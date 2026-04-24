@@ -2680,6 +2680,156 @@ def create_mesh_app(
         """Schedule initial browser proxy push as a background task (non-blocking)."""
         asyncio.create_task(_deferred_push_browser_proxies())
 
+    # § Browser metrics poll loop. The browser service container can't push
+    # to the mesh's in-process EventBus, so the mesh pulls. Runs on a 60s
+    # cadence — matching BrowserManager._emit_metrics — and fans each new
+    # per-agent aggregate out as a ``browser_metrics`` event. High-water
+    # seq per boot_id; boot_id change resets the watermark. Poll failures
+    # are logged at DEBUG normally; after ``_POLL_WARN_THRESHOLD`` consecutive
+    # failures we escalate to WARNING so operators can diagnose persistent
+    # issues (auth rotation, browser down, network partition).
+    _poll_state: dict = {
+        "boot_id": "",
+        "last_seen_seq": 0,
+        "consecutive_failures": 0,
+        "last_success_ts": 0.0,
+    }
+    _POLL_WARN_THRESHOLD = 5  # ~5 minutes of failures before warning
+
+    async def _poll_browser_metrics_once() -> None:
+        if not container_manager or event_bus is None:
+            return
+        svc_url = getattr(container_manager, "browser_service_url", None)
+        svc_token = getattr(container_manager, "browser_auth_token", "")
+        if not svc_url:
+            return
+        headers: dict = {}
+        if svc_token:
+            headers["Authorization"] = f"Bearer {svc_token}"
+
+        def _record_failure(reason: str) -> None:
+            _poll_state["consecutive_failures"] += 1
+            n = _poll_state["consecutive_failures"]
+            # Quiet when it's the first couple of misses (normal during
+            # boot / brief outages); loud once it looks like a real problem,
+            # then back off so we don't flood logs indefinitely.
+            if n in (_POLL_WARN_THRESHOLD, _POLL_WARN_THRESHOLD * 4,
+                     _POLL_WARN_THRESHOLD * 16):
+                logger.warning(
+                    "Browser metrics poll has failed %d consecutive times "
+                    "(%s)", n, reason,
+                )
+            else:
+                logger.debug("Browser metrics poll failed: %s", reason)
+
+        try:
+            resp = await _browser_proxy_client.get(
+                f"{svc_url}/browser/metrics",
+                params={"since": _poll_state["last_seen_seq"]},
+                headers=headers,
+                timeout=10,
+            )
+        except Exception as e:
+            _record_failure(f"request error: {e}")
+            return
+        if resp.status_code >= 400:
+            _record_failure(f"HTTP {resp.status_code}")
+            return
+        try:
+            data = resp.json()
+        except Exception as e:
+            _record_failure(f"bad JSON: {e}")
+            return
+
+        # Success — reset failure counter and log recovery if we were noisy.
+        if _poll_state["consecutive_failures"] >= _POLL_WARN_THRESHOLD:
+            logger.info(
+                "Browser metrics poll recovered after %d failures",
+                _poll_state["consecutive_failures"],
+            )
+        _poll_state["consecutive_failures"] = 0
+        _poll_state["last_success_ts"] = time.time()
+
+        boot_id = data.get("boot_id") or ""
+        previous_boot_id = _poll_state["boot_id"]
+        since_used = _poll_state["last_seen_seq"]
+        is_first_seen = previous_boot_id != boot_id
+        # Reset the watermark when the browser service restarts, otherwise
+        # we'd starve forever waiting for seqs that never arrive.
+        if is_first_seen:
+            _poll_state["boot_id"] = boot_id
+            _poll_state["last_seen_seq"] = 0
+            # If we queried with a non-zero ``since`` (stale high-water
+            # from the pre-restart browser) and the browser's ``seq > since``
+            # filter dropped everything, we have to re-poll with ``since=0``
+            # before those payloads scroll off the browser's history deque.
+            # Skip the re-poll when: (a) since was already 0 — nothing got
+            # filtered; or (b) the response already contains payloads — the
+            # filter wasn't the problem. Both cases would double-emit.
+            if since_used > 0 and previous_boot_id and not data.get("metrics"):
+                try:
+                    resp = await _browser_proxy_client.get(
+                        f"{svc_url}/browser/metrics",
+                        params={"since": 0},
+                        headers=headers,
+                        timeout=10,
+                    )
+                    if resp.status_code < 400:
+                        data = resp.json()
+                except Exception as e:
+                    logger.debug("Post-restart re-poll failed: %s", e)
+                    # Keep the original response rather than aborting;
+                    # next tick will recover.
+
+        payloads = [
+            p for p in (data.get("metrics") or [])
+            if int(p.get("seq", 0)) > _poll_state["last_seen_seq"]
+        ]
+        # On first-seen (fresh mesh or browser restart), only surface the
+        # latest payload per agent. A long-running browser service can
+        # return hours of history; flooding the dashboard's 500-event
+        # ring buffer with stale entries would evict live events and
+        # show agents with data that no longer reflects current health.
+        if is_first_seen and payloads:
+            latest_by_agent: dict[str, dict] = {}
+            for p in payloads:
+                latest_by_agent[p.get("agent_id", "")] = p
+            payloads = sorted(
+                latest_by_agent.values(), key=lambda p: int(p.get("seq", 0)),
+            )
+
+        for payload in payloads:
+            seq = int(payload.get("seq", 0))
+            if seq > _poll_state["last_seen_seq"]:
+                _poll_state["last_seen_seq"] = seq
+            agent_id = payload.get("agent_id", "")
+            event_bus.emit("browser_metrics", agent=agent_id, data=payload)
+
+    async def _browser_metrics_loop() -> None:
+        # First pass runs ~5s after boot to give the browser service time
+        # to register, then every 60s. Tolerates transient failures — the
+        # metric channel is best-effort observability, not correctness.
+        await asyncio.sleep(5)
+        while True:
+            try:
+                await _poll_browser_metrics_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.debug("Browser metrics poll loop tick failed: %s", e)
+            await asyncio.sleep(60)
+
+    # Expose the poll primitives on app.state so tests (and future admin
+    # endpoints) can reach them without walking closure cells.
+    app.state.poll_browser_metrics_once = _poll_browser_metrics_once
+    app.state.browser_metrics_poll_state = _poll_state
+
+    @app.on_event("startup")
+    async def _start_browser_metrics_poll() -> None:
+        # No-op if the mesh is running without a browser service configured
+        # (early-returned inside _poll_browser_metrics_once).
+        asyncio.create_task(_browser_metrics_loop())
+
     # Mesh-side input validation: reject typo'd action names with a clean 400
     # before proxying to the browser service. Permissions are enforced separately
     # via PermissionMatrix.can_browser_action (default-allow for all known
