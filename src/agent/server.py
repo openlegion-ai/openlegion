@@ -28,6 +28,7 @@ import base64
 import contextlib
 import json as json_module
 import mimetypes
+import os
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -508,7 +509,15 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
 
     # ── Artifact API ─────────────────────────────────────────
 
-    _MAX_ARTIFACT_BYTES = 2 * 1024 * 1024  # 2 MB cap for content transfer
+    _MAX_ARTIFACT_BYTES = 2 * 1024 * 1024  # 2 MB cap for content transfer (read)
+    # 50 MB cap for ingested artifacts (browser downloads, mesh-streamed files).
+    # Larger than read cap because ingestion streams; reads are loaded in memory.
+    # Overridable via env so operators with specialty workflows can tune.
+    import os as _os_ingest
+    _MAX_ARTIFACT_INGEST_BYTES = int(_os_ingest.environ.get(
+        "OPENLEGION_ARTIFACT_INGEST_MAX_MB", "50",
+    )) * 1024 * 1024
+    del _os_ingest
     _ARTIFACT_NAME_RE = re.compile(r"^[\w][\w.\-/ ]{0,198}[\w.]$")
 
     @app.get("/artifacts")
@@ -602,6 +611,89 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
                     "size": size, "mime_type": mime, "encoding": "base64",
                     "truncated": size > _MAX_READ}
 
+    @app.post("/artifacts/ingest/{name:path}")
+    async def ingest_artifact(name: str, request: Request) -> dict:
+        """Stream-write an artifact into the workspace (Phase 1.5).
+
+        Intended as the landing endpoint for browser downloads: the mesh
+        streams bytes from the browser service here, and they arrive in
+        the agent's workspace as a regular artifact (same API surface as
+        artifacts saved by the agent itself via ``save_artifact``).
+
+        Disciplines:
+        - **X-Mesh-Internal required.** Mirrors the workspace-write endpoint
+          — agents shouldn't be calling their own ingest from a tool, only
+          the mesh should stream into it.
+        - **Streaming size cap.** Counts bytes as they arrive and aborts if
+          the 50 MB default cap is exceeded. Does NOT trust Content-Length.
+        - **Atomic write.** Streams into ``{name}.partial``, then
+          ``os.replace`` on success. A crash mid-stream leaves an orphan
+          ``.partial`` that ``delete_artifact``/operator cleanup can remove.
+        - **Filename collision.** If ``{name}`` exists, the name gains a
+          numeric suffix: ``foo.pdf`` → ``foo-1.pdf`` → ``foo-2.pdf`` … .
+          The final name is returned so the caller can look it up.
+        - **Same path-traversal guards** as existing artifact endpoints.
+        """
+        if not loop.workspace:
+            raise HTTPException(503, "Workspace not available")
+        if not request.headers.get("x-mesh-internal"):
+            raise HTTPException(
+                403,
+                "Artifact ingest requires X-Mesh-Internal header.",
+            )
+        if not _ARTIFACT_NAME_RE.match(name):
+            raise HTTPException(400, f"Invalid artifact name: {name}")
+
+        artifacts_dir = Path(loop.workspace.root) / "artifacts"
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        target = (artifacts_dir / name).resolve()
+        resolved_dir = artifacts_dir.resolve()
+        if not target.is_relative_to(resolved_dir):
+            raise HTTPException(400, "Path traversal not allowed")
+        target.parent.mkdir(parents=True, exist_ok=True)
+
+        # Collision avoidance — never overwrite. Append numeric suffix.
+        final = _disambiguate_artifact_name(target)
+        partial = final.with_suffix(final.suffix + ".partial")
+
+        max_bytes = _MAX_ARTIFACT_INGEST_BYTES
+        bytes_written = 0
+        try:
+            with partial.open("wb") as fh:
+                async for chunk in request.stream():
+                    bytes_written += len(chunk)
+                    if bytes_written > max_bytes:
+                        raise HTTPException(
+                            413,
+                            f"Artifact exceeds {max_bytes} bytes",
+                        )
+                    fh.write(chunk)
+        except HTTPException:
+            # Size-cap or client disconnect — clean up partial.
+            with contextlib.suppress(FileNotFoundError, OSError):
+                partial.unlink()
+            raise
+        except Exception as e:
+            with contextlib.suppress(FileNotFoundError, OSError):
+                partial.unlink()
+            raise HTTPException(500, f"Ingest failed: {e}") from e
+
+        # Reject zero-byte: almost always a client error, better to 400
+        # than silently create an empty artifact that agents later hit.
+        if bytes_written == 0:
+            with contextlib.suppress(FileNotFoundError, OSError):
+                partial.unlink()
+            raise HTTPException(400, "Empty request body")
+
+        os.replace(partial, final)
+        rel_name = str(final.relative_to(resolved_dir))
+        mime = mimetypes.guess_type(rel_name)[0] or "application/octet-stream"
+        return {
+            "artifact_name": rel_name,
+            "size_bytes": bytes_written,
+            "mime_type": mime,
+        }
+
     @app.delete("/artifacts/{name:path}")
     async def delete_artifact(name: str) -> dict:
         """Delete an artifact file from the workspace."""
@@ -631,6 +723,26 @@ def _summarize_payload(payload: dict, max_len: int = 500) -> str:
     """Compact a message payload for memory storage."""
     text = json_module.dumps(payload, default=str)
     return text[:max_len] + "..." if len(text) > max_len else text
+
+
+def _disambiguate_artifact_name(target: Path) -> Path:
+    """Return a unique file path next to ``target``.
+
+    If ``target`` doesn't exist, returns it unchanged. If it does, appends
+    ``-1``, ``-2``, … before the suffix until a free name is found. Stops
+    at 999 attempts to avoid pathological loops on a corrupt dir.
+    """
+    if not target.exists():
+        return target
+    stem = target.stem
+    suffix = target.suffix
+    parent = target.parent
+    for n in range(1, 1000):
+        candidate = parent / f"{stem}-{n}{suffix}"
+        if not candidate.exists():
+            return candidate
+    # 1000 collisions is unrecoverable; let the caller handle as a server error.
+    raise RuntimeError(f"Too many collisions disambiguating {target}")
 
 
 def _log_task_exception(task: asyncio.Task) -> None:

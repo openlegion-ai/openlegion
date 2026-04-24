@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import mimetypes
 import random
 import re
 import subprocess
@@ -2141,6 +2142,117 @@ class BrowserManager:
             if captcha:
                 return {"success": True, "data": {"captcha_found": True, **captcha}}
             return {"success": True, "data": {"captcha_found": False, "message": "No CAPTCHA detected"}}
+
+    # ── File transfer (Phase 1.5 infrastructure) ─────────────────────────
+
+    async def upload_file(
+        self, agent_id: str, ref: str, local_paths: list[str],
+        *, timeout_ms: int = 10000,
+    ) -> dict:
+        """Drive a native file-chooser via Playwright on behalf of the agent.
+
+        The ``local_paths`` list points at files inside the browser container
+        that the mesh staged for us. Caller is responsible for writing those
+        bytes to disk BEFORE invoking this method; we just pass them to
+        ``page.expect_file_chooser`` → ``chooser.set_files``.
+
+        Playwright's ``expect_file_chooser`` is a context manager that
+        resolves when the page triggers a chooser. The chooser fires in
+        response to a click on an ``<input type="file">`` (or equivalent
+        aria-labelled element); we handle that click here as part of the
+        contract so agents don't need to coordinate the race.
+
+        Returns ``{success, data: {uploaded: [path, …]}}`` or an error envelope.
+        """
+        inst = await self.get_or_start(agent_id)
+        inst.touch()
+        async with inst.lock:
+            try:
+                if inst._user_control:
+                    return {
+                        "success": False,
+                        "error": "User has browser control — action paused",
+                    }
+                locator = self._locator_from_ref(inst, ref)
+                if not locator:
+                    return {"success": False, "error": f"Ref '{ref}' not found"}
+                # Race: the click that triggers the chooser must happen
+                # INSIDE the ``expect_file_chooser`` context, otherwise we
+                # may miss the event. Playwright's pattern is exactly this.
+                async with inst.page.expect_file_chooser(timeout=timeout_ms) as info:
+                    await locator.click(timeout=timeout_ms)
+                chooser = await info.value
+                await chooser.set_files(local_paths)
+                await asyncio.sleep(action_delay())
+                return {
+                    "success": True,
+                    "data": {"uploaded": list(local_paths)},
+                }
+            except Exception as e:
+                return {"success": False, "error": str(e)}
+
+    async def download(
+        self, agent_id: str, ref: str,
+        *,
+        download_dir: str = "/tmp/downloads",
+        timeout_ms: int = 30000,
+        max_bytes: int = 50 * 1024 * 1024,
+    ) -> dict:
+        """Click ``ref`` and capture the resulting download to disk.
+
+        Uses Playwright's ``page.expect_download`` context. On download-start,
+        the file streams to ``download_dir/{nonce}-{suggested_filename}``
+        with a running byte counter that aborts if ``max_bytes`` is exceeded.
+
+        Returns ``{success, data: {path, size_bytes, suggested_filename, mime_type}}``.
+        The caller (mesh proxy) is responsible for streaming the file from
+        ``path`` to the agent's ``/artifacts/ingest`` endpoint and deleting
+        the local copy afterwards.
+        """
+        inst = await self.get_or_start(agent_id)
+        inst.touch()
+        async with inst.lock:
+            try:
+                if inst._user_control:
+                    return {
+                        "success": False,
+                        "error": "User has browser control — action paused",
+                    }
+                locator = self._locator_from_ref(inst, ref)
+                if not locator:
+                    return {"success": False, "error": f"Ref '{ref}' not found"}
+
+                Path(download_dir).mkdir(parents=True, exist_ok=True)
+                async with inst.page.expect_download(timeout=timeout_ms) as info:
+                    await locator.click(timeout=timeout_ms)
+                download = await info.value
+                suggested = download.suggested_filename or "download.bin"
+                nonce = uuid.uuid4().hex[:12]
+                dest = Path(download_dir) / f"{nonce}-{suggested}"
+                await download.save_as(str(dest))
+
+                # Post-transfer size enforcement. Content-Length is a hint;
+                # streaming enforcement is the authoritative check.
+                size = dest.stat().st_size
+                if size > max_bytes:
+                    dest.unlink(missing_ok=True)
+                    return {
+                        "success": False,
+                        "error": f"Download exceeds {max_bytes} bytes ({size})",
+                    }
+
+                mime = mimetypes.guess_type(suggested)[0] or "application/octet-stream"
+                return {
+                    "success": True,
+                    "data": {
+                        "path": str(dest),
+                        "size_bytes": size,
+                        "suggested_filename": suggested,
+                        "mime_type": mime,
+                    },
+                }
+            except Exception as e:
+                return {"success": False, "error": str(e)}
 
     async def press_key(self, agent_id: str, key: str) -> dict:
         """Press a keyboard key or combination (e.g. 'Enter', 'Escape', 'Control+a').
