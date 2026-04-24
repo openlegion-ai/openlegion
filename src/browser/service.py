@@ -2173,6 +2173,17 @@ class BrowserManager:
                         "success": False,
                         "error": "User has browser control — action paused",
                     }
+                # Validate every local path before opening the chooser —
+                # Playwright's ``set_files`` raises a cryptic error if a
+                # path is missing, and the chooser-open side-effect has
+                # already happened by then.  Fail fast, keep the error
+                # message actionable.
+                for p in local_paths:
+                    if not Path(p).is_file():
+                        return {
+                            "success": False,
+                            "error": f"Upload path not found: {p}",
+                        }
                 locator = self._locator_from_ref(inst, ref)
                 if not locator:
                     return {"success": False, "error": f"Ref '{ref}' not found"}

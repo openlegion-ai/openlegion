@@ -89,11 +89,42 @@ class TestUploadFile:
             "src.browser.service.action_delay", lambda: 0,
         )
 
-        result = await mgr.upload_file("a1", "e1", ["/tmp/foo.pdf"])
+        # Use a real path that exists so the path-validation guard passes.
+        real_file = tmp_path / "foo.pdf"
+        real_file.write_bytes(b"fake pdf")
+
+        result = await mgr.upload_file("a1", "e1", [str(real_file)])
         assert result["success"] is True
-        assert result["data"]["uploaded"] == ["/tmp/foo.pdf"]
-        chooser.set_files.assert_awaited_once_with(["/tmp/foo.pdf"])
+        assert result["data"]["uploaded"] == [str(real_file)]
+        chooser.set_files.assert_awaited_once_with([str(real_file)])
         fake_locator.click.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_missing_local_path_returns_error_before_click(
+        self, tmp_path, monkeypatch,
+    ):
+        """Playwright's ``set_files`` raises cryptically on missing paths AND
+        by then the chooser has already opened.  We validate up front so
+        the failure is fast and the message is actionable."""
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "p"))
+        inst = _make_instance()
+
+        fake_locator = MagicMock()
+        fake_locator.click = AsyncMock()
+        inst.page.expect_file_chooser = MagicMock()
+        monkeypatch.setattr(
+            mgr, "_locator_from_ref", lambda _i, _r: fake_locator,
+        )
+        monkeypatch.setattr(mgr, "get_or_start", AsyncMock(return_value=inst))
+
+        result = await mgr.upload_file(
+            "a1", "e1", [str(tmp_path / "nonexistent.pdf")],
+        )
+        assert result["success"] is False
+        assert "not found" in result["error"].lower()
+        # No click should have fired — we failed before entering the chooser context.
+        fake_locator.click.assert_not_called()
+        inst.page.expect_file_chooser.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_ref_not_found_returns_error(self, tmp_path, monkeypatch):
@@ -101,9 +132,14 @@ class TestUploadFile:
         inst = _make_instance()
         monkeypatch.setattr(mgr, "_locator_from_ref", lambda _i, _r: None)
         monkeypatch.setattr(mgr, "get_or_start", AsyncMock(return_value=inst))
-        result = await mgr.upload_file("a1", "missing", ["/tmp/x"])
+        # Use a real path so the path-validation guard (added for upload
+        # correctness) passes and we actually exercise the ref-not-found
+        # branch.
+        real_file = tmp_path / "present.txt"
+        real_file.write_text("x")
+        result = await mgr.upload_file("a1", "missing-ref", [str(real_file)])
         assert result["success"] is False
-        assert "missing" in result["error"]
+        assert "missing-ref" in result["error"]
 
     @pytest.mark.asyncio
     async def test_user_control_blocks_upload(self, tmp_path, monkeypatch):

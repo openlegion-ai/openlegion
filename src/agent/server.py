@@ -652,14 +652,16 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
             raise HTTPException(400, "Path traversal not allowed")
         target.parent.mkdir(parents=True, exist_ok=True)
 
-        # Collision avoidance — never overwrite. Append numeric suffix.
-        final = _disambiguate_artifact_name(target)
-        partial = final.with_suffix(final.suffix + ".partial")
+        # Collision avoidance — never overwrite.  ``_open_partial_exclusive``
+        # atomically reserves a ``{name}-N.partial`` slot via ``O_CREAT|O_EXCL``,
+        # so two concurrent ingest requests for the same base name can never
+        # claim the same suffix (the loser retries with the next number).
+        final, partial, fd = _open_partial_exclusive(target)
 
         max_bytes = _MAX_ARTIFACT_INGEST_BYTES
         bytes_written = 0
         try:
-            with partial.open("wb") as fh:
+            with os.fdopen(fd, "wb") as fh:
                 async for chunk in request.stream():
                     bytes_written += len(chunk)
                     if bytes_written > max_bytes:
@@ -725,23 +727,48 @@ def _summarize_payload(payload: dict, max_len: int = 500) -> str:
     return text[:max_len] + "..." if len(text) > max_len else text
 
 
-def _disambiguate_artifact_name(target: Path) -> Path:
-    """Return a unique file path next to ``target``.
+def _open_partial_exclusive(target: Path) -> tuple[Path, Path, int]:
+    """Atomically reserve a ``.partial`` slot and return ``(final, partial, fd)``.
 
-    If ``target`` doesn't exist, returns it unchanged. If it does, appends
-    ``-1``, ``-2``, … before the suffix until a free name is found. Stops
-    at 999 attempts to avoid pathological loops on a corrupt dir.
+    Collision-avoidance WITHOUT a TOCTOU window: tries the base name first,
+    then ``-1``, ``-2``, …, using ``os.O_CREAT | os.O_EXCL`` each time to
+    guarantee only one caller can own each candidate. Two concurrent
+    ingests of the same base name land on distinct final names —
+    `report.pdf` and `report-1.pdf` — with no overwrite race.
+
+    The caller receives an OS-level file descriptor open for writing; wrap
+    in ``os.fdopen(fd, "wb")`` to get a file-like.  The ``partial`` path
+    will be renamed to ``final`` on successful completion.
     """
-    if not target.exists():
-        return target
     stem = target.stem
     suffix = target.suffix
     parent = target.parent
-    for n in range(1, 1000):
-        candidate = parent / f"{stem}-{n}{suffix}"
-        if not candidate.exists():
-            return candidate
-    # 1000 collisions is unrecoverable; let the caller handle as a server error.
+    for n in range(0, 1000):
+        if n == 0:
+            final = target
+        else:
+            final = parent / f"{stem}-{n}{suffix}"
+        # Write to a .partial sidecar first; atomic replace on success.
+        # Exclusive create on the .partial owns the slot — if a peer is
+        # mid-stream for the same name, its .partial blocks ours and we
+        # try the next suffix.
+        partial = final.with_suffix(final.suffix + ".partial")
+        try:
+            fd = os.open(
+                partial,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o644,
+            )
+        except FileExistsError:
+            continue
+        # If final already exists (committed by a peer), the .partial we
+        # just created is pointless — clean it up and try the next suffix.
+        if final.exists():
+            os.close(fd)
+            with contextlib.suppress(FileNotFoundError, OSError):
+                partial.unlink()
+            continue
+        return final, partial, fd
     raise RuntimeError(f"Too many collisions disambiguating {target}")
 
 
