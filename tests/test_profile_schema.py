@@ -685,6 +685,63 @@ class TestSyncAdblockExtension:
         from src.browser.profile_schema import sync_adblock_extension
         assert sync_adblock_extension(tmp_path / "no-such") is False
 
+    def test_returns_existing_state_when_peer_holds_lock(
+        self, profile, fake_xpi,
+    ):
+        """When a peer browser-service process holds the per-profile
+        flock, sync_adblock_extension skips its install step and reports
+        whether the XPI is already present (peer is doing the same work,
+        idempotency means eventual state is correct)."""
+        import fcntl
+        import os
+
+        from src.browser.profile_schema import (
+            UBLOCK_ADDON_ID,
+            _LOCK_FILENAME,
+            sync_adblock_extension,
+        )
+        # Pre-install so the contended path can find the existing XPI.
+        (profile / "extensions").mkdir()
+        existing_xpi = profile / "extensions" / f"{UBLOCK_ADDON_ID}.xpi"
+        existing_xpi.write_bytes(b"existing")
+
+        lock_path = profile / _LOCK_FILENAME
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            # Returns True because the existing XPI satisfies the
+            # presence check, but skips the install (verified by the
+            # XPI bytes being unchanged from the pre-existing state).
+            result = sync_adblock_extension(profile)
+            assert result is True
+            assert existing_xpi.read_bytes() == b"existing"
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+    def test_returns_false_when_peer_holds_lock_and_no_xpi(
+        self, profile, fake_xpi,
+    ):
+        """Same flock contention but no existing XPI in the profile —
+        the peer hasn't finished installing yet, so we report False."""
+        import fcntl
+        import os
+
+        from src.browser.profile_schema import (
+            _LOCK_FILENAME,
+            sync_adblock_extension,
+        )
+        lock_path = profile / _LOCK_FILENAME
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            assert sync_adblock_extension(profile) is False
+            # No install happened — peer hasn't released the lock.
+            assert not (profile / "extensions").exists()
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
 
 class TestStealthExtensionPrefs:
     """The migration drops the XPI on disk; Firefox needs cooperative
