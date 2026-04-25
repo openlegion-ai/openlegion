@@ -70,15 +70,27 @@ def _v2_clear_font_caches(profile: Path) -> None:
     The container image just gained the Carlito/Caladea/Liberation/DejaVu
     font stack plus fontconfig aliases that resolve Segoe UI / Calibri /
     Cambria to those substitutes. Firefox caches the font list it sees
-    at first launch in ``startupCache/`` and several of the parent-level
-    ``.mozlz4`` blobs under the profile root. If we don't clear them,
-    existing profiles keep using the stale "no Segoe UI available" font
-    table and the fingerprint alignment we just installed never takes
-    effect.
+    at first launch in ``startupCache/`` and ``fontlist.json`` under the
+    profile root. If we don't clear them, existing profiles keep using
+    the stale "no Segoe UI available" font table and the fingerprint
+    alignment we just installed never takes effect.
+
+    **Critical:** we deliberately DO NOT touch ``compatibility.ini``.
+    Firefox uses that file to track "is this the same Firefox build that
+    last opened this profile?" — if we delete it, the next launch
+    triggers the full first-run path: about:welcome tab, default-browser
+    nag, profile-reset prompts, etc. All of which block automation. The
+    font cache rebuilds correctly without compatibility.ini being
+    touched.
 
     Idempotent. Missing files on a fresh profile are fine. Touches only
     cache artifacts — never cookies / localStorage / IndexedDB /
     bookmarks / the user's session state.
+
+    Raises ``OSError`` on any unlink failure so the migration framework
+    triggers its backup-restore path. Letting unlinks fail silently
+    would leave the profile in a half-state (some cache cleared, some
+    not) with the marker stamped at v2 — unrecoverable on next launch.
     """
     # startupCache/ holds compiled-XUL + fontlist blobs Firefox rebuilds
     # on any chrome/resource change. Whole directory is safe to wipe —
@@ -88,23 +100,18 @@ def _v2_clear_font_caches(profile: Path) -> None:
         _remove_tree(startup_cache)
 
     # Top-level cache blobs Firefox uses for font metadata. Names are
-    # stable across versions; removing them is safe.
+    # stable across versions; removing them is safe. ``compatibility.ini``
+    # is INTENTIONALLY OMITTED — see docstring.
     for cache_file in (
         "fontlist.json",
         "font.properties",
-        "compatibility.ini",  # triggers Firefox to re-probe on next start
     ):
         target = profile / cache_file
         if target.is_file():
-            try:
-                target.unlink()
-            except OSError as e:
-                # Migration framework restores backup on exception; a
-                # locked file should be rare but worth reporting up.
-                logger.warning(
-                    "v2 font-cache clear: could not remove %s: %s",
-                    target, e,
-                )
+            # Re-raise on failure so the migration framework's restore
+            # path triggers. A locked/permissioned cache file is the
+            # operator's signal that this profile needs investigation.
+            target.unlink()
 
 
 # Callables registered here run in `migrate_profile()` when the on-disk

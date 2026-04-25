@@ -102,3 +102,31 @@ class TestResolutionPool:
 
         picked = {pick_resolution(f"a{i}") for i in range(50)}
         assert len(picked) >= 2
+
+    def test_pick_resolution_handles_empty_agent_id(self):
+        """Defensive: AGENT_ID_RE_PATTERN forbids it upstream, but the
+        function must not crash if called with an empty string."""
+        from src.browser.stealth import _RESOLUTION_POOL, pick_resolution
+
+        result = pick_resolution("")
+        valid = {res for res, _ in _RESOLUTION_POOL}
+        assert result in valid
+
+
+class TestQuietStartupPrefs:
+    """Phase 3 §6.2 follow-on: quiet-startup prefs prevent Firefox's
+    first-run UI (about:welcome, default-browser nag, profile-reset
+    prompt) from blocking automation. Even though v2 migration
+    deliberately preserves ``compatibility.ini`` to avoid triggering
+    these, a fresh profile or a Firefox version bump can also cross
+    those code paths — these prefs are belt-and-suspenders."""
+
+    def test_first_run_prompts_disabled(self):
+        from src.browser.stealth import _stealth_prefs
+
+        prefs = _stealth_prefs()
+        assert prefs["browser.shell.checkDefaultBrowser"] is False
+        assert prefs["browser.aboutwelcome.enabled"] is False
+        assert prefs["browser.startup.homepage_override.mstone"] == "ignore"
+        assert prefs["startup.homepage_welcome_url"] == ""
+        assert prefs["browser.disableResetPrompt"] is True

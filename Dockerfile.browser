@@ -32,8 +32,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # the metric-compatible substitutes installed above. Must live under
 # /etc/fonts/conf.d/ with a high numeric prefix so it wins over any
 # system defaults (fontconfig applies rules in filename order).
+#
+# Validity check via fontconfig itself: ``fc-match -v "Segoe UI"`` should
+# resolve to a Carlito family if our alias file loaded correctly. If the
+# XML failed to parse, fontconfig silently ignores the file and the
+# match falls through to a default — we want that to be a hard build
+# failure rather than a silent fingerprint regression at runtime.
 COPY docker/fontconfig-windows-aliases.conf /etc/fonts/conf.d/99-openlegion-windows-fonts.conf
-RUN fc-cache -f
+RUN fc-cache -f \
+    && fc-match "Segoe UI" | grep -qi "Carlito" \
+       || (echo "BUILD FAIL: 'Segoe UI' did not resolve to Carlito — " \
+                "check fontconfig file parsing and font installation"; \
+           fc-match -v "Segoe UI"; exit 1) \
+    && fc-match "Cambria" | grep -qi "Caladea" \
+       || (echo "BUILD FAIL: 'Cambria' did not resolve to Caladea"; \
+           fc-match -v "Cambria"; exit 1)
 
 # Remove KasmVNC branding: hide logo, splash screen, and control bar branding.
 # Also patch loading screen HTML to remove logo images.
@@ -95,11 +108,19 @@ RUN mkdir -p /home/browser/.config/openbox \
     <followMouse>no</followMouse>\n\
     <focusLast>yes</focusLast>\n\
   </focus>\n\
+  <placement>\n\
+    <policy>Smart</policy>\n\
+    <center>yes</center>\n\
+  </placement>\n\
   <keyboard></keyboard>\n\
   <applications>\n\
     <application class="*">\n\
       <decor>no</decor>\n\
       <focus>yes</focus>\n\
+      <position force="yes">\n\
+        <x>center</x>\n\
+        <y>center</y>\n\
+      </position>\n\
     </application>\n\
   </applications>\n\
 </openbox_config>\n' > /home/browser/.config/openbox/rc.xml \

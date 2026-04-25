@@ -380,12 +380,48 @@ class TestV2FontCacheClear:
 
         (profile / "fontlist.json").write_text("{}")
         (profile / "font.properties").write_text("k=v")
-        (profile / "compatibility.ini").write_text("[Compatibility]\n")
 
         _v2_clear_font_caches(profile)
         assert not (profile / "fontlist.json").exists()
         assert not (profile / "font.properties").exists()
-        assert not (profile / "compatibility.ini").exists()
+
+    def test_compatibility_ini_preserved(self, profile):
+        """Critical: deleting ``compatibility.ini`` triggers Firefox's
+        first-run UI on next launch (about:welcome, default-browser nag,
+        profile-import wizard). The v2 migration must NOT remove it —
+        only the font cache itself needs wiping."""
+        from src.browser.profile_schema import _v2_clear_font_caches
+
+        compat = profile / "compatibility.ini"
+        compat.write_text("[Compatibility]\nLastVersion=138.0\n")
+        (profile / "fontlist.json").write_text("{}")
+
+        _v2_clear_font_caches(profile)
+        assert compat.exists(), (
+            "compatibility.ini was deleted — would trigger Firefox "
+            "first-run UI on next launch"
+        )
+        assert compat.read_text().startswith("[Compatibility]")
+        assert not (profile / "fontlist.json").exists()  # cache still wiped
+
+    def test_unlink_failure_propagates(self, profile, monkeypatch):
+        """Migration framework restores backup on raise. If
+        ``_v2_clear_font_caches`` swallowed unlink errors, a partial
+        wipe would leave the profile half-migrated with the marker
+        stamped at v2 — unrecoverable on next launch."""
+        from src.browser.profile_schema import _v2_clear_font_caches
+
+        (profile / "fontlist.json").write_text("{}")
+        original_unlink = Path.unlink
+
+        def boom(self, *a, **kw):
+            if self.name == "fontlist.json":
+                raise PermissionError("simulated lock")
+            return original_unlink(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "unlink", boom)
+        with pytest.raises(PermissionError):
+            _v2_clear_font_caches(profile)
 
     def test_preserves_cookies_and_storage(self, populated_profile):
         """Hardest invariant: we MUST NOT touch the user's session."""

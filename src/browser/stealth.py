@@ -304,4 +304,21 @@ def _stealth_prefs() -> dict:
         "browser.newtabpage.activity-stream.asrouter.userprefs.cfr.addons": False,
         "browser.newtabpage.activity-stream.asrouter.userprefs.cfr.features": False,
         "extensions.htmlaboutaddons.recommendations.enabled": False,
+
+        # ── First-run / welcome / default-browser prompts ────────────────────
+        # Belt-and-suspenders against the about:welcome tab, default-browser
+        # nag, and profile-import wizard. Phase 3 profile schema v2 takes
+        # care to NOT delete ``compatibility.ini`` (which would itself
+        # trigger first-run UI), but a fresh profile or a Firefox version
+        # bump can also cross those code paths. None of these prompts
+        # appear on a properly-warmed profile, but they all block
+        # automation when they do — so suppress them at the pref layer.
+        "browser.shell.checkDefaultBrowser": False,
+        "browser.aboutwelcome.enabled": False,
+        "browser.startup.homepage_override.mstone": "ignore",
+        "startup.homepage_welcome_url": "",
+        "startup.homepage_welcome_url.additional": "",
+        "browser.disableResetPrompt": True,
+        "browser.tabs.warnOnClose": False,
+        "browser.tabs.warnOnCloseOtherTabs": False,
     }
