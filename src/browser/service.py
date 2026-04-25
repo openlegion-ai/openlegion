@@ -56,6 +56,57 @@ _CONTEXT_ROLES = frozenset({
     "listbox", "tree", "grid", "toolbar", "menu", "status",
 })
 
+# §7.7 semantic filters. Each value maps to a frozenset of roles that
+# admit nodes into the snapshot output. ``None`` (no filter passed) is
+# handled separately and falls back to the historical default of
+# ``_ACTIONABLE_ROLES ∪ _CONTEXT_ROLES``.
+_FILTER_INPUTS = frozenset({
+    "textbox", "searchbox", "checkbox", "radio", "combobox",
+    "slider", "spinbutton", "switch",
+})
+_FILTER_HEADINGS = frozenset({"heading"})
+_FILTER_LANDMARKS = frozenset({
+    "navigation", "main", "complementary", "banner", "contentinfo",
+    "form", "region", "dialog", "alertdialog",
+})
+_FILTER_PRESETS: dict[str, frozenset[str]] = {
+    "actionable": _ACTIONABLE_ROLES,
+    "inputs": _FILTER_INPUTS,
+    "headings": _FILTER_HEADINGS,
+    "landmarks": _FILTER_LANDMARKS,
+}
+
+
+def _resolve_filter_roles(filter_name: str | None) -> frozenset[str] | None:
+    """Map a ``filter`` parameter to the role frozenset to admit.
+
+    ``None`` ⇒ ``None`` (caller falls back to the historical default).
+    Unknown name ⇒ raises ``ValueError`` with a helpful list of valid
+    options. Empty string is treated like ``None`` so callers passing
+    JSON ``""`` from a UI default don't accidentally narrow the result.
+
+    Case-insensitive — LLMs frequently capitalize parameter values. A
+    naive case-sensitive lookup would have rejected ``"Actionable"`` /
+    ``"INPUTS"`` with ``invalid_input``; the agent then has to retry.
+    """
+    if filter_name is None:
+        return None
+    if not isinstance(filter_name, str):
+        raise ValueError(
+            f"filter must be a string, got {type(filter_name).__name__}"
+        )
+    key = filter_name.strip().lower()
+    if key == "":
+        return None
+    preset = _FILTER_PRESETS.get(key)
+    if preset is None:
+        valid = ", ".join(sorted(_FILTER_PRESETS))
+        raise ValueError(
+            f"Unknown filter {filter_name!r}; valid options: {valid}"
+        )
+    return preset
+
+
 _MAX_SNAPSHOT_ELEMENTS = 200
 
 
@@ -232,11 +283,18 @@ _JS_A11Y_TREE = r"""(rootEl) => {
         'heading','img','dialog','alertdialog','alert',
         'listbox','tree','grid','toolbar','menu','status'
     ]);
-    const ROLES = new Set([...ACTIONABLE, ...CONTEXT]);
     const LANDMARK = new Set([
         'navigation','main','complementary','banner','contentinfo',
         'form','region','dialog','alertdialog'
     ]);
+    // §7.7 includes LANDMARK in the set so ``filter='landmarks'``
+    // works even when ``page.accessibility.snapshot()`` is unavailable
+    // and we fall back to this JS walker. Without LANDMARK in ROLES,
+    // landmark elements collapse to ``role: 'none'`` here and never
+    // reach the Python ``_walk`` even with the right ``allowed_roles``.
+    // Default snapshot output is unaffected: Python ``_walk`` still
+    // gates on ACTIONABLE+CONTEXT unless an explicit filter is passed.
+    const ROLES = new Set([...ACTIONABLE, ...CONTEXT, ...LANDMARK]);
     const IMPLICIT = {
         BUTTON:'button',TEXTAREA:'textbox',SELECT:'combobox',OPTION:'option',
         IMG:'img',H1:'heading',H2:'heading',H3:'heading',
@@ -1750,17 +1808,125 @@ class BrowserManager:
             logger.debug("JS a11y tree fallback failed: %s", e)
             return None
 
-    async def snapshot(self, agent_id: str) -> dict:
-        """Get accessibility tree with element refs."""
+    async def snapshot(
+        self,
+        agent_id: str,
+        filter: str | None = None,
+        from_ref: str | None = None,
+    ) -> dict:
+        """Get accessibility tree with element refs.
+
+        ``filter`` constrains which elements appear in the result (§7.7):
+
+        - ``None`` (default) — actionable + context roles (the historic
+          behavior, balanced for general-purpose agents).
+        - ``"actionable"`` — only roles the agent can act on
+          (button, link, textbox, ...). Skips heading/img/landmark.
+        - ``"inputs"`` — form-input roles only. Useful when the agent is
+          mid-form and doesn't need the navigation skeleton.
+        - ``"headings"`` — heading nodes only. ``browser_find_text`` for
+          structural orientation when the page is huge.
+        - ``"landmarks"`` — top-level region nodes only (navigation, main,
+          complementary, ...). Cheap orientation pass before drilling in.
+
+        ``from_ref`` (§7.4) restricts the snapshot to the subtree rooted
+        at an element captured in a previous call. Pass an ``e<N>`` ref
+        from ``inst.refs``; the returned tree shows only that element
+        and its descendants. Combine with ``filter`` to focus a busy
+        list on its inputs, etc.
+        """
         inst = await self.get_or_start(agent_id)
         inst.touch()
         async with inst.lock:
-            return await self._snapshot_impl(inst, agent_id)
+            return await self._snapshot_impl(
+                inst, agent_id, filter=filter, from_ref=from_ref,
+            )
 
-    async def _snapshot_impl(self, inst: CamoufoxInstance, agent_id: str) -> dict:
+    async def _snapshot_impl(
+        self,
+        inst: CamoufoxInstance,
+        agent_id: str,
+        filter: str | None = None,
+        from_ref: str | None = None,
+    ) -> dict:
         """Snapshot implementation.  Caller must hold ``inst.lock``."""
+        # Resolve the optional filter once so the inner _walk sees a
+        # frozenset rather than re-deriving on every node.
         try:
-            tree = await self._build_a11y_tree(inst)
+            allowed_roles = _resolve_filter_roles(filter)
+        except ValueError as e:
+            return {
+                "success": False,
+                "error": {
+                    "code": "invalid_input",
+                    "message": str(e),
+                    "retry_after_ms": None,
+                },
+            }
+        try:
+            # ── Optional scoped root via ``from_ref`` (§7.4) ────────────────
+            scoped_root_handle = None
+            if from_ref is not None:
+                if not from_ref:
+                    return {
+                        "success": False,
+                        "error": {
+                            "code": "invalid_input",
+                            "message": "from_ref must be a non-empty ref id",
+                            "retry_after_ms": None,
+                        },
+                    }
+                if from_ref not in inst.refs:
+                    return {
+                        "success": False,
+                        "error": {
+                            "code": "not_found",
+                            "message": f"ref {from_ref!r} not in current snapshot",
+                            "retry_after_ms": None,
+                        },
+                    }
+                # Resolve to a Playwright ElementHandle. ``_locator_from_ref``
+                # may raise RefStale on closed-tab refs — that's the same
+                # contract every other ref-using path follows; surface as
+                # ref_stale so the agent re-snapshots.
+                try:
+                    locator = self._locator_from_ref(inst, from_ref)
+                    if locator is None:
+                        return {
+                            "success": False,
+                            "error": {
+                                "code": "not_found",
+                                "message": f"ref {from_ref!r} could not be resolved",
+                                "retry_after_ms": None,
+                            },
+                        }
+                    scoped_root_handle = await locator.element_handle(timeout=2000)
+                except RefStale as e:
+                    return {
+                        "success": False,
+                        "error": {
+                            "code": "ref_stale",
+                            "message": str(e),
+                            "retry_after_ms": None,
+                        },
+                    }
+                if scoped_root_handle is None:
+                    # Locator resolved structurally but the element is no
+                    # longer in the DOM — common for dynamic SPAs that
+                    # tear down and re-render between snapshots.
+                    return {
+                        "success": False,
+                        "error": {
+                            "code": "ref_stale",
+                            "message": (
+                                f"ref {from_ref!r} no longer attached to the page; "
+                                "re-snapshot to get fresh refs"
+                            ),
+                            "retry_after_ms": None,
+                        },
+                    }
+
+            tree = await self._build_a11y_tree(inst, root=scoped_root_handle)
             if not tree:
                 return {"success": True, "data": {"snapshot": "(empty page)", "refs": {}}}
 
@@ -1790,7 +1956,13 @@ class BrowserManager:
                     return
                 role = node.get("role", "")
                 name = node.get("name", "")
-                if role in _ACTIONABLE_ROLES or role in _CONTEXT_ROLES:
+                # ``allowed_roles=None`` means "use the historical default"
+                # (actionable ∪ context). Any explicit filter shrinks that.
+                if allowed_roles is None:
+                    is_admitted = role in _ACTIONABLE_ROLES or role in _CONTEXT_ROLES
+                else:
+                    is_admitted = role in allowed_roles
+                if is_admitted:
                     if ref_counter[0] < _MAX_SNAPSHOT_ELEMENTS:
                         ref_id = f"e{ref_counter[0]}"
                         ref_counter[0] += 1
@@ -1836,6 +2008,72 @@ class BrowserManager:
                         )
                 for child in node.get("children", []):
                     _walk(child, depth + 1)
+
+            # When ``from_ref`` is set the caller is asking for a deep
+            # scope into a specific element; modal-detection would
+            # second-guess that intent, so skip straight to a single
+            # ``_walk`` of the scoped tree.
+            if scoped_root_handle is not None:
+                # Snapshot the live modal state BEFORE walking — clearing
+                # ``dialog_active`` here would let subsequent
+                # ``_locator_from_ref`` resolutions of these scoped refs
+                # bypass modal scoping, allowing duplicate role+name
+                # elements behind the overlay to silently match. We keep
+                # the live state intact so the next non-scoped snapshot
+                # re-detects modals naturally; in the meantime, scoped
+                # refs taken inside a modal still resolve through the
+                # modal selector.
+                was_modal = bool(inst.dialog_active)
+                _walk(tree)
+                # If the agent took this scoped snapshot while a modal
+                # was open, patch ``scope_root`` on every emitted ref so
+                # ``_locator_from_ref`` keeps clicks bounded to the dialog
+                # subtree. Without this the scoped refs could resolve to
+                # identical-named elements behind the overlay.
+                if was_modal:
+                    for rid, handle in refs.items():
+                        if handle.scope_root is None:
+                            refs[rid] = RefHandle(
+                                page_id=handle.page_id,
+                                frame_id=handle.frame_id,
+                                shadow_path=handle.shadow_path,
+                                scope_root=_MODAL_SELECTOR,
+                                role=handle.role,
+                                name=handle.name,
+                                occurrence=handle.occurrence,
+                                disabled=handle.disabled,
+                                element_key=handle.element_key,
+                            )
+                inst.refs = refs
+                # Cross-PR fix (#749 ↔ #750): the from_ref early-return
+                # must honor the same v2 dispatch as the main return
+                # path. Without this, scoped snapshots stay v1 even
+                # when ``BROWSER_SNAPSHOT_FORMAT=v2`` is set — agents
+                # parsing on the ``# snapshot-v2`` first-line marker
+                # would silently see mixed formats.
+                from src.browser.flags import get_str as _flag_get_str
+                _scoped_fmt = (
+                    _flag_get_str(
+                        "BROWSER_SNAPSHOT_FORMAT", "v1", agent_id=agent_id,
+                    )
+                    .strip()
+                    .lower()
+                )
+                if _scoped_fmt == "v2":
+                    snapshot_text = _format_snapshot_v2(lines, entries)
+                else:
+                    snapshot_text = (
+                        "\n".join(lines) if lines else "(no interactive elements)"
+                    )
+                snapshot_text = self.redactor.redact(agent_id, snapshot_text)
+                inst.m_snapshot_bytes.append(len(snapshot_text))
+                response_refs = {
+                    rid: h.to_agent_dict() for rid, h in refs.items()
+                }
+                return {
+                    "success": True,
+                    "data": {"snapshot": snapshot_text, "refs": response_refs},
+                }
 
             # When a modal dialog is open, scope to only dialog elements
             # so agents don't see/click elements behind the overlay
@@ -1991,7 +2229,20 @@ class BrowserManager:
             response_refs = {rid: h.to_agent_dict() for rid, h in refs.items()}
             return {"success": True, "data": {"snapshot": snapshot_text, "refs": response_refs}}
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            # Match the §2.3 error envelope used by the new from_ref /
+            # filter paths above so agents see a uniform shape regardless
+            # of which branch raised. Preserves the message under
+            # ``error.message`` so existing log scrapers still see the
+            # underlying string.
+            logger.exception("Snapshot failed for %s", agent_id)
+            return {
+                "success": False,
+                "error": {
+                    "code": "service_unavailable",
+                    "message": str(e),
+                    "retry_after_ms": None,
+                },
+            }
 
     @staticmethod
     async def _is_visible_modal(el, vp_size: dict | None) -> bool:

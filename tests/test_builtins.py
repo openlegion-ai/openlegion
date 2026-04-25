@@ -1113,8 +1113,47 @@ class TestBrowserSnapshotHttpClient:
 
         result = await browser_get_elements(mesh_client=mc)
 
+        # Default call sends an empty payload — service applies its
+        # historical default behavior.
         mc.browser_command.assert_awaited_once_with("snapshot", {})
         assert result["element_count"] == 3
+
+    @pytest.mark.asyncio
+    async def test_snapshot_filter_forwarded(self):
+        """``filter`` param is forwarded to the browser service."""
+        from src.agent.builtins.browser_tool import browser_get_elements
+
+        mc = AsyncMock()
+        mc.browser_command = AsyncMock(return_value={"data": {}})
+        await browser_get_elements(filter="actionable", mesh_client=mc)
+        mc.browser_command.assert_awaited_once_with(
+            "snapshot", {"filter": "actionable"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_snapshot_from_ref_forwarded(self):
+        """``from_ref`` param scopes the snapshot to a subtree."""
+        from src.agent.builtins.browser_tool import browser_get_elements
+
+        mc = AsyncMock()
+        mc.browser_command = AsyncMock(return_value={"data": {}})
+        await browser_get_elements(from_ref="e3", mesh_client=mc)
+        mc.browser_command.assert_awaited_once_with(
+            "snapshot", {"from_ref": "e3"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_snapshot_filter_and_from_ref_combine(self):
+        from src.agent.builtins.browser_tool import browser_get_elements
+
+        mc = AsyncMock()
+        mc.browser_command = AsyncMock(return_value={"data": {}})
+        await browser_get_elements(
+            filter="inputs", from_ref="e7", mesh_client=mc,
+        )
+        mc.browser_command.assert_awaited_once_with(
+            "snapshot", {"filter": "inputs", "from_ref": "e7"},
+        )
 
 
 class TestBrowserClickHttpClient:
