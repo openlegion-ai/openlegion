@@ -375,10 +375,13 @@ def _encode_screenshot(
         from io import BytesIO
 
         from PIL import Image
-    except Exception:
+    except ImportError:
         # Pillow missing — log once per encode attempt at debug only;
         # this is expected on the agent-side dev path where Pillow isn't
-        # bundled. Caller still gets a usable PNG.
+        # bundled. Caller still gets a usable PNG. Narrowed to
+        # ImportError specifically so non-import failures (e.g. partially
+        # broken install raising OSError at module init) surface as bugs
+        # rather than silently downgrading.
         logger.debug(
             "Pillow not installed; falling back to PNG (agent=%s)", agent_id,
         )
