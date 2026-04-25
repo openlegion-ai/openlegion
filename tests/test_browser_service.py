@@ -8024,9 +8024,14 @@ class TestShadowDOM:
         assert "if (d > MAX_WALK_DEPTH" in _JS_A11Y_TREE
 
     @pytest.mark.asyncio
+    @pytest.mark.browser
     @pytest.mark.skipif(
         _no_playwright(),
-        reason="playwright not installed in dev env; CI runs this",
+        reason=(
+            "playwright not in [dev] deps (browser binaries bloat install); "
+            "CI honours this skip — install manually via "
+            "'pip install playwright && playwright install firefox' to run"
+        ),
     )
     async def test_js_walker_open_shadow_root_real_browser(self):
         """Spin up a real browser, set HTML with an open shadow root,
@@ -8072,9 +8077,14 @@ class TestShadowDOM:
                 await browser.close()
 
     @pytest.mark.asyncio
+    @pytest.mark.browser
     @pytest.mark.skipif(
         _no_playwright(),
-        reason="playwright not installed in dev env; CI runs this",
+        reason=(
+            "playwright not in [dev] deps (browser binaries bloat install); "
+            "CI honours this skip — install manually via "
+            "'pip install playwright && playwright install firefox' to run"
+        ),
     )
     async def test_js_walker_closed_shadow_root_invisible_real_browser(self):
         """Real-browser test: closed shadow roots are unreachable per
@@ -8113,9 +8123,14 @@ class TestShadowDOM:
                 await browser.close()
 
     @pytest.mark.asyncio
+    @pytest.mark.browser
     @pytest.mark.skipif(
         _no_playwright(),
-        reason="playwright not installed in dev env; CI runs this",
+        reason=(
+            "playwright not in [dev] deps (browser binaries bloat install); "
+            "CI honours this skip — install manually via "
+            "'pip install playwright && playwright install firefox' to run"
+        ),
     )
     async def test_js_walker_depth_cap_real_browser(self):
         """Real-browser test: a 60-deep nested DOM must produce zero
@@ -8334,3 +8349,313 @@ class TestShadowDOM:
         result = await mgr.click("a1", ref="e0")
         assert result["success"] is True
         element_handle.click.assert_called()
+
+    # ── Codex-review fixes (Fix 1, 2, 4, 5) ─────────────────────────────────
+
+    def test_walker_and_stage2_share_name_extraction(self):
+        """Fix 1 — walker and stage-2 must use the *same* accessible-name
+        extraction. Both JS bodies must contain the shared
+        ``accessibleName`` helper string so a name emitted from
+        ``placeholder``/``alt``/``aria-labelledby``/``label[for=]``/etc.
+        in the walker is matchable in stage 2.
+        """
+        from src.browser.service import (
+            _JS_A11Y_TREE,
+            _JS_NAME_HELPERS,
+            _JS_SHADOW_RESOLVE_STAGE2,
+        )
+        # Sanity-check that the shared helper is well-formed.
+        assert "function accessibleName(el, role)" in _JS_NAME_HELPERS
+        assert "function implicitRoleFor(el)" in _JS_NAME_HELPERS
+        # Both JS bodies inline the shared helper. The placeholder
+        # ``__NAME_HELPERS__`` must NOT survive in either rendered body.
+        assert "__NAME_HELPERS__" not in _JS_A11Y_TREE
+        assert "__NAME_HELPERS__" not in _JS_SHADOW_RESOLVE_STAGE2
+        for js in (_JS_A11Y_TREE, _JS_SHADOW_RESOLVE_STAGE2):
+            assert "function accessibleName(el, role)" in js
+            assert "function implicitRoleFor(el)" in js
+        # Stage-2's matcher must use accessibleName(...) — not the old
+        # narrow ``aria-label || textContent`` fallback that missed
+        # placeholder/alt/labelledby.
+        assert "accessibleName(el, role)" in _JS_SHADOW_RESOLVE_STAGE2
+
+    @pytest.mark.asyncio
+    @pytest.mark.browser
+    @pytest.mark.skipif(
+        _no_playwright(),
+        reason=(
+            "playwright not in [dev] deps (browser binaries bloat install); "
+            "CI honours this skip — install manually via "
+            "'pip install playwright && playwright install firefox' to run"
+        ),
+    )
+    async def test_shadow_input_with_placeholder_resolves(self):
+        """Fix 1 (real browser) — an ``<input placeholder="Search">``
+        inside a shadow root snapshots with name "Search". Stage 2 must
+        match it via the shared ``accessibleName`` extraction; otherwise
+        the resolver returns null and the agent sees a spurious
+        ``ref_stale``.
+        """
+        from playwright.async_api import async_playwright
+
+        from src.browser.service import (
+            _JS_A11Y_TREE,
+            _JS_SHADOW_RESOLVE_STAGE1,
+            _JS_SHADOW_RESOLVE_STAGE2,
+        )
+        async with async_playwright() as p:
+            browser = await p.firefox.launch()
+            try:
+                page = await browser.new_page()
+                await page.set_content("""
+                    <html><body>
+                      <my-search id="srch"></my-search>
+                      <script>
+                        const host = document.getElementById('srch');
+                        host.setAttribute('data-testid', 'search-host');
+                        const root = host.attachShadow({mode: 'open'});
+                        const inp = document.createElement('input');
+                        inp.type = 'search';
+                        inp.placeholder = 'Search';
+                        root.appendChild(inp);
+                      </script>
+                    </body></html>
+                """)
+                tree = await page.evaluate(_JS_A11Y_TREE)
+
+                # Find the input emitted by the walker — its name must
+                # come from the placeholder.
+                def find_searchbox(node):
+                    if node.get("role") == "searchbox":
+                        return node
+                    for c in node.get("children", []) or []:
+                        r = find_searchbox(c)
+                        if r:
+                            return r
+                    return None
+                tb = find_searchbox(tree)
+                assert tb is not None, "shadow input not in walked tree"
+                assert tb.get("name") == "Search"
+                sp = tb.get("shadow_path")
+                assert sp, "shadow input missing shadow_path"
+
+                # Now drive the actual resolver. Stage-1 returns the
+                # shadowRoot; stage-2 must find the input *by its
+                # placeholder-derived name* — that's the regression.
+                import json as _json
+                stage1 = await page.evaluate_handle(
+                    _JS_SHADOW_RESOLVE_STAGE1,
+                    {"path": _json.dumps(sp)},
+                )
+                # Verify stage-1 didn't error out.
+                err = await stage1.evaluate(
+                    "(v) => (v && typeof v === 'object' && '__OL_RESOLVER_ERROR__' in v)"
+                    " ? v.__OL_RESOLVER_ERROR__ : null",
+                )
+                assert err is None, f"stage-1 unexpectedly errored: {err}"
+                stage2 = await stage1.evaluate_handle(
+                    _JS_SHADOW_RESOLVE_STAGE2,
+                    {"role": "searchbox", "name": "Search", "occurrence": 0},
+                )
+                element = stage2.as_element()
+                assert element is not None, (
+                    "stage-2 failed to match shadow input by placeholder name"
+                )
+                tag = await element.evaluate("(el) => el.tagName")
+                assert tag == "INPUT"
+            finally:
+                await browser.close()
+
+    @pytest.mark.asyncio
+    @pytest.mark.browser
+    @pytest.mark.skipif(
+        _no_playwright(),
+        reason=(
+            "playwright not in [dev] deps (browser binaries bloat install); "
+            "CI honours this skip — install manually via "
+            "'pip install playwright && playwright install firefox' to run"
+        ),
+    )
+    async def test_nested_shadow_hosts_indexed_per_root(self):
+        """Fix 2 (real browser) — two duplicate inner shadow hosts under
+        the *same* outer shadow root must each get an occurrence index
+        scoped to that outer root. Walker and stage-1 resolver must
+        agree on the scope (per-root for hops past the first), so both
+        hosts resolve back to a real button.
+
+        Without the fix the walker computes occurrence document-wide
+        while stage-1 walks ``parentShadowRoot.querySelectorAll(...)``
+        for nested hops — they disagree → stage-1 picks the wrong host
+        → discriminator mismatch → spurious RefStale.
+        """
+        from playwright.async_api import async_playwright
+
+        from src.browser.service import (
+            _JS_A11Y_TREE,
+            _JS_SHADOW_RESOLVE_STAGE1,
+            _JS_SHADOW_RESOLVE_STAGE2,
+        )
+        async with async_playwright() as p:
+            browser = await p.firefox.launch()
+            try:
+                page = await browser.new_page()
+                await page.set_content("""
+                    <html><body>
+                      <outer-host id="outer"></outer-host>
+                      <script>
+                        const outer = document.getElementById('outer');
+                        outer.setAttribute('data-testid', 'outer');
+                        const oroot = outer.attachShadow({mode: 'open'});
+                        // Two duplicate inner hosts inside the SAME outer
+                        // shadow root.
+                        for (let i = 0; i < 2; i++) {
+                          const inner = document.createElement('inner-host');
+                          inner.setAttribute('data-testid', 'inner-' + i);
+                          const iroot = inner.attachShadow({mode: 'open'});
+                          const btn = document.createElement('button');
+                          btn.textContent = 'Inner-' + i;
+                          iroot.appendChild(btn);
+                          oroot.appendChild(inner);
+                        }
+                      </script>
+                    </body></html>
+                """)
+                tree = await page.evaluate(_JS_A11Y_TREE)
+
+                # Collect both inner buttons with their shadow paths.
+                buttons = []
+                def collect(node):
+                    if node.get("role") == "button":
+                        buttons.append(node)
+                    for c in node.get("children", []) or []:
+                        collect(c)
+                collect(tree)
+                assert len(buttons) == 2, f"expected 2 inner buttons, got {len(buttons)}"
+                names = sorted(b.get("name") for b in buttons)
+                assert names == ["Inner-0", "Inner-1"]
+
+                # Each button has a 2-hop shadow path. The inner hop's
+                # ``occurrence`` must be 0 / 1 *within the outer root*,
+                # not document-scoped.
+                import json as _json
+                for btn in buttons:
+                    sp = btn.get("shadow_path")
+                    assert sp and len(sp) == 2, f"expected 2-hop path, got {sp}"
+                    # Resolve via the actual stage-1 + stage-2 pipeline.
+                    stage1 = await page.evaluate_handle(
+                        _JS_SHADOW_RESOLVE_STAGE1,
+                        {"path": _json.dumps(sp)},
+                    )
+                    err = await stage1.evaluate(
+                        "(v) => (v && typeof v === 'object' && '__OL_RESOLVER_ERROR__' in v)"
+                        " ? v.__OL_RESOLVER_ERROR__ : null",
+                    )
+                    assert err is None, (
+                        f"nested-host resolution errored for {btn['name']}: {err}"
+                    )
+                    stage2 = await stage1.evaluate_handle(
+                        _JS_SHADOW_RESOLVE_STAGE2,
+                        {
+                            "role": "button",
+                            "name": btn["name"],
+                            "occurrence": 0,
+                        },
+                    )
+                    element = stage2.as_element()
+                    assert element is not None, (
+                        f"stage-2 returned null for nested button {btn['name']}"
+                    )
+                    text = await element.evaluate("(el) => el.textContent")
+                    assert text == btn["name"]
+            finally:
+                await browser.close()
+
+    def test_stage1_uses_unique_resolver_error_sentinel(self):
+        """Fix 4 — stage 1 must signal errors via the unique
+        ``__OL_RESOLVER_ERROR__`` key, not bare ``error``. A page that
+        attaches an ``error`` expando to a ShadowRoot must NOT be able
+        to masquerade as a resolver error.
+        """
+        from src.browser.service import _JS_SHADOW_RESOLVE_STAGE1
+        # Sentinel key appears in the stage-1 body; bare ``error: "..."``
+        # must NOT be the only signal (i.e. ``return {error: "..."}`` is
+        # gone).
+        assert "__OL_RESOLVER_ERROR__" in _JS_SHADOW_RESOLVE_STAGE1
+        assert 'return {error: "stale_host_missing"}' not in _JS_SHADOW_RESOLVE_STAGE1
+        assert (
+            'return {error: "stale_discriminator_mismatch"}'
+            not in _JS_SHADOW_RESOLVE_STAGE1
+        )
+
+    @pytest.mark.asyncio
+    async def test_stale_host_uses_sentinel_key_not_bare_error(self):
+        """Fix 4 (Python side) — the resolver looks for the sentinel
+        ``__OL_RESOLVER_ERROR__`` value via the ``in`` operator on the
+        returned object, NOT a generic truthiness check on ``v.error``.
+        Mirrored here by mocking what ``stage1.evaluate(...)`` returns
+        with the new sentinel-key probe text and confirming the Python
+        path interprets the value correctly.
+        """
+        from src.browser.ref_handle import RefHandle, RefStale, ShadowHop
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = MagicMock()
+        stage1_handle = AsyncMock()
+        # The Python resolver evaluates a key-exact probe on the
+        # returned object. Whatever string it picks out *via that probe*
+        # is what we assert on. Mock returns the resolved sentinel value
+        # — the same shape the real probe produces.
+        stage1_handle.evaluate = AsyncMock(return_value="stale_host_missing")
+        mock_page.evaluate_handle = AsyncMock(return_value=stage1_handle)
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        page_id = inst._page_id_for(inst.page)
+        inst.refs["e0"] = RefHandle.shadow(
+            page_id=page_id, scope_root=None,
+            shadow_path=(ShadowHop("ghost-card", 0, "testid:gone"),),
+            role="button", name="Submit", occurrence=0, disabled=False,
+        )
+
+        with pytest.raises(RefStale):
+            await mgr._locator_from_ref(inst, "e0")
+
+        # The probe script must look up the sentinel key, NOT v.error.
+        eval_call = stage1_handle.evaluate.call_args
+        probe_src = eval_call[0][0]
+        assert "__OL_RESOLVER_ERROR__" in probe_src
+        assert "v.error" not in probe_src
+
+    @pytest.mark.asyncio
+    async def test_locator_from_ref_raises_ref_stale_on_detached_shadow_root(self):
+        """Fix 5 — when stage 1 succeeded but stage 2 sees a detached
+        shadow root (TOCTOU between the two evaluate_handle calls),
+        the resolver must raise ``RefStale("shadow root detached…")``,
+        not let it fall through to a plain element-not-found path.
+        """
+        from src.browser.ref_handle import RefHandle, RefStale, ShadowHop
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = MagicMock()
+        stage1_handle = AsyncMock()
+        stage1_handle.evaluate = AsyncMock(return_value=None)  # stage 1 OK
+        stage2_handle = AsyncMock()
+        # Stage-2 reports the detach sentinel via its evaluate probe.
+        stage2_handle.evaluate = AsyncMock(return_value="shadow_root_detached")
+        # ``as_element`` returns None because the JS object is the
+        # sentinel dict rather than an Element handle.
+        stage2_handle.as_element = MagicMock(return_value=None)
+        stage1_handle.evaluate_handle = AsyncMock(return_value=stage2_handle)
+        mock_page.evaluate_handle = AsyncMock(return_value=stage1_handle)
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        page_id = inst._page_id_for(inst.page)
+        inst.refs["e0"] = RefHandle.shadow(
+            page_id=page_id, scope_root=None,
+            shadow_path=(ShadowHop("my-card", 0, "testid:c"),),
+            role="button", name="Submit", occurrence=0, disabled=False,
+        )
+
+        with pytest.raises(RefStale, match="detached"):
+            await mgr._locator_from_ref(inst, "e0")

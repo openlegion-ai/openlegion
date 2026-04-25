@@ -75,3 +75,15 @@ select = ["E", "F", "W", "I"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    # Tests that drive a real browser via ``playwright.async_api``.
+    # Playwright is intentionally NOT in ``[dev]`` deps (browser
+    # binaries balloon the install). The shared browser container ships
+    # Camoufox which bundles a Playwright variant — production code is
+    # exercised end-to-end by ``tests/test_e2e_*``. For unit-test runs,
+    # ``_no_playwright()`` skipif lets these tests run only when the
+    # developer has installed playwright manually (``pip install
+    # playwright && playwright install firefox``). CI honours the same
+    # skipif and does NOT install playwright.
+    "browser: real-browser test requiring playwright (CI does not run)",
+]

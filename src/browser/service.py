@@ -281,6 +281,71 @@ _IMPLICIT_ROLE_MAP: dict[str, str] = {
 }
 
 
+# Shared JS source for accessible-name extraction. Injected into BOTH the
+# walker (which produces ``name`` for emitted nodes) and the Stage-2
+# resolver (which matches candidates by name inside a shadowRoot). Single
+# source of truth — if these diverged, an element snapshotted with name
+# from e.g. ``placeholder`` would never re-resolve via Stage 2 and the
+# agent would see spurious ``ref_stale``. Defines two functions:
+#
+#   implicitRoleFor(el)              — implicit ARIA role mapping
+#   accessibleName(el, role)         — same priority chain as W3C ACCNAME:
+#       aria-label → aria-labelledby → label[for=] / wrapping <label>
+#       → alt (img) → placeholder/title (input/textarea/select)
+#       → textContent for name-from-content roles → title fallback
+#
+# IMPLICIT and INPUT_ROLES must already be in scope at the injection site.
+_JS_NAME_HELPERS = r"""
+    function implicitRoleFor(el) {
+        const r = el.getAttribute('role');
+        if (r) return r.split(/\s+/)[0].toLowerCase();
+        if (el.tagName === 'A') return el.hasAttribute('href') ? 'link' : null;
+        if (el.tagName === 'INPUT') return INPUT_ROLES[(el.type||'text').toLowerCase()] || null;
+        if (el.getAttribute('contenteditable') === 'true') return 'textbox';
+        return IMPLICIT[el.tagName] || null;
+    }
+    function accessibleName(el, role) {
+        let n = el.getAttribute('aria-label');
+        if (n) return n.trim();
+        const by = el.getAttribute('aria-labelledby');
+        if (by) {
+            const root = el.getRootNode();
+            const lookup = (root && root.getElementById) ? root : document;
+            const t = by.split(/\s+/).map(id => {
+                const ref = lookup.getElementById ? lookup.getElementById(id) : document.getElementById(id);
+                return ref ? ref.textContent.trim() : '';
+            }).filter(Boolean).join(' ');
+            if (t) return t;
+        }
+        if (el.tagName === 'IMG') return (el.alt || '').trim();
+        if (['INPUT','TEXTAREA','SELECT'].includes(el.tagName)) {
+            if (el.id) {
+                const root = el.getRootNode();
+                const scope = (root && root.querySelector) ? root : document;
+                const lbl = scope.querySelector('label[for="' + CSS.escape(el.id) + '"]');
+                if (lbl) return lbl.textContent.trim().slice(0, 200);
+            }
+            const wrap = el.closest('label');
+            if (wrap) {
+                const c = wrap.cloneNode(true);
+                c.querySelectorAll('input,textarea,select').forEach(i => i.remove());
+                const t = c.textContent.trim();
+                if (t) return t.slice(0, 200);
+            }
+            return (el.placeholder || el.title || '').trim();
+        }
+        if (['button','link','tab','menuitem','menuitemcheckbox','menuitemradio',
+            'switch','option','treeitem','heading','alert','alertdialog','dialog',
+            'listbox','toolbar','menu','status'
+        ].includes(role)) {
+            const t = el.textContent;
+            if (t) { const s = t.trim(); if (s) return s.slice(0, 200); }
+        }
+        return (el.title || '').trim();
+    }
+"""
+
+
 def _build_js_a11y_tree() -> str:
     """Build the JS a11y walker source with the implicit role map injected.
 
@@ -360,65 +425,25 @@ def _build_js_a11y_tree() -> str:
         if (t) return tag + '[data-testid="' + t.replace(/"/g, '\\"') + '"]';
         return tag;
     }
-    function siblingOccurrence(host, _parent, selector) {
-        // Document-wide indexing matches the stage-1 resolver scope
-        // (root = document → root.querySelectorAll(hop.selector)). A
-        // parent-scoped count would mismatch when bestStableId collides
-        // across multiple hosts under different parents. Tradeoff: an
-        // unrelated <my-tag> inserted elsewhere shifts the index.
-        const candidates = document.querySelectorAll(selector);
+    function siblingOccurrence(host, selector, scopeRoot) {
+        // Per-hop scope mirrors the stage-1 resolver: first hop uses
+        // ``document``, subsequent hops use the parent ``shadowRoot``
+        // (since stage-1 walks ``root = host.shadowRoot`` after each
+        // hop and queries ``root.querySelectorAll(hop.selector)``).
+        // Walker passes ``document`` for the top-level call and the
+        // parent shadowRoot when descending into a nested host.
+        const root = scopeRoot || document;
+        const candidates = root.querySelectorAll(selector);
         for (let i = 0; i < candidates.length; i++) {
             if (candidates[i] === host) return i;
         }
         return 0;
     }
-    function getRole(el) {
-        const r = el.getAttribute('role');
-        if (r) return r.split(/\s+/)[0].toLowerCase();
-        if (el.tagName === 'A') return el.hasAttribute('href') ? 'link' : null;
-        if (el.tagName === 'INPUT') return INPUT_ROLES[(el.type||'text').toLowerCase()] || null;
-        if (el.getAttribute('contenteditable') === 'true') return 'textbox';
-        return IMPLICIT[el.tagName] || null;
-    }
-    function getName(el, role) {
-        let n = el.getAttribute('aria-label');
-        if (n) return n.trim();
-        const by = el.getAttribute('aria-labelledby');
-        if (by) {
-            const root = el.getRootNode();
-            const lookup = (root && root.getElementById) ? root : document;
-            const t = by.split(/\s+/).map(id => {
-                const ref = lookup.getElementById ? lookup.getElementById(id) : document.getElementById(id);
-                return ref ? ref.textContent.trim() : '';
-            }).filter(Boolean).join(' ');
-            if (t) return t;
-        }
-        if (el.tagName === 'IMG') return (el.alt || '').trim();
-        if (['INPUT','TEXTAREA','SELECT'].includes(el.tagName)) {
-            if (el.id) {
-                const root = el.getRootNode();
-                const scope = (root && root.querySelector) ? root : document;
-                const lbl = scope.querySelector('label[for="' + CSS.escape(el.id) + '"]');
-                if (lbl) return lbl.textContent.trim().slice(0, 200);
-            }
-            const wrap = el.closest('label');
-            if (wrap) {
-                const c = wrap.cloneNode(true);
-                c.querySelectorAll('input,textarea,select').forEach(i => i.remove());
-                const t = c.textContent.trim();
-                if (t) return t.slice(0, 200);
-            }
-            return (el.placeholder || el.title || '').trim();
-        }
-        if (['button','link','tab','menuitem','menuitemcheckbox','menuitemradio',
-            'switch','option','treeitem','heading','alert','alertdialog','dialog',
-            'listbox','toolbar','menu','status'
-        ].includes(role)) {
-            const t = el.textContent;
-            if (t) { const s = t.trim(); if (s) return s.slice(0, 200); }
-        }
-        return (el.title || '').trim();
-    }
+__NAME_HELPERS__
+    // Walker name/role wrappers — single source of truth shared with
+    // the stage-2 resolver.
+    const getRole = implicitRoleFor;
+    const getName = accessibleName;
     function isVisible(el) {
         if (el.getAttribute && el.getAttribute('aria-hidden') === 'true') return false;
         const s = getComputedStyle(el);
@@ -430,7 +455,7 @@ def _build_js_a11y_tree() -> str:
         }
         return true;
     }
-    function walk(el, d, parentLandmark, shadowPath) {
+    function walk(el, d, parentLandmark, shadowPath, currentRoot) {
         if (d > MAX_WALK_DEPTH || !el || el.nodeType !== 1) return null;
         const tag = el.tagName;
         if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT' || tag === 'TEMPLATE')
@@ -444,18 +469,22 @@ def _build_js_a11y_tree() -> str:
         }
         const children = [];
         for (const child of el.children) {
-            const r = walk(child, d + 1, childLandmark, shadowPath);
+            const r = walk(child, d + 1, childLandmark, shadowPath, currentRoot);
             if (r) children.push(r);
         }
         if (el.shadowRoot && el.shadowRoot.mode === 'open') {
             const sel = cssPath(el);
-            const occ = siblingOccurrence(el, el.parentNode, sel);
+            // Scope occurrence to ``currentRoot`` (document for the
+            // first hop, parent shadowRoot for subsequent hops). Mirrors
+            // stage-1 resolver scope so nested hosts index identically
+            // on both sides.
+            const occ = siblingOccurrence(el, sel, currentRoot);
             const disc = bestStableId(el);
             const nextPath = shadowPath.concat([{
                 selector: sel, occurrence: occ, discriminator: disc,
             }]);
             for (const child of el.shadowRoot.children) {
-                const r = walk(child, d + 1, childLandmark, nextPath);
+                const r = walk(child, d + 1, childLandmark, nextPath, el.shadowRoot);
                 if (r) children.push(r);
             }
         }
@@ -484,13 +513,15 @@ def _build_js_a11y_tree() -> str:
         return nd;
     }
     const start = rootEl || document.body || document.documentElement;
-    const tree = walk(start, 0, null, []);
+    const tree = walk(start, 0, null, [], document);
     if (rootEl) return tree || { role: 'none', name: '', children: [] };
     if (!tree) return { role: 'WebArea', name: document.title || '', children: [] };
     if (tree.role === 'none')
         return { role: 'WebArea', name: document.title || '', children: tree.children || [] };
     return { role: 'WebArea', name: document.title || '', children: [tree] };
 })""".replace(
+        "__NAME_HELPERS__", _JS_NAME_HELPERS,
+    ).replace(
         "__IMPLICIT_ROLE_MAP__", implicit_json,
     ).replace(
         "__MAX_WALK_DEPTH__", str(_MAX_WALK_DEPTH),
@@ -521,13 +552,24 @@ _JS_A11Y_TREE = _build_js_a11y_tree()
 # Playwright-correct two-stage shadow resolver. ``get_by_role`` does NOT
 # pierce shadow boundaries, so non-empty ``shadow_path`` falls through
 # this evaluate_handle pair instead of the locator API.
+# Sentinel key for stage-1 errors. Uses a unique prefixed name rather than
+# bare ``error`` so a page that happens to set ``shadowRoot.error = 'foo'``
+# (or any expando the page might attach) cannot masquerade as a resolver
+# error. Stage-2 also rejects any rooted shadow root carrying this key as
+# an expando — defence-in-depth, since the property is on a ShadowRoot
+# object that the page does not normally write to.
+_JS_RESOLVER_ERROR_KEY = "__OL_RESOLVER_ERROR__"
+
 _JS_SHADOW_RESOLVE_STAGE1 = r"""(args) => {
+    const ERR_KEY = "__OL_RESOLVER_ERROR__";
     const path = JSON.parse(args.path);
     let root = document;
     for (const hop of path) {
         const candidates = root.querySelectorAll(hop.selector);
         const host = candidates[hop.occurrence];
-        if (!host || !host.shadowRoot) return {error: "stale_host_missing"};
+        if (!host || !host.shadowRoot) {
+            const e = {}; e[ERR_KEY] = "stale_host_missing"; return e;
+        }
         function isStableId(id) {
             if (!id) return false;
             if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) return false;
@@ -555,7 +597,9 @@ _JS_SHADOW_RESOLVE_STAGE1 = r"""(args) => {
             return 'fp:' + fp;
         }
         const got = bestStableId(host);
-        if (got !== hop.discriminator) return {error: "stale_discriminator_mismatch"};
+        if (got !== hop.discriminator) {
+            const e = {}; e[ERR_KEY] = "stale_discriminator_mismatch"; return e;
+        }
         root = host.shadowRoot;
     }
     return root;
@@ -563,9 +607,34 @@ _JS_SHADOW_RESOLVE_STAGE1 = r"""(args) => {
 
 
 def _build_js_shadow_resolve_stage2() -> str:
+    """Stage-2 resolver: pick the role+name match at ``occurrence`` inside
+    the ShadowRoot stage-1 returned.
+
+    Uses the SAME ``accessibleName(el, role)`` helper as the walker
+    (injected via ``__NAME_HELPERS__``). If the two diverged, an element
+    snapshotted with name from e.g. ``placeholder=Search`` would never
+    match Stage 2 here and the agent would see spurious ``ref_stale``.
+    Defence-in-depth against page-controlled expandos: rejects any
+    ``root`` carrying the resolver-error sentinel even if the call site
+    forgot to pre-check it.
+    """
     implicit_json = json.dumps(_IMPLICIT_ROLE_MAP)
     return r"""((root, args) => {
-    if (!root || root.error) return null;
+    const ERR_KEY = "__OL_RESOLVER_ERROR__";
+    // TOCTOU sentinel distinct from null/undefined: caller maps this to
+    // RefStale (transient — shadow root detached between stage 1 and
+    // stage 2 evaluate_handle calls). A bare null result, by contrast,
+    // means stage 2 ran successfully but the element isn't at the
+    // requested occurrence inside an otherwise-live shadow root —
+    // that's a real "element vanished" condition.
+    if (!root) {
+        const e = {}; e[ERR_KEY] = "shadow_root_detached"; return e;
+    }
+    if (typeof root === 'object' && ERR_KEY in root) {
+        // Stage-1 already errored out; surface the same sentinel so the
+        // caller can distinguish from an element-not-found null.
+        return root;
+    }
     const role = args.role;
     const name = args.name;
     const occurrence = args.occurrence;
@@ -577,23 +646,32 @@ def _build_js_shadow_resolve_stage2() -> str:
         range:'slider',number:'spinbutton',
         submit:'button',reset:'button',button:'button'
     };
-    function implicitRoleFor(el) {
-        const r = el.getAttribute('role');
-        if (r) return r.split(/\s+/)[0].toLowerCase();
-        if (el.tagName === 'A') return el.hasAttribute('href') ? 'link' : null;
-        if (el.tagName === 'INPUT') return INPUT_ROLES[(el.type||'text').toLowerCase()] || null;
-        if (el.getAttribute('contenteditable') === 'true') return 'textbox';
-        return IMPLICIT[el.tagName] || null;
+__NAME_HELPERS__
+    let candidates;
+    try {
+        candidates = Array.from(root.querySelectorAll('*')).filter(el => {
+            const r = implicitRoleFor(el);
+            if (r !== role) return false;
+            if (!name) return true;
+            // Match using the SAME accessible-name extraction the walker
+            // ran when emitting the snapshot. Anything else (e.g. only
+            // ``aria-label || textContent``) misses elements named via
+            // ``placeholder``, ``alt``, ``aria-labelledby``, ``label[for=]``,
+            // or ``title`` — producing spurious RefStale.
+            const n = (accessibleName(el, role) || '').trim();
+            return n === name;
+        });
+    } catch (_e) {
+        // ``querySelectorAll`` on a detached ShadowRoot can throw. Treat
+        // as a transient detach rather than an element-not-found.
+        const e = {}; e[ERR_KEY] = "shadow_root_detached"; return e;
     }
-    const candidates = Array.from(root.querySelectorAll('*')).filter(el => {
-        const r = implicitRoleFor(el);
-        if (r !== role) return false;
-        if (!name) return true;
-        const n = (el.getAttribute('aria-label') || el.textContent || '').trim();
-        return n === name;
-    });
     return candidates[occurrence] || null;
-})""".replace("__IMPLICIT_ROLE_MAP__", implicit_json)
+})""".replace(
+        "__NAME_HELPERS__", _JS_NAME_HELPERS,
+    ).replace(
+        "__IMPLICIT_ROLE_MAP__", implicit_json,
+    )
 
 
 _JS_SHADOW_RESOLVE_STAGE2 = _build_js_shadow_resolve_stage2()
@@ -2829,6 +2907,21 @@ class BrowserManager:
         each host's discriminator. Stage 2 picks the role+name match at
         the requested occurrence inside that root. Either stage can
         raise :class:`RefStale` when the DOM has shifted since snapshot.
+
+        Error taxonomy:
+
+        * Stage-1 ``stale_host_missing``      → RefStale (host removed).
+        * Stage-1 ``stale_discriminator_mismatch`` → RefStale (host swapped).
+        * Stage-2 ``shadow_root_detached``    → RefStale (TOCTOU between
+          stage 1 succeeding and stage 2 running).
+        * Stage-2 returns null                → RefStale (element no
+          longer present at the requested occurrence inside an otherwise
+          live shadow root).
+
+        Errors are signaled via a unique ``__OL_RESOLVER_ERROR__`` key
+        rather than a plain ``error`` property so a page that happens to
+        attach an ``error`` expando to a ShadowRoot cannot masquerade as
+        a resolver failure.
         """
         path_payload = [
             {
@@ -2842,8 +2935,14 @@ class BrowserManager:
             _JS_SHADOW_RESOLVE_STAGE1,
             {"path": json.dumps(path_payload)},
         )
+        # Read the stage-1 error sentinel by exact key. Page-controlled
+        # ``error`` expandos cannot match because we look up
+        # ``__OL_RESOLVER_ERROR__`` specifically.
         try:
-            err = await stage1.evaluate("(v) => v && v.error ? v.error : null")
+            err = await stage1.evaluate(
+                "(v) => (v && typeof v === 'object' && '__OL_RESOLVER_ERROR__' in v)"
+                " ? v.__OL_RESOLVER_ERROR__ : null",
+            )
         except Exception:
             err = None
         if err == "stale_host_missing":
@@ -2858,6 +2957,20 @@ class BrowserManager:
                 "occurrence": handle.occurrence,
             },
         )
+        # Distinguish a detached shadow root (transient TOCTOU between
+        # stage 1 and stage 2) from a genuine element-not-found. The
+        # detached case surfaces as the ``shadow_root_detached`` sentinel
+        # so the caller emits a transient ``ref_stale`` rather than a
+        # potentially-misleading ``not_found``.
+        try:
+            stage2_err = await stage2.evaluate(
+                "(v) => (v && typeof v === 'object' && '__OL_RESOLVER_ERROR__' in v)"
+                " ? v.__OL_RESOLVER_ERROR__ : null",
+            )
+        except Exception:
+            stage2_err = None
+        if stage2_err == "shadow_root_detached":
+            raise RefStale("shadow root detached during resolve", ref=ref)
         element = stage2.as_element()
         if element is None:
             raise RefStale("shadow element not found at occurrence", ref=ref)
