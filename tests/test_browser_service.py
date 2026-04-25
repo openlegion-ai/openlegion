@@ -2274,6 +2274,76 @@ class TestDiffSnapshot:
         assert len(data["changed"]) == 1
         assert data["changed"][0]["checked"] == {"from": False, "to": True}
 
+    @pytest.mark.asyncio
+    async def test_unnamed_sibling_removal_is_positional(self):
+        """Documents the priority-4 keying behavior: ``sibling_index``
+        is positional (which slot in walk-order this is for the
+        (role, name) pair) — NOT element identity. Removing the last
+        unnamed sibling drops slot N; slot 0..N-1 keep the same keys.
+        Result: diff reports one ``removed`` and zero ``added`` —
+        which is more conservative than the worst-case "remove+add
+        every shifted sibling" interpretation. Still imperfect: an
+        agent that cares which specific button was removed has no
+        signal beyond the count. data-testid extraction (priority 1)
+        will give true element identity."""
+        tree_v1 = {
+            "role": "WebArea", "name": "",
+            "children": [
+                {"role": "button", "name": ""},   # nameless sibling 1
+                {"role": "button", "name": ""},   # nameless sibling 2
+            ],
+        }
+        tree_v2 = {
+            "role": "WebArea", "name": "",
+            "children": [
+                {"role": "button", "name": ""},   # only one survives
+            ],
+        }
+        mgr, _, mock_page = await self._setup(tree_v1)
+        await mgr.snapshot("a1")
+        mock_page.accessibility.snapshot = AsyncMock(return_value=tree_v2)
+        result = await mgr.snapshot("a1", diff_from_last=True)
+        data = result["data"]
+        # Slot-0 survivor matches baseline slot-0 key → unchanged.
+        # The vanished slot-1 entry → removed.
+        assert len(data["removed"]) == 1
+        assert len(data["added"]) == 0
+        assert data["unchanged_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_named_duplicate_collision_misses_remove(self):
+        """Documents the priority-3 keying limitation: two elements
+        with the same role+name+landmark collide on element_key, and
+        ``ref_summary`` keeps only the latest one. Removing one of the
+        duplicates is reported as "unchanged" because the survivor's
+        key matches the baseline's surviving entry. Same future fix
+        (data-testid)."""
+        tree_v1 = {
+            "role": "WebArea", "name": "",
+            "children": [
+                {"role": "button", "name": "Click"},
+                {"role": "button", "name": "Click"},
+            ],
+        }
+        tree_v2 = {
+            "role": "WebArea", "name": "",
+            "children": [
+                {"role": "button", "name": "Click"},
+            ],
+        }
+        mgr, _, mock_page = await self._setup(tree_v1)
+        await mgr.snapshot("a1")
+        mock_page.accessibility.snapshot = AsyncMock(return_value=tree_v2)
+        result = await mgr.snapshot("a1", diff_from_last=True)
+        data = result["data"]
+        # Documented limitation: duplicate-named removal is invisible
+        # to the diff. unchanged_count==1 because the surviving
+        # duplicate matches the baseline's surviving entry.
+        assert data["scope"] == "same"
+        assert data["removed"] == []
+        assert data["added"] == []
+        assert data["unchanged_count"] == 1
+
     def test_compute_diff_descriptors_are_deterministic(self):
         from src.browser.service import _compute_snapshot_diff
         prev = {

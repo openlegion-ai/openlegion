@@ -2163,12 +2163,29 @@ class BrowserManager:
                         entries.append(
                             (ref_id, role, name, attr_str, landmark, depth),
                         )
-                        # §7.3: stable element-key for cross-snapshot diffing.
-                        # Today only the role+name+landmark path of
-                        # ``compute_element_key`` is wired (priorities 3/4);
-                        # data-testid / dom-id extraction is a follow-up that
-                        # plugs into this same hash path without breaking
-                        # already-seeded handles.
+                        # §7.3: stable element-key for cross-snapshot
+                        # diffing. Today only ``compute_element_key``'s
+                        # role+name+landmark path (priorities 3/4) is
+                        # wired; data-testid / dom-id extraction (priorities
+                        # 1/2) is a follow-up that will plug into this
+                        # same hash via ``test_id=`` / ``dom_id=`` kwargs
+                        # without breaking already-seeded handles.
+                        #
+                        # Known keying limitations until that lands:
+                        #
+                        # - Two elements with the SAME role+name+landmark
+                        #   collide on the same key. ``ref_summary`` keeps
+                        #   the latest one (logged at debug); the previous
+                        #   one falls out of the diff baseline. Diff misses
+                        #   add/remove of duplicates within a single
+                        #   landmark (e.g. multiple "Like" buttons in a
+                        #   feed). Acceptable for v1: most agent flows
+                        #   target uniquely-named elements.
+                        # - Unnamed siblings (priority-4 fallback) include
+                        #   ``sibling_index`` in their key. Removing one
+                        #   shifts the surviving siblings' indices →
+                        #   reported as a remove+add pair instead of
+                        #   "unchanged". Same fix: data-testid extraction.
                         from src.browser.ref_handle import compute_element_key
                         # frame_id / shadow_path are folded in even though
                         # they're constant defaults today (no iframe walker
