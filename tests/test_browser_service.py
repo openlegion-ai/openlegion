@@ -7395,6 +7395,88 @@ class TestFindText:
         match_refs = [m["ref"] for m in result["data"]["matches"]]
         assert match_refs == ["e0", "e2"]
 
+    @pytest.mark.asyncio
+    async def test_find_text_unicode_casefold(self):
+        mgr = self._make_manager()
+        refs = {
+            "e0": {"role": "link", "name": "Straße", "index": 0, "disabled": False},
+        }
+        inst, BrowserManager = self._make_instance(refs)
+
+        mock_locator = AsyncMock()
+        mock_locator.is_visible = AsyncMock(return_value=False)
+        mock_locator.bounding_box = AsyncMock(return_value=None)
+        mock_locator.scroll_into_view_if_needed = AsyncMock()
+
+        async def fake_snapshot(self_mgr, _inst, _agent_id, **_kw):
+            return {"success": True, "data": {}}
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst), \
+             patch.object(BrowserManager, "_locator_from_ref", return_value=mock_locator), \
+             patch.object(BrowserManager, "_snapshot_impl", new=fake_snapshot):
+            result = await mgr.find_text("agent1", "STRASSE")
+
+        assert result["success"] is True
+        match_refs = [m["ref"] for m in result["data"]["matches"]]
+        assert match_refs == ["e0"]
+
+    @pytest.mark.asyncio
+    async def test_find_text_caps_at_50_matches(self):
+        mgr = self._make_manager()
+        refs = {
+            f"e{i}": {"role": "button", "name": "Save item", "index": i, "disabled": False}
+            for i in range(60)
+        }
+        inst, BrowserManager = self._make_instance(refs)
+
+        mock_locator = AsyncMock()
+        mock_locator.is_visible = AsyncMock(return_value=False)
+        mock_locator.bounding_box = AsyncMock(return_value=None)
+        mock_locator.scroll_into_view_if_needed = AsyncMock()
+
+        async def fake_snapshot(self_mgr, _inst, _agent_id, **_kw):
+            return {"success": True, "data": {}}
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst), \
+             patch.object(BrowserManager, "_locator_from_ref", return_value=mock_locator), \
+             patch.object(BrowserManager, "_snapshot_impl", new=fake_snapshot):
+            result = await mgr.find_text("agent1", "save")
+
+        assert result["success"] is True
+        assert len(result["data"]["matches"]) == 50
+        assert result["data"]["truncated"] is True
+
+    @pytest.mark.asyncio
+    async def test_find_text_does_not_clobber_diff_baseline(self):
+        from src.browser.service import BrowserManager
+
+        mgr = self._make_manager()
+        refs = {
+            "e0": {"role": "button", "name": "Submit", "index": 0, "disabled": False},
+        }
+        inst, _BM = self._make_instance(refs)
+
+        captured: dict = {}
+
+        async def fake_snapshot(
+            self_mgr, _inst, _agent_id, *, _skip_baseline=False, **_kw,
+        ):
+            captured["skip"] = _skip_baseline
+            return {"success": True, "data": {}}
+
+        mock_locator = AsyncMock()
+        mock_locator.is_visible = AsyncMock(return_value=False)
+        mock_locator.bounding_box = AsyncMock(return_value=None)
+        mock_locator.scroll_into_view_if_needed = AsyncMock()
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst), \
+             patch.object(BrowserManager, "_locator_from_ref", return_value=mock_locator), \
+             patch.object(BrowserManager, "_snapshot_impl", new=fake_snapshot):
+            result = await mgr.find_text("agent1", "submit")
+
+        assert result["success"] is True
+        assert captured.get("skip") is True
+
 
 # ── browser_open_tab tests ─────────────────────────────────────────────────
 

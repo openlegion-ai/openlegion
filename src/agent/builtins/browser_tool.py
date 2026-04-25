@@ -6,6 +6,8 @@ service container. Agent containers no longer bundle Chrome or VNC.
 
 from __future__ import annotations
 
+from urllib.parse import urlparse
+
 from src.agent.skills import skill
 
 # ``_redact_credentials`` is re-exported here (via the aliased import) so
@@ -713,7 +715,10 @@ async def browser_open_tab(
     """Open a URL in a new tab and make it the active page."""
     if not url:
         return {"error": "The 'url' parameter is required"}
-    scheme = url.split(":", 1)[0].lower() if ":" in url else ""
+    try:
+        scheme = urlparse(url).scheme.lower()
+    except Exception:
+        scheme = ""
     if scheme not in ("http", "https"):
         return {"error": "URL must start with http:// or https://"}
     return await _browser_command(

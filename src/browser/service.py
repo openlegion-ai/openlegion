@@ -210,6 +210,7 @@ _BLOCKED_URL_SCHEMES = frozenset({
     "file", "javascript", "data", "blob",
     "about", "moz-extension", "chrome-extension", "chrome",
 })
+_ALLOWED_URL_SCHEMES = frozenset({"http", "https"})
 _MAX_WAIT_MS = 10000  # 10 seconds max wait after navigation
 _MAX_SCROLL_PX = 10000  # 10000 pixels max per scroll call
 _CLICK_TIMEOUT_MS = 10000  # 10 seconds — SPAs like X need time for animations/overlays
@@ -2014,6 +2015,7 @@ class BrowserManager:
         filter: str | None = None,
         from_ref: str | None = None,
         diff_from_last: bool = False,
+        _skip_baseline: bool = False,
     ) -> dict:
         """Snapshot implementation.  Caller must hold ``inst.lock``."""
         # Resolve the optional filter once so the inner _walk sees a
@@ -2494,7 +2496,7 @@ class BrowserManager:
             # snapshots, not anchors. ``last_active_page_id`` still
             # advances so tab-change detection stays accurate.
             _is_scoped_call = (filter is not None) or (from_ref is not None)
-            if not _is_scoped_call:
+            if not _is_scoped_call and not _skip_baseline:
                 inst.last_snapshot[snapshot_page_id] = {
                     "refs_by_key": dict(ref_summary),
                     "url": current_url,
@@ -3919,7 +3921,9 @@ class BrowserManager:
                         "success": False,
                         "error": "User has browser control — action paused until control is released.",
                     }
-                snap = await self._snapshot_impl(inst, agent_id)
+                snap = await self._snapshot_impl(
+                    inst, agent_id, _skip_baseline=True,
+                )
                 if not snap.get("success"):
                     return snap
 
@@ -4003,7 +4007,7 @@ class BrowserManager:
         except Exception:
             return {"success": False, "error": "Invalid URL"}
         scheme = parsed.scheme.lower()
-        if scheme not in ("http", "https"):
+        if scheme not in _ALLOWED_URL_SCHEMES:
             return {
                 "success": False,
                 "error": f"URL scheme '{parsed.scheme}' is not allowed",
@@ -4025,10 +4029,29 @@ class BrowserManager:
 
             try:
                 page_id = inst._register_page(new_page)
+                resolved_referer = ""
                 try:
-                    await new_page.goto(
-                        url, wait_until="domcontentloaded", timeout=30000,
+                    previous_url = (
+                        previous_page.url
+                        if previous_page is not None and inst.had_real_navigate
+                        else ""
                     )
+                    resolved_referer = pick_referer(
+                        url,
+                        previous_url=previous_url,
+                        recent_referers=tuple(inst.recent_referers),
+                    )
+                except Exception as e:
+                    logger.debug("open_tab referer pick failed: %s", e)
+                    resolved_referer = ""
+
+                goto_kwargs: dict = {
+                    "wait_until": "domcontentloaded", "timeout": 30000,
+                }
+                if resolved_referer:
+                    goto_kwargs["referer"] = resolved_referer
+                try:
+                    await new_page.goto(url, **goto_kwargs)
                 except Exception as e:
                     try:
                         await new_page.close()
@@ -4036,6 +4059,12 @@ class BrowserManager:
                         pass
                     inst.page = previous_page
                     return {"success": False, "error": str(e)}
+
+                try:
+                    inst.recent_referers.append(resolved_referer)
+                    inst.had_real_navigate = True
+                except Exception as e:
+                    logger.debug("open_tab referer state update failed: %s", e)
 
                 inst.page = new_page
                 inst.dialog_active = False
@@ -4050,8 +4079,7 @@ class BrowserManager:
                     title = await new_page.title()
                 except Exception:
                     pass
-                tabs = list(inst.context.pages)
-                tab_index = tabs.index(new_page) if new_page in tabs else len(tabs) - 1
+                tab_index = len(inst.context.pages) - 1
                 current_url = new_page.url
 
                 data = {
