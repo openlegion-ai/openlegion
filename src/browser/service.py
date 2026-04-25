@@ -365,6 +365,11 @@ class CamoufoxInstance:
         # off so production pays no cost.
         from src.browser.recorder import BehaviorRecorder
         self.recorder = BehaviorRecorder(agent_id)
+        # §6.5 rolling-5 history of recently-used referers. The picker
+        # uses this to avoid immediate repeats so a fleet at scale
+        # doesn't all show the same Google referer back-to-back. Resets
+        # on browser restart, matching a real user-session boundary.
+        self.recent_referers: deque[str] = deque(maxlen=5)
 
     def _register_page(self, page) -> str:
         """Assign a stable UUID to a Page if not already registered.
@@ -1066,6 +1071,7 @@ class BrowserManager:
         self, agent_id: str, url: str, wait_ms: int = 1000,
         wait_until: str = "domcontentloaded",
         snapshot_after: bool = False,
+        referer: str | None = None,
     ) -> dict:
         """Navigate to URL and return page text.
 
@@ -1074,6 +1080,15 @@ class BrowserManager:
           - "load": all resources loaded; good for most sites
           - "networkidle": no network requests for 500ms; best for heavy SPAs (X, etc.)
           - "commit": first byte received; fastest, rarely useful
+
+        referer (Phase 3 §6.5): override the Referer header / document.referrer
+        for this nav. ``None`` (default) lets the service pick a plausible
+        value from :func:`src.browser.stealth.pick_referer` based on the
+        target host and the agent's recent nav history. Pass an empty
+        string ``""`` to explicitly send NO referer (equivalent to a
+        bookmarked / typed-URL arrival). Pass a specific URL to override
+        the picker entirely — useful when the agent is following a known
+        link from a specific page.
         """
         # Validate URL scheme
         try:
@@ -1096,10 +1111,38 @@ class BrowserManager:
                     "success": False,
                     "error": "User has browser control — action paused until control is released.",
                 }
+
+            # §6.5 referer realism. ``referer is None`` ⇒ picker decides;
+            # explicit ``""`` ⇒ direct navigation (no referer); any other
+            # string ⇒ caller override (Playwright passes it through).
+            if referer is None:
+                from src.browser.stealth import pick_referer
+                previous_url = inst.page.url if inst.page else ""
+                resolved_referer = pick_referer(
+                    url,
+                    previous_url=previous_url,
+                    recent_referers=tuple(inst.recent_referers),
+                )
+            else:
+                resolved_referer = referer
+            # Maintain the rolling-5 history on the instance so subsequent
+            # navs avoid immediate repeats. We track even empty strings so
+            # the picker can see that we just used a "direct" pattern and
+            # not always pick direct again.
+            inst.recent_referers.append(resolved_referer)
+
+            # Playwright accepts ``referer`` for goto and sets both the
+            # network header and document.referrer consistently. Pass
+            # the empty string as no kwarg — Playwright treats unset as
+            # "no override" which is the right behaviour here.
+            goto_kwargs: dict = {"wait_until": wait_until, "timeout": 30000}
+            if resolved_referer:
+                goto_kwargs["referer"] = resolved_referer
+
             # Single retry on timeout — transient network issues get a second chance.
             for attempt in range(2):
                 try:
-                    await inst.page.goto(url, wait_until=wait_until, timeout=30000)
+                    await inst.page.goto(url, **goto_kwargs)
                     break
                 except Exception as e:
                     if attempt == 0 and "timeout" in str(e).lower():

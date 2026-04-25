@@ -28,10 +28,157 @@ consistent and realistic:
 from __future__ import annotations
 
 import os
+import random
+from urllib.parse import urlparse
 
 from src.shared.utils import setup_logging
 
 logger = setup_logging("browser.stealth")
+
+
+# ── §6.5 Referrer realism on navigate ─────────────────────────────────────────
+
+
+# Why a referer pool at all: real users overwhelmingly arrive at a page with
+# a non-empty ``document.referrer`` and a ``Referer`` request header. An
+# agent that issues every navigate with no referer at all is, statistically,
+# the easiest fingerprint to flag at scale — a single property that holds
+# across every page load.
+#
+# The pool models the common arrival shapes:
+#
+#   * **same-origin** — landed via internal link from same host; populated
+#                       at runtime per-nav by the picker when the previous
+#                       URL's host matches; not a static pool entry
+#   * **direct**   — empty referer; typed URL, bookmark, or in-app deep
+#                    link; the right shape for first-party logged-in
+#                    surfaces (Gmail, GitHub dashboards) where a
+#                    search-engine referer would itself be suspicious
+#   * **social**   — Twitter/Facebook click-through; targeted at host-
+#                    specific destinations where a social referer is
+#                    plausible (don't fabricate ``t.co`` for arbitrary
+#                    sites — would itself be a tell)
+#   * **search**   — "user found us via Google/Bing/DDG"; safe default
+#                    for any site that tolerates organic-search arrivals
+#
+# Per the plan: picked per-nav with small randomness, stored per-agent
+# rolling-5 to avoid immediate repeats. The rolling history lives on
+# ``CamoufoxInstance`` so it survives across navigate calls but resets on
+# browser restart (matches a real session boundary).
+
+# Search-engine referrers — by far the most common organic-arrival shape.
+# Google dominates global desktop traffic; Bing + DDG are the next plausible
+# non-Google shapes that wouldn't themselves look like a spoof.
+_SEARCH_REFERERS: tuple[str, ...] = (
+    "https://www.google.com/",
+    "https://www.bing.com/",
+    "https://duckduckgo.com/",
+)
+
+# Social referers, keyed by destination hostname. ``t.co`` is Twitter's
+# own click-tracking shim; every real Twitter outbound link travels
+# through it.
+_SOCIAL_REFERERS: dict[str, tuple[str, ...]] = {
+    "twitter.com": ("https://t.co/",),
+    "x.com": ("https://t.co/",),
+}
+
+# Hosts where real users typically arrive via direct navigation (typed
+# URL, bookmark, app deep-link). A search-engine referer would itself
+# be suspicious here — nobody Googles "gmail.com" to check their email.
+_DIRECT_NAV_HOSTS: frozenset[str] = frozenset({
+    "mail.google.com",
+    "gmail.com",
+    "github.com",
+    "app.slack.com",
+    "outlook.office.com",
+    "calendar.google.com",
+    "drive.google.com",
+    "linear.app",
+    "notion.so",
+    "www.notion.so",
+})
+
+# Probability of using a social referer when one is registered for the
+# target host. Real users mix social inbound with direct/search arrivals;
+# always-social would itself be a pattern break.
+_SOCIAL_REFERER_PROB: float = 0.30
+
+
+def pick_referer(
+    target_url: str,
+    *,
+    previous_url: str = "",
+    recent_referers: tuple[str, ...] = (),
+    rng: random.Random | None = None,
+) -> str:
+    """Pick a plausible referer for navigating to ``target_url``.
+
+    Returns an empty string for the "direct navigation" case. Caller passes
+    the result straight to ``Page.goto(referer=...)`` which sets BOTH the
+    network ``Referer`` header and the JS-visible ``document.referrer`` —
+    keeping them consistent (a mismatch would itself be a detection signal).
+
+    Decision order:
+
+    1. If ``previous_url`` is a real page on the target host, return its
+       origin as a same-origin referer. Real users follow internal links;
+       same-origin referer is the commonest case once you're inside a site.
+    2. If the target host is in :data:`_DIRECT_NAV_HOSTS`, return empty.
+       These are surfaces where a search-engine referer would itself be
+       suspicious.
+    3. If the target host has a registered social pool, do a weighted
+       coin-flip (:data:`_SOCIAL_REFERER_PROB`) between social and search.
+    4. Default: pick a search-engine referer.
+
+    ``recent_referers`` is the per-agent rolling history (most-recent
+    last). The picker avoids returning a value already in that list,
+    falling back to a different slot in the same category. This breaks
+    the obvious "every nav has the same Google referer" pattern at
+    fleet scale.
+    """
+    rng = rng or random
+    try:
+        parsed = urlparse(target_url)
+    except Exception:
+        return ""
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return ""
+
+    # 1. Same-origin: previous nav was on the same host
+    if previous_url:
+        try:
+            prev = urlparse(previous_url)
+            if (prev.hostname and prev.scheme
+                    and prev.hostname.lower() == host):
+                # Real-user-shape: landed via internal link from "/"
+                return f"{prev.scheme}://{prev.hostname}/"
+        except Exception:
+            pass
+
+    # 2. Direct-nav surface
+    if host in _DIRECT_NAV_HOSTS:
+        return ""
+
+    # 3. Social — only when destination has one registered AND only some
+    # of the time so we don't make every X visit look like it came
+    # from t.co.
+    social = _SOCIAL_REFERERS.get(host)
+    if social and rng.random() < _SOCIAL_REFERER_PROB:
+        unseen = [r for r in social if r not in recent_referers]
+        if unseen:
+            return rng.choice(unseen)
+
+    # 4. Default — search referer, avoid immediate repeats from history
+    candidates = [r for r in _SEARCH_REFERERS if r not in recent_referers]
+    if not candidates:
+        # Rolling history covered every option — fall back to the full
+        # set rather than return empty (which would itself be a
+        # notable pattern break).
+        candidates = list(_SEARCH_REFERERS)
+    return rng.choice(candidates)
+
 
 # ── Launch options ─────────────────────────────────────────────────────────────
 

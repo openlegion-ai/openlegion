@@ -148,8 +148,16 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         wait_ms = body.get("wait_ms", 1000)
         wait_until = body.get("wait_until", "domcontentloaded")
         snapshot_after = body.get("snapshot_after", False)
-        result = await manager.navigate(agent_id, url, wait_ms, wait_until,
-                                        snapshot_after=snapshot_after)
+        # §6.5 referer: forward the param ONLY when the caller included
+        # it. ``"referer" not in body`` ⇒ leave the kwarg default (None)
+        # so the service-side picker runs. Explicit empty-string ⇒
+        # caller wants direct nav. Any other string ⇒ caller override.
+        nav_kwargs: dict = {"snapshot_after": snapshot_after}
+        if "referer" in body:
+            nav_kwargs["referer"] = body["referer"]
+        result = await manager.navigate(
+            agent_id, url, wait_ms, wait_until, **nav_kwargs,
+        )
         await _apply_delay()
         return result
 
