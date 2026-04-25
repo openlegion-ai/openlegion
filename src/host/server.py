@@ -2899,7 +2899,7 @@ def create_mesh_app(
         # docker/browser-entrypoint.sh — that layer covers DNS rebinding,
         # HTTP redirects, subresource loads (img/script/iframe), XHR/fetch,
         # and WebSockets, none of which can be gated at the Playwright API.
-        if action == "navigate":
+        if action in ("navigate", "open_tab"):
             nav_url = params.get("url", "")
             if nav_url:
                 from src.agent.builtins.http_tool import _resolve_and_pin

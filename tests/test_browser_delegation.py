@@ -975,3 +975,45 @@ class TestBrowserLoginRequestEndpoint:
                 )
                 assert resp.status_code == 400, (bad, resp.text)
                 assert "must be a string" in resp.text
+
+
+class TestBrowserCommandSSRF:
+    """Mesh-side early-reject for navigate / open_tab pointing at private IPs."""
+
+    @pytest.mark.asyncio
+    async def test_navigate_private_ip_rejected(self, tmp_path):
+        from httpx import ASGITransport, AsyncClient
+
+        app, _event_bus, _cm = _build_app(
+            tmp_path,
+            perms_map={"worker": {"can_use_browser": True}},
+        )
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            resp = await client.post(
+                "/mesh/browser/command",
+                json={"action": "navigate", "params": {"url": "http://127.0.0.1/"}},
+                headers={"X-Agent-ID": "worker"},
+            )
+        assert resp.status_code == 400, resp.text
+
+    @pytest.mark.asyncio
+    async def test_open_tab_private_ip_rejected(self, tmp_path):
+        from httpx import ASGITransport, AsyncClient
+
+        app, _event_bus, _cm = _build_app(
+            tmp_path,
+            perms_map={"worker": {"can_use_browser": True}},
+        )
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            resp = await client.post(
+                "/mesh/browser/command",
+                json={"action": "open_tab", "params": {"url": "http://127.0.0.1/"}},
+                headers={"X-Agent-ID": "worker"},
+            )
+        assert resp.status_code == 400, resp.text

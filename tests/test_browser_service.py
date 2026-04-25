@@ -7210,3 +7210,588 @@ class TestCheckCaptchaAutoSolve:
         assert result is not None
         assert "CAPTCHA detected" in result["message"]
         mock_solver.solve.assert_called_once()
+
+
+# ── browser_find_text tests ────────────────────────────────────────────────
+
+
+class TestFindText:
+    """Tests for BrowserManager.find_text() (Phase 5 §8.5)."""
+
+    def _make_manager(self):
+        from src.browser.redaction import CredentialRedactor
+        from src.browser.service import BrowserManager
+        mgr = BrowserManager.__new__(BrowserManager)
+        mgr.redactor = CredentialRedactor()
+        return mgr
+
+    def _make_instance(self, refs_dict: dict):
+        from src.browser.service import BrowserManager
+        inst = MagicMock()
+        inst.refs = {k: _h(v) for k, v in refs_dict.items()}
+        inst.page = AsyncMock()
+        inst.page.viewport_size = {"width": 1280, "height": 720}
+        inst.lock = asyncio.Lock()
+        inst.touch = MagicMock()
+        inst._user_control = False
+        return inst, BrowserManager
+
+    @pytest.mark.asyncio
+    async def test_find_text_matches_by_name_case_insensitive(self):
+        mgr = self._make_manager()
+        refs = {
+            "e0": {"role": "button", "name": "Submit", "index": 0, "disabled": False},
+            "e1": {"role": "button", "name": "Cancel", "index": 0, "disabled": False},
+            "e2": {"role": "link", "name": "View profile", "index": 0, "disabled": False},
+        }
+        inst, BrowserManager = self._make_instance(refs)
+
+        mock_locator = AsyncMock()
+        mock_locator.is_visible = AsyncMock(return_value=True)
+        mock_locator.bounding_box = AsyncMock(
+            return_value={"x": 10, "y": 10, "width": 50, "height": 20},
+        )
+        mock_locator.scroll_into_view_if_needed = AsyncMock()
+
+        async def fake_snapshot(self_mgr, _inst, _agent_id, **_kw):
+            return {"success": True, "data": {}}
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst), \
+             patch.object(BrowserManager, "_locator_from_ref", return_value=mock_locator), \
+             patch.object(BrowserManager, "_snapshot_impl", new=fake_snapshot):
+            result = await mgr.find_text("agent1", "submit")
+
+        assert result["success"] is True
+        matches = result["data"]["matches"]
+        assert len(matches) == 1
+        assert matches[0]["ref"] == "e0"
+        assert matches[0]["text"] == "Submit"
+        assert matches[0]["in_viewport"] is True
+        assert result["data"]["truncated"] is False
+
+    @pytest.mark.asyncio
+    async def test_find_text_no_matches(self):
+        mgr = self._make_manager()
+        refs = {
+            "e0": {"role": "button", "name": "Submit", "index": 0, "disabled": False},
+        }
+        inst, BrowserManager = self._make_instance(refs)
+
+        async def fake_snapshot(self_mgr, _inst, _agent_id, **_kw):
+            return {"success": True, "data": {}}
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst), \
+             patch.object(BrowserManager, "_snapshot_impl", new=fake_snapshot):
+            result = await mgr.find_text("agent1", "no-such-thing")
+
+        assert result["success"] is True
+        assert result["data"]["matches"] == []
+        assert result["data"]["total"] == 0
+        assert result["data"]["truncated"] is False
+
+    @pytest.mark.asyncio
+    async def test_find_text_query_too_long_rejected(self):
+        mgr = self._make_manager()
+        result = await mgr.find_text("agent1", "x" * 501)
+        assert result["success"] is False
+        assert "500" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_find_text_query_empty_rejected(self):
+        mgr = self._make_manager()
+        result = await mgr.find_text("agent1", "")
+        assert result["success"] is False
+
+    @pytest.mark.asyncio
+    async def test_find_text_scroll_true_scrolls_first_match(self):
+        mgr = self._make_manager()
+        refs = {
+            "e0": {"role": "button", "name": "Save", "index": 0, "disabled": False},
+            "e1": {"role": "button", "name": "Save", "index": 1, "disabled": False},
+        }
+        inst, BrowserManager = self._make_instance(refs)
+
+        mock_locator = AsyncMock()
+        mock_locator.is_visible = AsyncMock(return_value=True)
+        mock_locator.bounding_box = AsyncMock(
+            return_value={"x": 0, "y": 0, "width": 50, "height": 20},
+        )
+        mock_locator.scroll_into_view_if_needed = AsyncMock()
+
+        async def fake_snapshot(self_mgr, _inst, _agent_id, **_kw):
+            return {"success": True, "data": {}}
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst), \
+             patch.object(BrowserManager, "_locator_from_ref", return_value=mock_locator), \
+             patch.object(BrowserManager, "_snapshot_impl", new=fake_snapshot):
+            result = await mgr.find_text("agent1", "save", scroll=True)
+
+        assert result["success"] is True
+        mock_locator.scroll_into_view_if_needed.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_find_text_scroll_false_does_not_scroll(self):
+        mgr = self._make_manager()
+        refs = {
+            "e0": {"role": "button", "name": "Save", "index": 0, "disabled": False},
+        }
+        inst, BrowserManager = self._make_instance(refs)
+
+        mock_locator = AsyncMock()
+        mock_locator.is_visible = AsyncMock(return_value=True)
+        mock_locator.bounding_box = AsyncMock(
+            return_value={"x": 0, "y": 0, "width": 50, "height": 20},
+        )
+        mock_locator.scroll_into_view_if_needed = AsyncMock()
+
+        async def fake_snapshot(self_mgr, _inst, _agent_id, **_kw):
+            return {"success": True, "data": {}}
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst), \
+             patch.object(BrowserManager, "_locator_from_ref", return_value=mock_locator), \
+             patch.object(BrowserManager, "_snapshot_impl", new=fake_snapshot):
+            result = await mgr.find_text("agent1", "save", scroll=False)
+
+        assert result["success"] is True
+        mock_locator.scroll_into_view_if_needed.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_find_text_user_control_returns_error(self):
+        mgr = self._make_manager()
+        refs = {"e0": {"role": "button", "name": "Submit", "index": 0, "disabled": False}}
+        inst, BrowserManager = self._make_instance(refs)
+        inst._user_control = True
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst):
+            result = await mgr.find_text("agent1", "submit")
+
+        assert result["success"] is False
+        assert "User has browser control" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_find_text_multi_match_preserves_order(self):
+        mgr = self._make_manager()
+        refs = {
+            "e0": {"role": "button", "name": "Save draft", "index": 0, "disabled": False},
+            "e1": {"role": "button", "name": "Cancel", "index": 0, "disabled": False},
+            "e2": {"role": "link", "name": "Save and exit", "index": 0, "disabled": False},
+        }
+        inst, BrowserManager = self._make_instance(refs)
+
+        mock_locator = AsyncMock()
+        mock_locator.is_visible = AsyncMock(return_value=False)
+        mock_locator.bounding_box = AsyncMock(return_value=None)
+        mock_locator.scroll_into_view_if_needed = AsyncMock()
+
+        async def fake_snapshot(self_mgr, _inst, _agent_id, **_kw):
+            return {"success": True, "data": {}}
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst), \
+             patch.object(BrowserManager, "_locator_from_ref", return_value=mock_locator), \
+             patch.object(BrowserManager, "_snapshot_impl", new=fake_snapshot):
+            result = await mgr.find_text("agent1", "save")
+
+        assert result["success"] is True
+        match_refs = [m["ref"] for m in result["data"]["matches"]]
+        assert match_refs == ["e0", "e2"]
+
+    @pytest.mark.asyncio
+    async def test_find_text_unicode_casefold(self):
+        mgr = self._make_manager()
+        refs = {
+            "e0": {"role": "link", "name": "Straße", "index": 0, "disabled": False},
+        }
+        inst, BrowserManager = self._make_instance(refs)
+
+        mock_locator = AsyncMock()
+        mock_locator.is_visible = AsyncMock(return_value=False)
+        mock_locator.bounding_box = AsyncMock(return_value=None)
+        mock_locator.scroll_into_view_if_needed = AsyncMock()
+
+        async def fake_snapshot(self_mgr, _inst, _agent_id, **_kw):
+            return {"success": True, "data": {}}
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst), \
+             patch.object(BrowserManager, "_locator_from_ref", return_value=mock_locator), \
+             patch.object(BrowserManager, "_snapshot_impl", new=fake_snapshot):
+            result = await mgr.find_text("agent1", "STRASSE")
+
+        assert result["success"] is True
+        match_refs = [m["ref"] for m in result["data"]["matches"]]
+        assert match_refs == ["e0"]
+
+    @pytest.mark.asyncio
+    async def test_find_text_caps_at_50_matches(self):
+        mgr = self._make_manager()
+        refs = {
+            f"e{i}": {"role": "button", "name": "Save item", "index": i, "disabled": False}
+            for i in range(60)
+        }
+        inst, BrowserManager = self._make_instance(refs)
+
+        mock_locator = AsyncMock()
+        mock_locator.is_visible = AsyncMock(return_value=False)
+        mock_locator.bounding_box = AsyncMock(return_value=None)
+        mock_locator.scroll_into_view_if_needed = AsyncMock()
+
+        async def fake_snapshot(self_mgr, _inst, _agent_id, **_kw):
+            return {"success": True, "data": {}}
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst), \
+             patch.object(BrowserManager, "_locator_from_ref", return_value=mock_locator), \
+             patch.object(BrowserManager, "_snapshot_impl", new=fake_snapshot):
+            result = await mgr.find_text("agent1", "save")
+
+        assert result["success"] is True
+        assert len(result["data"]["matches"]) == 50
+        assert result["data"]["truncated"] is True
+
+    @pytest.mark.asyncio
+    async def test_find_text_caps_text_at_200_chars(self):
+        mgr = self._make_manager()
+        # Use a phrase the credential redactor won't flag as a secret.
+        long_name = "Submit application " * 50  # 950 chars
+        refs = {
+            "e0": {"role": "button", "name": long_name, "index": 0, "disabled": False},
+        }
+        inst, BrowserManager = self._make_instance(refs)
+
+        mock_locator = AsyncMock()
+        mock_locator.is_visible = AsyncMock(return_value=False)
+        mock_locator.bounding_box = AsyncMock(return_value=None)
+        mock_locator.scroll_into_view_if_needed = AsyncMock()
+
+        async def fake_snapshot(self_mgr, _inst, _agent_id, **_kw):
+            return {"success": True, "data": {}}
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst), \
+             patch.object(BrowserManager, "_locator_from_ref", return_value=mock_locator), \
+             patch.object(BrowserManager, "_snapshot_impl", new=fake_snapshot):
+            result = await mgr.find_text("agent1", "submit")
+
+        assert result["success"] is True
+        matches = result["data"]["matches"]
+        assert len(matches) == 1
+        assert len(matches[0]["text"]) == 200
+        assert matches[0]["text"] == long_name[:200]
+
+    @pytest.mark.asyncio
+    async def test_find_text_does_not_clobber_diff_baseline(self):
+        """Calling find_text after a baselined snapshot must not overwrite the
+        per-page diff baseline — the next ``diff_from_last`` call should
+        compare against the pre-find_text state, not the find_text-time state.
+        """
+        from src.browser.service import BrowserManager, CamoufoxInstance
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        tree_v1 = {
+            "role": "WebArea", "name": "",
+            "children": [{"role": "button", "name": "Submit"}],
+        }
+        mock_page = AsyncMock()
+        mock_page.url = "https://example.com"
+        mock_page.viewport_size = {"width": 1280, "height": 720}
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value=tree_v1)
+        inst = CamoufoxInstance("agent1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["agent1"] = inst
+
+        # Establish baseline via a real snapshot.
+        await mgr.snapshot("agent1")
+        page_id = inst.last_active_page_id
+        baseline_before = dict(inst.last_snapshot[page_id])
+
+        # Page state changes (a Cancel button appears) before find_text runs.
+        tree_v2 = {
+            "role": "WebArea", "name": "",
+            "children": [
+                {"role": "button", "name": "Submit"},
+                {"role": "button", "name": "Cancel"},
+            ],
+        }
+        mock_page.accessibility.snapshot = AsyncMock(return_value=tree_v2)
+
+        mock_locator = AsyncMock()
+        mock_locator.is_visible = AsyncMock(return_value=False)
+        mock_locator.bounding_box = AsyncMock(return_value=None)
+        mock_locator.scroll_into_view_if_needed = AsyncMock()
+        with patch.object(BrowserManager, "_locator_from_ref", return_value=mock_locator):
+            result = await mgr.find_text("agent1", "submit")
+
+        assert result["success"] is True
+        # Baseline must be unchanged — find_text passes _skip_baseline=True.
+        assert inst.last_snapshot[page_id] == baseline_before
+
+
+# ── browser_open_tab tests ─────────────────────────────────────────────────
+
+
+class TestOpenTab:
+    """Tests for BrowserManager.open_tab() (Phase 5 §8.6)."""
+
+    def _make_manager(self):
+        from src.browser.redaction import CredentialRedactor
+        from src.browser.service import BrowserManager
+        mgr = BrowserManager.__new__(BrowserManager)
+        mgr.redactor = CredentialRedactor()
+        return mgr
+
+    def _make_instance(self, *, existing_pages=None):
+        from src.browser.service import CamoufoxInstance
+        page0 = AsyncMock()
+        page0.url = "https://example.com"
+        inst = CamoufoxInstance("agent1", MagicMock(), MagicMock(), page0)
+        inst.context = MagicMock()
+        existing = list(existing_pages) if existing_pages else [page0]
+        inst.context.pages = existing
+        return inst, page0
+
+    @pytest.mark.asyncio
+    async def test_open_tab_success_returns_page_id_and_index(self):
+        from src.browser.service import BrowserManager
+
+        mgr = self._make_manager()
+        inst, _page0 = self._make_instance()
+
+        new_page = AsyncMock()
+        new_page.goto = AsyncMock()
+        new_page.title = AsyncMock(return_value="New Tab Title")
+        new_page.url = "https://example.org/landing"
+        new_page.bring_to_front = AsyncMock()
+        inst.context.new_page = AsyncMock(return_value=new_page)
+        inst.context.pages = [inst.page, new_page]
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst):
+            result = await mgr.open_tab("agent1", "https://example.org/landing")
+
+        assert result["success"] is True
+        assert result["data"]["page_id"]
+        assert result["data"]["tab_index"] == 1
+        assert result["data"]["url"] == "https://example.org/landing"
+        assert result["data"]["title"] == "New Tab Title"
+        assert inst.page is new_page
+        new_page.goto.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_open_tab_becomes_active(self):
+        from src.browser.service import BrowserManager
+
+        mgr = self._make_manager()
+        inst, page0 = self._make_instance()
+
+        new_page = AsyncMock()
+        new_page.goto = AsyncMock()
+        new_page.title = AsyncMock(return_value="X")
+        new_page.url = "https://example.org/"
+        new_page.bring_to_front = AsyncMock()
+        inst.context.new_page = AsyncMock(return_value=new_page)
+        inst.context.pages = [page0, new_page]
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst):
+            await mgr.open_tab("agent1", "https://example.org/")
+
+        assert inst.page is new_page
+
+    @pytest.mark.asyncio
+    async def test_open_tab_rejects_file_url(self):
+        from src.browser.service import BrowserManager
+
+        mgr = self._make_manager()
+        inst, _page0 = self._make_instance()
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst):
+            result = await mgr.open_tab("agent1", "file:///etc/passwd")
+        assert result["success"] is False
+        assert "not allowed" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_open_tab_rejects_javascript_url(self):
+        from src.browser.service import BrowserManager
+
+        mgr = self._make_manager()
+        inst, _page0 = self._make_instance()
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst):
+            result = await mgr.open_tab("agent1", "javascript:alert(1)")
+        assert result["success"] is False
+        assert "not allowed" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_open_tab_goto_failure_closes_new_page(self):
+        from src.browser.service import BrowserManager
+
+        mgr = self._make_manager()
+        inst, page0 = self._make_instance()
+
+        new_page = AsyncMock()
+        new_page.goto = AsyncMock(side_effect=Exception("net::ERR_CONNECTION_REFUSED"))
+        new_page.close = AsyncMock()
+        inst.context.new_page = AsyncMock(return_value=new_page)
+        inst.context.pages = [page0, new_page]
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst):
+            result = await mgr.open_tab("agent1", "https://example.org/")
+
+        assert result["success"] is False
+        assert "ERR_CONNECTION_REFUSED" in result["error"]
+        new_page.close.assert_awaited_once()
+        assert inst.page is page0
+
+    @pytest.mark.asyncio
+    async def test_open_tab_user_control_returns_error(self):
+        from src.browser.service import BrowserManager
+
+        mgr = self._make_manager()
+        inst, _page0 = self._make_instance()
+        inst._user_control = True
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst):
+            result = await mgr.open_tab("agent1", "https://example.org/")
+
+        assert result["success"] is False
+        assert "User has browser control" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_open_tab_snapshot_after_returns_snapshot(self):
+        from src.browser.service import BrowserManager
+
+        mgr = self._make_manager()
+        inst, page0 = self._make_instance()
+
+        new_page = AsyncMock()
+        new_page.goto = AsyncMock()
+        new_page.title = AsyncMock(return_value="X")
+        new_page.url = "https://example.org/"
+        new_page.bring_to_front = AsyncMock()
+        inst.context.new_page = AsyncMock(return_value=new_page)
+        inst.context.pages = [page0, new_page]
+
+        async def fake_snapshot(self_mgr, _inst, _agent_id, **_kw):
+            return {"success": True, "data": {"element_count": 7}}
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst), \
+             patch.object(BrowserManager, "_snapshot_impl", new=fake_snapshot):
+            result = await mgr.open_tab(
+                "agent1", "https://example.org/", snapshot_after=True,
+            )
+
+        assert result["success"] is True
+        assert result["data"]["snapshot"] == {"element_count": 7}
+
+    @pytest.mark.asyncio
+    async def test_open_tab_two_consecutive_distinct_page_ids(self):
+        from src.browser.service import BrowserManager
+
+        mgr = self._make_manager()
+        inst, page0 = self._make_instance()
+
+        new_page1 = AsyncMock()
+        new_page1.goto = AsyncMock()
+        new_page1.title = AsyncMock(return_value="A")
+        new_page1.url = "https://example.org/a"
+        new_page1.bring_to_front = AsyncMock()
+
+        new_page2 = AsyncMock()
+        new_page2.goto = AsyncMock()
+        new_page2.title = AsyncMock(return_value="B")
+        new_page2.url = "https://example.org/b"
+        new_page2.bring_to_front = AsyncMock()
+
+        pages_iter = iter([new_page1, new_page2])
+        async def fake_new_page():
+            p = next(pages_iter)
+            inst.context.pages = inst.context.pages + [p]
+            return p
+
+        inst.context.new_page = fake_new_page
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst):
+            r1 = await mgr.open_tab("agent1", "https://example.org/a")
+            r2 = await mgr.open_tab("agent1", "https://example.org/b")
+
+        assert r1["success"] is True
+        assert r2["success"] is True
+        assert r1["data"]["page_id"] != r2["data"]["page_id"]
+        assert r2["data"]["tab_index"] == 2
+
+    @pytest.mark.asyncio
+    async def test_open_tab_clears_prior_tab_refs(self):
+        from src.browser.service import BrowserManager
+
+        mgr = self._make_manager()
+        inst, _page0 = self._make_instance()
+        # Pre-populate refs as if a prior snapshot ran on the original tab.
+        inst.seed_refs_legacy({
+            "e0": {"role": "button", "name": "OldTabButton", "index": 0},
+        })
+        assert "e0" in inst.refs
+
+        new_page = AsyncMock()
+        new_page.goto = AsyncMock()
+        new_page.title = AsyncMock(return_value="New")
+        new_page.url = "https://example.org/"
+        new_page.bring_to_front = AsyncMock()
+        inst.context.new_page = AsyncMock(return_value=new_page)
+        inst.context.pages = [inst.page, new_page]
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst):
+            result = await mgr.open_tab("agent1", "https://example.org/")
+
+        assert result["success"] is True
+        assert inst.refs == {}
+
+    @pytest.mark.asyncio
+    async def test_click_after_open_tab_uses_fresh_refs(self):
+        from src.browser.service import BrowserManager
+
+        mgr = self._make_manager()
+        inst, _page0 = self._make_instance()
+        inst.seed_refs_legacy({
+            "e0": {"role": "button", "name": "OldTabButton", "index": 0},
+        })
+
+        new_page = AsyncMock()
+        new_page.goto = AsyncMock()
+        new_page.title = AsyncMock(return_value="New")
+        new_page.url = "https://example.org/"
+        new_page.bring_to_front = AsyncMock()
+        inst.context.new_page = AsyncMock(return_value=new_page)
+        inst.context.pages = [inst.page, new_page]
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst):
+            open_result = await mgr.open_tab("agent1", "https://example.org/")
+            assert open_result["success"] is True
+            click_result = await mgr.click("agent1", ref="e0")
+
+        # Old ref must not resolve — open_tab cleared inst.refs, so the click
+        # rejects the request rather than acting on a stale handle from the
+        # previous tab.
+        assert click_result["success"] is False
+        assert "e0" not in inst.refs
+
+    @pytest.mark.asyncio
+    async def test_open_tab_as_first_action(self):
+        """Opening a tab as the very first action (no prior snapshot/refs) succeeds
+        and the new page becomes active."""
+        from src.browser.service import BrowserManager
+
+        mgr = self._make_manager()
+        inst, page0 = self._make_instance()
+        # Fresh instance: refs empty, no prior snapshot.
+        assert inst.refs == {}
+
+        new_page = AsyncMock()
+        new_page.goto = AsyncMock()
+        new_page.title = AsyncMock(return_value="First")
+        new_page.url = "https://example.org/first"
+        new_page.bring_to_front = AsyncMock()
+        inst.context.new_page = AsyncMock(return_value=new_page)
+        inst.context.pages = [page0, new_page]
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst):
+            result = await mgr.open_tab("agent1", "https://example.org/first")
+
+        assert result["success"] is True
+        assert result["data"]["page_id"]
+        assert inst.page is new_page
+        assert inst.refs == {}

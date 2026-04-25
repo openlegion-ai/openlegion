@@ -41,7 +41,7 @@ from src.browser.timing import (
     x11_step_delay,
 )
 from src.shared.types import AGENT_ID_RE_PATTERN
-from src.shared.utils import setup_logging
+from src.shared.utils import sanitize_for_prompt, setup_logging
 
 logger = setup_logging("browser.service")
 
@@ -210,6 +210,7 @@ _BLOCKED_URL_SCHEMES = frozenset({
     "file", "javascript", "data", "blob",
     "about", "moz-extension", "chrome-extension", "chrome",
 })
+_ALLOWED_URL_SCHEMES = frozenset({"http", "https"})
 _MAX_WAIT_MS = 10000  # 10 seconds max wait after navigation
 _MAX_SCROLL_PX = 10000  # 10000 pixels max per scroll call
 _CLICK_TIMEOUT_MS = 10000  # 10 seconds — SPAs like X need time for animations/overlays
@@ -2014,6 +2015,7 @@ class BrowserManager:
         filter: str | None = None,
         from_ref: str | None = None,
         diff_from_last: bool = False,
+        _skip_baseline: bool = False,
     ) -> dict:
         """Snapshot implementation.  Caller must hold ``inst.lock``."""
         # Resolve the optional filter once so the inner _walk sees a
@@ -2494,7 +2496,7 @@ class BrowserManager:
             # snapshots, not anchors. ``last_active_page_id`` still
             # advances so tab-change detection stays accurate.
             _is_scoped_call = (filter is not None) or (from_ref is not None)
-            if not _is_scoped_call:
+            if not _is_scoped_call and not _skip_baseline:
                 inst.last_snapshot[snapshot_page_id] = {
                     "refs_by_key": dict(ref_summary),
                     "url": current_url,
@@ -3892,6 +3894,211 @@ class BrowserManager:
                     },
                 }
             except Exception as e:
+                return {"success": False, "error": str(e)}
+
+    async def find_text(
+        self, agent_id: str, query: str, scroll: bool = True,
+    ) -> dict:
+        """Find elements whose accessible name contains ``query`` (case-folded).
+
+        Performs a fresh snapshot to populate ``inst.refs``, then scans every
+        ref's accessible name with :meth:`str.casefold` for Unicode-aware
+        case-insensitive substring matching. Returns up to 50 matches in
+        snapshot order. When ``scroll`` is True and matches exist, the first
+        match is scrolled into view (best-effort, non-fatal).
+        """
+        if not isinstance(query, str) or not (1 <= len(query) <= 500):
+            return {
+                "success": False,
+                "error": "query must be a non-empty string up to 500 chars",
+            }
+        inst = await self.get_or_start(agent_id)
+        inst.touch()
+        async with inst.lock:
+            try:
+                if inst._user_control:
+                    return {
+                        "success": False,
+                        "error": "User has browser control — action paused until control is released.",
+                    }
+                snap = await self._snapshot_impl(
+                    inst, agent_id, _skip_baseline=True,
+                )
+                if not snap.get("success"):
+                    return snap
+
+                needle = query.casefold()
+                viewport = inst.page.viewport_size or {}
+                vw = int(viewport.get("width") or 0)
+                vh = int(viewport.get("height") or 0)
+
+                matches: list[dict] = []
+                truncated = False
+                first_locator = None
+                for ref_id, handle in inst.refs.items():
+                    name = handle.name or ""
+                    if not name or needle not in name.casefold():
+                        continue
+                    if len(matches) >= 50:
+                        truncated = True
+                        break
+                    locator = self._locator_from_ref(inst, ref_id)
+                    in_viewport = False
+                    if locator is not None:
+                        try:
+                            visible = await locator.is_visible()
+                        except Exception:
+                            visible = False
+                        if visible and vw > 0 and vh > 0:
+                            try:
+                                box = await locator.bounding_box()
+                            except Exception:
+                                box = None
+                            if box:
+                                bx = float(box.get("x", 0))
+                                by = float(box.get("y", 0))
+                                bw = float(box.get("width", 0))
+                                bh = float(box.get("height", 0))
+                                in_viewport = (
+                                    bx + bw > 0 and by + bh > 0
+                                    and bx < vw and by < vh
+                                )
+                    redacted_name = self.redactor.redact(agent_id, name)
+                    matches.append({
+                        "ref": ref_id,
+                        "text": sanitize_for_prompt(redacted_name)[:200],
+                        "in_viewport": bool(in_viewport),
+                    })
+                    if first_locator is None and locator is not None:
+                        first_locator = locator
+
+                if scroll and first_locator is not None:
+                    try:
+                        await first_locator.scroll_into_view_if_needed(timeout=3000)
+                    except Exception as e:
+                        logger.debug(
+                            "scroll_into_view_if_needed failed for %s: %s",
+                            agent_id, e,
+                        )
+
+                return {
+                    "success": True,
+                    "data": {
+                        "matches": matches,
+                        "total": len(matches),
+                        "truncated": truncated,
+                    },
+                }
+            except Exception as e:
+                return {"success": False, "error": str(e)}
+
+    async def open_tab(
+        self, agent_id: str, url: str, snapshot_after: bool = False,
+    ) -> dict:
+        """Open ``url`` in a new tab and make it the active page.
+
+        Cookies and storage are shared with existing tabs (same browser
+        context). The new page is registered in ``inst.page_ids`` so refs
+        captured against it resolve correctly. On goto failure the new
+        page is closed and the previous active tab is restored.
+        """
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            return {"success": False, "error": "Invalid URL"}
+        scheme = parsed.scheme.lower()
+        if scheme not in _ALLOWED_URL_SCHEMES:
+            return {
+                "success": False,
+                "error": f"URL scheme '{parsed.scheme}' is not allowed",
+            }
+
+        inst = await self.get_or_start(agent_id)
+        inst.touch()
+        async with inst.lock:
+            if inst._user_control:
+                return {
+                    "success": False,
+                    "error": "User has browser control — action paused until control is released.",
+                }
+            previous_page = inst.page
+            try:
+                new_page = await inst.context.new_page()
+            except Exception as e:
+                return {"success": False, "error": f"Failed to open tab: {e}"}
+
+            try:
+                page_id = inst._register_page(new_page)
+                resolved_referer = ""
+                try:
+                    previous_url = (
+                        previous_page.url
+                        if previous_page is not None and inst.had_real_navigate
+                        else ""
+                    )
+                    resolved_referer = pick_referer(
+                        url,
+                        previous_url=previous_url,
+                        recent_referers=tuple(inst.recent_referers),
+                    )
+                except Exception as e:
+                    logger.debug("open_tab referer pick failed: %s", e)
+                    resolved_referer = ""
+
+                goto_kwargs: dict = {
+                    "wait_until": "domcontentloaded", "timeout": 30000,
+                }
+                if resolved_referer:
+                    goto_kwargs["referer"] = resolved_referer
+                try:
+                    await new_page.goto(url, **goto_kwargs)
+                except Exception as e:
+                    try:
+                        await new_page.close()
+                    except Exception:
+                        pass
+                    inst.page = previous_page
+                    return {"success": False, "error": str(e)}
+
+                try:
+                    inst.recent_referers.append(resolved_referer)
+                    inst.had_real_navigate = True
+                except Exception as e:
+                    logger.debug("open_tab referer state update failed: %s", e)
+
+                inst.page = new_page
+                inst.refs = {}  # Stale refs from previous tab's snapshot
+                inst.dialog_active = False
+                inst.dialog_detected = False
+                try:
+                    await new_page.bring_to_front()
+                except Exception:
+                    pass
+
+                title = ""
+                try:
+                    title = await new_page.title()
+                except Exception:
+                    pass
+                tab_index = len(inst.context.pages) - 1
+                current_url = new_page.url
+
+                data = {
+                    "page_id": page_id,
+                    "tab_index": tab_index,
+                    "url": self.redactor.redact(agent_id, current_url),
+                    "title": self.redactor.redact(agent_id, title),
+                }
+                if snapshot_after:
+                    snap = await self._snapshot_impl(inst, agent_id)
+                    data["snapshot"] = snap.get("data") or {}
+                return {"success": True, "data": data}
+            except Exception as e:
+                try:
+                    await new_page.close()
+                except Exception:
+                    pass
+                inst.page = previous_page
                 return {"success": False, "error": str(e)}
 
     async def press_key(self, agent_id: str, key: str) -> dict:

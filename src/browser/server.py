@@ -401,6 +401,32 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         await _apply_delay()
         return result
 
+    @app.post("/browser/{agent_id}/find_text")
+    async def find_text(agent_id: str, request: Request):
+        _verify_auth(request)
+        body = await request.json()
+        query = body.get("query", "")
+        if not query:
+            raise HTTPException(400, "query required")
+        scroll = bool(body.get("scroll", True))
+        result = await manager.find_text(agent_id, query, scroll=scroll)
+        await _apply_delay()
+        return result
+
+    @app.post("/browser/{agent_id}/open_tab")
+    async def open_tab(agent_id: str, request: Request):
+        _verify_auth(request)
+        body = await request.json()
+        url = body.get("url", "")
+        if not url:
+            raise HTTPException(400, "url required")
+        snapshot_after = bool(body.get("snapshot_after", False))
+        result = await manager.open_tab(
+            agent_id, url, snapshot_after=snapshot_after,
+        )
+        await _apply_delay()
+        return result
+
     # ── Settings ───────────────────────────────────────────────────────────
 
     @app.get("/browser/settings")

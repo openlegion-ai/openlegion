@@ -6,6 +6,8 @@ service container. Agent containers no longer bundle Chrome or VNC.
 
 from __future__ import annotations
 
+from urllib.parse import urlparse
+
 from src.agent.skills import skill
 
 # ``_redact_credentials`` is re-exported here (via the aliased import) so
@@ -634,6 +636,94 @@ async def browser_switch_tab(tab_index: int = -1, *, mesh_client=None) -> dict:
     """List open tabs and optionally switch to one."""
     return await _browser_command(
         mesh_client, "switch_tab", {"tab_index": tab_index},
+    )
+
+
+@skill(
+    name="browser_find_text",
+    description=(
+        "Find elements on the current page whose accessible name contains "
+        "the query string. Matching is Unicode-aware case-insensitive via "
+        "str.casefold() — 'EMAIL' matches 'email', 'STRASSE' matches "
+        "'straße'. Returns up to 50 matches in snapshot order, each with "
+        "a ref usable by browser_click / browser_type plus an in_viewport "
+        "flag. When scroll=true (default) and at least one match exists, "
+        "the first match is scrolled into view. Use this to locate a "
+        "specific button or link by its visible label without scanning "
+        "the whole element list yourself."
+    ),
+    parameters={
+        "query": {
+            "type": "string",
+            "description": (
+                "Substring to search for (1–500 chars). Case-insensitive."
+            ),
+        },
+        "scroll": {
+            "type": "boolean",
+            "description": (
+                "If true (default), scroll the first match into view. "
+                "Set false to inspect matches without affecting scroll "
+                "position."
+            ),
+            "default": True,
+        },
+    },
+    parallel_safe=False,
+)
+async def browser_find_text(
+    query: str, scroll: bool = True, *, mesh_client=None,
+) -> dict:
+    """Find elements whose accessible name contains the query."""
+    if not query:
+        return {"error": "The 'query' parameter is required"}
+    return await _browser_command(
+        mesh_client, "find_text", {"query": query, "scroll": scroll},
+    )
+
+
+@skill(
+    name="browser_open_tab",
+    description=(
+        "Open a URL in a new browser tab. The new tab becomes the active "
+        "page — subsequent browser_get_elements / browser_click / etc. "
+        "operate on it. Cookies and storage are shared with existing "
+        "tabs. Use browser_switch_tab to return to the previous tab. "
+        "Set snapshot_after=true to include the element snapshot in the "
+        "response (saves a separate browser_get_elements call)."
+    ),
+    parameters={
+        "url": {
+            "type": "string",
+            "description": (
+                "URL to open in a new tab. Must be http:// or https://."
+            ),
+        },
+        "snapshot_after": {
+            "type": "boolean",
+            "description": (
+                "Include element snapshot in the response (default false)."
+            ),
+            "default": False,
+        },
+    },
+    parallel_safe=False,
+)
+async def browser_open_tab(
+    url: str, snapshot_after: bool = False, *, mesh_client=None,
+) -> dict:
+    """Open a URL in a new tab and make it the active page."""
+    if not url:
+        return {"error": "The 'url' parameter is required"}
+    try:
+        scheme = urlparse(url).scheme.lower()
+    except Exception:
+        scheme = ""
+    if scheme not in ("http", "https"):
+        return {"error": "URL must start with http:// or https://"}
+    return await _browser_command(
+        mesh_client, "open_tab",
+        {"url": url, "snapshot_after": snapshot_after},
     )
 
 

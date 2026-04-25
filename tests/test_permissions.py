@@ -175,7 +175,8 @@ class TestCanBrowserAction:
         """browser_actions=None (default) → all known actions allowed."""
         for action in ("navigate", "click", "type", "screenshot", "scroll",
                        "focus", "status", "detect_captcha", "upload_file",
-                       "download", "fill_form", "solve_captcha"):
+                       "download", "find_text", "open_tab",
+                       "fill_form", "solve_captcha"):
             assert browser_matrix.can_browser_action("legacy-agent", action) is True, action
 
     def test_default_also_allows_future_actions(self, browser_matrix):
@@ -263,6 +264,13 @@ class TestKnownBrowserActionsSet:
         from src.host.permissions import KNOWN_BROWSER_ACTIONS
         assert "upload_file" in KNOWN_BROWSER_ACTIONS
         assert "download" in KNOWN_BROWSER_ACTIONS
+
+    def test_phase_5_find_text_and_open_tab_present(self):
+        """Phase 5 §8.5 / §8.6 default-allow actions registered with the
+        mesh input validator."""
+        from src.host.permissions import KNOWN_BROWSER_ACTIONS
+        assert "find_text" in KNOWN_BROWSER_ACTIONS
+        assert "open_tab" in KNOWN_BROWSER_ACTIONS
 
     def test_legacy_alias_still_exported(self):
         """Back-compat alias for callers that imported the old name."""

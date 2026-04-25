@@ -40,6 +40,8 @@ KNOWN_BROWSER_ACTIONS: frozenset[str] = frozenset({
     # 404 on the unknown URL instead of the mesh rejecting the action
     # name as unknown — avoids a cross-PR merge-order dependency.
     "upload_file", "download",
+    # Phase 5 §8.5 / §8.6 default-allow read-only / nav-equivalent actions.
+    "find_text", "open_tab",
 })
 
 # Back-compat alias — retained so `host/server.py` and test fixtures that

@@ -2393,6 +2393,117 @@ class TestBrowserDetectCaptchaHttpClient:
         assert "error" in result
 
 
+class TestBrowserFindTextHttpClient:
+    """browser_find_text sends find_text command through mesh_client."""
+
+    @pytest.mark.asyncio
+    async def test_find_text_calls_browser_command(self):
+        from src.agent.builtins.browser_tool import browser_find_text
+
+        mc = AsyncMock()
+        mc.browser_command = AsyncMock(return_value={
+            "success": True,
+            "data": {"matches": [], "total": 0, "truncated": False},
+        })
+
+        result = await browser_find_text(query="submit", mesh_client=mc)
+
+        mc.browser_command.assert_awaited_once_with(
+            "find_text", {"query": "submit", "scroll": True},
+        )
+        assert result["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_find_text_passes_scroll_false(self):
+        from src.agent.builtins.browser_tool import browser_find_text
+
+        mc = AsyncMock()
+        mc.browser_command = AsyncMock(return_value={"success": True, "data": {}})
+
+        await browser_find_text(query="hi", scroll=False, mesh_client=mc)
+        mc.browser_command.assert_awaited_once_with(
+            "find_text", {"query": "hi", "scroll": False},
+        )
+
+    @pytest.mark.asyncio
+    async def test_find_text_empty_query_rejected(self):
+        from src.agent.builtins.browser_tool import browser_find_text
+
+        result = await browser_find_text(query="", mesh_client=AsyncMock())
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_find_text_no_mesh_client(self):
+        from src.agent.builtins.browser_tool import browser_find_text
+
+        result = await browser_find_text(query="ok", mesh_client=None)
+        assert "error" in result
+
+
+class TestBrowserOpenTabHttpClient:
+    """browser_open_tab sends open_tab command through mesh_client."""
+
+    @pytest.mark.asyncio
+    async def test_open_tab_calls_browser_command(self):
+        from src.agent.builtins.browser_tool import browser_open_tab
+
+        mc = AsyncMock()
+        mc.browser_command = AsyncMock(return_value={
+            "success": True,
+            "data": {
+                "page_id": "p2-abc",
+                "tab_index": 1,
+                "url": "https://example.com/",
+                "title": "Example",
+            },
+        })
+
+        result = await browser_open_tab(url="https://example.com/", mesh_client=mc)
+
+        mc.browser_command.assert_awaited_once_with(
+            "open_tab",
+            {"url": "https://example.com/", "snapshot_after": False},
+        )
+        assert result["data"]["tab_index"] == 1
+
+    @pytest.mark.asyncio
+    async def test_open_tab_with_snapshot_after(self):
+        from src.agent.builtins.browser_tool import browser_open_tab
+
+        mc = AsyncMock()
+        mc.browser_command = AsyncMock(return_value={"success": True, "data": {}})
+
+        await browser_open_tab(
+            url="https://example.com/", snapshot_after=True, mesh_client=mc,
+        )
+        mc.browser_command.assert_awaited_once_with(
+            "open_tab",
+            {"url": "https://example.com/", "snapshot_after": True},
+        )
+
+    @pytest.mark.asyncio
+    async def test_open_tab_rejects_non_http_scheme(self):
+        from src.agent.builtins.browser_tool import browser_open_tab
+
+        for bad in ("file:///etc/passwd", "javascript:alert(1)", "data:text/html,x"):
+            result = await browser_open_tab(url=bad, mesh_client=AsyncMock())
+            assert "error" in result, bad
+
+    @pytest.mark.asyncio
+    async def test_open_tab_empty_url_rejected(self):
+        from src.agent.builtins.browser_tool import browser_open_tab
+
+        result = await browser_open_tab(url="", mesh_client=AsyncMock())
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_open_tab_no_mesh_client(self):
+        from src.agent.builtins.browser_tool import browser_open_tab
+
+        result = await browser_open_tab(url="https://example.com/", mesh_client=None)
+        assert "error" in result
+
+
 class TestBrowserScrollHttpClient:
     """browser_scroll sends scroll command through mesh_client."""
 
