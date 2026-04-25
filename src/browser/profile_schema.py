@@ -292,14 +292,40 @@ def sync_adblock_extension(profile_dir: Path | str) -> bool:
     profile = Path(profile_dir)
     if not profile.is_dir():
         return False
+    # Acquire the same per-profile flock that ``migrate_profile`` uses so
+    # two browser-service processes (e.g. agent restart racing the
+    # provisioner update path) can't both write to ``extensions/`` at
+    # once. Non-blocking — if the peer holds it, skip; the peer is
+    # doing the same work. Idempotency means the eventual XPI state is
+    # correct regardless of who wins.
+    lock_path = profile / _LOCK_FILENAME
     try:
-        # Re-use the migration helper — it's already idempotent and
-        # respects the source-missing / flag-disabled guards.
-        _v3_install_ublock(profile)
-    except Exception as e:
+        with _try_lock(lock_path) as acquired:
+            if not acquired:
+                logger.debug(
+                    "sync_adblock_extension: peer holds lock on %s; "
+                    "skipping (peer will install)", profile,
+                )
+                return (
+                    profile / "extensions" / f"{UBLOCK_ADDON_ID}.xpi"
+                ).is_file()
+            try:
+                # Re-use the migration helper — already idempotent and
+                # respects the source-missing / flag-disabled guards.
+                _v3_install_ublock(profile)
+            except Exception as e:
+                logger.warning(
+                    "Launch-time uBlock sync failed for %s: %s "
+                    "(browser will start without ad-blocking)",
+                    profile, e,
+                )
+                return False
+    except OSError as e:
+        # Lock-file creation failure (FS read-only, perms) — treat as
+        # best-effort and continue; the browser still launches.
         logger.warning(
-            "Launch-time uBlock sync failed for %s: %s "
-            "(browser will start without ad-blocking)", profile, e,
+            "sync_adblock_extension: lock acquire failed for %s: %s",
+            profile, e,
         )
         return False
     target = profile / "extensions" / f"{UBLOCK_ADDON_ID}.xpi"
