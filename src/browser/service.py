@@ -2343,6 +2343,12 @@ class BrowserManager:
                     # produces phantom refs that don't match ``inst.refs``
                     # under v2.
                     entries.clear()
+                    # §7.3 baseline integrity: ``ref_summary`` is the
+                    # element_key→summary map persisted to last_snapshot.
+                    # Without this clear, the discarded scoping pass leaks
+                    # entries into the diff baseline and the next
+                    # ``diff_from_last`` call reports phantom removals.
+                    ref_summary.clear()
                     ref_counter[0] = 0
                     occurrence_counts.clear()
                     lines.append("** Modal dialog is open — only dialog elements are shown **")
@@ -2378,9 +2384,12 @@ class BrowserManager:
                     # rather than hit the wrong target.
                     lines.clear()
                     # Same reset rationale as the retry branch above —
-                    # discard fallback's ``entries`` so v2 rendering
-                    # only sees the post-fallback _walk(tree) output.
+                    # discard fallback's parallel structures (entries
+                    # for v2 rendering, ref_summary for §7.3 diff
+                    # baseline) so the post-fallback _walk(tree) is
+                    # the only contributor.
                     entries.clear()
+                    ref_summary.clear()
                     lines.append(
                         "** A modal dialog is open but its elements could "
                         "not be isolated — elements with a (dialog: ...) "
