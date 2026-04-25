@@ -743,6 +743,108 @@ async def browser_detect_captcha(*, mesh_client=None) -> dict:
     return await _browser_command(mesh_client, "detect_captcha")
 
 
+_UPLOAD_MAX_BYTES = 50 * 1024 * 1024
+_UPLOAD_MAX_FILES = 5
+
+
+@skill(
+    name="browser_upload_file",
+    description=(
+        "Upload one or more workspace files to a file-input element. "
+        "Provide a `ref` from a prior browser_get_elements snapshot pointing "
+        "at an <input type=\"file\"> (or aria-equivalent). `paths` is a list "
+        "of workspace files (1..5) to upload — these are read from /data and "
+        "forwarded to the browser. Each file ≤50MB. "
+        "Returns {success, data: {uploaded: [path, ...]}}."
+    ),
+    parameters={
+        "ref": {
+            "type": "string",
+            "description": "Element ref (e.g. 'e7') for the file-input element.",
+        },
+        "paths": {
+            "type": "array",
+            "description": (
+                "Workspace paths under /data to upload (1..5 files). "
+                "Paths may be passed without the /data/ prefix — e.g. "
+                "'uploads/resume.pdf'. Each file must be <=50MB."
+            ),
+            "items": {"type": "string"},
+        },
+    },
+    parallel_safe=False,
+)
+async def browser_upload_file(
+    ref: str,
+    paths: list[str],
+    *,
+    mesh_client=None,
+) -> dict:
+    """Stage workspace files via mesh and drive the browser file-chooser."""
+    if not mesh_client:
+        return {"error": "Browser requires mesh connectivity"}
+    if not ref or not isinstance(ref, str):
+        return {"error": "ref is required"}
+    if not isinstance(paths, list) or not paths:
+        return {"error": "paths must be a non-empty list"}
+    if len(paths) > _UPLOAD_MAX_FILES:
+        return {"error": f"at most {_UPLOAD_MAX_FILES} files per upload"}
+    if not all(isinstance(p, str) and p for p in paths):
+        return {"error": "paths must be a list of non-empty strings"}
+
+    from src.agent.builtins.file_tool import _safe_path
+
+    file_blobs: list[bytes] = []
+    for path in paths:
+        try:
+            safe = _safe_path(path)
+        except (ValueError, OSError) as e:
+            return {"error": f"Invalid workspace path '{path}': {e}"}
+        if not safe.is_file():
+            return {"error": f"Upload path not found: {path}"}
+        try:
+            size = safe.stat().st_size
+        except OSError as e:
+            return {"error": f"Cannot stat '{path}': {e}"}
+        if size > _UPLOAD_MAX_BYTES:
+            return {
+                "error": (
+                    f"File '{path}' is {size} bytes; per-file cap is "
+                    f"{_UPLOAD_MAX_BYTES} bytes (50MB)"
+                ),
+            }
+        try:
+            file_blobs.append(safe.read_bytes())
+        except OSError as e:
+            return {"error": f"Cannot read '{path}': {e}"}
+
+    import uuid as _uuid
+    idem_key = _uuid.uuid4().hex
+    staged_handles: list[str] = []
+    try:
+        for i, blob in enumerate(file_blobs):
+            stage_key = f"{idem_key}-{i}"
+            stage_resp = await mesh_client.browser_upload_stage(
+                blob, idempotency_key=stage_key,
+            )
+            handle = stage_resp.get("staged_handle")
+            if not handle:
+                return {"error": "Mesh did not return a staged_handle"}
+            staged_handles.append(handle)
+    except Exception as e:
+        return {"error": _deep_redact(str(e))}
+
+    try:
+        result = await mesh_client.browser_upload_apply({
+            "ref": ref,
+            "staged_handles": staged_handles,
+            "idempotency_key": idem_key,
+        })
+        return _deep_redact(result)
+    except Exception as e:
+        return {"error": _deep_redact(str(e))}
+
+
 @skill(
     name="request_browser_login",
     description=(

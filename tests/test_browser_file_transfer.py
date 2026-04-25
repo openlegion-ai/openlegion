@@ -240,3 +240,123 @@ class TestDownload:
         result = await mgr.download("a1", "e1", download_dir=str(tmp_path / "dl"))
         assert result["success"] is False
         assert "control" in result["error"].lower()
+
+
+class TestUploadStageIngest:
+    """`/browser/{a}/_stage_upload` mesh-internal byte ingest endpoint."""
+
+    def _make_client(self, tmp_path, monkeypatch):
+        from src.browser.server import create_browser_app
+        recv = tmp_path / "recv"
+        monkeypatch.setenv("OPENLEGION_UPLOAD_RECV_DIR", str(recv))
+        monkeypatch.delenv("BROWSER_AUTH_TOKEN", raising=False)
+        monkeypatch.delenv("MESH_AUTH_TOKEN", raising=False)
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "p"))
+        app = create_browser_app(mgr)
+        from starlette.testclient import TestClient
+        return TestClient(app), mgr, recv
+
+    def test_ingest_writes_file_and_returns_path(self, tmp_path, monkeypatch):
+        client, _mgr, recv = self._make_client(tmp_path, monkeypatch)
+        resp = client.post(
+            "/browser/a1/_stage_upload",
+            content=b"hello bytes",
+            headers={"X-Mesh-Internal": "1"},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["size_bytes"] == len(b"hello bytes")
+        assert Path(body["path"]).is_file()
+        assert Path(body["path"]).parent == recv
+        assert Path(body["path"]).read_bytes() == b"hello bytes"
+
+    def test_ingest_rejects_without_mesh_internal_header(self, tmp_path, monkeypatch):
+        client, _mgr, _recv = self._make_client(tmp_path, monkeypatch)
+        resp = client.post("/browser/a1/_stage_upload", content=b"hi")
+        assert resp.status_code == 403
+
+    def test_ingest_413_when_oversize(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("OPENLEGION_UPLOAD_STAGE_MAX_MB", "1")
+        client, _mgr, recv = self._make_client(tmp_path, monkeypatch)
+        too_big = b"X" * (2 * 1024 * 1024)
+        resp = client.post(
+            "/browser/a1/_stage_upload",
+            content=too_big,
+            headers={"X-Mesh-Internal": "1"},
+        )
+        assert resp.status_code == 413, resp.text
+        assert not any(p.is_file() for p in recv.iterdir())
+
+    def test_ingest_path_consumed_by_upload_file(self, tmp_path, monkeypatch):
+        client, mgr, _recv = self._make_client(tmp_path, monkeypatch)
+        resp = client.post(
+            "/browser/a1/_stage_upload",
+            content=b"resume.pdf bytes",
+            headers={"X-Mesh-Internal": "1"},
+            params={"suggested_filename": "resume.pdf"},
+        )
+        ingested_path = resp.json()["path"]
+        assert Path(ingested_path).is_file()
+        assert "resume.pdf" in ingested_path
+
+        async def _fake_upload(agent_id, ref, paths):
+            assert paths == [ingested_path]
+            return {"success": True, "data": {"uploaded": paths}}
+
+        mgr.upload_file = _fake_upload
+        upload_resp = client.post(
+            "/browser/a1/upload_file",
+            json={"ref": "e1", "paths": [ingested_path]},
+        )
+        assert upload_resp.status_code == 200
+        assert upload_resp.json()["success"] is True
+
+    def test_ingest_sanitizes_suggested_filename(self, tmp_path, monkeypatch):
+        client, _mgr, recv = self._make_client(tmp_path, monkeypatch)
+        resp = client.post(
+            "/browser/a1/_stage_upload",
+            content=b"x",
+            headers={"X-Mesh-Internal": "1"},
+            params={"suggested_filename": "../../etc/passwd"},
+        )
+        assert resp.status_code == 200, resp.text
+        path = Path(resp.json()["path"])
+        assert path.parent == recv
+        assert ".." not in path.name
+
+
+class TestUploadFileStageCleanup:
+    """After `set_files` succeeds the manager removes the staged paths."""
+
+    @pytest.mark.asyncio
+    async def test_stage_files_unlinked_after_success(self, tmp_path, monkeypatch):
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "p"))
+        inst = _make_instance()
+        chooser = MagicMock()
+        chooser.set_files = AsyncMock()
+
+        async def _chooser_value():
+            return chooser
+
+        inst.page.expect_file_chooser = MagicMock(
+            return_value=_async_ctx(_chooser_value()),
+        )
+
+        fake_locator = MagicMock()
+        fake_locator.click = AsyncMock()
+        monkeypatch.setattr(
+            mgr, "_locator_from_ref", lambda _i, _r: fake_locator,
+        )
+        monkeypatch.setattr(mgr, "get_or_start", AsyncMock(return_value=inst))
+        monkeypatch.setattr(
+            "src.browser.service.action_delay", lambda: 0,
+        )
+
+        a = tmp_path / "a.txt"
+        b = tmp_path / "b.txt"
+        a.write_text("a")
+        b.write_text("b")
+        result = await mgr.upload_file("a1", "e1", [str(a), str(b)])
+        assert result["success"] is True
+        assert not a.exists()
+        assert not b.exists()

@@ -62,6 +62,11 @@ KNOWN_FLAGS: dict[str, str] = {
     "OPENLEGION_REDACTION_URL_QUERY_ALLOW": "comma-separated param names",
     # ── Concurrency (§8.2) ────────────────────────────────────────────────
     "OPENLEGION_BROWSER_MAX_CONCURRENT": "int, startup-only (default 5)",
+    # ── File transfer (§4.5 / §8.1) ───────────────────────────────────────
+    "OPENLEGION_UPLOAD_STAGE_MAX_MB": "int, per-file upload byte cap (default 50)",
+    "OPENLEGION_UPLOAD_STAGE_DIR": "mesh staging dir (default /tmp/openlegion-upload-stage)",
+    "OPENLEGION_UPLOAD_RECV_DIR": "browser receive dir (default /tmp/upload-recv)",
+    "OPENLEGION_UPLOAD_STAGE_TTL_S": "orphan staging TTL in seconds (default 60)",
     # ── CAPTCHA solver (§11) ──────────────────────────────────────────────
     "CAPTCHA_SOLVER_PROVIDER": "2captcha | capsolver | unset",
     "CAPTCHA_SOLVER_KEY": "API key for the primary provider",

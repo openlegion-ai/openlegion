@@ -181,6 +181,7 @@ def create_mesh_app(
         "wallet_execute": (10, 3600),
         "image_gen": (10, 60),
         "agent_profile": (30, 60),
+        "upload_stage": (30, 60),
     }
 
     async def _check_rate_limit(endpoint: str, agent_id: str) -> None:
@@ -2948,6 +2949,325 @@ def create_mesh_app(
         except Exception as e:
             logger.warning("Browser proxy error: %s", e)
             raise HTTPException(502, f"Browser service error: {e}")
+
+    # ── §4.5 / §8.1 file-upload staging ──────────────────────────────────
+    #
+    # Two-phase mesh-mediated upload:
+    #   A) /mesh/browser/upload-stage stores raw bytes from the agent into
+    #      a tmpfs-backed staging dir keyed by an opaque handle.
+    #   B) /mesh/browser/upload_file resolves staged_handles → bytes,
+    #      streams them into the browser container's receive dir, then
+    #      drives /browser/{agent}/upload_file with the resulting paths.
+    #
+    # Stage files older than _UPLOAD_STAGE_TTL_S are reaped by a periodic
+    # garbage-collection loop scheduled at startup.
+
+    import hashlib as _hashlib
+    import os as _os
+    from pathlib import Path as _Path
+
+    _UPLOAD_STAGE_DIR = _Path(
+        _os.environ.get(
+            "OPENLEGION_UPLOAD_STAGE_DIR",
+            "/tmp/openlegion-upload-stage",
+        ),
+    )
+    try:
+        _UPLOAD_STAGE_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError as _e:
+        logger.warning(
+            "Could not create upload-stage dir %s: %s", _UPLOAD_STAGE_DIR, _e,
+        )
+
+    try:
+        _UPLOAD_STAGE_TTL_S = max(
+            5, int(_os.environ.get("OPENLEGION_UPLOAD_STAGE_TTL_S", "60")),
+        )
+    except ValueError:
+        _UPLOAD_STAGE_TTL_S = 60
+
+    try:
+        _UPLOAD_STAGE_MAX_MB = max(
+            1, int(_os.environ.get("OPENLEGION_UPLOAD_STAGE_MAX_MB", "50")),
+        )
+    except ValueError:
+        _UPLOAD_STAGE_MAX_MB = 50
+    _UPLOAD_STAGE_MAX_BYTES = _UPLOAD_STAGE_MAX_MB * 1024 * 1024
+
+    def _stage_paths(handle: str) -> tuple[_Path, _Path]:
+        return (
+            _UPLOAD_STAGE_DIR / f"{handle}.bin",
+            _UPLOAD_STAGE_DIR / f"{handle}.json",
+        )
+
+    def _read_stage_meta(meta_path: _Path) -> dict | None:
+        try:
+            return json.loads(meta_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    @app.post("/mesh/browser/upload-stage")
+    async def upload_stage(request: Request) -> dict:
+        """Phase A: stream raw bytes into the mesh staging dir.
+
+        Returns ``{staged_handle, size_bytes, expires_at}``. Bytes are
+        capped at ``_UPLOAD_STAGE_MAX_BYTES``; oversize requests return
+        413 and clean up the partial file.
+
+        Idempotency: when ``Idempotency-Key`` is supplied AND a previous
+        sidecar from the same caller has matching key + sha256 + age <
+        TTL, the existing handle is returned without rewriting the file.
+        """
+        caller_id = _extract_verified_agent_id(request)
+        await _check_rate_limit("upload_stage", caller_id)
+        if not permissions.can_browser_action(caller_id, "upload_file"):
+            raise HTTPException(403, "Browser action 'upload_file' denied")
+
+        idem_key = request.headers.get("idempotency-key", "") or None
+        max_bytes = _UPLOAD_STAGE_MAX_BYTES
+        handle = f"{caller_id}-{_uuid.uuid4().hex[:24]}"
+        bin_path, meta_path = _stage_paths(handle)
+
+        sha = _hashlib.sha256()
+        size = 0
+        try:
+            with open(bin_path, "wb") as fh:
+                async for chunk in request.stream():
+                    if not chunk:
+                        continue
+                    size += len(chunk)
+                    if size > max_bytes:
+                        fh.close()
+                        with contextlib.suppress(OSError):
+                            bin_path.unlink()
+                        raise HTTPException(
+                            413,
+                            f"Upload exceeds {_UPLOAD_STAGE_MAX_MB}MB limit",
+                        )
+                    fh.write(chunk)
+                    sha.update(chunk)
+        except HTTPException:
+            raise
+        except OSError as e:
+            with contextlib.suppress(OSError):
+                bin_path.unlink()
+            raise HTTPException(500, f"Stage write failed: {e}")
+
+        digest = sha.hexdigest()
+
+        if idem_key:
+            now = time.time()
+            for existing_meta in _UPLOAD_STAGE_DIR.glob("*.json"):
+                if existing_meta == meta_path:
+                    continue
+                try:
+                    age = now - existing_meta.stat().st_mtime
+                except OSError:
+                    continue
+                if age > _UPLOAD_STAGE_TTL_S:
+                    continue
+                meta = _read_stage_meta(existing_meta)
+                if not meta:
+                    continue
+                if (
+                    meta.get("caller_id") == caller_id
+                    and meta.get("idempotency_key") == idem_key
+                    and meta.get("sha256") == digest
+                ):
+                    existing_handle = existing_meta.stem
+                    existing_bin = existing_meta.with_suffix(".bin")
+                    if existing_bin.is_file():
+                        with contextlib.suppress(OSError):
+                            bin_path.unlink()
+                        expires_at = (
+                            datetime.fromtimestamp(
+                                existing_meta.stat().st_mtime, timezone.utc,
+                            )
+                            + timedelta(seconds=_UPLOAD_STAGE_TTL_S)
+                        ).isoformat()
+                        return {
+                            "staged_handle": existing_handle,
+                            "size_bytes": int(meta.get("size_bytes", 0)),
+                            "expires_at": expires_at,
+                        }
+
+        meta_payload = {
+            "caller_id": caller_id,
+            "idempotency_key": idem_key,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "size_bytes": size,
+            "sha256": digest,
+        }
+        try:
+            meta_path.write_text(json.dumps(meta_payload))
+        except OSError as e:
+            with contextlib.suppress(OSError):
+                bin_path.unlink()
+            raise HTTPException(500, f"Stage meta write failed: {e}")
+
+        expires_at = (
+            datetime.now(timezone.utc) + timedelta(seconds=_UPLOAD_STAGE_TTL_S)
+        ).isoformat()
+        return {
+            "staged_handle": handle,
+            "size_bytes": size,
+            "expires_at": expires_at,
+        }
+
+    @app.post("/mesh/browser/upload_file")
+    async def upload_apply(request: Request) -> dict:
+        """Phase B: forward staged bytes into the browser, drive upload_file.
+
+        Body: ``{target_agent_id?, ref, staged_handles: [str],
+        idempotency_key?}``. Resolves each handle to its mesh-side bytes,
+        streams to ``/browser/{a}/_stage_upload``, then POSTs the
+        resulting paths to ``/browser/{a}/upload_file``.
+        """
+        caller_id = _extract_verified_agent_id(request)
+        body = await request.json()
+        req_agent_id = _resolve_browser_target(
+            caller_id, body.get("target_agent_id") or "",
+        )
+
+        ref = body.get("ref", "")
+        staged_handles = body.get("staged_handles") or []
+        if not ref:
+            raise HTTPException(400, "ref required")
+        if (
+            not isinstance(staged_handles, list)
+            or not all(isinstance(h, str) and h for h in staged_handles)
+        ):
+            raise HTTPException(400, "staged_handles must be a non-empty list of strings")
+        if not staged_handles:
+            raise HTTPException(400, "staged_handles must not be empty")
+        if len(staged_handles) > 5:
+            raise HTTPException(400, "at most 5 files per upload")
+
+        if not permissions.can_browser_action(req_agent_id, "upload_file"):
+            raise HTTPException(403, "Browser action 'upload_file' denied")
+
+        resolved: list[tuple[str, _Path, dict]] = []
+        for handle in staged_handles:
+            bin_path, meta_path = _stage_paths(handle)
+            if not bin_path.is_file() or not meta_path.is_file():
+                raise HTTPException(404, f"Unknown staged_handle: {handle}")
+            meta = _read_stage_meta(meta_path) or {}
+            if meta.get("caller_id") != caller_id:
+                raise HTTPException(403, "staged_handle does not belong to caller")
+            resolved.append((handle, bin_path, meta))
+
+        browser_service_url = None
+        if container_manager:
+            browser_service_url = getattr(container_manager, "browser_service_url", None)
+        if not browser_service_url:
+            raise HTTPException(503, "Browser service not available")
+
+        browser_auth = getattr(container_manager, "browser_auth_token", "")
+        ingest_headers: dict = {"X-Mesh-Internal": "1"}
+        if browser_auth:
+            ingest_headers["Authorization"] = f"Bearer {browser_auth}"
+        incoming_trace = request.headers.get("x-trace-id")
+        if incoming_trace:
+            ingest_headers["X-Trace-Id"] = incoming_trace
+
+        async def _stream_file(path: _Path):
+            with open(path, "rb") as fh:
+                while True:
+                    chunk = fh.read(64 * 1024)
+                    if not chunk:
+                        break
+                    yield chunk
+
+        browser_paths: list[str] = []
+        try:
+            for handle, bin_path, _meta in resolved:
+                try:
+                    resp = await _browser_proxy_client.post(
+                        f"{browser_service_url}/browser/{req_agent_id}/_stage_upload",
+                        params={"suggested_filename": handle},
+                        content=_stream_file(bin_path),
+                        headers=ingest_headers,
+                    )
+                except _httpx.ConnectError as e:
+                    raise HTTPException(503, f"Browser service unreachable: {e}")
+                if resp.status_code >= 400:
+                    raise HTTPException(
+                        resp.status_code,
+                        f"Browser stage ingest failed: {resp.text}",
+                    )
+                ingest = resp.json()
+                ingested_path = ingest.get("path")
+                if not ingested_path:
+                    raise HTTPException(502, "Browser stage ingest returned no path")
+                browser_paths.append(ingested_path)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.warning("Upload ingest stream error: %s", e)
+            raise HTTPException(502, f"Browser ingest error: {e}")
+
+        upload_headers: dict = {}
+        if browser_auth:
+            upload_headers["Authorization"] = f"Bearer {browser_auth}"
+        if incoming_trace:
+            upload_headers["X-Trace-Id"] = incoming_trace
+        try:
+            resp = await _browser_proxy_client.post(
+                f"{browser_service_url}/browser/{req_agent_id}/upload_file",
+                json={"ref": ref, "paths": browser_paths},
+                headers=upload_headers,
+            )
+            resp.raise_for_status()
+            result = resp.json()
+        except _httpx.HTTPStatusError as e:
+            raise HTTPException(e.response.status_code, e.response.text)
+        except Exception as e:
+            logger.warning("Browser upload_file proxy error: %s", e)
+            raise HTTPException(502, f"Browser service error: {e}")
+
+        if result.get("success"):
+            for handle, _bin_path, _meta in resolved:
+                _bin, _meta_path = _stage_paths(handle)
+                with contextlib.suppress(OSError):
+                    _bin.unlink()
+                with contextlib.suppress(OSError):
+                    _meta_path.unlink()
+        return result
+
+    async def _upload_stage_gc_once() -> int:
+        """Reap orphan stage files older than TTL. Returns reaped count."""
+        if not _UPLOAD_STAGE_DIR.exists():
+            return 0
+        now = time.time()
+        reaped = 0
+        for child in list(_UPLOAD_STAGE_DIR.iterdir()):
+            try:
+                age = now - child.stat().st_mtime
+            except OSError:
+                continue
+            if age > _UPLOAD_STAGE_TTL_S:
+                with contextlib.suppress(OSError):
+                    child.unlink()
+                    reaped += 1
+        return reaped
+
+    async def _upload_stage_gc_loop() -> None:
+        while True:
+            try:
+                await _upload_stage_gc_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.debug("upload_stage gc tick failed: %s", e)
+            await asyncio.sleep(max(1, _UPLOAD_STAGE_TTL_S // 2))
+
+    app.state.upload_stage_dir = _UPLOAD_STAGE_DIR
+    app.state.upload_stage_ttl_s = _UPLOAD_STAGE_TTL_S
+    app.state.upload_stage_gc_once = _upload_stage_gc_once
+
+    @app.on_event("startup")
+    async def _start_upload_stage_gc() -> None:
+        asyncio.create_task(_upload_stage_gc_loop())
 
     # === Event Bus ===
 

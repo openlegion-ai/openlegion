@@ -3826,9 +3826,13 @@ class BrowserManager:
                 chooser = await info.value
                 await chooser.set_files(local_paths)
                 await asyncio.sleep(action_delay())
+                uploaded = list(local_paths)
+                for p in uploaded:
+                    with contextlib.suppress(OSError):
+                        Path(p).unlink(missing_ok=True)
                 return {
                     "success": True,
-                    "data": {"uploaded": list(local_paths)},
+                    "data": {"uploaded": uploaded},
                 }
             except Exception as e:
                 return {"success": False, "error": str(e)}

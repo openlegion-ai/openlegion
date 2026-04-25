@@ -11,6 +11,8 @@ import contextlib
 import hmac
 import json
 import os
+import uuid
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 
@@ -345,6 +347,71 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         result = await manager.upload_file(agent_id, ref, paths)
         await _apply_delay()
         return result
+
+    @app.post("/browser/{agent_id}/_stage_upload")
+    async def stage_upload(agent_id: str, request: Request):
+        """Mesh-internal byte-stream ingest endpoint for §4.5 file uploads.
+
+        Reads the request body as raw bytes, writes them under
+        ``OPENLEGION_UPLOAD_RECV_DIR`` (default ``/tmp/upload-recv``) with
+        a freshly-generated nonce filename, and returns the on-disk path
+        for the mesh to forward into ``/browser/{agent_id}/upload_file``.
+
+        Mesh-only — requires ``X-Mesh-Internal: 1``. Agents never call
+        this directly because they don't possess the browser bearer token,
+        but the header gate is a defense-in-depth check.
+        """
+        _verify_auth(request)
+        if request.headers.get("x-mesh-internal", "") != "1":
+            raise HTTPException(403, "Mesh-internal endpoint")
+        from src.browser.flags import get_int as _flag_int
+        from src.browser.flags import get_str as _flag_str
+        max_mb = _flag_int(
+            "OPENLEGION_UPLOAD_STAGE_MAX_MB", 50, min_value=1, max_value=1024,
+        )
+        max_bytes = max_mb * 1024 * 1024
+        recv_dir = Path(
+            _flag_str("OPENLEGION_UPLOAD_RECV_DIR", "/tmp/upload-recv"),
+        )
+        try:
+            recv_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise HTTPException(500, f"Cannot create receive dir: {e}")
+
+        nonce = uuid.uuid4().hex
+        suggested = request.query_params.get("suggested_filename", "")
+        suffix = ""
+        if suggested:
+            base = os.path.basename(suggested).strip()
+            base = base.replace("\x00", "")
+            base = base.replace("/", "").replace("\\", "")
+            if base and not base.startswith("."):
+                suffix = "-" + base[:80]
+        target = recv_dir / f"{nonce}{suffix or '.bin'}"
+
+        size = 0
+        try:
+            with open(target, "wb") as fh:
+                async for chunk in request.stream():
+                    if not chunk:
+                        continue
+                    size += len(chunk)
+                    if size > max_bytes:
+                        fh.close()
+                        with contextlib.suppress(OSError):
+                            target.unlink()
+                        raise HTTPException(
+                            413,
+                            f"Upload exceeds {max_mb}MB limit",
+                        )
+                    fh.write(chunk)
+        except HTTPException:
+            raise
+        except OSError as e:
+            with contextlib.suppress(OSError):
+                target.unlink()
+            raise HTTPException(500, f"Write failed: {e}")
+        return {"path": str(target), "size_bytes": size}
 
     @app.post("/browser/{agent_id}/download")
     async def download_trigger(agent_id: str, request: Request):

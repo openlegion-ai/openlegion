@@ -2793,3 +2793,160 @@ class TestGetAgentProfile:
 
         result = await get_agent_profile("writer", mesh_client=None)
         assert "error" in result
+
+
+class TestBrowserUploadFileHttpClient:
+    """browser_upload_file reads workspace files and stages via mesh."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        import src.agent.builtins.file_tool as ft
+        self._ft = ft
+        self._original_root = ft._ALLOWED_ROOT
+        ft._ALLOWED_ROOT = self._tmpdir
+        os.makedirs(os.path.join(self._tmpdir, "uploads"), exist_ok=True)
+
+    def teardown_method(self):
+        self._ft._ALLOWED_ROOT = self._original_root
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _write(self, name: str, content: bytes) -> str:
+        path = os.path.join(self._tmpdir, "uploads", name)
+        with open(path, "wb") as fh:
+            fh.write(content)
+        return f"uploads/{name}"
+
+    @pytest.mark.asyncio
+    async def test_happy_path_stages_then_applies(self):
+        from src.agent.builtins.browser_tool import browser_upload_file
+
+        rel = self._write("resume.pdf", b"hello pdf bytes")
+        mc = AsyncMock()
+        mc.browser_upload_stage = AsyncMock(
+            return_value={"staged_handle": "worker-handle-1", "size_bytes": 15},
+        )
+        mc.browser_upload_apply = AsyncMock(
+            return_value={
+                "success": True,
+                "data": {"uploaded": ["/tmp/upload-recv/handle.bin"]},
+            },
+        )
+
+        result = await browser_upload_file(
+            ref="e7", paths=[rel], mesh_client=mc,
+        )
+
+        assert result["success"] is True
+        mc.browser_upload_stage.assert_awaited_once()
+        stage_args = mc.browser_upload_stage.await_args
+        assert stage_args.args[0] == b"hello pdf bytes"
+        assert stage_args.kwargs["idempotency_key"]
+
+        mc.browser_upload_apply.assert_awaited_once()
+        body = mc.browser_upload_apply.await_args.args[0]
+        assert body["ref"] == "e7"
+        assert body["staged_handles"] == ["worker-handle-1"]
+        assert body["idempotency_key"]
+
+    @pytest.mark.asyncio
+    async def test_no_mesh_client_returns_error(self):
+        from src.agent.builtins.browser_tool import browser_upload_file
+        result = await browser_upload_file(
+            ref="e1", paths=["uploads/x.txt"], mesh_client=None,
+        )
+        assert "error" in result
+        assert "mesh" in result["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_empty_paths_returns_error(self):
+        from src.agent.builtins.browser_tool import browser_upload_file
+        result = await browser_upload_file(
+            ref="e1", paths=[], mesh_client=AsyncMock(),
+        )
+        assert "error" in result
+        assert "non-empty" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_too_many_paths_returns_error(self):
+        from src.agent.builtins.browser_tool import browser_upload_file
+        result = await browser_upload_file(
+            ref="e1",
+            paths=["a", "b", "c", "d", "e", "f"],
+            mesh_client=AsyncMock(),
+        )
+        assert "error" in result
+        assert "5" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_path_traversal_blocked(self):
+        from src.agent.builtins.browser_tool import browser_upload_file
+        mc = AsyncMock()
+        result = await browser_upload_file(
+            ref="e1", paths=["../etc/passwd"], mesh_client=mc,
+        )
+        assert "error" in result
+        assert "traversal" in result["error"].lower() or "invalid" in result["error"].lower()
+        mc.browser_upload_stage.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_missing_file_returns_error(self):
+        from src.agent.builtins.browser_tool import browser_upload_file
+        mc = AsyncMock()
+        result = await browser_upload_file(
+            ref="e1", paths=["uploads/nope.pdf"], mesh_client=mc,
+        )
+        assert "error" in result
+        assert "not found" in result["error"].lower()
+        mc.browser_upload_stage.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_oversize_file_rejected_at_skill(self, monkeypatch):
+        from src.agent.builtins import browser_tool
+        rel = self._write("big.bin", b"x")
+        monkeypatch.setattr(browser_tool, "_UPLOAD_MAX_BYTES", 0)
+        mc = AsyncMock()
+        result = await browser_tool.browser_upload_file(
+            ref="e1", paths=[rel], mesh_client=mc,
+        )
+        assert "error" in result
+        assert "50MB" in result["error"] or "cap" in result["error"]
+        mc.browser_upload_stage.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_invalid_ref_returns_error(self):
+        from src.agent.builtins.browser_tool import browser_upload_file
+        mc = AsyncMock()
+        result = await browser_upload_file(
+            ref="", paths=["uploads/x.txt"], mesh_client=mc,
+        )
+        assert "error" in result
+        assert "ref" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_multiple_files_each_get_unique_idempotency_key(self):
+        from src.agent.builtins.browser_tool import browser_upload_file
+
+        rel1 = self._write("a.pdf", b"file-a")
+        rel2 = self._write("b.pdf", b"file-b")
+        mc = AsyncMock()
+        handles = ["h1", "h2"]
+
+        async def fake_stage(blob, idempotency_key=None):
+            return {"staged_handle": handles.pop(0)}
+
+        mc.browser_upload_stage = AsyncMock(side_effect=fake_stage)
+        mc.browser_upload_apply = AsyncMock(
+            return_value={"success": True, "data": {"uploaded": []}},
+        )
+        result = await browser_upload_file(
+            ref="e1", paths=[rel1, rel2], mesh_client=mc,
+        )
+        assert result["success"] is True
+        assert mc.browser_upload_stage.await_count == 2
+        keys = [
+            c.kwargs["idempotency_key"]
+            for c in mc.browser_upload_stage.await_args_list
+        ]
+        assert len(set(keys)) == 2
+        body = mc.browser_upload_apply.await_args.args[0]
+        assert body["staged_handles"] == ["h1", "h2"]
