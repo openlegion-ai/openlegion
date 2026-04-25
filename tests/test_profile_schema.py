@@ -358,3 +358,124 @@ class TestMarkerAtomicWrite:
         # Under normal flow there's no persistent .tmp after the replace;
         # the spy above already confirms the tmp→final replace happened.
         assert observed["used_replace"]
+
+
+class TestV2FontCacheClear:
+    """§6.2 migration v2: clear Firefox font caches when new fonts land
+    in the container image. Must preserve cookies/storage/prefs."""
+
+    def test_clears_startup_cache_directory(self, profile):
+        from src.browser.profile_schema import _v2_clear_font_caches
+
+        cache = profile / "startupCache"
+        cache.mkdir()
+        (cache / "startupCache.4.little").write_bytes(b"compiled-xul")
+        (cache / "scriptCache-child-current.bin").write_bytes(b"compiled-js")
+
+        _v2_clear_font_caches(profile)
+        assert not cache.exists()
+
+    def test_clears_top_level_cache_blobs(self, profile):
+        from src.browser.profile_schema import _v2_clear_font_caches
+
+        (profile / "fontlist.json").write_text("{}")
+        (profile / "font.properties").write_text("k=v")
+
+        _v2_clear_font_caches(profile)
+        assert not (profile / "fontlist.json").exists()
+        assert not (profile / "font.properties").exists()
+
+    def test_compatibility_ini_preserved(self, profile):
+        """Critical: deleting ``compatibility.ini`` triggers Firefox's
+        first-run UI on next launch (about:welcome, default-browser nag,
+        profile-import wizard). The v2 migration must NOT remove it —
+        only the font cache itself needs wiping."""
+        from src.browser.profile_schema import _v2_clear_font_caches
+
+        compat = profile / "compatibility.ini"
+        compat.write_text("[Compatibility]\nLastVersion=138.0\n")
+        (profile / "fontlist.json").write_text("{}")
+
+        _v2_clear_font_caches(profile)
+        assert compat.exists(), (
+            "compatibility.ini was deleted — would trigger Firefox "
+            "first-run UI on next launch"
+        )
+        assert compat.read_text().startswith("[Compatibility]")
+        assert not (profile / "fontlist.json").exists()  # cache still wiped
+
+    def test_unlink_failure_propagates(self, profile, monkeypatch):
+        """Migration framework restores backup on raise. If
+        ``_v2_clear_font_caches`` swallowed unlink errors, a partial
+        wipe would leave the profile half-migrated with the marker
+        stamped at v2 — unrecoverable on next launch."""
+        from src.browser.profile_schema import _v2_clear_font_caches
+
+        (profile / "fontlist.json").write_text("{}")
+        original_unlink = Path.unlink
+
+        def boom(self, *a, **kw):
+            if self.name == "fontlist.json":
+                raise PermissionError("simulated lock")
+            return original_unlink(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "unlink", boom)
+        with pytest.raises(PermissionError):
+            _v2_clear_font_caches(profile)
+
+    def test_startupcache_rmtree_failure_propagates(self, profile, monkeypatch):
+        """Same invariant as ``test_unlink_failure_propagates`` but for
+        the ``startupCache`` directory removal. Previously this used
+        the best-effort ``_remove_tree`` helper which would log+continue
+        on failure — leaving stale compiled-XUL blobs in place while
+        the marker stamped v2 and other caches cleared. Codex caught
+        the inconsistency."""
+        import shutil as _shutil
+
+        from src.browser.profile_schema import _v2_clear_font_caches
+
+        cache = profile / "startupCache"
+        cache.mkdir()
+        (cache / "x.bin").write_bytes(b"x")
+
+        def boom(*a, **kw):
+            raise PermissionError("simulated lock")
+
+        monkeypatch.setattr(_shutil, "rmtree", boom)
+        with pytest.raises(PermissionError):
+            _v2_clear_font_caches(profile)
+
+    def test_preserves_cookies_and_storage(self, populated_profile):
+        """Hardest invariant: we MUST NOT touch the user's session."""
+        from src.browser.profile_schema import _v2_clear_font_caches
+
+        _v2_clear_font_caches(populated_profile)
+        assert (populated_profile / "cookies.sqlite").read_bytes() == b"cookies-fake"
+        assert (populated_profile / "prefs.js").exists()
+        assert (populated_profile / "storage" / "default" / "idb.sqlite").exists()
+
+    def test_idempotent_on_fresh_profile(self, profile):
+        """Running on a profile that has no cache files must be a no-op."""
+        from src.browser.profile_schema import _v2_clear_font_caches
+
+        _v2_clear_font_caches(profile)  # no caches to clear
+        _v2_clear_font_caches(profile)  # and again — still fine
+
+    def test_end_to_end_migration_at_v2(self, profile):
+        """Fresh profile → migrate → marker is at v2, no crash on empty caches."""
+        (profile / "startupCache").mkdir()
+        (profile / "startupCache" / "x.bin").write_bytes(b"x")
+        result = migrate_profile(profile)
+        assert result == 2
+        assert not (profile / "startupCache").exists()
+
+    def test_rerun_after_v2_is_noop(self, populated_profile):
+        """Already-at-v2 profile: migrate is a fast no-op and doesn't
+        clear caches a second time (idempotence of the framework)."""
+        (populated_profile / _MARKER_FILENAME).write_text("2\n")
+        (populated_profile / "startupCache").mkdir()
+        (populated_profile / "startupCache" / "survives.bin").write_bytes(b"y")
+
+        migrate_profile(populated_profile)
+        # Cache survived the no-op re-migrate.
+        assert (populated_profile / "startupCache" / "survives.bin").exists()

@@ -6,18 +6,47 @@ FROM python:3.12-slim
 # KasmVNC provides Xvnc (X server + VNC server) so no separate Xvfb needed.
 # iptables + gosu are used by docker/browser-entrypoint.sh to install the
 # SSRF egress filter as root, then drop privileges to the non-root browser user.
+#
+# Windows-lookalike font stack (Phase 3 §6.2): Carlito is metric-compatible
+# with Calibri / Segoe UI; Caladea with Cambria; Liberation covers
+# Arial/Times/Courier; DejaVu fills the rest. Without these the container
+# cannot render Segoe UI / Calibri / Cambria — which with os=windows in the
+# fingerprint is a detectable inconsistency. Font-cache rebuild for Firefox
+# profiles is handled by src/browser/profile_schema.py migration v2.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tini openbox wmctrl xdotool x11-xserver-utils unclutter-xfixes procps curl \
     iptables gosu \
     libgtk-3-0 libatk1.0-0 libasound2 \
     libxcomposite1 libxdamage1 libxrandr2 libxkbcommon0 libgbm1 \
     libpango-1.0-0 libcairo2 libdbus-glib-1-2 \
+    fontconfig fonts-crosextra-carlito fonts-crosextra-caladea \
+    fonts-liberation fonts-dejavu-core \
     && ARCH=$(dpkg --print-architecture) \
     && curl -fSL -o /tmp/kasmvnc.deb \
        "https://github.com/kasmtech/KasmVNC/releases/download/v1.4.0/kasmvncserver_bookworm_1.4.0_${ARCH}.deb" \
     && apt-get install -y --no-install-recommends /tmp/kasmvnc.deb \
     && rm /tmp/kasmvnc.deb \
     && rm -rf /var/lib/apt/lists/*
+
+# Install fontconfig alias file that redirects Windows typeface names to
+# the metric-compatible substitutes installed above. Must live under
+# /etc/fonts/conf.d/ with a high numeric prefix so it wins over any
+# system defaults (fontconfig applies rules in filename order).
+#
+# Validity check via fontconfig itself: ``fc-match -v "Segoe UI"`` should
+# resolve to a Carlito family if our alias file loaded correctly. If the
+# XML failed to parse, fontconfig silently ignores the file and the
+# match falls through to a default — we want that to be a hard build
+# failure rather than a silent fingerprint regression at runtime.
+COPY docker/fontconfig-windows-aliases.conf /etc/fonts/conf.d/99-openlegion-windows-fonts.conf
+RUN fc-cache -f \
+    && fc-match "Segoe UI" | grep -qi "Carlito" \
+       || (echo "BUILD FAIL: 'Segoe UI' did not resolve to Carlito — " \
+                "check fontconfig file parsing and font installation"; \
+           fc-match -v "Segoe UI"; exit 1) \
+    && fc-match "Cambria" | grep -qi "Caladea" \
+       || (echo "BUILD FAIL: 'Cambria' did not resolve to Caladea"; \
+           fc-match -v "Cambria"; exit 1)
 
 # Remove KasmVNC branding: hide logo, splash screen, and control bar branding.
 # Also patch loading screen HTML to remove logo images.
@@ -61,7 +90,15 @@ VOLUME /data
 #     keyboard input (Super+D, A-F4, etc.) never accidentally minimises/closes
 #     the browser window
 #   - focusNew + focus=yes: every new window (OAuth redirect, dialog) is
-#     immediately focused and maximised
+#     immediately focused.
+#   - Notable omission: we used to force <maximized>true</maximized> on
+#     every window so the browser filled the KasmVNC display. Phase 3 §6.1
+#     gives each agent its own resolution from a weighted pool, and a
+#     forced-maximize would override ``window=(w,h)`` from Camoufox —
+#     leaving the JS-reported ``window.screen`` at the pool size while
+#     ``innerWidth`` jumped to 1920, a detectable mismatch. Instead we
+#     let Firefox launch at its configured size; undersized agents show
+#     dead space on VNC, filled by the dark wallpaper from __main__.py.
 RUN mkdir -p /home/browser/.config/openbox \
     && printf '<?xml version="1.0" encoding="UTF-8"?>\n\
 <openbox_config xmlns="http://openbox.org/3.4/rc">\n\
@@ -71,12 +108,19 @@ RUN mkdir -p /home/browser/.config/openbox \
     <followMouse>no</followMouse>\n\
     <focusLast>yes</focusLast>\n\
   </focus>\n\
+  <placement>\n\
+    <policy>Smart</policy>\n\
+    <center>yes</center>\n\
+  </placement>\n\
   <keyboard></keyboard>\n\
   <applications>\n\
     <application class="*">\n\
       <decor>no</decor>\n\
-      <maximized>true</maximized>\n\
       <focus>yes</focus>\n\
+      <position force="yes">\n\
+        <x>center</x>\n\
+        <y>center</y>\n\
+      </position>\n\
     </application>\n\
   </applications>\n\
 </openbox_config>\n' > /home/browser/.config/openbox/rc.xml \

@@ -1452,6 +1452,71 @@ function dashboard() {
         };
       }
 
+      // §6.3 navigator self-test result (one-shot per browser start).
+      // We attach the probe summary to the per-agent metrics entry so it
+      // renders alongside click rate / snapshot bytes, and toast on
+      // mismatch so operators see fingerprint regressions immediately.
+      if (evt.type === 'browser_nav_probe' && evt.agent && evt.data) {
+        const existing = this.browserMetrics[evt.agent] || {};
+        this.browserMetrics = {
+          ...this.browserMetrics,
+          [evt.agent]: {
+            ...existing,
+            probe_ok: evt.data.ok,
+            probe_mismatches: evt.data.mismatches || [],
+            probe_signals: evt.data.signals || {},
+            probe_at: Date.now(),
+            // Preserve the most recent drain timestamp if any so the
+            // staleness check still works. For probe-only updates we
+            // intentionally do NOT bump receivedAt — otherwise an
+            // agent that only ever probes (no clicks/navs) would never
+            // hit the 30-min eviction even after going truly idle.
+            receivedAt: existing.receivedAt || Date.now(),
+          },
+        };
+        if (!evt.data.ok && (evt.data.mismatches || []).length) {
+          // Toast dedup: a fleet-wide regression (e.g. Camoufox version
+          // bump that breaks navigator.connection injection) would
+          // otherwise stack one 8s toast per agent on a mass restart.
+          // Fingerprint signature = the sorted mismatch list. Suppress
+          // identical signatures fired within the same 30s window;
+          // surface a "+N more" toast instead.
+          const sig = (evt.data.mismatches || []).slice().sort().join('|');
+          this._probeToastSeen = this._probeToastSeen || new Map();
+          const now = Date.now();
+          // Cap the dedup map at ~5 minutes of history so a long-lived
+          // dashboard session doesn't accumulate signatures forever.
+          // Past 5 minutes, the entry is irrelevant (way past the 30s
+          // dedup window) and just leaks memory.
+          const STALE_AT = now - 5 * 60 * 1000;
+          if (this._probeToastSeen.size > 50) {
+            for (const [k, v] of this._probeToastSeen) {
+              if (v.firstAt < STALE_AT) this._probeToastSeen.delete(k);
+            }
+          }
+          const last = this._probeToastSeen.get(sig);
+          if (!last || now - last.firstAt > 30000) {
+            this._probeToastSeen.set(sig, { firstAt: now, count: 1 });
+            this.showToast(
+              'Browser fingerprint drift on ' + evt.agent + ': ' +
+              evt.data.mismatches.slice(0, 2).join('; '),
+              8000,
+            );
+          } else {
+            last.count += 1;
+            // Coalesce: only emit the rollup toast on the second hit
+            // (rollup-of-rollup would itself spam).
+            if (last.count === 2) {
+              this.showToast(
+                'Browser fingerprint drift hit ' + last.count +
+                ' agents in the last 30s — check Browser tab',
+                8000,
+              );
+            }
+          }
+        }
+      }
+
       // Highlight blackboard writes + update comms badge
       if (evt.type === 'blackboard_write' && evt.data && evt.data.key) {
         if (!this.bbHighlights.includes(evt.data.key)) this.bbHighlights.push(evt.data.key);
@@ -5724,6 +5789,7 @@ function dashboard() {
         cron_trigger: 'text-pink-400',
         llm_stream: 'text-purple-300',
         browser_metrics: 'text-sky-400',
+        browser_nav_probe: 'text-amber-400',
       };
       return map[type] || 'text-gray-400';
     },
@@ -5755,6 +5821,7 @@ function dashboard() {
         cron_trigger: 'bg-pink-400',
         llm_stream: 'bg-purple-300',
         browser_metrics: 'bg-sky-400',
+        browser_nav_probe: 'bg-amber-400',
       };
       return map[type] || 'bg-gray-400';
     },
