@@ -1393,6 +1393,148 @@ class TestSnapshot:
         assert len(result["data"]["refs"]) == _MAX_SNAPSHOT_ELEMENTS
 
 
+class TestSnapshotFormatV2:
+    """§7.2 — landmark section headers + capped indent."""
+
+    @pytest.fixture
+    def v2_flag(self, monkeypatch):
+        """Force BROWSER_SNAPSHOT_FORMAT=v2 for the duration of one test."""
+        monkeypatch.setenv("BROWSER_SNAPSHOT_FORMAT", "v2")
+
+    @pytest.mark.asyncio
+    async def test_v1_default_unchanged(self):
+        """Without the flag the snapshot is the historical v1 format —
+        no version marker, no section headers."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mock_page = AsyncMock()
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value={
+            "role": "WebArea", "name": "",
+            "children": [
+                {"role": "button", "name": "Submit",
+                 "landmark": "navigation: Top"},
+            ],
+        })
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        snap = result["data"]["snapshot"]
+        assert "snapshot-v2" not in snap
+        assert "(navigation: Top)" in snap  # v1 suffix
+
+    @pytest.mark.asyncio
+    async def test_v2_emits_version_marker(self, v2_flag):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mock_page = AsyncMock()
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value={
+            "role": "WebArea", "name": "",
+            "children": [{"role": "button", "name": "Click"}],
+        })
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        snap = result["data"]["snapshot"]
+        assert snap.startswith("# snapshot-v2\n")
+
+    @pytest.mark.asyncio
+    async def test_v2_groups_by_landmark(self, v2_flag):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mock_page = AsyncMock()
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value={
+            "role": "WebArea", "name": "",
+            "children": [
+                {"role": "navigation", "name": "Top",
+                 "children": [
+                     {"role": "link", "name": "Home",
+                      "landmark": "navigation: Top"},
+                 ]},
+                {"role": "main", "name": "Article",
+                 "children": [
+                     {"role": "heading", "name": "Title",
+                      "landmark": "main: Article"},
+                     {"role": "button", "name": "Comment",
+                      "landmark": "main: Article"},
+                 ]},
+            ],
+        })
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        snap = result["data"]["snapshot"]
+        assert "# navigation: Top" in snap
+        assert "# main: Article" in snap
+        assert "(navigation: Top)" not in snap
+        assert "(main: Article)" not in snap
+        assert '] link "Home"' in snap
+        assert '] heading "Title"' in snap
+        assert '] button "Comment"' in snap
+
+    @pytest.mark.asyncio
+    async def test_v2_unlandmarked_section_emitted(self, v2_flag):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mock_page = AsyncMock()
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value={
+            "role": "WebArea", "name": "",
+            "children": [
+                {"role": "button", "name": "Loose"},
+            ],
+        })
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        snap = result["data"]["snapshot"]
+        assert "# (no landmark)" in snap
+        assert '] button "Loose"' in snap
+
+    def test_v2_caps_indent_depth(self):
+        """Direct test of the formatter — depth>4 collapses to 4 levels."""
+        from src.browser.service import _format_snapshot_v2
+        entries = [
+            ("e0", "button", "Deep", "", "main: Body", 7),
+            ("e1", "link", "Shallow", "", "main: Body", 1),
+        ]
+        out = _format_snapshot_v2([], entries)
+        assert '\n        - [e0] button "Deep"' in out
+        assert '\n  - [e1] link "Shallow"' in out
+
+    def test_v2_passes_through_modal_banner(self):
+        """``**`` preamble lines (modal warning) ride along ahead of the
+        section blocks."""
+        from src.browser.service import _format_snapshot_v2
+        lines = [
+            "** Modal dialog is open — only dialog elements are shown **",
+            "  - [e0] button \"Close\" (dialog: Compose)",
+        ]
+        entries = [("e0", "button", "Close", "", "dialog: Compose", 0)]
+        out = _format_snapshot_v2(lines, entries)
+        assert out.startswith("# snapshot-v2\n** Modal dialog is open")
+        assert "# dialog: Compose" in out
+
+    def test_v2_empty_entries_returns_marker_only(self):
+        from src.browser.service import _format_snapshot_v2
+        out = _format_snapshot_v2([], [])
+        assert out == "# snapshot-v2\n(no interactive elements)"
+
+    def test_v2_attr_string_preserved(self):
+        from src.browser.service import _format_snapshot_v2
+        entries = [
+            ("e0", "checkbox", "Subscribe", " [checked=True]", "form: Signup", 2),
+        ]
+        out = _format_snapshot_v2([], entries)
+        assert '- [e0] checkbox "Subscribe" [checked=True]' in out
+
+
 class TestTypeTextWithRef:
     """Tests for type_text using ref-based element resolution."""
 
