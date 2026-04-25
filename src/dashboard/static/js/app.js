@@ -1467,18 +1467,43 @@ function dashboard() {
             probe_signals: evt.data.signals || {},
             probe_at: Date.now(),
             // Preserve the most recent drain timestamp if any so the
-            // staleness check still works.
+            // staleness check still works. For probe-only updates we
+            // intentionally do NOT bump receivedAt — otherwise an
+            // agent that only ever probes (no clicks/navs) would never
+            // hit the 30-min eviction even after going truly idle.
             receivedAt: existing.receivedAt || Date.now(),
           },
         };
         if (!evt.data.ok && (evt.data.mismatches || []).length) {
-          // Linger 8s — fingerprint drift deserves more attention than
-          // the default 4s success toast.
-          this.showToast(
-            'Browser fingerprint drift on ' + evt.agent + ': ' +
-            evt.data.mismatches.slice(0, 2).join('; '),
-            8000,
-          );
+          // Toast dedup: a fleet-wide regression (e.g. Camoufox version
+          // bump that breaks navigator.connection injection) would
+          // otherwise stack one 8s toast per agent on a mass restart.
+          // Fingerprint signature = the sorted mismatch list. Suppress
+          // identical signatures fired within the same 30s window;
+          // surface a "+N more" toast instead.
+          const sig = (evt.data.mismatches || []).slice().sort().join('|');
+          this._probeToastSeen = this._probeToastSeen || new Map();
+          const now = Date.now();
+          const last = this._probeToastSeen.get(sig);
+          if (!last || now - last.firstAt > 30000) {
+            this._probeToastSeen.set(sig, { firstAt: now, count: 1 });
+            this.showToast(
+              'Browser fingerprint drift on ' + evt.agent + ': ' +
+              evt.data.mismatches.slice(0, 2).join('; '),
+              8000,
+            );
+          } else {
+            last.count += 1;
+            // Coalesce: only emit the rollup toast on the second hit
+            // (rollup-of-rollup would itself spam).
+            if (last.count === 2) {
+              this.showToast(
+                'Browser fingerprint drift hit ' + last.count +
+                ' agents in the last 30s — check Browser tab',
+                8000,
+              );
+            }
+          }
         }
       }
 

@@ -273,6 +273,57 @@ def _short_ua(ua: str) -> str:
     return ua[:80]
 
 
+def _js_string(value: str) -> str:
+    """Escape a Python string for safe interpolation into a JS literal.
+
+    Used by the ``navigator.connection`` init-script to inject the
+    per-agent ``effectiveType`` value. The values are drawn from a
+    fixed pool (``"4g"`` etc.) so injection is bounded today, but
+    a defensive escape costs nothing and prevents future agent-id-
+    derived values from breaking out.
+    """
+    return ("'" + value
+            .replace("\\", "\\\\")
+            .replace("'", "\\'")
+            .replace("\n", "\\n") + "'")
+
+
+# §6.6 navigator.connection fallback. Defines a getter on
+# ``Navigator.prototype`` that returns a frozen object matching the
+# NetworkInformation API surface real Chromium-shaped browsers expose.
+# ``configurable: true`` so a future Camoufox upgrade that adds native
+# support can override this. Runs before any page script via
+# ``BrowserContext.add_init_script``.
+_NAV_CONNECTION_INIT_SCRIPT = """
+(() => {{
+  try {{
+    if (typeof navigator !== 'undefined' && navigator.connection !== undefined) {{
+      return;  // Camoufox / Firefox already exposes the API
+    }}
+    const fake = Object.freeze({{
+      effectiveType: {effective},
+      downlink: {downlink},
+      rtt: {rtt},
+      saveData: {save_data},
+      type: 'wifi',
+      addEventListener: () => {{}},
+      removeEventListener: () => {{}},
+      dispatchEvent: () => false,
+      onchange: null,
+    }});
+    Object.defineProperty(Navigator.prototype, 'connection', {{
+      get: () => fake,
+      configurable: true,
+      enumerable: true,
+    }});
+  }} catch (_e) {{
+    // Defensive: any failure here is operator-debuggable via the
+    // §6.3 navigator self-test, which will flag the missing API.
+  }}
+}})();
+"""
+
+
 def _is_empty_payload(payload: dict) -> bool:
     """True when a drain produced no activity *in this interval*.
 
@@ -861,6 +912,35 @@ class BrowserManager:
         pages = context.pages
         page = pages[0] if pages else await context.new_page()
 
+        # §6.6 ``navigator.connection`` fallback. We pass the spoof
+        # values via Camoufox's ``config`` dict above, but it's not
+        # documented whether Camoufox honours those keys (Firefox itself
+        # doesn't natively expose NetworkInformation). Install an
+        # ``add_init_script`` that defines ``navigator.connection`` if
+        # the property is missing — runs in every document context
+        # before page scripts. ``Object.defineProperty`` on
+        # ``Navigator.prototype`` with ``configurable: true`` matches
+        # what real Chromium-shaped Firefox extension polyfills do.
+        try:
+            from src.browser.stealth import pick_network_info
+            netinfo = pick_network_info(agent_id)
+            await context.add_init_script(
+                _NAV_CONNECTION_INIT_SCRIPT.format(
+                    effective=_js_string(netinfo["effectiveType"]),
+                    downlink=float(netinfo["downlink"]),
+                    rtt=int(netinfo["rtt"]),
+                    save_data="false",
+                ),
+            )
+        except Exception as e:
+            # Non-fatal — Camoufox may already have NetworkInformation
+            # support, and the §6.3 probe will catch the gap if neither
+            # path lands.
+            logger.debug(
+                "navigator.connection init-script failed for '%s': %s",
+                agent_id, e,
+            )
+
         inst = CamoufoxInstance(agent_id, browser, context, page)
 
         # Discover the new X11 window for targeted focus
@@ -896,8 +976,16 @@ class BrowserManager:
 
         Stores the result on ``inst.probe_result`` and emits a one-shot
         ``nav_probe`` payload via ``self._metrics_sink`` (when wired). At
-        the dashboard layer this surfaces as a ``browser_metrics`` event
-        with a ``probe`` field, distinct from per-minute drain payloads.
+        the dashboard layer this surfaces as a ``browser_nav_probe``
+        event, distinct from per-minute drain payloads.
+
+        **Probes on ``about:blank``** so we read the platform / browser
+        signals as the engine sees them, not as some loaded site has
+        possibly shadowed them via an injected content script. With
+        ``persistent_context=True`` the page resumes whatever the agent
+        had open last session — that page's globals could include
+        custom getters on ``Navigator.prototype``. Forcing a navigation
+        to ``about:blank`` first eliminates that path.
 
         Mismatches the probe flags:
           * ``navigator.webdriver !== false`` — the canonical bot tell
@@ -915,6 +1003,21 @@ class BrowserManager:
             "macos": "MacIntel",
             "linux": "Linux x86_64",
         }.get(os_hint)
+
+        # Best-effort isolate the probe context. ``about:blank`` is a
+        # special URL that Firefox loads instantly with a fresh,
+        # script-free document — perfect for reading raw navigator
+        # signals. If the goto fails (e.g. ``about:blank`` blocked by
+        # some weird policy), we fall through and probe the current
+        # page anyway; the result will still be populated and any
+        # shadowing-induced mismatch is itself useful signal.
+        try:
+            await inst.page.goto("about:blank", timeout=5000)
+        except Exception as e:
+            logger.debug(
+                "Probe pre-nav to about:blank failed for '%s' "
+                "(continuing on current page): %s", inst.agent_id, e,
+            )
 
         try:
             signals = await inst.page.evaluate(
