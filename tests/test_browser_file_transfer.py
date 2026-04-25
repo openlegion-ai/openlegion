@@ -408,6 +408,22 @@ class TestUploadStageIngest:
         assert resp.status_code == 200, resp.text
         assert resp.json()["path"].endswith("-resume.pdf")
 
+    def test_long_filename_preserves_extension(self, tmp_path, monkeypatch):
+        """P0.4: truncation must not drop the extension. A 200-char
+        ``.pdf`` filename ends up stored as ``...<truncated>.pdf`` so
+        Playwright reports the right type to the form site."""
+        client, _mgr, _recv = self._make_client(tmp_path, monkeypatch)
+        long_stem = "scan_2026_04_25_invoice_" + ("x" * 200)
+        long_name = f"{long_stem}.pdf"
+        resp = client.post(
+            "/browser/a1/_stage_upload",
+            content=b"data",
+            headers={"X-Mesh-Internal": "1"},
+            params={"suggested_filename": long_name},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["path"].endswith(".pdf")
+
     def test_auth_insecure_requires_bearer_for_internal_endpoint(
         self, tmp_path, monkeypatch,
     ):
@@ -431,6 +447,37 @@ class TestUploadStageIngest:
             headers={"X-Mesh-Internal": "1"},
         )
         assert resp.status_code == 403, resp.text
+
+    def test_startup_raises_when_mesh_token_set_but_browser_token_missing(
+        self, tmp_path, monkeypatch,
+    ):
+        """P1.5: production posture — MESH_AUTH_TOKEN set but no
+        BROWSER_AUTH_TOKEN and no INSECURE override → RuntimeError."""
+        import pytest as _pytest
+
+        from src.browser.server import create_browser_app
+        monkeypatch.delenv("BROWSER_AUTH_TOKEN", raising=False)
+        monkeypatch.setenv("MESH_AUTH_TOKEN", "live-token")
+        monkeypatch.delenv("BROWSER_AUTH_INSECURE", raising=False)
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "p"))
+        with _pytest.raises(RuntimeError):
+            create_browser_app(mgr)
+
+    def test_startup_allows_insecure_override_in_dev_with_mesh_token(
+        self, tmp_path, monkeypatch,
+    ):
+        """P1.5: BROWSER_AUTH_INSECURE=1 overrides the production guard
+        so the dev posture (no bearer required) is reachable while
+        keeping the per-endpoint guard at /_stage_upload."""
+        from src.browser.server import create_browser_app
+        monkeypatch.delenv("BROWSER_AUTH_TOKEN", raising=False)
+        monkeypatch.setenv("MESH_AUTH_TOKEN", "live-token")
+        monkeypatch.setenv("BROWSER_AUTH_INSECURE", "1")
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "p"))
+        # Must not raise. App still has the per-endpoint bearer guard
+        # exercised in the prior test.
+        app = create_browser_app(mgr)
+        assert app is not None
 
 
 class TestUploadFileStageCleanup:

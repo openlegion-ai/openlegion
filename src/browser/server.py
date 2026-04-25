@@ -48,12 +48,20 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
     auth_token = os.environ.get("BROWSER_AUTH_TOKEN", "")
     if not auth_token:
         if os.environ.get("MESH_AUTH_TOKEN"):
-            raise RuntimeError(
-                "BROWSER_AUTH_TOKEN not set but MESH_AUTH_TOKEN is configured. "
-                "Browser auth cannot be disabled in production. "
-                "Set BROWSER_AUTH_TOKEN or BROWSER_AUTH_INSECURE=1 to override."
-            )
-        logger.warning("BROWSER_AUTH_TOKEN not set — browser service auth is DISABLED")
+            if os.environ.get("BROWSER_AUTH_INSECURE"):
+                logger.warning(
+                    "BROWSER_AUTH_TOKEN not set; BROWSER_AUTH_INSECURE=1 "
+                    "override engaged — browser service auth DISABLED. "
+                    "Use only in dev/test."
+                )
+            else:
+                raise RuntimeError(
+                    "BROWSER_AUTH_TOKEN not set but MESH_AUTH_TOKEN is configured. "
+                    "Browser auth cannot be disabled in production. "
+                    "Set BROWSER_AUTH_TOKEN or BROWSER_AUTH_INSECURE=1 to override."
+                )
+        else:
+            logger.warning("BROWSER_AUTH_TOKEN not set — browser service auth is DISABLED")
 
     def _verify_auth(request: Request) -> None:
         if not auth_token:
@@ -395,7 +403,20 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
             base = base.replace("\x00", "")
             base = base.replace("/", "").replace("\\", "")
             if base and not base.startswith("."):
-                suffix = "-" + base[:80]
+                # P0.4: preserve the extension. Naively truncating the
+                # whole string (``base[:80]``) drops the ``.pdf`` from
+                # long names like ``scan_..._final.pdf``, leaving
+                # Playwright with a typeless filename.
+                from pathlib import PurePosixPath
+                pp = PurePosixPath(base)
+                ext = pp.suffix
+                stem = pp.stem
+                budget = 80 - len(ext)
+                if budget < 1:
+                    truncated = base[:80]
+                else:
+                    truncated = stem[:budget] + ext
+                suffix = "-" + truncated
         target = recv_dir / f"{nonce}{suffix or '.bin'}"
 
         size = 0

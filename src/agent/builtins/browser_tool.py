@@ -743,7 +743,19 @@ async def browser_detect_captcha(*, mesh_client=None) -> dict:
     return await _browser_command(mesh_client, "detect_captcha")
 
 
-_UPLOAD_MAX_BYTES = 50 * 1024 * 1024
+def _upload_max_bytes() -> int:
+    """Per-file upload cap. Read from the same env var as the mesh +
+    browser layers so an operator override stays consistent across all
+    three. Defaults to 50 MB."""
+    import os as _os
+    raw = _os.environ.get("OPENLEGION_UPLOAD_STAGE_MAX_MB", "50")
+    try:
+        mb = max(1, int(raw))
+    except ValueError:
+        mb = 50
+    return mb * 1024 * 1024
+
+
 _UPLOAD_MAX_FILES = 5
 
 
@@ -818,11 +830,12 @@ async def browser_upload_file(
             size = safe.stat().st_size
         except OSError as e:
             return {"error": f"Cannot stat '{path}': {e}"}
-        if size > _UPLOAD_MAX_BYTES:
+        cap = _upload_max_bytes()
+        if size > cap:
             return {
                 "error": (
                     f"File '{path}' is {size} bytes; per-file cap is "
-                    f"{_UPLOAD_MAX_BYTES} bytes (50MB)"
+                    f"{cap} bytes ({cap // (1024 * 1024)}MB)"
                 ),
             }
         resolved_paths.append(safe)

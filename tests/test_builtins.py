@@ -2930,15 +2930,18 @@ class TestBrowserUploadFileHttpClient:
 
     @pytest.mark.asyncio
     async def test_oversize_file_rejected_at_skill(self, monkeypatch):
+        """Skill cap is now sourced from OPENLEGION_UPLOAD_STAGE_MAX_MB so
+        it stays consistent with the mesh + browser layers (P1.9).
+        Setting it to 1 MB makes a 2 MB file blow the per-file cap."""
         from src.agent.builtins import browser_tool
-        rel = self._write("big.bin", b"x")
-        monkeypatch.setattr(browser_tool, "_UPLOAD_MAX_BYTES", 0)
+        rel = self._write("big.bin", b"x" * (2 * 1024 * 1024))
+        monkeypatch.setenv("OPENLEGION_UPLOAD_STAGE_MAX_MB", "1")
         mc = AsyncMock()
         result = await browser_tool.browser_upload_file(
             ref="e1", paths=[rel], mesh_client=mc,
         )
         assert "error" in result
-        assert "50MB" in result["error"] or "cap" in result["error"]
+        assert "cap" in result["error"]
         mc.browser_upload_stage.assert_not_called()
 
     @pytest.mark.asyncio
