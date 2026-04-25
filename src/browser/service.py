@@ -1011,6 +1011,13 @@ class BrowserManager:
         # some weird policy), we fall through and probe the current
         # page anyway; the result will still be populated and any
         # shadowing-induced mismatch is itself useful signal.
+        #
+        # Side-effect operators may notice: this clobbers the resumed
+        # page on a persistent-profile restart. An agent that had
+        # ``twitter.com`` open last session sees ``about:blank`` for a
+        # split second after restart, then whatever its first action
+        # navigates to. Cookies / localStorage / IndexedDB all survive
+        # — only the loaded-page URL is lost.
         try:
             await inst.page.goto("about:blank", timeout=5000)
         except Exception as e:
