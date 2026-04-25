@@ -45,7 +45,11 @@ async def _browser_command(mesh_client, action: str, params: dict | None = None)
         "For heavy SPAs (X/Twitter, Gmail, etc.) use wait_until='networkidle' or "
         "wait_until='load' so the page fully renders before you read elements. "
         "Set snapshot_after=true to include element refs in the response (saves "
-        "a separate browser_get_elements call)."
+        "a separate browser_get_elements call). "
+        "Leave 'referer' unset for normal browsing — the service picks a "
+        "plausible referer (search engine, same-origin, etc.) based on the "
+        "destination so the page sees a realistic arrival pattern. Override "
+        "only when you're explicitly modeling a specific click-through."
     ),
     parameters={
         "url": {"type": "string", "description": "URL to navigate to"},
@@ -70,20 +74,35 @@ async def _browser_command(mesh_client, action: str, params: dict | None = None)
             "description": "Include element snapshot in the response (default false)",
             "default": False,
         },
+        "referer": {
+            "type": "string",
+            "description": (
+                "Optional referer URL to send with the navigation. "
+                "Default: leave unset and let the service pick. "
+                "Pass an empty string to explicitly send no referer "
+                "(equivalent to a typed URL or bookmark)."
+            ),
+        },
     },
     parallel_safe=False,
 )
 async def browser_navigate(
     url: str, wait_ms: int = 1000, wait_until: str = "domcontentloaded",
     snapshot_after: bool = False,
+    referer: str | None = None,
     *, mesh_client=None,
 ) -> dict:
     """Navigate to a URL via the browser service."""
-    return await _browser_command(
-        mesh_client, "navigate",
-        {"url": url, "wait_ms": wait_ms, "wait_until": wait_until,
-         "snapshot_after": snapshot_after},
-    )
+    params: dict = {
+        "url": url, "wait_ms": wait_ms, "wait_until": wait_until,
+        "snapshot_after": snapshot_after,
+    }
+    # Forward referer ONLY when the caller specified it — None means
+    # "let the service pick", which is signalled by the param's absence
+    # so the browser-service navigate picker fires.
+    if referer is not None:
+        params["referer"] = referer
+    return await _browser_command(mesh_client, "navigate", params)
 
 
 @skill(

@@ -2380,9 +2380,13 @@ class TestNavigateWaitUntil:
         mgr._instances["a1"] = inst
 
         await mgr.navigate("a1", "https://x.com", wait_ms=0)
-        mock_page.goto.assert_awaited_once_with(
-            "https://x.com", wait_until="domcontentloaded", timeout=30000
-        )
+        # Assert the wait_until and timeout kwargs specifically — Phase 3
+        # §6.5 may also pass a ``referer=`` kwarg picked from the pool;
+        # we don't pin it here to keep this test about wait_until alone.
+        call = mock_page.goto.await_args
+        assert call.args == ("https://x.com",)
+        assert call.kwargs["wait_until"] == "domcontentloaded"
+        assert call.kwargs["timeout"] == 30000
 
     @pytest.mark.asyncio
     async def test_navigate_networkidle_passed_through(self):
@@ -2397,11 +2401,14 @@ class TestNavigateWaitUntil:
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         mgr._instances["a1"] = inst
 
-        result = await mgr.navigate("a1", "https://x.com", wait_ms=0, wait_until="networkidle")
-        assert result["success"] is True
-        mock_page.goto.assert_awaited_once_with(
-            "https://x.com", wait_until="networkidle", timeout=30000
+        result = await mgr.navigate(
+            "a1", "https://x.com", wait_ms=0, wait_until="networkidle",
         )
+        assert result["success"] is True
+        call = mock_page.goto.await_args
+        assert call.args == ("https://x.com",)
+        assert call.kwargs["wait_until"] == "networkidle"
+        assert call.kwargs["timeout"] == 30000
 
     @pytest.mark.asyncio
     async def test_navigate_invalid_wait_until_rejected(self):

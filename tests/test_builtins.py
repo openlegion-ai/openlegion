@@ -1050,6 +1050,49 @@ class TestBrowserNavigateHttpClient:
         assert "error" in result
         assert "mesh" in result["error"].lower()
 
+    @pytest.mark.asyncio
+    async def test_navigate_omits_referer_when_unset(self):
+        """§6.5: ``referer is None`` (default) ⇒ param NOT in the
+        forwarded body. The browser-service-side picker decides."""
+        from src.agent.builtins.browser_tool import browser_navigate
+
+        mc = AsyncMock()
+        mc.browser_command = AsyncMock(return_value={"url": "..."})
+
+        await browser_navigate(url="https://example.com", mesh_client=mc)
+        params = mc.browser_command.await_args.args[1]
+        assert "referer" not in params
+
+    @pytest.mark.asyncio
+    async def test_navigate_forwards_explicit_referer(self):
+        from src.agent.builtins.browser_tool import browser_navigate
+
+        mc = AsyncMock()
+        mc.browser_command = AsyncMock(return_value={"url": "..."})
+
+        await browser_navigate(
+            url="https://example.com",
+            referer="https://news.ycombinator.com/",
+            mesh_client=mc,
+        )
+        params = mc.browser_command.await_args.args[1]
+        assert params["referer"] == "https://news.ycombinator.com/"
+
+    @pytest.mark.asyncio
+    async def test_navigate_forwards_empty_referer_explicitly(self):
+        """``referer=""`` is a deliberate "no referer" — must reach the
+        service layer (which uses it to bypass the picker)."""
+        from src.agent.builtins.browser_tool import browser_navigate
+
+        mc = AsyncMock()
+        mc.browser_command = AsyncMock(return_value={"url": "..."})
+
+        await browser_navigate(
+            url="https://example.com", referer="", mesh_client=mc,
+        )
+        params = mc.browser_command.await_args.args[1]
+        assert params["referer"] == ""
+
 
 class TestBrowserSnapshotHttpClient:
     """browser_get_elements sends snapshot command through mesh_client."""

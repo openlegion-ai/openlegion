@@ -26,7 +26,7 @@ from src.browser.captcha import get_solver
 from src.browser.profile_schema import migrate_profile
 from src.browser.redaction import CredentialRedactor
 from src.browser.ref_handle import RefHandle, RefStale
-from src.browser.stealth import build_launch_options
+from src.browser.stealth import build_launch_options, pick_referer, validate_referer
 from src.browser.timing import (
     action_delay,
     click_dwell,
@@ -435,6 +435,19 @@ class CamoufoxInstance:
         # off so production pays no cost.
         from src.browser.recorder import BehaviorRecorder
         self.recorder = BehaviorRecorder(agent_id)
+        # §6.5 rolling-5 history of recently-used referers. The picker
+        # uses this to avoid immediate repeats so a fleet at scale
+        # doesn't all show the same Google referer back-to-back. Resets
+        # on browser restart, matching a real user-session boundary.
+        self.recent_referers: deque[str] = deque(maxlen=5)
+        # §6.5 first-real-navigate gate. With ``persistent_context=True``
+        # the browser resumes whatever page was open last session — the
+        # picker would otherwise treat that stale URL as a "previous page"
+        # and fabricate a same-origin referer for the next nav, even though
+        # there's been no recent navigation in this session. The flag flips
+        # to True after the first navigate completes; subsequent navs may
+        # use ``inst.page.url`` as the previous-URL hint.
+        self.had_real_navigate: bool = False
         # §6.3 navigator self-test result. ``None`` until the post-launch
         # probe runs. Populated dict (see ``BrowserManager._run_navigator_probe``)
         # exposes ``ok`` + ``mismatches`` + raw signal values for dashboard /
@@ -1341,6 +1354,7 @@ class BrowserManager:
         self, agent_id: str, url: str, wait_ms: int = 1000,
         wait_until: str = "domcontentloaded",
         snapshot_after: bool = False,
+        referer: str | None = None,
     ) -> dict:
         """Navigate to URL and return page text.
 
@@ -1349,6 +1363,15 @@ class BrowserManager:
           - "load": all resources loaded; good for most sites
           - "networkidle": no network requests for 500ms; best for heavy SPAs (X, etc.)
           - "commit": first byte received; fastest, rarely useful
+
+        referer (Phase 3 §6.5): override the Referer header / document.referrer
+        for this nav. ``None`` (default) lets the service pick a plausible
+        value from :func:`src.browser.stealth.pick_referer` based on the
+        target host and the agent's recent nav history. Pass an empty
+        string ``""`` to explicitly send NO referer (equivalent to a
+        bookmarked / typed-URL arrival). Pass a specific URL to override
+        the picker entirely — useful when the agent is following a known
+        link from a specific page.
         """
         # Validate URL scheme
         try:
@@ -1371,10 +1394,55 @@ class BrowserManager:
                     "success": False,
                     "error": "User has browser control — action paused until control is released.",
                 }
+
+            # §6.5 referer realism. ``referer is None`` ⇒ picker decides;
+            # explicit ``""`` ⇒ direct navigation (no referer); any other
+            # string ⇒ caller override, validated before reaching
+            # Playwright (the agent skill is LLM-callable so a malformed
+            # value can land here from untrusted-by-default input).
+            if referer is None:
+                # Only honour ``inst.page.url`` as the previous-URL hint
+                # AFTER the first navigate this session — otherwise a
+                # persistent profile resume would falsely indicate
+                # internal-link arrival on the very first nav.
+                previous_url = (
+                    inst.page.url if inst.page and inst.had_real_navigate
+                    else ""
+                )
+                resolved_referer = pick_referer(
+                    url,
+                    previous_url=previous_url,
+                    recent_referers=tuple(inst.recent_referers),
+                )
+            else:
+                # Caller override — must validate. ValueError surfaces
+                # to the agent as a navigate error; better than silently
+                # forwarding ``javascript:alert(1)`` to Playwright.
+                try:
+                    resolved_referer = validate_referer(referer)
+                except ValueError as e:
+                    return {
+                        "success": False,
+                        "error": f"invalid referer: {e}",
+                    }
+
+            # Maintain the rolling-5 history on the instance. Both
+            # picker output and validated overrides are tracked so the
+            # picker can see "we just used a direct/social/search
+            # pattern" and rotate accordingly.
+            inst.recent_referers.append(resolved_referer)
+
+            # Playwright accepts ``referer`` for goto and sets both the
+            # network header and document.referrer consistently. Empty
+            # string ⇒ omit the kwarg ⇒ Playwright sends no Referer.
+            goto_kwargs: dict = {"wait_until": wait_until, "timeout": 30000}
+            if resolved_referer:
+                goto_kwargs["referer"] = resolved_referer
+
             # Single retry on timeout — transient network issues get a second chance.
             for attempt in range(2):
                 try:
-                    await inst.page.goto(url, wait_until=wait_until, timeout=30000)
+                    await inst.page.goto(url, **goto_kwargs)
                     break
                 except Exception as e:
                     if attempt == 0 and "timeout" in str(e).lower():
@@ -1394,6 +1462,12 @@ class BrowserManager:
             inst.recorder.record_navigate(
                 host=parsed.hostname or "", wait_until=wait_until,
             )
+
+            # §6.5: future navs may now use ``inst.page.url`` as a
+            # previous-URL hint for the picker. The flag stays True for
+            # the lifetime of this CamoufoxInstance; a browser restart
+            # creates a new instance and resets it.
+            inst.had_real_navigate = True
 
             inst.dialog_active = False
             inst.dialog_detected = False
