@@ -15,6 +15,32 @@ class TestSameOrigin:
         )
         assert ref == "https://www.example.com/"
 
+    def test_same_origin_preserves_non_default_port(self):
+        """Codex review: dropping the port produces a wrong-origin
+        referer. Browsers treat ``host:8443`` and ``host`` as
+        different origins; a mismatch on emit is itself a tell."""
+        from src.browser.stealth import pick_referer
+
+        ref = pick_referer(
+            "https://example.com:8443/api",
+            previous_url="https://example.com:8443/dashboard",
+        )
+        assert ref == "https://example.com:8443/"
+
+    def test_same_origin_strips_userinfo_from_referer(self):
+        """Defensive: ``netloc`` includes userinfo so naive use would
+        emit ``https://user:pass@host/`` as a Referer, leaking
+        credentials. The picker must rebuild from hostname+port."""
+        from src.browser.stealth import pick_referer
+
+        ref = pick_referer(
+            "https://example.com/page",
+            previous_url="https://user:pass@example.com/dash",
+        )
+        assert "user:pass@" not in ref
+        assert "@" not in ref
+        assert ref == "https://example.com/"
+
     def test_previous_different_host_does_not_match(self):
         from src.browser.stealth import pick_referer
 

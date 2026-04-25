@@ -81,8 +81,13 @@ _SEARCH_REFERERS: tuple[str, ...] = (
 _SOCIAL_REFERERS: dict[str, tuple[str, ...]] = {
     # Pool of >1 entry per destination so the rolling-5 history can
     # rotate without creating an obvious "every 6th visit is t.co"
-    # pattern. The same-origin shapes are plausible "user clicked a
-    # tweet from another tweet" arrivals.
+    # pattern. Path-bearing entries (``twitter.com/home``) are
+    # intentional — they mimic "user clicked a tweet from another
+    # tweet/explore tab" arrivals. Real Referer headers carry the
+    # full path of the source page, so a path-bearing referer is the
+    # closer-to-real shape; the bare-origin entries (``t.co/``) cover
+    # the click-tracking shim case. Picker emits these unchanged via
+    # ``rng.choice`` — no path-stripping needed.
     "twitter.com": (
         "https://t.co/",
         "https://twitter.com/home",
@@ -224,8 +229,19 @@ def pick_referer(
             prev = urlparse(previous_url)
             if (prev.hostname and prev.scheme
                     and prev.hostname.lower() == host):
-                # Real-user-shape: landed via internal link from "/"
-                return f"{prev.scheme}://{prev.hostname}/"
+                # Real-user-shape: landed via internal link from "/".
+                # Rebuild the origin from ``hostname`` + ``port`` rather
+                # than using ``netloc`` directly: ``netloc`` includes
+                # userinfo (``user:pass@host``), and emitting that as
+                # a Referer would both leak credentials AND look like
+                # a bot. Including the non-default port is intentional
+                # — browsers treat ``host:8443`` and ``host`` as
+                # different origins, so a mismatch on emit is itself
+                # a fingerprint bug.
+                authority = prev.hostname.lower()
+                if prev.port is not None:
+                    authority = f"{authority}:{prev.port}"
+                return f"{prev.scheme}://{authority}/"
         except Exception:
             pass
 
