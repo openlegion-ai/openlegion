@@ -567,6 +567,124 @@ def _encode_screenshot(
         return png_bytes, "png"
 
 
+def _classify_diff_scope(
+    inst,
+    *,
+    snapshot_page_id: str,
+    previous: dict | None,
+    current_url: str,
+    current_dialog_active: bool,
+) -> str:
+    """Decide which scope label applies to the current diff request.
+
+    Order matters — earlier checks shadow later ones (e.g. a tab change
+    that also crossed a navigation reports as ``tab_changed`` because
+    the agent's mental model is "I switched tabs"; the URL change is a
+    consequence). The five values map to §7.3 contract:
+
+    * ``tab_changed`` — active page differs from the page that owned the
+      previous baseline (``inst.last_active_page_id``).
+    * ``navigation`` — same tab, but the URL changed since baseline.
+    * ``modal_opened`` / ``modal_closed`` — the ``dialog_active`` state
+      flipped between baseline and now.
+    * ``frame_changed`` — at least one ref's frame_id from the previous
+      baseline is no longer attached. Today the iframe walker is
+      Phase 8.4; this scope is scaffolded for that future wiring.
+    * ``same`` — none of the above. Diff content is meaningful.
+
+    ``previous=None`` (no baseline yet) is treated as ``navigation``
+    by the caller so the agent still gets useful output on the very
+    first ``diff_from_last`` call.
+    """
+    if previous is None:
+        return "navigation"
+    if (
+        inst.last_active_page_id is not None
+        and inst.last_active_page_id != snapshot_page_id
+    ):
+        return "tab_changed"
+    if previous.get("url") != current_url:
+        return "navigation"
+    prev_dialog = bool(previous.get("dialog_active", False))
+    if prev_dialog != current_dialog_active:
+        return "modal_opened" if current_dialog_active else "modal_closed"
+    # ``frame_changed`` detection is scaffolded for §8.4. We hold the
+    # default to ``same`` until that phase wires per-frame UUIDs.
+    return "same"
+
+
+def _compute_snapshot_diff(
+    previous: dict[str, dict],
+    current: dict[str, dict],
+) -> dict:
+    """Diff two ``element_key → summary`` maps.
+
+    Returns ``{added, removed, changed, unchanged_count}`` where each
+    entry in the lists is a small descriptor dict the agent can read
+    directly. The descriptors are intentionally compact: role, name,
+    landmark, current ref id (where applicable), and any state delta.
+    """
+    prev_keys = set(previous.keys())
+    curr_keys = set(current.keys())
+
+    added_keys = curr_keys - prev_keys
+    removed_keys = prev_keys - curr_keys
+    common_keys = curr_keys & prev_keys
+
+    added: list[dict] = []
+    for k in sorted(added_keys, key=lambda key: current[key]["ref_id"]):
+        s = current[k]
+        added.append({
+            "ref": s["ref_id"],
+            "role": s["role"],
+            "name": s["name"],
+            "landmark": s["landmark"],
+        })
+
+    removed: list[dict] = []
+    for k in sorted(removed_keys):
+        s = previous[k]
+        removed.append({
+            "role": s["role"],
+            "name": s["name"],
+            "landmark": s.get("landmark", ""),
+        })
+
+    changed: list[dict] = []
+    unchanged = 0
+    for k in common_keys:
+        prev_s = previous[k]
+        curr_s = current[k]
+        delta: dict = {}
+        for field in ("disabled", "value", "checked"):
+            if prev_s.get(field) != curr_s.get(field):
+                delta[field] = {
+                    "from": prev_s.get(field),
+                    "to": curr_s.get(field),
+                }
+        if delta:
+            changed.append({
+                "ref": curr_s["ref_id"],
+                "role": curr_s["role"],
+                "name": curr_s["name"],
+                "landmark": curr_s.get("landmark", ""),
+                **delta,
+            })
+        else:
+            unchanged += 1
+    # Stable order for the changed list — by current ref id so the
+    # output is deterministic across snapshots that touch the same
+    # elements in different orders.
+    changed.sort(key=lambda d: d["ref"])
+
+    return {
+        "added": added,
+        "removed": removed,
+        "changed": changed,
+        "unchanged_count": unchanged,
+    }
+
+
 def _extract_text_from_a11y(tree: dict | None, max_chars: int = 5000) -> str:
     """Extract readable text from an accessibility snapshot tree.
 
@@ -650,6 +768,17 @@ class CamoufoxInstance:
         # payload, giving operators an "is the browser currently healthy"
         # signal that doesn't flap on low-traffic minutes.
         self.click_window: deque[bool] = deque(maxlen=100)
+        # §7.3 diff-mode baseline: per-page snapshot of {element_key →
+        # RefHandle} from the most recent ``browser_get_elements`` call,
+        # plus the URL and modal state at that time. ``diff_from_last``
+        # snapshots compare against this baseline.
+        # Keyed by ``page_id`` so multi-tab agents preserve baselines
+        # across ``browser_switch_tab`` (§8.6). Each tab resumes diffing
+        # from the cached state when re-entered.
+        self.last_snapshot: dict[str, dict] = {}
+        # Track the last-active page_id so tab_changed can be detected
+        # by comparing to the page_id captured at the previous snapshot.
+        self.last_active_page_id: str | None = None
         # §5.3 behavioral entropy recorder (dev-only). Always constructed;
         # every record_* call short-circuits when the feature flag is
         # off so production pays no cost.
@@ -1813,6 +1942,7 @@ class BrowserManager:
         agent_id: str,
         filter: str | None = None,
         from_ref: str | None = None,
+        diff_from_last: bool = False,
     ) -> dict:
         """Get accessibility tree with element refs.
 
@@ -1834,12 +1964,40 @@ class BrowserManager:
         from ``inst.refs``; the returned tree shows only that element
         and its descendants. Combine with ``filter`` to focus a busy
         list on its inputs, etc.
+
+        ``diff_from_last`` (§7.3) — when ``True``, compare against the
+        cached baseline for the active tab and return a structural diff
+        instead of the full tree:
+
+        * scope ``"same"`` / ``"modal_opened"`` / ``"modal_closed"`` /
+          ``"frame_changed"`` — payload is
+          ``{added: [...], removed: [...], changed: [...],
+             unchanged_count: N, scope: "..."}``.
+        * scope ``"navigation"`` — main-frame URL changed since the
+          previous snapshot. Diffing across navigation produces all-
+          removed + all-added noise, so we return the full snapshot
+          alongside ``scope: "navigation"``.
+        * scope ``"tab_changed"`` — active tab differs from the one
+          baselined. Same full-snapshot return path. The previous tab's
+          baseline is retained under its ``page_id`` so returning to
+          that tab via ``browser_switch_tab`` resumes diffing where it
+          left off.
+
+        Cross-PR (§7.3 ↔ §7.4/§7.7): when ``filter`` or ``from_ref`` is
+        set, the resulting refs are a subset of the page. Persisting
+        that subset as the diff baseline would cause the next
+        unfiltered ``diff_from_last`` to report the omitted elements
+        as ``removed``. ``_snapshot_impl`` skips the baseline update
+        for scoped/filtered calls — they're informational, not anchors.
         """
         inst = await self.get_or_start(agent_id)
         inst.touch()
         async with inst.lock:
             return await self._snapshot_impl(
-                inst, agent_id, filter=filter, from_ref=from_ref,
+                inst, agent_id,
+                filter=filter,
+                from_ref=from_ref,
+                diff_from_last=diff_from_last,
             )
 
     async def _snapshot_impl(
@@ -1848,6 +2006,7 @@ class BrowserManager:
         agent_id: str,
         filter: str | None = None,
         from_ref: str | None = None,
+        diff_from_last: bool = False,
     ) -> dict:
         """Snapshot implementation.  Caller must hold ``inst.lock``."""
         # Resolve the optional filter once so the inner _walk sees a
@@ -1950,6 +2109,9 @@ class BrowserManager:
             # traversal. Each entry: (ref_id, role, name, attr_str,
             # landmark, depth).
             entries: list[tuple[str, str, str, str, str, int]] = []
+            # §7.3: diff-mode also needs the per-ref attr summary keyed by
+            # element_key so changed-state detection can compare values.
+            ref_summary: dict[str, dict] = {}
 
             def _walk(node, depth=0):
                 if depth > _MAX_WALK_DEPTH:
@@ -1994,6 +2156,17 @@ class BrowserManager:
                         entries.append(
                             (ref_id, role, name, attr_str, landmark, depth),
                         )
+                        # §7.3: stable element-key for cross-snapshot diffing.
+                        # Today only the role+name+landmark path of
+                        # ``compute_element_key`` is wired (priorities 3/4);
+                        # data-testid / dom-id extraction is a follow-up that
+                        # plugs into this same hash path without breaking
+                        # already-seeded handles.
+                        from src.browser.ref_handle import compute_element_key
+                        elem_key = compute_element_key(
+                            role=role, name=name, landmark=landmark,
+                            sibling_index=occ,
+                        )
                         # scope_root is finalized after the modal-scoping
                         # branch below. For now record the unscoped handle;
                         # we overwrite scope_root once we know the final
@@ -2005,7 +2178,20 @@ class BrowserManager:
                             name=name,
                             occurrence=occ,
                             disabled=bool(node.get("disabled")),
+                            element_key=elem_key,
                         )
+                        # Diff-mode summary — keyed by element_key so the
+                        # next snapshot can match across re-renders that
+                        # change ref ids.
+                        ref_summary[elem_key] = {
+                            "ref_id": ref_id,
+                            "role": role,
+                            "name": name,
+                            "landmark": landmark,
+                            "disabled": bool(node.get("disabled")),
+                            "value": node.get("value", ""),
+                            "checked": node.get("checked"),
+                        }
                 for child in node.get("children", []):
                     _walk(child, depth + 1)
 
@@ -2227,7 +2413,71 @@ class BrowserManager:
             # Agent-visible `refs` uses the minimal dict shape (backward
             # compatible); RefHandle is strictly an internal detail.
             response_refs = {rid: h.to_agent_dict() for rid, h in refs.items()}
-            return {"success": True, "data": {"snapshot": snapshot_text, "refs": response_refs}}
+
+            # ── §7.3 diff-mode handling ─────────────────────────────────────
+            current_url = inst.page.url
+            current_dialog_active = bool(inst.dialog_active)
+            previous_baseline = inst.last_snapshot.get(snapshot_page_id)
+            scope = _classify_diff_scope(
+                inst,
+                snapshot_page_id=snapshot_page_id,
+                previous=previous_baseline,
+                current_url=current_url,
+                current_dialog_active=current_dialog_active,
+            )
+
+            # Persist new baseline regardless of diff mode so the *next*
+            # diff_from_last call has a fresh anchor. Per-page so multi-tab
+            # state is preserved.
+            #
+            # Cross-PR (§7.3 ↔ §7.4/§7.7): when ``filter`` or ``from_ref``
+            # is set, the resulting refs are a SUBSET of the page. Storing
+            # that subset as the diff baseline would cause the next
+            # unfiltered ``diff_from_last`` call to report all the
+            # filtered-out elements as ``removed``. Skip the baseline
+            # update for scoped/filtered calls — they're informational
+            # snapshots, not anchors. ``last_active_page_id`` still
+            # advances so tab-change detection stays accurate.
+            _is_scoped_call = (filter is not None) or (from_ref is not None)
+            if not _is_scoped_call:
+                inst.last_snapshot[snapshot_page_id] = {
+                    "refs_by_key": dict(ref_summary),
+                    "url": current_url,
+                    "dialog_active": current_dialog_active,
+                }
+            inst.last_active_page_id = snapshot_page_id
+
+            if diff_from_last and scope in ("same", "modal_opened",
+                                             "modal_closed", "frame_changed"):
+                if previous_baseline is None:
+                    # No prior baseline — fall through to the full-snapshot
+                    # path so the agent still gets useful output. Effective
+                    # scope becomes "navigation" since "added/removed against
+                    # nothing" is meaningless.
+                    return {
+                        "success": True,
+                        "data": {
+                            "snapshot": snapshot_text,
+                            "refs": response_refs,
+                            "scope": "navigation",
+                        },
+                    }
+                diff = _compute_snapshot_diff(
+                    previous_baseline["refs_by_key"], ref_summary,
+                )
+                return {
+                    "success": True,
+                    "data": {**diff, "scope": scope},
+                }
+
+            # Either diff_from_last=False, or scope is navigation/tab_changed
+            # — return the full snapshot. ``scope`` is included only when
+            # diff_from_last=True so non-diff callers see the historical
+            # response shape.
+            data: dict = {"snapshot": snapshot_text, "refs": response_refs}
+            if diff_from_last:
+                data["scope"] = scope
+            return {"success": True, "data": data}
         except Exception as e:
             # Match the §2.3 error envelope used by the new from_ref /
             # filter paths above so agents see a uniform shape regardless

@@ -120,7 +120,12 @@ async def browser_navigate(
         "Optional: pass filter='actionable'|'inputs'|'headings'|'landmarks' "
         "to narrow the result (cheaper tokens on huge pages). Pass "
         "from_ref='e3' to scope the snapshot to a specific element's "
-        "subtree — useful for drilling into a list, table, or form section."
+        "subtree — useful for drilling into a list, table, or form section. "
+        "Pass diff_from_last=True after an action to get only what changed "
+        "since the last snapshot — added/removed/changed elements with a "
+        "'scope' label (same | modal_opened | modal_closed | frame_changed "
+        "| navigation | tab_changed). Returns a full snapshot when scope is "
+        "navigation/tab_changed."
     ),
     parameters={
         "filter": {
@@ -145,12 +150,23 @@ async def browser_navigate(
                 "before clicking refs from a scoped result."
             ),
         },
+        "diff_from_last": {
+            "type": "boolean",
+            "description": (
+                "When True, return only what changed since the previous "
+                "snapshot in this tab. Useful after a click/type to see "
+                "what your action did without re-paying the full snapshot "
+                "token cost."
+            ),
+            "default": False,
+        },
     },
     parallel_safe=False,
 )
 async def browser_get_elements(
     filter: str | None = None,
     from_ref: str | None = None,
+    diff_from_last: bool = False,
     *,
     mesh_client=None,
 ) -> dict:
@@ -160,6 +176,8 @@ async def browser_get_elements(
         payload["filter"] = filter
     if from_ref is not None:
         payload["from_ref"] = from_ref
+    if diff_from_last:
+        payload["diff_from_last"] = True
     return await _browser_command(mesh_client, "snapshot", payload)
 
 

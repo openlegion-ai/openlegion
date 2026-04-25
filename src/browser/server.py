@@ -172,6 +172,7 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
             agent_id,
             filter=(body or {}).get("filter"),
             from_ref=(body or {}).get("from_ref"),
+            diff_from_last=bool((body or {}).get("diff_from_last", False)),
         )
 
     @app.post("/browser/{agent_id}/click")
