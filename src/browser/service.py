@@ -347,6 +347,71 @@ def _is_empty_payload(payload: dict) -> bool:
     ))
 
 
+def _encode_screenshot(
+    png_bytes: bytes,
+    fmt: str,
+    quality: int,
+    scale: float,
+    *,
+    agent_id: str = "",
+) -> tuple[bytes, str]:
+    """Encode a Playwright PNG to WebP / PNG with optional downscale.
+
+    Returns ``(encoded_bytes, actual_format)``. ``actual_format`` may be
+    ``"png"`` even when ``fmt="webp"`` was requested — Pillow may be
+    absent in the dev path or fail on a corrupt frame; PNG fallback
+    keeps the agent unblocked rather than returning an error.
+
+    The function is intentionally synchronous and pure — easy to unit
+    test and reason about. Pillow does its own threading internally;
+    callers should either be on a worker thread or accept that an
+    ~1080p WebP encode runs in ~10–20 ms.
+    """
+    # Fast path: caller asked for PNG and no scale change → pass through.
+    if fmt == "png" and abs(scale - 1.0) < 1e-3:
+        return png_bytes, "png"
+
+    try:
+        from io import BytesIO
+
+        from PIL import Image
+    except Exception:
+        # Pillow missing — log once per encode attempt at debug only;
+        # this is expected on the agent-side dev path where Pillow isn't
+        # bundled. Caller still gets a usable PNG.
+        logger.debug(
+            "Pillow not installed; falling back to PNG (agent=%s)", agent_id,
+        )
+        return png_bytes, "png"
+
+    try:
+        img = Image.open(BytesIO(png_bytes))
+        # Downscale via Lanczos when requested. Avoids the no-op resize
+        # cost when scale is effectively 1.0.
+        if abs(scale - 1.0) >= 1e-3 and scale > 0:
+            new_w = max(1, int(img.width * scale))
+            new_h = max(1, int(img.height * scale))
+            img = img.resize((new_w, new_h), Image.LANCZOS)
+
+        out = BytesIO()
+        if fmt == "webp":
+            # Convert to RGB first — WebP doesn't accept palette or
+            # certain RGBA modes from Pillow versions <10.4 cleanly.
+            if img.mode not in ("RGB", "RGBA"):
+                img = img.convert("RGB")
+            img.save(out, format="WEBP", quality=quality, method=4)
+            return out.getvalue(), "webp"
+        # PNG re-encode (only reached when scale != 1.0 above).
+        img.save(out, format="PNG", optimize=True)
+        return out.getvalue(), "png"
+    except Exception as e:
+        logger.warning(
+            "Screenshot %s encode failed (%s); falling back to original PNG",
+            fmt, e,
+        )
+        return png_bytes, "png"
+
+
 def _extract_text_from_a11y(tree: dict | None, max_chars: int = 5000) -> str:
     """Extract readable text from an accessibility snapshot tree.
 
@@ -1477,10 +1542,19 @@ class BrowserManager:
                 title = await inst.page.title()
                 current_url = inst.page.url
                 body_text = ""
+                # When snapshot_after=True the response already carries the
+                # full element tree — keep ``body`` as a short preview
+                # (1000 chars) so the agent has page-text context without
+                # paying full-text token cost twice. With snapshot_after
+                # off the agent depends on body for content, so retain
+                # the historical 5000-char cap.
+                body_cap = 1000 if snapshot_after else 5000
                 if not inst._js_snapshot_mode:
                     try:
                         _a11y = await inst.page.accessibility.snapshot()
-                        body_text = _extract_text_from_a11y(_a11y)
+                        body_text = _extract_text_from_a11y(
+                            _a11y, max_chars=body_cap,
+                        )
                     except AttributeError:
                         inst._js_snapshot_mode = True
                     except Exception:
@@ -2659,17 +2733,72 @@ class BrowserManager:
             except Exception as e:
                 return {"success": False, "error": str(e)}
 
-    async def screenshot(self, agent_id: str, full_page: bool = False) -> dict:
-        """Take screenshot, return base64 PNG."""
+    async def screenshot(
+        self,
+        agent_id: str,
+        full_page: bool = False,
+        format: str = "webp",
+        quality: int = 75,
+        scale: float = 1.0,
+    ) -> dict:
+        """Take a screenshot and return it as base64.
+
+        ``format`` controls the encoding:
+        - ``"webp"`` (default) — lossy WebP at ``quality`` (1–100). Roughly
+          5–10× smaller than PNG for the same visual content; the
+          difference compounds heavily across multi-step browsing tasks
+          where the agent may pull dozens of screenshots per task.
+        - ``"png"`` — original lossless PNG path (Playwright native).
+          Selected automatically if WebP encoding fails (e.g. Pillow
+          missing in dev env, corrupt frame buffer) so callers always
+          get a usable image.
+
+        ``scale`` (0.5–1.0) rescales the captured image post-encode-prep,
+        for further token savings when full-fidelity isn't needed. The
+        Playwright native scale option is intentionally NOT used —
+        Playwright applies it via ``deviceScaleFactor`` which mutates the
+        viewport's pixel ratio and can leak fingerprint signal. Pillow
+        downscale here is a pure post-process.
+        """
         inst = await self.get_or_start(agent_id)
         inst.touch()
+        # Validate inputs early — reject unknown formats with a clear
+        # error rather than silently falling through to PNG.
+        fmt = (format or "webp").lower()
+        if fmt not in ("webp", "png"):
+            return {"success": False, "error": f"Unsupported screenshot format: {format!r}"}
+        try:
+            quality = int(quality)
+        except (TypeError, ValueError):
+            quality = 75
+        quality = max(1, min(100, quality))
+        try:
+            scale_f = float(scale)
+        except (TypeError, ValueError):
+            scale_f = 1.0
+        scale_f = max(0.5, min(1.0, scale_f))
+
         async with inst.lock:
             try:
+                # Ask Playwright for PNG either way — WebP encoding happens
+                # post-capture so we can downscale and quality-tune in a
+                # single Pillow pass without touching the page renderer.
                 png_bytes = await inst.page.screenshot(full_page=full_page)
-                b64 = base64.b64encode(png_bytes).decode()
-                return {"success": True, "data": {"image_base64": b64, "format": "png"}}
             except Exception as e:
                 return {"success": False, "error": str(e)}
+
+        encoded, used_format = _encode_screenshot(
+            png_bytes, fmt, quality, scale_f, agent_id=agent_id,
+        )
+        b64 = base64.b64encode(encoded).decode()
+        return {
+            "success": True,
+            "data": {
+                "image_base64": b64,
+                "format": used_format,
+                "bytes": len(encoded),
+            },
+        }
 
     async def _type_with_variance(self, page, text: str) -> None:
         """Type text character-by-character with human-like inter-key delays.

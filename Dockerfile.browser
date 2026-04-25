@@ -66,10 +66,14 @@ RUN useradd --create-home --uid 1000 --shell /bin/bash browser
 WORKDIR /app
 
 # Python dependencies — upgrade pip first to avoid resolver bugs with stale base images
+# Pillow ships with bundled libwebp on manylinux wheels, so no apt-level WebP
+# library is required. The encode path in src/browser/service.py uses
+# Image.save(..., format="WEBP") which is Pillow's built-in encoder.
 COPY pyproject.toml .
 RUN pip install --no-cache-dir --root-user-action=ignore --upgrade pip \
     && pip install --no-cache-dir --root-user-action=ignore \
-    "camoufox[geoip]" fastapi uvicorn pydantic httpx
+    "camoufox[geoip]" fastapi uvicorn pydantic httpx \
+    "Pillow>=10.0"
 
 # Application code
 COPY src/browser/ /app/src/browser/
