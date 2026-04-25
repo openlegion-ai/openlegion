@@ -27,11 +27,67 @@ consistent and realistic:
 
 from __future__ import annotations
 
+import hashlib
 import os
 
 from src.shared.utils import setup_logging
 
 logger = setup_logging("browser.stealth")
+
+# ── Per-agent resolution pool (§6.1) ──────────────────────────────────────────
+
+
+# Distribution approximates Windows-desktop market share on the most common
+# aspect ratios (16:9 + 16:10). Numbers sourced from StatCounter worldwide
+# desktop 2025 Q1 aggregated into the relevant bins. Each agent picks one
+# deterministically from its ``agent_id`` so the same agent reports the same
+# resolution across browser restarts, profile wipes, and container rebuilds.
+#
+# Why a pool at all: a fleet where every agent reports 1920×1080 is itself a
+# cross-agent correlation signal at the detection layer — three "different"
+# accounts with identical screen / DPR / viewport shape will correlate in
+# fingerprint storage. Spreading across realistic sizes masks the cluster
+# without straying into rare/fingerprintable outliers (4K, unusual ratios).
+#
+# Weights sum to 1.0. Keep ordered by descending weight so the common path
+# bisects fewer buckets.
+_RESOLUTION_POOL: tuple[tuple[tuple[int, int], float], ...] = (
+    ((1920, 1080), 0.34),
+    ((1366, 768), 0.22),
+    ((1536, 864), 0.14),
+    ((1440, 900), 0.12),
+    ((1280, 720), 0.10),
+    ((1680, 1050), 0.08),
+)
+
+
+def pick_resolution(agent_id: str) -> tuple[int, int]:
+    """Return the resolution this agent is assigned to report.
+
+    Deterministic from ``agent_id`` alone: SHA-256 of the id → first 8 bytes
+    as an unsigned int → normalized to ``[0, 1)`` → cumulative-weight
+    bucket from :data:`_RESOLUTION_POOL`. SHA-256 produces a near-uniform
+    distribution, which means at fleet scale the pool weights are honored
+    to within sampling error.
+
+    Stable per agent by construction — the plan specifies "survives
+    profile wipe", which rules out using profile-local state or the
+    browser service's ``boot_id``. Using ``agent_id`` alone also means
+    operators can predict the resolution an agent will report when
+    auditing fleet diversity.
+    """
+    digest = hashlib.sha256(agent_id.encode("utf-8")).digest()
+    u = int.from_bytes(digest[:8], "big") / (1 << 64)
+    cumulative = 0.0
+    for resolution, weight in _RESOLUTION_POOL:
+        cumulative += weight
+        if u < cumulative:
+            return resolution
+    # Floating-point slack: sum-of-weights can be microscopically < 1.0;
+    # fall back to the highest-weight option so nothing silently picks a
+    # default outside the pool.
+    return _RESOLUTION_POOL[0][0]
+
 
 # ── Launch options ─────────────────────────────────────────────────────────────
 
@@ -64,17 +120,26 @@ def build_launch_options(agent_id: str, profile_dir: str, proxy: dict | None = N
 
     locale = os.environ.get("BROWSER_LOCALE", "en-US")
 
-    # VNC display is always 1920×1080.  We set window= and Screen to match so
-    # that window.innerWidth and window.screen.width are consistent — a mismatch
-    # (innerWidth > screen.width) is itself a detectable bot signal.  Per-agent
-    # resolution variation is not worth breaking the KasmVNC UX.
+    # §6.1: pick a per-agent resolution from the pool. The KasmVNC display
+    # itself stays 1920×1080 (shared by all agents on this container); the
+    # chosen resolution determines Firefox's window size + the reported
+    # ``window.screen`` dimensions. Undersized windows show dead space
+    # around them on VNC, filled by the dark wallpaper set in __main__.py.
+    #
+    # This also requires the Openbox config NOT to force-maximize the main
+    # browser window — the maximize rule was removed from Dockerfile.browser
+    # alongside this feature. Otherwise the window would end up at full
+    # display size while the fingerprint reported 1280×720, a detectable
+    # mismatch.
+    width, height = pick_resolution(agent_id)
+    logger.debug("Agent '%s' resolution: %dx%d", agent_id, width, height)
 
     options: dict = {
         "headless": False,
         "humanize": True,        # Camoufox mouse-curves + micro-delays
         "os": os_hint,
         "locale": locale,        # navigator.language / Accept-Language header
-        "window": (1920, 1080),  # fill the KasmVNC display
+        "window": (width, height),
         # block_webrtc: Camoufox native toggle — prevents Docker container IP
         # from leaking via ICE candidates.  More reliable than manual prefs.
         "block_webrtc": True,
@@ -84,11 +149,12 @@ def build_launch_options(agent_id: str, profile_dir: str, proxy: dict | None = N
     # timezone_id, not timezone).  Passing it causes a TypeError on browser
     # startup.  Locale implicitly determines timezone via GeoIP or BrowserForge.
 
-    # Lock the BrowserForge screen fingerprint to 1920×1080 so it stays
-    # consistent with the actual window size.
+    # Lock the BrowserForge screen fingerprint to the chosen resolution so
+    # window.innerWidth ≤ window.screen.width holds (a mismatch is itself a
+    # detection signal).
     try:
         from browserforge.fingerprints import Screen
-        options["screen"] = Screen(max_width=1920, max_height=1080)
+        options["screen"] = Screen(max_width=width, max_height=height)
     except ImportError:
         pass  # browserforge only available in browser container
 
@@ -238,4 +304,21 @@ def _stealth_prefs() -> dict:
         "browser.newtabpage.activity-stream.asrouter.userprefs.cfr.addons": False,
         "browser.newtabpage.activity-stream.asrouter.userprefs.cfr.features": False,
         "extensions.htmlaboutaddons.recommendations.enabled": False,
+
+        # ── First-run / welcome / default-browser prompts ────────────────────
+        # Belt-and-suspenders against the about:welcome tab, default-browser
+        # nag, and profile-import wizard. Phase 3 profile schema v2 takes
+        # care to NOT delete ``compatibility.ini`` (which would itself
+        # trigger first-run UI), but a fresh profile or a Firefox version
+        # bump can also cross those code paths. None of these prompts
+        # appear on a properly-warmed profile, but they all block
+        # automation when they do — so suppress them at the pref layer.
+        "browser.shell.checkDefaultBrowser": False,
+        "browser.aboutwelcome.enabled": False,
+        "browser.startup.homepage_override.mstone": "ignore",
+        "startup.homepage_welcome_url": "",
+        "startup.homepage_welcome_url.additional": "",
+        "browser.disableResetPrompt": True,
+        "browser.tabs.warnOnClose": False,
+        "browser.tabs.warnOnCloseOtherTabs": False,
     }

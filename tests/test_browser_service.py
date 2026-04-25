@@ -503,20 +503,35 @@ class TestStealthConfig:
             opts = build_launch_options("agent1", "/tmp/profile", proxy=proxy)
         assert opts.get("geoip") is True
 
-    # Resolution tests removed — _pick_resolution was dead code (VNC is always
-    # 1920×1080, so per-agent resolution variation was unused).
+    def test_window_matches_screen_fingerprint(self):
+        """Phase 3 §6.1: window= is picked from the resolution pool per
+        agent, and must match the Screen() fingerprint max dimensions.
 
-    def test_window_fills_vnc_display(self):
-        """window= must be (1920, 1080) to fill the KasmVNC display.
-
-        The VNC container runs at 1920×1080.  window= must match screen= so that
-        window.innerWidth and window.screen.width are consistent — a mismatch
-        is itself a bot detection signal.
+        What we're enforcing is the *consistency invariant*, not a
+        specific size. ``innerWidth`` > ``screen.width`` is a detection
+        signal; equal sizes are safe. The VNC display itself stays
+        1920×1080 (shared across agents); the browser window inside it
+        is whatever the pool assigned this agent.
         """
-        from src.browser.stealth import build_launch_options
+        from src.browser.stealth import (
+            _RESOLUTION_POOL,
+            build_launch_options,
+            pick_resolution,
+        )
+
         with patch.dict("os.environ", {}, clear=True):
             opts = build_launch_options("agent1", "/tmp/profile")
-        assert opts["window"] == (1920, 1080)
+
+        # The window came from the pool (not a hardcoded default).
+        expected = pick_resolution("agent1")
+        assert opts["window"] == expected
+        assert expected in {res for res, _ in _RESOLUTION_POOL}
+
+        # And the Screen() fingerprint matches when browserforge is
+        # available — in the unit-test environment it may not be.
+        screen = opts.get("screen")
+        if screen is not None:
+            assert (screen.max_width, screen.max_height) == expected
 
     def test_locale_set_and_timezone_absent(self):
         """locale= is a valid Camoufox param; timezone= is NOT (would cause TypeError).
