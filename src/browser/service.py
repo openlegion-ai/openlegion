@@ -11,6 +11,7 @@ import asyncio
 import base64
 import contextlib
 import mimetypes
+import os
 import random
 import re
 import subprocess
@@ -260,6 +261,69 @@ _JS_A11Y_TREE = r"""(rootEl) => {
 }"""
 
 
+def _short_ua(ua: str) -> str:
+    """Compact a UA string for log output — keep the tail Firefox-version
+    bit, drop the OS/locale boilerplate readers don't need at INFO level."""
+    if not ua:
+        return ""
+    # Most useful bit is "Firefox/138.0" at the end; everything before is
+    # noise for debugging fingerprint regressions.
+    if "Firefox/" in ua:
+        return "Firefox/" + ua.split("Firefox/", 1)[1]
+    return ua[:80]
+
+
+def _js_string(value: str) -> str:
+    """Escape a Python string for safe interpolation into a JS literal.
+
+    Used by the ``navigator.connection`` init-script to inject the
+    per-agent ``effectiveType`` value. The values are drawn from a
+    fixed pool (``"4g"`` etc.) so injection is bounded today, but
+    a defensive escape costs nothing and prevents future agent-id-
+    derived values from breaking out.
+    """
+    return ("'" + value
+            .replace("\\", "\\\\")
+            .replace("'", "\\'")
+            .replace("\n", "\\n") + "'")
+
+
+# §6.6 navigator.connection fallback. Defines a getter on
+# ``Navigator.prototype`` that returns a frozen object matching the
+# NetworkInformation API surface real Chromium-shaped browsers expose.
+# ``configurable: true`` so a future Camoufox upgrade that adds native
+# support can override this. Runs before any page script via
+# ``BrowserContext.add_init_script``.
+_NAV_CONNECTION_INIT_SCRIPT = """
+(() => {{
+  try {{
+    if (typeof navigator !== 'undefined' && navigator.connection !== undefined) {{
+      return;  // Camoufox / Firefox already exposes the API
+    }}
+    const fake = Object.freeze({{
+      effectiveType: {effective},
+      downlink: {downlink},
+      rtt: {rtt},
+      saveData: {save_data},
+      type: 'wifi',
+      addEventListener: () => {{}},
+      removeEventListener: () => {{}},
+      dispatchEvent: () => false,
+      onchange: null,
+    }});
+    Object.defineProperty(Navigator.prototype, 'connection', {{
+      get: () => fake,
+      configurable: true,
+      enumerable: true,
+    }});
+  }} catch (_e) {{
+    // Defensive: any failure here is operator-debuggable via the
+    // §6.3 navigator self-test, which will flag the missing API.
+  }}
+}})();
+"""
+
+
 def _is_empty_payload(payload: dict) -> bool:
     """True when a drain produced no activity *in this interval*.
 
@@ -268,7 +332,13 @@ def _is_empty_payload(payload: dict) -> bool:
     Only per-minute counters count here — the rolling click window
     persists across drains and would permanently bypass the filter if
     included (any agent that ever clicked would be "non-idle" forever).
+
+    Payloads with an explicit ``kind`` (e.g. §6.3 ``nav_probe``) are
+    one-shot events, not drain samples — they are never "empty" even
+    when the per-minute counter fields are absent.
     """
+    if payload.get("kind"):
+        return False
     return not any((
         payload.get("click_success"),
         payload.get("click_fail"),
@@ -365,6 +435,11 @@ class CamoufoxInstance:
         # off so production pays no cost.
         from src.browser.recorder import BehaviorRecorder
         self.recorder = BehaviorRecorder(agent_id)
+        # §6.3 navigator self-test result. ``None`` until the post-launch
+        # probe runs. Populated dict (see ``BrowserManager._run_navigator_probe``)
+        # exposes ``ok`` + ``mismatches`` + raw signal values for dashboard /
+        # status endpoint consumers.
+        self.probe_result: dict | None = None
 
     def _register_page(self, page) -> str:
         """Assign a stable UUID to a Page if not already registered.
@@ -837,6 +912,35 @@ class BrowserManager:
         pages = context.pages
         page = pages[0] if pages else await context.new_page()
 
+        # §6.6 ``navigator.connection`` fallback. We pass the spoof
+        # values via Camoufox's ``config`` dict above, but it's not
+        # documented whether Camoufox honours those keys (Firefox itself
+        # doesn't natively expose NetworkInformation). Install an
+        # ``add_init_script`` that defines ``navigator.connection`` if
+        # the property is missing — runs in every document context
+        # before page scripts. ``Object.defineProperty`` on
+        # ``Navigator.prototype`` with ``configurable: true`` matches
+        # what real Chromium-shaped Firefox extension polyfills do.
+        try:
+            from src.browser.stealth import pick_network_info
+            netinfo = pick_network_info(agent_id)
+            await context.add_init_script(
+                _NAV_CONNECTION_INIT_SCRIPT.format(
+                    effective=_js_string(netinfo["effectiveType"]),
+                    downlink=float(netinfo["downlink"]),
+                    rtt=int(netinfo["rtt"]),
+                    save_data="false",
+                ),
+            )
+        except Exception as e:
+            # Non-fatal — Camoufox may already have NetworkInformation
+            # support, and the §6.3 probe will catch the gap if neither
+            # path lands.
+            logger.debug(
+                "navigator.connection init-script failed for '%s': %s",
+                agent_id, e,
+            )
+
         inst = CamoufoxInstance(agent_id, browser, context, page)
 
         # Discover the new X11 window for targeted focus
@@ -854,7 +958,167 @@ class BrowserManager:
             )
             inst._jitter_task = None
 
+        # §6.3 run the navigator self-test once. Best-effort — a probe
+        # failure must not block browser start (the inconsistency is
+        # itself the operator's signal to investigate).
+        try:
+            await self._run_navigator_probe(inst)
+        except Exception as e:
+            logger.warning(
+                "Navigator self-test probe failed for '%s': %s", agent_id, e,
+            )
+
         return inst
+
+    async def _run_navigator_probe(self, inst: CamoufoxInstance) -> None:
+        """Read key navigator/Intl signals from the live page and validate
+        them against the configured fingerprint.
+
+        Stores the result on ``inst.probe_result`` and emits a one-shot
+        ``nav_probe`` payload via ``self._metrics_sink`` (when wired). At
+        the dashboard layer this surfaces as a ``browser_nav_probe``
+        event, distinct from per-minute drain payloads.
+
+        **Probes on ``about:blank``** so we read the platform / browser
+        signals as the engine sees them, not as some loaded site has
+        possibly shadowed them via an injected content script. With
+        ``persistent_context=True`` the page resumes whatever the agent
+        had open last session — that page's globals could include
+        custom getters on ``Navigator.prototype``. Forcing a navigation
+        to ``about:blank`` first eliminates that path.
+
+        Mismatches the probe flags:
+          * ``navigator.webdriver !== false`` — the canonical bot tell
+          * ``navigator.platform`` doesn't match our configured ``os`` hint
+          * ``navigator.userAgent`` lacks ``Firefox/`` (would mean §6.4
+            tripwire was bypassed somehow at runtime)
+          * ``navigator.connection.*`` is undefined (would mean §6.6
+            override silently failed inside Camoufox)
+
+        Per the plan: "WARNING if webdriver !== false or mismatch."
+        """
+        os_hint = os.environ.get("BROWSER_OS", "windows").lower()
+        expected_platform = {
+            "windows": "Win32",
+            "macos": "MacIntel",
+            "linux": "Linux x86_64",
+        }.get(os_hint)
+
+        # Best-effort isolate the probe context. ``about:blank`` is a
+        # special URL that Firefox loads instantly with a fresh,
+        # script-free document — perfect for reading raw navigator
+        # signals. If the goto fails (e.g. ``about:blank`` blocked by
+        # some weird policy), we fall through and probe the current
+        # page anyway; the result will still be populated and any
+        # shadowing-induced mismatch is itself useful signal.
+        #
+        # Side-effect operators may notice: this clobbers the resumed
+        # page on a persistent-profile restart. An agent that had
+        # ``twitter.com`` open last session sees ``about:blank`` for a
+        # split second after restart, then whatever its first action
+        # navigates to. Cookies / localStorage / IndexedDB all survive
+        # — only the loaded-page URL is lost.
+        try:
+            await inst.page.goto("about:blank", timeout=5000)
+        except Exception as e:
+            logger.debug(
+                "Probe pre-nav to about:blank failed for '%s' "
+                "(continuing on current page): %s", inst.agent_id, e,
+            )
+
+        try:
+            signals = await inst.page.evaluate(
+                "() => ({"
+                "  webdriver: navigator.webdriver,"
+                "  plugins_len: navigator.plugins ? navigator.plugins.length : -1,"
+                "  mimeTypes_len: navigator.mimeTypes ? navigator.mimeTypes.length : -1,"
+                "  hardwareConcurrency: navigator.hardwareConcurrency,"
+                "  deviceMemory: navigator.deviceMemory,"
+                "  userAgent: navigator.userAgent,"
+                "  platform: navigator.platform,"
+                "  language: navigator.language,"
+                "  timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,"
+                "  conn_effective: navigator.connection ? navigator.connection.effectiveType : null,"
+                "  conn_downlink: navigator.connection ? navigator.connection.downlink : null,"
+                "  conn_rtt: navigator.connection ? navigator.connection.rtt : null"
+                "})",
+            )
+        except Exception as e:
+            inst.probe_result = {
+                "ok": False, "mismatches": [f"evaluate failed: {e}"],
+                "signals": {},
+            }
+            logger.warning(
+                "Navigator probe evaluate failed for '%s': %s",
+                inst.agent_id, e,
+            )
+            return
+
+        mismatches: list[str] = []
+        if signals.get("webdriver") is not False:
+            mismatches.append(
+                f"webdriver={signals.get('webdriver')!r} (expected False)",
+            )
+        if expected_platform and signals.get("platform") != expected_platform:
+            mismatches.append(
+                f"platform={signals.get('platform')!r} "
+                f"(expected {expected_platform!r} for os={os_hint!r})",
+            )
+        ua = signals.get("userAgent", "")
+        if ua and "Firefox/" not in ua:
+            mismatches.append(f"userAgent lacks 'Firefox/': {ua!r}")
+        # navigator.connection should be populated by §6.6 spoof. ``null``
+        # means the override silently failed.
+        if signals.get("conn_effective") is None:
+            mismatches.append(
+                "navigator.connection.effectiveType is null "
+                "(§6.6 override may have failed)",
+            )
+
+        ok = not mismatches
+        inst.probe_result = {
+            "ok": ok,
+            "mismatches": mismatches,
+            "signals": signals,
+        }
+
+        if ok:
+            logger.info(
+                "Navigator probe OK for '%s': platform=%s, ua=%s, tz=%s",
+                inst.agent_id, signals.get("platform"),
+                _short_ua(ua), signals.get("timezone"),
+            )
+        else:
+            logger.warning(
+                "Navigator probe MISMATCH for '%s': %s",
+                inst.agent_id, "; ".join(mismatches),
+            )
+
+        # One-shot emit so operators see the result on the dashboard
+        # without waiting for the next per-minute drain. Distinguished
+        # from drain payloads by the ``kind`` field; Phase 2.1's history
+        # buffer + mesh poll forward both shapes. We write to the history
+        # buffer FIRST (so a missing sink doesn't drop the event) and
+        # call the optional sink for in-process consumers (tests).
+        probe_payload = {
+            "kind": "nav_probe",
+            "agent_id": inst.agent_id,
+            "ok": ok,
+            "mismatches": mismatches,
+            "signals": signals,
+        }
+        self._metrics_seq += 1
+        probe_payload["seq"] = self._metrics_seq
+        probe_payload["ts"] = time.time()
+        self._metrics_history.append(probe_payload)
+        if self._metrics_sink is not None:
+            try:
+                self._metrics_sink(probe_payload)
+            except Exception as e:
+                logger.debug(
+                    "metrics_sink raised on nav_probe for '%s': %s",
+                    inst.agent_id, e,
+                )
 
     async def stop(self, agent_id: str) -> None:
         """Stop and clean up a specific agent's browser."""
@@ -958,13 +1222,24 @@ class BrowserManager:
             inst = self._instances.get(agent_id)
             if not inst:
                 return {"running": False}
-            return {
+            status = {
                 "running": True,
                 "idle_seconds": int(time.time() - inst.last_activity),
                 "url": inst.page.url if inst.page else "",
                 "click_window_size": len(inst.click_window),
                 "click_success_rate_100": inst.rolling_click_success_rate(),
             }
+            # §6.3 navigator probe summary (boot-once). When ``probe_result``
+            # is None the probe hasn't run yet (instance just started).
+            # Operators polling /status get the same signal as the dashboard
+            # nav-probe event; we only surface the high-level shape, not the
+            # raw signals payload (those are in the EventBus event).
+            if inst.probe_result is not None:
+                status["probe_ok"] = inst.probe_result["ok"]
+                status["probe_mismatches"] = list(
+                    inst.probe_result.get("mismatches") or [],
+                )
+            return status
 
     async def get_service_status(self) -> dict:
         """Get overall service health."""

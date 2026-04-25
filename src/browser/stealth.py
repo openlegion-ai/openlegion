@@ -89,6 +89,68 @@ def pick_resolution(agent_id: str) -> tuple[int, int]:
     return _RESOLUTION_POOL[0][0]
 
 
+# ── §6.6 NetworkInformation per-agent fingerprint ─────────────────────────────
+
+
+def pick_network_info(agent_id: str) -> dict:
+    """Stable per-agent ``navigator.connection`` values.
+
+    Real desktop users on broadband / 4G / 5G report
+    ``effectiveType="4g"`` overwhelmingly; the variability is in
+    ``downlink`` (Mbps) and ``rtt`` (ms). Datacenter Firefox often
+    leaves all three undefined, which is itself a signal.
+
+    Picks per-agent from plausible bands:
+      - downlink: 5–20 Mbps (covers home broadband, mobile 4G good signal)
+      - rtt: 20–120 ms (covers wired through mobile)
+      - saveData: always False (rare on desktop; True would itself be a flag)
+
+    Deterministic from ``agent_id`` so the same agent reports the same
+    network shape across browser restarts. SHA-256 splits into two
+    independent 4-byte words for downlink and rtt — using one byte each
+    would give a coarse 256-bucket distribution and visible quantisation
+    on fleet-scale analysis.
+    """
+    digest = hashlib.sha256(f"netinfo:{agent_id}".encode("utf-8")).digest()
+    dl_unit = int.from_bytes(digest[:4], "big") / (1 << 32)   # [0, 1)
+    rtt_unit = int.from_bytes(digest[4:8], "big") / (1 << 32)  # [0, 1)
+    return {
+        "effectiveType": "4g",
+        "downlink": round(5.0 + dl_unit * 15.0, 1),
+        "rtt": int(20 + rtt_unit * 100),
+        "saveData": False,
+    }
+
+
+# ── §6.4 Client-Hints / Firefox-UA guard ──────────────────────────────────────
+
+
+def _assert_firefox_ua(ua: str) -> None:
+    """Refuse a non-Firefox UA string.
+
+    Detection at the Client-Hints layer (Sec-CH-UA-* headers) is
+    Chromium-only — real Firefox doesn't send those headers. If this
+    project ever switches to a Chromium base (or someone hand-overrides
+    ``BROWSER_UA_VERSION`` with a Chrome string), the resulting browser
+    would advertise itself as Chrome via UA but NOT send the matching
+    Sec-CH-UA-* hints, which is itself a strong inconsistency signal.
+
+    This assertion is a tripwire: if it fires, whoever changed the UA
+    has to also wire up Sec-CH-UA / Sec-CH-UA-Mobile / Sec-CH-UA-Platform
+    overrides before removing the guard. Camoufox doesn't currently
+    expose Client-Hints injection, so flipping this off without that
+    work means shipping a detectable agent.
+    """
+    if not ua:
+        return
+    if "Firefox/" not in ua:
+        raise ValueError(
+            "Refusing non-Firefox UA — Client-Hints would leak the "
+            "inconsistency. Wire up Sec-CH-UA-* overrides before "
+            f"shipping this UA: {ua!r}",
+        )
+
+
 # ── Launch options ─────────────────────────────────────────────────────────────
 
 
@@ -171,6 +233,24 @@ def build_launch_options(agent_id: str, profile_dir: str, proxy: dict | None = N
 
     options["firefox_user_prefs"] = _stealth_prefs()
 
+    # ── §6.6 NetworkInformation spoof ────────────────────────────────────────
+    # Camoufox's ``config`` dict supports dotted keys for navigator.* override.
+    # Set per-agent stable values so ``navigator.connection.{effectiveType,
+    # downlink, rtt}`` look like a desktop on broadband. Without this Firefox
+    # leaves these undefined on Linux containers, which detection scripts use
+    # as a desktop-vs-bot tell.
+    netinfo = pick_network_info(agent_id)
+    options["config"] = {
+        "navigator.connection.effectiveType": netinfo["effectiveType"],
+        "navigator.connection.downlink": netinfo["downlink"],
+        "navigator.connection.rtt": netinfo["rtt"],
+        "navigator.connection.saveData": netinfo["saveData"],
+    }
+    # Camoufox requires this acknowledgement before applying ``config``
+    # overrides. We're past the early-return path so it's safe to set
+    # unconditionally now.
+    options["i_know_what_im_doing"] = True
+
     # ── User-Agent version override ──────────────────────────────────────────
     # Camoufox bundles a specific Firefox build (e.g. 135.0).  Some sites
     # (Shopify, etc.) enforce minimum browser versions and block old Firefox.
@@ -186,8 +266,11 @@ def build_launch_options(agent_id: str, profile_dir: str, proxy: dict | None = N
     if ua_version:
         ua = _build_ua_string(os_hint, ua_version)
         if ua:
-            options["config"] = {"navigator.userAgent": ua}
-            options["i_know_what_im_doing"] = True
+            # §6.4 tripwire — the UA we're about to ship MUST be Firefox.
+            # If a future change introduces a Chromium UA, this raises so
+            # the developer has to wire Sec-CH-UA-* overrides first.
+            _assert_firefox_ua(ua)
+            options["config"]["navigator.userAgent"] = ua
             options["firefox_user_prefs"]["general.useragent.override"] = ua
             logger.info("UA override: Firefox/%s", ua_version)
 

@@ -2786,16 +2786,19 @@ def create_mesh_app(
             if int(p.get("seq", 0)) > _poll_state["last_seen_seq"]
         ]
         # On first-seen (fresh mesh or browser restart), only surface the
-        # latest payload per agent. A long-running browser service can
-        # return hours of history; flooding the dashboard's 500-event
-        # ring buffer with stale entries would evict live events and
-        # show agents with data that no longer reflects current health.
+        # latest payload per (agent, kind). A long-running browser
+        # service can return hours of history; flooding the dashboard's
+        # 500-event ring buffer with stale entries would evict live
+        # events. Collapse keys are ``(agent_id, kind)`` so a drain
+        # payload and a §6.3 nav_probe for the same agent are both
+        # preserved (each kind has at most one entry per agent).
         if is_first_seen and payloads:
-            latest_by_agent: dict[str, dict] = {}
+            latest_by_key: dict[tuple[str, str], dict] = {}
             for p in payloads:
-                latest_by_agent[p.get("agent_id", "")] = p
+                key = (p.get("agent_id", ""), p.get("kind", ""))
+                latest_by_key[key] = p
             payloads = sorted(
-                latest_by_agent.values(), key=lambda p: int(p.get("seq", 0)),
+                latest_by_key.values(), key=lambda p: int(p.get("seq", 0)),
             )
 
         for payload in payloads:
@@ -2803,7 +2806,15 @@ def create_mesh_app(
             if seq > _poll_state["last_seen_seq"]:
                 _poll_state["last_seen_seq"] = seq
             agent_id = payload.get("agent_id", "")
-            event_bus.emit("browser_metrics", agent=agent_id, data=payload)
+            # §6.3 nav_probe events get their own type so the dashboard can
+            # render them distinctly (warning toast on mismatch, etc.) and
+            # they don't overwrite the per-minute drain in browserMetrics[].
+            event_type = (
+                "browser_nav_probe"
+                if payload.get("kind") == "nav_probe"
+                else "browser_metrics"
+            )
+            event_bus.emit(event_type, agent=agent_id, data=payload)
 
     async def _browser_metrics_loop() -> None:
         # First pass runs ~5s after boot to give the browser service time
