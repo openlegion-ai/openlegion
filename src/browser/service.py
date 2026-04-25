@@ -84,10 +84,21 @@ def _resolve_filter_roles(filter_name: str | None) -> frozenset[str] | None:
     Unknown name ⇒ raises ``ValueError`` with a helpful list of valid
     options. Empty string is treated like ``None`` so callers passing
     JSON ``""`` from a UI default don't accidentally narrow the result.
+
+    Case-insensitive — LLMs frequently capitalize parameter values. A
+    naive case-sensitive lookup would have rejected ``"Actionable"`` /
+    ``"INPUTS"`` with ``invalid_input``; the agent then has to retry.
     """
-    if filter_name is None or filter_name == "":
+    if filter_name is None:
         return None
-    preset = _FILTER_PRESETS.get(filter_name)
+    if not isinstance(filter_name, str):
+        raise ValueError(
+            f"filter must be a string, got {type(filter_name).__name__}"
+        )
+    key = filter_name.strip().lower()
+    if key == "":
+        return None
+    preset = _FILTER_PRESETS.get(key)
     if preset is None:
         valid = ", ".join(sorted(_FILTER_PRESETS))
         raise ValueError(
@@ -272,11 +283,18 @@ _JS_A11Y_TREE = r"""(rootEl) => {
         'heading','img','dialog','alertdialog','alert',
         'listbox','tree','grid','toolbar','menu','status'
     ]);
-    const ROLES = new Set([...ACTIONABLE, ...CONTEXT]);
     const LANDMARK = new Set([
         'navigation','main','complementary','banner','contentinfo',
         'form','region','dialog','alertdialog'
     ]);
+    // §7.7 includes LANDMARK in the set so ``filter='landmarks'``
+    // works even when ``page.accessibility.snapshot()`` is unavailable
+    // and we fall back to this JS walker. Without LANDMARK in ROLES,
+    // landmark elements collapse to ``role: 'none'`` here and never
+    // reach the Python ``_walk`` even with the right ``allowed_roles``.
+    // Default snapshot output is unaffected: Python ``_walk`` still
+    // gates on ACTIONABLE+CONTEXT unless an explicit filter is passed.
+    const ROLES = new Set([...ACTIONABLE, ...CONTEXT, ...LANDMARK]);
     const IMPLICIT = {
         BUTTON:'button',TEXTAREA:'textbox',SELECT:'combobox',OPTION:'option',
         IMG:'img',H1:'heading',H2:'heading',H3:'heading',
@@ -1996,9 +2014,36 @@ class BrowserManager:
             # second-guess that intent, so skip straight to a single
             # ``_walk`` of the scoped tree.
             if scoped_root_handle is not None:
-                inst.dialog_active = False
-                inst.dialog_detected = False
+                # Snapshot the live modal state BEFORE walking — clearing
+                # ``dialog_active`` here would let subsequent
+                # ``_locator_from_ref`` resolutions of these scoped refs
+                # bypass modal scoping, allowing duplicate role+name
+                # elements behind the overlay to silently match. We keep
+                # the live state intact so the next non-scoped snapshot
+                # re-detects modals naturally; in the meantime, scoped
+                # refs taken inside a modal still resolve through the
+                # modal selector.
+                was_modal = bool(inst.dialog_active)
                 _walk(tree)
+                # If the agent took this scoped snapshot while a modal
+                # was open, patch ``scope_root`` on every emitted ref so
+                # ``_locator_from_ref`` keeps clicks bounded to the dialog
+                # subtree. Without this the scoped refs could resolve to
+                # identical-named elements behind the overlay.
+                if was_modal:
+                    for rid, handle in refs.items():
+                        if handle.scope_root is None:
+                            refs[rid] = RefHandle(
+                                page_id=handle.page_id,
+                                frame_id=handle.frame_id,
+                                shadow_path=handle.shadow_path,
+                                scope_root=_MODAL_SELECTOR,
+                                role=handle.role,
+                                name=handle.name,
+                                occurrence=handle.occurrence,
+                                disabled=handle.disabled,
+                                element_key=handle.element_key,
+                            )
                 inst.refs = refs
                 snapshot_text = (
                     "\n".join(lines) if lines else "(no interactive elements)"

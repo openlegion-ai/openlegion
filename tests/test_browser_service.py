@@ -1726,6 +1726,28 @@ class TestSnapshotFilter:
         # Same set as the default-None case.
         assert "heading" in roles and "img" in roles
 
+    @pytest.mark.asyncio
+    async def test_filter_case_insensitive(self):
+        """LLMs frequently capitalize argument values. ``Actionable``,
+        ``INPUTS`` etc. must work like their lowercase counterparts."""
+        result = await self._snap_with_filter("Actionable")
+        assert result["success"] is True
+        roles = {r["role"] for r in result["data"]["refs"].values()}
+        assert roles == {"button", "textbox", "checkbox", "link"}
+
+        result = await self._snap_with_filter("INPUTS")
+        assert result["success"] is True
+        roles = {r["role"] for r in result["data"]["refs"].values()}
+        assert roles == {"textbox", "checkbox"}
+
+    @pytest.mark.asyncio
+    async def test_filter_whitespace_tolerated(self):
+        """Stray whitespace shouldn't trip the filter — strip+lower."""
+        result = await self._snap_with_filter("  inputs  ")
+        assert result["success"] is True
+        roles = {r["role"] for r in result["data"]["refs"].values()}
+        assert roles == {"textbox", "checkbox"}
+
 
 class TestSnapshotFromRef:
     """§7.4 — scoped snapshot rooted at a previously-seen element."""
@@ -1852,6 +1874,91 @@ class TestSnapshotFromRef:
         assert result["success"] is True
         roles = {r["role"] for r in result["data"]["refs"].values()}
         assert roles == {"textbox"}
+
+    @pytest.mark.asyncio
+    async def test_from_ref_inside_modal_preserves_scope_root(self):
+        """Regression for the silent-misclick bug: when ``from_ref`` is
+        used while a modal is open, the scoped refs MUST carry
+        ``scope_root=_MODAL_SELECTOR`` so subsequent ``_locator_from_ref``
+        calls stay bounded to the dialog. Pre-fix, scoped refs had
+        ``scope_root=None`` and ``inst.dialog_active`` was cleared,
+        letting clicks resolve to identical-named elements behind the
+        overlay."""
+        from src.browser.ref_handle import RefHandle
+        from src.browser.service import _MODAL_SELECTOR, BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value={
+            "role": "form", "name": "Compose",
+            "children": [
+                {"role": "button", "name": "Post"},
+                {"role": "button", "name": "Cancel"},
+            ],
+        })
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        # Simulate live modal state at the time the agent calls snapshot.
+        inst.dialog_active = True
+        inst.dialog_detected = True
+        page_id = inst._page_id_for(inst.page)
+        inst.refs["e0"] = RefHandle.light_dom(
+            page_id=page_id, scope_root=_MODAL_SELECTOR,
+            role="form", name="Compose", occurrence=0, disabled=False,
+        )
+        mgr._instances["a1"] = inst
+
+        fake_locator = AsyncMock()
+        fake_locator.element_handle = AsyncMock(return_value=MagicMock())
+        with patch.object(
+            BrowserManager, "_locator_from_ref", return_value=fake_locator,
+        ):
+            result = await mgr.snapshot("a1", from_ref="e0")
+
+        assert result["success"] is True
+        # Every emitted ref should carry the modal scope_root so the
+        # next click stays bounded to the dialog subtree.
+        for handle in inst.refs.values():
+            assert handle.scope_root == _MODAL_SELECTOR, (
+                f"Ref {handle.role!r} {handle.name!r} leaked outside "
+                f"the modal scope: scope_root={handle.scope_root!r}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_from_ref_outside_modal_no_scope_root(self):
+        """Inverse of the modal-preservation test: when no modal is
+        active during a from_ref snapshot, refs should NOT acquire a
+        modal scope_root (stays None)."""
+        from src.browser.ref_handle import RefHandle
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value={
+            "role": "form", "name": "Login",
+            "children": [{"role": "button", "name": "Submit"}],
+        })
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        # No modal active.
+        inst.dialog_active = False
+        page_id = inst._page_id_for(inst.page)
+        inst.refs["e0"] = RefHandle.light_dom(
+            page_id=page_id, scope_root=None,
+            role="form", name="Login", occurrence=0, disabled=False,
+        )
+        mgr._instances["a1"] = inst
+
+        fake_locator = AsyncMock()
+        fake_locator.element_handle = AsyncMock(return_value=MagicMock())
+        with patch.object(
+            BrowserManager, "_locator_from_ref", return_value=fake_locator,
+        ):
+            result = await mgr.snapshot("a1", from_ref="e0")
+
+        assert result["success"] is True
+        for handle in inst.refs.values():
+            assert handle.scope_root is None
 
 
 class TestTypeTextWithRef:
