@@ -2344,6 +2344,84 @@ class TestDiffSnapshot:
         assert data["added"] == []
         assert data["unchanged_count"] == 1
 
+    @pytest.mark.asyncio
+    async def test_filter_call_does_not_pollute_baseline(self):
+        """Cross-PR §7.3 ↔ §7.7: a filter='inputs' call returns only
+        textbox/checkbox refs. If we updated the diff baseline with that
+        subset, the next unfiltered diff_from_last would report all the
+        filtered-out elements as removed. Verify the baseline survives
+        a scoped call unchanged."""
+        tree = {
+            "role": "WebArea", "name": "",
+            "children": [
+                {"role": "button", "name": "Click"},
+                {"role": "textbox", "name": "Email"},
+                {"role": "heading", "name": "Title"},
+            ],
+        }
+        mgr, inst, _ = await self._setup(tree)
+        # Baseline call (no filter) — full ref summary stored.
+        await mgr.snapshot("a1")
+        baseline_keys = set(
+            inst.last_snapshot[inst.last_active_page_id]["refs_by_key"]
+        )
+        assert len(baseline_keys) == 3  # button + textbox + heading
+
+        # Filtered call — should NOT update the baseline.
+        await mgr.snapshot("a1", filter="inputs")
+        post_filter_keys = set(
+            inst.last_snapshot[inst.last_active_page_id]["refs_by_key"]
+        )
+        assert post_filter_keys == baseline_keys, (
+            "filter='inputs' poisoned the diff baseline with a subset"
+        )
+
+        # Confirm the next diff is meaningful — same scope, no removals.
+        result = await mgr.snapshot("a1", diff_from_last=True)
+        data = result["data"]
+        assert data["scope"] == "same"
+        assert data["removed"] == []
+        assert data["unchanged_count"] == 3
+
+    @pytest.mark.asyncio
+    async def test_from_ref_call_does_not_pollute_baseline(self):
+        """Same invariant as above but for ``from_ref`` — scoped
+        snapshots are informational, not anchors."""
+        from src.browser.ref_handle import RefHandle
+
+        tree = {
+            "role": "form", "name": "Login",
+            "children": [
+                {"role": "textbox", "name": "Email"},
+                {"role": "textbox", "name": "Password"},
+            ],
+        }
+        mgr, inst, _ = await self._setup(tree)
+        await mgr.snapshot("a1")
+        baseline_keys = set(
+            inst.last_snapshot[inst.last_active_page_id]["refs_by_key"]
+        )
+
+        # Seed a ref so from_ref can resolve.
+        page_id = inst._page_id_for(inst.page)
+        inst.refs["e0"] = RefHandle.light_dom(
+            page_id=page_id, scope_root=None, role="form", name="Login",
+            occurrence=0, disabled=False,
+        )
+        fake_locator = AsyncMock()
+        fake_locator.element_handle = AsyncMock(return_value=MagicMock())
+        with patch.object(
+            type(mgr), "_locator_from_ref", return_value=fake_locator,
+        ):
+            await mgr.snapshot("a1", from_ref="e0")
+
+        post_scoped_keys = set(
+            inst.last_snapshot[inst.last_active_page_id]["refs_by_key"]
+        )
+        assert post_scoped_keys == baseline_keys, (
+            "from_ref poisoned the diff baseline"
+        )
+
     def test_compute_diff_descriptors_are_deterministic(self):
         from src.browser.service import _compute_snapshot_diff
         prev = {
