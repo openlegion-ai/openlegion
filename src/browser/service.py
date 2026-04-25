@@ -3966,7 +3966,7 @@ class BrowserManager:
                     redacted_name = self.redactor.redact(agent_id, name)
                     matches.append({
                         "ref": ref_id,
-                        "text": sanitize_for_prompt(redacted_name),
+                        "text": sanitize_for_prompt(redacted_name)[:200],
                         "in_viewport": bool(in_viewport),
                     })
                     if first_locator is None and locator is not None:
@@ -4067,6 +4067,7 @@ class BrowserManager:
                     logger.debug("open_tab referer state update failed: %s", e)
 
                 inst.page = new_page
+                inst.refs = {}  # Stale refs from previous tab's snapshot
                 inst.dialog_active = False
                 inst.dialog_detected = False
                 try:
