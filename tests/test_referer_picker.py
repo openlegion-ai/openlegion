@@ -152,3 +152,125 @@ class TestEdgeCases:
         from src.browser.stealth import pick_referer
 
         assert pick_referer("file:///etc/passwd") == ""
+
+    def test_userinfo_in_target_url_does_not_leak(self):
+        """``https://evil@google.com/`` should not produce a same-origin
+        leak even if previous URL also has userinfo. The picker uses
+        ``parsed.hostname`` which strips userinfo, so this is correct
+        by-construction — regression test pins the contract."""
+        from src.browser.stealth import pick_referer
+
+        # No previous → fall through to search (deterministic via rng)
+        ref = pick_referer(
+            "https://evil@google.com/", rng=__import__("random").Random(0),
+        )
+        assert ref.startswith("https://")
+        # Should not be a fabricated same-origin pointing at evil
+        assert "evil@" not in ref
+
+
+class TestValidateReferer:
+    """Phase 3 §6.5 — validation of caller-supplied referer values."""
+
+    def test_empty_string_passes(self):
+        from src.browser.stealth import validate_referer
+
+        assert validate_referer("") == ""
+        assert validate_referer("   ") == ""  # whitespace → empty
+
+    def test_http_and_https_pass(self):
+        from src.browser.stealth import validate_referer
+
+        assert validate_referer("https://example.com/") == "https://example.com/"
+        assert validate_referer("http://example.com/") == "http://example.com/"
+
+    def test_strips_surrounding_whitespace(self):
+        from src.browser.stealth import validate_referer
+
+        assert validate_referer("  https://example.com/  ") == "https://example.com/"
+
+    def test_javascript_scheme_rejected(self):
+        """Most important rejection — Playwright doesn't validate this
+        strictly enough for our threat model."""
+        import pytest
+
+        from src.browser.stealth import validate_referer
+
+        with pytest.raises(ValueError, match="http"):
+            validate_referer("javascript:alert(1)")
+
+    def test_data_scheme_rejected(self):
+        import pytest
+
+        from src.browser.stealth import validate_referer
+
+        with pytest.raises(ValueError, match="http"):
+            validate_referer("data:text/html,<h1>x</h1>")
+
+    def test_file_scheme_rejected(self):
+        import pytest
+
+        from src.browser.stealth import validate_referer
+
+        with pytest.raises(ValueError, match="http"):
+            validate_referer("file:///etc/passwd")
+
+    def test_about_scheme_rejected(self):
+        import pytest
+
+        from src.browser.stealth import validate_referer
+
+        with pytest.raises(ValueError, match="http"):
+            validate_referer("about:blank")
+
+    def test_url_without_hostname_rejected(self):
+        import pytest
+
+        from src.browser.stealth import validate_referer
+
+        with pytest.raises(ValueError, match="hostname"):
+            validate_referer("https:///path-only")
+
+    def test_non_string_rejected(self):
+        import pytest
+
+        from src.browser.stealth import validate_referer
+
+        with pytest.raises(ValueError, match="str"):
+            validate_referer(42)  # type: ignore
+
+
+class TestOAuthDirectNav:
+    """Phase 3 §6.5 review fix — OAuth identity providers must NOT
+    receive a fabricated search referer mid-flow."""
+
+    def test_oauth_idps_in_direct_nav(self):
+        from src.browser.stealth import _DIRECT_NAV_HOSTS
+
+        for host in (
+            "accounts.google.com",
+            "login.microsoftonline.com",
+            "appleid.apple.com",
+            "id.atlassian.com",
+        ):
+            assert host in _DIRECT_NAV_HOSTS, (
+                f"{host} missing from direct-nav set; OAuth bounce would "
+                f"get fabricated search referer"
+            )
+
+    def test_oauth_idp_navigation_returns_empty_referer(self):
+        from src.browser.stealth import pick_referer
+
+        assert pick_referer("https://accounts.google.com/signin") == ""
+
+
+class TestExpandedSocialPool:
+    """Phase 3 §6.5 review fix — Twitter/X social pool is no longer
+    size 1, so rolling-history exhaustion doesn't force a clockwork
+    pattern."""
+
+    def test_x_social_pool_has_multiple_shapes(self):
+        from src.browser.stealth import _SOCIAL_REFERERS
+
+        assert len(_SOCIAL_REFERERS["x.com"]) >= 2
+        assert len(_SOCIAL_REFERERS["twitter.com"]) >= 2

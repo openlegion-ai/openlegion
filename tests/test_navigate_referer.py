@@ -133,8 +133,95 @@ class TestRollingHistory:
 
         mgr = BrowserManager(profiles_dir=str(tmp_path / "profiles"))
         inst = _make_inst(monkeypatch, current_url="https://example.com/dash")
+        # Mark this as a session that's already had at least one real
+        # navigate — without this flag, ``inst.page.url`` is ignored
+        # to avoid leaking stale persistent-profile state.
+        inst.had_real_navigate = True
         mgr._instances["a1"] = inst
 
         await mgr.navigate("a1", "https://example.com/orders")
         kwargs = inst.page.goto.call_args.kwargs
         assert kwargs["referer"] == "https://example.com/"
+
+
+class TestPersistentProfileGate:
+    """Phase 3 §6.5 review fix — first navigate after restart must NOT
+    treat the persistent-profile resumed URL as a "previous page"."""
+
+    @pytest.mark.asyncio
+    async def test_first_nav_ignores_resumed_page_url(
+        self, monkeypatch, tmp_path,
+    ):
+        from src.browser.service import BrowserManager
+
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "profiles"))
+        # Profile resumed to twitter.com from a prior session
+        inst = _make_inst(monkeypatch, current_url="https://twitter.com/home")
+        assert inst.had_real_navigate is False
+        mgr._instances["a1"] = inst
+
+        # Navigating to a different site should NOT see twitter.com as
+        # the previous URL (would falsify "internal-link arrival" claim).
+        await mgr.navigate("a1", "https://example.com/")
+        kwargs = inst.page.goto.call_args.kwargs
+        # No same-origin referer (would be "https://twitter.com/" if
+        # the gate failed). Picker should fall through to search/etc.
+        assert kwargs.get("referer") != "https://twitter.com/"
+
+    @pytest.mark.asyncio
+    async def test_subsequent_nav_uses_previous_url(
+        self, monkeypatch, tmp_path,
+    ):
+        from src.browser.service import BrowserManager
+
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "profiles"))
+        inst = _make_inst(monkeypatch, current_url="")
+        mgr._instances["a1"] = inst
+
+        # First nav — picker runs but no previous URL hint.
+        await mgr.navigate("a1", "https://example.com/page1")
+        assert inst.had_real_navigate is True
+
+        # Mock the page url to mirror real Playwright behaviour.
+        inst.page.url = "https://example.com/page1"
+        await mgr.navigate("a1", "https://example.com/page2")
+        # Same-origin referer now applies.
+        kwargs = inst.page.goto.call_args_list[-1].kwargs
+        assert kwargs["referer"] == "https://example.com/"
+
+
+class TestExplicitRefererValidation:
+    @pytest.mark.asyncio
+    async def test_javascript_referer_rejected(self, monkeypatch, tmp_path):
+        from src.browser.service import BrowserManager
+
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "profiles"))
+        inst = _make_inst(monkeypatch)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.navigate(
+            "a1", "https://example.com/", referer="javascript:alert(1)",
+        )
+        assert result["success"] is False
+        assert "invalid referer" in result["error"]
+        # And nothing reached Playwright
+        inst.page.goto.assert_not_called()
+        # And nothing was appended to recent_referers
+        assert len(inst.recent_referers) == 0
+
+    @pytest.mark.asyncio
+    async def test_whitespace_referer_normalized_to_empty(
+        self, monkeypatch, tmp_path,
+    ):
+        from src.browser.service import BrowserManager
+
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "profiles"))
+        inst = _make_inst(monkeypatch)
+        mgr._instances["a1"] = inst
+
+        await mgr.navigate("a1", "https://example.com/", referer="   ")
+        # Validator strips → empty → goto called WITHOUT referer kwarg
+        kwargs = inst.page.goto.call_args.kwargs
+        assert "referer" not in kwargs
+        # Recent_referers got the cleaned (empty) value
+        assert list(inst.recent_referers) == [""]

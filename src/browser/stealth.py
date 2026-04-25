@@ -79,30 +79,102 @@ _SEARCH_REFERERS: tuple[str, ...] = (
 # own click-tracking shim; every real Twitter outbound link travels
 # through it.
 _SOCIAL_REFERERS: dict[str, tuple[str, ...]] = {
-    "twitter.com": ("https://t.co/",),
-    "x.com": ("https://t.co/",),
+    # Pool of >1 entry per destination so the rolling-5 history can
+    # rotate without creating an obvious "every 6th visit is t.co"
+    # pattern. The same-origin shapes are plausible "user clicked a
+    # tweet from another tweet" arrivals.
+    "twitter.com": (
+        "https://t.co/",
+        "https://twitter.com/home",
+        "https://twitter.com/explore",
+    ),
+    "x.com": (
+        "https://t.co/",
+        "https://x.com/home",
+        "https://x.com/explore",
+    ),
 }
 
 # Hosts where real users typically arrive via direct navigation (typed
 # URL, bookmark, app deep-link). A search-engine referer would itself
 # be suspicious here — nobody Googles "gmail.com" to check their email.
+#
+# Includes OAuth identity providers: an OAuth flow lands on
+# ``accounts.google.com`` mid-redirect carrying the consumer-app's
+# Referer; a fabricated Google referer there breaks detection at
+# the IDP layer. Better to send no referer (matches the bookmark /
+# typed-URL shape) than a fabricated one.
 _DIRECT_NAV_HOSTS: frozenset[str] = frozenset({
+    # Webmail / messaging
     "mail.google.com",
     "gmail.com",
-    "github.com",
-    "app.slack.com",
     "outlook.office.com",
-    "calendar.google.com",
-    "drive.google.com",
+    "outlook.live.com",
+    # Source / collab
+    "github.com",
+    "gist.github.com",
     "linear.app",
     "notion.so",
     "www.notion.so",
+    # Real-time chat
+    "app.slack.com",
+    # Google productivity
+    "calendar.google.com",
+    "drive.google.com",
+    "docs.google.com",
+    "sheets.google.com",
+    # OAuth identity providers — preserve the consumer-app referer or
+    # send empty; never fabricate. (GitHub OAuth uses ``github.com``,
+    # already covered above.)
+    "accounts.google.com",
+    "login.microsoftonline.com",
+    "login.live.com",
+    "appleid.apple.com",
+    "id.atlassian.com",
 })
 
 # Probability of using a social referer when one is registered for the
 # target host. Real users mix social inbound with direct/search arrivals;
 # always-social would itself be a pattern break.
 _SOCIAL_REFERER_PROB: float = 0.30
+
+
+def validate_referer(referer: str) -> str:
+    """Sanitize a caller-supplied ``referer`` string.
+
+    Returns the cleaned value (empty string ⇒ "no referer"). Raises
+    ``ValueError`` on a value that isn't safe to forward to Playwright.
+
+    Allowed shapes:
+      * ``""`` — explicit no-referer, equivalent to a typed-URL arrival
+      * ``http://...`` or ``https://...`` with a hostname
+
+    Rejected:
+      * Whitespace-only strings (would emit a malformed Referer header)
+      * Pseudo-schemes (``javascript:``, ``data:``, ``file:``, ``about:``)
+      * URLs without a hostname (``http:///path``)
+
+    The agent skill is LLM-callable, so a malformed value can reach
+    here from untrusted-by-default agent output. Playwright doesn't
+    validate ``Page.goto(referer=...)`` strictly enough for our threat
+    model — defense in depth.
+    """
+    if not isinstance(referer, str):
+        raise ValueError(f"referer must be str, got {type(referer).__name__}")
+    cleaned = referer.strip()
+    if not cleaned:
+        return ""
+    try:
+        parsed = urlparse(cleaned)
+    except Exception as e:
+        raise ValueError(f"referer is not a parseable URL: {e}") from e
+    if parsed.scheme.lower() not in ("http", "https"):
+        raise ValueError(
+            f"referer must be http:// or https://, got scheme {parsed.scheme!r}",
+        )
+    if not parsed.hostname:
+        raise ValueError("referer URL has no hostname")
+    return cleaned
 
 
 def pick_referer(
