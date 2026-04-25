@@ -1998,6 +1998,454 @@ class TestSnapshotFromRef:
         assert result["data"]["snapshot"].startswith("# snapshot-v2\n")
 
 
+class TestDiffSnapshot:
+    """§7.3 — diff_from_last produces structured deltas instead of a
+    full snapshot when nothing tab-shaped has changed."""
+
+    async def _setup(self, tree, url="https://example.com"):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mock_page = AsyncMock()
+        mock_page.url = url
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value=tree)
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+        return mgr, inst, mock_page
+
+    @pytest.mark.asyncio
+    async def test_first_diff_call_returns_full_snapshot(self):
+        """No baseline → ``scope=navigation`` and full snapshot returned."""
+        tree = {
+            "role": "WebArea", "name": "",
+            "children": [{"role": "button", "name": "Click"}],
+        }
+        mgr, inst, _ = await self._setup(tree)
+        result = await mgr.snapshot("a1", diff_from_last=True)
+        assert result["success"] is True
+        data = result["data"]
+        assert data["scope"] == "navigation"
+        assert "snapshot" in data
+        assert "refs" in data
+
+    @pytest.mark.asyncio
+    async def test_no_changes_returns_same_scope_with_unchanged_count(self):
+        tree = {
+            "role": "WebArea", "name": "",
+            "children": [
+                {"role": "button", "name": "Click"},
+                {"role": "textbox", "name": "Email"},
+            ],
+        }
+        mgr, _, _ = await self._setup(tree)
+        await mgr.snapshot("a1")
+        result = await mgr.snapshot("a1", diff_from_last=True)
+        data = result["data"]
+        assert data["scope"] == "same"
+        assert data["added"] == []
+        assert data["removed"] == []
+        assert data["changed"] == []
+        assert data["unchanged_count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_added_element_in_diff(self):
+        tree_v1 = {
+            "role": "WebArea", "name": "",
+            "children": [{"role": "button", "name": "Click"}],
+        }
+        tree_v2 = {
+            "role": "WebArea", "name": "",
+            "children": [
+                {"role": "button", "name": "Click"},
+                {"role": "button", "name": "Cancel"},
+            ],
+        }
+        mgr, inst, mock_page = await self._setup(tree_v1)
+        await mgr.snapshot("a1")
+        mock_page.accessibility.snapshot = AsyncMock(return_value=tree_v2)
+        result = await mgr.snapshot("a1", diff_from_last=True)
+        data = result["data"]
+        assert data["scope"] == "same"
+        assert len(data["added"]) == 1
+        assert data["added"][0]["name"] == "Cancel"
+        assert data["added"][0]["role"] == "button"
+        assert data["unchanged_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_removed_element_in_diff(self):
+        tree_v1 = {
+            "role": "WebArea", "name": "",
+            "children": [
+                {"role": "button", "name": "Click"},
+                {"role": "button", "name": "Cancel"},
+            ],
+        }
+        tree_v2 = {
+            "role": "WebArea", "name": "",
+            "children": [{"role": "button", "name": "Click"}],
+        }
+        mgr, inst, mock_page = await self._setup(tree_v1)
+        await mgr.snapshot("a1")
+        mock_page.accessibility.snapshot = AsyncMock(return_value=tree_v2)
+        result = await mgr.snapshot("a1", diff_from_last=True)
+        data = result["data"]
+        assert len(data["removed"]) == 1
+        assert data["removed"][0]["name"] == "Cancel"
+
+    @pytest.mark.asyncio
+    async def test_changed_disabled_state(self):
+        tree_v1 = {
+            "role": "WebArea", "name": "",
+            "children": [{"role": "button", "name": "Submit", "disabled": True}],
+        }
+        tree_v2 = {
+            "role": "WebArea", "name": "",
+            "children": [{"role": "button", "name": "Submit", "disabled": False}],
+        }
+        mgr, _, mock_page = await self._setup(tree_v1)
+        await mgr.snapshot("a1")
+        mock_page.accessibility.snapshot = AsyncMock(return_value=tree_v2)
+        result = await mgr.snapshot("a1", diff_from_last=True)
+        data = result["data"]
+        assert len(data["changed"]) == 1
+        assert data["changed"][0]["disabled"] == {"from": True, "to": False}
+
+    @pytest.mark.asyncio
+    async def test_navigation_returns_full_snapshot(self):
+        tree = {
+            "role": "WebArea", "name": "",
+            "children": [{"role": "button", "name": "Click"}],
+        }
+        mgr, inst, mock_page = await self._setup(tree, url="https://a.com")
+        await mgr.snapshot("a1")
+        mock_page.url = "https://b.com"
+        result = await mgr.snapshot("a1", diff_from_last=True)
+        data = result["data"]
+        assert data["scope"] == "navigation"
+        assert "snapshot" in data
+        assert "refs" in data
+
+    @pytest.mark.asyncio
+    async def test_modal_closed_scope(self):
+        # Modal scoping is driven by ``query_selector_all(_MODAL_SELECTOR)``
+        # returning visible modals. Easier test angle: drive the
+        # dialog_active flag directly via the persisted baseline so the
+        # scope-classifier sees the flip without a fragile DOM mock.
+        tree = {
+            "role": "WebArea", "name": "",
+            "children": [{"role": "button", "name": "Click"}],
+        }
+        mgr, inst, mock_page = await self._setup(tree)
+        await mgr.snapshot("a1")
+        baseline = inst.last_snapshot[inst.last_active_page_id]
+        baseline["dialog_active"] = True
+        # Current state stays modal-inactive — flip from True→False.
+        result = await mgr.snapshot("a1", diff_from_last=True)
+        assert result["data"]["scope"] == "modal_closed"
+
+    @pytest.mark.asyncio
+    async def test_diff_off_returns_historical_shape(self):
+        """Without ``diff_from_last`` the response shape is unchanged
+        from pre-§7.3 (no ``scope`` field)."""
+        tree = {
+            "role": "WebArea", "name": "",
+            "children": [{"role": "button", "name": "Click"}],
+        }
+        mgr, _, _ = await self._setup(tree)
+        result = await mgr.snapshot("a1")
+        assert "scope" not in result["data"]
+        assert "snapshot" in result["data"]
+        assert "refs" in result["data"]
+
+    @pytest.mark.asyncio
+    async def test_tab_changed_to_baselined_tab(self):
+        """Switching to a previously-baselined tab → ``tab_changed``."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        # Tab A: baseline at https://a.com.
+        page_a = AsyncMock()
+        page_a.url = "https://a.com"
+        page_a.accessibility = MagicMock()
+        page_a.accessibility.snapshot = AsyncMock(return_value={
+            "role": "WebArea", "name": "",
+            "children": [{"role": "button", "name": "A"}],
+        })
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), page_a)
+        mgr._instances["a1"] = inst
+        await mgr.snapshot("a1")
+        page_a_id = inst.last_active_page_id
+
+        # Tab B: separate Page object → different page_id.
+        page_b = AsyncMock()
+        page_b.url = "https://b.com"
+        page_b.accessibility = MagicMock()
+        page_b.accessibility.snapshot = AsyncMock(return_value={
+            "role": "WebArea", "name": "",
+            "children": [{"role": "button", "name": "B"}],
+        })
+        # Baseline tab B too.
+        inst.page = page_b
+        inst._register_page(page_b)
+        await mgr.snapshot("a1")
+
+        # Switch BACK to tab A and ask for a diff.
+        inst.page = page_a
+        result = await mgr.snapshot("a1", diff_from_last=True)
+        assert result["data"]["scope"] == "tab_changed"
+        # tab_changed returns a full snapshot, not a diff payload.
+        assert "snapshot" in result["data"]
+        assert "refs" in result["data"]
+
+    @pytest.mark.asyncio
+    async def test_tab_changed_to_unbaselined_tab(self):
+        """Switching to a never-snapshotted tab still reports
+        tab_changed when last_active_page_id differs (regression for
+        the previous-vs-current ordering bug)."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        page_a = AsyncMock()
+        page_a.url = "https://a.com"
+        page_a.accessibility = MagicMock()
+        page_a.accessibility.snapshot = AsyncMock(return_value={
+            "role": "WebArea", "name": "",
+            "children": [{"role": "button", "name": "A"}],
+        })
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), page_a)
+        mgr._instances["a1"] = inst
+        # Baseline tab A.
+        await mgr.snapshot("a1")
+
+        # Switch to tab B (never baselined) and request a diff.
+        page_b = AsyncMock()
+        page_b.url = "https://b.com"
+        page_b.accessibility = MagicMock()
+        page_b.accessibility.snapshot = AsyncMock(return_value={
+            "role": "WebArea", "name": "",
+            "children": [{"role": "button", "name": "B"}],
+        })
+        inst.page = page_b
+        inst._register_page(page_b)
+        result = await mgr.snapshot("a1", diff_from_last=True)
+        # Pre-fix: returned "navigation" because previous-is-None check
+        # ran before tab-change check.
+        assert result["data"]["scope"] == "tab_changed"
+
+    @pytest.mark.asyncio
+    async def test_value_field_change_in_diff(self):
+        """``value`` mutation (e.g. user typed into a textbox) shows up
+        as a ``changed`` entry."""
+        tree_v1 = {
+            "role": "WebArea", "name": "",
+            "children": [{"role": "textbox", "name": "Email", "value": ""}],
+        }
+        tree_v2 = {
+            "role": "WebArea", "name": "",
+            "children": [{"role": "textbox", "name": "Email",
+                           "value": "alice@example.com"}],
+        }
+        mgr, _, mock_page = await self._setup(tree_v1)
+        await mgr.snapshot("a1")
+        mock_page.accessibility.snapshot = AsyncMock(return_value=tree_v2)
+        result = await mgr.snapshot("a1", diff_from_last=True)
+        data = result["data"]
+        assert len(data["changed"]) == 1
+        assert data["changed"][0]["value"] == {
+            "from": "", "to": "alice@example.com",
+        }
+
+    @pytest.mark.asyncio
+    async def test_checked_field_change_in_diff(self):
+        """``checked`` flip on a checkbox shows up as ``changed``."""
+        tree_v1 = {
+            "role": "WebArea", "name": "",
+            "children": [{"role": "checkbox", "name": "Subscribe",
+                           "checked": False}],
+        }
+        tree_v2 = {
+            "role": "WebArea", "name": "",
+            "children": [{"role": "checkbox", "name": "Subscribe",
+                           "checked": True}],
+        }
+        mgr, _, mock_page = await self._setup(tree_v1)
+        await mgr.snapshot("a1")
+        mock_page.accessibility.snapshot = AsyncMock(return_value=tree_v2)
+        result = await mgr.snapshot("a1", diff_from_last=True)
+        data = result["data"]
+        assert len(data["changed"]) == 1
+        assert data["changed"][0]["checked"] == {"from": False, "to": True}
+
+    @pytest.mark.asyncio
+    async def test_unnamed_sibling_removal_is_positional(self):
+        """Documents the priority-4 keying behavior: ``sibling_index``
+        is positional (which slot in walk-order this is for the
+        (role, name) pair) — NOT element identity. Removing the last
+        unnamed sibling drops slot N; slot 0..N-1 keep the same keys.
+        Result: diff reports one ``removed`` and zero ``added`` —
+        which is more conservative than the worst-case "remove+add
+        every shifted sibling" interpretation. Still imperfect: an
+        agent that cares which specific button was removed has no
+        signal beyond the count. data-testid extraction (priority 1)
+        will give true element identity."""
+        tree_v1 = {
+            "role": "WebArea", "name": "",
+            "children": [
+                {"role": "button", "name": ""},   # nameless sibling 1
+                {"role": "button", "name": ""},   # nameless sibling 2
+            ],
+        }
+        tree_v2 = {
+            "role": "WebArea", "name": "",
+            "children": [
+                {"role": "button", "name": ""},   # only one survives
+            ],
+        }
+        mgr, _, mock_page = await self._setup(tree_v1)
+        await mgr.snapshot("a1")
+        mock_page.accessibility.snapshot = AsyncMock(return_value=tree_v2)
+        result = await mgr.snapshot("a1", diff_from_last=True)
+        data = result["data"]
+        # Slot-0 survivor matches baseline slot-0 key → unchanged.
+        # The vanished slot-1 entry → removed.
+        assert len(data["removed"]) == 1
+        assert len(data["added"]) == 0
+        assert data["unchanged_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_named_duplicate_collision_misses_remove(self):
+        """Documents the priority-3 keying limitation: two elements
+        with the same role+name+landmark collide on element_key, and
+        ``ref_summary`` keeps only the latest one. Removing one of the
+        duplicates is reported as "unchanged" because the survivor's
+        key matches the baseline's surviving entry. Same future fix
+        (data-testid)."""
+        tree_v1 = {
+            "role": "WebArea", "name": "",
+            "children": [
+                {"role": "button", "name": "Click"},
+                {"role": "button", "name": "Click"},
+            ],
+        }
+        tree_v2 = {
+            "role": "WebArea", "name": "",
+            "children": [
+                {"role": "button", "name": "Click"},
+            ],
+        }
+        mgr, _, mock_page = await self._setup(tree_v1)
+        await mgr.snapshot("a1")
+        mock_page.accessibility.snapshot = AsyncMock(return_value=tree_v2)
+        result = await mgr.snapshot("a1", diff_from_last=True)
+        data = result["data"]
+        # Documented limitation: duplicate-named removal is invisible
+        # to the diff. unchanged_count==1 because the surviving
+        # duplicate matches the baseline's surviving entry.
+        assert data["scope"] == "same"
+        assert data["removed"] == []
+        assert data["added"] == []
+        assert data["unchanged_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_filter_call_does_not_pollute_baseline(self):
+        """Cross-PR §7.3 ↔ §7.7: a filter='inputs' call returns only
+        textbox/checkbox refs. If we updated the diff baseline with that
+        subset, the next unfiltered diff_from_last would report all the
+        filtered-out elements as removed. Verify the baseline survives
+        a scoped call unchanged."""
+        tree = {
+            "role": "WebArea", "name": "",
+            "children": [
+                {"role": "button", "name": "Click"},
+                {"role": "textbox", "name": "Email"},
+                {"role": "heading", "name": "Title"},
+            ],
+        }
+        mgr, inst, _ = await self._setup(tree)
+        # Baseline call (no filter) — full ref summary stored.
+        await mgr.snapshot("a1")
+        baseline_keys = set(
+            inst.last_snapshot[inst.last_active_page_id]["refs_by_key"]
+        )
+        assert len(baseline_keys) == 3  # button + textbox + heading
+
+        # Filtered call — should NOT update the baseline.
+        await mgr.snapshot("a1", filter="inputs")
+        post_filter_keys = set(
+            inst.last_snapshot[inst.last_active_page_id]["refs_by_key"]
+        )
+        assert post_filter_keys == baseline_keys, (
+            "filter='inputs' poisoned the diff baseline with a subset"
+        )
+
+        # Confirm the next diff is meaningful — same scope, no removals.
+        result = await mgr.snapshot("a1", diff_from_last=True)
+        data = result["data"]
+        assert data["scope"] == "same"
+        assert data["removed"] == []
+        assert data["unchanged_count"] == 3
+
+    @pytest.mark.asyncio
+    async def test_from_ref_call_does_not_pollute_baseline(self):
+        """Same invariant as above but for ``from_ref`` — scoped
+        snapshots are informational, not anchors."""
+        from src.browser.ref_handle import RefHandle
+
+        tree = {
+            "role": "form", "name": "Login",
+            "children": [
+                {"role": "textbox", "name": "Email"},
+                {"role": "textbox", "name": "Password"},
+            ],
+        }
+        mgr, inst, _ = await self._setup(tree)
+        await mgr.snapshot("a1")
+        baseline_keys = set(
+            inst.last_snapshot[inst.last_active_page_id]["refs_by_key"]
+        )
+
+        # Seed a ref so from_ref can resolve.
+        page_id = inst._page_id_for(inst.page)
+        inst.refs["e0"] = RefHandle.light_dom(
+            page_id=page_id, scope_root=None, role="form", name="Login",
+            occurrence=0, disabled=False,
+        )
+        fake_locator = AsyncMock()
+        fake_locator.element_handle = AsyncMock(return_value=MagicMock())
+        with patch.object(
+            type(mgr), "_locator_from_ref", return_value=fake_locator,
+        ):
+            await mgr.snapshot("a1", from_ref="e0")
+
+        post_scoped_keys = set(
+            inst.last_snapshot[inst.last_active_page_id]["refs_by_key"]
+        )
+        assert post_scoped_keys == baseline_keys, (
+            "from_ref poisoned the diff baseline"
+        )
+
+    def test_compute_diff_descriptors_are_deterministic(self):
+        from src.browser.service import _compute_snapshot_diff
+        prev = {
+            "k1": {"ref_id": "e0", "role": "button", "name": "A",
+                   "landmark": "main", "disabled": False, "value": "",
+                   "checked": None},
+        }
+        curr = {
+            "k2": {"ref_id": "e1", "role": "link", "name": "B",
+                   "landmark": "nav", "disabled": False, "value": "",
+                   "checked": None},
+            "k3": {"ref_id": "e0", "role": "link", "name": "C",
+                   "landmark": "nav", "disabled": False, "value": "",
+                   "checked": None},
+        }
+        diff = _compute_snapshot_diff(prev, curr)
+        assert len(diff["added"]) == 2
+        # added sort order is by ref_id — e0 first.
+        assert diff["added"][0]["name"] == "C"
+        assert diff["added"][1]["name"] == "B"
+        assert len(diff["removed"]) == 1
+        assert diff["removed"][0]["name"] == "A"
+
+
 class TestTypeTextWithRef:
     """Tests for type_text using ref-based element resolution."""
 

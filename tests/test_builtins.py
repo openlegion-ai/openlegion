@@ -1155,6 +1155,18 @@ class TestBrowserSnapshotHttpClient:
             "snapshot", {"filter": "inputs", "from_ref": "e7"},
         )
 
+    @pytest.mark.asyncio
+    async def test_diff_from_last_forwarded(self):
+        """``diff_from_last=True`` is forwarded to the browser service."""
+        from src.agent.builtins.browser_tool import browser_get_elements
+
+        mc = AsyncMock()
+        mc.browser_command = AsyncMock(return_value={"data": {}})
+        await browser_get_elements(diff_from_last=True, mesh_client=mc)
+        mc.browser_command.assert_awaited_once_with(
+            "snapshot", {"diff_from_last": True},
+        )
+
 
 class TestBrowserClickHttpClient:
     """browser_click sends click command through mesh_client."""
