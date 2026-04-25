@@ -553,22 +553,29 @@ class TestUAOverride:
     """Tests for BROWSER_UA_VERSION user-agent override."""
 
     def test_no_override_by_default(self):
-        """Without BROWSER_UA_VERSION, no config or UA pref should be set."""
+        """Without BROWSER_UA_VERSION, no UA-specific keys should be set.
+
+        Phase 3 §6.6 introduced unconditional ``navigator.connection.*``
+        keys plus ``i_know_what_im_doing`` so the assertions for those
+        no longer hold here — but ``navigator.userAgent`` and the
+        Firefox pref-level override must still be absent on the no-UA-
+        version path. That's the actual contract this test is guarding.
+        """
         from src.browser.stealth import build_launch_options
         with patch.dict("os.environ", {}, clear=True):
             opts = build_launch_options("agent1", "/tmp/profile")
-        assert "config" not in opts
-        assert "i_know_what_im_doing" not in opts
+        assert "navigator.userAgent" not in (opts.get("config") or {})
         assert "general.useragent.override" not in opts["firefox_user_prefs"]
 
     def test_override_sets_camoufox_config(self):
-        """BROWSER_UA_VERSION should set Camoufox's config dict (primary mechanism)."""
+        """BROWSER_UA_VERSION should set Camoufox's UA config (primary mechanism)."""
         from src.browser.stealth import build_launch_options
         with patch.dict("os.environ", {"BROWSER_UA_VERSION": "138.0"}, clear=True):
             opts = build_launch_options("agent1", "/tmp/profile")
-        assert opts["config"] == {
-            "navigator.userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:138.0) Gecko/20100101 Firefox/138.0",
-        }
+        assert opts["config"]["navigator.userAgent"] == (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:138.0) "
+            "Gecko/20100101 Firefox/138.0"
+        )
         assert opts["i_know_what_im_doing"] is True
 
     def test_override_sets_firefox_pref_fallback(self):
@@ -615,11 +622,13 @@ class TestUAOverride:
         assert "Firefox/138.0.1" in opts["config"]["navigator.userAgent"]
 
     def test_override_rejects_non_numeric(self):
-        """Non-numeric version should be ignored with a warning."""
+        """Non-numeric version should be ignored — UA-specific keys absent."""
         from src.browser.stealth import build_launch_options
         with patch.dict("os.environ", {"BROWSER_UA_VERSION": "abc"}, clear=True):
             opts = build_launch_options("agent1", "/tmp/profile")
-        assert "config" not in opts
+        # The §6.6 navigator.connection.* keys are still set; only the
+        # UA override path must not have run.
+        assert "navigator.userAgent" not in (opts.get("config") or {})
         assert "general.useragent.override" not in opts["firefox_user_prefs"]
 
     def test_override_rejects_single_number(self):
@@ -627,7 +636,7 @@ class TestUAOverride:
         from src.browser.stealth import build_launch_options
         with patch.dict("os.environ", {"BROWSER_UA_VERSION": "138"}, clear=True):
             opts = build_launch_options("agent1", "/tmp/profile")
-        assert "config" not in opts
+        assert "navigator.userAgent" not in (opts.get("config") or {})
 
     def test_override_rejects_empty_parts(self):
         """Malformed versions like '138.' or '.0' should be rejected."""
@@ -635,7 +644,9 @@ class TestUAOverride:
         for bad in ("138.", ".0", ".", ".."):
             with patch.dict("os.environ", {"BROWSER_UA_VERSION": bad}, clear=True):
                 opts = build_launch_options("agent1", "/tmp/profile")
-            assert "config" not in opts, f"Expected rejection for {bad!r}"
+            assert "navigator.userAgent" not in (opts.get("config") or {}), (
+                f"Expected rejection for {bad!r}"
+            )
 
     def test_override_strips_whitespace(self):
         """Leading/trailing whitespace should be stripped."""
@@ -648,7 +659,9 @@ class TestUAOverride:
         from src.browser.stealth import build_launch_options
         with patch.dict("os.environ", {"BROWSER_UA_VERSION": ""}, clear=True):
             opts = build_launch_options("agent1", "/tmp/profile")
-        assert "config" not in opts
+        # config exists for §6.6 NetworkInformation; the UA-specific
+        # key inside it is what must not be set.
+        assert "navigator.userAgent" not in (opts.get("config") or {})
 
     def test_build_ua_string_directly(self):
         """Unit test the helper function."""

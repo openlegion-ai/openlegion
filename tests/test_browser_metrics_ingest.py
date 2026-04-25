@@ -476,6 +476,57 @@ class TestMetricsPoll:
         await poll()
         assert event_bus.emit.call_count == 0
 
+    @pytest.mark.asyncio
+    async def test_nav_probe_payload_routes_to_distinct_event(
+        self, tmp_path, monkeypatch,
+    ):
+        """§6.3 nav_probe payloads must emit as ``browser_nav_probe`` (not
+        ``browser_metrics``) so the dashboard can render them distinctly
+        and they don't overwrite the per-minute drain payload in
+        browserMetrics[]."""
+        import httpx
+
+        canned = {
+            "current_seq": 2,
+            "boot_id": "b1",
+            "metrics": [
+                {
+                    "seq": 1, "ts": 1.0, "agent_id": "a1",
+                    "click_success": 1, "click_fail": 0, "nav_timeout": 0,
+                    "snapshot_count": 0, "snapshot_bytes_p50": 0,
+                    "snapshot_bytes_p95": 0, "click_window_size": 0,
+                    "click_success_rate_100": None,
+                },
+                {
+                    "seq": 2, "ts": 2.0, "agent_id": "a1",
+                    "kind": "nav_probe", "ok": True, "mismatches": [],
+                    "signals": {"webdriver": False},
+                },
+            ],
+        }
+
+        async def fake_get(self, url, *args, **kwargs):
+            req = httpx.Request("GET", url)
+            return httpx.Response(200, json=canned, request=req)
+
+        monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+
+        app, event_bus, _cm = _build_mesh(tmp_path)
+        poll = _extract_poll_fn(app)
+        await poll()
+
+        # Two emit() calls, with distinct event types.
+        types = [c.args[0] for c in event_bus.emit.call_args_list]
+        assert "browser_metrics" in types
+        assert "browser_nav_probe" in types
+        # The nav_probe call carries the kind field intact.
+        probe_call = next(
+            c for c in event_bus.emit.call_args_list
+            if c.args[0] == "browser_nav_probe"
+        )
+        assert probe_call.kwargs["data"]["kind"] == "nav_probe"
+        assert probe_call.kwargs["agent"] == "a1"
+
 
 # ── Helpers ─────────────────────────────────────────────────────────
 
