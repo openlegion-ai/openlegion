@@ -95,9 +95,14 @@ def _v2_clear_font_caches(profile: Path) -> None:
     # startupCache/ holds compiled-XUL + fontlist blobs Firefox rebuilds
     # on any chrome/resource change. Whole directory is safe to wipe —
     # it's rebuilt automatically on next launch.
+    #
+    # Use ``shutil.rmtree`` directly (NOT ``_remove_tree``) so any
+    # OSError propagates. ``_remove_tree`` is the best-effort helper
+    # used during framework backup teardown where partial-fail is
+    # tolerable; here partial-fail must trigger backup-restore.
     startup_cache = profile / "startupCache"
     if startup_cache.exists() and startup_cache.is_dir():
-        _remove_tree(startup_cache)
+        shutil.rmtree(startup_cache)
 
     # Top-level cache blobs Firefox uses for font metadata. Names are
     # stable across versions; removing them is safe. ``compatibility.ini``

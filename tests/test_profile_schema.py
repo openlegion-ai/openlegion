@@ -423,6 +423,28 @@ class TestV2FontCacheClear:
         with pytest.raises(PermissionError):
             _v2_clear_font_caches(profile)
 
+    def test_startupcache_rmtree_failure_propagates(self, profile, monkeypatch):
+        """Same invariant as ``test_unlink_failure_propagates`` but for
+        the ``startupCache`` directory removal. Previously this used
+        the best-effort ``_remove_tree`` helper which would log+continue
+        on failure — leaving stale compiled-XUL blobs in place while
+        the marker stamped v2 and other caches cleared. Codex caught
+        the inconsistency."""
+        import shutil as _shutil
+
+        from src.browser.profile_schema import _v2_clear_font_caches
+
+        cache = profile / "startupCache"
+        cache.mkdir()
+        (cache / "x.bin").write_bytes(b"x")
+
+        def boom(*a, **kw):
+            raise PermissionError("simulated lock")
+
+        monkeypatch.setattr(_shutil, "rmtree", boom)
+        with pytest.raises(PermissionError):
+            _v2_clear_font_caches(profile)
+
     def test_preserves_cookies_and_storage(self, populated_profile):
         """Hardest invariant: we MUST NOT touch the user's session."""
         from src.browser.profile_schema import _v2_clear_font_caches
