@@ -966,10 +966,58 @@ class BrowserManager:
         # service with many agents doesn't grow without bound.
         self._metrics_history: deque[dict] = deque(maxlen=1024)
         self._metrics_seq: int = 0
+        self._upload_recv_gc_task: asyncio.Task | None = None
 
     async def start_cleanup_loop(self):
         """Start background task that cleans up idle browsers."""
         self._cleanup_task = asyncio.create_task(self._cleanup_loop())
+        self._upload_recv_gc_task = asyncio.create_task(self._upload_recv_gc_loop())
+
+    async def _upload_recv_gc_once(self) -> int:
+        """Reap orphan upload-recv files older than the stage TTL.
+
+        Mirrors the mesh-side reaper: under normal flow ``upload_file`` cleans
+        its own files via the try/finally, but a hard crash between
+        ``_stage_upload`` and ``upload_file`` (chooser timeout, ref-not-found,
+        process kill) would leak bytes to the recv dir.
+        """
+        from src.browser.flags import get_int as _flag_int
+        from src.browser.flags import get_str as _flag_str
+
+        recv_dir = Path(_flag_str("OPENLEGION_UPLOAD_RECV_DIR", "/tmp/upload-recv"))
+        if not recv_dir.exists():
+            return 0
+        ttl_s = _flag_int(
+            "OPENLEGION_UPLOAD_STAGE_TTL_S", 60, min_value=5, max_value=3600,
+        )
+        now = time.time()
+        reaped = 0
+        try:
+            entries = list(recv_dir.iterdir())
+        except OSError:
+            return 0
+        for child in entries:
+            try:
+                age = now - child.stat().st_mtime
+            except OSError:
+                continue
+            if age > ttl_s:
+                try:
+                    child.unlink()
+                    reaped += 1
+                except OSError:
+                    continue
+        return reaped
+
+    async def _upload_recv_gc_loop(self):
+        while True:
+            try:
+                await self._upload_recv_gc_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.debug("upload_recv gc tick failed: %s", e)
+            await asyncio.sleep(30)
 
     async def _cleanup_loop(self):
         while True:
@@ -3804,11 +3852,6 @@ class BrowserManager:
                         "success": False,
                         "error": "User has browser control — action paused",
                     }
-                # Validate every local path before opening the chooser —
-                # Playwright's ``set_files`` raises a cryptic error if a
-                # path is missing, and the chooser-open side-effect has
-                # already happened by then.  Fail fast, keep the error
-                # message actionable.
                 for p in local_paths:
                     if not Path(p).is_file():
                         return {
@@ -3818,24 +3861,23 @@ class BrowserManager:
                 locator = self._locator_from_ref(inst, ref)
                 if not locator:
                     return {"success": False, "error": f"Ref '{ref}' not found"}
-                # Race: the click that triggers the chooser must happen
-                # INSIDE the ``expect_file_chooser`` context, otherwise we
-                # may miss the event. Playwright's pattern is exactly this.
                 async with inst.page.expect_file_chooser(timeout=timeout_ms) as info:
                     await locator.click(timeout=timeout_ms)
                 chooser = await info.value
                 await chooser.set_files(local_paths)
                 await asyncio.sleep(action_delay())
-                uploaded = list(local_paths)
-                for p in uploaded:
-                    with contextlib.suppress(OSError):
-                        Path(p).unlink(missing_ok=True)
                 return {
                     "success": True,
-                    "data": {"uploaded": uploaded},
+                    "data": {"uploaded": list(local_paths)},
                 }
             except Exception as e:
                 return {"success": False, "error": str(e)}
+            finally:
+                for p in local_paths:
+                    try:
+                        Path(p).unlink(missing_ok=True)
+                    except Exception:
+                        logger.debug("Stage cleanup failed for %s", p)
 
     async def download(
         self, agent_id: str, ref: str,

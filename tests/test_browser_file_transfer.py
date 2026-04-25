@@ -151,6 +151,77 @@ class TestUploadFile:
         assert result["success"] is False
         assert "control" in result["error"].lower()
 
+    @pytest.mark.asyncio
+    async def test_browser_side_orphan_cleanup_on_chooser_timeout(
+        self, tmp_path, monkeypatch,
+    ):
+        """Even when the chooser flow throws, the staged files are deleted."""
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "p"))
+        inst = _make_instance()
+
+        class _BadCM:
+            async def __aenter__(self_):
+                raise asyncio.TimeoutError("chooser never appeared")
+
+            async def __aexit__(self_, *exc):
+                return False
+
+        inst.page.expect_file_chooser = MagicMock(return_value=_BadCM())
+
+        fake_locator = MagicMock()
+        fake_locator.click = AsyncMock()
+        monkeypatch.setattr(mgr, "_locator_from_ref", lambda _i, _r: fake_locator)
+        monkeypatch.setattr(mgr, "get_or_start", AsyncMock(return_value=inst))
+
+        a = tmp_path / "a.txt"
+        a.write_text("a")
+        result = await mgr.upload_file("a1", "e1", [str(a)])
+        assert result["success"] is False
+        assert not a.exists()
+
+    @pytest.mark.asyncio
+    async def test_browser_side_orphan_cleanup_on_user_control(
+        self, tmp_path, monkeypatch,
+    ):
+        """User-control branch returns early — files must still be cleaned."""
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "p"))
+        inst = _make_instance()
+        inst._user_control = True
+        monkeypatch.setattr(mgr, "get_or_start", AsyncMock(return_value=inst))
+
+        a = tmp_path / "stage1.txt"
+        a.write_text("x")
+        result = await mgr.upload_file("a1", "e1", [str(a)])
+        assert result["success"] is False
+        assert not a.exists()
+
+
+class TestBrowserSidePeriodicGc:
+    @pytest.mark.asyncio
+    async def test_gc_reaps_files_older_than_ttl(self, tmp_path, monkeypatch):
+        """Browser-side recv-dir GC removes files older than the stage TTL."""
+        import os
+        import time
+
+        recv = tmp_path / "recv"
+        recv.mkdir()
+        monkeypatch.setenv("OPENLEGION_UPLOAD_RECV_DIR", str(recv))
+        monkeypatch.setenv("OPENLEGION_UPLOAD_STAGE_TTL_S", "5")
+
+        old = recv / "old.bin"
+        old.write_bytes(b"x")
+        new = recv / "new.bin"
+        new.write_bytes(b"y")
+
+        old_t = time.time() - 60
+        os.utime(old, (old_t, old_t))
+
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "p"))
+        reaped = await mgr._upload_recv_gc_once()
+        assert reaped == 1
+        assert not old.exists()
+        assert new.exists()
+
 
 class TestDownload:
     @pytest.mark.asyncio
@@ -323,6 +394,43 @@ class TestUploadStageIngest:
         path = Path(resp.json()["path"])
         assert path.parent == recv
         assert ".." not in path.name
+
+    def test_ingest_filename_includes_original_basename(self, tmp_path, monkeypatch):
+        """When mesh forwards a real filename, the on-disk path ends with it
+        so Playwright reports the correct name to the form site."""
+        client, _mgr, _recv = self._make_client(tmp_path, monkeypatch)
+        resp = client.post(
+            "/browser/a1/_stage_upload",
+            content=b"data",
+            headers={"X-Mesh-Internal": "1"},
+            params={"suggested_filename": "resume.pdf"},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["path"].endswith("-resume.pdf")
+
+    def test_auth_insecure_requires_bearer_for_internal_endpoint(
+        self, tmp_path, monkeypatch,
+    ):
+        """BROWSER_AUTH_INSECURE=1 must NOT bypass auth for the internal
+        byte-ingest endpoint; missing bearer → 403 even in dev mode."""
+        from src.browser.server import create_browser_app
+
+        recv = tmp_path / "recv"
+        monkeypatch.setenv("OPENLEGION_UPLOAD_RECV_DIR", str(recv))
+        monkeypatch.delenv("BROWSER_AUTH_TOKEN", raising=False)
+        monkeypatch.delenv("MESH_AUTH_TOKEN", raising=False)
+        monkeypatch.setenv("BROWSER_AUTH_INSECURE", "1")
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "p"))
+        app = create_browser_app(mgr)
+        from starlette.testclient import TestClient
+        client = TestClient(app)
+
+        resp = client.post(
+            "/browser/a1/_stage_upload",
+            content=b"x",
+            headers={"X-Mesh-Internal": "1"},
+        )
+        assert resp.status_code == 403, resp.text
 
 
 class TestUploadFileStageCleanup:

@@ -2821,10 +2821,16 @@ class TestBrowserUploadFileHttpClient:
         from src.agent.builtins.browser_tool import browser_upload_file
 
         rel = self._write("resume.pdf", b"hello pdf bytes")
+
+        captured_chunks: list[bytes] = []
+
+        async def _stage(body, idempotency_key=None):
+            data = body.read()
+            captured_chunks.append(data)
+            return {"staged_handle": "worker-handle-1", "size_bytes": len(data)}
+
         mc = AsyncMock()
-        mc.browser_upload_stage = AsyncMock(
-            return_value={"staged_handle": "worker-handle-1", "size_bytes": 15},
-        )
+        mc.browser_upload_stage = AsyncMock(side_effect=_stage)
         mc.browser_upload_apply = AsyncMock(
             return_value={
                 "success": True,
@@ -2838,15 +2844,38 @@ class TestBrowserUploadFileHttpClient:
 
         assert result["success"] is True
         mc.browser_upload_stage.assert_awaited_once()
-        stage_args = mc.browser_upload_stage.await_args
-        assert stage_args.args[0] == b"hello pdf bytes"
-        assert stage_args.kwargs["idempotency_key"]
+        assert captured_chunks == [b"hello pdf bytes"]
+        assert mc.browser_upload_stage.await_args.kwargs["idempotency_key"]
 
         mc.browser_upload_apply.assert_awaited_once()
         body = mc.browser_upload_apply.await_args.args[0]
         assert body["ref"] == "e7"
         assert body["staged_handles"] == ["worker-handle-1"]
+        assert body["suggested_filenames"] == ["resume.pdf"]
         assert body["idempotency_key"]
+
+    @pytest.mark.asyncio
+    async def test_explicit_idempotency_key_passed_through(self):
+        from src.agent.builtins.browser_tool import browser_upload_file
+
+        rel = self._write("resume.pdf", b"x")
+        mc = AsyncMock()
+        mc.browser_upload_stage = AsyncMock(
+            return_value={"staged_handle": "h1", "size_bytes": 1},
+        )
+        mc.browser_upload_apply = AsyncMock(
+            return_value={"success": True, "data": {"uploaded": []}},
+        )
+
+        await browser_upload_file(
+            ref="e1", paths=[rel], idempotency_key="caller-key-42",
+            mesh_client=mc,
+        )
+
+        stage_kwargs = mc.browser_upload_stage.await_args.kwargs
+        assert stage_kwargs["idempotency_key"] == "caller-key-42-0"
+        body = mc.browser_upload_apply.await_args.args[0]
+        assert body["idempotency_key"] == "caller-key-42"
 
     @pytest.mark.asyncio
     async def test_no_mesh_client_returns_error(self):

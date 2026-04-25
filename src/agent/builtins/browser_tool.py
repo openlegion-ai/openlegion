@@ -755,6 +755,8 @@ _UPLOAD_MAX_FILES = 5
         "at an <input type=\"file\"> (or aria-equivalent). `paths` is a list "
         "of workspace files (1..5) to upload — these are read from /data and "
         "forwarded to the browser. Each file ≤50MB. "
+        "Optional `idempotency_key` allows the caller to dedupe retries "
+        "explicitly across calls; when omitted a fresh key is generated. "
         "Returns {success, data: {uploaded: [path, ...]}}."
     ),
     parameters={
@@ -771,12 +773,21 @@ _UPLOAD_MAX_FILES = 5
             ),
             "items": {"type": "string"},
         },
+        "idempotency_key": {
+            "type": "string",
+            "description": (
+                "Optional caller-supplied key for cross-call dedupe. "
+                "Same key + same caller + same content within the stage "
+                "TTL returns the existing staged handle."
+            ),
+        },
     },
     parallel_safe=False,
 )
 async def browser_upload_file(
     ref: str,
     paths: list[str],
+    idempotency_key: str | None = None,
     *,
     mesh_client=None,
 ) -> dict:
@@ -794,7 +805,8 @@ async def browser_upload_file(
 
     from src.agent.builtins.file_tool import _safe_path
 
-    file_blobs: list[bytes] = []
+    resolved_paths: list = []
+    suggested_filenames: list[str] = []
     for path in paths:
         try:
             safe = _safe_path(path)
@@ -813,20 +825,19 @@ async def browser_upload_file(
                     f"{_UPLOAD_MAX_BYTES} bytes (50MB)"
                 ),
             }
-        try:
-            file_blobs.append(safe.read_bytes())
-        except OSError as e:
-            return {"error": f"Cannot read '{path}': {e}"}
+        resolved_paths.append(safe)
+        suggested_filenames.append(safe.name)
 
     import uuid as _uuid
-    idem_key = _uuid.uuid4().hex
+    idem_key = idempotency_key if isinstance(idempotency_key, str) and idempotency_key else _uuid.uuid4().hex
     staged_handles: list[str] = []
     try:
-        for i, blob in enumerate(file_blobs):
+        for i, safe_path in enumerate(resolved_paths):
             stage_key = f"{idem_key}-{i}"
-            stage_resp = await mesh_client.browser_upload_stage(
-                blob, idempotency_key=stage_key,
-            )
+            with open(safe_path, "rb") as fh:
+                stage_resp = await mesh_client.browser_upload_stage(
+                    fh, idempotency_key=stage_key,
+                )
             handle = stage_resp.get("staged_handle")
             if not handle:
                 return {"error": "Mesh did not return a staged_handle"}
@@ -838,6 +849,7 @@ async def browser_upload_file(
         result = await mesh_client.browser_upload_apply({
             "ref": ref,
             "staged_handles": staged_handles,
+            "suggested_filenames": suggested_filenames,
             "idempotency_key": idem_key,
         })
         return _deep_redact(result)

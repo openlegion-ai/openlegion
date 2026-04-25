@@ -357,13 +357,22 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         a freshly-generated nonce filename, and returns the on-disk path
         for the mesh to forward into ``/browser/{agent_id}/upload_file``.
 
-        Mesh-only — requires ``X-Mesh-Internal: 1``. Agents never call
-        this directly because they don't possess the browser bearer token,
-        but the header gate is a defense-in-depth check.
+        Two gates: (1) ``X-Mesh-Internal: 1`` header AND (2) bearer
+        ``Authorization`` token. Both must pass even when
+        ``BROWSER_AUTH_INSECURE=1`` is set — unlike public endpoints,
+        internal byte-ingest never opens its bearer gate in dev mode.
         """
-        _verify_auth(request)
         if request.headers.get("x-mesh-internal", "") != "1":
             raise HTTPException(403, "Mesh-internal endpoint")
+        _verify_auth(request)
+        if (
+            os.environ.get("BROWSER_AUTH_INSECURE")
+            and not request.headers.get("authorization")
+        ):
+            raise HTTPException(
+                403,
+                "Internal endpoint requires bearer auth even in dev mode",
+            )
         from src.browser.flags import get_int as _flag_int
         from src.browser.flags import get_str as _flag_str
         max_mb = _flag_int(

@@ -791,14 +791,16 @@ class MeshClient:
         return response.json()
 
     async def browser_upload_stage(
-        self, file_bytes: bytes, idempotency_key: str | None = None,
+        self, body, idempotency_key: str | None = None,
     ) -> dict:
         """Phase A of the §4.5 file-upload flow.
 
-        Streams ``file_bytes`` to ``/mesh/browser/upload-stage`` and
-        returns the staging response (``{staged_handle, size_bytes,
-        expires_at}``). Mesh enforces the 50MB cap; pass an
-        ``idempotency_key`` to dedupe retried uploads of the same bytes.
+        Streams ``body`` to ``/mesh/browser/upload-stage`` and returns the
+        staging response (``{staged_handle, size_bytes, expires_at}``).
+        ``body`` may be ``bytes`` or any object accepted by httpx's
+        ``content=`` (file handle, async iterable). Mesh enforces the 50MB
+        cap; pass an ``idempotency_key`` to dedupe retried uploads of the
+        same bytes.
         """
         client = await self._get_client()
         headers = dict(self._trace_headers())
@@ -806,7 +808,7 @@ class MeshClient:
             headers["Idempotency-Key"] = idempotency_key
         response = await client.post(
             f"{self.mesh_url}/mesh/browser/upload-stage",
-            content=file_bytes,
+            content=body,
             headers=headers,
             timeout=120,
         )
