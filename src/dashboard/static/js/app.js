@@ -1484,6 +1484,16 @@ function dashboard() {
           const sig = (evt.data.mismatches || []).slice().sort().join('|');
           this._probeToastSeen = this._probeToastSeen || new Map();
           const now = Date.now();
+          // Cap the dedup map at ~5 minutes of history so a long-lived
+          // dashboard session doesn't accumulate signatures forever.
+          // Past 5 minutes, the entry is irrelevant (way past the 30s
+          // dedup window) and just leaks memory.
+          const STALE_AT = now - 5 * 60 * 1000;
+          if (this._probeToastSeen.size > 50) {
+            for (const [k, v] of this._probeToastSeen) {
+              if (v.firstAt < STALE_AT) this._probeToastSeen.delete(k);
+            }
+          }
           const last = this._probeToastSeen.get(sig);
           if (!last || now - last.firstAt > 30000) {
             this._probeToastSeen.set(sig, { firstAt: now, count: 1 });
