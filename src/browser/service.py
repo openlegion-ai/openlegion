@@ -119,13 +119,38 @@ def _format_snapshot_v2(
         if landmark_key == _V2_NO_LANDMARK_KEY:
             out.append("# (no landmark)")
         else:
-            out.append(f"# {landmark_key}")
+            # Sanitize newlines in landmark keys: a malicious DOM
+            # node with ``aria-label="x\n# fake-section: pwn"`` would
+            # otherwise inject a phantom section header into the
+            # parsed output (operator scripts reading the v2 format
+            # split on '#' prefixes). Replace with single spaces so
+            # the structural marker stays one-line.
+            out.append(f"# {_v2_strip_newlines(landmark_key)}")
         for ref_id, role, name, attr_str, depth in group_entries:
             indent_depth = min(depth, _V2_MAX_INDENT_DEPTH)
             indent = "  " * indent_depth
-            out.append(f"{indent}- [{ref_id}] {role} \"{name}\"{attr_str}")
+            # Same sanitization on per-element name + attr_str so an
+            # accessible-name with embedded ``\n# fake`` can't escape
+            # to a fake section header.
+            safe_name = _v2_strip_newlines(name)
+            safe_attr = _v2_strip_newlines(attr_str)
+            out.append(f"{indent}- [{ref_id}] {role} \"{safe_name}\"{safe_attr}")
 
     return "\n".join(out)
+
+
+def _v2_strip_newlines(s: str) -> str:
+    """Collapse ``\\n``/``\\r`` to single spaces.
+
+    v2 promotes ``# ``-prefixed lines to structural meaning. A DOM
+    node with newlines in its accessible name or landmark would
+    otherwise inject phantom section headers into the parsed
+    snapshot. Cheap belt-and-braces over the JS-walker side which
+    only ``.trim()``s whitespace endpoints.
+    """
+    if not s:
+        return s
+    return s.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
 
 # Block schemes that could expose local files or browser internals.
 # about: covers about:logins (saved passwords), about:config, etc.
