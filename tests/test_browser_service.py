@@ -879,23 +879,200 @@ class TestClick:
         assert inst.rolling_click_success_rate() == 0.0
 
 
+def _make_png_bytes(width: int = 64, height: int = 48) -> bytes:
+    """Render a real PNG via Pillow for screenshot encode tests."""
+    from io import BytesIO
+
+    from PIL import Image
+    img = Image.new("RGB", (width, height))
+    pixels = img.load()
+    for y in range(height):
+        for x in range(width):
+            pixels[x, y] = (x * 4 % 256, y * 4 % 256, (x + y) * 2 % 256)
+    out = BytesIO()
+    img.save(out, format="PNG")
+    return out.getvalue()
+
+
 class TestScreenshot:
     """Tests for BrowserManager.screenshot()."""
 
     @pytest.mark.asyncio
-    async def test_screenshot_success(self):
+    async def test_screenshot_corrupt_bytes_falls_back_to_png(self):
+        """Fake PNG bytes — Pillow can't decode them, so we fall back
+        to returning the original payload as PNG. Keeps the agent
+        unblocked rather than failing the call."""
         from src.browser.service import BrowserManager, CamoufoxInstance
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
 
         mock_page = AsyncMock()
-        mock_page.screenshot = AsyncMock(return_value=b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
+        mock_page.screenshot = AsyncMock(
+            return_value=b"\x89PNG\r\n\x1a\n" + b"\x00" * 100,
+        )
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         mgr._instances["a1"] = inst
 
         result = await mgr.screenshot("a1")
         assert result["success"] is True
+        # Default format is webp; corrupt data triggers the PNG fallback.
         assert result["data"]["format"] == "png"
         assert len(result["data"]["image_base64"]) > 0
+
+    @pytest.mark.asyncio
+    async def test_screenshot_default_returns_webp(self):
+        """Default call yields a valid WebP payload."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        # Larger fixture so WebP's container overhead is dominated by
+        # the encoded pixel data — small fixtures can encode larger as
+        # WebP than PNG because of header/chunk overhead.
+        png = _make_png_bytes(width=400, height=300)
+        mock_page = AsyncMock()
+        mock_page.screenshot = AsyncMock(return_value=png)
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.screenshot("a1")
+        assert result["success"] is True
+        assert result["data"]["format"] == "webp"
+        assert result["data"]["bytes"] > 0
+        # Decoded base64 should equal the byte-count we emitted.
+        import base64
+        decoded = base64.b64decode(result["data"]["image_base64"])
+        assert len(decoded) == result["data"]["bytes"]
+        # First 4 bytes of WebP file are 'RIFF'; bytes 8-11 are 'WEBP'.
+        assert decoded[:4] == b"RIFF"
+        assert decoded[8:12] == b"WEBP"
+
+    @pytest.mark.asyncio
+    async def test_screenshot_explicit_png_passthrough(self):
+        """Explicit ``format='png'`` with scale=1.0 returns the raw
+        Playwright bytes (no Pillow round-trip)."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        png = _make_png_bytes()
+        mock_page = AsyncMock()
+        mock_page.screenshot = AsyncMock(return_value=png)
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.screenshot("a1", format="png", scale=1.0)
+        assert result["success"] is True
+        assert result["data"]["format"] == "png"
+        import base64
+        decoded = base64.b64decode(result["data"]["image_base64"])
+        # Pass-through: identical bytes.
+        assert decoded == png
+
+    @pytest.mark.asyncio
+    async def test_screenshot_scale_resizes(self):
+        """``scale=0.5`` cuts dimensions in half."""
+        from io import BytesIO
+
+        from PIL import Image
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        png = _make_png_bytes(width=200, height=120)
+        mock_page = AsyncMock()
+        mock_page.screenshot = AsyncMock(return_value=png)
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.screenshot("a1", format="webp", scale=0.5)
+        assert result["success"] is True
+        import base64
+        decoded = base64.b64decode(result["data"]["image_base64"])
+        img = Image.open(BytesIO(decoded))
+        assert img.size == (100, 60)
+
+    @pytest.mark.asyncio
+    async def test_screenshot_unknown_format_rejected(self):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mock_page = AsyncMock()
+        mock_page.screenshot = AsyncMock(return_value=b"")
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.screenshot("a1", format="jpeg")
+        assert result["success"] is False
+        assert "Unsupported" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_screenshot_format_none_uses_operator_default(self, monkeypatch):
+        """``format=None`` (JSON null) consults the operator flag,
+        defaulting to ``webp`` when unset."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        # Force operator default to PNG via env override.
+        monkeypatch.setenv("BROWSER_SCREENSHOT_FORMAT", "png")
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        png = _make_png_bytes(400, 300)
+        mock_page = AsyncMock()
+        mock_page.screenshot = AsyncMock(return_value=png)
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.screenshot("a1", format=None)
+        assert result["success"] is True
+        assert result["data"]["format"] == "png"
+
+    @pytest.mark.asyncio
+    async def test_screenshot_format_whitespace_normalized(self):
+        """``format=' WEBP '`` strips + lowercases instead of rejecting."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        png = _make_png_bytes(400, 300)
+        mock_page = AsyncMock()
+        mock_page.screenshot = AsyncMock(return_value=png)
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.screenshot("a1", format=" WEBP ")
+        assert result["success"] is True
+        assert result["data"]["format"] == "webp"
+
+    @pytest.mark.asyncio
+    async def test_screenshot_quality_clamped(self):
+        """Out-of-range quality clamps silently rather than raising."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        png = _make_png_bytes()
+        mock_page = AsyncMock()
+        mock_page.screenshot = AsyncMock(return_value=png)
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        # quality=999 should clamp to 100 → encode succeeds.
+        result = await mgr.screenshot("a1", quality=999)
+        assert result["success"] is True
+        # quality=-1 should clamp to 1 → encode succeeds (tiny output).
+        result = await mgr.screenshot("a1", quality=-1)
+        assert result["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_screenshot_pillow_missing_falls_back_to_png(self, monkeypatch):
+        """If Pillow can't be imported the helper returns the raw PNG."""
+        import builtins
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        png = _make_png_bytes()
+        mock_page = AsyncMock()
+        mock_page.screenshot = AsyncMock(return_value=png)
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        real_import = builtins.__import__
+
+        def _fake_import(name, *args, **kwargs):
+            if name == "PIL":
+                raise ImportError("forced for test")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", _fake_import)
+        result = await mgr.screenshot("a1", format="webp")
+        assert result["success"] is True
+        # Pillow missing → graceful PNG fallback.
+        assert result["data"]["format"] == "png"
 
 
 class TestEvaluate:
@@ -2127,6 +2304,113 @@ class TestSnapshotAfter:
 
         assert result["success"] is True
         assert "snapshot" not in result
+
+
+class TestNavigateBodyCap:
+    """§7.6 — body preview is shorter when snapshot_after=True since
+    the snapshot already carries the element tree."""
+
+    def _make_long_a11y(self, text_len: int) -> dict:
+        # Many short leaves — total joined length ≈ text_len. Avoids
+        # tripping the credential redactor (which targets long base64-
+        # like runs) and produces realistic word-spaced output that
+        # ``_extract_text_from_a11y`` joins with spaces.
+        word = "hello "
+        n_leaves = max(1, text_len // len(word))
+        return {
+            "role": "WebArea",
+            "name": "T",
+            "children": [
+                {"role": "text", "name": "hello"} for _ in range(n_leaves)
+            ],
+        }
+
+    @pytest.mark.asyncio
+    async def test_body_capped_at_1000_with_snapshot_after(self):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mock_page = AsyncMock()
+        mock_page.goto = AsyncMock()
+        mock_page.title = AsyncMock(return_value="t")
+        mock_page.url = "https://example.com"
+        # accessibility.snapshot returns a tree with a 4000-char leaf
+        a11y_tree = self._make_long_a11y(4000)
+        mock_page.accessibility = AsyncMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value=a11y_tree)
+        # query_selector_all + evaluate are used by the snapshot path
+        mock_page.query_selector_all = AsyncMock(return_value=[])
+        mock_page.evaluate = AsyncMock(return_value={
+            "role": "WebArea", "name": "t", "children": [],
+        })
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.navigate(
+            "a1", "https://example.com", wait_ms=0, snapshot_after=True,
+        )
+        assert result["success"] is True
+        # body is the cap-1000 preview when snapshot_after is on.
+        assert len(result["data"]["body"]) <= 1000
+        # And the snapshot rides alongside.
+        assert "snapshot" in result
+
+    @pytest.mark.asyncio
+    async def test_body_capped_at_5000_without_snapshot_after(self):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mock_page = AsyncMock()
+        mock_page.goto = AsyncMock()
+        mock_page.title = AsyncMock(return_value="t")
+        mock_page.url = "https://example.com"
+        # 8000-char-equivalent tree → joined output trims to the cap.
+        a11y_tree = self._make_long_a11y(8000)
+        mock_page.accessibility = AsyncMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value=a11y_tree)
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.navigate(
+            "a1", "https://example.com", wait_ms=0, snapshot_after=False,
+        )
+        assert result["success"] is True
+        # body is returned at the 5000-char cap when snapshot_after off.
+        body = result["data"]["body"]
+        assert 4000 <= len(body) <= 5000, len(body)
+
+    @pytest.mark.asyncio
+    async def test_body_falls_back_to_5000_when_snapshot_fails(self):
+        """When snapshot_after=True but the snapshot itself fails or
+        returns nothing, the agent must NOT be left with a 1000-char
+        body AND an empty snapshot — strictly worse than the
+        snapshot_after=False path. The body falls back to the 5000-char
+        cap so the agent has usable page text."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mock_page = AsyncMock()
+        mock_page.goto = AsyncMock()
+        mock_page.title = AsyncMock(return_value="t")
+        mock_page.url = "https://example.com"
+        a11y_tree = self._make_long_a11y(8000)
+        mock_page.accessibility = AsyncMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value=a11y_tree)
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        # Stub out _snapshot_impl to simulate failure.
+        async def _failing_snapshot(*_a, **_k):
+            return {"success": False, "error": "boom"}
+
+        with patch.object(mgr, "_snapshot_impl", _failing_snapshot):
+            result = await mgr.navigate(
+                "a1", "https://example.com", wait_ms=0, snapshot_after=True,
+            )
+        assert result["success"] is True
+        body = result["data"]["body"]
+        # Falls back to 5000-cap when snapshot was unsuccessful.
+        assert 4000 <= len(body) <= 5000, len(body)
 
 
 class TestNavigateRetry:

@@ -300,7 +300,13 @@ async def _run_single_scanner(
     # demote status. A page that navigated but can't screenshot is
     # still useful signal; operators read the status first.
     try:
-        shot = await manager.screenshot(CANARY_AGENT_ID, full_page=True)
+        # Force PNG: the canary report is read by humans for pixel-level
+        # comparisons across runs. WebP's lossy default would smear
+        # detection artefacts (color rings, font renderings) operators
+        # are watching for. Cost is fine — canary fires hourly.
+        shot = await manager.screenshot(
+            CANARY_AGENT_ID, full_page=True, format="png",
+        )
         if shot.get("success"):
             report_dir.mkdir(parents=True, exist_ok=True)
             path = report_dir / f"{int(ts)}-{name}.png"

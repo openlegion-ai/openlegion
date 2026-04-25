@@ -231,7 +231,13 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
     async def screenshot(agent_id: str, request: Request):
         _verify_auth(request)
         body = await request.json()
-        return await manager.screenshot(agent_id, full_page=body.get("full_page", False))
+        return await manager.screenshot(
+            agent_id,
+            full_page=body.get("full_page", False),
+            format=body.get("format", "webp"),
+            quality=body.get("quality", 75),
+            scale=body.get("scale", 1.0),
+        )
 
     @app.post("/browser/{agent_id}/reset")
     async def reset(agent_id: str, request: Request):

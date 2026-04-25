@@ -1691,10 +1691,14 @@ class TestBrowserScreenshotHttpClient:
 
         result = await browser_screenshot(mesh_client=mc)
 
-        mc.browser_command.assert_awaited_once_with("screenshot", {"full_page": False})
+        mc.browser_command.assert_awaited_once_with(
+            "screenshot",
+            {"full_page": False, "format": "webp", "quality": 75, "scale": 1.0},
+        )
         # image_base64 is extracted into _image, not left in data
         assert "image_base64" not in result.get("data", {})
         assert result["_image"]["data"] == "iVBORw0KGgo="
+        # Service returned format=png (legacy fallback) → media_type matches.
         assert result["_image"]["media_type"] == "image/png"
         assert result["status"] == "screenshot captured"
 
@@ -1710,8 +1714,41 @@ class TestBrowserScreenshotHttpClient:
 
         result = await browser_screenshot(full_page=True, mesh_client=mc)
 
-        mc.browser_command.assert_awaited_once_with("screenshot", {"full_page": True})
+        mc.browser_command.assert_awaited_once_with(
+            "screenshot",
+            {"full_page": True, "format": "webp", "quality": 75, "scale": 1.0},
+        )
         assert result["_image"]["data"] == "data"
+
+    @pytest.mark.asyncio
+    async def test_screenshot_webp_media_type(self):
+        """When the service returns format=webp, the agent-side block
+        carries media_type=image/webp so the LLM sees a WebP data URI."""
+        from src.agent.builtins.browser_tool import browser_screenshot
+
+        mc = AsyncMock()
+        mc.browser_command = AsyncMock(return_value={
+            "success": True,
+            "data": {"image_base64": "UklGRg==", "format": "webp", "bytes": 4},
+        })
+        result = await browser_screenshot(mesh_client=mc)
+        assert result["_image"]["media_type"] == "image/webp"
+
+    @pytest.mark.asyncio
+    async def test_screenshot_explicit_png(self):
+        """When the agent asks for PNG explicitly, the kwargs are forwarded."""
+        from src.agent.builtins.browser_tool import browser_screenshot
+
+        mc = AsyncMock()
+        mc.browser_command = AsyncMock(return_value={
+            "success": True,
+            "data": {"image_base64": "iVBORw0KGgo=", "format": "png"},
+        })
+        await browser_screenshot(format="png", quality=90, scale=0.75, mesh_client=mc)
+        mc.browser_command.assert_awaited_once_with(
+            "screenshot",
+            {"full_page": False, "format": "png", "quality": 90, "scale": 0.75},
+        )
 
     @pytest.mark.asyncio
     async def test_screenshot_no_image_in_response(self):

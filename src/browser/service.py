@@ -347,6 +347,74 @@ def _is_empty_payload(payload: dict) -> bool:
     ))
 
 
+def _encode_screenshot(
+    png_bytes: bytes,
+    fmt: str,
+    quality: int,
+    scale: float,
+    *,
+    agent_id: str = "",
+) -> tuple[bytes, str]:
+    """Encode a Playwright PNG to WebP / PNG with optional downscale.
+
+    Returns ``(encoded_bytes, actual_format)``. ``actual_format`` may be
+    ``"png"`` even when ``fmt="webp"`` was requested — Pillow may be
+    absent in the dev path or fail on a corrupt frame; PNG fallback
+    keeps the agent unblocked rather than returning an error.
+
+    The function is intentionally synchronous and pure — easy to unit
+    test and reason about. Pillow does its own threading internally;
+    callers should either be on a worker thread or accept that an
+    ~1080p WebP encode runs in ~10–20 ms.
+    """
+    # Fast path: caller asked for PNG and no scale change → pass through.
+    if fmt == "png" and abs(scale - 1.0) < 1e-3:
+        return png_bytes, "png"
+
+    try:
+        from io import BytesIO
+
+        from PIL import Image
+    except ImportError:
+        # Pillow missing — log once per encode attempt at debug only;
+        # this is expected on the agent-side dev path where Pillow isn't
+        # bundled. Caller still gets a usable PNG. Narrowed to
+        # ImportError specifically so non-import failures (e.g. partially
+        # broken install raising OSError at module init) surface as bugs
+        # rather than silently downgrading.
+        logger.debug(
+            "Pillow not installed; falling back to PNG (agent=%s)", agent_id,
+        )
+        return png_bytes, "png"
+
+    try:
+        img = Image.open(BytesIO(png_bytes))
+        # Downscale via Lanczos when requested. Avoids the no-op resize
+        # cost when scale is effectively 1.0.
+        if abs(scale - 1.0) >= 1e-3 and scale > 0:
+            new_w = max(1, int(img.width * scale))
+            new_h = max(1, int(img.height * scale))
+            img = img.resize((new_w, new_h), Image.LANCZOS)
+
+        out = BytesIO()
+        if fmt == "webp":
+            # Convert to RGB first — WebP doesn't accept palette or
+            # certain RGBA modes from Pillow versions <10.4 cleanly.
+            if img.mode not in ("RGB", "RGBA"):
+                img = img.convert("RGB")
+            img.save(out, format="WEBP", quality=quality, method=4)
+            return out.getvalue(), "webp"
+        # PNG re-encode (only reached when scale != 1.0 above).
+        img.save(out, format="PNG", optimize=True)
+        return out.getvalue(), "png"
+    except Exception as e:
+        logger.warning(
+            "Screenshot %s encode failed (%s); falling back to original PNG",
+            fmt, e,
+        )
+        return png_bytes, "png"
+
+
 def _extract_text_from_a11y(tree: dict | None, max_chars: int = 5000) -> str:
     """Extract readable text from an accessibility snapshot tree.
 
@@ -1477,10 +1545,19 @@ class BrowserManager:
                 title = await inst.page.title()
                 current_url = inst.page.url
                 body_text = ""
+                # Always extract body at the historical 5000-char cap so
+                # we have a usable fallback if the snapshot path fails
+                # below. We trim to a 1000-char preview only AFTER the
+                # snapshot succeeds — that's when the agent has the full
+                # element tree and doesn't need a long body. If the
+                # snapshot fails, we ship the full body so the agent
+                # isn't stranded with truncated text + empty snapshot.
                 if not inst._js_snapshot_mode:
                     try:
                         _a11y = await inst.page.accessibility.snapshot()
-                        body_text = _extract_text_from_a11y(_a11y)
+                        body_text = _extract_text_from_a11y(
+                            _a11y, max_chars=5000,
+                        )
                     except AttributeError:
                         inst._js_snapshot_mode = True
                     except Exception:
@@ -1490,16 +1567,34 @@ class BrowserManager:
                     "data": {
                         "url": self.redactor.redact(agent_id, current_url),
                         "title": self.redactor.redact(agent_id, title),
-                        "body": self.redactor.redact(agent_id, body_text),
+                        # Body filled in below once we know whether the
+                        # optional snapshot succeeded — see body cap
+                        # comment.
+                        "body": "",
                     },
                 }
                 # Auto-detect CAPTCHAs so the agent knows immediately
                 captcha = await self._check_captcha(inst)
                 if captcha:
                     result["captcha"] = captcha
+                snapshot_succeeded = False
                 if snapshot_after:
                     snap = await self._snapshot_impl(inst, agent_id)
-                    result["snapshot"] = snap.get("data", {})
+                    snap_data = snap.get("data") or {}
+                    result["snapshot"] = snap_data
+                    snapshot_succeeded = bool(snap.get("success") and snap_data)
+                # §7.6: shrink body to 1000-char preview ONLY when the
+                # snapshot actually carried back element refs. A failed
+                # snapshot would otherwise leave the agent with both a
+                # truncated body AND an empty/{} snapshot — strictly
+                # worse than the snapshot_after=False path. Restore the
+                # full body in that failure case.
+                final_body = (
+                    body_text[:1000] if snapshot_succeeded else body_text
+                )
+                result["data"]["body"] = self.redactor.redact(
+                    agent_id, final_body,
+                )
                 return result
             except Exception as e:
                 return {"success": False, "error": str(e)}
@@ -2659,17 +2754,86 @@ class BrowserManager:
             except Exception as e:
                 return {"success": False, "error": str(e)}
 
-    async def screenshot(self, agent_id: str, full_page: bool = False) -> dict:
-        """Take screenshot, return base64 PNG."""
+    async def screenshot(
+        self,
+        agent_id: str,
+        full_page: bool = False,
+        format: str = "webp",
+        quality: int = 75,
+        scale: float = 1.0,
+    ) -> dict:
+        """Take a screenshot and return it as base64.
+
+        ``format`` controls the encoding:
+        - ``"webp"`` (default) — lossy WebP at ``quality`` (1–100). Roughly
+          5–10× smaller than PNG for the same visual content; the
+          difference compounds heavily across multi-step browsing tasks
+          where the agent may pull dozens of screenshots per task.
+        - ``"png"`` — original lossless PNG path (Playwright native).
+          Selected automatically if WebP encoding fails (e.g. Pillow
+          missing in dev env, corrupt frame buffer) so callers always
+          get a usable image.
+
+        ``scale`` (0.5–1.0) rescales the captured image post-encode-prep,
+        for further token savings when full-fidelity isn't needed. The
+        Playwright native scale option is intentionally NOT used —
+        Playwright applies it via ``deviceScaleFactor`` which mutates the
+        viewport's pixel ratio and can leak fingerprint signal. Pillow
+        downscale here is a pure post-process.
+        """
         inst = await self.get_or_start(agent_id)
         inst.touch()
+        # Validate inputs early — reject unknown formats with a clear
+        # error rather than silently falling through to PNG. Operator
+        # default comes from ``BROWSER_SCREENSHOT_FORMAT`` (per §2.1) so
+        # an operator can globally force PNG without changing the caller.
+        # ``.strip()`` guards against trailing whitespace from JSON UI
+        # defaults; ``.lower()`` normalizes case.
+        from src.browser.flags import get_str
+        if not format:
+            format = get_str(
+                "BROWSER_SCREENSHOT_FORMAT", "webp", agent_id=agent_id,
+            )
+        fmt = format.strip().lower()
+        if fmt not in ("webp", "png"):
+            return {"success": False, "error": f"Unsupported screenshot format: {format!r}"}
+        try:
+            quality = int(quality)
+        except (TypeError, ValueError):
+            quality = 75
+        quality = max(1, min(100, quality))
+        try:
+            scale_f = float(scale)
+        except (TypeError, ValueError):
+            scale_f = 1.0
+        scale_f = max(0.5, min(1.0, scale_f))
+
         async with inst.lock:
             try:
+                # Ask Playwright for PNG either way — WebP encoding happens
+                # post-capture so we can downscale and quality-tune in a
+                # single Pillow pass without touching the page renderer.
                 png_bytes = await inst.page.screenshot(full_page=full_page)
-                b64 = base64.b64encode(png_bytes).decode()
-                return {"success": True, "data": {"image_base64": b64, "format": "png"}}
             except Exception as e:
                 return {"success": False, "error": str(e)}
+
+        # Pillow encode is synchronous and ~10–20 ms on a 1080p frame —
+        # offload to a thread so we don't block the event loop. Pillow
+        # releases the GIL during its C-level encode steps, so this
+        # actually parallelizes across concurrent agent screenshots.
+        encoded, used_format = await asyncio.to_thread(
+            _encode_screenshot,
+            png_bytes, fmt, quality, scale_f, agent_id=agent_id,
+        )
+        b64 = base64.b64encode(encoded).decode()
+        return {
+            "success": True,
+            "data": {
+                "image_base64": b64,
+                "format": used_format,
+                "bytes": len(encoded),
+            },
+        }
 
     async def _type_with_variance(self, page, text: str) -> None:
         """Type text character-by-character with human-like inter-key delays.

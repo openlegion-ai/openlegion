@@ -175,8 +175,11 @@ async def browser_wait_for(
 @skill(
     name="browser_screenshot",
     description=(
-        "Take a screenshot of the current page. "
-        "Returns a visual PNG image you can see directly."
+        "Take a screenshot of the current page. Returns a visual image you "
+        "can see directly. Defaults: WebP at quality=75, full resolution. "
+        "Use format='png' for lossless capture (e.g. when comparing pixels "
+        "or feeding into an OCR pipeline). Use scale=0.75 to shrink the "
+        "image further for token-cheap reconnaissance shots."
     ),
     parameters={
         "full_page": {
@@ -184,37 +187,85 @@ async def browser_wait_for(
             "description": "Capture full scrollable page (default false)",
             "default": False,
         },
+        "format": {
+            "type": "string",
+            "description": (
+                "Image format: 'webp' (default, smaller, lossy) or 'png' "
+                "(lossless, larger). WebP is ~5–10× cheaper in tokens."
+            ),
+            "default": "webp",
+        },
+        "quality": {
+            "type": "integer",
+            "description": (
+                "WebP quality 1–100 (default 75). Ignored for PNG. Lower "
+                "values trade visual fidelity for smaller payloads."
+            ),
+            "default": 75,
+        },
+        "scale": {
+            "type": "number",
+            "description": (
+                "Resize factor 0.5–1.0 (default 1.0). 0.75 keeps the page "
+                "readable while cutting bytes ~45%."
+            ),
+            "default": 1.0,
+        },
     },
     parallel_safe=False,
     loop_exempt=True,
 )
-async def browser_screenshot(full_page: bool = False, *, mesh_client=None) -> dict:
+async def browser_screenshot(
+    full_page: bool = False,
+    format: str = "webp",
+    quality: int = 75,
+    scale: float = 1.0,
+    *,
+    mesh_client=None,
+) -> dict:
     """Take a screenshot via the browser service.
 
     Extracts image_base64 from the raw result *before* ``_deep_redact`` runs,
     because the broad credential-redaction patterns (40+ hex/base64 chars)
-    would corrupt any PNG payload.  The base64 data is returned under the
+    would corrupt any image payload. The base64 data is returned under the
     ``_image`` key so ``_run_tool`` can build a multimodal content block.
+
+    The browser service is the source of truth for the actual encoding
+    used — it may fall back to PNG when WebP encoding fails (e.g. Pillow
+    missing or a corrupt frame buffer). The returned ``_image.media_type``
+    reflects what was actually emitted, not what was requested.
     """
     if not mesh_client:
         return {"error": "Browser requires mesh connectivity"}
     try:
-        raw = await mesh_client.browser_command("screenshot", {"full_page": full_page})
+        raw = await mesh_client.browser_command(
+            "screenshot",
+            {
+                "full_page": full_page,
+                "format": format,
+                "quality": quality,
+                "scale": scale,
+            },
+        )
     except Exception as e:
         return {"error": _deep_redact(str(e))}
 
     # Pull out image data before redaction can corrupt it.
-    # Browser service returns {"success": ..., "data": {"image_base64": ..., ...}}
+    # Browser service returns {"success": ..., "data":
+    #   {"image_base64": ..., "format": "webp"|"png", "bytes": int}}
     image_data = None
+    actual_format = "png"
     if isinstance(raw, dict):
         data = raw.get("data")
         if isinstance(data, dict) and data.get("image_base64"):
             image_data = data.pop("image_base64")
+            actual_format = (data.get("format") or "png").lower()
 
     result = _deep_redact(raw)
 
     if image_data:
-        result["_image"] = {"data": image_data, "media_type": "image/png"}
+        media_type = "image/webp" if actual_format == "webp" else "image/png"
+        result["_image"] = {"data": image_data, "media_type": media_type}
         # Give the LLM a short text summary instead of the raw base64 blob
         result.setdefault("status", "screenshot captured")
 
