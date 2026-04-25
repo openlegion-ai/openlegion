@@ -2167,7 +2167,20 @@ class BrowserManager:
             response_refs = {rid: h.to_agent_dict() for rid, h in refs.items()}
             return {"success": True, "data": {"snapshot": snapshot_text, "refs": response_refs}}
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            # Match the §2.3 error envelope used by the new from_ref /
+            # filter paths above so agents see a uniform shape regardless
+            # of which branch raised. Preserves the message under
+            # ``error.message`` so existing log scrapers still see the
+            # underlying string.
+            logger.exception("Snapshot failed for %s", agent_id)
+            return {
+                "success": False,
+                "error": {
+                    "code": "service_unavailable",
+                    "message": str(e),
+                    "retry_after_ms": None,
+                },
+            }
 
     @staticmethod
     async def _is_visible_modal(el, vp_size: dict | None) -> bool:
