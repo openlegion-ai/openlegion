@@ -10,6 +10,14 @@ from src.browser.ref_handle import from_legacy_dict as _h
 from src.browser.service import BrowserManager, CamoufoxInstance
 
 
+def _no_playwright() -> bool:
+    try:
+        import playwright.async_api  # noqa: F401
+        return False
+    except ImportError:
+        return True
+
+
 class TestCredentialRedactor:
     """Tests for browser.redaction.CredentialRedactor."""
 
@@ -970,6 +978,7 @@ class TestScreenshot:
         from io import BytesIO
 
         from PIL import Image
+
         from src.browser.service import BrowserManager, CamoufoxInstance
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
         png = _make_png_bytes(width=200, height=120)
@@ -1053,6 +1062,7 @@ class TestScreenshot:
     async def test_screenshot_pillow_missing_falls_back_to_png(self, monkeypatch):
         """If Pillow can't be imported the helper returns the raw PNG."""
         import builtins
+
         from src.browser.service import BrowserManager, CamoufoxInstance
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
         png = _make_png_bytes()
@@ -7819,6 +7829,16 @@ class TestShadowDOM:
         assert roundtrip.occurrence == 2
         assert roundtrip.discriminator == "testid:foo"
 
+    def test_shadow_hop_rejects_empty_selector(self):
+        from src.browser.ref_handle import ShadowHop
+        with pytest.raises(ValueError, match="selector"):
+            ShadowHop(selector="", occurrence=0, discriminator="testid:x")
+
+    def test_shadow_hop_rejects_empty_discriminator(self):
+        from src.browser.ref_handle import ShadowHop
+        with pytest.raises(ValueError, match="discriminator"):
+            ShadowHop(selector="my-card", occurrence=0, discriminator="")
+
     @pytest.mark.asyncio
     async def test_compute_element_key_folds_shadow_path(self):
         from src.browser.ref_handle import ShadowHop, compute_element_key
@@ -7935,17 +7955,15 @@ class TestShadowDOM:
             assert handle.frame_id is None
 
     @pytest.mark.asyncio
-    async def test_closed_shadow_root_not_in_snapshot(self):
-        """Closed shadow roots are unreachable per the web spec — the
-        walker cannot pierce them. We assert that a tree without a
-        ``shadow_path`` annotation does NOT acquire one (i.e. nodes the
-        walker would have emitted for a closed root simply never appear)."""
+    async def test_python_walk_does_not_invent_shadow_path(self):
+        """Python-side regression: the synthesized tree fed to the Python
+        ``_walk`` carries no ``shadow_path`` annotation, so emitted refs
+        must keep ``shadow_path == ()``. Does NOT exercise the JS walker
+        or actual closed shadow roots — see real-browser tests for that.
+        """
         from src.browser.service import BrowserManager, CamoufoxInstance
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
 
-        # Tree shape simulates a page where the shadow host is visible
-        # but its closed shadow contents are NOT walked: only the host
-        # element shows up, no inner ref.
         tree = {
             "role": "WebArea", "name": "",
             "children": [
@@ -7964,9 +7982,10 @@ class TestShadowDOM:
             assert handle.shadow_path == ()
 
     @pytest.mark.asyncio
-    async def test_max_walk_depth_caps_descent(self):
-        """``_MAX_WALK_DEPTH=50`` caps total walker depth — synthesizing
-        a 51-deep tree must produce zero refs past the cap."""
+    async def test_python_walk_depth_cap_stops_descent(self):
+        """Python-side regression: ``_MAX_WALK_DEPTH`` aborts deep trees.
+        Does NOT exercise the JS walker's ``MAX_WALK_DEPTH`` constant —
+        see ``test_js_walker_depth_cap`` for the JS-side check."""
         from src.browser.service import (
             _MAX_SNAPSHOT_ELEMENTS,
             BrowserManager,
@@ -7988,13 +8007,146 @@ class TestShadowDOM:
 
         result = await mgr.snapshot("a1")
         assert result["success"] is True
-        # Depth cap means the deepest button never gets walked.
-        # _MAX_SNAPSHOT_ELEMENTS is large; the cap is the limiter here.
-        assert _MAX_SNAPSHOT_ELEMENTS > 0  # sanity
-        # No refs emitted for the deeply nested button.
-        assert all(
-            h.name != "Deep" for h in inst.refs.values()
-        )
+        assert _MAX_SNAPSHOT_ELEMENTS > 0
+        assert all(h.name != "Deep" for h in inst.refs.values())
+
+    def test_js_walker_max_walk_depth_constant_injected(self):
+        """The JS walker reads ``MAX_WALK_DEPTH`` from a Python-side
+        constant. A drift between the Python ``_MAX_WALK_DEPTH`` and the
+        JS template would silently let one path walk deeper than the
+        other; this test catches that by inspecting the rendered JS.
+        """
+        from src.browser.service import _JS_A11Y_TREE, _MAX_WALK_DEPTH
+        # The constant is materialized into the JS body — the literal
+        # number must appear and the placeholder must NOT remain.
+        assert "__MAX_WALK_DEPTH__" not in _JS_A11Y_TREE
+        assert f"const MAX_WALK_DEPTH = {_MAX_WALK_DEPTH};" in _JS_A11Y_TREE
+        assert "if (d > MAX_WALK_DEPTH" in _JS_A11Y_TREE
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(
+        _no_playwright(),
+        reason="playwright not installed in dev env; CI runs this",
+    )
+    async def test_js_walker_open_shadow_root_real_browser(self):
+        """Spin up a real browser, set HTML with an open shadow root,
+        run the actual JS walker. The shadow ref must appear with
+        non-empty ``shadow_path``."""
+        from playwright.async_api import async_playwright
+
+        from src.browser.service import _JS_A11Y_TREE
+        async with async_playwright() as p:
+            browser = await p.firefox.launch()
+            try:
+                page = await browser.new_page()
+                await page.set_content("""
+                    <html><body>
+                      <my-card id="card1"></my-card>
+                      <script>
+                        const host = document.getElementById('card1');
+                        const root = host.attachShadow({mode: 'open'});
+                        const btn = document.createElement('button');
+                        btn.textContent = 'Submit';
+                        root.appendChild(btn);
+                      </script>
+                    </body></html>
+                """)
+                tree = await page.evaluate(_JS_A11Y_TREE)
+                # Walk the tree to find the button — must carry a
+                # non-empty shadow_path.
+                def find_button(node):
+                    if node.get("role") == "button":
+                        return node
+                    for c in node.get("children", []) or []:
+                        r = find_button(c)
+                        if r:
+                            return r
+                    return None
+                btn = find_button(tree)
+                assert btn is not None, "shadow button not found in walked tree"
+                sp = btn.get("shadow_path")
+                assert sp, "shadow button missing shadow_path"
+                assert sp[0]["selector"] in ("my-card", "my-card#card1")
+                assert sp[0]["discriminator"]
+            finally:
+                await browser.close()
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(
+        _no_playwright(),
+        reason="playwright not installed in dev env; CI runs this",
+    )
+    async def test_js_walker_closed_shadow_root_invisible_real_browser(self):
+        """Real-browser test: closed shadow roots are unreachable per
+        spec, so descendants must not appear in the walker output."""
+        from playwright.async_api import async_playwright
+
+        from src.browser.service import _JS_A11Y_TREE
+        async with async_playwright() as p:
+            browser = await p.firefox.launch()
+            try:
+                page = await browser.new_page()
+                await page.set_content("""
+                    <html><body>
+                      <my-card id="card1"></my-card>
+                      <button>Outside</button>
+                      <script>
+                        const host = document.getElementById('card1');
+                        const root = host.attachShadow({mode: 'closed'});
+                        const btn = document.createElement('button');
+                        btn.textContent = 'Inside';
+                        root.appendChild(btn);
+                      </script>
+                    </body></html>
+                """)
+                tree = await page.evaluate(_JS_A11Y_TREE)
+                def collect_button_names(node, out):
+                    if node.get("role") == "button":
+                        out.append(node.get("name", ""))
+                    for c in node.get("children", []) or []:
+                        collect_button_names(c, out)
+                names = []
+                collect_button_names(tree, names)
+                assert "Outside" in names
+                assert "Inside" not in names
+            finally:
+                await browser.close()
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(
+        _no_playwright(),
+        reason="playwright not installed in dev env; CI runs this",
+    )
+    async def test_js_walker_depth_cap_real_browser(self):
+        """Real-browser test: a 60-deep nested DOM must produce zero
+        emitted nodes past ``MAX_WALK_DEPTH=50``. Exercises the JS-side
+        depth gate, not the Python one."""
+        from playwright.async_api import async_playwright
+
+        from src.browser.service import _JS_A11Y_TREE, _MAX_WALK_DEPTH
+        async with async_playwright() as p:
+            browser = await p.firefox.launch()
+            try:
+                page = await browser.new_page()
+                # Generate 60 nested divs, deepest carries a button.
+                inner = '<button>Deep</button>'
+                for _ in range(60):
+                    inner = f'<div>{inner}</div>'
+                await page.set_content(f"<html><body>{inner}</body></html>")
+                tree = await page.evaluate(_JS_A11Y_TREE)
+                def find_button_depth(node, d=0):
+                    if node.get("role") == "button":
+                        return d
+                    for c in node.get("children", []) or []:
+                        r = find_button_depth(c, d + 1)
+                        if r is not None:
+                            return r
+                    return None
+                depth = find_button_depth(tree)
+                # Walker stopped before reaching the button at depth 60.
+                assert depth is None or depth <= _MAX_WALK_DEPTH
+            finally:
+                await browser.close()
 
     @pytest.mark.asyncio
     async def test_locator_from_ref_uses_evaluate_handle_for_shadow(self):

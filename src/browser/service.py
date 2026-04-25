@@ -109,6 +109,7 @@ def _resolve_filter_roles(filter_name: str | None) -> frozenset[str] | None:
 
 
 _MAX_SNAPSHOT_ELEMENTS = 200
+_MAX_WALK_DEPTH = 50
 
 
 # §7.2 v2 format — depth indent is capped so a 50-deep DOM doesn't
@@ -296,6 +297,7 @@ def _build_js_a11y_tree() -> str:
     """
     implicit_json = json.dumps(_IMPLICIT_ROLE_MAP)
     return r"""((rootEl) => {
+    const MAX_WALK_DEPTH = __MAX_WALK_DEPTH__;
     const ACTIONABLE = new Set([
         'button','link','textbox','checkbox','radio','combobox','searchbox',
         'slider','spinbutton','switch','tab','menuitem','menuitemcheckbox',
@@ -334,8 +336,20 @@ def _build_js_a11y_tree() -> str:
         if (t) return 'testid:' + t;
         const id = el.getAttribute('id');
         if (id && isStableId(id)) return 'id:' + id;
-        const cls = (el.getAttribute('class') || '').trim().split(/\s+/).slice(0, 3).join('.');
-        const fp = el.tagName + '|' + cls + '|' + (el.childElementCount || 0);
+        // Structural fingerprint excludes class/style/data-* —
+        // those flip on hover/focus/aria-state and would break the
+        // discriminator across snapshots. tagName + childElementCount
+        // + sorted attribute names (state-free subset) is stable.
+        const attrNames = [];
+        for (const a of el.attributes) {
+            const n = a.name;
+            if (n === 'class' || n === 'style') continue;
+            if (n.startsWith('data-')) continue;
+            attrNames.push(n);
+        }
+        attrNames.sort();
+        const fp = el.tagName + '|' + (el.childElementCount || 0)
+            + '|' + attrNames.join(',');
         return 'fp:' + fp;
     }
     function cssPath(host) {
@@ -346,13 +360,15 @@ def _build_js_a11y_tree() -> str:
         if (t) return tag + '[data-testid="' + t.replace(/"/g, '\\"') + '"]';
         return tag;
     }
-    function siblingOccurrence(host, parent, selector) {
-        if (!parent) return 0;
-        let i = 0;
-        const candidates = parent.querySelectorAll(selector);
-        for (const c of candidates) {
-            if (c === host) return i;
-            i++;
+    function siblingOccurrence(host, _parent, selector) {
+        // Document-wide indexing matches the stage-1 resolver scope
+        // (root = document → root.querySelectorAll(hop.selector)). A
+        // parent-scoped count would mismatch when bestStableId collides
+        // across multiple hosts under different parents. Tradeoff: an
+        // unrelated <my-tag> inserted elsewhere shifts the index.
+        const candidates = document.querySelectorAll(selector);
+        for (let i = 0; i < candidates.length; i++) {
+            if (candidates[i] === host) return i;
         }
         return 0;
     }
@@ -415,7 +431,7 @@ def _build_js_a11y_tree() -> str:
         return true;
     }
     function walk(el, d, parentLandmark, shadowPath) {
-        if (d > 50 || !el || el.nodeType !== 1) return null;
+        if (d > MAX_WALK_DEPTH || !el || el.nodeType !== 1) return null;
         const tag = el.tagName;
         if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT' || tag === 'TEMPLATE')
             return null;
@@ -474,7 +490,11 @@ def _build_js_a11y_tree() -> str:
     if (tree.role === 'none')
         return { role: 'WebArea', name: document.title || '', children: tree.children || [] };
     return { role: 'WebArea', name: document.title || '', children: [tree] };
-})""".replace("__IMPLICIT_ROLE_MAP__", implicit_json)
+})""".replace(
+        "__IMPLICIT_ROLE_MAP__", implicit_json,
+    ).replace(
+        "__MAX_WALK_DEPTH__", str(_MAX_WALK_DEPTH),
+    )
 
 
 # ── JS-based accessibility tree builder ──────────────────────────────────
@@ -522,8 +542,16 @@ _JS_SHADOW_RESOLVE_STAGE1 = r"""(args) => {
             if (t) return 'testid:' + t;
             const id = el.getAttribute('id');
             if (id && isStableId(id)) return 'id:' + id;
-            const cls = (el.getAttribute('class') || '').trim().split(/\s+/).slice(0, 3).join('.');
-            const fp = el.tagName + '|' + cls + '|' + (el.childElementCount || 0);
+            const attrNames = [];
+            for (const a of el.attributes) {
+                const n = a.name;
+                if (n === 'class' || n === 'style') continue;
+                if (n.startsWith('data-')) continue;
+                attrNames.push(n);
+            }
+            attrNames.sort();
+            const fp = el.tagName + '|' + (el.childElementCount || 0)
+                + '|' + attrNames.join(',');
             return 'fp:' + fp;
         }
         const got = bestStableId(host);
@@ -2215,8 +2243,8 @@ class BrowserManager:
                 # contract every other ref-using path follows; surface as
                 # ref_stale so the agent re-snapshots.
                 try:
-                    locator = await self._locator_from_ref(inst, from_ref)
-                    if locator is None:
+                    handle_or_loc = await self._locator_from_ref(inst, from_ref)
+                    if handle_or_loc is None:
                         return {
                             "success": False,
                             "error": {
@@ -2225,7 +2253,12 @@ class BrowserManager:
                                 "retry_after_ms": None,
                             },
                         }
-                    scoped_root_handle = await locator.element_handle(timeout=2000)
+                    if hasattr(handle_or_loc, "element_handle"):
+                        scoped_root_handle = await handle_or_loc.element_handle(
+                            timeout=2000,
+                        )
+                    else:
+                        scoped_root_handle = handle_or_loc
                 except RefStale as e:
                     return {
                         "success": False,
@@ -2267,8 +2300,6 @@ class BrowserManager:
             # disambiguate duplicate elements (e.g. X's two composer nodes).
             occurrence_counts: dict[tuple, int] = {}
 
-            _MAX_WALK_DEPTH = 50
-
             # Collect entries for §7.2 v2 rendering AND build v1 lines in
             # parallel. The entry list is a structured intermediate so we
             # can pivot between formats post-walk without a second tree
@@ -2295,7 +2326,22 @@ class BrowserManager:
                         ref_id = f"e{ref_counter[0]}"
                         ref_counter[0] += 1
 
-                        key = (role, name)
+                        # Materialize shadow_path NOW so the occurrence
+                        # key folds it: stage-2 picks candidates inside
+                        # one shadow root, so two same-named elements in
+                        # different roots must not share an occurrence
+                        # counter (would index past stage-2's candidates
+                        # array → spurious RefStale).
+                        raw_shadow = node.get("shadow_path") or ()
+                        shadow_hops: tuple[ShadowHop, ...] = tuple(
+                            ShadowHop(
+                                selector=str(hop.get("selector", "")),
+                                occurrence=int(hop.get("occurrence", 0)),
+                                discriminator=str(hop.get("discriminator", "")),
+                            )
+                            for hop in raw_shadow
+                        )
+                        key = (role, name, shadow_hops)
                         occ = occurrence_counts.get(key, 0)
                         occurrence_counts[key] = occ + 1
 
@@ -2346,19 +2392,11 @@ class BrowserManager:
                         #   reported as a remove+add pair instead of
                         #   "unchanged". Same fix: data-testid extraction.
                         from src.browser.ref_handle import compute_element_key
-                        raw_shadow = node.get("shadow_path") or ()
-                        shadow_hops: tuple[ShadowHop, ...] = tuple(
-                            ShadowHop(
-                                selector=str(hop.get("selector", "")),
-                                occurrence=int(hop.get("occurrence", 0)),
-                                discriminator=str(hop.get("discriminator", "")),
-                            )
-                            for hop in raw_shadow
-                        )
-                        # frame_id stays constant today (no iframe walker
-                        # until §8.4); ``shadow_path`` is now populated by
-                        # the §8.3 walker. ``compute_element_key`` folds
-                        # both so identical role+name+landmark in distinct
+                        # ``shadow_hops`` already materialized above so
+                        # the occurrence key could fold it. frame_id
+                        # stays constant today (no iframe walker until
+                        # §8.4). ``compute_element_key`` folds both so
+                        # identical role+name+landmark in distinct
                         # shadow roots produce different element_keys.
                         elem_key = compute_element_key(
                             role=role, name=name, landmark=landmark,

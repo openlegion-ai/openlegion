@@ -62,6 +62,12 @@ class ShadowHop:
     occurrence: int
     discriminator: str
 
+    def __post_init__(self) -> None:
+        if not self.selector:
+            raise ValueError("ShadowHop.selector must be non-empty")
+        if not self.discriminator:
+            raise ValueError("ShadowHop.discriminator must be non-empty")
+
 
 # ── Ref handle (the canonical identity of a snapshot ref) ───────────────────
 
