@@ -917,7 +917,10 @@ class BrowserManager:
         #   * Any other exception — migration hit a real failure and the
         #     backup has already been restored. Not safely retryable until
         #     a human investigates.
-        from src.browser.profile_schema import ProfileMigrationBusy
+        from src.browser.profile_schema import (
+            ProfileMigrationBusy,
+            sync_adblock_extension,
+        )
         try:
             migrate_profile(Path(profile_dir))
         except ProfileMigrationBusy:
@@ -932,6 +935,14 @@ class BrowserManager:
                 agent_id,
             )
             raise
+
+        # Phase 4 §7.1 — make sure the ad-blocker XPI matches the operator's
+        # current ``BROWSER_ENABLE_ADBLOCK`` setting. This is intentionally
+        # separate from the schema migration: the migration runs once per
+        # version bump, but flag toggles + image rebuilds with newer XPIs
+        # need to take effect on every launch. Best-effort — never blocks
+        # the browser from starting.
+        sync_adblock_extension(Path(profile_dir))
 
         proxy_config = self.get_proxy_config(agent_id)
         if proxy_config is not None:

@@ -48,8 +48,8 @@ KNOWN_FLAGS: dict[str, str] = {
     "BROWSER_SNAPSHOT_FORMAT": "v1 | v2 (default v2 after one release gate)",
     "BROWSER_SCREENSHOT_FORMAT": "webp (default) | png",
     "BROWSER_SCREENSHOT_QUALITY": "WebP quality 1-100 (default 75)",
-    # ── Ad-blocker / egress (§7.1, existing) ─────────────────────────────
-    "BROWSER_ENABLE_ADBLOCK": "true | false (default true after phase 7.1)",
+    # ── Ad-blocker / egress (§7.1) ─────────────────────────────
+    "BROWSER_ENABLE_ADBLOCK": "true | false (default true; gates uBO install)",
     # ── Resolution pool (§6.1) ────────────────────────────────────────────
     "BROWSER_RESOLUTION_POOL": "true | false (default true after phase 6.1)",
     # ── Canary (§5.4) ─────────────────────────────────────────────────────

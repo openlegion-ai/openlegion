@@ -65,6 +65,37 @@ RUN useradd --create-home --uid 1000 --shell /bin/bash browser
 
 WORKDIR /app
 
+# uBlock Origin XPI (Phase 4 §7.1) — bundled at build time so air-gapped
+# deployments don't need addons.mozilla.org reachability at runtime.
+# Stored read-only in /opt; the profile-schema v3 migration copies it
+# into each agent profile's extensions/ dir on first launch.
+#
+# Placed BEFORE the pyproject.toml COPY layer so a Python-dependency
+# bump doesn't invalidate the 3MB XPI download cache. Bumping
+# UBLOCK_VERSION (or rebuilding without --cache-from) refreshes it.
+#
+# Pin to the AMO-signed Firefox build so Camoufox's patched Firefox
+# loads it without warning. Bumping this version → bump
+# PROFILE_SCHEMA_VERSION in src/browser/profile_schema.py to ensure
+# existing profiles re-install the new XPI on next launch.
+#
+# The ``.firefox.signed.xpi`` naming covers all stable uBO 1.x releases
+# we'd reasonably ship. Pre-release / beta builds (1.70.1b1 etc.) ship
+# only ``.firefox.xpi`` (unsigned) — fall back to that name so a tester
+# can pin to a beta without hand-editing the URL. Camoufox's patched
+# Firefox accepts unsigned XPIs because xpinstall.signatures.required
+# is set to False in stealth prefs.
+ARG UBLOCK_VERSION=1.62.0
+RUN mkdir -p /opt/openlegion/extensions \
+    && ( \
+       curl -fSL -o /opt/openlegion/extensions/uBlock0.xpi \
+          "https://github.com/gorhill/uBlock/releases/download/${UBLOCK_VERSION}/uBlock0_${UBLOCK_VERSION}.firefox.signed.xpi" \
+       || curl -fSL -o /opt/openlegion/extensions/uBlock0.xpi \
+          "https://github.com/gorhill/uBlock/releases/download/${UBLOCK_VERSION}/uBlock0_${UBLOCK_VERSION}.firefox.xpi" \
+       ) \
+    && test -s /opt/openlegion/extensions/uBlock0.xpi \
+    && chmod 0644 /opt/openlegion/extensions/uBlock0.xpi
+
 # Python dependencies — upgrade pip first to avoid resolver bugs with stale base images
 # Pillow ships with bundled libwebp on manylinux wheels, so no apt-level WebP
 # library is required. The encode path in src/browser/service.py uses

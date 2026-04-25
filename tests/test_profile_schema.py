@@ -461,12 +461,13 @@ class TestV2FontCacheClear:
         _v2_clear_font_caches(profile)  # no caches to clear
         _v2_clear_font_caches(profile)  # and again — still fine
 
-    def test_end_to_end_migration_at_v2(self, profile):
-        """Fresh profile → migrate → marker is at v2, no crash on empty caches."""
+    def test_end_to_end_migration_clears_font_cache(self, profile):
+        """Fresh profile → migrate → font cache is wiped by v2 step,
+        regardless of which version the schema currently tops out at."""
         (profile / "startupCache").mkdir()
         (profile / "startupCache" / "x.bin").write_bytes(b"x")
         result = migrate_profile(profile)
-        assert result == 2
+        assert result == PROFILE_SCHEMA_VERSION
         assert not (profile / "startupCache").exists()
 
     def test_rerun_after_v2_is_noop(self, populated_profile):
@@ -479,3 +480,286 @@ class TestV2FontCacheClear:
         migrate_profile(populated_profile)
         # Cache survived the no-op re-migrate.
         assert (populated_profile / "startupCache" / "survives.bin").exists()
+
+
+class TestV3UblockInstall:
+    """§7.1 migration v3: drop the bundled uBlock Origin XPI into a
+    profile's ``extensions/`` directory so Firefox auto-installs it."""
+
+    @pytest.fixture
+    def fake_xpi(self, tmp_path: Path, monkeypatch) -> Path:
+        """Synthetic XPI on disk + ``OPENLEGION_UBLOCK_XPI`` env override
+        so the migration sees it instead of the container path."""
+        xpi = tmp_path / "uBlock0.xpi"
+        xpi.write_bytes(b"PK\x03\x04" + b"fake-zip" * 100)
+        monkeypatch.setenv("OPENLEGION_UBLOCK_XPI", str(xpi))
+        return xpi
+
+    def test_copies_xpi_into_extensions_dir(self, profile, fake_xpi):
+        from src.browser.profile_schema import (
+            UBLOCK_ADDON_ID,
+            _v3_install_ublock,
+        )
+        _v3_install_ublock(profile)
+        target = profile / "extensions" / f"{UBLOCK_ADDON_ID}.xpi"
+        assert target.exists()
+        assert target.read_bytes() == fake_xpi.read_bytes()
+        # Reasonable perms for Firefox to read.
+        mode = target.stat().st_mode & 0o777
+        assert mode == 0o644
+
+    def test_skipped_when_source_missing(self, profile, monkeypatch):
+        from src.browser.profile_schema import _v3_install_ublock
+        monkeypatch.setenv(
+            "OPENLEGION_UBLOCK_XPI", "/nonexistent/uBlock0.xpi",
+        )
+        _v3_install_ublock(profile)
+        assert not (profile / "extensions").exists()
+
+    def test_skipped_when_flag_disabled(
+        self, profile, fake_xpi, monkeypatch,
+    ):
+        from src.browser.profile_schema import _v3_install_ublock
+        monkeypatch.setenv("BROWSER_ENABLE_ADBLOCK", "false")
+        _v3_install_ublock(profile)
+        assert not (profile / "extensions").exists()
+
+    def test_full_migration_with_flag_disabled_still_stamps_v3(
+        self, profile, fake_xpi, monkeypatch,
+    ):
+        """Regression for the migration framework: even when the v3
+        callable is a no-op (flag disabled), the framework MUST stamp
+        the marker to v3 — otherwise every launch re-runs the migration
+        and the operator never sees forward progress."""
+        from src.browser.profile_schema import (
+            PROFILE_SCHEMA_VERSION,
+            _MARKER_FILENAME,
+            UBLOCK_ADDON_ID,
+        )
+        monkeypatch.setenv("BROWSER_ENABLE_ADBLOCK", "false")
+        result = migrate_profile(profile)
+        assert result == PROFILE_SCHEMA_VERSION == 3
+        assert (profile / _MARKER_FILENAME).read_text().strip() == "3"
+        # And no XPI was installed.
+        assert not (
+            profile / "extensions" / f"{UBLOCK_ADDON_ID}.xpi"
+        ).exists()
+
+    def test_idempotent_skips_recopy_when_unchanged(
+        self, profile, fake_xpi, monkeypatch,
+    ):
+        from src.browser.profile_schema import (
+            UBLOCK_ADDON_ID,
+            _v3_install_ublock,
+        )
+        _v3_install_ublock(profile)
+        target = profile / "extensions" / f"{UBLOCK_ADDON_ID}.xpi"
+        first_mtime = target.stat().st_mtime
+        # No changes → copy is skipped.
+        import shutil
+        copy_calls: list[tuple] = []
+        original_copy2 = shutil.copy2
+
+        def spy(src, dst, *a, **kw):
+            copy_calls.append((src, dst))
+            return original_copy2(src, dst, *a, **kw)
+
+        monkeypatch.setattr(shutil, "copy2", spy)
+        _v3_install_ublock(profile)
+        assert copy_calls == []
+        assert target.stat().st_mtime == first_mtime
+
+    def test_recopies_when_source_changes(
+        self, profile, fake_xpi, monkeypatch,
+    ):
+        import time
+
+        from src.browser.profile_schema import (
+            UBLOCK_ADDON_ID,
+            _v3_install_ublock,
+        )
+        _v3_install_ublock(profile)
+        target = profile / "extensions" / f"{UBLOCK_ADDON_ID}.xpi"
+        first_size = target.stat().st_size
+
+        # Update the source: bigger payload, fresher mtime.
+        time.sleep(1.1)  # bump mtime past the 1-second guard window
+        fake_xpi.write_bytes(b"PK\x03\x04" + b"new" * 1000)
+        _v3_install_ublock(profile)
+        assert target.stat().st_size != first_size
+        assert target.read_bytes() == fake_xpi.read_bytes()
+
+    def test_end_to_end_migration_at_v3(self, profile, fake_xpi):
+        from src.browser.profile_schema import UBLOCK_ADDON_ID
+        result = migrate_profile(profile)
+        assert result == 3
+        target = profile / "extensions" / f"{UBLOCK_ADDON_ID}.xpi"
+        assert target.exists()
+
+    def test_v3_runs_after_v2(self, profile, fake_xpi):
+        """v0 → v3 should run v2 then v3 in order."""
+        # Seed startupCache so v2 has work to do
+        (profile / "startupCache").mkdir()
+        (profile / "startupCache" / "x.bin").write_bytes(b"x")
+        migrate_profile(profile)
+        assert not (profile / "startupCache").exists()  # v2 ran
+        from src.browser.profile_schema import UBLOCK_ADDON_ID
+        assert (profile / "extensions" / f"{UBLOCK_ADDON_ID}.xpi").exists()  # v3 ran
+
+    def test_preserves_cookies_and_storage(
+        self, populated_profile, fake_xpi,
+    ):
+        """v3 must not touch the user's session — only adds the XPI."""
+        from src.browser.profile_schema import (
+            UBLOCK_ADDON_ID,
+            _v3_install_ublock,
+        )
+        _v3_install_ublock(populated_profile)
+        assert (
+            populated_profile / "cookies.sqlite"
+        ).read_bytes() == b"cookies-fake"
+        assert (populated_profile / "prefs.js").exists()
+        assert (
+            populated_profile / "storage" / "default" / "idb.sqlite"
+        ).exists()
+        assert (
+            populated_profile / "extensions" / f"{UBLOCK_ADDON_ID}.xpi"
+        ).exists()
+
+
+class TestSyncAdblockExtension:
+    """Launch-time sync helper — runs every browser start, distinct
+    from migration which runs once per schema bump."""
+
+    @pytest.fixture
+    def fake_xpi(self, tmp_path: Path, monkeypatch) -> Path:
+        xpi = tmp_path / "uBlock0.xpi"
+        xpi.write_bytes(b"PK\x03\x04" + b"sync-test" * 100)
+        monkeypatch.setenv("OPENLEGION_UBLOCK_XPI", str(xpi))
+        return xpi
+
+    def test_installs_when_flag_enabled_and_source_present(
+        self, profile, fake_xpi,
+    ):
+        from src.browser.profile_schema import (
+            UBLOCK_ADDON_ID,
+            sync_adblock_extension,
+        )
+        result = sync_adblock_extension(profile)
+        assert result is True
+        assert (
+            profile / "extensions" / f"{UBLOCK_ADDON_ID}.xpi"
+        ).exists()
+
+    def test_returns_false_when_flag_disabled(
+        self, profile, fake_xpi, monkeypatch,
+    ):
+        from src.browser.profile_schema import sync_adblock_extension
+        monkeypatch.setenv("BROWSER_ENABLE_ADBLOCK", "false")
+        assert sync_adblock_extension(profile) is False
+
+    def test_returns_false_when_source_missing(
+        self, profile, monkeypatch,
+    ):
+        from src.browser.profile_schema import sync_adblock_extension
+        monkeypatch.setenv(
+            "OPENLEGION_UBLOCK_XPI", "/nonexistent/uBlock0.xpi",
+        )
+        assert sync_adblock_extension(profile) is False
+
+    def test_never_raises_on_unexpected_failure(
+        self, profile, fake_xpi, monkeypatch,
+    ):
+        """Helper is best-effort — never block browser launch."""
+        from src.browser import profile_schema as ps
+        from src.browser.profile_schema import sync_adblock_extension
+
+        def boom(*_a, **_k):
+            raise OSError("simulated I/O explosion")
+
+        monkeypatch.setattr(ps, "_v3_install_ublock", boom)
+        # No exception escapes — caller (BrowserManager) keeps going.
+        assert sync_adblock_extension(profile) is False
+
+    def test_returns_false_for_missing_profile_dir(self, tmp_path):
+        from src.browser.profile_schema import sync_adblock_extension
+        assert sync_adblock_extension(tmp_path / "no-such") is False
+
+    def test_returns_existing_state_when_peer_holds_lock(
+        self, profile, fake_xpi,
+    ):
+        """When a peer browser-service process holds the per-profile
+        flock, sync_adblock_extension skips its install step and reports
+        whether the XPI is already present (peer is doing the same work,
+        idempotency means eventual state is correct)."""
+        import fcntl
+        import os
+
+        from src.browser.profile_schema import (
+            UBLOCK_ADDON_ID,
+            _LOCK_FILENAME,
+            sync_adblock_extension,
+        )
+        # Pre-install so the contended path can find the existing XPI.
+        (profile / "extensions").mkdir()
+        existing_xpi = profile / "extensions" / f"{UBLOCK_ADDON_ID}.xpi"
+        existing_xpi.write_bytes(b"existing")
+
+        lock_path = profile / _LOCK_FILENAME
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            # Returns True because the existing XPI satisfies the
+            # presence check, but skips the install (verified by the
+            # XPI bytes being unchanged from the pre-existing state).
+            result = sync_adblock_extension(profile)
+            assert result is True
+            assert existing_xpi.read_bytes() == b"existing"
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+    def test_returns_false_when_peer_holds_lock_and_no_xpi(
+        self, profile, fake_xpi,
+    ):
+        """Same flock contention but no existing XPI in the profile —
+        the peer hasn't finished installing yet, so we report False."""
+        import fcntl
+        import os
+
+        from src.browser.profile_schema import (
+            _LOCK_FILENAME,
+            sync_adblock_extension,
+        )
+        lock_path = profile / _LOCK_FILENAME
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            assert sync_adblock_extension(profile) is False
+            # No install happened — peer hasn't released the lock.
+            assert not (profile / "extensions").exists()
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+
+class TestStealthExtensionPrefs:
+    """The migration drops the XPI on disk; Firefox needs cooperative
+    prefs to actually load it. Regression-guard those prefs in
+    ``_stealth_prefs``."""
+
+    def test_auto_disable_scopes_zero(self):
+        from src.browser.stealth import _stealth_prefs
+        prefs = _stealth_prefs()
+        assert prefs["extensions.autoDisableScopes"] == 0
+
+    def test_startup_scan_scopes_all(self):
+        from src.browser.stealth import _stealth_prefs
+        prefs = _stealth_prefs()
+        # 15 = 1|2|4|8 = app|system|user|profile.
+        assert prefs["extensions.startupScanScopes"] == 15
+
+    def test_signature_required_off(self):
+        from src.browser.stealth import _stealth_prefs
+        prefs = _stealth_prefs()
+        assert prefs["xpinstall.signatures.required"] is False
