@@ -137,7 +137,12 @@ async def browser_navigate(
             "description": (
                 "Optional ref id (e.g. 'e7') from a previous "
                 "browser_get_elements call. When set, the snapshot is "
-                "rooted at that element's subtree."
+                "rooted at that element's subtree. Note: refs returned "
+                "from a scoped snapshot resolve against the whole page, "
+                "not the subtree — if a modal or other overlay is open, "
+                "duplicate role+name elements behind it could match. "
+                "When in doubt, take a non-scoped browser_get_elements "
+                "before clicking refs from a scoped result."
             ),
         },
     },
