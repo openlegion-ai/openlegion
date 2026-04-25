@@ -16,6 +16,7 @@ import subprocess
 import sys
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI
@@ -116,6 +117,26 @@ def _start_unclutter() -> subprocess.Popen | None:
         return None
 
 
+def _cleanup_orphan_downloads() -> None:
+    """Blanket-delete the download staging dir on startup to clear crashed-tab orphans.
+
+    Idempotent and non-fatal; logs but never raises.
+    """
+    dl_dir = Path(os.environ.get("BROWSER_DOWNLOAD_DIR", "/tmp/downloads"))
+    if not dl_dir.is_dir():
+        return
+    removed = 0
+    for entry in dl_dir.iterdir():
+        try:
+            if entry.is_file() or entry.is_symlink():
+                entry.unlink(missing_ok=True)
+                removed += 1
+        except OSError as e:
+            logger.warning("Could not remove orphan download %s: %s", entry, e)
+    if removed:
+        logger.info("Cleared %d orphan download(s) from %s", removed, dl_dir)
+
+
 def _start_openbox() -> subprocess.Popen:
     """Start Openbox window manager on the KasmVNC display."""
     proc = subprocess.Popen(
@@ -143,6 +164,7 @@ def main() -> None:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        _cleanup_orphan_downloads()
         await manager.start_cleanup_loop()
         logger.info("Browser service ready (max=%d, idle_timeout=%dm)", _MAX_BROWSERS, _IDLE_TIMEOUT)
         yield

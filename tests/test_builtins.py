@@ -2564,6 +2564,72 @@ class TestBrowserOpenTabHttpClient:
         assert "error" in result
 
 
+class TestBrowserDownloadHttpClient:
+    """browser_download skill calls mesh_client.browser_download (Phase 5 §8.2)."""
+
+    @pytest.mark.asyncio
+    async def test_download_calls_mesh_with_args(self):
+        from src.agent.builtins.browser_tool import browser_download
+
+        mc = AsyncMock()
+        mc.browser_download = AsyncMock(return_value={
+            "success": True,
+            "data": {
+                "artifact_name": "report.pdf",
+                "size_bytes": 12345,
+                "mime_type": "application/pdf",
+            },
+        })
+
+        result = await browser_download(ref="e1", timeout_ms=15000, mesh_client=mc)
+
+        mc.browser_download.assert_awaited_once_with(ref="e1", timeout_ms=15000)
+        assert result["success"] is True
+        assert result["data"]["artifact_name"] == "report.pdf"
+        assert result["data"]["size_bytes"] == 12345
+
+    @pytest.mark.asyncio
+    async def test_download_no_mesh_client(self):
+        from src.agent.builtins.browser_tool import browser_download
+
+        result = await browser_download(ref="e1", mesh_client=None)
+        assert "error" in result
+        assert "mesh" in result["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_download_missing_ref(self):
+        from src.agent.builtins.browser_tool import browser_download
+
+        mc = AsyncMock()
+        result = await browser_download(ref="", mesh_client=mc)
+        assert "error" in result
+        mc.browser_download.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_download_passes_through_error_envelope(self):
+        from src.agent.builtins.browser_tool import browser_download
+
+        mc = AsyncMock()
+        mc.browser_download = AsyncMock(return_value={
+            "success": False,
+            "error": {"code": "forbidden", "message": "Downloads disabled by operator"},
+        })
+
+        result = await browser_download(ref="e1", mesh_client=mc)
+        assert result["success"] is False
+        assert result["error"]["code"] == "forbidden"
+
+    @pytest.mark.asyncio
+    async def test_download_service_error_returns_error_dict(self):
+        from src.agent.builtins.browser_tool import browser_download
+
+        mc = AsyncMock()
+        mc.browser_download = AsyncMock(side_effect=Exception("connection refused"))
+
+        result = await browser_download(ref="e1", mesh_client=mc)
+        assert "error" in result
+
+
 class TestBrowserScrollHttpClient:
     """browser_scroll sends scroll command through mesh_client."""
 

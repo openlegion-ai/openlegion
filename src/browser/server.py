@@ -11,10 +11,12 @@ import contextlib
 import hmac
 import json
 import os
+import re
 import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import StreamingResponse
 
 from src.browser.service import BrowserManager
 from src.shared.trace import TRACE_HEADER, current_trace_id
@@ -452,10 +454,10 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
     async def download_trigger(agent_id: str, request: Request):
         """Click a ref that triggers a download and return a local path.
 
-        Response ``data`` contains ``{path, size_bytes, suggested_filename,
-        mime_type}``. The caller (mesh proxy) is expected to stream the
-        file from ``path`` to the agent's ``/artifacts/ingest`` endpoint
-        and then delete it from the browser container.
+        Response ``data`` contains ``{path, nonce, size_bytes,
+        suggested_filename, mime_type}``. The caller (mesh proxy) is expected
+        to fetch the file via ``/_download_stream?nonce=...`` and then call
+        ``/_download_cleanup`` to remove it from the browser container.
         """
         _verify_auth(request)
         body = await request.json()
@@ -464,9 +466,82 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
             raise HTTPException(400, "ref required")
         timeout_ms = int(body.get("timeout_ms", 30000))
         result = await manager.download(agent_id, ref, timeout_ms=timeout_ms)
-        # No action delay — downloads can be long-running and the client
-        # needs to act on the result immediately to free the tmp file.
         return result
+
+    _NONCE_RE = re.compile(r"^[a-f0-9]{12}$")
+
+    def _download_dir() -> Path:
+        return Path(os.environ.get("BROWSER_DOWNLOAD_DIR", "/tmp/downloads"))
+
+    def _resolve_download_path(nonce: str) -> Path | None:
+        if not _NONCE_RE.match(nonce):
+            raise HTTPException(400, "Invalid nonce")
+        dl_dir = _download_dir()
+        if not dl_dir.is_dir():
+            return None
+        for entry in dl_dir.iterdir():
+            if entry.is_file() and entry.name.startswith(f"{nonce}-"):
+                return entry
+        return None
+
+    @app.get("/browser/{agent_id}/_download_stream")
+    async def download_stream(agent_id: str, request: Request, nonce: str = ""):
+        """Stream a previously-saved download by its nonce.
+
+        Internal endpoint — only the mesh should hit this. The mesh
+        addresses files by nonce so the on-disk path stays a server-side
+        detail and clients can't request arbitrary paths.
+
+        Registers the nonce in ``_active_download_nonces`` BEFORE
+        resolving the on-disk path so the GC janitor running between
+        resolve() and stream-open can't reap the file mid-handoff.
+        """
+        _verify_auth(request)
+        if not nonce or not _NONCE_RE.match(nonce):
+            raise HTTPException(400, "Invalid nonce")
+
+        manager._active_download_nonces.add(nonce)
+        try:
+            path = _resolve_download_path(nonce)
+            if path is None:
+                manager._active_download_nonces.discard(nonce)
+                raise HTTPException(404, "Download not found")
+        except HTTPException:
+            raise
+        except Exception:
+            manager._active_download_nonces.discard(nonce)
+            raise
+
+        async def _iter():
+            try:
+                with path.open("rb") as fh:
+                    while True:
+                        chunk = fh.read(64 * 1024)
+                        if not chunk:
+                            break
+                        yield chunk
+            finally:
+                manager._active_download_nonces.discard(nonce)
+
+        return StreamingResponse(_iter(), media_type="application/octet-stream")
+
+    @app.post("/browser/{agent_id}/_download_cleanup")
+    async def download_cleanup(agent_id: str, request: Request):
+        """Delete a previously-saved download by its nonce."""
+        _verify_auth(request)
+        body = await request.json()
+        nonce = body.get("nonce", "")
+        if not _NONCE_RE.match(nonce):
+            raise HTTPException(400, "Invalid nonce")
+        deleted = 0
+        dl_dir = _download_dir()
+        if dl_dir.is_dir():
+            for entry in list(dl_dir.iterdir()):
+                if entry.is_file() and entry.name.startswith(f"{nonce}-"):
+                    with contextlib.suppress(FileNotFoundError, OSError):
+                        entry.unlink()
+                        deleted += 1
+        return {"deleted": deleted}
 
     @app.post("/browser/{agent_id}/press_key")
     async def press_key(agent_id: str, request: Request):
