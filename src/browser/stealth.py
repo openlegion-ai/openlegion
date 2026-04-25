@@ -152,12 +152,13 @@ def validate_referer(referer: str) -> str:
 
     Allowed shapes:
       * ``""`` — explicit no-referer, equivalent to a typed-URL arrival
+      * Whitespace-only strings — normalized to ``""``
       * ``http://...`` or ``https://...`` with a hostname
 
-    Rejected:
-      * Whitespace-only strings (would emit a malformed Referer header)
+    Rejected (raises ``ValueError``):
       * Pseudo-schemes (``javascript:``, ``data:``, ``file:``, ``about:``)
       * URLs without a hostname (``http:///path``)
+      * Non-string types
 
     The agent skill is LLM-callable, so a malformed value can reach
     here from untrusted-by-default agent output. Playwright doesn't
