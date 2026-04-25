@@ -425,6 +425,14 @@ def _build_js_a11y_tree() -> str:
         if (t) return tag + '[data-testid="' + t.replace(/"/g, '\\"') + '"]';
         return tag;
     }
+    // Walk-scoped cache for ``querySelectorAll`` results so a page with
+    // N shadow hosts at the same root no longer triggers O(N²) work
+    // (each emit ran a fresh ``scopeRoot.querySelectorAll(selector)``).
+    // Keyed by (scopeRoot, selector); both keys are alive only for the
+    // duration of one walker invocation. ``Map`` keyed on the live
+    // root reference is safe because the walker runs synchronously
+    // and the scopeRoot is held by caller frames during the walk.
+    const occurrenceCache = new Map();
     function siblingOccurrence(host, selector, scopeRoot) {
         // Per-hop scope mirrors the stage-1 resolver: first hop uses
         // ``document``, subsequent hops use the parent ``shadowRoot``
@@ -433,11 +441,18 @@ def _build_js_a11y_tree() -> str:
         // Walker passes ``document`` for the top-level call and the
         // parent shadowRoot when descending into a nested host.
         const root = scopeRoot || document;
-        const candidates = root.querySelectorAll(selector);
-        for (let i = 0; i < candidates.length; i++) {
-            if (candidates[i] === host) return i;
+        let scopeMap = occurrenceCache.get(root);
+        if (!scopeMap) {
+            scopeMap = new Map();
+            occurrenceCache.set(root, scopeMap);
         }
-        return 0;
+        let candidates = scopeMap.get(selector);
+        if (!candidates) {
+            candidates = Array.from(root.querySelectorAll(selector));
+            scopeMap.set(selector, candidates);
+        }
+        const idx = candidates.indexOf(host);
+        return idx === -1 ? 0 : idx;
     }
 __NAME_HELPERS__
     // Walker name/role wrappers — single source of truth shared with
@@ -563,7 +578,22 @@ _JS_RESOLVER_ERROR_KEY = "__OL_RESOLVER_ERROR__"
 _JS_SHADOW_RESOLVE_STAGE1 = r"""(args) => {
     const ERR_KEY = "__OL_RESOLVER_ERROR__";
     const path = JSON.parse(args.path);
-    let root = document;
+    // ``scope_root`` (optional): when the ref was captured during a
+    // modal-scoped snapshot, ``_locator_from_ref`` patches a modal
+    // selector onto the handle. Stage-1 must start its walk at the
+    // modal element instead of ``document`` so a same-selector shadow
+    // host living *outside* the dialog cannot match. Without this,
+    // shadow refs effectively bypass modal scoping, and clicks could
+    // land on a duplicate-named element behind the overlay.
+    let root;
+    if (args.scope_root) {
+        root = document.querySelector(args.scope_root);
+        if (!root) {
+            const e = {}; e[ERR_KEY] = "scope_root_missing"; return e;
+        }
+    } else {
+        root = document;
+    }
     for (const hop of path) {
         const candidates = root.querySelectorAll(hop.selector);
         const host = candidates[hop.occurrence];
@@ -647,19 +677,26 @@ def _build_js_shadow_resolve_stage2() -> str:
         submit:'button',reset:'button',button:'button'
     };
 __NAME_HELPERS__
+    // Normalize the snapshot-time name so the empty case is unambiguous:
+    // the walker buckets unnamed siblings as ``(role, "", path)``. Stage 2
+    // must match elements whose live accessible name is *also* empty when
+    // the ref carries an empty name — otherwise unnamed elements collapse
+    // with same-role *named* siblings (the previous ``if (!name) return
+    // true;`` admitted all same-role candidates, returning candidates[0]
+    // and landing the click on the wrong element).
+    const expected = (name || '').trim();
     let candidates;
     try {
         candidates = Array.from(root.querySelectorAll('*')).filter(el => {
             const r = implicitRoleFor(el);
             if (r !== role) return false;
-            if (!name) return true;
             // Match using the SAME accessible-name extraction the walker
             // ran when emitting the snapshot. Anything else (e.g. only
             // ``aria-label || textContent``) misses elements named via
             // ``placeholder``, ``alt``, ``aria-labelledby``, ``label[for=]``,
             // or ``title`` — producing spurious RefStale.
             const n = (accessibleName(el, role) || '').trim();
-            return n === name;
+            return n === expected;
         });
     } catch (_e) {
         // ``querySelectorAll`` on a detached ShadowRoot can throw. Treat
@@ -1007,7 +1044,11 @@ class CamoufoxInstance:
         self.dialog_detected: bool = False  # True when a modal was found (even if scoping failed)
         self.lock = asyncio.Lock()  # serialize page operations per instance
         self.x11_wid: int | None = None  # X11 window ID for targeted focus
-        self._js_snapshot_mode: bool = False  # True after page.accessibility permanently fails
+        # P0.3: vestigial — the snapshot tree builder always uses the JS
+        # walker now. Still consulted by ``navigate()`` for body-text
+        # extraction, where the native ``page.accessibility.snapshot()``
+        # is acceptable (no shadow descent needed for a text summary).
+        self._js_snapshot_mode: bool = False
         self._user_control: bool = False  # True when user has VNC control
         # Per-Page stable UUID maps. Page objects survive navigation within a
         # tab; UUIDs are stable for the life of the Page. Refs carry a
@@ -2163,49 +2204,33 @@ class BrowserManager:
                 return {"success": False, "error": str(e)}
 
     async def _build_a11y_tree(self, inst: CamoufoxInstance, root=None):
-        """Get accessibility tree, falling back to JS-based DOM walk.
+        """Get accessibility tree via the JS DOM walker.
 
-        Playwright's ``page.accessibility.snapshot()`` uses Firefox's native
-        ``nsIAccessibilityService`` — a browser-internal API with zero
-        JavaScript execution in the page context.  This makes it invisible
-        to anti-bot systems that hook DOM APIs via Proxy.
+        Phase 5 §8.3 collapsed the prior "native first / JS fallback"
+        dispatch into the JS walker as the sole path. Firefox's native
+        ``nsIAccessibilityService`` (exposed through Playwright's
+        ``page.accessibility.snapshot()``) is faster and more invisible
+        to anti-bot DOM proxies, but it does NOT pierce open shadow
+        boundaries — so a default Camoufox path silently lost shadow
+        content. Phase 5 (shadow + iframe support) made the JS walker
+        the canonical implementation, and the native path was retained
+        only as a perf optimisation; with shadow descent baked into the
+        JS walker, dual paths produced inconsistent snapshots depending
+        on which path won the race.
 
-        If the API is absent (``AttributeError``), permanently switches to
-        a JS-based tree builder per-instance.  Transient failures get one
-        retry before falling through to JS.
+        Always runs the JS walker now, regardless of the (now-vestigial)
+        ``inst._js_snapshot_mode`` flag. The flag remains in
+        :class:`CamoufoxInstance` for the navigate-mode body extraction
+        path that still consults ``page.accessibility.snapshot()`` for a
+        cheap text-only summary; that path is independent of the
+        snapshot tree builder.
         """
-        if not inst._js_snapshot_mode:
-            for attempt in range(2):
-                try:
-                    if root:
-                        return await inst.page.accessibility.snapshot(root=root)
-                    return await inst.page.accessibility.snapshot()
-                except AttributeError:
-                    logger.warning(
-                        "page.accessibility not available for %s — "
-                        "switching to JS-based accessibility tree",
-                        inst.agent_id,
-                    )
-                    inst._js_snapshot_mode = True
-                    break
-                except Exception:
-                    if attempt == 0:
-                        await asyncio.sleep(0.15)
-                        continue
-                    logger.warning(
-                        "page.accessibility.snapshot() failed after retry "
-                        "for %s — falling back to JS tree",
-                        inst.agent_id,
-                    )
-                    break
-
-        # JS fallback: walk DOM to build equivalent tree
         try:
             if root:
                 return await root.evaluate(_JS_A11Y_TREE)
             return await inst.page.evaluate(_JS_A11Y_TREE)
         except Exception as e:
-            logger.debug("JS a11y tree fallback failed: %s", e)
+            logger.debug("JS a11y tree builder failed: %s", e)
             return None
 
     async def snapshot(
@@ -2931,50 +2956,105 @@ class BrowserManager:
             }
             for hop in handle.shadow_path
         ]
+        # Defensive: shadow + iframe combination is not implemented yet
+        # (Phase 5 PR3). Threading a Frame through Stage 1 here would
+        # require cross-PR coordination; explicit error makes the seam
+        # loud so PR3's merge has to address it rather than letting a
+        # frame_id'd shadow ref silently resolve against the main frame.
+        if handle.frame_id is not None:
+            raise NotImplementedError(
+                "Shadow + iframe combination not yet supported",
+            )
+        # Pass scope_root through so Stage 1 starts its walk inside the
+        # modal subtree when a ref was captured under modal scoping.
+        # Without this, a same-selector shadow host living outside the
+        # dialog could resolve and the click would land on the wrong
+        # element entirely.
         stage1 = await page.evaluate_handle(
             _JS_SHADOW_RESOLVE_STAGE1,
-            {"path": json.dumps(path_payload)},
-        )
-        # Read the stage-1 error sentinel by exact key. Page-controlled
-        # ``error`` expandos cannot match because we look up
-        # ``__OL_RESOLVER_ERROR__`` specifically.
-        try:
-            err = await stage1.evaluate(
-                "(v) => (v && typeof v === 'object' && '__OL_RESOLVER_ERROR__' in v)"
-                " ? v.__OL_RESOLVER_ERROR__ : null",
-            )
-        except Exception:
-            err = None
-        if err == "stale_host_missing":
-            raise RefStale("shadow host missing", ref=ref)
-        if err == "stale_discriminator_mismatch":
-            raise RefStale("shadow host discriminator changed", ref=ref)
-        stage2 = await stage1.evaluate_handle(
-            _JS_SHADOW_RESOLVE_STAGE2,
             {
-                "role": handle.role,
-                "name": handle.name,
-                "occurrence": handle.occurrence,
+                "path": json.dumps(path_payload),
+                "scope_root": handle.scope_root,
             },
         )
-        # Distinguish a detached shadow root (transient TOCTOU between
-        # stage 1 and stage 2) from a genuine element-not-found. The
-        # detached case surfaces as the ``shadow_root_detached`` sentinel
-        # so the caller emits a transient ``ref_stale`` rather than a
-        # potentially-misleading ``not_found``.
+        # Stage 1 is a JSHandle that we OWN — Playwright does not GC
+        # JSHandles automatically (they pin the JS object on the page
+        # side). Wrap the entire stage-2 invocation in a try/finally so
+        # discriminator-mismatch / detach / RefStale paths don't leak
+        # the handle. Stage 2 is returned to the caller as an
+        # ElementHandle on success; ownership transfers there. On any
+        # failure path we dispose stage2 ourselves before raising so
+        # neither handle outlives this method.
+        stage2 = None
         try:
-            stage2_err = await stage2.evaluate(
-                "(v) => (v && typeof v === 'object' && '__OL_RESOLVER_ERROR__' in v)"
-                " ? v.__OL_RESOLVER_ERROR__ : null",
+            # Read the stage-1 error sentinel by exact key. Page-
+            # controlled ``error`` expandos cannot match because we look
+            # up ``__OL_RESOLVER_ERROR__`` specifically.
+            try:
+                err = await stage1.evaluate(
+                    "(v) => (v && typeof v === 'object' && '__OL_RESOLVER_ERROR__' in v)"
+                    " ? v.__OL_RESOLVER_ERROR__ : null",
+                )
+            except Exception:
+                err = None
+            if err == "stale_host_missing":
+                raise RefStale("shadow host missing", ref=ref)
+            if err == "stale_discriminator_mismatch":
+                raise RefStale("shadow host discriminator changed", ref=ref)
+            if err == "scope_root_missing":
+                # Modal closed between snapshot and resolve — same RefStale
+                # contract as a missing host. Agent re-snapshots.
+                raise RefStale("modal scope_root missing", ref=ref)
+            stage2 = await stage1.evaluate_handle(
+                _JS_SHADOW_RESOLVE_STAGE2,
+                {
+                    "role": handle.role,
+                    "name": handle.name,
+                    "occurrence": handle.occurrence,
+                },
             )
+            # Distinguish a detached shadow root (transient TOCTOU between
+            # stage 1 and stage 2) from a genuine element-not-found. The
+            # detached case surfaces as the ``shadow_root_detached``
+            # sentinel so the caller emits a transient ``ref_stale``
+            # rather than a potentially-misleading ``not_found``.
+            try:
+                stage2_err = await stage2.evaluate(
+                    "(v) => (v && typeof v === 'object' && '__OL_RESOLVER_ERROR__' in v)"
+                    " ? v.__OL_RESOLVER_ERROR__ : null",
+                )
+            except Exception:
+                stage2_err = None
+            if stage2_err == "shadow_root_detached":
+                raise RefStale("shadow root detached during resolve", ref=ref)
+            element = stage2.as_element()
+            if element is None:
+                raise RefStale(
+                    "shadow element not found at occurrence", ref=ref,
+                )
+            # Success — ownership of the underlying handle transfers to
+            # the caller via ``element``. Detach our local ``stage2``
+            # reference so the finally block below does not dispose the
+            # handle out from under the returned ElementHandle.
+            # (``as_element`` returns the same underlying handle, so
+            # disposing ``stage2`` would invalidate ``element`` too.)
+            stage2 = None
+            return element
         except Exception:
-            stage2_err = None
-        if stage2_err == "shadow_root_detached":
-            raise RefStale("shadow root detached during resolve", ref=ref)
-        element = stage2.as_element()
-        if element is None:
-            raise RefStale("shadow element not found at occurrence", ref=ref)
-        return element
+            # Any error path — dispose stage2 if we got that far. The
+            # outer finally takes care of stage1.
+            if stage2 is not None:
+                try:
+                    await stage2.dispose()
+                except Exception:
+                    pass
+                stage2 = None
+            raise
+        finally:
+            try:
+                await stage1.dispose()
+            except Exception:
+                pass
 
     async def _human_click(self, page, locator, *, force: bool = False,
                            timeout: int = _CLICK_TIMEOUT_MS) -> None:
