@@ -999,6 +999,39 @@ class TestScreenshot:
         assert "Unsupported" in result["error"]
 
     @pytest.mark.asyncio
+    async def test_screenshot_format_none_uses_operator_default(self, monkeypatch):
+        """``format=None`` (JSON null) consults the operator flag,
+        defaulting to ``webp`` when unset."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        # Force operator default to PNG via env override.
+        monkeypatch.setenv("BROWSER_SCREENSHOT_FORMAT", "png")
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        png = _make_png_bytes(400, 300)
+        mock_page = AsyncMock()
+        mock_page.screenshot = AsyncMock(return_value=png)
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.screenshot("a1", format=None)
+        assert result["success"] is True
+        assert result["data"]["format"] == "png"
+
+    @pytest.mark.asyncio
+    async def test_screenshot_format_whitespace_normalized(self):
+        """``format=' WEBP '`` strips + lowercases instead of rejecting."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        png = _make_png_bytes(400, 300)
+        mock_page = AsyncMock()
+        mock_page.screenshot = AsyncMock(return_value=png)
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.screenshot("a1", format=" WEBP ")
+        assert result["success"] is True
+        assert result["data"]["format"] == "webp"
+
+    @pytest.mark.asyncio
     async def test_screenshot_quality_clamped(self):
         """Out-of-range quality clamps silently rather than raising."""
         from src.browser.service import BrowserManager, CamoufoxInstance

@@ -2766,8 +2766,17 @@ class BrowserManager:
         inst = await self.get_or_start(agent_id)
         inst.touch()
         # Validate inputs early — reject unknown formats with a clear
-        # error rather than silently falling through to PNG.
-        fmt = (format or "webp").lower()
+        # error rather than silently falling through to PNG. Operator
+        # default comes from ``BROWSER_SCREENSHOT_FORMAT`` (per §2.1) so
+        # an operator can globally force PNG without changing the caller.
+        # ``.strip()`` guards against trailing whitespace from JSON UI
+        # defaults; ``.lower()`` normalizes case.
+        from src.browser.flags import get_str
+        if not format:
+            format = get_str(
+                "BROWSER_SCREENSHOT_FORMAT", "webp", agent_id=agent_id,
+            )
+        fmt = format.strip().lower()
         if fmt not in ("webp", "png"):
             return {"success": False, "error": f"Unsupported screenshot format: {format!r}"}
         try:
@@ -2790,7 +2799,12 @@ class BrowserManager:
             except Exception as e:
                 return {"success": False, "error": str(e)}
 
-        encoded, used_format = _encode_screenshot(
+        # Pillow encode is synchronous and ~10–20 ms on a 1080p frame —
+        # offload to a thread so we don't block the event loop. Pillow
+        # releases the GIL during its C-level encode steps, so this
+        # actually parallelizes across concurrent agent screenshots.
+        encoded, used_format = await asyncio.to_thread(
+            _encode_screenshot,
             png_bytes, fmt, quality, scale_f, agent_id=agent_id,
         )
         b64 = base64.b64encode(encoded).decode()
