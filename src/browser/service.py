@@ -2163,9 +2163,19 @@ class BrowserManager:
                         # plugs into this same hash path without breaking
                         # already-seeded handles.
                         from src.browser.ref_handle import compute_element_key
+                        # frame_id / shadow_path are folded in even though
+                        # they're constant defaults today (no iframe walker
+                        # until §8.4, no shadow walker until §8.3). Keeping
+                        # the kwargs explicit at this site means the §4.2
+                        # promise — "same role+name+landmark in different
+                        # frames / shadow roots get DIFFERENT keys" —
+                        # holds the moment the walkers start populating
+                        # those fields. No code change needed there.
                         elem_key = compute_element_key(
                             role=role, name=name, landmark=landmark,
                             sibling_index=occ,
+                            frame_id=None,
+                            shadow_path=(),
                         )
                         # scope_root is finalized after the modal-scoping
                         # branch below. For now record the unscoped handle;
@@ -2182,7 +2192,19 @@ class BrowserManager:
                         )
                         # Diff-mode summary — keyed by element_key so the
                         # next snapshot can match across re-renders that
-                        # change ref ids.
+                        # change ref ids. A duplicate key inside one
+                        # snapshot drops the earlier entry from the diff
+                        # baseline and reports it as ``removed`` next time
+                        # — log so the operator can investigate what's
+                        # producing identical-looking siblings.
+                        if elem_key in ref_summary:
+                            logger.debug(
+                                "element_key collision in snapshot for %s: "
+                                "key=%s overwritten by ref %s (was %s); "
+                                "diff baseline will lose the earlier one",
+                                agent_id, elem_key, ref_id,
+                                ref_summary[elem_key].get("ref_id"),
+                            )
                         ref_summary[elem_key] = {
                             "ref_id": ref_id,
                             "role": role,
