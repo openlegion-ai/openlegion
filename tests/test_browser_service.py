@@ -2157,6 +2157,123 @@ class TestDiffSnapshot:
         assert "snapshot" in result["data"]
         assert "refs" in result["data"]
 
+    @pytest.mark.asyncio
+    async def test_tab_changed_to_baselined_tab(self):
+        """Switching to a previously-baselined tab → ``tab_changed``."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        # Tab A: baseline at https://a.com.
+        page_a = AsyncMock()
+        page_a.url = "https://a.com"
+        page_a.accessibility = MagicMock()
+        page_a.accessibility.snapshot = AsyncMock(return_value={
+            "role": "WebArea", "name": "",
+            "children": [{"role": "button", "name": "A"}],
+        })
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), page_a)
+        mgr._instances["a1"] = inst
+        await mgr.snapshot("a1")
+        page_a_id = inst.last_active_page_id
+
+        # Tab B: separate Page object → different page_id.
+        page_b = AsyncMock()
+        page_b.url = "https://b.com"
+        page_b.accessibility = MagicMock()
+        page_b.accessibility.snapshot = AsyncMock(return_value={
+            "role": "WebArea", "name": "",
+            "children": [{"role": "button", "name": "B"}],
+        })
+        # Baseline tab B too.
+        inst.page = page_b
+        inst._register_page(page_b)
+        await mgr.snapshot("a1")
+
+        # Switch BACK to tab A and ask for a diff.
+        inst.page = page_a
+        result = await mgr.snapshot("a1", diff_from_last=True)
+        assert result["data"]["scope"] == "tab_changed"
+        # tab_changed returns a full snapshot, not a diff payload.
+        assert "snapshot" in result["data"]
+        assert "refs" in result["data"]
+
+    @pytest.mark.asyncio
+    async def test_tab_changed_to_unbaselined_tab(self):
+        """Switching to a never-snapshotted tab still reports
+        tab_changed when last_active_page_id differs (regression for
+        the previous-vs-current ordering bug)."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        page_a = AsyncMock()
+        page_a.url = "https://a.com"
+        page_a.accessibility = MagicMock()
+        page_a.accessibility.snapshot = AsyncMock(return_value={
+            "role": "WebArea", "name": "",
+            "children": [{"role": "button", "name": "A"}],
+        })
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), page_a)
+        mgr._instances["a1"] = inst
+        # Baseline tab A.
+        await mgr.snapshot("a1")
+
+        # Switch to tab B (never baselined) and request a diff.
+        page_b = AsyncMock()
+        page_b.url = "https://b.com"
+        page_b.accessibility = MagicMock()
+        page_b.accessibility.snapshot = AsyncMock(return_value={
+            "role": "WebArea", "name": "",
+            "children": [{"role": "button", "name": "B"}],
+        })
+        inst.page = page_b
+        inst._register_page(page_b)
+        result = await mgr.snapshot("a1", diff_from_last=True)
+        # Pre-fix: returned "navigation" because previous-is-None check
+        # ran before tab-change check.
+        assert result["data"]["scope"] == "tab_changed"
+
+    @pytest.mark.asyncio
+    async def test_value_field_change_in_diff(self):
+        """``value`` mutation (e.g. user typed into a textbox) shows up
+        as a ``changed`` entry."""
+        tree_v1 = {
+            "role": "WebArea", "name": "",
+            "children": [{"role": "textbox", "name": "Email", "value": ""}],
+        }
+        tree_v2 = {
+            "role": "WebArea", "name": "",
+            "children": [{"role": "textbox", "name": "Email",
+                           "value": "alice@example.com"}],
+        }
+        mgr, _, mock_page = await self._setup(tree_v1)
+        await mgr.snapshot("a1")
+        mock_page.accessibility.snapshot = AsyncMock(return_value=tree_v2)
+        result = await mgr.snapshot("a1", diff_from_last=True)
+        data = result["data"]
+        assert len(data["changed"]) == 1
+        assert data["changed"][0]["value"] == {
+            "from": "", "to": "alice@example.com",
+        }
+
+    @pytest.mark.asyncio
+    async def test_checked_field_change_in_diff(self):
+        """``checked`` flip on a checkbox shows up as ``changed``."""
+        tree_v1 = {
+            "role": "WebArea", "name": "",
+            "children": [{"role": "checkbox", "name": "Subscribe",
+                           "checked": False}],
+        }
+        tree_v2 = {
+            "role": "WebArea", "name": "",
+            "children": [{"role": "checkbox", "name": "Subscribe",
+                           "checked": True}],
+        }
+        mgr, _, mock_page = await self._setup(tree_v1)
+        await mgr.snapshot("a1")
+        mock_page.accessibility.snapshot = AsyncMock(return_value=tree_v2)
+        result = await mgr.snapshot("a1", diff_from_last=True)
+        data = result["data"]
+        assert len(data["changed"]) == 1
+        assert data["changed"][0]["checked"] == {"from": False, "to": True}
+
     def test_compute_diff_descriptors_are_deterministic(self):
         from src.browser.service import _compute_snapshot_diff
         prev = {

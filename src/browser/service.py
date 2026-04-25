@@ -596,13 +596,20 @@ def _classify_diff_scope(
     by the caller so the agent still gets useful output on the very
     first ``diff_from_last`` call.
     """
-    if previous is None:
-        return "navigation"
+    # Tab-change detection runs FIRST — it's based on ``last_active_page_id``,
+    # which the caller maintains independently of per-page baselines. A
+    # switch to a never-baselined tab still reports tab_changed (the
+    # agent's mental model is "I switched tabs", not "I navigated"); the
+    # response is a full snapshot either way, but the scope label drives
+    # operator analytics and matches §7.3 spec wording.
     if (
         inst.last_active_page_id is not None
         and inst.last_active_page_id != snapshot_page_id
     ):
         return "tab_changed"
+    # No baseline for the active page yet — first call on this tab.
+    if previous is None:
+        return "navigation"
     if previous.get("url") != current_url:
         return "navigation"
     prev_dialog = bool(previous.get("dialog_active", False))
