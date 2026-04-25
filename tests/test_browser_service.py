@@ -1534,6 +1534,69 @@ class TestSnapshotFormatV2:
         out = _format_snapshot_v2([], entries)
         assert '- [e0] checkbox "Subscribe" [checked=True]' in out
 
+    @pytest.mark.asyncio
+    async def test_v2_modal_retry_does_not_leak_phantom_refs(self, v2_flag):
+        """Regression: when modal scoping fails on first try, the discarded
+        ``_walk`` pass must not bleed entries into v2 output. Pre-fix,
+        ``lines.clear()`` reset v1 output but ``entries`` was never reset,
+        producing duplicated refs in v2 that didn't match ``inst.refs``.
+        """
+        from src.browser.service import BrowserManager, CamoufoxInstance
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        # Modal is detected (visible) but scoping returns a tree with
+        # only context (heading) — no actionable refs — on first pass.
+        # Second pass after the retry yields an actionable button.
+        first_pass_tree = {
+            "role": "WebArea", "name": "",
+            "children": [{"role": "heading", "name": "Loading...",
+                          "landmark": "dialog: Compose"}],
+        }
+        second_pass_tree = {
+            "role": "WebArea", "name": "",
+            "children": [{"role": "button", "name": "Post",
+                          "landmark": "dialog: Compose"}],
+        }
+
+        # Modal selector returns a single visible modal.
+        modal_el = AsyncMock()
+        modal_el.is_visible = AsyncMock(return_value=True)
+        modal_el.bounding_box = AsyncMock(
+            return_value={"x": 0, "y": 0, "width": 200, "height": 200},
+        )
+        modal_el.evaluate = AsyncMock(return_value=False)
+        mock_page = AsyncMock()
+        mock_page.viewport_size = {"width": 1920, "height": 1080}
+        mock_page.query_selector_all = AsyncMock(return_value=[modal_el])
+        mock_page.accessibility = MagicMock()
+        # First call (page-level snapshot) → first_pass.
+        # Calls with root=modal_el → first_pass on first attempt,
+        # second_pass after retry.
+        accessibility_calls = [
+            first_pass_tree,   # initial page-level snapshot for whole-tree fallback
+            first_pass_tree,   # first scoped snapshot inside modal
+            second_pass_tree,  # post-retry scoped snapshot
+        ]
+        mock_page.accessibility.snapshot = AsyncMock(
+            side_effect=accessibility_calls + [second_pass_tree] * 5,
+        )
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        with patch("src.browser.service.asyncio.sleep"):
+            result = await mgr.snapshot("a1")
+
+        snap = result["data"]["snapshot"]
+        # Every ref id appearing in the rendered v2 snapshot must also
+        # exist in inst.refs (the resolution table). The pre-fix bug
+        # produced refs that were rendered but not present in inst.refs.
+        import re
+        rendered_refs = set(re.findall(r"\[e\d+\]", snap))
+        actual_refs = {f"[{rid}]" for rid in inst.refs}
+        assert rendered_refs.issubset(actual_refs), (
+            f"phantom refs in v2 output: {rendered_refs - actual_refs}"
+        )
+
 
 class TestTypeTextWithRef:
     """Tests for type_text using ref-based element resolution."""

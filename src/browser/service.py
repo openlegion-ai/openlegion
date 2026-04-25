@@ -1865,6 +1865,13 @@ class BrowserManager:
                     await asyncio.sleep(wait)
                     refs.clear()
                     lines.clear()
+                    # §7.2: ``entries`` is the parallel structure v2 renders
+                    # from. Forgetting to reset it here would leak entries
+                    # from the discarded scoping pass into the v2 output —
+                    # invisible in v1 (which renders ``lines`` only) but
+                    # produces phantom refs that don't match ``inst.refs``
+                    # under v2.
+                    entries.clear()
                     ref_counter[0] = 0
                     occurrence_counts.clear()
                     lines.append("** Modal dialog is open — only dialog elements are shown **")
@@ -1899,6 +1906,10 @@ class BrowserManager:
                     # scoped click that can't find the element will timeout
                     # rather than hit the wrong target.
                     lines.clear()
+                    # Same reset rationale as the retry branch above —
+                    # discard fallback's ``entries`` so v2 rendering
+                    # only sees the post-fallback _walk(tree) output.
+                    entries.clear()
                     lines.append(
                         "** A modal dialog is open but its elements could "
                         "not be isolated — elements with a (dialog: ...) "
