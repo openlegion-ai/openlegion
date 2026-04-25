@@ -81,7 +81,8 @@ class TestUploadFile:
         fake_locator = MagicMock()
         fake_locator.click = AsyncMock()
         monkeypatch.setattr(
-            mgr, "_locator_from_ref", lambda _inst, _ref: fake_locator,
+            mgr, "_locator_from_ref",
+            AsyncMock(return_value=fake_locator),
         )
         monkeypatch.setattr(mgr, "get_or_start", AsyncMock(return_value=inst))
         # Mock action_delay's sleep.
@@ -113,7 +114,8 @@ class TestUploadFile:
         fake_locator.click = AsyncMock()
         inst.page.expect_file_chooser = MagicMock()
         monkeypatch.setattr(
-            mgr, "_locator_from_ref", lambda _i, _r: fake_locator,
+            mgr, "_locator_from_ref",
+            AsyncMock(return_value=fake_locator),
         )
         monkeypatch.setattr(mgr, "get_or_start", AsyncMock(return_value=inst))
 
@@ -130,7 +132,9 @@ class TestUploadFile:
     async def test_ref_not_found_returns_error(self, tmp_path, monkeypatch):
         mgr = BrowserManager(profiles_dir=str(tmp_path / "p"))
         inst = _make_instance()
-        monkeypatch.setattr(mgr, "_locator_from_ref", lambda _i, _r: None)
+        monkeypatch.setattr(
+            mgr, "_locator_from_ref", AsyncMock(return_value=None),
+        )
         monkeypatch.setattr(mgr, "get_or_start", AsyncMock(return_value=inst))
         # Use a real path so the path-validation guard (added for upload
         # correctness) passes and we actually exercise the ref-not-found
@@ -181,7 +185,9 @@ class TestDownload:
         inst.page.expect_download = MagicMock(
             return_value=_async_ctx(_dl_value()),
         )
-        monkeypatch.setattr(mgr, "_locator_from_ref", lambda _i, _r: fake_locator)
+        monkeypatch.setattr(
+            mgr, "_locator_from_ref", AsyncMock(return_value=fake_locator),
+        )
         monkeypatch.setattr(mgr, "get_or_start", AsyncMock(return_value=inst))
 
         result = await mgr.download(
@@ -220,7 +226,9 @@ class TestDownload:
         inst.page.expect_download = MagicMock(
             return_value=_async_ctx(_dl_value()),
         )
-        monkeypatch.setattr(mgr, "_locator_from_ref", lambda _i, _r: fake_locator)
+        monkeypatch.setattr(
+            mgr, "_locator_from_ref", AsyncMock(return_value=fake_locator),
+        )
         monkeypatch.setattr(mgr, "get_or_start", AsyncMock(return_value=inst))
 
         result = await mgr.download(

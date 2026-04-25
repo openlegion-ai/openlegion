@@ -308,7 +308,7 @@ class TestBrowserManagerRefResolution:
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         inst.seed_refs_legacy({"e0": {"role": "button", "name": "Submit", "index": 0}})
 
-        locator = mgr._locator_from_ref(inst, "e0")
+        locator = await mgr._locator_from_ref(inst, "e0")
         mock_page.get_by_role.assert_called_once_with("button", name="Submit", exact=True)
         # .nth(0) is called to target the specific occurrence
         mock_page.get_by_role.return_value.nth.assert_called_once_with(0)
@@ -326,7 +326,7 @@ class TestBrowserManagerRefResolution:
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         inst.seed_refs_legacy({"e0": {"role": "textbox", "name": "", "index": 0}})
 
-        mgr._locator_from_ref(inst, "e0")
+        await mgr._locator_from_ref(inst, "e0")
         mock_page.get_by_role.assert_called_once_with("textbox")
         mock_locator.nth.assert_called_once_with(0)
 
@@ -347,7 +347,7 @@ class TestBrowserManagerRefResolution:
             "e1": {"role": "textbox", "name": "Post text", "index": 1},
         })
 
-        mgr._locator_from_ref(inst, "e1")
+        await mgr._locator_from_ref(inst, "e1")
         mock_locator.nth.assert_called_once_with(1)
 
     @pytest.mark.asyncio
@@ -358,7 +358,7 @@ class TestBrowserManagerRefResolution:
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), MagicMock())
         inst.refs = {}
 
-        assert mgr._locator_from_ref(inst, "e99") is None
+        assert await mgr._locator_from_ref(inst, "e99") is None
 
 
 
@@ -1829,7 +1829,8 @@ class TestSnapshotFromRef:
         mgr._instances["a1"] = inst
 
         with patch.object(
-            BrowserManager, "_locator_from_ref", return_value=fake_locator,
+            BrowserManager, "_locator_from_ref",
+            new_callable=AsyncMock, return_value=fake_locator,
         ):
             result = await mgr.snapshot("a1", from_ref="e0")
 
@@ -1868,7 +1869,8 @@ class TestSnapshotFromRef:
         fake_locator = AsyncMock()
         fake_locator.element_handle = AsyncMock(return_value=MagicMock())
         with patch.object(
-            BrowserManager, "_locator_from_ref", return_value=fake_locator,
+            BrowserManager, "_locator_from_ref",
+            new_callable=AsyncMock, return_value=fake_locator,
         ):
             result = await mgr.snapshot("a1", from_ref="e0", filter="inputs")
         assert result["success"] is True
@@ -1911,7 +1913,8 @@ class TestSnapshotFromRef:
         fake_locator = AsyncMock()
         fake_locator.element_handle = AsyncMock(return_value=MagicMock())
         with patch.object(
-            BrowserManager, "_locator_from_ref", return_value=fake_locator,
+            BrowserManager, "_locator_from_ref",
+            new_callable=AsyncMock, return_value=fake_locator,
         ):
             result = await mgr.snapshot("a1", from_ref="e0")
 
@@ -1952,7 +1955,8 @@ class TestSnapshotFromRef:
         fake_locator = AsyncMock()
         fake_locator.element_handle = AsyncMock(return_value=MagicMock())
         with patch.object(
-            BrowserManager, "_locator_from_ref", return_value=fake_locator,
+            BrowserManager, "_locator_from_ref",
+            new_callable=AsyncMock, return_value=fake_locator,
         ):
             result = await mgr.snapshot("a1", from_ref="e0")
 
@@ -1990,7 +1994,8 @@ class TestSnapshotFromRef:
         fake_locator = AsyncMock()
         fake_locator.element_handle = AsyncMock(return_value=MagicMock())
         with patch.object(
-            BrowserManager, "_locator_from_ref", return_value=fake_locator,
+            BrowserManager, "_locator_from_ref",
+            new_callable=AsyncMock, return_value=fake_locator,
         ):
             result = await mgr.snapshot("a1", from_ref="e0")
         assert result["success"] is True
@@ -2411,7 +2416,8 @@ class TestDiffSnapshot:
         fake_locator = AsyncMock()
         fake_locator.element_handle = AsyncMock(return_value=MagicMock())
         with patch.object(
-            type(mgr), "_locator_from_ref", return_value=fake_locator,
+            type(mgr), "_locator_from_ref",
+            new_callable=AsyncMock, return_value=fake_locator,
         ):
             await mgr.snapshot("a1", from_ref="e0")
 
@@ -4112,7 +4118,7 @@ class TestAutoForceClick:
         mock_locator.click = AsyncMock()
 
         with patch.object(BrowserManager, "get_or_start", return_value=inst):
-            with patch.object(BrowserManager, "_locator_from_ref", return_value=mock_locator):
+            with patch.object(BrowserManager, "_locator_from_ref", new_callable=AsyncMock, return_value=mock_locator):
                 with patch("src.browser.service.action_delay", return_value=0.01):
                     with patch("src.browser.service.asyncio.sleep", new_callable=AsyncMock):
                         result = await mgr.click("agent1", ref="e1")
@@ -4135,7 +4141,7 @@ class TestAutoForceClick:
         mock_locator.click = AsyncMock()
 
         with patch.object(BrowserManager, "get_or_start", return_value=inst):
-            with patch.object(BrowserManager, "_locator_from_ref", return_value=mock_locator):
+            with patch.object(BrowserManager, "_locator_from_ref", new_callable=AsyncMock, return_value=mock_locator):
                 with patch("src.browser.service.action_delay", return_value=0.01):
                     with patch("src.browser.service.asyncio.sleep", new_callable=AsyncMock):
                         result = await mgr.click("agent1", ref="e2")
@@ -4162,7 +4168,7 @@ class TestAutoForceClick:
         mock_locator.click = AsyncMock()
 
         with patch.object(BrowserManager, "get_or_start", return_value=inst):
-            with patch.object(BrowserManager, "_locator_from_ref", return_value=mock_locator):
+            with patch.object(BrowserManager, "_locator_from_ref", new_callable=AsyncMock, return_value=mock_locator):
                 with patch("src.browser.service.action_delay", return_value=0.01):
                     with patch("src.browser.service.asyncio.sleep", new_callable=AsyncMock):
                         result = await mgr.click("agent1", ref="e3")
@@ -4188,7 +4194,7 @@ class TestAutoForceClick:
         mock_locator.click = AsyncMock()
 
         with patch.object(BrowserManager, "get_or_start", return_value=inst):
-            with patch.object(BrowserManager, "_locator_from_ref", return_value=mock_locator):
+            with patch.object(BrowserManager, "_locator_from_ref", new_callable=AsyncMock, return_value=mock_locator):
                 with patch("src.browser.service.action_delay", return_value=0.01):
                     with patch("src.browser.service.asyncio.sleep", new_callable=AsyncMock):
                         result = await mgr.click("agent1", ref="e4")
@@ -4214,7 +4220,7 @@ class TestAutoForceClick:
         mock_locator.click = AsyncMock()
 
         with patch.object(BrowserManager, "get_or_start", return_value=inst):
-            with patch.object(BrowserManager, "_locator_from_ref", return_value=mock_locator):
+            with patch.object(BrowserManager, "_locator_from_ref", new_callable=AsyncMock, return_value=mock_locator):
                 with patch("src.browser.service.action_delay", return_value=0.01):
                     with patch("src.browser.service.asyncio.sleep", new_callable=AsyncMock):
                         result = await mgr.click("agent1", ref="e5")
@@ -4236,7 +4242,7 @@ class TestAutoForceClick:
         mock_locator.click = AsyncMock()
 
         with patch.object(BrowserManager, "get_or_start", return_value=inst):
-            with patch.object(BrowserManager, "_locator_from_ref", return_value=mock_locator):
+            with patch.object(BrowserManager, "_locator_from_ref", new_callable=AsyncMock, return_value=mock_locator):
                 with patch("src.browser.service.action_delay", return_value=0.01):
                     with patch("src.browser.service.asyncio.sleep", new_callable=AsyncMock):
                         result = await mgr.click("agent1", ref="e6", force=True)
@@ -4258,7 +4264,7 @@ class TestAutoForceClick:
         mock_locator.click = AsyncMock()
 
         with patch.object(BrowserManager, "get_or_start", return_value=inst):
-            with patch.object(BrowserManager, "_locator_from_ref", return_value=mock_locator):
+            with patch.object(BrowserManager, "_locator_from_ref", new_callable=AsyncMock, return_value=mock_locator):
                 with patch("src.browser.service.action_delay", return_value=0.01):
                     with patch("src.browser.service.asyncio.sleep", new_callable=AsyncMock):
                         result = await mgr.click("agent1", ref="e7")
@@ -4366,7 +4372,7 @@ class TestTypeTextSettleDelays:
         mock_locator = AsyncMock()
 
         with patch.object(BrowserManager, "get_or_start", return_value=inst):
-            with patch.object(BrowserManager, "_locator_from_ref", return_value=mock_locator):
+            with patch.object(BrowserManager, "_locator_from_ref", new_callable=AsyncMock, return_value=mock_locator):
                 with patch.object(BrowserManager, "_x11_click", new_callable=AsyncMock):
                     with patch.object(BrowserManager, "_x11_type", new_callable=AsyncMock):
                         with patch.object(BrowserManager, "_x11_key", new_callable=AsyncMock):
@@ -4410,7 +4416,7 @@ class TestTypeTextSettleDelays:
         mock_locator = AsyncMock()
 
         with patch.object(BrowserManager, "get_or_start", return_value=inst):
-            with patch.object(BrowserManager, "_locator_from_ref", return_value=mock_locator):
+            with patch.object(BrowserManager, "_locator_from_ref", new_callable=AsyncMock, return_value=mock_locator):
                 with patch.object(BrowserManager, "_x11_click", new_callable=AsyncMock):
                     with patch.object(BrowserManager, "_x11_type", new_callable=AsyncMock):
                         with patch.object(BrowserManager, "_x11_key", new_callable=AsyncMock):
@@ -5029,7 +5035,7 @@ class TestDialogScoping:
         inst.dialog_active = True
         inst.seed_refs_legacy({"e0": {"role": "button", "name": "Post", "index": 0}})
 
-        locator = mgr._locator_from_ref(inst, "e0")
+        locator = await mgr._locator_from_ref(inst, "e0")
 
         # Should scope to dialog/modal elements
         call_args = mock_page.locator.call_args[0][0]
@@ -5054,7 +5060,7 @@ class TestDialogScoping:
         inst.dialog_active = False
         inst.seed_refs_legacy({"e0": {"role": "button", "name": "Post", "index": 0}})
 
-        mgr._locator_from_ref(inst, "e0")
+        await mgr._locator_from_ref(inst, "e0")
 
         mock_page.locator.assert_not_called()
         mock_page.get_by_role.assert_called_once_with("button", name="Post", exact=True)
@@ -6232,7 +6238,7 @@ class TestX11Input:
 
         mock_locator = AsyncMock()
         mgr.get_or_start = AsyncMock(return_value=inst)
-        mgr._locator_from_ref = MagicMock(return_value=mock_locator)
+        mgr._locator_from_ref = AsyncMock(return_value=mock_locator)
         mgr._x11_click = AsyncMock()
         mgr._x11_key = AsyncMock()
         mgr._x11_type = AsyncMock()
@@ -6256,7 +6262,7 @@ class TestX11Input:
 
         mock_locator = AsyncMock()
         mgr.get_or_start = AsyncMock(return_value=inst)
-        mgr._locator_from_ref = MagicMock(return_value=mock_locator)
+        mgr._locator_from_ref = AsyncMock(return_value=mock_locator)
         mgr._x11_click = AsyncMock()
         mgr._x11_type = AsyncMock()
         mgr._x11_key = AsyncMock()
@@ -6360,7 +6366,7 @@ class TestX11Input:
 
         mock_locator = AsyncMock()
         mgr.get_or_start = AsyncMock(return_value=inst)
-        mgr._locator_from_ref = MagicMock(return_value=mock_locator)
+        mgr._locator_from_ref = AsyncMock(return_value=mock_locator)
         mgr._x11_click = AsyncMock()
         mgr._x11_key = AsyncMock()
         mgr._x11_type = AsyncMock()
@@ -6383,7 +6389,7 @@ class TestX11Input:
 
         mock_locator = AsyncMock()
         mgr.get_or_start = AsyncMock(return_value=inst)
-        mgr._locator_from_ref = MagicMock(return_value=mock_locator)
+        mgr._locator_from_ref = AsyncMock(return_value=mock_locator)
         mgr._x11_click = AsyncMock()
         mgr._x11_key = AsyncMock()
         mgr._x11_type = AsyncMock()
@@ -6487,7 +6493,7 @@ class TestX11Input:
 
         mock_locator = AsyncMock()
         mgr.get_or_start = AsyncMock(return_value=inst)
-        mgr._locator_from_ref = MagicMock(return_value=mock_locator)
+        mgr._locator_from_ref = AsyncMock(return_value=mock_locator)
         mgr._x11_click = AsyncMock()
         mgr._snapshot_impl = AsyncMock(return_value={"data": {}})
 
@@ -6508,7 +6514,7 @@ class TestX11Input:
 
         mock_locator = AsyncMock()
         mgr.get_or_start = AsyncMock(return_value=inst)
-        mgr._locator_from_ref = MagicMock(return_value=mock_locator)
+        mgr._locator_from_ref = AsyncMock(return_value=mock_locator)
         mgr._x11_click = AsyncMock()
         mgr._x11_key = AsyncMock()
         mgr._x11_type = AsyncMock()
@@ -6532,7 +6538,7 @@ class TestX11Input:
 
         mock_locator = AsyncMock()
         mgr.get_or_start = AsyncMock(return_value=inst)
-        mgr._locator_from_ref = MagicMock(return_value=mock_locator)
+        mgr._locator_from_ref = AsyncMock(return_value=mock_locator)
         mgr._x11_click = AsyncMock(side_effect=RuntimeError("xdotool error"))
         mgr._human_click = AsyncMock()
         mgr._x11_key = AsyncMock()
@@ -6671,7 +6677,7 @@ class TestX11Input:
 
         mock_locator = AsyncMock()
         mgr.get_or_start = AsyncMock(return_value=inst)
-        mgr._locator_from_ref = MagicMock(return_value=mock_locator)
+        mgr._locator_from_ref = AsyncMock(return_value=mock_locator)
         mgr._x11_hover = AsyncMock()
 
         result = await mgr.hover("agent-1", ref="e0")
@@ -6691,7 +6697,7 @@ class TestX11Input:
         mock_locator = AsyncMock()
         mock_locator.hover = AsyncMock()
         mgr.get_or_start = AsyncMock(return_value=inst)
-        mgr._locator_from_ref = MagicMock(return_value=mock_locator)
+        mgr._locator_from_ref = AsyncMock(return_value=mock_locator)
         mgr._x11_hover = AsyncMock()
 
         result = await mgr.hover("agent-1", ref="e0")
@@ -6712,7 +6718,7 @@ class TestX11Input:
         mock_locator = AsyncMock()
         mock_locator.hover = AsyncMock()
         mgr.get_or_start = AsyncMock(return_value=inst)
-        mgr._locator_from_ref = MagicMock(return_value=mock_locator)
+        mgr._locator_from_ref = AsyncMock(return_value=mock_locator)
         mgr._x11_hover = AsyncMock(side_effect=RuntimeError("xdotool failed"))
 
         result = await mgr.hover("agent-1", ref="e0")
@@ -7795,3 +7801,384 @@ class TestOpenTab:
         assert result["data"]["page_id"]
         assert inst.page is new_page
         assert inst.refs == {}
+
+
+class TestShadowDOM:
+    """§8.3 — open shadow-root descent in the JS a11y walker plus the
+    two-stage Playwright resolver for shadow refs."""
+
+    @pytest.mark.asyncio
+    async def test_shadow_path_serialization_roundtrip(self):
+        from src.browser.ref_handle import ShadowHop
+        hop = ShadowHop(selector="my-card", occurrence=2, discriminator="testid:foo")
+        import dataclasses
+        d = dataclasses.asdict(hop)
+        roundtrip = ShadowHop(**d)
+        assert roundtrip == hop
+        assert roundtrip.selector == "my-card"
+        assert roundtrip.occurrence == 2
+        assert roundtrip.discriminator == "testid:foo"
+
+    @pytest.mark.asyncio
+    async def test_compute_element_key_folds_shadow_path(self):
+        from src.browser.ref_handle import ShadowHop, compute_element_key
+        light = compute_element_key(role="button", name="Submit")
+        in_shadow = compute_element_key(
+            role="button", name="Submit",
+            shadow_path=(ShadowHop("my-card", 0, "testid:a"),),
+        )
+        nested = compute_element_key(
+            role="button", name="Submit",
+            shadow_path=(
+                ShadowHop("my-card", 0, "testid:a"),
+                ShadowHop("inner-widget", 0, "testid:b"),
+            ),
+        )
+        assert light != in_shadow
+        assert in_shadow != nested
+        assert light != nested
+
+    @pytest.mark.asyncio
+    async def test_walker_emits_shadow_path_for_open_root(self):
+        from src.browser.ref_handle import RefHandle
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        tree = {
+            "role": "WebArea", "name": "",
+            "children": [
+                {
+                    "role": "button", "name": "Submit",
+                    "shadow_path": [
+                        {
+                            "selector": "my-card",
+                            "occurrence": 0,
+                            "discriminator": "testid:card",
+                        },
+                    ],
+                },
+            ],
+        }
+        mock_page = AsyncMock()
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value=tree)
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        assert result["success"] is True
+        assert "e0" in result["data"]["refs"]
+        handle: RefHandle = inst.refs["e0"]
+        assert len(handle.shadow_path) == 1
+        assert handle.shadow_path[0].selector == "my-card"
+        assert handle.shadow_path[0].occurrence == 0
+        assert handle.shadow_path[0].discriminator == "testid:card"
+
+    @pytest.mark.asyncio
+    async def test_walker_emits_nested_shadow_path(self):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        tree = {
+            "role": "WebArea", "name": "",
+            "children": [
+                {
+                    "role": "button", "name": "Inner",
+                    "shadow_path": [
+                        {"selector": "outer-host", "occurrence": 0,
+                         "discriminator": "testid:outer"},
+                        {"selector": "inner-host", "occurrence": 1,
+                         "discriminator": "id:inner-1"},
+                    ],
+                },
+            ],
+        }
+        mock_page = AsyncMock()
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value=tree)
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        assert result["success"] is True
+        handle = inst.refs["e0"]
+        assert len(handle.shadow_path) == 2
+        assert handle.shadow_path[0].selector == "outer-host"
+        assert handle.shadow_path[0].discriminator == "testid:outer"
+        assert handle.shadow_path[1].selector == "inner-host"
+        assert handle.shadow_path[1].occurrence == 1
+        assert handle.shadow_path[1].discriminator == "id:inner-1"
+
+    @pytest.mark.asyncio
+    async def test_walker_light_dom_keeps_empty_shadow_path(self):
+        """Regression guard: pages without any shadow DOM must produce
+        light_dom-shaped handles (shadow_path=())."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        tree = {
+            "role": "WebArea", "name": "",
+            "children": [
+                {"role": "button", "name": "Submit"},
+                {"role": "textbox", "name": "Email"},
+            ],
+        }
+        mock_page = AsyncMock()
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value=tree)
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        assert result["success"] is True
+        for handle in inst.refs.values():
+            assert handle.shadow_path == ()
+            assert handle.frame_id is None
+
+    @pytest.mark.asyncio
+    async def test_closed_shadow_root_not_in_snapshot(self):
+        """Closed shadow roots are unreachable per the web spec — the
+        walker cannot pierce them. We assert that a tree without a
+        ``shadow_path`` annotation does NOT acquire one (i.e. nodes the
+        walker would have emitted for a closed root simply never appear)."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        # Tree shape simulates a page where the shadow host is visible
+        # but its closed shadow contents are NOT walked: only the host
+        # element shows up, no inner ref.
+        tree = {
+            "role": "WebArea", "name": "",
+            "children": [
+                {"role": "button", "name": "Outside Shadow"},
+            ],
+        }
+        mock_page = AsyncMock()
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value=tree)
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        assert result["success"] is True
+        for handle in inst.refs.values():
+            assert handle.shadow_path == ()
+
+    @pytest.mark.asyncio
+    async def test_max_walk_depth_caps_descent(self):
+        """``_MAX_WALK_DEPTH=50`` caps total walker depth — synthesizing
+        a 51-deep tree must produce zero refs past the cap."""
+        from src.browser.service import (
+            _MAX_SNAPSHOT_ELEMENTS,
+            BrowserManager,
+            CamoufoxInstance,
+        )
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        # Build 51 nested layers, the deepest carrying a button.
+        node = {"role": "button", "name": "Deep"}
+        for _ in range(51):
+            node = {"role": "generic", "name": "", "children": [node]}
+        tree = {"role": "WebArea", "name": "", "children": [node]}
+
+        mock_page = AsyncMock()
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value=tree)
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        assert result["success"] is True
+        # Depth cap means the deepest button never gets walked.
+        # _MAX_SNAPSHOT_ELEMENTS is large; the cap is the limiter here.
+        assert _MAX_SNAPSHOT_ELEMENTS > 0  # sanity
+        # No refs emitted for the deeply nested button.
+        assert all(
+            h.name != "Deep" for h in inst.refs.values()
+        )
+
+    @pytest.mark.asyncio
+    async def test_locator_from_ref_uses_evaluate_handle_for_shadow(self):
+        """Non-empty ``shadow_path`` triggers the two-stage
+        ``evaluate_handle`` resolver instead of ``get_by_role.nth(...)``."""
+        from src.browser.ref_handle import RefHandle, ShadowHop
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = MagicMock()
+        # Stage-1 returns a JSHandle whose .evaluate returns no error
+        stage1_handle = AsyncMock()
+        stage1_handle.evaluate = AsyncMock(return_value=None)
+        stage2_handle = AsyncMock()
+        stage2_element = MagicMock()
+        stage2_handle.as_element = MagicMock(return_value=stage2_element)
+        stage1_handle.evaluate_handle = AsyncMock(return_value=stage2_handle)
+        mock_page.evaluate_handle = AsyncMock(return_value=stage1_handle)
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        page_id = inst._page_id_for(inst.page)
+        inst.refs["e0"] = RefHandle.shadow(
+            page_id=page_id, scope_root=None,
+            shadow_path=(ShadowHop("my-card", 0, "testid:foo"),),
+            role="button", name="Submit", occurrence=0, disabled=False,
+        )
+
+        result = await mgr._locator_from_ref(inst, "e0")
+        assert result is stage2_element
+        # get_by_role must NOT be called for shadow refs
+        mock_page.get_by_role.assert_not_called()
+        # Stage-1 evaluate_handle was called on the page with the path
+        mock_page.evaluate_handle.assert_called_once()
+        first_call_args = mock_page.evaluate_handle.call_args
+        path_arg = first_call_args[0][1]["path"]
+        import json as _json
+        decoded = _json.loads(path_arg)
+        assert decoded == [
+            {"selector": "my-card", "occurrence": 0, "discriminator": "testid:foo"},
+        ]
+        # Stage-2 evaluate_handle was called on the shadow root handle
+        # with role/name/occurrence
+        stage1_handle.evaluate_handle.assert_called_once()
+        stage2_call = stage1_handle.evaluate_handle.call_args
+        stage2_args = stage2_call[0][1]
+        assert stage2_args == {
+            "role": "button", "name": "Submit", "occurrence": 0,
+        }
+
+    @pytest.mark.asyncio
+    async def test_locator_from_ref_raises_ref_stale_on_missing_host(self):
+        from src.browser.ref_handle import RefHandle, RefStale, ShadowHop
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = MagicMock()
+        stage1_handle = AsyncMock()
+        stage1_handle.evaluate = AsyncMock(return_value="stale_host_missing")
+        mock_page.evaluate_handle = AsyncMock(return_value=stage1_handle)
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        page_id = inst._page_id_for(inst.page)
+        inst.refs["e0"] = RefHandle.shadow(
+            page_id=page_id, scope_root=None,
+            shadow_path=(ShadowHop("ghost-card", 0, "testid:gone"),),
+            role="button", name="Submit", occurrence=0, disabled=False,
+        )
+
+        with pytest.raises(RefStale):
+            await mgr._locator_from_ref(inst, "e0")
+
+    @pytest.mark.asyncio
+    async def test_locator_from_ref_raises_ref_stale_on_discriminator_mismatch(self):
+        from src.browser.ref_handle import RefHandle, RefStale, ShadowHop
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = MagicMock()
+        stage1_handle = AsyncMock()
+        stage1_handle.evaluate = AsyncMock(return_value="stale_discriminator_mismatch")
+        mock_page.evaluate_handle = AsyncMock(return_value=stage1_handle)
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        page_id = inst._page_id_for(inst.page)
+        inst.refs["e0"] = RefHandle.shadow(
+            page_id=page_id, scope_root=None,
+            shadow_path=(ShadowHop("my-card", 0, "testid:was-foo"),),
+            role="button", name="Submit", occurrence=0, disabled=False,
+        )
+
+        with pytest.raises(RefStale):
+            await mgr._locator_from_ref(inst, "e0")
+
+    @pytest.mark.asyncio
+    async def test_locator_from_ref_raises_ref_stale_when_element_not_found(self):
+        from src.browser.ref_handle import RefHandle, RefStale, ShadowHop
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = MagicMock()
+        stage1_handle = AsyncMock()
+        stage1_handle.evaluate = AsyncMock(return_value=None)
+        stage2_handle = AsyncMock()
+        stage2_handle.as_element = MagicMock(return_value=None)
+        stage1_handle.evaluate_handle = AsyncMock(return_value=stage2_handle)
+        mock_page.evaluate_handle = AsyncMock(return_value=stage1_handle)
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        page_id = inst._page_id_for(inst.page)
+        inst.refs["e0"] = RefHandle.shadow(
+            page_id=page_id, scope_root=None,
+            shadow_path=(ShadowHop("my-card", 0, "testid:foo"),),
+            role="button", name="Vanished", occurrence=99, disabled=False,
+        )
+
+        with pytest.raises(RefStale):
+            await mgr._locator_from_ref(inst, "e0")
+
+    @pytest.mark.asyncio
+    async def test_type_text_accepts_shadow_element_handle(self):
+        """``type_text`` must accept the ElementHandle returned by the
+        shadow resolver, not just a Locator. Both expose ``.click``,
+        ``.bounding_box`` and ``.scroll_into_view_if_needed``."""
+        from src.browser.ref_handle import RefHandle, ShadowHop
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.keyboard = AsyncMock()
+        mock_page.keyboard.press = AsyncMock()
+        mock_page.evaluate = AsyncMock(return_value=True)
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        page_id = inst._page_id_for(inst.page)
+        inst.refs["e0"] = RefHandle.shadow(
+            page_id=page_id, scope_root=None,
+            shadow_path=(ShadowHop("my-input", 0, "testid:i"),),
+            role="textbox", name="Email", occurrence=0, disabled=False,
+        )
+        mgr._instances["a1"] = inst
+
+        # Stub _locator_from_ref to return an ElementHandle-like object
+        # whose interface matches what _human_click and the type code
+        # actually call: hover, click, scroll_into_view_if_needed,
+        # bounding_box.
+        element_handle = AsyncMock()
+        element_handle.hover = AsyncMock()
+        element_handle.click = AsyncMock()
+        element_handle.scroll_into_view_if_needed = AsyncMock()
+        element_handle.bounding_box = AsyncMock(
+            return_value={"x": 10, "y": 10, "width": 50, "height": 20},
+        )
+        mgr._locator_from_ref = AsyncMock(return_value=element_handle)
+
+        with patch("src.browser.service.random.random", return_value=1.0):
+            result = await mgr.type_text("a1", ref="e0", text="hi", clear=False)
+        assert result["success"] is True
+        # ElementHandle.click was driven by the focus path
+        element_handle.click.assert_called()
+        # Keyboard typing dispatched per character
+        press_calls = [c[0][0] for c in mock_page.keyboard.press.call_args_list]
+        assert "h" in press_calls and "i" in press_calls
+
+    @pytest.mark.asyncio
+    async def test_click_accepts_shadow_element_handle(self):
+        from src.browser.ref_handle import RefHandle, ShadowHop
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        page_id = inst._page_id_for(inst.page)
+        inst.refs["e0"] = RefHandle.shadow(
+            page_id=page_id, scope_root=None,
+            shadow_path=(ShadowHop("my-card", 0, "testid:c"),),
+            role="button", name="Submit", occurrence=0, disabled=False,
+        )
+        mgr._instances["a1"] = inst
+
+        element_handle = AsyncMock()
+        element_handle.hover = AsyncMock()
+        element_handle.click = AsyncMock()
+        mgr._locator_from_ref = AsyncMock(return_value=element_handle)
+
+        result = await mgr.click("a1", ref="e0")
+        assert result["success"] is True
+        element_handle.click.assert_called()

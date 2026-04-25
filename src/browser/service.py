@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import json
 import mimetypes
 import os
 import random
@@ -25,7 +26,7 @@ from urllib.parse import urlparse
 from src.browser.captcha import get_solver
 from src.browser.profile_schema import migrate_profile
 from src.browser.redaction import CredentialRedactor
-from src.browser.ref_handle import RefHandle, RefStale
+from src.browser.ref_handle import RefHandle, RefStale, ShadowHop
 from src.browser.stealth import build_launch_options, pick_referer, validate_referer
 from src.browser.timing import (
     action_delay,
@@ -264,17 +265,37 @@ _MODAL_SELECTOR = (
 )
 
 
-# ── JS-based accessibility tree builder ──────────────────────────────────
-# Fallback when page.accessibility.snapshot() is unavailable (Camoufox
-# bundles a Playwright version that removed or never exposed the API).
-# Walks the DOM using standard APIs (getAttribute, getComputedStyle) and
-# returns the same {role, name, children, disabled, ...} tree structure
-# that the Python _walk() function expects.
-#
-# Called as:
-#   page.evaluate(_JS_A11Y_TREE)          — full page tree
-#   element_handle.evaluate(_JS_A11Y_TREE) — scoped to element
-_JS_A11Y_TREE = r"""(rootEl) => {
+# Implicit role map — single source of truth shared between the JS a11y
+# walker and the Python-side shadow-path resolver. Tag names are uppercase
+# (matches DOM ``Element.tagName``). Injected into the JS body via
+# ``json.dumps()`` so the JS literally sees this Python dict's contents.
+_IMPLICIT_ROLE_MAP: dict[str, str] = {
+    "BUTTON": "button", "TEXTAREA": "textbox", "SELECT": "combobox",
+    "OPTION": "option",
+    "IMG": "img", "H1": "heading", "H2": "heading", "H3": "heading",
+    "H4": "heading", "H5": "heading", "H6": "heading", "DIALOG": "dialog",
+    "NAV": "navigation", "MAIN": "main", "HEADER": "banner",
+    "FOOTER": "contentinfo",
+    "ASIDE": "complementary", "FORM": "form",
+}
+
+
+def _build_js_a11y_tree() -> str:
+    """Build the JS a11y walker source with the implicit role map injected.
+
+    The walker descends ``el.shadowRoot`` when ``shadowRoot.mode === 'open'``
+    (closed roots are unreachable per the spec). Each emitted node carries
+    a ``shadow_path`` array; on the page side this is empty for light-DOM
+    nodes and accumulates ``{selector, occurrence, discriminator}`` triples
+    as the walker crosses shadow boundaries.
+
+    Discriminator priority: ``data-testid`` > stable ``id`` (UUID-shaped
+    rejected) > structural fingerprint of host (tagName + className +
+    childElementCount). Always a string — ``ShadowHop.discriminator`` is
+    guaranteed non-empty by the JS side.
+    """
+    implicit_json = json.dumps(_IMPLICIT_ROLE_MAP)
+    return r"""((rootEl) => {
     const ACTIONABLE = new Set([
         'button','link','textbox','checkbox','radio','combobox','searchbox',
         'slider','spinbutton','switch','tab','menuitem','menuitemcheckbox',
@@ -288,21 +309,8 @@ _JS_A11Y_TREE = r"""(rootEl) => {
         'navigation','main','complementary','banner','contentinfo',
         'form','region','dialog','alertdialog'
     ]);
-    // §7.7 includes LANDMARK in the set so ``filter='landmarks'``
-    // works even when ``page.accessibility.snapshot()`` is unavailable
-    // and we fall back to this JS walker. Without LANDMARK in ROLES,
-    // landmark elements collapse to ``role: 'none'`` here and never
-    // reach the Python ``_walk`` even with the right ``allowed_roles``.
-    // Default snapshot output is unaffected: Python ``_walk`` still
-    // gates on ACTIONABLE+CONTEXT unless an explicit filter is passed.
     const ROLES = new Set([...ACTIONABLE, ...CONTEXT, ...LANDMARK]);
-    const IMPLICIT = {
-        BUTTON:'button',TEXTAREA:'textbox',SELECT:'combobox',OPTION:'option',
-        IMG:'img',H1:'heading',H2:'heading',H3:'heading',
-        H4:'heading',H5:'heading',H6:'heading',DIALOG:'dialog',
-        NAV:'navigation',MAIN:'main',HEADER:'banner',FOOTER:'contentinfo',
-        ASIDE:'complementary',FORM:'form'
-    };
+    const IMPLICIT = __IMPLICIT_ROLE_MAP__;
     const INPUT_ROLES = {
         text:'textbox',email:'textbox',url:'textbox',tel:'textbox',
         password:'textbox',search:'searchbox',
@@ -310,6 +318,44 @@ _JS_A11Y_TREE = r"""(rootEl) => {
         range:'slider',number:'spinbutton',
         submit:'button',reset:'button',button:'button'
     };
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const REACT_ID_RE = /^(:r|r:|:R)[0-9a-zA-Z]+:?$/;
+    function isStableId(id) {
+        if (!id) return false;
+        if (UUID_RE.test(id)) return false;
+        if (REACT_ID_RE.test(id)) return false;
+        if (id.length >= 16 && /^[0-9a-f]+$/i.test(id)) return false;
+        return true;
+    }
+    function bestStableId(el) {
+        const t = el.getAttribute('data-testid')
+            || el.getAttribute('data-test')
+            || el.getAttribute('data-qa');
+        if (t) return 'testid:' + t;
+        const id = el.getAttribute('id');
+        if (id && isStableId(id)) return 'id:' + id;
+        const cls = (el.getAttribute('class') || '').trim().split(/\s+/).slice(0, 3).join('.');
+        const fp = el.tagName + '|' + cls + '|' + (el.childElementCount || 0);
+        return 'fp:' + fp;
+    }
+    function cssPath(host) {
+        const tag = host.tagName.toLowerCase();
+        const id = host.getAttribute('id');
+        if (id && isStableId(id)) return tag + '#' + CSS.escape(id);
+        const t = host.getAttribute('data-testid');
+        if (t) return tag + '[data-testid="' + t.replace(/"/g, '\\"') + '"]';
+        return tag;
+    }
+    function siblingOccurrence(host, parent, selector) {
+        if (!parent) return 0;
+        let i = 0;
+        const candidates = parent.querySelectorAll(selector);
+        for (const c of candidates) {
+            if (c === host) return i;
+            i++;
+        }
+        return 0;
+    }
     function getRole(el) {
         const r = el.getAttribute('role');
         if (r) return r.split(/\s+/)[0].toLowerCase();
@@ -323,8 +369,10 @@ _JS_A11Y_TREE = r"""(rootEl) => {
         if (n) return n.trim();
         const by = el.getAttribute('aria-labelledby');
         if (by) {
+            const root = el.getRootNode();
+            const lookup = (root && root.getElementById) ? root : document;
             const t = by.split(/\s+/).map(id => {
-                const ref = document.getElementById(id);
+                const ref = lookup.getElementById ? lookup.getElementById(id) : document.getElementById(id);
                 return ref ? ref.textContent.trim() : '';
             }).filter(Boolean).join(' ');
             if (t) return t;
@@ -332,7 +380,9 @@ _JS_A11Y_TREE = r"""(rootEl) => {
         if (el.tagName === 'IMG') return (el.alt || '').trim();
         if (['INPUT','TEXTAREA','SELECT'].includes(el.tagName)) {
             if (el.id) {
-                const lbl = document.querySelector('label[for="' + CSS.escape(el.id) + '"]');
+                const root = el.getRootNode();
+                const scope = (root && root.querySelector) ? root : document;
+                const lbl = scope.querySelector('label[for="' + CSS.escape(el.id) + '"]');
                 if (lbl) return lbl.textContent.trim().slice(0, 200);
             }
             const wrap = el.closest('label');
@@ -354,7 +404,7 @@ _JS_A11Y_TREE = r"""(rootEl) => {
         return (el.title || '').trim();
     }
     function isVisible(el) {
-        if (el.getAttribute('aria-hidden') === 'true') return false;
+        if (el.getAttribute && el.getAttribute('aria-hidden') === 'true') return false;
         const s = getComputedStyle(el);
         if (s.visibility === 'hidden' || s.visibility === 'collapse') return false;
         if (parseFloat(s.opacity) === 0) return false;
@@ -364,7 +414,7 @@ _JS_A11Y_TREE = r"""(rootEl) => {
         }
         return true;
     }
-    function walk(el, d, parentLandmark) {
+    function walk(el, d, parentLandmark, shadowPath) {
         if (d > 50 || !el || el.nodeType !== 1) return null;
         const tag = el.tagName;
         if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT' || tag === 'TEMPLATE')
@@ -378,8 +428,20 @@ _JS_A11Y_TREE = r"""(rootEl) => {
         }
         const children = [];
         for (const child of el.children) {
-            const r = walk(child, d + 1, childLandmark);
+            const r = walk(child, d + 1, childLandmark, shadowPath);
             if (r) children.push(r);
+        }
+        if (el.shadowRoot && el.shadowRoot.mode === 'open') {
+            const sel = cssPath(el);
+            const occ = siblingOccurrence(el, el.parentNode, sel);
+            const disc = bestStableId(el);
+            const nextPath = shadowPath.concat([{
+                selector: sel, occurrence: occ, discriminator: disc,
+            }]);
+            for (const child of el.shadowRoot.children) {
+                const r = walk(child, d + 1, childLandmark, nextPath);
+                if (r) children.push(r);
+            }
         }
         if (!role || !ROLES.has(role)) {
             if (!children.length) return null;
@@ -387,6 +449,7 @@ _JS_A11Y_TREE = r"""(rootEl) => {
             return { role: 'none', name: '', children };
         }
         const nd = { role, name: getName(el, role) };
+        if (shadowPath.length) nd.shadow_path = shadowPath;
         if (parentLandmark) nd.landmark = parentLandmark;
         if (el.disabled || el.getAttribute('aria-disabled') === 'true') nd.disabled = true;
         const chkRoles = ['checkbox','radio','switch','menuitemcheckbox','menuitemradio'];
@@ -405,13 +468,107 @@ _JS_A11Y_TREE = r"""(rootEl) => {
         return nd;
     }
     const start = rootEl || document.body || document.documentElement;
-    const tree = walk(start, 0, null);
+    const tree = walk(start, 0, null, []);
     if (rootEl) return tree || { role: 'none', name: '', children: [] };
     if (!tree) return { role: 'WebArea', name: document.title || '', children: [] };
     if (tree.role === 'none')
         return { role: 'WebArea', name: document.title || '', children: tree.children || [] };
     return { role: 'WebArea', name: document.title || '', children: [tree] };
+})""".replace("__IMPLICIT_ROLE_MAP__", implicit_json)
+
+
+# ── JS-based accessibility tree builder ──────────────────────────────────
+# Fallback when page.accessibility.snapshot() is unavailable (Camoufox
+# bundles a Playwright version that removed or never exposed the API).
+# Walks the DOM using standard APIs (getAttribute, getComputedStyle) and
+# returns the same {role, name, children, disabled, ...} tree structure
+# that the Python _walk() function expects.
+#
+# Descends ``el.shadowRoot`` when ``shadowRoot.mode === 'open'``; closed
+# shadow roots are unreachable by web spec and remain invisible. Emitted
+# nodes inside shadow DOM carry a ``shadow_path`` array of
+# ``{selector, occurrence, discriminator}`` hops that the Python side
+# folds into ``RefHandle.shadow_path`` for resolution.
+#
+# Called as:
+#   page.evaluate(_JS_A11Y_TREE)          — full page tree
+#   element_handle.evaluate(_JS_A11Y_TREE) — scoped to element
+_JS_A11Y_TREE = _build_js_a11y_tree()
+
+
+# Stage-1 (walk shadow_path → return inner shadowRoot) and Stage-2
+# (role+name match inside that shadowRoot → ElementHandle) for the
+# Playwright-correct two-stage shadow resolver. ``get_by_role`` does NOT
+# pierce shadow boundaries, so non-empty ``shadow_path`` falls through
+# this evaluate_handle pair instead of the locator API.
+_JS_SHADOW_RESOLVE_STAGE1 = r"""(args) => {
+    const path = JSON.parse(args.path);
+    let root = document;
+    for (const hop of path) {
+        const candidates = root.querySelectorAll(hop.selector);
+        const host = candidates[hop.occurrence];
+        if (!host || !host.shadowRoot) return {error: "stale_host_missing"};
+        function isStableId(id) {
+            if (!id) return false;
+            if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) return false;
+            if (/^(:r|r:|:R)[0-9a-zA-Z]+:?$/.test(id)) return false;
+            if (id.length >= 16 && /^[0-9a-f]+$/i.test(id)) return false;
+            return true;
+        }
+        function bestStableId(el) {
+            const t = el.getAttribute('data-testid')
+                || el.getAttribute('data-test')
+                || el.getAttribute('data-qa');
+            if (t) return 'testid:' + t;
+            const id = el.getAttribute('id');
+            if (id && isStableId(id)) return 'id:' + id;
+            const cls = (el.getAttribute('class') || '').trim().split(/\s+/).slice(0, 3).join('.');
+            const fp = el.tagName + '|' + cls + '|' + (el.childElementCount || 0);
+            return 'fp:' + fp;
+        }
+        const got = bestStableId(host);
+        if (got !== hop.discriminator) return {error: "stale_discriminator_mismatch"};
+        root = host.shadowRoot;
+    }
+    return root;
 }"""
+
+
+def _build_js_shadow_resolve_stage2() -> str:
+    implicit_json = json.dumps(_IMPLICIT_ROLE_MAP)
+    return r"""((root, args) => {
+    if (!root || root.error) return null;
+    const role = args.role;
+    const name = args.name;
+    const occurrence = args.occurrence;
+    const IMPLICIT = __IMPLICIT_ROLE_MAP__;
+    const INPUT_ROLES = {
+        text:'textbox',email:'textbox',url:'textbox',tel:'textbox',
+        password:'textbox',search:'searchbox',
+        checkbox:'checkbox',radio:'radio',
+        range:'slider',number:'spinbutton',
+        submit:'button',reset:'button',button:'button'
+    };
+    function implicitRoleFor(el) {
+        const r = el.getAttribute('role');
+        if (r) return r.split(/\s+/)[0].toLowerCase();
+        if (el.tagName === 'A') return el.hasAttribute('href') ? 'link' : null;
+        if (el.tagName === 'INPUT') return INPUT_ROLES[(el.type||'text').toLowerCase()] || null;
+        if (el.getAttribute('contenteditable') === 'true') return 'textbox';
+        return IMPLICIT[el.tagName] || null;
+    }
+    const candidates = Array.from(root.querySelectorAll('*')).filter(el => {
+        const r = implicitRoleFor(el);
+        if (r !== role) return false;
+        if (!name) return true;
+        const n = (el.getAttribute('aria-label') || el.textContent || '').trim();
+        return n === name;
+    });
+    return candidates[occurrence] || null;
+})""".replace("__IMPLICIT_ROLE_MAP__", implicit_json)
+
+
+_JS_SHADOW_RESOLVE_STAGE2 = _build_js_shadow_resolve_stage2()
 
 
 def _short_ua(ua: str) -> str:
@@ -2058,7 +2215,7 @@ class BrowserManager:
                 # contract every other ref-using path follows; surface as
                 # ref_stale so the agent re-snapshots.
                 try:
-                    locator = self._locator_from_ref(inst, from_ref)
+                    locator = await self._locator_from_ref(inst, from_ref)
                     if locator is None:
                         return {
                             "success": False,
@@ -2189,33 +2346,51 @@ class BrowserManager:
                         #   reported as a remove+add pair instead of
                         #   "unchanged". Same fix: data-testid extraction.
                         from src.browser.ref_handle import compute_element_key
-                        # frame_id / shadow_path are folded in even though
-                        # they're constant defaults today (no iframe walker
-                        # until §8.4, no shadow walker until §8.3). Keeping
-                        # the kwargs explicit at this site means the §4.2
-                        # promise — "same role+name+landmark in different
-                        # frames / shadow roots get DIFFERENT keys" —
-                        # holds the moment the walkers start populating
-                        # those fields. No code change needed there.
+                        raw_shadow = node.get("shadow_path") or ()
+                        shadow_hops: tuple[ShadowHop, ...] = tuple(
+                            ShadowHop(
+                                selector=str(hop.get("selector", "")),
+                                occurrence=int(hop.get("occurrence", 0)),
+                                discriminator=str(hop.get("discriminator", "")),
+                            )
+                            for hop in raw_shadow
+                        )
+                        # frame_id stays constant today (no iframe walker
+                        # until §8.4); ``shadow_path`` is now populated by
+                        # the §8.3 walker. ``compute_element_key`` folds
+                        # both so identical role+name+landmark in distinct
+                        # shadow roots produce different element_keys.
                         elem_key = compute_element_key(
                             role=role, name=name, landmark=landmark,
                             sibling_index=occ,
                             frame_id=None,
-                            shadow_path=(),
+                            shadow_path=shadow_hops,
                         )
                         # scope_root is finalized after the modal-scoping
                         # branch below. For now record the unscoped handle;
                         # we overwrite scope_root once we know the final
                         # dialog_active state (see scope-root patching below).
-                        refs[ref_id] = RefHandle.light_dom(
-                            page_id=snapshot_page_id,
-                            scope_root=None,
-                            role=role,
-                            name=name,
-                            occurrence=occ,
-                            disabled=bool(node.get("disabled")),
-                            element_key=elem_key,
-                        )
+                        if shadow_hops:
+                            refs[ref_id] = RefHandle.shadow(
+                                page_id=snapshot_page_id,
+                                scope_root=None,
+                                shadow_path=shadow_hops,
+                                role=role,
+                                name=name,
+                                occurrence=occ,
+                                disabled=bool(node.get("disabled")),
+                                element_key=elem_key,
+                            )
+                        else:
+                            refs[ref_id] = RefHandle.light_dom(
+                                page_id=snapshot_page_id,
+                                scope_root=None,
+                                role=role,
+                                name=name,
+                                occurrence=occ,
+                                disabled=bool(node.get("disabled")),
+                                element_key=elem_key,
+                            )
                         # Diff-mode summary — keyed by element_key so the
                         # next snapshot can match across re-renders that
                         # change ref ids. A duplicate key inside one
@@ -2573,32 +2748,33 @@ class BrowserManager:
         except Exception:
             return False
 
-    def _locator_from_ref(self, inst: CamoufoxInstance, ref: str):
-        """Build a Playwright locator from a stored RefHandle.
+    async def _locator_from_ref(self, inst: CamoufoxInstance, ref: str):
+        """Build a Playwright locator (or ElementHandle) from a stored RefHandle.
 
         Resolution order (§4.2):
             1. ``page_id`` → Page object (raises :class:`RefStale` if the
                tab has closed).
-            2. ``frame_id`` → Frame (None = main frame).  Always None in
-               v1.2; populated by §8.4 iframe traversal.
+            2. ``frame_id`` → Frame (None = main frame).  Always None
+               until §8.4 iframe traversal.
             3. ``scope_root`` — modal selector bound during snapshot, so
                occurrence indices match.
-            4. ``shadow_path`` — walk through open shadow roots.  Empty in
-               v1.2; populated by §8.3 shadow DOM walker.
+            4. ``shadow_path`` — walk open shadow roots via the
+               §8.3 two-stage ``evaluate_handle`` pattern. Returns an
+               :class:`ElementHandle` rather than a ``Locator`` because
+               ``get_by_role`` does not pierce shadow boundaries.
             5. ``get_by_role(role, name=name, exact=True).nth(occurrence)``.
 
         Returns ``None`` when ``ref`` isn't in ``inst.refs`` (classic
         not-found).  Raises :class:`RefStale` when the ref points to a
-        closed tab — caller should report ``ref_stale`` to the agent so
-        it knows to re-snapshot rather than retry.
+        closed tab, a missing shadow host, or a discriminator mismatch —
+        callers should report ``ref_stale`` so the agent re-snapshots.
         """
         handle = inst.refs.get(ref)
         if handle is None:
             return None
-        # Resolve Page; may raise RefStale.
         page = inst._resolve_page_id(handle.page_id)
-        # v1.2: frame/shadow always empty — light DOM, main frame. Those
-        # branches activate in §8.3 / §8.4.
+        if handle.shadow_path:
+            return await self._resolve_shadow_element(page, handle, ref)
         base = page
         if handle.scope_root:
             base = page.locator(handle.scope_root)
@@ -2607,6 +2783,47 @@ class BrowserManager:
         else:
             locator = base.get_by_role(handle.role)
         return locator.nth(handle.occurrence)
+
+    async def _resolve_shadow_element(self, page, handle: RefHandle, ref: str):
+        """Two-stage resolver for refs whose ``shadow_path`` is non-empty.
+
+        Stage 1 walks the path to the inner ``shadowRoot``, verifying
+        each host's discriminator. Stage 2 picks the role+name match at
+        the requested occurrence inside that root. Either stage can
+        raise :class:`RefStale` when the DOM has shifted since snapshot.
+        """
+        path_payload = [
+            {
+                "selector": hop.selector,
+                "occurrence": hop.occurrence,
+                "discriminator": hop.discriminator,
+            }
+            for hop in handle.shadow_path
+        ]
+        stage1 = await page.evaluate_handle(
+            _JS_SHADOW_RESOLVE_STAGE1,
+            {"path": json.dumps(path_payload)},
+        )
+        try:
+            err = await stage1.evaluate("(v) => v && v.error ? v.error : null")
+        except Exception:
+            err = None
+        if err == "stale_host_missing":
+            raise RefStale("shadow host missing", ref=ref)
+        if err == "stale_discriminator_mismatch":
+            raise RefStale("shadow host discriminator changed", ref=ref)
+        stage2 = await stage1.evaluate_handle(
+            _JS_SHADOW_RESOLVE_STAGE2,
+            {
+                "role": handle.role,
+                "name": handle.name,
+                "occurrence": handle.occurrence,
+            },
+        )
+        element = stage2.as_element()
+        if element is None:
+            raise RefStale("shadow element not found at occurrence", ref=ref)
+        return element
 
     async def _human_click(self, page, locator, *, force: bool = False,
                            timeout: int = _CLICK_TIMEOUT_MS) -> None:
@@ -3162,7 +3379,7 @@ class BrowserManager:
                             "Auto-force click on disabled %s ref=%s for '%s'",
                             ref_info.role, ref, agent_id,
                         )
-                    locator = self._locator_from_ref(inst, ref)
+                    locator = await self._locator_from_ref(inst, ref)
                     if locator:
                         if inst.x11_wid and self._is_x11_site(inst):
                             try:
@@ -3298,7 +3515,7 @@ class BrowserManager:
         async with inst.lock:
             try:
                 if ref and ref in inst.refs:
-                    locator = self._locator_from_ref(inst, ref)
+                    locator = await self._locator_from_ref(inst, ref)
                     if not locator:
                         return {"success": False, "error": f"Ref '{ref}' not found"}
                     if inst.x11_wid and self._is_x11_site(inst):
@@ -3363,7 +3580,7 @@ class BrowserManager:
                 _use_x11 = bool(inst.x11_wid) and self._is_x11_site(inst)
 
                 if ref and ref in inst.refs:
-                    locator = self._locator_from_ref(inst, ref)
+                    locator = await self._locator_from_ref(inst, ref)
                     if not locator:
                         return {"success": False, "error": f"Ref '{ref}' not found"}
                     if _use_x11:
@@ -3632,7 +3849,7 @@ class BrowserManager:
                 if ref:
                     if ref not in inst.refs:
                         return {"success": False, "error": f"Ref '{ref}' not found in snapshot"}
-                    locator = self._locator_from_ref(inst, ref)
+                    locator = await self._locator_from_ref(inst, ref)
                     if locator:
                         await locator.scroll_into_view_if_needed(timeout=5000)
                         return {"success": True, "data": {"scrolled_to_ref": ref}}
@@ -3815,7 +4032,7 @@ class BrowserManager:
                             "success": False,
                             "error": f"Upload path not found: {p}",
                         }
-                locator = self._locator_from_ref(inst, ref)
+                locator = await self._locator_from_ref(inst, ref)
                 if not locator:
                     return {"success": False, "error": f"Ref '{ref}' not found"}
                 # Race: the click that triggers the chooser must happen
@@ -3860,7 +4077,7 @@ class BrowserManager:
                         "success": False,
                         "error": "User has browser control — action paused",
                     }
-                locator = self._locator_from_ref(inst, ref)
+                locator = await self._locator_from_ref(inst, ref)
                 if not locator:
                     return {"success": False, "error": f"Ref '{ref}' not found"}
 

@@ -170,6 +170,40 @@ class RefHandle:
             element_key=element_key,
         )
 
+    @classmethod
+    def shadow(
+        cls,
+        *,
+        page_id: str,
+        scope_root: str | None,
+        shadow_path: tuple[ShadowHop, ...],
+        role: str,
+        name: str,
+        occurrence: int,
+        disabled: bool,
+        element_key: str = "",
+        frame_id: str | None = None,
+    ) -> "RefHandle":
+        """Build a handle that points inside one or more open shadow roots.
+
+        ``shadow_path`` must be non-empty; the outermost shadow host is
+        first. Empty ``shadow_path`` would be a light-DOM ref — use
+        :meth:`light_dom` instead so the call site reads correctly.
+        """
+        if not shadow_path:
+            raise ValueError("shadow_path must be non-empty for RefHandle.shadow")
+        return cls(
+            page_id=page_id,
+            frame_id=frame_id,
+            shadow_path=shadow_path,
+            scope_root=scope_root,
+            role=role,
+            name=name,
+            occurrence=occurrence,
+            disabled=disabled,
+            element_key=element_key,
+        )
+
 
 # ── Element-key computation ─────────────────────────────────────────────────
 
