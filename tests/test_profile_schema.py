@@ -524,6 +524,27 @@ class TestV3UblockInstall:
         _v3_install_ublock(profile)
         assert not (profile / "extensions").exists()
 
+    def test_full_migration_with_flag_disabled_still_stamps_v3(
+        self, profile, fake_xpi, monkeypatch,
+    ):
+        """Regression for the migration framework: even when the v3
+        callable is a no-op (flag disabled), the framework MUST stamp
+        the marker to v3 — otherwise every launch re-runs the migration
+        and the operator never sees forward progress."""
+        from src.browser.profile_schema import (
+            PROFILE_SCHEMA_VERSION,
+            _MARKER_FILENAME,
+            UBLOCK_ADDON_ID,
+        )
+        monkeypatch.setenv("BROWSER_ENABLE_ADBLOCK", "false")
+        result = migrate_profile(profile)
+        assert result == PROFILE_SCHEMA_VERSION == 3
+        assert (profile / _MARKER_FILENAME).read_text().strip() == "3"
+        # And no XPI was installed.
+        assert not (
+            profile / "extensions" / f"{UBLOCK_ADDON_ID}.xpi"
+        ).exists()
+
     def test_idempotent_skips_recopy_when_unchanged(
         self, profile, fake_xpi, monkeypatch,
     ):
