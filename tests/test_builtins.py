@@ -1167,6 +1167,39 @@ class TestBrowserSnapshotHttpClient:
             "snapshot", {"diff_from_last": True},
         )
 
+    @pytest.mark.asyncio
+    async def test_frame_param_forwarded(self):
+        from src.agent.builtins.browser_tool import browser_get_elements
+
+        mc = AsyncMock()
+        mc.browser_command = AsyncMock(return_value={"data": {}})
+        await browser_get_elements(
+            frame="example.com/iframe", mesh_client=mc,
+        )
+        mc.browser_command.assert_awaited_once_with(
+            "snapshot", {"frame": "example.com/iframe"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_browser_get_elements_skill_include_frames_param(self):
+        """include_frames=False is forwarded; default True is omitted from
+        payload (server defaults to True)."""
+        from src.agent.builtins.browser_tool import browser_get_elements
+
+        # Default — payload should NOT carry include_frames.
+        mc = AsyncMock()
+        mc.browser_command = AsyncMock(return_value={"data": {}})
+        await browser_get_elements(mesh_client=mc)
+        mc.browser_command.assert_awaited_once_with("snapshot", {})
+
+        # Explicit False — payload carries include_frames=False.
+        mc2 = AsyncMock()
+        mc2.browser_command = AsyncMock(return_value={"data": {}})
+        await browser_get_elements(include_frames=False, mesh_client=mc2)
+        mc2.browser_command.assert_awaited_once_with(
+            "snapshot", {"include_frames": False},
+        )
+
 
 class TestBrowserClickHttpClient:
     """browser_click sends click command through mesh_client."""
@@ -1205,6 +1238,19 @@ class TestBrowserClickHttpClient:
         assert "error" in result
         assert "Provide either" in result["error"]
 
+    @pytest.mark.asyncio
+    async def test_click_frame_param_forwarded(self):
+        from src.agent.builtins.browser_tool import browser_click
+
+        mc = AsyncMock()
+        mc.browser_command = AsyncMock(return_value={"clicked": "#btn"})
+        await browser_click(
+            selector="#btn", frame="iframe.html", mesh_client=mc,
+        )
+        sent = mc.browser_command.await_args.args[1]
+        assert sent.get("frame") == "iframe.html"
+        assert sent.get("selector") == "#btn"
+
 
 class TestBrowserTypeHttpClient:
     """browser_type sends type command through mesh_client (plain text)."""
@@ -1239,6 +1285,20 @@ class TestBrowserTypeHttpClient:
         result = await browser_type(text="hello", mesh_client=AsyncMock())
         assert "error" in result
         assert "Provide either" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_type_frame_param_forwarded(self):
+        from src.agent.builtins.browser_tool import browser_type
+
+        mc = AsyncMock()
+        mc.browser_command = AsyncMock(return_value={"success": True})
+        await browser_type(
+            text="hello", selector="input", frame="iframe.html",
+            mesh_client=mc,
+        )
+        sent = mc.browser_command.await_args.args[1]
+        assert sent.get("frame") == "iframe.html"
+        assert sent.get("text") == "hello"
 
 
 class TestCredentialRedaction:

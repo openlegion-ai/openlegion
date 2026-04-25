@@ -136,13 +136,23 @@ class RefHandle:
 
         Stable public surface — do not add fields here without updating
         ``browser_get_elements`` callers and the agent-tools documentation.
+
+        ``frame_id`` is exposed only when the ref came from inside an
+        iframe (main-frame refs keep the historical 4-key shape). The
+        ``browser_click`` / ``browser_type`` ``frame=`` parameter is
+        documented as accepting either a URL substring or a frame_id
+        token returned by snapshot, so the token MUST appear here for
+        duplicate or anonymous iframes that cannot be addressed by URL.
         """
-        return {
+        d: dict = {
             "role": self.role,
             "name": self.name,
             "index": self.occurrence,
             "disabled": self.disabled,
         }
+        if self.frame_id is not None:
+            d["frame_id"] = self.frame_id
+        return d
 
     # ── Factory helpers ─────────────────────────────────────────────────────
 

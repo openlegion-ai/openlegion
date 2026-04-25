@@ -162,6 +162,27 @@ async def browser_navigate(
             ),
             "default": False,
         },
+        "frame": {
+            "type": "string",
+            "description": (
+                "Optional frame selector. Matched as a URL substring "
+                "against frame URLs, or as a frame_id token returned by "
+                "a prior snapshot. When set, the snapshot walks only "
+                "that frame instead of main-frame plus iframes."
+            ),
+        },
+        "include_frames": {
+            "type": "boolean",
+            "description": (
+                "When True (default) the snapshot descends into "
+                "same-origin iframes, emitting refs from inner frames "
+                "with their own frame_id. Set False to walk only the "
+                "main frame (or, with frame= set, only that frame) "
+                "without recursing — useful when iframe contents are "
+                "noise for the current task."
+            ),
+            "default": True,
+        },
     },
     parallel_safe=False,
 )
@@ -169,6 +190,8 @@ async def browser_get_elements(
     filter: str | None = None,
     from_ref: str | None = None,
     diff_from_last: bool = False,
+    frame: str | None = None,
+    include_frames: bool = True,
     *,
     mesh_client=None,
 ) -> dict:
@@ -180,6 +203,10 @@ async def browser_get_elements(
         payload["from_ref"] = from_ref
     if diff_from_last:
         payload["diff_from_last"] = True
+    if frame is not None:
+        payload["frame"] = frame
+    if not include_frames:
+        payload["include_frames"] = False
     return await _browser_command(mesh_client, "snapshot", payload)
 
 
@@ -377,12 +404,23 @@ async def browser_screenshot(
                 "'Post all'). Default 10000, max 30000."
             ),
         },
+        "frame": {
+            "type": "string",
+            "description": (
+                "Optional frame selector for selector-based clicks. "
+                "Matched as a URL substring against frame URLs, or as a "
+                "frame_id token from a prior snapshot. Refs from a "
+                "snapshot already carry their frame, so this argument is "
+                "redundant when ref is set and conflicts return an error."
+            ),
+        },
     },
     parallel_safe=False,
 )
 async def browser_click(
     selector: str = "", ref: str = "", force: bool = False,
     snapshot_after: bool = False, timeout_ms: int | None = None,
+    frame: str | None = None,
     *, mesh_client=None,
 ) -> dict:
     """Click an element by ref or CSS selector."""
@@ -392,6 +430,8 @@ async def browser_click(
            "snapshot_after": snapshot_after}
     if timeout_ms is not None:
         cmd["timeout_ms"] = timeout_ms
+    if frame is not None:
+        cmd["frame"] = frame
     return await _browser_command(mesh_client, "click", cmd)
 
 
@@ -447,12 +487,23 @@ async def browser_click(
             "description": "Include element snapshot in the response (default false)",
             "default": False,
         },
+        "frame": {
+            "type": "string",
+            "description": (
+                "Optional frame selector for selector-based typing. "
+                "Matched as a URL substring against frame URLs, or as a "
+                "frame_id token from a prior snapshot. Refs from a "
+                "snapshot already carry their frame, so this argument is "
+                "redundant when ref is set and conflicts return an error."
+            ),
+        },
     },
     parallel_safe=False,
 )
 async def browser_type(
     text: str, selector: str = "", ref: str = "", clear: bool = True,
-    fast: bool = False, snapshot_after: bool = False, *, mesh_client=None,
+    fast: bool = False, snapshot_after: bool = False,
+    frame: str | None = None, *, mesh_client=None,
 ) -> dict:
     """Type text into an element."""
     if not text:
@@ -460,11 +511,11 @@ async def browser_type(
     if not selector and not ref:
         return {"error": "Provide either 'ref' (from browser_get_elements) or 'selector' (CSS)"}
 
-    return await _browser_command(
-        mesh_client, "type",
-        {"ref": ref, "selector": selector, "text": text, "clear": clear,
-         "fast": fast, "snapshot_after": snapshot_after},
-    )
+    cmd = {"ref": ref, "selector": selector, "text": text, "clear": clear,
+           "fast": fast, "snapshot_after": snapshot_after}
+    if frame is not None:
+        cmd["frame"] = frame
+    return await _browser_command(mesh_client, "type", cmd)
 
 
 @skill(
