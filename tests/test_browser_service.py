@@ -1393,6 +1393,256 @@ class TestSnapshot:
         assert len(result["data"]["refs"]) == _MAX_SNAPSHOT_ELEMENTS
 
 
+class TestSnapshotFormatV2:
+    """§7.2 — landmark section headers + capped indent."""
+
+    @pytest.fixture
+    def v2_flag(self, monkeypatch):
+        """Force BROWSER_SNAPSHOT_FORMAT=v2 for the duration of one test."""
+        monkeypatch.setenv("BROWSER_SNAPSHOT_FORMAT", "v2")
+
+    @pytest.mark.asyncio
+    async def test_v1_default_unchanged(self):
+        """Without the flag the snapshot is the historical v1 format —
+        no version marker, no section headers."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mock_page = AsyncMock()
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value={
+            "role": "WebArea", "name": "",
+            "children": [
+                {"role": "button", "name": "Submit",
+                 "landmark": "navigation: Top"},
+            ],
+        })
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        snap = result["data"]["snapshot"]
+        assert "snapshot-v2" not in snap
+        assert "(navigation: Top)" in snap  # v1 suffix
+
+    @pytest.mark.asyncio
+    async def test_v2_emits_version_marker(self, v2_flag):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mock_page = AsyncMock()
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value={
+            "role": "WebArea", "name": "",
+            "children": [{"role": "button", "name": "Click"}],
+        })
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        snap = result["data"]["snapshot"]
+        assert snap.startswith("# snapshot-v2\n")
+
+    @pytest.mark.asyncio
+    async def test_v2_groups_by_landmark(self, v2_flag):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mock_page = AsyncMock()
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value={
+            "role": "WebArea", "name": "",
+            "children": [
+                {"role": "navigation", "name": "Top",
+                 "children": [
+                     {"role": "link", "name": "Home",
+                      "landmark": "navigation: Top"},
+                 ]},
+                {"role": "main", "name": "Article",
+                 "children": [
+                     {"role": "heading", "name": "Title",
+                      "landmark": "main: Article"},
+                     {"role": "button", "name": "Comment",
+                      "landmark": "main: Article"},
+                 ]},
+            ],
+        })
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        snap = result["data"]["snapshot"]
+        assert "# navigation: Top" in snap
+        assert "# main: Article" in snap
+        assert "(navigation: Top)" not in snap
+        assert "(main: Article)" not in snap
+        assert '] link "Home"' in snap
+        assert '] heading "Title"' in snap
+        assert '] button "Comment"' in snap
+
+    @pytest.mark.asyncio
+    async def test_v2_unlandmarked_section_emitted(self, v2_flag):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mock_page = AsyncMock()
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value={
+            "role": "WebArea", "name": "",
+            "children": [
+                {"role": "button", "name": "Loose"},
+            ],
+        })
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        snap = result["data"]["snapshot"]
+        assert "# (no landmark)" in snap
+        assert '] button "Loose"' in snap
+
+    def test_v2_caps_indent_depth(self):
+        """Direct test of the formatter — depth>4 collapses to 4 levels."""
+        from src.browser.service import _format_snapshot_v2
+        entries = [
+            ("e0", "button", "Deep", "", "main: Body", 7),
+            ("e1", "link", "Shallow", "", "main: Body", 1),
+        ]
+        out = _format_snapshot_v2([], entries)
+        assert '\n        - [e0] button "Deep"' in out
+        assert '\n  - [e1] link "Shallow"' in out
+
+    def test_v2_passes_through_modal_banner(self):
+        """``**`` preamble lines (modal warning) ride along ahead of the
+        section blocks."""
+        from src.browser.service import _format_snapshot_v2
+        lines = [
+            "** Modal dialog is open — only dialog elements are shown **",
+            "  - [e0] button \"Close\" (dialog: Compose)",
+        ]
+        entries = [("e0", "button", "Close", "", "dialog: Compose", 0)]
+        out = _format_snapshot_v2(lines, entries)
+        assert out.startswith("# snapshot-v2\n** Modal dialog is open")
+        assert "# dialog: Compose" in out
+
+    def test_v2_empty_entries_returns_marker_only(self):
+        from src.browser.service import _format_snapshot_v2
+        out = _format_snapshot_v2([], [])
+        assert out == "# snapshot-v2\n(no interactive elements)"
+
+    def test_v2_attr_string_preserved(self):
+        from src.browser.service import _format_snapshot_v2
+        entries = [
+            ("e0", "checkbox", "Subscribe", " [checked=True]", "form: Signup", 2),
+        ]
+        out = _format_snapshot_v2([], entries)
+        assert '- [e0] checkbox "Subscribe" [checked=True]' in out
+
+    def test_v2_strips_newlines_from_landmark_and_name(self):
+        """An adversarial DOM with embedded newlines in the accessible
+        name (or landmark) must not inject a phantom section header.
+
+        Pre-fix, a button with ``aria-label="x\\n# fake-section: pwn"``
+        would land in v2 output as a literal newline followed by
+        ``# fake-section: pwn``, which a parser would interpret as a
+        new section. The fix collapses CR/LF to spaces before emit."""
+        from src.browser.service import _format_snapshot_v2
+        entries = [
+            (
+                "e0", "button",
+                "Real\n# fake-section: pwn",
+                " [disabled]",
+                "main: Body\n# evil",
+                1,
+            ),
+        ]
+        out = _format_snapshot_v2([], entries)
+        # No newline appears between ``Real`` and ``# fake``; landmark
+        # key is sanitized similarly.
+        assert "\n# fake-section: pwn" not in out
+        assert "\n# evil" not in out
+        # The actual emitted lines have a single section header and a
+        # single element line.
+        section_lines = [ln for ln in out.splitlines() if ln.startswith("# ")]
+        # First section line is the version marker; second is the
+        # sanitized landmark.
+        assert section_lines[0] == "# snapshot-v2"
+        assert section_lines[1] == "# main: Body # evil"
+
+    def test_v2_empty_with_preamble_only(self):
+        """Modal-scoping retry can produce zero entries but a non-empty
+        preamble (the ``** Modal dialog ... **`` banner). v2 must
+        emit the marker + the preamble cleanly."""
+        from src.browser.service import _format_snapshot_v2
+        out = _format_snapshot_v2(
+            ["** Modal dialog is open — only dialog elements are shown **"],
+            [],
+        )
+        assert out == (
+            "# snapshot-v2\n"
+            "** Modal dialog is open — only dialog elements are shown **"
+        )
+
+    @pytest.mark.asyncio
+    async def test_v2_modal_retry_does_not_leak_phantom_refs(self, v2_flag):
+        """Regression: when modal scoping fails on first try, the discarded
+        ``_walk`` pass must not bleed entries into v2 output. Pre-fix,
+        ``lines.clear()`` reset v1 output but ``entries`` was never reset,
+        producing duplicated refs in v2 that didn't match ``inst.refs``.
+        """
+        from src.browser.service import BrowserManager, CamoufoxInstance
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        # Modal is detected (visible) but scoping returns a tree with
+        # only context (heading) — no actionable refs — on first pass.
+        # Second pass after the retry yields an actionable button.
+        first_pass_tree = {
+            "role": "WebArea", "name": "",
+            "children": [{"role": "heading", "name": "Loading...",
+                          "landmark": "dialog: Compose"}],
+        }
+        second_pass_tree = {
+            "role": "WebArea", "name": "",
+            "children": [{"role": "button", "name": "Post",
+                          "landmark": "dialog: Compose"}],
+        }
+
+        # Modal selector returns a single visible modal.
+        modal_el = AsyncMock()
+        modal_el.is_visible = AsyncMock(return_value=True)
+        modal_el.bounding_box = AsyncMock(
+            return_value={"x": 0, "y": 0, "width": 200, "height": 200},
+        )
+        modal_el.evaluate = AsyncMock(return_value=False)
+        mock_page = AsyncMock()
+        mock_page.viewport_size = {"width": 1920, "height": 1080}
+        mock_page.query_selector_all = AsyncMock(return_value=[modal_el])
+        mock_page.accessibility = MagicMock()
+        # First call (page-level snapshot) → first_pass.
+        # Calls with root=modal_el → first_pass on first attempt,
+        # second_pass after retry.
+        accessibility_calls = [
+            first_pass_tree,   # initial page-level snapshot for whole-tree fallback
+            first_pass_tree,   # first scoped snapshot inside modal
+            second_pass_tree,  # post-retry scoped snapshot
+        ]
+        mock_page.accessibility.snapshot = AsyncMock(
+            side_effect=accessibility_calls + [second_pass_tree] * 5,
+        )
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        with patch("src.browser.service.asyncio.sleep"):
+            result = await mgr.snapshot("a1")
+
+        snap = result["data"]["snapshot"]
+        # Every ref id appearing in the rendered v2 snapshot must also
+        # exist in inst.refs (the resolution table). The pre-fix bug
+        # produced refs that were rendered but not present in inst.refs.
+        import re
+        rendered_refs = set(re.findall(r"\[e\d+\]", snap))
+        actual_refs = {f"[{rid}]" for rid in inst.refs}
+        assert rendered_refs.issubset(actual_refs), (
+            f"phantom refs in v2 output: {rendered_refs - actual_refs}"
+        )
+
+
 class TestTypeTextWithRef:
     """Tests for type_text using ref-based element resolution."""
 

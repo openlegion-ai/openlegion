@@ -58,6 +58,100 @@ _CONTEXT_ROLES = frozenset({
 
 _MAX_SNAPSHOT_ELEMENTS = 200
 
+
+# §7.2 v2 format — depth indent is capped so a 50-deep DOM doesn't
+# explode into 100-character indents. Anything past this depth shares
+# the cap-line indent (still distinguishable as "deep" but not bytewise
+# punishing).
+_V2_MAX_INDENT_DEPTH = 4
+_V2_NO_LANDMARK_KEY = ""
+
+
+def _format_snapshot_v2(
+    lines: list[str],
+    entries: list[tuple[str, str, str, str, str, int]],
+) -> str:
+    """Render the snapshot in §7.2 ``v2`` format.
+
+    Group entries by landmark and emit each group under a section
+    header (``# nav: Top``) instead of suffixing every element with
+    ``(navigation: Top)``. Indent depth is capped at
+    :data:`_V2_MAX_INDENT_DEPTH`.
+
+    Modal-mode preamble lines (those starting with ``**`` in the v1
+    output) are passed through verbatim ahead of the section blocks
+    so the agent still sees the modal context.
+
+    Args:
+        lines: the v1 line list — only used for ``**`` preamble lines.
+        entries: per-element tuples
+            ``(ref_id, role, name, attr_str, landmark, depth)``.
+
+    Returns the rendered string. Always begins with the
+    ``# snapshot-v2`` version marker so parsers can detect the format
+    without out-of-band signaling.
+    """
+    if not entries:
+        # Empty result. Still emit the marker so a parser using the
+        # first line for routing decisions doesn't trip. Also pass
+        # through any modal-banner preamble that v1 produced.
+        preamble = [ln for ln in lines if ln.startswith("**")]
+        if preamble:
+            return "# snapshot-v2\n" + "\n".join(preamble)
+        return "# snapshot-v2\n(no interactive elements)"
+
+    # Modal-banner preamble (lines starting ``**``) precedes the
+    # element output. Keeps the modal-scoped warning visible.
+    preamble = [ln for ln in lines if ln.startswith("**")]
+
+    # Preserve insertion order — the dict-by-design key order matches
+    # the order entries were emitted, which is doc order.
+    groups: dict[str, list[tuple[str, str, str, str, int]]] = {}
+    for ref_id, role, name, attr_str, landmark, depth in entries:
+        key = landmark or _V2_NO_LANDMARK_KEY
+        groups.setdefault(key, []).append(
+            (ref_id, role, name, attr_str, depth),
+        )
+
+    out: list[str] = ["# snapshot-v2"]
+    out.extend(preamble)
+    for landmark_key, group_entries in groups.items():
+        if landmark_key == _V2_NO_LANDMARK_KEY:
+            out.append("# (no landmark)")
+        else:
+            # Sanitize newlines in landmark keys: a malicious DOM
+            # node with ``aria-label="x\n# fake-section: pwn"`` would
+            # otherwise inject a phantom section header into the
+            # parsed output (operator scripts reading the v2 format
+            # split on '#' prefixes). Replace with single spaces so
+            # the structural marker stays one-line.
+            out.append(f"# {_v2_strip_newlines(landmark_key)}")
+        for ref_id, role, name, attr_str, depth in group_entries:
+            indent_depth = min(depth, _V2_MAX_INDENT_DEPTH)
+            indent = "  " * indent_depth
+            # Same sanitization on per-element name + attr_str so an
+            # accessible-name with embedded ``\n# fake`` can't escape
+            # to a fake section header.
+            safe_name = _v2_strip_newlines(name)
+            safe_attr = _v2_strip_newlines(attr_str)
+            out.append(f"{indent}- [{ref_id}] {role} \"{safe_name}\"{safe_attr}")
+
+    return "\n".join(out)
+
+
+def _v2_strip_newlines(s: str) -> str:
+    """Collapse ``\\n``/``\\r`` to single spaces.
+
+    v2 promotes ``# ``-prefixed lines to structural meaning. A DOM
+    node with newlines in its accessible name or landmark would
+    otherwise inject phantom section headers into the parsed
+    snapshot. Cheap belt-and-braces over the JS-walker side which
+    only ``.trim()``s whitespace endpoints.
+    """
+    if not s:
+        return s
+    return s.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+
 # Block schemes that could expose local files or browser internals.
 # about: covers about:logins (saved passwords), about:config, etc.
 # moz-extension: / chrome-extension: cover installed extensions.
@@ -1684,6 +1778,13 @@ class BrowserManager:
 
             _MAX_WALK_DEPTH = 50
 
+            # Collect entries for §7.2 v2 rendering AND build v1 lines in
+            # parallel. The entry list is a structured intermediate so we
+            # can pivot between formats post-walk without a second tree
+            # traversal. Each entry: (ref_id, role, name, attr_str,
+            # landmark, depth).
+            entries: list[tuple[str, str, str, str, str, int]] = []
+
             def _walk(node, depth=0):
                 if depth > _MAX_WALK_DEPTH:
                     return
@@ -1718,6 +1819,9 @@ class BrowserManager:
 
                         line = f"{'  ' * depth}- [{ref_id}] {role} \"{name}\"{attr_str}{ctx_str}"
                         lines.append(line)
+                        entries.append(
+                            (ref_id, role, name, attr_str, landmark, depth),
+                        )
                         # scope_root is finalized after the modal-scoping
                         # branch below. For now record the unscoped handle;
                         # we overwrite scope_root once we know the final
@@ -1786,6 +1890,13 @@ class BrowserManager:
                     await asyncio.sleep(wait)
                     refs.clear()
                     lines.clear()
+                    # §7.2: ``entries`` is the parallel structure v2 renders
+                    # from. Forgetting to reset it here would leak entries
+                    # from the discarded scoping pass into the v2 output —
+                    # invisible in v1 (which renders ``lines`` only) but
+                    # produces phantom refs that don't match ``inst.refs``
+                    # under v2.
+                    entries.clear()
                     ref_counter[0] = 0
                     occurrence_counts.clear()
                     lines.append("** Modal dialog is open — only dialog elements are shown **")
@@ -1820,6 +1931,10 @@ class BrowserManager:
                     # scoped click that can't find the element will timeout
                     # rather than hit the wrong target.
                     lines.clear()
+                    # Same reset rationale as the retry branch above —
+                    # discard fallback's ``entries`` so v2 rendering
+                    # only sees the post-fallback _walk(tree) output.
+                    entries.clear()
                     lines.append(
                         "** A modal dialog is open but its elements could "
                         "not be isolated — elements with a (dialog: ...) "
@@ -1852,7 +1967,21 @@ class BrowserManager:
                         )
 
             inst.refs = refs
-            snapshot_text = "\n".join(lines) if lines else "(no interactive elements)"
+            # §7.2 — choose between v1 (per-element landmark suffix) and
+            # v2 (landmark headers + capped indent). Flag default is v1
+            # for the canary period, flips to v2 once parse rate ≥99%.
+            from src.browser.flags import get_str
+            fmt = (
+                get_str("BROWSER_SNAPSHOT_FORMAT", "v1", agent_id=agent_id)
+                .strip()
+                .lower()
+            )
+            if fmt == "v2":
+                snapshot_text = _format_snapshot_v2(lines, entries)
+            else:
+                snapshot_text = (
+                    "\n".join(lines) if lines else "(no interactive elements)"
+                )
             snapshot_text = self.redactor.redact(agent_id, snapshot_text)
             # Record snapshot byte size for §4.6 metrics. Collected per call;
             # drained as p50/p95 on the next minute tick.
