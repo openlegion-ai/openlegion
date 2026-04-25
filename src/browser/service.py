@@ -1545,18 +1545,18 @@ class BrowserManager:
                 title = await inst.page.title()
                 current_url = inst.page.url
                 body_text = ""
-                # When snapshot_after=True the response already carries the
-                # full element tree — keep ``body`` as a short preview
-                # (1000 chars) so the agent has page-text context without
-                # paying full-text token cost twice. With snapshot_after
-                # off the agent depends on body for content, so retain
-                # the historical 5000-char cap.
-                body_cap = 1000 if snapshot_after else 5000
+                # Always extract body at the historical 5000-char cap so
+                # we have a usable fallback if the snapshot path fails
+                # below. We trim to a 1000-char preview only AFTER the
+                # snapshot succeeds — that's when the agent has the full
+                # element tree and doesn't need a long body. If the
+                # snapshot fails, we ship the full body so the agent
+                # isn't stranded with truncated text + empty snapshot.
                 if not inst._js_snapshot_mode:
                     try:
                         _a11y = await inst.page.accessibility.snapshot()
                         body_text = _extract_text_from_a11y(
-                            _a11y, max_chars=body_cap,
+                            _a11y, max_chars=5000,
                         )
                     except AttributeError:
                         inst._js_snapshot_mode = True
@@ -1567,16 +1567,34 @@ class BrowserManager:
                     "data": {
                         "url": self.redactor.redact(agent_id, current_url),
                         "title": self.redactor.redact(agent_id, title),
-                        "body": self.redactor.redact(agent_id, body_text),
+                        # Body filled in below once we know whether the
+                        # optional snapshot succeeded — see body cap
+                        # comment.
+                        "body": "",
                     },
                 }
                 # Auto-detect CAPTCHAs so the agent knows immediately
                 captcha = await self._check_captcha(inst)
                 if captcha:
                     result["captcha"] = captcha
+                snapshot_succeeded = False
                 if snapshot_after:
                     snap = await self._snapshot_impl(inst, agent_id)
-                    result["snapshot"] = snap.get("data", {})
+                    snap_data = snap.get("data") or {}
+                    result["snapshot"] = snap_data
+                    snapshot_succeeded = bool(snap.get("success") and snap_data)
+                # §7.6: shrink body to 1000-char preview ONLY when the
+                # snapshot actually carried back element refs. A failed
+                # snapshot would otherwise leave the agent with both a
+                # truncated body AND an empty/{} snapshot — strictly
+                # worse than the snapshot_after=False path. Restore the
+                # full body in that failure case.
+                final_body = (
+                    body_text[:1000] if snapshot_succeeded else body_text
+                )
+                result["data"]["body"] = self.redactor.redact(
+                    agent_id, final_body,
+                )
                 return result
             except Exception as e:
                 return {"success": False, "error": str(e)}

@@ -2379,6 +2379,39 @@ class TestNavigateBodyCap:
         body = result["data"]["body"]
         assert 4000 <= len(body) <= 5000, len(body)
 
+    @pytest.mark.asyncio
+    async def test_body_falls_back_to_5000_when_snapshot_fails(self):
+        """When snapshot_after=True but the snapshot itself fails or
+        returns nothing, the agent must NOT be left with a 1000-char
+        body AND an empty snapshot — strictly worse than the
+        snapshot_after=False path. The body falls back to the 5000-char
+        cap so the agent has usable page text."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mock_page = AsyncMock()
+        mock_page.goto = AsyncMock()
+        mock_page.title = AsyncMock(return_value="t")
+        mock_page.url = "https://example.com"
+        a11y_tree = self._make_long_a11y(8000)
+        mock_page.accessibility = AsyncMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value=a11y_tree)
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        # Stub out _snapshot_impl to simulate failure.
+        async def _failing_snapshot(*_a, **_k):
+            return {"success": False, "error": "boom"}
+
+        with patch.object(mgr, "_snapshot_impl", _failing_snapshot):
+            result = await mgr.navigate(
+                "a1", "https://example.com", wait_ms=0, snapshot_after=True,
+            )
+        assert result["success"] is True
+        body = result["data"]["body"]
+        # Falls back to 5000-cap when snapshot was unsuccessful.
+        assert 4000 <= len(body) <= 5000, len(body)
+
 
 class TestNavigateRetry:
     """Tests for navigation timeout retry."""
