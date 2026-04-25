@@ -1960,6 +1960,43 @@ class TestSnapshotFromRef:
         for handle in inst.refs.values():
             assert handle.scope_root is None
 
+    @pytest.mark.asyncio
+    async def test_from_ref_dispatches_through_v2_when_flag_set(
+        self, monkeypatch,
+    ):
+        """Cross-PR (§7.4 ↔ §7.2): when BROWSER_SNAPSHOT_FORMAT=v2,
+        the from_ref early-return must use the v2 formatter so scoped
+        snapshots emit the ``# snapshot-v2`` marker just like the
+        main return path. Without this, agents parsing on the
+        first-line marker would see mixed formats."""
+        from src.browser.ref_handle import RefHandle
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        monkeypatch.setenv("BROWSER_SNAPSHOT_FORMAT", "v2")
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mock_page = AsyncMock()
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value={
+            "role": "form", "name": "Login",
+            "children": [{"role": "button", "name": "Submit"}],
+        })
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        page_id = inst._page_id_for(inst.page)
+        inst.refs["e0"] = RefHandle.light_dom(
+            page_id=page_id, scope_root=None,
+            role="form", name="Login", occurrence=0, disabled=False,
+        )
+        mgr._instances["a1"] = inst
+
+        fake_locator = AsyncMock()
+        fake_locator.element_handle = AsyncMock(return_value=MagicMock())
+        with patch.object(
+            BrowserManager, "_locator_from_ref", return_value=fake_locator,
+        ):
+            result = await mgr.snapshot("a1", from_ref="e0")
+        assert result["success"] is True
+        # v2 marker on first line — the scoped path now honors the flag.
+        assert result["data"]["snapshot"].startswith("# snapshot-v2\n")
+
 
 class TestTypeTextWithRef:
     """Tests for type_text using ref-based element resolution."""

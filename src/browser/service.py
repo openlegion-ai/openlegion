@@ -2045,9 +2045,26 @@ class BrowserManager:
                                 element_key=handle.element_key,
                             )
                 inst.refs = refs
-                snapshot_text = (
-                    "\n".join(lines) if lines else "(no interactive elements)"
+                # Cross-PR fix (#749 ↔ #750): the from_ref early-return
+                # must honor the same v2 dispatch as the main return
+                # path. Without this, scoped snapshots stay v1 even
+                # when ``BROWSER_SNAPSHOT_FORMAT=v2`` is set — agents
+                # parsing on the ``# snapshot-v2`` first-line marker
+                # would silently see mixed formats.
+                from src.browser.flags import get_str as _flag_get_str
+                _scoped_fmt = (
+                    _flag_get_str(
+                        "BROWSER_SNAPSHOT_FORMAT", "v1", agent_id=agent_id,
+                    )
+                    .strip()
+                    .lower()
                 )
+                if _scoped_fmt == "v2":
+                    snapshot_text = _format_snapshot_v2(lines, entries)
+                else:
+                    snapshot_text = (
+                        "\n".join(lines) if lines else "(no interactive elements)"
+                    )
                 snapshot_text = self.redactor.redact(agent_id, snapshot_text)
                 inst.m_snapshot_bytes.append(len(snapshot_text))
                 response_refs = {
