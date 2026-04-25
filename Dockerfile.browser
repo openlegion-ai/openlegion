@@ -71,6 +71,22 @@ RUN pip install --no-cache-dir --root-user-action=ignore --upgrade pip \
     && pip install --no-cache-dir --root-user-action=ignore \
     "camoufox[geoip]" fastapi uvicorn pydantic httpx
 
+# uBlock Origin XPI (Phase 4 §7.1) — bundled at build time so air-gapped
+# deployments don't need addons.mozilla.org reachability at runtime.
+# Stored read-only in /opt; the profile-schema v3 migration copies it
+# into each agent profile's extensions/ dir on first launch.
+#
+# Pin to the AMO-signed Firefox build so Camoufox's patched Firefox
+# loads it without warning. Updating this version → bump
+# PROFILE_SCHEMA_VERSION in src/browser/profile_schema.py to ensure
+# existing profiles re-install the new XPI.
+ARG UBLOCK_VERSION=1.62.0
+RUN mkdir -p /opt/openlegion/extensions \
+    && curl -fSL -o /opt/openlegion/extensions/uBlock0.xpi \
+       "https://github.com/gorhill/uBlock/releases/download/${UBLOCK_VERSION}/uBlock0_${UBLOCK_VERSION}.firefox.signed.xpi" \
+    && test -s /opt/openlegion/extensions/uBlock0.xpi \
+    && chmod 0644 /opt/openlegion/extensions/uBlock0.xpi
+
 # Application code
 COPY src/browser/ /app/src/browser/
 COPY src/shared/ /app/src/shared/

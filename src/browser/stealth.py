@@ -623,6 +623,28 @@ def _stealth_prefs() -> dict:
         "browser.newtabpage.activity-stream.asrouter.userprefs.cfr.features": False,
         "extensions.htmlaboutaddons.recommendations.enabled": False,
 
+        # ── Bundled extensions (Phase 4 §7.1) ─────────────────────────────────
+        # The profile-schema v3 migration drops uBlock Origin's signed XPI
+        # into ``{profile}/extensions/{addon-id}.xpi``. Firefox detects
+        # extensions there at launch but only enables them automatically
+        # when these prefs cooperate:
+        #   * ``autoDisableScopes=0`` — bit-mask of scopes whose extensions
+        #     start *disabled* on first install. 0 means none of the
+        #     auto-discovered scopes are disabled, so our profile-bundled
+        #     uBlock loads on first run.
+        #   * ``startupScanScopes=15`` — bit-mask of scopes scanned for
+        #     extension changes at every startup. 15 = all (1=app, 2=system,
+        #     4=user, 8=profile). Without this, Firefox only re-scans the
+        #     profile dir when the addon DB tracks a known XPI; a freshly-
+        #     dropped XPI from our migration would otherwise wait until the
+        #     next manifest change.
+        #   * ``xpinstall.signatures.required=False`` — Camoufox's patched
+        #     Firefox already loosens this, but setting it explicitly keeps
+        #     us robust against upstream Camoufox changes that re-tighten it.
+        "extensions.autoDisableScopes": 0,
+        "extensions.startupScanScopes": 15,
+        "xpinstall.signatures.required": False,
+
         # ── First-run / welcome / default-browser prompts ────────────────────
         # Belt-and-suspenders against the about:welcome tab, default-browser
         # nag, and profile-import wizard. Phase 3 profile schema v2 takes

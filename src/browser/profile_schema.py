@@ -61,7 +61,42 @@ logger = setup_logging("browser.profile_schema")
 
 # Bump this monotonically when adding a new migration. Never decrement.
 # Never reuse a number — migrations are applied by version key in order.
-PROFILE_SCHEMA_VERSION: int = 2
+PROFILE_SCHEMA_VERSION: int = 3
+
+
+# uBlock Origin's Firefox addon ID. Used as the filename when copying
+# the bundled XPI into a profile's ``extensions/`` directory — Firefox
+# requires the file to be named ``{addon-id}.xpi`` for auto-discovery.
+UBLOCK_ADDON_ID: str = "uBlock0@raymondhill.net"
+
+
+def _ublock_source_path() -> Path:
+    """Source XPI inside the browser container (placed by Dockerfile.browser).
+
+    Override via ``OPENLEGION_UBLOCK_XPI`` for unit tests + dev environments
+    where the container artifact isn't available. When the source is
+    missing, the migration logs and stamps the schema anyway — the launch
+    still succeeds without the extension, which matters for fresh dev
+    installs whose Dockerfile.browser may not yet have shipped uBO.
+    """
+    return Path(
+        os.environ.get(
+            "OPENLEGION_UBLOCK_XPI",
+            "/opt/openlegion/extensions/uBlock0.xpi",
+        )
+    )
+
+
+def _adblock_enabled() -> bool:
+    """Operator escape hatch (§7.1 / §2.1 ``BROWSER_ENABLE_ADBLOCK``).
+
+    Defaults to ``true``. Setting ``BROWSER_ENABLE_ADBLOCK=false`` skips
+    the install entirely — already-installed profiles keep their
+    extension (cleanly uninstalling Firefox extensions in-place is
+    fragile; operators wanting a hard reset should ``openlegion reset``).
+    """
+    raw = os.environ.get("BROWSER_ENABLE_ADBLOCK", "true").strip().lower()
+    return raw not in ("false", "0", "no", "off", "")
 
 
 def _v2_clear_font_caches(profile: Path) -> None:
@@ -130,8 +165,84 @@ def _v2_clear_font_caches(profile: Path) -> None:
 #   - Never touch cookies.sqlite, webappsstore.sqlite, storage/default/,
 #     or bookmarks.sqlite. Preserve user sessions.
 #   - Raise on unrecoverable failure. The caller will restore from .bak.
+def _v3_install_ublock(profile: Path) -> None:
+    """Migration v3 (Phase 4 §7.1): install uBlock Origin into the profile.
+
+    Firefox auto-discovers extensions placed at
+    ``{profile}/extensions/{addon-id}.xpi`` on launch (combined with
+    ``extensions.autoDisableScopes=0`` and ``extensions.startupScanScopes``
+    set in stealth prefs). The XPI itself is bundled at build time by
+    ``Dockerfile.browser`` to ``/opt/openlegion/extensions/uBlock0.xpi``.
+
+    Behavior:
+
+    - **Source missing.** Log INFO and return. Happens on dev installs
+      whose browser image hasn't been rebuilt yet, or test environments
+      that don't ship the XPI. Migration framework still stamps the
+      profile to v3 — the next launch on a properly-built container
+      will fix it because :func:`sync_adblock_extension` runs every
+      launch (see ``src/browser/service.py``).
+    - **Adblock disabled.** Operator set ``BROWSER_ENABLE_ADBLOCK=false``;
+      skip without raising so existing profiles still upgrade their
+      schema marker (no-op-ifying the migration prevents a stuck
+      "stamped at v2 forever" state).
+    - **Default install.** Copy XPI to ``{profile}/extensions/``,
+      ``chmod 0644``. Firefox installs and enables on next launch.
+
+    Idempotent — copies are guarded by mtime/size comparison so
+    re-running the migration on an already-installed profile is cheap.
+
+    Raises ``OSError`` only on unrecoverable I/O failures (disk full,
+    permission denied on a directory we own). The migration framework's
+    backup-restore path triggers; the operator gets a stable profile
+    rolled back to v2.
+    """
+    source = _ublock_source_path()
+    if not source.is_file():
+        logger.info(
+            "uBlock Origin XPI not found at %s — skipping install for %s "
+            "(profile will be stamped to v3; launch-time sync will install "
+            "later when the source becomes available)",
+            source, profile,
+        )
+        return
+    if not _adblock_enabled():
+        logger.info(
+            "BROWSER_ENABLE_ADBLOCK=false — skipping uBlock Origin install "
+            "for %s (existing extension files left untouched)", profile,
+        )
+        return
+
+    extensions_dir = profile / "extensions"
+    extensions_dir.mkdir(parents=True, exist_ok=True)
+    target = extensions_dir / f"{UBLOCK_ADDON_ID}.xpi"
+
+    # Idempotent copy: skip when the destination already matches the
+    # source (same size + mtime within 1s). Re-applies the chmod regardless
+    # so a profile restored from a backup with stale perms gets fixed.
+    if target.is_file():
+        try:
+            src_stat = source.stat()
+            tgt_stat = target.stat()
+            if (
+                src_stat.st_size == tgt_stat.st_size
+                and abs(src_stat.st_mtime - tgt_stat.st_mtime) < 1.0
+            ):
+                target.chmod(0o644)
+                return
+        except OSError:
+            # Stat failure is non-fatal — fall through to a fresh copy.
+            pass
+
+    # ``copy2`` preserves mtime so the size+mtime guard above will hit on
+    # the next migration call (idempotency).
+    shutil.copy2(source, target)
+    target.chmod(0o644)
+
+
 _MIGRATIONS: dict[int, Callable[[Path], None]] = {
     2: _v2_clear_font_caches,
+    3: _v3_install_ublock,
 }
 
 
@@ -154,6 +265,45 @@ class ProfileMigrationBusy(Exception):
 
 
 # ── Public API ──────────────────────────────────────────────────────────────
+
+
+def sync_adblock_extension(profile_dir: Path | str) -> bool:
+    """Refresh the uBlock Origin install for ``profile_dir`` at launch.
+
+    Distinct from :func:`migrate_profile`: that runs once per schema bump.
+    This runs every launch so flipping ``BROWSER_ENABLE_ADBLOCK`` on a
+    long-lived profile, or rebuilding the browser image with a newer XPI
+    version, takes effect on the next browser start without needing a
+    schema bump.
+
+    Returns ``True`` if the profile now has the bundled uBlock XPI in
+    place, ``False`` otherwise (source missing, adblock disabled, or
+    copy failed). Never raises — extension install is best-effort and
+    must not block browser launch.
+
+    Note on uninstall: when the operator flips
+    ``BROWSER_ENABLE_ADBLOCK=false`` AND the profile previously had
+    uBlock, this function does *not* attempt removal. Cleanly removing
+    a Firefox extension after first install requires editing
+    ``extensions.json`` + the profile DB, which is fragile across
+    Firefox versions. Operators wanting a hard reset should
+    ``openlegion reset`` (full profile wipe).
+    """
+    profile = Path(profile_dir)
+    if not profile.is_dir():
+        return False
+    try:
+        # Re-use the migration helper — it's already idempotent and
+        # respects the source-missing / flag-disabled guards.
+        _v3_install_ublock(profile)
+    except Exception as e:
+        logger.warning(
+            "Launch-time uBlock sync failed for %s: %s "
+            "(browser will start without ad-blocking)", profile, e,
+        )
+        return False
+    target = profile / "extensions" / f"{UBLOCK_ADDON_ID}.xpi"
+    return target.is_file()
 
 
 def migrate_profile(profile_dir: Path | str) -> int:
