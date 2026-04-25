@@ -116,14 +116,46 @@ async def browser_navigate(
         "page. Elements include structural context like (navigation), "
         "(dialog: Name) — when duplicates exist, prefer the one inside the "
         "relevant container. This returns structured text, NOT a visual "
-        "image — use browser_screenshot for that."
+        "image — use browser_screenshot for that.\n\n"
+        "Optional: pass filter='actionable'|'inputs'|'headings'|'landmarks' "
+        "to narrow the result (cheaper tokens on huge pages). Pass "
+        "from_ref='e3' to scope the snapshot to a specific element's "
+        "subtree — useful for drilling into a list, table, or form section."
     ),
-    parameters={},
+    parameters={
+        "filter": {
+            "type": "string",
+            "description": (
+                "Optional role filter. 'actionable' = clickable / typeable "
+                "elements only; 'inputs' = form inputs only; 'headings' = "
+                "section headings for orientation; 'landmarks' = top-level "
+                "regions (navigation/main/...). Omit for the default mix."
+            ),
+        },
+        "from_ref": {
+            "type": "string",
+            "description": (
+                "Optional ref id (e.g. 'e7') from a previous "
+                "browser_get_elements call. When set, the snapshot is "
+                "rooted at that element's subtree."
+            ),
+        },
+    },
     parallel_safe=False,
 )
-async def browser_get_elements(*, mesh_client=None) -> dict:
+async def browser_get_elements(
+    filter: str | None = None,
+    from_ref: str | None = None,
+    *,
+    mesh_client=None,
+) -> dict:
     """Return an accessibility tree snapshot with element refs."""
-    return await _browser_command(mesh_client, "snapshot")
+    payload: dict = {}
+    if filter is not None:
+        payload["filter"] = filter
+    if from_ref is not None:
+        payload["from_ref"] = from_ref
+    return await _browser_command(mesh_client, "snapshot", payload)
 
 
 @skill(

@@ -164,7 +164,15 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
     @app.post("/browser/{agent_id}/snapshot")
     async def snapshot(agent_id: str, request: Request):
         _verify_auth(request)
-        return await manager.snapshot(agent_id)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        return await manager.snapshot(
+            agent_id,
+            filter=(body or {}).get("filter"),
+            from_ref=(body or {}).get("from_ref"),
+        )
 
     @app.post("/browser/{agent_id}/click")
     async def click(agent_id: str, request: Request):

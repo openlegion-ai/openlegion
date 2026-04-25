@@ -1642,6 +1642,217 @@ class TestSnapshotFormatV2:
             f"phantom refs in v2 output: {rendered_refs - actual_refs}"
         )
 
+class TestSnapshotFilter:
+    """§7.7 — semantic filter narrows the snapshot to one role family."""
+
+    def _mixed_tree(self) -> dict:
+        return {
+            "role": "WebArea",
+            "name": "Mixed",
+            "children": [
+                {"role": "navigation", "name": "Top"},
+                {"role": "main", "name": "Main"},
+                {"role": "heading", "name": "Section A"},
+                {"role": "button", "name": "Click"},
+                {"role": "textbox", "name": "Email"},
+                {"role": "checkbox", "name": "Subscribe"},
+                {"role": "img", "name": "Logo"},
+                {"role": "link", "name": "Help"},
+            ],
+        }
+
+    async def _snap_with_filter(self, filter_value):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mock_page = AsyncMock()
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(
+            return_value=self._mixed_tree(),
+        )
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+        return await mgr.snapshot("a1", filter=filter_value)
+
+    @pytest.mark.asyncio
+    async def test_default_filter_includes_actionable_and_context(self):
+        result = await self._snap_with_filter(None)
+        assert result["success"] is True
+        roles = {r["role"] for r in result["data"]["refs"].values()}
+        # Actionable + context: button, textbox, checkbox, link, heading, img.
+        # Landmarks (navigation/main) are NOT in the default mix.
+        assert "button" in roles
+        assert "heading" in roles
+        assert "img" in roles
+        assert "navigation" not in roles
+        assert "main" not in roles
+
+    @pytest.mark.asyncio
+    async def test_actionable_filter_excludes_context(self):
+        result = await self._snap_with_filter("actionable")
+        roles = {r["role"] for r in result["data"]["refs"].values()}
+        assert roles == {"button", "textbox", "checkbox", "link"}
+
+    @pytest.mark.asyncio
+    async def test_inputs_filter_includes_inputs_only(self):
+        result = await self._snap_with_filter("inputs")
+        roles = {r["role"] for r in result["data"]["refs"].values()}
+        assert roles == {"textbox", "checkbox"}
+
+    @pytest.mark.asyncio
+    async def test_headings_filter(self):
+        result = await self._snap_with_filter("headings")
+        roles = {r["role"] for r in result["data"]["refs"].values()}
+        assert roles == {"heading"}
+
+    @pytest.mark.asyncio
+    async def test_landmarks_filter(self):
+        result = await self._snap_with_filter("landmarks")
+        roles = {r["role"] for r in result["data"]["refs"].values()}
+        assert roles == {"navigation", "main"}
+
+    @pytest.mark.asyncio
+    async def test_invalid_filter_returns_invalid_input(self):
+        result = await self._snap_with_filter("nope")
+        assert result["success"] is False
+        assert result["error"]["code"] == "invalid_input"
+        assert "nope" in result["error"]["message"]
+
+    @pytest.mark.asyncio
+    async def test_empty_string_treated_as_default(self):
+        """JSON UI defaults often pass ``""`` — must not narrow the result."""
+        result = await self._snap_with_filter("")
+        assert result["success"] is True
+        roles = {r["role"] for r in result["data"]["refs"].values()}
+        # Same set as the default-None case.
+        assert "heading" in roles and "img" in roles
+
+
+class TestSnapshotFromRef:
+    """§7.4 — scoped snapshot rooted at a previously-seen element."""
+
+    @pytest.mark.asyncio
+    async def test_from_ref_unknown_returns_not_found(self):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mock_page = AsyncMock()
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value={
+            "role": "WebArea", "name": "", "children": [],
+        })
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+        result = await mgr.snapshot("a1", from_ref="e99")
+        assert result["success"] is False
+        assert result["error"]["code"] == "not_found"
+
+    @pytest.mark.asyncio
+    async def test_from_ref_empty_returns_invalid_input(self):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), AsyncMock())
+        mgr._instances["a1"] = inst
+        result = await mgr.snapshot("a1", from_ref="")
+        assert result["success"] is False
+        assert result["error"]["code"] == "invalid_input"
+
+    @pytest.mark.asyncio
+    async def test_from_ref_scopes_tree_to_subtree(self):
+        """When ``from_ref`` is set, ``_build_a11y_tree`` is called with the
+        resolved element handle as ``root``; the result is just that subtree."""
+        from src.browser.ref_handle import RefHandle
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        # 1. Set up the inst and seed it with a single ref that
+        # ``_locator_from_ref`` can resolve. Using light_dom because shadow/
+        # frame fields aren't relevant to this test.
+        mock_page = AsyncMock()
+        mock_page.url = "https://example.com"
+        mock_page.accessibility = MagicMock()
+        # Default page-level a11y returns a small tree with a "form" role.
+        mock_page.accessibility.snapshot = AsyncMock(return_value={
+            "role": "form", "name": "Login",
+            "children": [
+                {"role": "textbox", "name": "Email"},
+                {"role": "textbox", "name": "Password"},
+            ],
+        })
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+
+        page_id = inst._page_id_for(inst.page)
+        inst.refs["e0"] = RefHandle.light_dom(
+            page_id=page_id, scope_root=None,
+            role="form", name="Login", occurrence=0, disabled=False,
+        )
+
+        # 2. Stub ``_locator_from_ref`` so it returns a Locator-like object
+        # whose ``element_handle`` returns a stub ElementHandle. The
+        # ``_build_a11y_tree`` with ``root=<handle>`` path will be exercised.
+        scoped_handle = MagicMock()  # ElementHandle stand-in
+        # In this branch the page-level fallback uses ``root.evaluate``
+        # rather than ``page.accessibility.snapshot``. Stub that path.
+        scoped_tree = {
+            "role": "form", "name": "Login",
+            "children": [
+                {"role": "textbox", "name": "Email"},
+                {"role": "textbox", "name": "Password"},
+            ],
+        }
+        # Make Camoufox's accessibility.snapshot(root=...) succeed too —
+        # _build_a11y_tree tries the native API first.
+        mock_page.accessibility.snapshot = AsyncMock(return_value=scoped_tree)
+
+        fake_locator = AsyncMock()
+        fake_locator.element_handle = AsyncMock(return_value=scoped_handle)
+        mgr._instances["a1"] = inst
+
+        with patch.object(
+            BrowserManager, "_locator_from_ref", return_value=fake_locator,
+        ):
+            result = await mgr.snapshot("a1", from_ref="e0")
+
+        assert result["success"] is True
+        roles = {r["role"] for r in result["data"]["refs"].values()}
+        # The scoped subtree only contains the two textboxes.
+        assert roles == {"textbox"}
+
+    @pytest.mark.asyncio
+    async def test_from_ref_with_filter_combines(self):
+        """``from_ref`` + ``filter`` should narrow the scoped subtree
+        further."""
+        from src.browser.ref_handle import RefHandle
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.accessibility = MagicMock()
+        # Scoped tree contains a heading + a button + a textbox.
+        mock_page.accessibility.snapshot = AsyncMock(return_value={
+            "role": "form", "name": "Login",
+            "children": [
+                {"role": "heading", "name": "Sign in"},
+                {"role": "button", "name": "Submit"},
+                {"role": "textbox", "name": "Email"},
+            ],
+        })
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        page_id = inst._page_id_for(inst.page)
+        inst.refs["e0"] = RefHandle.light_dom(
+            page_id=page_id, scope_root=None,
+            role="form", name="Login", occurrence=0, disabled=False,
+        )
+        mgr._instances["a1"] = inst
+
+        fake_locator = AsyncMock()
+        fake_locator.element_handle = AsyncMock(return_value=MagicMock())
+        with patch.object(
+            BrowserManager, "_locator_from_ref", return_value=fake_locator,
+        ):
+            result = await mgr.snapshot("a1", from_ref="e0", filter="inputs")
+        assert result["success"] is True
+        roles = {r["role"] for r in result["data"]["refs"].values()}
+        assert roles == {"textbox"}
+
 
 class TestTypeTextWithRef:
     """Tests for type_text using ref-based element resolution."""
