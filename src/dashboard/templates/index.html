@@ -1903,6 +1903,12 @@
                   profile (<code>cookies.sqlite</code>). For high-value sessions,
                   use an encrypted volume or treat the profile as ephemeral.
                 </div>
+                <div class="text-[11px] text-gray-400/90 bg-gray-800/40 border border-gray-700/40 rounded px-2 py-1.5">
+                  Imports MERGE with existing cookies — a collision on
+                  (name + domain + path) overwrites the prior cookie; everything
+                  else is appended. Reset the agent profile first if you need a
+                  clean slate.
+                </div>
                 <div class="flex items-center gap-3">
                   <label class="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer">
                     <input type="radio" name="ci-mode" value="playwright"

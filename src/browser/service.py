@@ -5529,6 +5529,12 @@ class BrowserManager:
         :func:`_validate_cookies` so this method receives a pre-validated
         list of Playwright-shaped cookie dicts.
 
+        Merge semantics: this calls Playwright's ``add_cookies`` which
+        MERGES with the existing context — a (name, domain, path) tuple
+        collision overwrites the prior cookie; non-colliding entries are
+        appended. There is no "wipe and replace" — operators wanting a
+        clean slate should reset the agent profile first.
+
         At-rest leak warning: Firefox stores cookies plaintext in
         ``cookies.sqlite`` inside the agent profile dir — operators
         handling high-value sessions must use encrypted volumes or
@@ -5555,12 +5561,19 @@ class BrowserManager:
                     "data": {"imported": len(cookies)},
                 }
             except Exception as e:
-                # Playwright raises various TypeError / ValueError shapes
-                # when a cookie field is malformed. Sanitize so we never
-                # echo a cookie value back in the response. The upstream
-                # validator already rejects malformed entries; this is
-                # defense-in-depth against future Playwright shape changes.
-                msg = str(e)
-                if "value" in msg.lower():
-                    msg = "Playwright rejected cookie shape"
-                return _err("invalid_input", msg)
+                # Defense-in-depth: never echo a Playwright error back to
+                # the operator — earlier review noted that a substring
+                # heuristic ("value" in msg) was fragile, e.g. a future
+                # Playwright change that renamed the offending field
+                # (or used the cookie ``name``) could leak the secret.
+                # The upstream ``_validate_cookies`` already rejects
+                # malformed entries, so any error here is unexpected.
+                # Log raw error server-side ONLY; return a generic shape.
+                logger.warning(
+                    "import_cookies: Playwright add_cookies failed for "
+                    "'%s': %s", agent_id, e,
+                )
+                return _err(
+                    "invalid_input",
+                    "cookie import failed (see service logs)",
+                )

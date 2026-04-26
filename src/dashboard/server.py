@@ -175,7 +175,9 @@ def _is_ip_literal_domain(domain: str) -> bool:
     return bool(_IPV6_DOMAIN_RE.match(bare))
 
 
-def _parse_netscape(text: str) -> list[dict]:
+def _parse_netscape(
+    text: str, *, malformed: list[str] | None = None,
+) -> list[dict]:
     """Parse Netscape ``cookies.txt`` format → Playwright-shaped dicts.
 
     Netscape format: ``domain\tincludeSubdomains\tpath\tsecure\texpires\tname\tvalue``
@@ -183,8 +185,11 @@ def _parse_netscape(text: str) -> list[dict]:
     ``#HttpOnly_<domain>`` prefix which marks the cookie as HttpOnly.
 
     Malformed lines (wrong field count, non-numeric ``expires``) are
-    silently skipped — the upstream validator records the drop count. This
-    parser never raises.
+    silently skipped. When ``malformed`` is supplied, a sentinel string
+    describing the reason is appended for each skipped line so the caller
+    can surface a ``malformed_line`` drop count to the operator. This
+    parser never raises and never echoes the bad line content (which may
+    contain a cookie value).
     """
     result: list[dict] = []
     if not isinstance(text, str):
@@ -203,12 +208,16 @@ def _parse_netscape(text: str) -> list[dict]:
         # value may itself contain tabs in some exporters, so don't split unbounded.
         parts = line.split("\t")
         if len(parts) < 7:
+            if malformed is not None:
+                malformed.append("field_count")
             continue
         domain, _include_sub, path, secure, expires, name, *value_parts = parts
         value = "\t".join(value_parts) if value_parts else ""
         try:
             expires_int = int(float(expires))
         except (ValueError, TypeError):
+            if malformed is not None:
+                malformed.append("expires")
             continue
         result.append({
             "name": name,
@@ -249,6 +258,11 @@ def _validate_cookies(
         elif isinstance(payload, str) and "\t" in payload:
             detected = "netscape"
 
+    drop_counts: dict[str, int] = {}
+
+    def _drop(reason: str) -> None:
+        drop_counts[reason] = drop_counts.get(reason, 0) + 1
+
     if detected == "playwright":
         if not isinstance(payload, list):
             return [], [], None
@@ -256,15 +270,16 @@ def _validate_cookies(
     elif detected == "netscape":
         if not isinstance(payload, str):
             return [], [], None
-        items = _parse_netscape(payload)
+        # Capture per-line malformed reasons so the operator sees a count
+        # of dropped Netscape lines instead of a silent zero result.
+        malformed_lines: list[str] = []
+        items = _parse_netscape(payload, malformed=malformed_lines)
+        for _ in malformed_lines:
+            _drop("malformed_line")
     else:
         return [], [], None
 
     accepted: list[dict] = []
-    drop_counts: dict[str, int] = {}
-
-    def _drop(reason: str) -> None:
-        drop_counts[reason] = drop_counts.get(reason, 0) + 1
 
     for raw in items:
         if not isinstance(raw, dict):
@@ -741,6 +756,12 @@ def create_dashboard_router(
         agent_id: str, request: Request,
     ) -> dict:
         """Phase 6 §9.2 — operator-only cookie/session import.
+
+        Merge semantics: Playwright's ``BrowserContext.add_cookies``
+        MERGES with existing cookies. A (name, domain, path) collision
+        OVERWRITES the existing cookie; non-colliding cookies are
+        appended. There is no "wipe and replace" — to start clean,
+        reset the agent profile first.
 
         At-rest leak warning (see plan §13 risk register row "Imported
         cookies at rest in profile (plaintext)"): Firefox stores cookies

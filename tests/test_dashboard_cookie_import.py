@@ -212,6 +212,28 @@ class TestParseNetscape:
         text = "# header\n.example.com\tTRUE\t/\tTRUE\n"  # too few fields
         assert _parse_netscape(text) == []
 
+    def test_malformed_lines_reported_via_optional_sink(self):
+        """Bad lines (wrong field count, non-numeric expires) accumulate
+        in the optional ``malformed`` list so callers can surface a
+        ``malformed_line`` drop count to the operator."""
+        text = (
+            ".example.com\tTRUE\t/\tTRUE\t100\tname\tval\n"  # ok
+            ".example.com\tTRUE\t/\tTRUE\n"                   # too few fields
+            ".example.com\tTRUE\t/\tTRUE\tnope\tn\tv\n"      # bad expires
+            "single-column-junk\n"                            # too few fields
+        )
+        sink: list[str] = []
+        result = _parse_netscape(text, malformed=sink)
+        assert len(result) == 1
+        # 3 malformed lines captured (2 field_count + 1 expires).
+        assert len(sink) == 3
+        # Sink contains category strings only — never the raw bad line
+        # (which could include cookie values).
+        assert all(reason in {"field_count", "expires"} for reason in sink)
+        for reason in sink:
+            assert "single-column-junk" not in reason
+            assert "nope" not in reason
+
     def test_unicode_domain_accepted(self):
         text = ".пример.com\tTRUE\t/\tTRUE\t100\tsid\txyz\n"
         result = _parse_netscape(text)
@@ -295,6 +317,34 @@ class TestValidateCookies:
         # An int payload doesn't match either format.
         _, _, fmt = _validate_cookies(42)
         assert fmt is None
+
+    def test_secure_prefix_passes_through(self):
+        """``__Secure-`` cookies have no special validation here —
+        Playwright/Firefox enforces the ``secure=true`` rule at SET time,
+        not at import. Importing a ``__Secure-foo`` with a domain is
+        therefore expected to be ACCEPTED by ``_validate_cookies``."""
+        accepted, dropped, fmt = _validate_cookies(
+            [{"name": "__Secure-sess", "value": "x",
+              "domain": ".example.com", "secure": True}],
+        )
+        assert fmt == "playwright"
+        assert len(accepted) == 1
+        assert dropped == []
+
+    def test_netscape_malformed_lines_surface_as_drop_count(self):
+        """When the input is Netscape and contains malformed lines, the
+        ``dropped`` aggregate must include a ``malformed_line`` entry —
+        operators previously got a silent zero-import result."""
+        ns = (
+            ".example.com\tTRUE\t/\tTRUE\t100\tsid\tabc\n"   # ok
+            ".example.com\tTRUE\t/\tTRUE\n"                   # too few fields
+            ".example.com\tTRUE\t/\tTRUE\tNaN\tn\tv\n"       # bad expires
+        )
+        accepted, dropped, fmt = _validate_cookies(ns, fmt="netscape")
+        assert fmt == "netscape"
+        assert len(accepted) == 1
+        reasons = {d["reason"]: d["count"] for d in dropped}
+        assert reasons.get("malformed_line") == 2
 
 
 class TestIsIpLiteralDomain:
@@ -727,3 +777,59 @@ class TestUnknownAgent:
             json={"format": "playwright", "cookies": []},
         )
         assert resp.status_code == 404
+
+
+class TestBrowserServiceErrorRedaction:
+    """Phase 6 §9.2 third-pass review: the browser service must NEVER
+    echo a Playwright-supplied error string back to the dashboard. Even
+    if a future Playwright update changes the error shape (so the prior
+    substring heuristic for ``value`` would miss it), the response must
+    use a generic message.
+    """
+
+    def test_browser_service_import_returns_generic_message(self):
+        """Direct unit test of ``BrowserManager.import_cookies``: when
+        the underlying ``add_cookies`` raises an exception whose message
+        embeds a cookie value, the response message MUST be the static
+        ``cookie import failed`` string."""
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        from src.browser.service import BrowserManager
+
+        mgr = BrowserManager.__new__(BrowserManager)
+
+        # Stub get_or_start to return a fake instance whose context
+        # raises a Playwright-shaped error — exactly what we don't want
+        # leaked back to the operator.
+        ctx_mock = MagicMock()
+        leaky_msg = "cookie name=session domain=evil.com VALUE=sk_live_DEADBEEF rejected"
+        ctx_mock.add_cookies = AsyncMock(side_effect=RuntimeError(leaky_msg))
+
+        inst_mock = MagicMock()
+        inst_mock.context = ctx_mock
+        inst_mock.touch = MagicMock()
+
+        class _AsyncCM:
+            async def __aenter__(self):
+                return None
+
+            async def __aexit__(self, *a):
+                return False
+
+        inst_mock.lock = _AsyncCM()
+        mgr.get_or_start = AsyncMock(return_value=inst_mock)
+
+        result = asyncio.run(
+            mgr.import_cookies("alpha", [{"name": "x", "value": "y",
+                                          "domain": ".e.com", "path": "/"}]),
+        )
+        assert result["success"] is False
+        msg = result["error"]["message"]
+        # Generic string regardless of Playwright error shape.
+        assert "cookie import failed" in msg.lower()
+        # MUST NOT include the secret or any Playwright-supplied detail.
+        assert "sk_live" not in msg
+        assert "DEADBEEF" not in msg
+        assert "session" not in msg.lower() or msg.lower().count("session") == 0
+        assert leaky_msg not in msg
