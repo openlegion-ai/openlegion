@@ -111,6 +111,13 @@ def _resolve_filter_roles(filter_name: str | None) -> frozenset[str] | None:
 _MAX_SNAPSHOT_ELEMENTS = 200
 _MAX_WALK_DEPTH = 50
 
+_MAX_FRAME_NESTING = 3
+
+# Token shape for frame_id values produced by `_register_frame`. Used
+# in `_resolve_frame_arg` to distinguish a detached/unknown frame_id
+# token (raise ref_stale) from a URL-substring miss (return None).
+_FRAME_ID_RE = re.compile(r"^f-[0-9a-f]{8}$")
+
 
 # §7.2 v2 format — depth indent is capped so a 50-deep DOM doesn't
 # explode into 100-character indents. Anything past this depth shares
@@ -187,7 +194,13 @@ def _format_snapshot_v2(
             # to a fake section header.
             safe_name = _v2_strip_newlines(name)
             safe_attr = _v2_strip_newlines(attr_str)
-            out.append(f"{indent}- [{ref_id}] {role} \"{safe_name}\"{safe_attr}")
+            # Iframe stubs (ref_id == "") are content nodes, not
+            # clickable handles — render without the ``[ref_id]``
+            # prefix so the v2 surface matches v1 (``- iframe "name"``).
+            if ref_id == "":
+                out.append(f"{indent}- {role} \"{safe_name}\"{safe_attr}")
+            else:
+                out.append(f"{indent}- [{ref_id}] {role} \"{safe_name}\"{safe_attr}")
 
     return "\n".join(out)
 
@@ -213,6 +226,23 @@ _BLOCKED_URL_SCHEMES = frozenset({
     "about", "moz-extension", "chrome-extension", "chrome",
 })
 _ALLOWED_URL_SCHEMES = frozenset({"http", "https"})
+
+
+def _err(code: str, message: str) -> dict:
+    """Standard error envelope for browser actions (§2.3).
+
+    Returns a structured ``{"success": False, "error": {"code", "message"}}``
+    payload so callers (mesh + agent skills) can branch on ``code`` rather
+    than substring-matching ``message``. Existing call sites that emit
+    ``{"success": False, "error": "..."}`` (string error) remain valid for
+    backward compatibility — this helper is for new structured-error paths.
+    """
+    return {
+        "success": False,
+        "error": {"code": code, "message": message},
+    }
+
+
 _MAX_WAIT_MS = 10000  # 10 seconds max wait after navigation
 _MAX_SCROLL_PX = 10000  # 10000 pixels max per scroll call
 _CLICK_TIMEOUT_MS = 10000  # 10 seconds — SPAs like X need time for animations/overlays
@@ -470,12 +500,59 @@ __NAME_HELPERS__
         }
         return true;
     }
+    function isCrossOriginFrame(el) {
+        try {
+            if (el.contentDocument === null) return true;
+        } catch (e) {
+            return true;
+        }
+        try {
+            const src = el.getAttribute('src') || '';
+            if (!src || src === 'about:blank') return false;
+            const u = new URL(src, window.location.href);
+            return u.origin !== window.location.origin;
+        } catch (e) {
+            return true;
+        }
+    }
     function walk(el, d, parentLandmark, shadowPath, currentRoot) {
         if (d > MAX_WALK_DEPTH || !el || el.nodeType !== 1) return null;
         const tag = el.tagName;
         if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT' || tag === 'TEMPLATE')
             return null;
         if (!isVisible(el)) return null;
+        if (tag === 'IFRAME' || tag === 'FRAME') {
+            const src = el.getAttribute('src') || '';
+            const title = (el.getAttribute('title') || '').trim();
+            const opaque = isCrossOriginFrame(el);
+            // srcdoc / anonymous iframes (no src, or src=about:blank)
+            // get an empty ``frame_url``; the Python descent uses
+            // ``iframe_index`` (sibling position among same-document
+            // iframes) as the descent key for those, and as a tie-
+            // breaker when two iframes legitimately share a URL.
+            let iframeIndex = -1;
+            try {
+                const allFrames = el.ownerDocument.querySelectorAll(
+                    'iframe, frame'
+                );
+                for (let i = 0; i < allFrames.length; i++) {
+                    if (allFrames[i] === el) { iframeIndex = i; break; }
+                }
+            } catch (e) {
+                // ownerDocument can be null in pathological cases — fall
+                // through with -1 so the Python side treats this as
+                // "no index hint available".
+            }
+            const stub = {
+                role: 'iframe',
+                name: opaque ? 'cross-origin' : (title || src).slice(0, 200),
+                frame_url: src,
+                opaque: opaque,
+                iframe_index: iframeIndex,
+            };
+            if (parentLandmark) stub.landmark = parentLandmark;
+            return stub;
+        }
         const role = getRole(el);
         let childLandmark = parentLandmark;
         if (role && LANDMARK.has(role)) {
@@ -1062,6 +1139,16 @@ class CamoufoxInstance:
         self.page_ids_inv: weakref.WeakValueDictionary = (
             weakref.WeakValueDictionary()
         )
+        # Per-Frame stable UUID maps. Frames navigate / detach as the page
+        # changes; WeakKey here so detached Frames drop out of the forward
+        # map automatically, and WeakValue on the reverse map so closed
+        # frames drop from resolution.
+        self.frame_ids: weakref.WeakKeyDictionary = (
+            weakref.WeakKeyDictionary()
+        )
+        self.frame_ids_inv: weakref.WeakValueDictionary = (
+            weakref.WeakValueDictionary()
+        )
         # Register the initial page so refs captured on it resolve correctly.
         self._register_page(page)
 
@@ -1146,6 +1233,21 @@ class CamoufoxInstance:
         if page is None:
             raise RefStale("tab closed or unknown page_id", ref=None)
         return page
+
+    def _register_frame(self, frame) -> str:
+        existing = self.frame_ids.get(frame)
+        if existing is not None:
+            return existing
+        new_id = f"f-{uuid.uuid4().hex[:8]}"
+        self.frame_ids[frame] = new_id
+        self.frame_ids_inv[new_id] = frame
+        return new_id
+
+    def _resolve_frame_id(self, frame_id: str):
+        frame = self.frame_ids_inv.get(frame_id)
+        if frame is None:
+            raise RefStale("frame_detached", ref=None)
+        return frame
 
     def seed_refs_legacy(self, legacy: "dict[str, dict]") -> None:
         """Test helper: build ``RefHandle`` entries from v1-shape dicts.
@@ -2239,6 +2341,8 @@ class BrowserManager:
         filter: str | None = None,
         from_ref: str | None = None,
         diff_from_last: bool = False,
+        frame: str | None = None,
+        include_frames: bool = True,
     ) -> dict:
         """Get accessibility tree with element refs.
 
@@ -2294,6 +2398,8 @@ class BrowserManager:
                 filter=filter,
                 from_ref=from_ref,
                 diff_from_last=diff_from_last,
+                frame=frame,
+                include_frames=include_frames,
             )
 
     async def _snapshot_impl(
@@ -2304,6 +2410,8 @@ class BrowserManager:
         from_ref: str | None = None,
         diff_from_last: bool = False,
         _skip_baseline: bool = False,
+        frame: str | None = None,
+        include_frames: bool = True,
     ) -> dict:
         """Snapshot implementation.  Caller must hold ``inst.lock``."""
         # Resolve the optional filter once so the inner _walk sees a
@@ -2320,6 +2428,42 @@ class BrowserManager:
                 },
             }
         try:
+            if frame is not None and from_ref is not None:
+                return {
+                    "success": False,
+                    "error": {
+                        "code": "invalid_input",
+                        "message": (
+                            "frame and from_ref are mutually exclusive"
+                        ),
+                        "retry_after_ms": None,
+                    },
+                }
+            target_frame = None
+            if frame is not None:
+                try:
+                    target_frame = self._resolve_frame_arg(inst, frame)
+                except RefStale as rs:
+                    return {
+                        "success": False,
+                        "error": {
+                            "code": "ref_stale",
+                            "message": str(rs),
+                            "retry_after_ms": None,
+                        },
+                    }
+                if target_frame is None:
+                    return {
+                        "success": False,
+                        "error": {
+                            "code": "not_found",
+                            "message": (
+                                f"frame {frame!r} did not match any frame "
+                                "url-substring or frame_id"
+                            ),
+                            "retry_after_ms": None,
+                        },
+                    }
             # ── Optional scoped root via ``from_ref`` (§7.4) ────────────────
             scoped_root_handle = None
             if from_ref is not None:
@@ -2387,7 +2531,19 @@ class BrowserManager:
                         },
                     }
 
-            tree = await self._build_a11y_tree(inst, root=scoped_root_handle)
+            if target_frame is not None and scoped_root_handle is None:
+                try:
+                    tree = await target_frame.evaluate(_JS_A11Y_TREE)
+                except Exception as exc:
+                    logger.debug(
+                        "Frame snapshot evaluate failed for %s: %s",
+                        agent_id, exc,
+                    )
+                    tree = None
+            else:
+                tree = await self._build_a11y_tree(
+                    inst, root=scoped_root_handle,
+                )
             if not tree:
                 return {"success": True, "data": {"snapshot": "(empty page)", "refs": {}}}
 
@@ -2398,6 +2554,11 @@ class BrowserManager:
             # refs still carry their original page_id so resolution targets
             # the right tab (or raises RefStale if the tab is closed).
             snapshot_page_id = inst._page_id_for(inst.page)
+            target_frame_id = (
+                inst._register_frame(target_frame)
+                if target_frame is not None
+                else None
+            )
             ref_counter = [0]
             # Counts occurrences of each (role, name) pair so we can
             # disambiguate duplicate elements (e.g. X's two composer nodes).
@@ -2413,11 +2574,69 @@ class BrowserManager:
             # element_key so changed-state detection can compare values.
             ref_summary: dict[str, dict] = {}
 
-            def _walk(node, depth=0):
+            pending_frames: list[tuple] = []
+
+            def _walk(node, depth=0, current_frame_id=None, frame_nesting=0):
                 if depth > _MAX_WALK_DEPTH:
                     return
                 role = node.get("role", "")
                 name = node.get("name", "")
+                if role == "iframe":
+                    # Stub name is title || src — long URLs in srcs are
+                    # common; cap so a single iframe doesn't blow up the
+                    # snapshot byte count.
+                    if name:
+                        name = name[:200]
+                    frame_url = node.get("frame_url", "")
+                    is_opaque = bool(node.get("opaque"))
+                    iframe_index = node.get("iframe_index", -1)
+                    landmark = node.get("landmark", "")
+                    ctx_str = f" ({landmark})" if landmark else ""
+                    suffix = " [cross-origin]" if is_opaque else ""
+                    # ``frame_nesting`` here is the iframe-level of the
+                    # CURRENT walking frame (0 = main). The stub being
+                    # emitted is one level deeper, so descent would only
+                    # succeed if ``frame_nesting + 1 <= _MAX_FRAME_NESTING``.
+                    # When that fails we still emit the stub (so the agent
+                    # sees the iframe exists) but tag it ``[depth-capped]``
+                    # so the agent doesn't waste a turn fishing for refs
+                    # that will never appear.
+                    is_depth_capped = (
+                        not is_opaque
+                        and include_frames
+                        and frame_nesting + 1 > _MAX_FRAME_NESTING
+                    )
+                    cap_suffix = " [depth-capped]" if is_depth_capped else ""
+                    line = (
+                        f"{'  ' * depth}- iframe \"{name}\""
+                        f"{suffix}{cap_suffix}{ctx_str}"
+                    )
+                    lines.append(line)
+                    # §7.2 v2 also needs to see iframe stubs — they were
+                    # previously lines-only, which made them invisible
+                    # under the v2 renderer. Emit a synthetic entry with
+                    # an empty ref_id; ``_format_snapshot_v2`` renders
+                    # iframe entries without the ``[ref_id]`` prefix to
+                    # match the v1 wire shape (iframe stubs are not
+                    # clickable handles).
+                    # Preserve leading-space convention for v2 attr_str:
+                    # ``suffix``/``cap_suffix`` already start with a space
+                    # (e.g. ``" [cross-origin]"``), so concatenation gives
+                    # ``" [cross-origin] [depth-capped]"`` when both apply.
+                    iframe_attr = f"{suffix}{cap_suffix}"
+                    entries.append(
+                        ("", "iframe", name, iframe_attr, landmark, depth),
+                    )
+                    # Descend into same-origin iframes regardless of
+                    # ``frame_url`` truthiness — srcdoc / about:blank
+                    # iframes legitimately emit ``frame_url=""`` and
+                    # must still be traversed via ``iframe_index``.
+                    if not is_opaque and include_frames:
+                        idx = iframe_index if isinstance(iframe_index, int) else -1
+                        pending_frames.append(
+                            (frame_url, depth, current_frame_id, idx),
+                        )
+                    return
                 # ``allowed_roles=None`` means "use the historical default"
                 # (actionable ∪ context). Any explicit filter shrinks that.
                 if allowed_roles is None:
@@ -2504,7 +2723,7 @@ class BrowserManager:
                         elem_key = compute_element_key(
                             role=role, name=name, landmark=landmark,
                             sibling_index=occ,
-                            frame_id=None,
+                            frame_id=current_frame_id,
                             shadow_path=shadow_hops,
                         )
                         # scope_root is finalized after the modal-scoping
@@ -2516,6 +2735,19 @@ class BrowserManager:
                                 page_id=snapshot_page_id,
                                 scope_root=None,
                                 shadow_path=shadow_hops,
+                                role=role,
+                                name=name,
+                                occurrence=occ,
+                                disabled=bool(node.get("disabled")),
+                                element_key=elem_key,
+                                frame_id=current_frame_id,
+                            )
+                        elif current_frame_id is not None:
+                            refs[ref_id] = RefHandle(
+                                page_id=snapshot_page_id,
+                                frame_id=current_frame_id,
+                                shadow_path=(),
+                                scope_root=None,
                                 role=role,
                                 name=name,
                                 occurrence=occ,
@@ -2557,7 +2789,174 @@ class BrowserManager:
                             "checked": node.get("checked"),
                         }
                 for child in node.get("children", []):
-                    _walk(child, depth + 1)
+                    _walk(child, depth + 1, current_frame_id, frame_nesting)
+
+            async def _descend_frames(parent_frame, parent_frame_id,
+                                      frame_nesting):
+                # ``_MAX_FRAME_NESTING`` counts iframe levels beyond the
+                # main frame. With cap=3: main(0) + L1 + L2 + L3 are
+                # admitted; an L4 stub triggers this guard. The plan
+                # §8.4 phrasing "Nesting cap: 3 levels" refers to these
+                # iframe-only levels — main is treated as the host
+                # surface and not counted.
+                if frame_nesting >= _MAX_FRAME_NESTING:
+                    capped = [
+                        e for e in pending_frames if e[2] == parent_frame_id
+                    ]
+                    if capped:
+                        # The corresponding stub lines were emitted by
+                        # ``_walk`` already with a ``[depth-capped]`` tag
+                        # so the agent can see them. Log the count so an
+                        # operator chasing "where did the deep iframe go?"
+                        # has a single grep target.
+                        try:
+                            parent_url = parent_frame.url
+                        except Exception:
+                            parent_url = "<unknown>"
+                        logger.debug(
+                            "iframe depth cap reached at %s; %d nested "
+                            "frame(s) not descended",
+                            parent_url, len(capped),
+                        )
+                    pending_frames[:] = [
+                        e for e in pending_frames
+                        if e[2] != parent_frame_id
+                    ]
+                    return
+                drained = [
+                    e for e in pending_frames if e[2] == parent_frame_id
+                ]
+                pending_frames[:] = [
+                    e for e in pending_frames if e[2] != parent_frame_id
+                ]
+                # Track per-parent-frame consumed children so two stubs
+                # that share a URL (e.g. duplicate ad iframes from one
+                # provider, or two srcdoc iframes that emit empty
+                # ``frame_url``) descend into DISTINCT child frames
+                # instead of both matching the first hit. Keyed by
+                # ``id(frame)`` because Playwright Frame objects aren't
+                # hashable in all binding versions.
+                consumed_child_ids: set[int] = set()
+                try:
+                    children_frames = list(parent_frame.child_frames)
+                except Exception:
+                    children_frames = []
+                # Filter to frames whose underlying iframe element is still
+                # attached. Playwright may briefly retain ``Frame`` objects
+                # whose ``<iframe>`` was just removed (GC lag); the JS
+                # walker counts only LIVE iframes via
+                # ``ownerDocument.querySelectorAll``, so its
+                # ``iframe_index`` is positional over live frames only. If
+                # we let detached frames stay in ``children_frames``, the
+                # index-based fallback below would target the wrong slot.
+                live_children: list = []
+                for cf in children_frames:
+                    try:
+                        if hasattr(cf, "is_detached") and cf.is_detached():
+                            continue
+                    except Exception:
+                        # ``is_detached()`` itself may raise on torn-down
+                        # bindings — fall through and trust the URL match
+                        # tiers below to handle it.
+                        pass
+                    live_children.append(cf)
+                for stub_url, stub_depth, _stub_parent_id, stub_index in drained:
+                    target_child = None
+                    # Phase 1: prefer exact URL match against an unconsumed
+                    # child. Falls through to substring + iframe_index
+                    # tiers so stubs whose ``frame_url`` was a partial
+                    # match (or empty for srcdoc) still resolve.
+                    if stub_url:
+                        for cf in live_children:
+                            if id(cf) in consumed_child_ids:
+                                continue
+                            try:
+                                cf_url = cf.url or ""
+                            except Exception:
+                                cf_url = ""
+                            if cf_url == stub_url:
+                                target_child = cf
+                                break
+                        if target_child is None:
+                            for cf in live_children:
+                                if id(cf) in consumed_child_ids:
+                                    continue
+                                try:
+                                    cf_url = cf.url or ""
+                                except Exception:
+                                    cf_url = ""
+                                if stub_url in cf_url:
+                                    target_child = cf
+                                    break
+                        if target_child is None:
+                            # Walker emitted ``frame_url=src`` from the
+                            # iframe ATTRIBUTE; by the time descent runs,
+                            # an in-page navigation may have changed
+                            # ``frame.url``. Falls through to the index
+                            # tier below — log so debugging walks aren't
+                            # blind to this race.
+                            try:
+                                live_urls = [c.url for c in live_children]
+                            except Exception:
+                                live_urls = []
+                            logger.debug(
+                                "Frame URL changed during snapshot for "
+                                "%s: stub_url=%r, live child urls=%r",
+                                agent_id, stub_url, live_urls,
+                            )
+                    if target_child is None:
+                        # Empty frame_url (srcdoc / about:blank-style
+                        # anonymous iframe) or no URL match: fall back
+                        # to the JS-emitted sibling index. The walker
+                        # tags every iframe stub with its position
+                        # among the parent document's iframes so two
+                        # same-URL or empty-URL siblings are still
+                        # individually addressable. Index is positional
+                        # over LIVE iframes (matching the walker's
+                        # ``ownerDocument.querySelectorAll`` count), so
+                        # we index into ``live_children`` not
+                        # ``children_frames``.
+                        if (
+                            stub_index is not None
+                            and 0 <= stub_index < len(live_children)
+                            and id(live_children[stub_index])
+                            not in consumed_child_ids
+                        ):
+                            target_child = live_children[stub_index]
+                    if target_child is None and len(live_children) == 1 and not consumed_child_ids:
+                        # Last-resort single-child fallback preserves
+                        # behavior on pages where the JS walker emitted
+                        # neither URL nor index (e.g. legacy stubs from
+                        # tests written before iframe_index existed).
+                        target_child = live_children[0]
+                    if target_child is None:
+                        continue
+                    consumed_child_ids.add(id(target_child))
+                    child_frame_id = inst._register_frame(target_child)
+                    try:
+                        # Cross-origin classification (``isCrossOriginFrame``
+                        # in ``_JS_A11Y_TREE``) runs within each frame's
+                        # OWN context, so a grandchild iframe's ``opaque``
+                        # bit reflects ITS origin vs its parent's, not vs
+                        # the main frame's. Spec-correct (Firefox SOP),
+                        # but means a grandchild whose origin matches main
+                        # may still be classified opaque if its parent is
+                        # on a different origin.
+                        sub_tree = await target_child.evaluate(_JS_A11Y_TREE)
+                    except Exception as exc:
+                        logger.debug(
+                            "Frame walk failed for %s: %s", agent_id, exc,
+                        )
+                        continue
+                    if not sub_tree:
+                        continue
+                    _walk(
+                        sub_tree, stub_depth + 1, child_frame_id,
+                        frame_nesting + 1,
+                    )
+                    await _descend_frames(
+                        target_child, child_frame_id, frame_nesting + 1,
+                    )
 
             # When ``from_ref`` is set the caller is asking for a deep
             # scope into a specific element; modal-detection would
@@ -2574,7 +2973,8 @@ class BrowserManager:
                 # refs taken inside a modal still resolve through the
                 # modal selector.
                 was_modal = bool(inst.dialog_active)
-                _walk(tree)
+                _walk(tree, 0, target_frame_id)
+                pending_frames.clear()
                 # If the agent took this scoped snapshot while a modal
                 # was open, patch ``scope_root`` on every emitted ref so
                 # ``_locator_from_ref`` keeps clicks bounded to the dialog
@@ -2662,7 +3062,10 @@ class BrowserManager:
                 for el in visible_modals:
                     subtree = await self._build_a11y_tree(inst, root=el)
                     if subtree:
-                        _walk(subtree)
+                        _walk(subtree, 0, target_frame_id)
+                # Modals are typically light-DOM in the main frame; iframe
+                # descent skipped for scoping fidelity.
+                pending_frames.clear()
                 actionable_refs = [
                     r for r in refs.values() if r.role in _ACTIONABLE_ROLES
                 ]
@@ -2706,9 +3109,12 @@ class BrowserManager:
                         try:
                             subtree = await self._build_a11y_tree(inst, root=el)
                             if subtree:
-                                _walk(subtree)
+                                _walk(subtree, 0, target_frame_id)
                         except Exception:
                             pass
+                    # Modals are typically light-DOM in the main frame;
+                    # iframe descent skipped for scoping fidelity.
+                    pending_frames.clear()
                     actionable_refs = [
                         r for r in refs.values() if r.role in _ACTIONABLE_ROLES
                     ]
@@ -2738,11 +3144,41 @@ class BrowserManager:
                         "or similar landmark annotation are in the modal; "
                         "others are behind the overlay **"
                     )
-                    _walk(tree)
+                    _walk(tree, 0, target_frame_id)
+                    if include_frames:
+                        if target_frame is None:
+                            await _descend_frames(
+                                inst.page.main_frame, None, 0,
+                            )
+                        else:
+                            # frame=X with nested same-origin frames inside
+                            # X: descend so refs from inner frames carry
+                            # their own frame_id. Nesting cap is relative
+                            # to the target — start at depth 0.
+                            await _descend_frames(
+                                target_frame, target_frame_id, 0,
+                            )
+                    else:
+                        pending_frames.clear()
             else:
                 inst.dialog_active = False
                 inst.dialog_detected = False
-                _walk(tree)
+                _walk(tree, 0, target_frame_id)
+                if include_frames:
+                    if target_frame is None:
+                        await _descend_frames(
+                            inst.page.main_frame, None, 0,
+                        )
+                    else:
+                        # frame=X with nested same-origin frames inside X:
+                        # descend so refs from inner frames carry their
+                        # own frame_id. Nesting cap is relative to the
+                        # target — start at depth 0.
+                        await _descend_frames(
+                            target_frame, target_frame_id, 0,
+                        )
+                else:
+                    pending_frames.clear()
 
             # Patch scope_root on refs captured during modal scoping so
             # `_locator_from_ref` queries are bounded to the dialog subtree.
@@ -2915,10 +3351,17 @@ class BrowserManager:
             return None
         page = inst._resolve_page_id(handle.page_id)
         if handle.shadow_path:
+            # NOTE: shadow + iframe combination raises NotImplementedError
+            # inside ``_resolve_shadow_element``; callers (click/type/etc)
+            # catch it and surface a ``not_supported`` envelope.
             return await self._resolve_shadow_element(page, handle, ref)
-        base = page
+        if handle.frame_id is not None:
+            frame = inst._resolve_frame_id(handle.frame_id)
+            base = frame
+        else:
+            base = page
         if handle.scope_root:
-            base = page.locator(handle.scope_root)
+            base = base.locator(handle.scope_root)
         if handle.name:
             locator = base.get_by_role(handle.role, name=handle.name, exact=True)
         else:
@@ -3055,6 +3498,41 @@ class BrowserManager:
                 await stage1.dispose()
             except Exception:
                 pass
+
+    def _resolve_frame_arg(self, inst: CamoufoxInstance, frame_arg: str):
+        if not isinstance(frame_arg, str) or not frame_arg.strip():
+            return None
+        token = frame_arg.strip()
+        direct = inst.frame_ids_inv.get(token)
+        if direct is not None:
+            return direct
+        # Frame-id-shaped tokens that miss the inverse map signal a
+        # detached frame, not a URL substring miss. Surfacing as
+        # RefStale lets callers re-snapshot rather than chase a
+        # non-existent URL substring.
+        if _FRAME_ID_RE.match(token):
+            raise RefStale("frame_detached", ref=None)
+        page = inst.page
+        exact = None
+        substring = None
+        # When two frames share the same URL exactly, the FIRST matching
+        # one wins (page.frames iteration order). Callers needing to
+        # disambiguate duplicate-URL siblings should use the frame_id
+        # token from ``RefHandle.to_agent_dict()`` instead of a URL
+        # substring.
+        for f in page.frames:
+            if f is page.main_frame:
+                continue
+            try:
+                url = f.url or ""
+            except Exception:
+                continue
+            if url == token:
+                exact = f
+                break
+            if substring is None and token in url:
+                substring = f
+        return exact if exact is not None else substring
 
     async def _human_click(self, page, locator, *, force: bool = False,
                            timeout: int = _CLICK_TIMEOUT_MS) -> None:
@@ -3566,6 +4044,7 @@ class BrowserManager:
         selector: str | None = None, force: bool = False,
         snapshot_after: bool = False,
         timeout_ms: int | None = None,
+        frame: str | None = None,
     ) -> dict:
         """Click element by ref or CSS selector.
 
@@ -3591,8 +4070,48 @@ class BrowserManager:
                 raw_timeout = _CLICK_TIMEOUT_MS if timeout_ms is None else timeout_ms
                 _timeout = max(1000, min(raw_timeout, 30000))
                 use_force = force
+                resolved_frame = None
+                if frame is not None:
+                    try:
+                        resolved_frame = self._resolve_frame_arg(inst, frame)
+                    except RefStale as rs:
+                        return {
+                            "success": False,
+                            "error": {
+                                "code": "ref_stale",
+                                "message": str(rs),
+                            },
+                        }
+                    if resolved_frame is None:
+                        return {
+                            "success": False,
+                            "error": (
+                                f"frame {frame!r} did not match any frame "
+                                "url-substring or frame_id"
+                            ),
+                        }
                 if ref and ref in inst.refs:
                     ref_info = inst.refs[ref]
+                    if frame is not None:
+                        resolved_frame_id = (
+                            inst._register_frame(resolved_frame)
+                            if resolved_frame is not None else None
+                        )
+                        # Caller asserted a specific frame; ref must agree.
+                        # Fires on main-frame refs (frame_id=None) too — a
+                        # frame= arg with a main-frame ref is a bug, not a
+                        # silently-ignored hint.
+                        if ref_info.frame_id != resolved_frame_id:
+                            return {
+                                "success": False,
+                                "error": {
+                                    "code": "invalid_input",
+                                    "message": (
+                                        "frame argument conflicts with "
+                                        "ref's frame"
+                                    ),
+                                },
+                            }
                     # Auto-force for disabled button/link roles — aria-disabled
                     # on SPA buttons doesn't mean the JS click handler won't fire.
                     # BUT: when a modal was detected and scoping failed
@@ -3610,7 +4129,16 @@ class BrowserManager:
                             "Auto-force click on disabled %s ref=%s for '%s'",
                             ref_info.role, ref, agent_id,
                         )
-                    locator = await self._locator_from_ref(inst, ref)
+                    try:
+                        locator = await self._locator_from_ref(inst, ref)
+                    except RefStale as rs:
+                        return {
+                            "success": False,
+                            "error": {
+                                "code": "ref_stale",
+                                "message": str(rs),
+                            },
+                        }
                     if locator:
                         if inst.x11_wid and self._is_x11_site(inst):
                             try:
@@ -3626,7 +4154,20 @@ class BrowserManager:
                     else:
                         return {"success": False, "error": f"Ref '{ref}' not found"}
                 elif selector:
-                    if inst.x11_wid and self._is_x11_site(inst):
+                    if resolved_frame is not None:
+                        # X11 click path requires page-level coordinates;
+                        # iframe-scoped selectors resolve through
+                        # Playwright's frame locator only. Anti-bot benefit
+                        # of the X11 path is lost for iframe clicks —
+                        # accepted tradeoff.
+                        loc = resolved_frame.locator(selector).first
+                        try:
+                            await self._human_click(
+                                inst.page, loc, force=force, timeout=_timeout,
+                            )
+                        except Exception as e:
+                            return {"success": False, "error": str(e)}
+                    elif inst.x11_wid and self._is_x11_site(inst):
                         loc = inst.page.locator(selector).first
                         try:
                             await self._x11_click(inst, loc, timeout=_timeout)
@@ -3725,6 +4266,20 @@ class BrowserManager:
                     snap = await self._snapshot_impl(inst, agent_id)
                     result["snapshot"] = snap.get("data", {})
                 return result
+            except NotImplementedError as e:
+                # Defensive: when PR2 (shadow DOM) merges, refs carrying
+                # both ``shadow_path`` and ``frame_id`` will hit the
+                # ``Shadow + iframe combination not yet supported`` guard
+                # in ``_resolve_shadow_element``. Wrap as a structured
+                # ``not_supported`` envelope so the agent sees a typed
+                # error rather than a 500 from the generic catch-all.
+                inst.m_click_fail += 1
+                inst.click_window.append(False)
+                inst.recorder.record_click(method="auto", success=False)
+                return _err(
+                    "not_supported",
+                    str(e) or "Action not supported on this ref type",
+                )
             except Exception as e:
                 inst.m_click_fail += 1
                 inst.click_window.append(False)
@@ -3777,12 +4332,20 @@ class BrowserManager:
                     return {"success": False, "error": "Must provide ref or selector"}
                 await asyncio.sleep(action_delay())
                 return {"success": True, "data": {"hovered": ref or selector}}
+            except NotImplementedError as e:
+                # See click() for rationale — pre-emptive catch for PR2's
+                # shadow+iframe combination guard.
+                return _err(
+                    "not_supported",
+                    str(e) or "Action not supported on this ref type",
+                )
             except Exception as e:
                 return {"success": False, "error": str(e)}
 
     async def type_text(self, agent_id: str, ref: str | None = None, selector: str | None = None,
                         text: str = "", clear: bool = True,
-                        fast: bool = False, snapshot_after: bool = False) -> dict:
+                        fast: bool = False, snapshot_after: bool = False,
+                        frame: str | None = None) -> dict:
         """Type text into element.
 
         fast=True uses minimal inter-key delays (8 ms) — still fires real
@@ -3810,8 +4373,59 @@ class BrowserManager:
                 # CDP+X11 sequences create a detectable signal.
                 _use_x11 = bool(inst.x11_wid) and self._is_x11_site(inst)
 
+                resolved_frame = None
+                if frame is not None:
+                    try:
+                        resolved_frame = self._resolve_frame_arg(inst, frame)
+                    except RefStale as rs:
+                        return {
+                            "success": False,
+                            "error": {
+                                "code": "ref_stale",
+                                "message": str(rs),
+                            },
+                        }
+                    if resolved_frame is None:
+                        return {
+                            "success": False,
+                            "error": (
+                                f"frame {frame!r} did not match any frame "
+                                "url-substring or frame_id"
+                            ),
+                        }
+
                 if ref and ref in inst.refs:
-                    locator = await self._locator_from_ref(inst, ref)
+                    if frame is not None:
+                        ref_info = inst.refs[ref]
+                        resolved_frame_id = (
+                            inst._register_frame(resolved_frame)
+                            if resolved_frame is not None else None
+                        )
+                        # Caller asserted a specific frame; ref must agree.
+                        # Fires on main-frame refs (frame_id=None) too — a
+                        # frame= arg with a main-frame ref is a bug, not a
+                        # silently-ignored hint.
+                        if ref_info.frame_id != resolved_frame_id:
+                            return {
+                                "success": False,
+                                "error": {
+                                    "code": "invalid_input",
+                                    "message": (
+                                        "frame argument conflicts with "
+                                        "ref's frame"
+                                    ),
+                                },
+                            }
+                    try:
+                        locator = await self._locator_from_ref(inst, ref)
+                    except RefStale as rs:
+                        return {
+                            "success": False,
+                            "error": {
+                                "code": "ref_stale",
+                                "message": str(rs),
+                            },
+                        }
                     if not locator:
                         return {"success": False, "error": f"Ref '{ref}' not found"}
                     if _use_x11:
@@ -3826,7 +4440,18 @@ class BrowserManager:
                     else:
                         await self._human_click(inst.page, locator)
                 elif selector:
-                    if _use_x11:
+                    if resolved_frame is not None:
+                        # X11 click path requires page-level coordinates;
+                        # iframe-scoped selectors resolve through
+                        # Playwright's frame locator only. Anti-bot benefit
+                        # of the X11 path is lost for iframe focus-clicks —
+                        # accepted tradeoff.
+                        loc = resolved_frame.locator(selector).first
+                        try:
+                            await self._human_click(inst.page, loc)
+                        except Exception as e:
+                            return {"success": False, "error": str(e)}
+                    elif _use_x11:
                         loc = inst.page.locator(selector).first
                         try:
                             await self._x11_click(inst, loc)
@@ -3880,6 +4505,13 @@ class BrowserManager:
                     snap = await self._snapshot_impl(inst, agent_id)
                     result["snapshot"] = snap.get("data", {})
                 return result
+            except NotImplementedError as e:
+                # See click() for rationale — pre-emptive catch for PR2's
+                # shadow+iframe combination guard.
+                return _err(
+                    "not_supported",
+                    str(e) or "Action not supported on this ref type",
+                )
             except Exception as e:
                 return {"success": False, "error": str(e)}
 
@@ -4146,6 +4778,15 @@ class BrowserManager:
                     "success": True,
                     "data": {"direction": direction, "pixels": scrolled},
                 }
+            except NotImplementedError as e:
+                # See click() for rationale — pre-emptive catch for PR2's
+                # shadow+iframe combination guard. ``scroll(ref=...)``
+                # routes through ``_locator_from_ref`` which is the path
+                # that will raise once shadow_path resolution lands.
+                return _err(
+                    "not_supported",
+                    str(e) or "Action not supported on this ref type",
+                )
             except Exception as e:
                 return {"success": False, "error": str(e)}
 

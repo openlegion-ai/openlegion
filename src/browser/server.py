@@ -168,11 +168,14 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
             body = await request.json()
         except Exception:
             body = {}
+        body = body or {}
         return await manager.snapshot(
             agent_id,
-            filter=(body or {}).get("filter"),
-            from_ref=(body or {}).get("from_ref"),
-            diff_from_last=bool((body or {}).get("diff_from_last", False)),
+            filter=body.get("filter"),
+            from_ref=body.get("from_ref"),
+            diff_from_last=bool(body.get("diff_from_last", False)),
+            frame=body.get("frame"),
+            include_frames=bool(body.get("include_frames", True)),
         )
 
     @app.post("/browser/{agent_id}/click")
@@ -186,6 +189,7 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
             force=body.get("force", False),
             snapshot_after=body.get("snapshot_after", False),
             timeout_ms=body.get("timeout_ms"),
+            frame=body.get("frame"),
         )
         await _apply_delay()
         return result
@@ -228,6 +232,7 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
             clear=body.get("clear", True),
             fast=body.get("fast", False),
             snapshot_after=body.get("snapshot_after", False),
+            frame=body.get("frame"),
         )
         await _apply_delay()
         return result

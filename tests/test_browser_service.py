@@ -3452,6 +3452,7 @@ class TestNavigateBodyCap:
         a11y_tree = self._make_long_a11y(4000)
         mock_page.accessibility = AsyncMock()
         mock_page.accessibility.snapshot = AsyncMock(return_value=a11y_tree)
+        mock_page.evaluate = mock_page.accessibility.snapshot
         # query_selector_all + evaluate are used by the snapshot path
         mock_page.query_selector_all = AsyncMock(return_value=[])
         mock_page.evaluate = AsyncMock(return_value={
@@ -7601,6 +7602,7 @@ class TestFindText:
         mock_page.viewport_size = {"width": 1280, "height": 720}
         mock_page.accessibility = MagicMock()
         mock_page.accessibility.snapshot = AsyncMock(return_value=tree_v1)
+        mock_page.evaluate = mock_page.accessibility.snapshot
         mock_page.evaluate = AsyncMock(return_value=tree_v1)
         inst = CamoufoxInstance("agent1", MagicMock(), MagicMock(), mock_page)
         mgr._instances["agent1"] = inst
@@ -7619,6 +7621,7 @@ class TestFindText:
             ],
         }
         mock_page.accessibility.snapshot = AsyncMock(return_value=tree_v2)
+        mock_page.evaluate = mock_page.accessibility.snapshot
         mock_page.evaluate = AsyncMock(return_value=tree_v2)
 
         mock_locator = AsyncMock()
@@ -9132,3 +9135,1267 @@ class TestShadowDOM:
             await mgr._locator_from_ref(inst, "e0")
         # Stage-1 was never invoked.
         mock_page.evaluate_handle.assert_not_called()
+
+
+def _make_frame(url, tree, *, detached: bool = False):
+    f = MagicMock()
+    f.url = url
+    f.evaluate = AsyncMock(return_value=tree)
+    f.child_frames = []
+    f.locator = MagicMock()
+    f.is_detached = MagicMock(return_value=detached)
+    return f
+
+
+def _attach_main_frame(mock_page, child_frames):
+    main_frame = MagicMock()
+    main_frame.child_frames = child_frames
+    mock_page.main_frame = main_frame
+    return main_frame
+
+
+class TestIframeTraversal:
+    """Tests for §8.4 iframe traversal in walker + click/type/snapshot."""
+
+    @pytest.mark.asyncio
+    async def test_same_origin_iframe_emits_refs_with_frame_id(self):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.url = "https://example.com/"
+        mock_page.viewport_size = {"width": 1024, "height": 768}
+        mock_page.query_selector_all = AsyncMock(return_value=[])
+        main_tree = {
+            "role": "WebArea",
+            "name": "outer",
+            "children": [
+                {"role": "button", "name": "Outer"},
+                {
+                    "role": "iframe",
+                    "name": "inner",
+                    "frame_url": "https://example.com/iframe.html",
+                    "opaque": False,
+                },
+            ],
+        }
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value=main_tree)
+        mock_page.evaluate = mock_page.accessibility.snapshot
+
+        inner_tree = {
+            "role": "WebArea",
+            "name": "inner",
+            "children": [
+                {"role": "button", "name": "InnerSubmit"},
+            ],
+        }
+        child = _make_frame("https://example.com/iframe.html", inner_tree)
+        _attach_main_frame(mock_page, [child])
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        assert result["success"] is True
+        refs = result["data"]["refs"]
+        assert refs["e0"]["role"] == "button"
+        assert refs["e0"]["name"] == "Outer"
+        assert inst.refs["e0"].frame_id is None
+        assert refs["e1"]["role"] == "button"
+        assert refs["e1"]["name"] == "InnerSubmit"
+        assert inst.refs["e1"].frame_id is not None
+        assert inst.refs["e1"].frame_id in inst.frame_ids_inv
+        assert "iframe" in result["data"]["snapshot"]
+
+    @pytest.mark.asyncio
+    async def test_two_iframes_get_different_frame_ids(self):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.url = "https://example.com/"
+        mock_page.viewport_size = {"width": 1024, "height": 768}
+        mock_page.query_selector_all = AsyncMock(return_value=[])
+        main_tree = {
+            "role": "WebArea",
+            "name": "outer",
+            "children": [
+                {
+                    "role": "iframe",
+                    "name": "a",
+                    "frame_url": "https://example.com/a.html",
+                    "opaque": False,
+                },
+                {
+                    "role": "iframe",
+                    "name": "b",
+                    "frame_url": "https://example.com/b.html",
+                    "opaque": False,
+                },
+            ],
+        }
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value=main_tree)
+        mock_page.evaluate = mock_page.accessibility.snapshot
+
+        tree_a = {
+            "role": "WebArea", "name": "a",
+            "children": [{"role": "button", "name": "AAA"}],
+        }
+        tree_b = {
+            "role": "WebArea", "name": "b",
+            "children": [{"role": "button", "name": "BBB"}],
+        }
+        child_a = _make_frame("https://example.com/a.html", tree_a)
+        child_b = _make_frame("https://example.com/b.html", tree_b)
+        _attach_main_frame(mock_page, [child_a, child_b])
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        assert result["success"] is True
+        a_ref = next(
+            (rid for rid, h in inst.refs.items() if h.name == "AAA"), None,
+        )
+        b_ref = next(
+            (rid for rid, h in inst.refs.items() if h.name == "BBB"), None,
+        )
+        assert a_ref is not None
+        assert b_ref is not None
+        a_fid = inst.refs[a_ref].frame_id
+        b_fid = inst.refs[b_ref].frame_id
+        assert a_fid is not None and b_fid is not None
+        assert a_fid != b_fid
+
+    @pytest.mark.asyncio
+    async def test_cross_origin_iframe_emits_opaque_stub_no_descent(self):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.url = "https://example.com/"
+        mock_page.viewport_size = {"width": 1024, "height": 768}
+        mock_page.query_selector_all = AsyncMock(return_value=[])
+        main_tree = {
+            "role": "WebArea",
+            "name": "outer",
+            "children": [
+                {
+                    "role": "iframe",
+                    "name": "cross-origin",
+                    "frame_url": "https://other.example/widget.html",
+                    "opaque": True,
+                },
+            ],
+        }
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value=main_tree)
+        mock_page.evaluate = mock_page.accessibility.snapshot
+
+        # If descent were attempted on this Frame, evaluate would be called.
+        forbidden = _make_frame(
+            "https://other.example/widget.html", {"role": "WebArea"},
+        )
+        _attach_main_frame(mock_page, [forbidden])
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        assert result["success"] is True
+        snap = result["data"]["snapshot"]
+        assert "iframe" in snap
+        assert "cross-origin" in snap
+        forbidden.evaluate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_click_via_ref_inside_iframe_uses_frame_locator(self):
+        from src.browser.ref_handle import RefHandle
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.url = "https://example.com/"
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+        page_id = inst._page_id_for(mock_page)
+
+        frame = MagicMock()
+        frame_locator = MagicMock()
+        frame_locator.nth = MagicMock(return_value=frame_locator)
+        frame_locator.hover = AsyncMock()
+        frame_locator.click = AsyncMock()
+        frame.get_by_role = MagicMock(return_value=frame_locator)
+        frame_id = inst._register_frame(frame)
+
+        inst.refs = {
+            "e0": RefHandle(
+                page_id=page_id, frame_id=frame_id, shadow_path=(),
+                scope_root=None, role="button", name="Inner", occurrence=0,
+                disabled=False, element_key="",
+            ),
+        }
+
+        result = await mgr.click("a1", ref="e0")
+        assert result["success"] is True
+        frame.get_by_role.assert_called_once_with(
+            "button", name="Inner", exact=True,
+        )
+        frame_locator.click.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_type_via_ref_inside_iframe_uses_frame_locator(self):
+        from src.browser.ref_handle import RefHandle
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.url = "https://example.com/"
+        mock_page.keyboard = AsyncMock()
+        mock_page.keyboard.press = AsyncMock()
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+        page_id = inst._page_id_for(mock_page)
+
+        frame = MagicMock()
+        frame_locator = MagicMock()
+        frame_locator.nth = MagicMock(return_value=frame_locator)
+        frame_locator.hover = AsyncMock()
+        frame_locator.click = AsyncMock()
+        frame.get_by_role = MagicMock(return_value=frame_locator)
+        frame_id = inst._register_frame(frame)
+
+        inst.refs = {
+            "e0": RefHandle(
+                page_id=page_id, frame_id=frame_id, shadow_path=(),
+                scope_root=None, role="textbox", name="Email", occurrence=0,
+                disabled=False, element_key="",
+            ),
+        }
+
+        result = await mgr.type_text("a1", ref="e0", text="hi", clear=False)
+        assert result["success"] is True
+        frame.get_by_role.assert_called_once_with(
+            "textbox", name="Email", exact=True,
+        )
+
+    @pytest.mark.asyncio
+    async def test_two_level_nested_iframes(self):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.url = "https://example.com/"
+        mock_page.viewport_size = {"width": 1024, "height": 768}
+        mock_page.query_selector_all = AsyncMock(return_value=[])
+        main_tree = {
+            "role": "WebArea", "name": "",
+            "children": [
+                {
+                    "role": "iframe", "name": "outer",
+                    "frame_url": "https://example.com/outer.html",
+                    "opaque": False,
+                },
+            ],
+        }
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value=main_tree)
+        mock_page.evaluate = mock_page.accessibility.snapshot
+
+        outer_tree = {
+            "role": "WebArea", "name": "outer",
+            "children": [
+                {
+                    "role": "iframe", "name": "inner",
+                    "frame_url": "https://example.com/inner.html",
+                    "opaque": False,
+                },
+            ],
+        }
+        inner_tree = {
+            "role": "WebArea", "name": "inner",
+            "children": [{"role": "button", "name": "DEEP"}],
+        }
+        outer_frame = _make_frame("https://example.com/outer.html", outer_tree)
+        inner_frame = _make_frame("https://example.com/inner.html", inner_tree)
+        outer_frame.child_frames = [inner_frame]
+        _attach_main_frame(mock_page, [outer_frame])
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        assert result["success"] is True
+        deep_ref = next(
+            (rid for rid, h in inst.refs.items() if h.name == "DEEP"), None,
+        )
+        assert deep_ref is not None
+        deep_handle = inst.refs[deep_ref]
+        assert deep_handle.frame_id is not None
+        assert deep_handle.frame_id in inst.frame_ids_inv
+        assert inst.frame_ids_inv[deep_handle.frame_id] is inner_frame
+
+    @pytest.mark.asyncio
+    async def test_four_deep_nesting_stops_at_limit(self):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.url = "https://example.com/"
+        mock_page.viewport_size = {"width": 1024, "height": 768}
+        mock_page.query_selector_all = AsyncMock(return_value=[])
+        main_tree = {
+            "role": "WebArea", "name": "",
+            "children": [
+                {
+                    "role": "iframe", "name": "lvl1",
+                    "frame_url": "https://example.com/1.html",
+                    "opaque": False,
+                },
+            ],
+        }
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value=main_tree)
+        mock_page.evaluate = mock_page.accessibility.snapshot
+
+        def _level(level):
+            children = []
+            if level < 4:
+                children = [{
+                    "role": "iframe", "name": f"lvl{level + 1}",
+                    "frame_url": f"https://example.com/{level + 1}.html",
+                    "opaque": False,
+                }]
+            children.append({"role": "button", "name": f"BTN{level}"})
+            return {"role": "WebArea", "name": f"lvl{level}", "children": children}
+
+        f1 = _make_frame("https://example.com/1.html", _level(1))
+        f2 = _make_frame("https://example.com/2.html", _level(2))
+        f3 = _make_frame("https://example.com/3.html", _level(3))
+        f4 = _make_frame("https://example.com/4.html", _level(4))
+        f1.child_frames = [f2]
+        f2.child_frames = [f3]
+        f3.child_frames = [f4]
+        _attach_main_frame(mock_page, [f1])
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        assert result["success"] is True
+        names = {h.name for h in inst.refs.values()}
+        assert "BTN1" in names
+        assert "BTN2" in names
+        assert "BTN3" in names
+        assert "BTN4" not in names
+        f4.evaluate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_snapshot_frame_arg_walks_only_target(self):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.url = "https://example.com/"
+        mock_page.viewport_size = {"width": 1024, "height": 768}
+        mock_page.query_selector_all = AsyncMock(return_value=[])
+
+        main_tree = {
+            "role": "WebArea", "name": "main",
+            "children": [
+                {"role": "button", "name": "MainOnly"},
+                {
+                    "role": "iframe", "name": "i",
+                    "frame_url": "https://example.com/iframe.html",
+                    "opaque": False,
+                },
+            ],
+        }
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value=main_tree)
+        mock_page.evaluate = mock_page.accessibility.snapshot
+
+        target_tree = {
+            "role": "WebArea", "name": "i",
+            "children": [{"role": "button", "name": "FromIframe"}],
+        }
+        target = _make_frame("https://example.com/iframe.html", target_tree)
+        mock_page.frames = [MagicMock(url="https://example.com/"), target]
+        _attach_main_frame(mock_page, [target])
+        # The page.main_frame should NOT be the target so iteration order
+        # reflects "skip main_frame" path in _resolve_frame_arg.
+        mock_page.frames[0].url = "https://example.com/"
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1", frame="example.com/iframe")
+        assert result["success"] is True
+        names = {h.name for h in inst.refs.values()}
+        assert names == {"FromIframe"}
+
+    @pytest.mark.asyncio
+    async def test_click_with_frame_arg_conflicting_ref_returns_error(self):
+        from src.browser.ref_handle import RefHandle
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.url = "https://example.com/"
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+        page_id = inst._page_id_for(mock_page)
+
+        # Ref carries one frame_id; caller passes frame= for a different
+        # iframe — these conflict.
+        other_frame = MagicMock()
+        other_frame.url = "https://example.com/other.html"
+        other_id = inst._register_frame(other_frame)
+        inst.refs = {
+            "e0": RefHandle(
+                page_id=page_id, frame_id=other_id, shadow_path=(),
+                scope_root=None, role="button", name="X", occurrence=0,
+                disabled=False, element_key="",
+            ),
+        }
+        target = MagicMock()
+        target.url = "https://example.com/iframe.html"
+        inst._register_frame(target)
+        mock_page.frames = [MagicMock(url="https://example.com/"), target]
+        mock_page.main_frame = mock_page.frames[0]
+
+        result = await mgr.click(
+            "a1", ref="e0", frame="example.com/iframe",
+        )
+        assert result["success"] is False
+        err = result["error"]
+        assert isinstance(err, dict)
+        assert err.get("code") == "invalid_input"
+        assert "frame" in err.get("message", "").lower()
+        assert "conflict" in err.get("message", "").lower()
+
+    @pytest.mark.asyncio
+    async def test_main_frame_ref_with_frame_arg_returns_error(self):
+        """Ref from main frame (frame_id=None) + frame= arg must error.
+
+        Pre-fix the conflict guard skipped the check when ref.frame_id
+        was None, silently ignoring the caller's frame= assertion.
+        """
+        from src.browser.ref_handle import RefHandle
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.url = "https://example.com/"
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+        page_id = inst._page_id_for(mock_page)
+
+        # Main-frame ref — frame_id=None.
+        inst.refs = {
+            "e0": RefHandle.light_dom(
+                page_id=page_id, scope_root=None, role="button",
+                name="Main", occurrence=0, disabled=False,
+            ),
+        }
+        target = MagicMock()
+        target.url = "https://example.com/iframe.html"
+        inst._register_frame(target)
+        mock_page.frames = [MagicMock(url="https://example.com/"), target]
+        mock_page.main_frame = mock_page.frames[0]
+
+        result = await mgr.click(
+            "a1", ref="e0", frame="example.com/iframe",
+        )
+        assert result["success"] is False
+        err = result["error"]
+        assert isinstance(err, dict)
+        assert err.get("code") == "invalid_input"
+        assert "frame" in err.get("message", "").lower()
+
+    @pytest.mark.asyncio
+    async def test_type_main_frame_ref_with_frame_arg_returns_error(self):
+        """Same as click() but for type_text()."""
+        from src.browser.ref_handle import RefHandle
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.url = "https://example.com/"
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+        page_id = inst._page_id_for(mock_page)
+
+        inst.refs = {
+            "e0": RefHandle.light_dom(
+                page_id=page_id, scope_root=None, role="textbox",
+                name="Email", occurrence=0, disabled=False,
+            ),
+        }
+        target = MagicMock()
+        target.url = "https://example.com/iframe.html"
+        inst._register_frame(target)
+        mock_page.frames = [MagicMock(url="https://example.com/"), target]
+        mock_page.main_frame = mock_page.frames[0]
+
+        result = await mgr.type_text(
+            "a1", text="hi", ref="e0", frame="example.com/iframe",
+        )
+        assert result["success"] is False
+        err = result["error"]
+        assert isinstance(err, dict)
+        assert err.get("code") == "invalid_input"
+
+    @pytest.mark.asyncio
+    async def test_click_returns_ref_stale_when_frame_detached(self):
+        from src.browser.ref_handle import RefHandle
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.url = "https://example.com/"
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+        page_id = inst._page_id_for(mock_page)
+
+        inst.refs = {
+            "e0": RefHandle(
+                page_id=page_id, frame_id="f-detached", shadow_path=(),
+                scope_root=None, role="button", name="Gone", occurrence=0,
+                disabled=False, element_key="",
+            ),
+        }
+        result = await mgr.click("a1", ref="e0")
+        assert result["success"] is False
+        err = result["error"]
+        assert isinstance(err, dict)
+        assert err.get("code") == "ref_stale"
+
+    @pytest.mark.asyncio
+    async def test_light_dom_only_page_unaffected(self):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.url = "https://example.com/"
+        mock_page.viewport_size = {"width": 1024, "height": 768}
+        mock_page.query_selector_all = AsyncMock(return_value=[])
+        main_tree = {
+            "role": "WebArea", "name": "Test",
+            "children": [
+                {"role": "button", "name": "Submit"},
+                {"role": "textbox", "name": "Email"},
+            ],
+        }
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value=main_tree)
+        mock_page.evaluate = mock_page.accessibility.snapshot
+        _attach_main_frame(mock_page, [])
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        assert result["success"] is True
+        for handle in inst.refs.values():
+            assert handle.frame_id is None
+        assert "iframe" not in result["data"]["snapshot"]
+
+    @pytest.mark.asyncio
+    async def test_frame_and_from_ref_mutually_exclusive(self):
+        """Passing both frame= and from_ref= must error rather than
+        silently ignoring frame=."""
+        from src.browser.ref_handle import RefHandle
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.url = "https://example.com/"
+        mock_page.viewport_size = {"width": 1024, "height": 768}
+        mock_page.query_selector_all = AsyncMock(return_value=[])
+        _attach_main_frame(mock_page, [])
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+        page_id = inst._page_id_for(mock_page)
+        inst.refs = {
+            "e0": RefHandle.light_dom(
+                page_id=page_id, scope_root=None, role="button",
+                name="X", occurrence=0, disabled=False,
+            ),
+        }
+
+        result = await mgr.snapshot(
+            "a1", frame="example.com/iframe", from_ref="e0",
+        )
+        assert result["success"] is False
+        err = result["error"]
+        assert isinstance(err, dict)
+        assert err.get("code") == "invalid_input"
+        assert "mutually exclusive" in err.get("message", "").lower()
+
+    @pytest.mark.asyncio
+    async def test_snapshot_frame_arg_recurses_into_nested_frames(self):
+        """snapshot(frame=outer) descends into same-origin frames inside
+        the targeted frame so nested refs carry their own frame_id."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.url = "https://example.com/"
+        mock_page.viewport_size = {"width": 1024, "height": 768}
+        mock_page.query_selector_all = AsyncMock(return_value=[])
+
+        # Main page is irrelevant when frame= targets outer.
+        main_tree = {
+            "role": "WebArea", "name": "main",
+            "children": [{"role": "button", "name": "MainOnly"}],
+        }
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value=main_tree)
+        mock_page.evaluate = mock_page.accessibility.snapshot
+
+        # Outer frame has a child iframe stub pointing at inner.
+        outer_tree = {
+            "role": "WebArea", "name": "outer",
+            "children": [
+                {"role": "button", "name": "OUTER_BTN"},
+                {
+                    "role": "iframe", "name": "inner",
+                    "frame_url": "https://example.com/inner.html",
+                    "opaque": False,
+                },
+            ],
+        }
+        inner_tree = {
+            "role": "WebArea", "name": "inner",
+            "children": [{"role": "button", "name": "DEEP_NESTED"}],
+        }
+        outer_frame = _make_frame(
+            "https://example.com/outer.html", outer_tree,
+        )
+        inner_frame = _make_frame(
+            "https://example.com/inner.html", inner_tree,
+        )
+        outer_frame.child_frames = [inner_frame]
+        # page.frames lists every frame; main_frame plus outer plus inner.
+        mock_page.frames = [
+            MagicMock(url="https://example.com/"),
+            outer_frame,
+            inner_frame,
+        ]
+        _attach_main_frame(mock_page, [outer_frame])
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1", frame="example.com/outer")
+        assert result["success"] is True
+        names = {h.name for h in inst.refs.values()}
+        # MainOnly is from the main frame and must NOT appear.
+        assert "MainOnly" not in names
+        assert "OUTER_BTN" in names
+        # P0.3 — inner frame's content must appear with its own frame_id.
+        assert "DEEP_NESTED" in names
+        deep_handle = next(
+            h for h in inst.refs.values() if h.name == "DEEP_NESTED"
+        )
+        outer_handle = next(
+            h for h in inst.refs.values() if h.name == "OUTER_BTN"
+        )
+        # Both have frame_ids; they must differ.
+        assert deep_handle.frame_id is not None
+        assert outer_handle.frame_id is not None
+        assert deep_handle.frame_id != outer_handle.frame_id
+        assert inst.frame_ids_inv[deep_handle.frame_id] is inner_frame
+        assert inst.frame_ids_inv[outer_handle.frame_id] is outer_frame
+
+    @pytest.mark.asyncio
+    async def test_resolve_frame_arg_token_not_in_inv_raises_ref_stale(self):
+        """A frame-id-shaped token (f-XXXXXXXX) that isn't in
+        frame_ids_inv signals a detached frame, not a URL miss — surface
+        as ref_stale so the agent re-snapshots."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.url = "https://example.com/"
+        mock_page.viewport_size = {"width": 1024, "height": 768}
+        mock_page.query_selector_all = AsyncMock(return_value=[])
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value={
+            "role": "WebArea", "name": "", "children": [],
+        })
+        mock_page.frames = [MagicMock(url="https://example.com/")]
+        _attach_main_frame(mock_page, [])
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        # Detached frame_id shape: f- + 8 hex.
+        result = await mgr.snapshot("a1", frame="f-deadbeef")
+        assert result["success"] is False
+        err = result["error"]
+        assert isinstance(err, dict)
+        assert err.get("code") == "ref_stale"
+
+    @pytest.mark.asyncio
+    async def test_resolve_frame_arg_prefers_exact_url_match(self):
+        """When two frames match by substring, exact URL equality wins."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.url = "https://example.com/"
+        # Two frames: one whose URL is the substring exactly, one longer.
+        wanted = MagicMock()
+        wanted.url = "https://example.com/feed"
+        longer = MagicMock()
+        longer.url = "https://example.com/feed/details"
+        mock_page.frames = [
+            MagicMock(url="https://example.com/"),
+            longer,
+            wanted,
+        ]
+        mock_page.main_frame = mock_page.frames[0]
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+
+        resolved = mgr._resolve_frame_arg(inst, "https://example.com/feed")
+        # Both frames contain the substring; exact match must win.
+        assert resolved is wanted
+
+    @pytest.mark.asyncio
+    async def test_iframe_stub_name_truncated_to_200(self):
+        """Long title/src on an iframe stub gets capped to 200 chars."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.url = "https://example.com/"
+        mock_page.viewport_size = {"width": 1024, "height": 768}
+        mock_page.query_selector_all = AsyncMock(return_value=[])
+
+        # Pick a character pattern that the credential redactor leaves
+        # alone: spaces split it into short tokens, none of which match
+        # the long-hex / long-base64 patterns in src/shared/redaction.py.
+        # opaque=False so the stub name is title||src (the long string),
+        # not the constant "cross-origin" sentinel.
+        long_word = "iframe-title "
+        very_long = (long_word * 50)[:500]  # 500 chars, broken by spaces
+        assert len(very_long) == 500
+        main_tree = {
+            "role": "WebArea", "name": "main",
+            "children": [
+                {
+                    "role": "iframe", "name": very_long,
+                    "frame_url": "https://example.com/inner.html",
+                    "opaque": False,
+                },
+            ],
+        }
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value=main_tree)
+        mock_page.evaluate = mock_page.accessibility.snapshot
+        # No matching child frame — descent is skipped, the stub line is
+        # all we get to inspect.
+        _attach_main_frame(mock_page, [])
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        assert result["success"] is True
+        snap = result["data"]["snapshot"]
+        # Truncated stub must not contain the full 500-char run.
+        assert very_long not in snap
+        # The truncated 200-char prefix must appear.
+        assert very_long[:200] in snap
+        # And no character past the cap should be present in a single run.
+        assert very_long[:201] not in snap
+
+    # ── Codex-review fixes (P1) ────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_snapshot_emits_frame_id_in_ref_dict_when_in_iframe(self):
+        """Fix 1 — refs from inside an iframe must surface ``frame_id``
+        in the agent-facing dict so duplicate / anonymous frames are
+        addressable via the documented ``frame=`` token. Main-frame
+        refs keep the historical 4-key shape."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.url = "https://example.com/"
+        mock_page.viewport_size = {"width": 1024, "height": 768}
+        mock_page.query_selector_all = AsyncMock(return_value=[])
+        main_tree = {
+            "role": "WebArea", "name": "outer",
+            "children": [
+                {"role": "button", "name": "MainBtn"},
+                {
+                    "role": "iframe", "name": "inner",
+                    "frame_url": "https://example.com/iframe.html",
+                    "opaque": False,
+                },
+            ],
+        }
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value=main_tree)
+        mock_page.evaluate = mock_page.accessibility.snapshot
+        inner_tree = {
+            "role": "WebArea", "name": "inner",
+            "children": [{"role": "button", "name": "InnerBtn"}],
+        }
+        child = _make_frame("https://example.com/iframe.html", inner_tree)
+        _attach_main_frame(mock_page, [child])
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        assert result["success"] is True
+        refs = result["data"]["refs"]
+        # Main-frame ref: 4-key shape, no frame_id field.
+        main_rid = next(rid for rid, r in refs.items() if r["name"] == "MainBtn")
+        assert "frame_id" not in refs[main_rid]
+        # Inner-frame ref: frame_id present and matches inst.frame_ids_inv.
+        inner_rid = next(rid for rid, r in refs.items() if r["name"] == "InnerBtn")
+        assert "frame_id" in refs[inner_rid]
+        token = refs[inner_rid]["frame_id"]
+        assert token in inst.frame_ids_inv
+        assert inst.frame_ids_inv[token] is child
+
+    @pytest.mark.asyncio
+    async def test_two_same_url_iframes_descend_into_distinct_children(self):
+        """Fix 2 — when two iframe stubs share a URL (e.g. two ad
+        frames from one provider), descent must consume each child
+        frame at most once so contents from BOTH frames appear with
+        distinct frame_ids — not the first child's content twice.
+        """
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.url = "https://example.com/"
+        mock_page.viewport_size = {"width": 1024, "height": 768}
+        mock_page.query_selector_all = AsyncMock(return_value=[])
+        main_tree = {
+            "role": "WebArea", "name": "outer",
+            "children": [
+                {
+                    "role": "iframe", "name": "ad1",
+                    "frame_url": "https://ads.example/widget.html",
+                    "opaque": False,
+                    "iframe_index": 0,
+                },
+                {
+                    "role": "iframe", "name": "ad2",
+                    "frame_url": "https://ads.example/widget.html",
+                    "opaque": False,
+                    "iframe_index": 1,
+                },
+            ],
+        }
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value=main_tree)
+        mock_page.evaluate = mock_page.accessibility.snapshot
+        # Two distinct child Frame objects with the SAME url; each
+        # exposes its own button so we can prove both were walked.
+        tree_a = {
+            "role": "WebArea", "name": "ad-a",
+            "children": [{"role": "button", "name": "AD_A"}],
+        }
+        tree_b = {
+            "role": "WebArea", "name": "ad-b",
+            "children": [{"role": "button", "name": "AD_B"}],
+        }
+        child_a = _make_frame("https://ads.example/widget.html", tree_a)
+        child_b = _make_frame("https://ads.example/widget.html", tree_b)
+        _attach_main_frame(mock_page, [child_a, child_b])
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        assert result["success"] is True
+        names = {h.name for h in inst.refs.values()}
+        # Both buttons must surface — pre-fix only AD_A appeared twice.
+        assert "AD_A" in names
+        assert "AD_B" in names
+        # Each frame got its own frame_id token.
+        a_handle = next(h for h in inst.refs.values() if h.name == "AD_A")
+        b_handle = next(h for h in inst.refs.values() if h.name == "AD_B")
+        assert a_handle.frame_id is not None
+        assert b_handle.frame_id is not None
+        assert a_handle.frame_id != b_handle.frame_id
+        # And the tokens map back to the distinct child Frames.
+        assert inst.frame_ids_inv[a_handle.frame_id] is child_a
+        assert inst.frame_ids_inv[b_handle.frame_id] is child_b
+
+    @pytest.mark.asyncio
+    async def test_srcdoc_iframe_traversed_via_iframe_index(self):
+        """Fix 3 — srcdoc / about:blank iframes emit ``frame_url=""``;
+        descent uses ``iframe_index`` (sibling position) so their
+        contents still surface in the snapshot."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.url = "https://example.com/"
+        mock_page.viewport_size = {"width": 1024, "height": 768}
+        mock_page.query_selector_all = AsyncMock(return_value=[])
+        # Stub has empty frame_url (srcdoc) — descent must NOT skip it.
+        main_tree = {
+            "role": "WebArea", "name": "outer",
+            "children": [
+                {
+                    "role": "iframe", "name": "(srcdoc)",
+                    "frame_url": "",
+                    "opaque": False,
+                    "iframe_index": 0,
+                },
+            ],
+        }
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value=main_tree)
+        mock_page.evaluate = mock_page.accessibility.snapshot
+        srcdoc_tree = {
+            "role": "WebArea", "name": "srcdoc-content",
+            "children": [{"role": "button", "name": "SRCDOC_BTN"}],
+        }
+        # Real srcdoc iframes have url == "about:srcdoc".
+        child = _make_frame("about:srcdoc", srcdoc_tree)
+        _attach_main_frame(mock_page, [child])
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        assert result["success"] is True
+        names = {h.name for h in inst.refs.values()}
+        # The srcdoc button surfaced — pre-fix descent was gated on a
+        # truthy ``frame_url`` and skipped this iframe entirely.
+        assert "SRCDOC_BTN" in names
+        srcdoc_handle = next(
+            h for h in inst.refs.values() if h.name == "SRCDOC_BTN"
+        )
+        assert srcdoc_handle.frame_id is not None
+        assert inst.frame_ids_inv[srcdoc_handle.frame_id] is child
+
+    @pytest.mark.asyncio
+    async def test_v2_snapshot_includes_iframe_stub(self, monkeypatch):
+        """Fix 4 — under ``BROWSER_SNAPSHOT_FORMAT=v2`` the iframe
+        stub must appear in the rendered snapshot. Pre-fix iframe
+        stubs were appended only to the v1 ``lines`` list and v2
+        rendered solely from ``entries``, so iframes vanished."""
+        monkeypatch.setenv("BROWSER_SNAPSHOT_FORMAT", "v2")
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.url = "https://example.com/"
+        mock_page.viewport_size = {"width": 1024, "height": 768}
+        mock_page.query_selector_all = AsyncMock(return_value=[])
+        main_tree = {
+            "role": "WebArea", "name": "outer",
+            "children": [
+                {"role": "button", "name": "OuterBtn"},
+                {
+                    "role": "iframe", "name": "embedded",
+                    "frame_url": "https://example.com/inner.html",
+                    "opaque": False,
+                    "iframe_index": 0,
+                },
+            ],
+        }
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value=main_tree)
+        mock_page.evaluate = mock_page.accessibility.snapshot
+        inner_tree = {
+            "role": "WebArea", "name": "inner",
+            "children": [{"role": "button", "name": "InnerBtn"}],
+        }
+        child = _make_frame("https://example.com/inner.html", inner_tree)
+        _attach_main_frame(mock_page, [child])
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        assert result["success"] is True
+        snap = result["data"]["snapshot"]
+        assert snap.startswith("# snapshot-v2")
+        # Iframe stub line is present in v2 output (rendered without a
+        # ``[ref_id]`` prefix because iframes are not clickable handles).
+        assert 'iframe "embedded"' in snap
+        # And the inner frame's button still has its own [eN] handle.
+        assert "InnerBtn" in snap
+
+    @pytest.mark.asyncio
+    async def test_depth_capped_iframe_stub_marked_in_snapshot(self):
+        """P1.1 — when a 4-deep iframe nest is encountered the L4 stub
+        is emitted (so the agent SEES the iframe exists) but tagged
+        ``[depth-capped]`` so the agent doesn't waste a turn fishing
+        for refs that will never appear.
+        """
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.url = "https://example.com/"
+        mock_page.viewport_size = {"width": 1024, "height": 768}
+        mock_page.query_selector_all = AsyncMock(return_value=[])
+        main_tree = {
+            "role": "WebArea", "name": "",
+            "children": [
+                {
+                    "role": "iframe", "name": "lvl1",
+                    "frame_url": "https://example.com/1.html",
+                    "opaque": False,
+                },
+            ],
+        }
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value=main_tree)
+        mock_page.evaluate = mock_page.accessibility.snapshot
+
+        def _level(level):
+            children = []
+            if level < 4:
+                children = [{
+                    "role": "iframe", "name": f"lvl{level + 1}",
+                    "frame_url": f"https://example.com/{level + 1}.html",
+                    "opaque": False,
+                }]
+            children.append({"role": "button", "name": f"BTN{level}"})
+            return {"role": "WebArea", "name": f"lvl{level}", "children": children}
+
+        f1 = _make_frame("https://example.com/1.html", _level(1))
+        f2 = _make_frame("https://example.com/2.html", _level(2))
+        f3 = _make_frame("https://example.com/3.html", _level(3))
+        f4 = _make_frame("https://example.com/4.html", _level(4))
+        f1.child_frames = [f2]
+        f2.child_frames = [f3]
+        f3.child_frames = [f4]
+        _attach_main_frame(mock_page, [f1])
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        assert result["success"] is True
+        snap = result["data"]["snapshot"]
+        # L1/L2/L3 stubs are NOT capped — descent proceeds.
+        for n in ("lvl1", "lvl2", "lvl3"):
+            line = next(
+                ln for ln in snap.split("\n")
+                if f'iframe "{n}"' in ln
+            )
+            assert "[depth-capped]" not in line, (
+                f"{n} stub should not be depth-capped: {line!r}"
+            )
+        # L4 stub IS capped — descent into it would exceed the nesting
+        # cap so the walker tags the stub.
+        l4_line = next(
+            ln for ln in snap.split("\n") if 'iframe "lvl4"' in ln
+        )
+        assert "[depth-capped]" in l4_line, (
+            f"lvl4 stub should be tagged depth-capped: {l4_line!r}"
+        )
+        # Sanity: the L4 frame was NOT descended into (no BTN4 ref).
+        names = {h.name for h in inst.refs.values()}
+        assert "BTN4" not in names
+
+    @pytest.mark.asyncio
+    async def test_descend_skips_detached_frames_when_index_matching(self):
+        """P1.2 — Playwright may briefly retain detached ``Frame``
+        objects in ``parent.child_frames``; the JS walker counts only
+        live iframes via ``ownerDocument.querySelectorAll``, so its
+        ``iframe_index`` is positional over LIVE frames only. Descent
+        must skip detached entries before applying the index fallback.
+        """
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.url = "https://example.com/"
+        mock_page.viewport_size = {"width": 1024, "height": 768}
+        mock_page.query_selector_all = AsyncMock(return_value=[])
+        # Two srcdoc iframes (empty frame_url forces index-based matching).
+        # Walker emits index=0 and index=1 — the live iframe count.
+        main_tree = {
+            "role": "WebArea", "name": "outer",
+            "children": [
+                {
+                    "role": "iframe", "name": "(srcdoc-0)",
+                    "frame_url": "", "opaque": False, "iframe_index": 0,
+                },
+                {
+                    "role": "iframe", "name": "(srcdoc-1)",
+                    "frame_url": "", "opaque": False, "iframe_index": 1,
+                },
+            ],
+        }
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value=main_tree)
+        mock_page.evaluate = mock_page.accessibility.snapshot
+        # Build child_frames with a detached entry sandwiched in slot 0.
+        # Without filtering, index=0 would target the detached frame and
+        # the LIVE frames would shift to slots 1 and 2.
+        detached = _make_frame("about:blank-stale", None, detached=True)
+        live_a = _make_frame("about:srcdoc", {
+            "role": "WebArea", "name": "a",
+            "children": [{"role": "button", "name": "LIVE_A"}],
+        })
+        live_b = _make_frame("about:srcdoc", {
+            "role": "WebArea", "name": "b",
+            "children": [{"role": "button", "name": "LIVE_B"}],
+        })
+        _attach_main_frame(mock_page, [detached, live_a, live_b])
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        assert result["success"] is True
+        names = {h.name for h in inst.refs.values()}
+        # Both LIVE iframes' contents must surface — pre-fix index=0
+        # would have targeted the detached frame and missed LIVE_A.
+        assert "LIVE_A" in names
+        assert "LIVE_B" in names
+        # And the detached frame's evaluate was never invoked.
+        detached.evaluate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_click_returns_not_supported_on_shadow_in_iframe(self):
+        """Defensive: when PR2 (shadow DOM) merges, refs carrying both
+        ``shadow_path`` AND ``frame_id`` will raise ``NotImplementedError``
+        from ``_resolve_shadow_element`` (the explicit "Shadow + iframe
+        combination not yet supported" guard). The click()/type/hover/
+        scroll outer try-blocks must wrap that as a structured
+        ``not_supported`` envelope rather than letting it surface as a
+        500 from the generic ``except Exception`` catch-all.
+        """
+        from src.browser.ref_handle import RefHandle
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.url = "https://example.com/"
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+        page_id = inst._page_id_for(mock_page)
+
+        # Register a fake frame so the ref's frame_id resolves cleanly —
+        # the NotImplementedError is the *only* failure surface this
+        # test cares about, so everything else has to look healthy.
+        frame = MagicMock()
+        frame_id = inst._register_frame(frame)
+
+        # Ref carries both shadow_path AND frame_id — exactly the
+        # combination PR2's guard rejects.
+        inst.refs = {
+            "e0": RefHandle(
+                page_id=page_id, frame_id=frame_id,
+                shadow_path=("div#root",), scope_root=None,
+                role="button", name="Submit", occurrence=0,
+                disabled=False, element_key="",
+            ),
+        }
+
+        # Stub the resolution path to simulate PR2's guard.
+        with patch.object(
+            BrowserManager, "_locator_from_ref",
+            side_effect=NotImplementedError(
+                "Shadow + iframe combination not yet supported",
+            ),
+        ):
+            result = await mgr.click("a1", ref="e0")
+
+        assert result["success"] is False, result
+        assert isinstance(result["error"], dict)
+        assert result["error"]["code"] == "not_supported"
+        assert "Shadow + iframe" in result["error"]["message"]
+        # Click failure stats still get bumped — the action attempted
+        # and failed even if the failure mode is structured.
+        assert inst.m_click_fail == 1
+
+
+class TestSelectorFrameClickAndType:
+    """P2.1 — happy-path coverage for ``selector + frame=`` on click()
+    and type_text(). Existing tests cover the conflict-with-ref case
+    only; these tests pin the selector path so a regression that drops
+    iframe-scoped selector dispatch surfaces immediately.
+    """
+
+    @pytest.mark.asyncio
+    async def test_click_with_selector_and_frame_arg(self):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.url = "https://example.com/"
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        # Frame whose URL substring the agent passes via frame=.
+        frame_locator = MagicMock()
+        frame_locator.hover = AsyncMock()
+        frame_locator.click = AsyncMock()
+        target_frame = MagicMock()
+        target_frame.url = "https://example.com/widget.html"
+        target_locator = MagicMock()
+        target_locator.first = frame_locator
+        target_frame.locator = MagicMock(return_value=target_locator)
+        inst._register_frame(target_frame)
+        mock_page.frames = [
+            MagicMock(url="https://example.com/"),
+            target_frame,
+        ]
+        mock_page.main_frame = mock_page.frames[0]
+
+        result = await mgr.click(
+            "a1", selector="button.submit", frame="example.com/widget",
+        )
+        assert result["success"] is True
+        # Selector resolved through the frame's locator, not page's.
+        target_frame.locator.assert_called_once_with("button.submit")
+        frame_locator.click.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_type_with_selector_and_frame_arg(self):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.url = "https://example.com/"
+        mock_page.keyboard = AsyncMock()
+        mock_page.keyboard.press = AsyncMock()
+        mock_page.keyboard.type = AsyncMock()
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        frame_locator = MagicMock()
+        frame_locator.hover = AsyncMock()
+        frame_locator.click = AsyncMock()
+        target_frame = MagicMock()
+        target_frame.url = "https://example.com/widget.html"
+        target_locator = MagicMock()
+        target_locator.first = frame_locator
+        target_frame.locator = MagicMock(return_value=target_locator)
+        inst._register_frame(target_frame)
+        mock_page.frames = [
+            MagicMock(url="https://example.com/"),
+            target_frame,
+        ]
+        mock_page.main_frame = mock_page.frames[0]
+
+        result = await mgr.type_text(
+            "a1", selector="input.email", text="hi",
+            frame="example.com/widget", clear=False,
+        )
+        assert result["success"] is True
+        target_frame.locator.assert_called_once_with("input.email")
+        # Focus click went through the frame-scoped locator.
+        frame_locator.click.assert_called()
