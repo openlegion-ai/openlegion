@@ -7365,7 +7365,7 @@ class TestFindText:
             return {"success": True, "data": {}}
 
         with patch.object(BrowserManager, "get_or_start", return_value=inst), \
-             patch.object(BrowserManager, "_locator_from_ref", return_value=mock_locator), \
+             patch.object(BrowserManager, "_locator_from_ref", new_callable=AsyncMock, return_value=mock_locator), \
              patch.object(BrowserManager, "_snapshot_impl", new=fake_snapshot):
             result = await mgr.find_text("agent1", "submit")
 
@@ -7430,7 +7430,7 @@ class TestFindText:
             return {"success": True, "data": {}}
 
         with patch.object(BrowserManager, "get_or_start", return_value=inst), \
-             patch.object(BrowserManager, "_locator_from_ref", return_value=mock_locator), \
+             patch.object(BrowserManager, "_locator_from_ref", new_callable=AsyncMock, return_value=mock_locator), \
              patch.object(BrowserManager, "_snapshot_impl", new=fake_snapshot):
             result = await mgr.find_text("agent1", "save", scroll=True)
 
@@ -7456,7 +7456,7 @@ class TestFindText:
             return {"success": True, "data": {}}
 
         with patch.object(BrowserManager, "get_or_start", return_value=inst), \
-             patch.object(BrowserManager, "_locator_from_ref", return_value=mock_locator), \
+             patch.object(BrowserManager, "_locator_from_ref", new_callable=AsyncMock, return_value=mock_locator), \
              patch.object(BrowserManager, "_snapshot_impl", new=fake_snapshot):
             result = await mgr.find_text("agent1", "save", scroll=False)
 
@@ -7495,7 +7495,7 @@ class TestFindText:
             return {"success": True, "data": {}}
 
         with patch.object(BrowserManager, "get_or_start", return_value=inst), \
-             patch.object(BrowserManager, "_locator_from_ref", return_value=mock_locator), \
+             patch.object(BrowserManager, "_locator_from_ref", new_callable=AsyncMock, return_value=mock_locator), \
              patch.object(BrowserManager, "_snapshot_impl", new=fake_snapshot):
             result = await mgr.find_text("agent1", "save")
 
@@ -7520,7 +7520,7 @@ class TestFindText:
             return {"success": True, "data": {}}
 
         with patch.object(BrowserManager, "get_or_start", return_value=inst), \
-             patch.object(BrowserManager, "_locator_from_ref", return_value=mock_locator), \
+             patch.object(BrowserManager, "_locator_from_ref", new_callable=AsyncMock, return_value=mock_locator), \
              patch.object(BrowserManager, "_snapshot_impl", new=fake_snapshot):
             result = await mgr.find_text("agent1", "STRASSE")
 
@@ -7546,7 +7546,7 @@ class TestFindText:
             return {"success": True, "data": {}}
 
         with patch.object(BrowserManager, "get_or_start", return_value=inst), \
-             patch.object(BrowserManager, "_locator_from_ref", return_value=mock_locator), \
+             patch.object(BrowserManager, "_locator_from_ref", new_callable=AsyncMock, return_value=mock_locator), \
              patch.object(BrowserManager, "_snapshot_impl", new=fake_snapshot):
             result = await mgr.find_text("agent1", "save")
 
@@ -7573,7 +7573,7 @@ class TestFindText:
             return {"success": True, "data": {}}
 
         with patch.object(BrowserManager, "get_or_start", return_value=inst), \
-             patch.object(BrowserManager, "_locator_from_ref", return_value=mock_locator), \
+             patch.object(BrowserManager, "_locator_from_ref", new_callable=AsyncMock, return_value=mock_locator), \
              patch.object(BrowserManager, "_snapshot_impl", new=fake_snapshot):
             result = await mgr.find_text("agent1", "submit")
 
@@ -7601,6 +7601,7 @@ class TestFindText:
         mock_page.viewport_size = {"width": 1280, "height": 720}
         mock_page.accessibility = MagicMock()
         mock_page.accessibility.snapshot = AsyncMock(return_value=tree_v1)
+        mock_page.evaluate = AsyncMock(return_value=tree_v1)
         inst = CamoufoxInstance("agent1", MagicMock(), MagicMock(), mock_page)
         mgr._instances["agent1"] = inst
 
@@ -7618,12 +7619,13 @@ class TestFindText:
             ],
         }
         mock_page.accessibility.snapshot = AsyncMock(return_value=tree_v2)
+        mock_page.evaluate = AsyncMock(return_value=tree_v2)
 
         mock_locator = AsyncMock()
         mock_locator.is_visible = AsyncMock(return_value=False)
         mock_locator.bounding_box = AsyncMock(return_value=None)
         mock_locator.scroll_into_view_if_needed = AsyncMock()
-        with patch.object(BrowserManager, "_locator_from_ref", return_value=mock_locator):
+        with patch.object(BrowserManager, "_locator_from_ref", new_callable=AsyncMock, return_value=mock_locator):
             result = await mgr.find_text("agent1", "submit")
 
         assert result["success"] is True

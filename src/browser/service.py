@@ -4390,7 +4390,7 @@ class BrowserManager:
                     if len(matches) >= 50:
                         truncated = True
                         break
-                    locator = self._locator_from_ref(inst, ref_id)
+                    locator = await self._locator_from_ref(inst, ref_id)
                     in_viewport = False
                     if locator is not None:
                         try:
