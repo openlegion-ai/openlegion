@@ -643,6 +643,7 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
             )
         if not _ARTIFACT_NAME_RE.match(name):
             raise HTTPException(400, f"Invalid artifact name: {name}")
+        trace_id = request.headers.get("x-trace-id", "")
 
         artifacts_dir = Path(loop.workspace.root) / "artifacts"
         artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -690,6 +691,10 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         os.replace(partial, final)
         rel_name = str(final.relative_to(resolved_dir))
         mime = mimetypes.guess_type(rel_name)[0] or "application/octet-stream"
+        logger.info(
+            "Ingested artifact %s (%d bytes)", rel_name, bytes_written,
+            extra={"trace_id": trace_id},
+        )
         return {
             "artifact_name": rel_name,
             "size_bytes": bytes_written,
