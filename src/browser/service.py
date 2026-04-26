@@ -108,6 +108,24 @@ def _resolve_filter_roles(filter_name: str | None) -> frozenset[str] | None:
     return preset
 
 
+def _err(
+    code: str, message: str, retry_after_ms: int | None = None,
+) -> dict:
+    """Build a Phase 5 §2.3 structured error envelope.
+
+    Per §2.3 the ``retry_after_ms`` field is always present
+    (``null`` when not applicable), so callers can rely on the shape.
+    """
+    return {
+        "success": False,
+        "error": {
+            "code": code,
+            "message": message,
+            "retry_after_ms": retry_after_ms,
+        },
+    }
+
+
 _MAX_SNAPSHOT_ELEMENTS = 200
 _MAX_WALK_DEPTH = 50
 
@@ -227,20 +245,6 @@ _BLOCKED_URL_SCHEMES = frozenset({
 })
 _ALLOWED_URL_SCHEMES = frozenset({"http", "https"})
 
-
-def _err(code: str, message: str) -> dict:
-    """Standard error envelope for browser actions (§2.3).
-
-    Returns a structured ``{"success": False, "error": {"code", "message"}}``
-    payload so callers (mesh + agent skills) can branch on ``code`` rather
-    than substring-matching ``message``. Existing call sites that emit
-    ``{"success": False, "error": "..."}`` (string error) remain valid for
-    backward compatibility — this helper is for new structured-error paths.
-    """
-    return {
-        "success": False,
-        "error": {"code": code, "message": message},
-    }
 
 
 _MAX_WAIT_MS = 10000  # 10 seconds max wait after navigation
@@ -5182,19 +5186,19 @@ class BrowserManager:
         match is scrolled into view (best-effort, non-fatal).
         """
         if not isinstance(query, str) or not (1 <= len(query) <= 500):
-            return {
-                "success": False,
-                "error": "query must be a non-empty string up to 500 chars",
-            }
+            return _err(
+                "invalid_input",
+                "query must be a non-empty string up to 500 chars",
+            )
         inst = await self.get_or_start(agent_id)
         inst.touch()
         async with inst.lock:
             try:
                 if inst._user_control:
-                    return {
-                        "success": False,
-                        "error": "User has browser control — action paused until control is released.",
-                    }
+                    return _err(
+                        "conflict",
+                        "User has browser control — action paused until control is released.",
+                    )
                 snap = await self._snapshot_impl(
                     inst, agent_id, _skip_baseline=True,
                 )
@@ -5264,7 +5268,8 @@ class BrowserManager:
                     },
                 }
             except Exception as e:
-                return {"success": False, "error": str(e)}
+                logger.debug("find_text failed for %s: %s", agent_id, e)
+                return _err("service_unavailable", "find_text failed")
 
     async def open_tab(
         self, agent_id: str, url: str, snapshot_after: bool = False,
@@ -5279,30 +5284,30 @@ class BrowserManager:
         try:
             parsed = urlparse(url)
         except Exception:
-            return {"success": False, "error": "Invalid URL"}
+            return _err("invalid_input", "Invalid URL")
         scheme = parsed.scheme.lower()
         if scheme not in _ALLOWED_URL_SCHEMES:
-            return {
-                "success": False,
-                "error": f"URL scheme '{parsed.scheme}' is not allowed",
-            }
+            return _err(
+                "invalid_input",
+                f"URL scheme '{parsed.scheme}' is not allowed",
+            )
 
         inst = await self.get_or_start(agent_id)
         inst.touch()
         async with inst.lock:
             if inst._user_control:
-                return {
-                    "success": False,
-                    "error": "User has browser control — action paused until control is released.",
-                }
+                return _err(
+                    "conflict",
+                    "User has browser control — action paused until control is released.",
+                )
             previous_page = inst.page
             try:
                 new_page = await inst.context.new_page()
             except Exception as e:
-                return {"success": False, "error": f"Failed to open tab: {e}"}
+                logger.debug("open_tab new_page failed for %s: %s", agent_id, e)
+                return _err("service_unavailable", "Failed to open new tab")
 
             try:
-                page_id = inst._register_page(new_page)
                 resolved_referer = ""
                 try:
                     previous_url = (
@@ -5327,18 +5332,24 @@ class BrowserManager:
                 try:
                     await new_page.goto(url, **goto_kwargs)
                 except Exception as e:
+                    logger.debug(
+                        "open_tab goto failed for %s url=%s: %s",
+                        agent_id, url, e,
+                    )
                     try:
                         await new_page.close()
                     except Exception:
                         pass
                     inst.page = previous_page
-                    return {"success": False, "error": str(e)}
+                    return _err("service_unavailable", "Failed to navigate to URL")
 
-                try:
-                    inst.recent_referers.append(resolved_referer)
-                    inst.had_real_navigate = True
-                except Exception as e:
-                    logger.debug("open_tab referer state update failed: %s", e)
+                # Register page only after goto succeeds — a failed goto
+                # closes the page, so registering before would leak an
+                # entry in inst.page_ids per failed open_tab call.
+                page_id = inst._register_page(new_page)
+
+                inst.recent_referers.append(resolved_referer)
+                inst.had_real_navigate = True
 
                 inst.page = new_page
                 inst.refs = {}  # Stale refs from previous tab's snapshot
@@ -5365,15 +5376,19 @@ class BrowserManager:
                 }
                 if snapshot_after:
                     snap = await self._snapshot_impl(inst, agent_id)
-                    data["snapshot"] = snap.get("data") or {}
+                    if snap.get("success"):
+                        data["snapshot"] = snap.get("data") or {}
+                    else:
+                        data["snapshot_error"] = snap.get("error")
                 return {"success": True, "data": data}
             except Exception as e:
+                logger.debug("open_tab failed for %s: %s", agent_id, e)
                 try:
                     await new_page.close()
                 except Exception:
                     pass
                 inst.page = previous_page
-                return {"success": False, "error": str(e)}
+                return _err("service_unavailable", "open_tab failed")
 
     async def press_key(self, agent_id: str, key: str) -> dict:
         """Press a keyboard key or combination (e.g. 'Enter', 'Escape', 'Control+a').

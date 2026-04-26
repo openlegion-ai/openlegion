@@ -7403,13 +7403,15 @@ class TestFindText:
         mgr = self._make_manager()
         result = await mgr.find_text("agent1", "x" * 501)
         assert result["success"] is False
-        assert "500" in result["error"]
+        assert result["error"]["code"] == "invalid_input"
+        assert "500" in result["error"]["message"]
 
     @pytest.mark.asyncio
     async def test_find_text_query_empty_rejected(self):
         mgr = self._make_manager()
         result = await mgr.find_text("agent1", "")
         assert result["success"] is False
+        assert result["error"]["code"] == "invalid_input"
 
     @pytest.mark.asyncio
     async def test_find_text_scroll_true_scrolls_first_match(self):
@@ -7475,7 +7477,8 @@ class TestFindText:
             result = await mgr.find_text("agent1", "submit")
 
         assert result["success"] is False
-        assert "User has browser control" in result["error"]
+        assert result["error"]["code"] == "conflict"
+        assert "User has browser control" in result["error"]["message"]
 
     @pytest.mark.asyncio
     async def test_find_text_multi_match_preserves_order(self):
@@ -7715,7 +7718,8 @@ class TestOpenTab:
         with patch.object(BrowserManager, "get_or_start", return_value=inst):
             result = await mgr.open_tab("agent1", "file:///etc/passwd")
         assert result["success"] is False
-        assert "not allowed" in result["error"]
+        assert result["error"]["code"] == "invalid_input"
+        assert "not allowed" in result["error"]["message"]
 
     @pytest.mark.asyncio
     async def test_open_tab_rejects_javascript_url(self):
@@ -7727,7 +7731,8 @@ class TestOpenTab:
         with patch.object(BrowserManager, "get_or_start", return_value=inst):
             result = await mgr.open_tab("agent1", "javascript:alert(1)")
         assert result["success"] is False
-        assert "not allowed" in result["error"]
+        assert result["error"]["code"] == "invalid_input"
+        assert "not allowed" in result["error"]["message"]
 
     @pytest.mark.asyncio
     async def test_open_tab_goto_failure_closes_new_page(self):
@@ -7746,7 +7751,9 @@ class TestOpenTab:
             result = await mgr.open_tab("agent1", "https://example.org/")
 
         assert result["success"] is False
-        assert "ERR_CONNECTION_REFUSED" in result["error"]
+        assert result["error"]["code"] == "service_unavailable"
+        assert result["error"]["message"] == "Failed to navigate to URL"
+        assert result["error"]["retry_after_ms"] is None
         new_page.close.assert_awaited_once()
         assert inst.page is page0
 
@@ -7762,7 +7769,8 @@ class TestOpenTab:
             result = await mgr.open_tab("agent1", "https://example.org/")
 
         assert result["success"] is False
-        assert "User has browser control" in result["error"]
+        assert result["error"]["code"] == "conflict"
+        assert "User has browser control" in result["error"]["message"]
 
     @pytest.mark.asyncio
     async def test_open_tab_snapshot_after_returns_snapshot(self):
@@ -7908,6 +7916,66 @@ class TestOpenTab:
         assert result["data"]["page_id"]
         assert inst.page is new_page
         assert inst.refs == {}
+
+    @pytest.mark.asyncio
+    async def test_open_tab_surfaces_snapshot_after_error_separately(self):
+        """When snapshot_after fails, the tab still opened so success stays True
+        but the snapshot error is surfaced under ``snapshot_error`` instead of
+        being silently dropped into an empty ``snapshot`` dict."""
+        from src.browser.service import BrowserManager
+
+        mgr = self._make_manager()
+        inst, page0 = self._make_instance()
+
+        new_page = AsyncMock()
+        new_page.goto = AsyncMock()
+        new_page.title = AsyncMock(return_value="X")
+        new_page.url = "https://example.org/"
+        new_page.bring_to_front = AsyncMock()
+        inst.context.new_page = AsyncMock(return_value=new_page)
+        inst.context.pages = [page0, new_page]
+
+        snap_err = {
+            "code": "service_unavailable",
+            "message": "snapshot timed out",
+            "retry_after_ms": None,
+        }
+
+        async def fake_snapshot(self_mgr, _inst, _agent_id, **_kw):
+            return {"success": False, "error": snap_err}
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst), \
+             patch.object(BrowserManager, "_snapshot_impl", new=fake_snapshot):
+            result = await mgr.open_tab(
+                "agent1", "https://example.org/", snapshot_after=True,
+            )
+
+        assert result["success"] is True
+        assert "snapshot" not in result["data"]
+        assert result["data"]["snapshot_error"] == snap_err
+
+    @pytest.mark.asyncio
+    async def test_open_tab_goto_failure_does_not_leak_page_id(self):
+        """A failed goto closes the new page; its id() must not remain
+        registered in inst.page_ids — otherwise repeated failures grow the
+        dict unboundedly with stale entries."""
+        from src.browser.service import BrowserManager
+
+        mgr = self._make_manager()
+        inst, page0 = self._make_instance()
+        baseline = dict(inst.page_ids)
+
+        new_page = AsyncMock()
+        new_page.goto = AsyncMock(side_effect=Exception("boom"))
+        new_page.close = AsyncMock()
+        inst.context.new_page = AsyncMock(return_value=new_page)
+        inst.context.pages = [page0, new_page]
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst):
+            result = await mgr.open_tab("agent1", "https://example.org/")
+
+        assert result["success"] is False
+        assert inst.page_ids == baseline
 
 
 class TestShadowDOM:
