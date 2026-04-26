@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -17,6 +18,7 @@ import sqlite3
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
@@ -153,26 +155,29 @@ _COOKIE_LIST_MAX_LEN = 1000                     # max cookies per import
 
 _VALID_SAMESITE = {"Lax": "Lax", "Strict": "Strict", "None": "None"}
 
-# Match a literal IPv4 (4-tuple) or IPv6 (bracketed). Cookie domains
-# matching these are dropped — Firefox stores them but the SSRF egress
-# filter inside the browser container would reject the requests anyway.
-_IPV4_DOMAIN_RE = re.compile(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$")
-_IPV6_DOMAIN_RE = re.compile(r"^\[[0-9A-Fa-f:]+\]$")
-
-
 def _is_ip_literal_domain(domain: str) -> bool:
     """True when ``domain`` is a literal IPv4 or IPv6 address."""
     if not domain:
         return False
-    bare = domain.lstrip(".")
-    if _IPV4_DOMAIN_RE.match(bare):
-        # Defense: confirm each octet is in 0..255.
-        try:
-            octets = [int(o) for o in bare.split(".")]
-            return all(0 <= o <= 255 for o in octets)
-        except ValueError:
-            return False
-    return bool(_IPV6_DOMAIN_RE.match(bare))
+    bare = domain.strip().lstrip(".")
+    if bare.startswith("[") and bare.endswith("]"):
+        bare = bare[1:-1]
+    try:
+        ipaddress.ip_address(bare)
+    except ValueError:
+        return False
+    return True
+
+
+def _cookie_url_host(url: str) -> str | None:
+    """Return host for an http(s) cookie URL, or None when invalid."""
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return None
+    if parsed.scheme.lower() not in ("http", "https") or not parsed.hostname:
+        return None
+    return parsed.hostname
 
 
 def _parse_netscape(
@@ -288,11 +293,25 @@ def _validate_cookies(
         name = raw.get("name", "")
         value = raw.get("value", "")
         domain = raw.get("domain", "")
+        url = raw.get("url")
         path = raw.get("path", "/") or "/"
         if not isinstance(name, str) or not name:
             _drop("empty_name")
             continue
-        if not isinstance(domain, str) or not domain:
+        if domain is None:
+            domain = ""
+        if not isinstance(domain, str):
+            _drop("empty_domain")
+            continue
+        if url is None:
+            url = ""
+        if not isinstance(url, str):
+            _drop("invalid_url")
+            continue
+        if domain and url:
+            _drop("domain_url_conflict")
+            continue
+        if not domain and not url:
             _drop("empty_domain")
             continue
         if not isinstance(value, str):
@@ -301,16 +320,39 @@ def _validate_cookies(
         if len(value.encode("utf-8")) > _COOKIE_VALUE_MAX_BYTES:
             _drop("value_too_large")
             continue
-        if _is_ip_literal_domain(domain):
+        url_host: str | None = None
+        if url:
+            url_host = _cookie_url_host(url)
+            if url_host is None:
+                _drop("invalid_url")
+                continue
+            if _is_ip_literal_domain(url_host):
+                _drop("ip_domain_unsupported")
+                continue
+        if domain and _is_ip_literal_domain(domain):
             _drop("ip_domain_unsupported")
             continue
         # RFC 6265bis: __Host- prefix forbids an explicit domain.
         if name.startswith("__Host-") and domain:
             _drop("host_prefix_with_domain")
             continue
-        normalized: dict = {
-            "name": name, "value": value, "domain": domain, "path": path,
-        }
+        secure_raw = raw.get("secure")
+        secure = bool(secure_raw) if secure_raw is not None else False
+        if name.startswith("__Host-"):
+            if path != "/":
+                _drop("host_prefix_invalid_path")
+                continue
+            if not secure:
+                _drop("host_prefix_without_secure")
+                continue
+        normalized: dict = {"name": name, "value": value}
+        if url:
+            normalized["url"] = url
+            if path:
+                normalized["path"] = path
+        else:
+            normalized["domain"] = domain
+            normalized["path"] = path
         # SameSite normalize (case-insensitive) — drop entry on unknown.
         ss_raw = raw.get("sameSite")
         if ss_raw is not None:
@@ -332,8 +374,8 @@ def _validate_cookies(
         # httpOnly / secure — coerce to bool only when explicitly present.
         if "httpOnly" in raw:
             normalized["httpOnly"] = bool(raw["httpOnly"])
-        if "secure" in raw:
-            normalized["secure"] = bool(raw["secure"])
+        if secure_raw is not None:
+            normalized["secure"] = secure
         accepted.append(normalized)
 
     dropped = [

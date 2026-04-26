@@ -272,23 +272,85 @@ class TestValidateCookies:
         assert accepted == []
         assert dropped == [{"reason": "host_prefix_with_domain", "count": 1}]
 
-    def test_allows_host_prefix_without_domain(self):
-        # __Host- without domain (empty domain) is rejected by empty_domain rule.
-        # The valid form has domain absent entirely; we just verify host_prefix
-        # only fires when domain is set.
+    def test_allows_host_prefix_url_cookie_without_domain(self):
         accepted, dropped, _ = _validate_cookies(
-            [{"name": "__Host-sess", "value": "abc", "domain": ""}],
+            [{
+                "name": "__Host-sess",
+                "value": "abc",
+                "url": "https://example.com/",
+                "path": "/",
+                "secure": True,
+            }],
         )
-        # empty_domain triggers first; not host_prefix
-        assert "host_prefix_with_domain" not in [d["reason"] for d in dropped]
+        assert dropped == []
+        assert accepted == [{
+            "name": "__Host-sess",
+            "value": "abc",
+            "url": "https://example.com/",
+            "path": "/",
+            "secure": True,
+        }]
+
+    def test_drops_host_prefix_url_cookie_without_secure(self):
+        accepted, dropped, _ = _validate_cookies(
+            [{
+                "name": "__Host-sess",
+                "value": "abc",
+                "url": "https://example.com/",
+                "path": "/",
+                "secure": False,
+            }],
+        )
+        assert accepted == []
+        assert dropped == [{"reason": "host_prefix_without_secure", "count": 1}]
+
+    def test_drops_host_prefix_url_cookie_wrong_path(self):
+        accepted, dropped, _ = _validate_cookies(
+            [{
+                "name": "__Host-sess",
+                "value": "abc",
+                "url": "https://example.com/app",
+                "path": "/app",
+                "secure": True,
+            }],
+        )
+        assert accepted == []
+        assert dropped == [{"reason": "host_prefix_invalid_path", "count": 1}]
+
+    def test_playwright_url_cookie_supported(self):
+        accepted, dropped, fmt = _validate_cookies(
+            [{"name": "sid", "value": "abc", "url": "https://example.com/"}],
+        )
+        assert fmt == "playwright"
+        assert dropped == []
+        assert accepted[0]["url"] == "https://example.com/"
+
+    def test_domain_and_url_conflict_dropped(self):
+        accepted, dropped, _ = _validate_cookies(
+            [{
+                "name": "sid",
+                "value": "abc",
+                "domain": ".example.com",
+                "url": "https://example.com/",
+            }],
+        )
+        assert accepted == []
+        assert dropped == [{"reason": "domain_url_conflict", "count": 1}]
 
     def test_drops_ip_literal_domain(self):
-        for domain in ["127.0.0.1", "[::1]", "192.168.1.1"]:
+        for domain in ["127.0.0.1", "[::1]", "2001:db8::1", "192.168.1.1"]:
             accepted, dropped, _ = _validate_cookies(
                 [{"name": "sid", "value": "x", "domain": domain}],
             )
             assert accepted == []
             assert dropped == [{"reason": "ip_domain_unsupported", "count": 1}]
+
+    def test_drops_ip_literal_url_host(self):
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "sid", "value": "x", "url": "https://127.0.0.1/"}],
+        )
+        assert accepted == []
+        assert dropped == [{"reason": "ip_domain_unsupported", "count": 1}]
 
     def test_drops_invalid_samesite(self):
         accepted, dropped, _ = _validate_cookies(
@@ -356,6 +418,10 @@ class TestIsIpLiteralDomain:
     def test_ipv6_bracketed(self):
         assert _is_ip_literal_domain("[::1]")
         assert _is_ip_literal_domain("[2001:db8::1]")
+
+    def test_ipv6_unbracketed(self):
+        assert _is_ip_literal_domain("::1")
+        assert _is_ip_literal_domain("2001:db8::1")
 
     def test_normal_domain(self):
         assert not _is_ip_literal_domain(".example.com")
