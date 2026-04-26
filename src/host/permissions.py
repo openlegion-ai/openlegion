@@ -44,6 +44,8 @@ KNOWN_BROWSER_ACTIONS: frozenset[str] = frozenset({
     "find_text", "open_tab",
     # Phase 6 §9.3 coordinate-based click with overlay pre-check.
     "click_xy",
+    # Phase 6 §9.1 read-only network inspection.
+    "inspect_requests",
 })
 
 # Back-compat alias — retained so `host/server.py` and test fixtures that

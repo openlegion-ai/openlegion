@@ -627,6 +627,39 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         await _apply_delay()
         return result
 
+    @app.post("/browser/{agent_id}/import_cookies")
+    async def import_cookies(agent_id: str, request: Request):
+        """Phase 6 §9.2 — operator-only cookie/session import.
+
+        NOT in ``KNOWN_BROWSER_ACTIONS`` — agents cannot reach this via
+        the ``/mesh/browser/command`` proxy. The dashboard endpoint calls
+        this route directly with the browser-service bearer token.
+        Validation and shape coercion happen upstream in the dashboard.
+        """
+        _verify_auth(request)
+        body = await request.json()
+        cookies = body.get("cookies")
+        if not isinstance(cookies, list):
+            raise HTTPException(400, "cookies must be a list")
+        result = await manager.import_cookies(agent_id, cookies)
+        return result
+
+    @app.post("/browser/{agent_id}/inspect_requests")
+    async def inspect_requests(agent_id: str, request: Request):
+        """Phase 6 §9.1 — list recent (redacted) network requests for an agent."""
+        _verify_auth(request)
+        body = await request.json()
+        include_blocked = bool(body.get("include_blocked", False))
+        try:
+            limit = int(body.get("limit", 50))
+        except (TypeError, ValueError):
+            limit = 50
+        result = await manager.inspect_requests(
+            agent_id, include_blocked=include_blocked, limit=limit,
+        )
+        await _apply_delay()
+        return result
+
     # ── Settings ───────────────────────────────────────────────────────────
 
     @app.get("/browser/settings")
