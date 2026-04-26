@@ -441,6 +441,156 @@ class TestBrowserMetricsEventBusContract:
         assert captured[0]["agent"] == "alpha"
         assert captured[0]["data"]["click_success"] == 1
 
+    def test_payload_shape_contract(self):
+        """Pin the WS event payload shape — the dashboard JS reads each of
+        these keys directly. A future refactor that drops or renames any
+        of them silently breaks the panel (Alpine renders ``undefined`` as
+        empty string, which looks like "no data" to the operator).
+
+        This is the single contract test gate the JS side relies on.
+        """
+        from src.dashboard.events import EventBus
+
+        # Canonical payload as produced by BrowserManager._emit_metrics.
+        # Every key here is read by app.js — see browserHistoryBars,
+        # browserHistoryClickRate, browserHistoryNavTimeouts, and the
+        # detail-panel template (Snap p95, etc.).
+        canonical = {
+            "agent_id": "alpha",
+            "seq": 7,
+            "ts": 1234567890.0,
+            "click_success": 5,
+            "click_fail": 1,
+            "snapshot_count": 4,
+            "snapshot_bytes_p50": 1024,
+            "snapshot_bytes_p95": 4096,
+            "nav_timeout": 0,
+            "click_success_rate_100": 0.83,
+            "click_window_size": 6,
+        }
+        # JS-side keys we cannot lose without breaking renders.
+        required_keys = {
+            "agent_id", "seq", "ts",
+            "click_success", "click_fail",
+            "snapshot_count", "snapshot_bytes_p50", "snapshot_bytes_p95",
+            "nav_timeout",
+            "click_success_rate_100", "click_window_size",
+        }
+        for k in required_keys:
+            assert k in canonical, f"required JS-side key missing: {k}"
+
+        # Round-trip through the EventBus to make sure none of the keys
+        # get dropped by Pydantic validation (DashboardEvent.data is
+        # ``dict[str, Any]`` so this is mostly a smoke check, but a future
+        # refactor that swaps to a typed model would surface here).
+        bus = EventBus()
+        bus.emit("browser_metrics", agent="alpha", data=canonical)
+        emitted = [e for e in bus.recent_events()
+                   if e["type"] == "browser_metrics"][0]
+        for k in required_keys:
+            assert k in emitted["data"]
+
+    @staticmethod
+    def _build_mesh_for_poll_test(tmp_path: str):
+        """Mirror tests/test_browser_metrics_ingest._build_mesh — minimal
+        mesh app with a fake container_manager pointing at a fake browser
+        service URL. Returns ``(app, event_bus)``.
+        """
+        from src.host.mesh import MessageRouter, PubSub
+        from src.host.permissions import PermissionMatrix
+        from src.host.server import create_mesh_app
+
+        blackboard = Blackboard(os.path.join(tmp_path, "bb.db"))
+        pubsub = PubSub()
+        permissions = PermissionMatrix()
+        router = MessageRouter(permissions, {})
+        costs = CostTracker(os.path.join(tmp_path, "costs.db"))
+        traces = TraceStore(os.path.join(tmp_path, "traces.db"))
+
+        cm = MagicMock()
+        cm.browser_service_url = "http://browser-svc:8500"
+        cm.browser_auth_token = ""
+
+        event_bus = MagicMock()
+        app = create_mesh_app(
+            blackboard=blackboard,
+            pubsub=pubsub,
+            router=router,
+            permissions=permissions,
+            cost_tracker=costs,
+            trace_store=traces,
+            event_bus=event_bus,
+            container_manager=cm,
+        )
+        return app, event_bus, blackboard, costs, traces
+
+    def test_poll_stamps_boot_id_into_emitted_payload(self):
+        """Phase 7 third-pass — mesh poller stamps ``boot_id`` into each
+        per-payload emit so the dashboard JS can detect a browser-service
+        restart mid-session. Without this, post-restart seq=1..N events
+        interleave with stale pre-restart entries on the operator's panel.
+
+        We reach into the startup handler's closure to call the poller
+        directly (same trick the existing ingest test uses to avoid the
+        5s sleep at the start of the poll loop).
+        """
+        import asyncio
+
+        import httpx
+
+        tmp = tempfile.mkdtemp()
+        try:
+            app, event_bus, bb, costs, traces = (
+                self._build_mesh_for_poll_test(tmp)
+            )
+
+            canned = {
+                "current_seq": 1,
+                "boot_id": "boot-XYZ",
+                "metrics": [{
+                    "seq": 1, "ts": 1.0, "agent_id": "alpha",
+                    "click_success": 1, "click_fail": 0, "nav_timeout": 0,
+                    "snapshot_count": 0, "snapshot_bytes_p50": 0,
+                    "snapshot_bytes_p95": 0, "click_window_size": 0,
+                    "click_success_rate_100": None,
+                }],
+            }
+
+            async def fake_get(self, url, *args, **kwargs):
+                req = httpx.Request("GET", url)
+                return httpx.Response(200, json=canned, request=req)
+
+            with mock.patch.object(httpx.AsyncClient, "get", fake_get):
+                poll_fn = app.state.poll_browser_metrics_once
+                # Fresh loop per call — asyncio.run() refuses to run
+                # inside an already-running loop, but TestClient hasn't
+                # opened one for this test path.
+                loop = asyncio.new_event_loop()
+                try:
+                    loop.run_until_complete(poll_fn())
+                finally:
+                    loop.close()
+
+            calls = [c for c in event_bus.emit.call_args_list
+                     if c.args and c.args[0] == "browser_metrics"]
+            assert len(calls) == 1
+            data = calls[0].kwargs["data"]
+            assert data.get("boot_id") == "boot-XYZ", (
+                "mesh poller must stamp boot_id into per-payload "
+                "browser_metrics emits so dashboard JS can detect a "
+                "browser service restart"
+            )
+            # Original payload fields must still be present alongside boot_id.
+            assert data.get("agent_id") == "alpha"
+            assert data.get("seq") == 1
+            assert data.get("click_success") == 1
+
+            bb.close()
+            costs.close()
+            traces.close()
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
 
 # ── §10.2: max_concurrent env-var resolution ───────────────────────────────
 

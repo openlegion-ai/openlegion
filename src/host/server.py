@@ -2816,7 +2816,18 @@ def create_mesh_app(
                 if payload.get("kind") == "nav_probe"
                 else "browser_metrics"
             )
-            event_bus.emit(event_type, agent=agent_id, data=payload)
+            # Stamp boot_id into the per-payload event data so the dashboard
+            # can detect a browser-service restart mid-session and flush its
+            # local history (otherwise post-restart seq=1..N would interleave
+            # with stale pre-restart entries — the dedup-by-seq path on the
+            # JS side wouldn't catch it because the seqs don't collide,
+            # they're just from a different counter generation). The mesh
+            # poller already resets its own watermark on boot_id change
+            # above; this propagates the same signal one hop further.
+            event_data = (
+                {**payload, "boot_id": boot_id} if boot_id else payload
+            )
+            event_bus.emit(event_type, agent=agent_id, data=event_data)
 
     async def _browser_metrics_loop() -> None:
         # First pass runs ~5s after boot to give the browser service time

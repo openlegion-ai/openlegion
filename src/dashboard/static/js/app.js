@@ -1462,6 +1462,29 @@ function dashboard() {
       // from BrowserManager._emit_metrics — we just index it by agent_id
       // and stamp receipt time so stale rows can fade.
       if (evt.type === 'browser_metrics' && evt.agent && evt.data) {
+        // Phase 7 third-pass: if the mesh stamped a boot_id and it differs
+        // from the last one we saw, the browser service restarted — its
+        // seq counter reset to 0, so any history we accumulated is from
+        // a previous boot. Flush before appending so the dedup-by-seq
+        // path doesn't get fooled into mixing two counter generations.
+        const newBootId = evt.data.boot_id || '';
+        const prevBootId = this._browserMetricsBootId[evt.agent] || '';
+        if (newBootId && prevBootId && newBootId !== prevBootId) {
+          this.browserMetricsHistory = {
+            ...this.browserMetricsHistory,
+            [evt.agent]: [],
+          };
+          this._browserMetricsSeq = {
+            ...this._browserMetricsSeq,
+            [evt.agent]: 0,
+          };
+        }
+        if (newBootId) {
+          this._browserMetricsBootId = {
+            ...this._browserMetricsBootId,
+            [evt.agent]: newBootId,
+          };
+        }
         this.browserMetrics = {
           ...this.browserMetrics,
           [evt.agent]: { ...evt.data, receivedAt: Date.now() },
@@ -5975,7 +5998,21 @@ function dashboard() {
         ...this._browserMetricsError,
         [agentId]: '',
       };
-      const since = this._browserMetricsSeq[agentId] || 0;
+      // Phase 7 third-pass: always seed from seq=0 rather than the
+      // WS-derived high-water mark. The race we have to handle is:
+      // (1) WS subscribes at app boot and starts populating history
+      //     and `_browserMetricsSeq[agentId]` from live emits; then
+      // (2) operator opens the agent panel and calls this seeder.
+      // If we paginate from `_browserMetricsSeq[agentId]`, we'd ask
+      // upstream "give me payloads with seq > N" — and since N is
+      // the *latest* seq we already received via WS, we'd get an
+      // empty list, leaving the rolling-hour history that lived in
+      // the buffer BEFORE the panel opened invisible. The browser
+      // service ring buffer is bounded (1024 entries service-wide),
+      // so requesting from 0 is cheap; `_appendBrowserMetricsHistory`
+      // dedupes by seq so any overlap with WS-derived entries is a
+      // no-op.
+      const since = 0;
       try {
         const resp = await fetch(
           `${window.__config.apiBase}/agents/${agentId}/browser/metrics?since=${since}`,
