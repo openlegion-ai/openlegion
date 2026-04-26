@@ -787,7 +787,20 @@ async def browser_open_tab(
         "seems broken because adblock dropped requests, or confirming a "
         "form POST went through. Returns up to 50 most-recent entries by "
         "default. Set include_blocked=true to include adblock-suppressed "
-        "entries (verbose; usually you don't want this)."
+        "entries (verbose; usually you don't want this).\n\n"
+        "Buffer holds the most recent 200 requests per agent; older "
+        "entries are evicted automatically. URLs are redacted at "
+        "store-time (userinfo stripped, JWT-shaped path segments masked, "
+        "sensitive query values like token/api_key replaced with "
+        "[REDACTED]).\n\n"
+        "Each entry has: url (str, redacted), method (str), "
+        "resource_type (str, one of: document, stylesheet, image, media, "
+        "font, script, texttrack, xhr, fetch, eventsource, websocket, "
+        "manifest, other), ts (str, ISO-8601 UTC like "
+        "'2026-04-26T12:34:56Z'), status (int|null — currently always "
+        "null; reserved for future response-status capture), "
+        "blocked_by_adblock (bool), user_cancelled (bool), "
+        "failed_network (bool)."
     ),
     parameters={
         "include_blocked": {

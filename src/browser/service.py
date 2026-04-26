@@ -5426,20 +5426,26 @@ class BrowserManager:
         """Wire BrowserContext-level ``request`` / ``requestfailed`` listeners.
 
         Idempotent — second and subsequent calls return immediately. Listeners
-        are attached on the *context* so tabs opened later (via ``window.open()``
-        or :meth:`open_tab`) inherit them automatically. The current page is
-        also wired explicitly in case the context-level ``page`` event has
-        already fired for it before listeners landed.
+        are attached on the *context*. Per Playwright docs the context-level
+        ``request`` event is "emitted when a request is issued from any pages
+        created through this context", so this single hook covers:
+
+        * the initial page (``inst.page``) without a separate per-page hookup,
+        * any pre-existing pages already in ``inst.context.pages`` (e.g. a
+          Camoufox profile that restored prior tabs at launch — rare, but
+          per-page wiring used to silently miss these),
+        * tabs opened later via in-page ``window.open()`` or
+          :meth:`open_tab`.
+
+        ``requestfailed`` is similarly context-scoped.
         """
         if inst._network_attached:
             return
         try:
             inst.context.on(
-                "page",
-                lambda p: p.on("request", lambda req: self._record_request(inst, req)),
+                "request",
+                lambda req: self._record_request(inst, req),
             )
-            if inst.page is not None:
-                inst.page.on("request", lambda req: self._record_request(inst, req))
             inst.context.on(
                 "requestfailed",
                 lambda req: self._record_request_failed(inst, req),
@@ -5471,6 +5477,12 @@ class BrowserManager:
                 "blocked_by_adblock": False,
                 "user_cancelled": False,
                 "failed_network": False,
+                # Internal pairing sentinel — set True the first time a
+                # ``requestfailed`` matches this entry so concurrent
+                # identical-URL failures pair to DIFFERENT log entries
+                # rather than overwriting the same one. Stripped from the
+                # response payload by ``inspect_requests``.
+                "_failure_tagged": False,
             })
         except Exception as e:
             logger.debug("network listener record failed: %s", e)
@@ -5483,6 +5495,14 @@ class BrowserManager:
         the request having already scrolled out of the maxlen=200 window.
         Creating a phantom entry would mislead operators about traffic that
         actually happened.
+
+        When two identical-URL requests fire in parallel and both fail
+        (e.g. two ``<img>`` loads of the same blocked tracker), each
+        ``requestfailed`` event tags a *different* log entry — we walk
+        newest-first and skip entries whose ``_failure_tagged`` is already
+        True. Without this, the second ``requestfailed`` would overwrite
+        the same entry and the first request would silently appear as
+        "successful" in the log.
         """
         try:
             from src.shared.redaction import redact_url
@@ -5514,15 +5534,23 @@ class BrowserManager:
                 cancelled = True
             failed_net = not (blocked or cancelled)
 
-            # Update the most recent matching entry. Reverse iteration so a
-            # rapid-fire request to the same URL+method picks up the freshest.
+            # Update the newest matching entry that hasn't already been
+            # tagged. Reverse iteration so a rapid-fire request to the same
+            # URL+method picks up the freshest available slot. Skipping
+            # tagged entries makes parallel identical failures pair 1:1.
             for entry in reversed(inst.network_log):
-                if entry["url"] == url and entry["method"] == method:
+                if (
+                    entry["url"] == url
+                    and entry["method"] == method
+                    and not entry.get("_failure_tagged")
+                ):
                     entry["blocked_by_adblock"] = blocked
                     entry["user_cancelled"] = cancelled
                     entry["failed_network"] = failed_net
+                    entry["_failure_tagged"] = True
                     return
-            # No match → discard. Do NOT append; would create a phantom entry.
+            # No untagged match → discard. Do NOT append; would create a
+            # phantom entry.
         except Exception as e:
             logger.debug("network listener fail-record failed: %s", e)
 

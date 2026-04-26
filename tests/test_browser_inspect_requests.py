@@ -63,14 +63,18 @@ def _make_instance_with_listeners():
     """Return a CamoufoxInstance with mocked context/page wired by listeners.
 
     The mocks capture handlers passed to ``.on(...)`` so the test can fire
-    them synchronously.
+    them synchronously. Listeners are attached at the *context* level
+    (``request`` + ``requestfailed``), so per-page ``request`` events from
+    any page in the context are covered by the single context handler. The
+    ``page_handlers`` dict is retained for backward-compat with tests that
+    expect the four-tuple shape, but is unused for new wiring.
     """
     from src.browser.service import BrowserManager, CamoufoxInstance
 
     mgr = BrowserManager.__new__(BrowserManager)
 
-    # Track context listeners in a dict so we can fire ``page`` / ``requestfailed``.
-    context_handlers: dict[str, list] = {"page": [], "requestfailed": []}
+    # Track context listeners in a dict so we can fire them synchronously.
+    context_handlers: dict[str, list] = {"request": [], "requestfailed": []}
 
     def _ctx_on(event: str, handler):
         context_handlers.setdefault(event, []).append(handler)
@@ -78,7 +82,9 @@ def _make_instance_with_listeners():
     context = MagicMock()
     context.on = MagicMock(side_effect=_ctx_on)
 
-    # Page mock: same trick — ``request`` handlers stored, callable via _fire.
+    # Page mock retained for tests that may still poke at it. Per-page
+    # ``request`` listeners are no longer attached by the implementation —
+    # see ``_attach_network_listeners`` which uses context-scope events.
     page_handlers: dict[str, list] = {}
 
     def _page_on(event: str, handler):
@@ -491,23 +497,28 @@ class TestResetClearsAndReattaches:
 
         mgr._attach_network_listeners(fresh)
         assert fresh._network_attached is True
-        # context-level listeners wired for ``page`` and ``requestfailed``.
+        # Context-level listeners wired for ``request`` and ``requestfailed`` —
+        # the single context-scope ``request`` event covers every page
+        # in the context (existing pages and new tabs alike), so per-page
+        # listener wiring is no longer needed.
         events = [call.args[0] for call in fresh_ctx.on.call_args_list]
-        assert "page" in events
+        assert "request" in events
         assert "requestfailed" in events
 
 
 # ───────────────────────────────────────────────────────────────────────
-# 10. Context-level listener wires per-request handler on new pages
+# 10. Context-level ``request`` listener covers every page in the context
 # ───────────────────────────────────────────────────────────────────────
 
 
 class TestContextLevelPageListener:
-    def test_new_page_inherits_request_handler(self):
-        """Simulate context.emit('page', new_page) firing the registered handler.
-
-        The handler we registered should attach a per-page ``request``
-        listener; firing that listener should record into ``network_log``.
+    def test_context_level_request_listener_records_for_any_page(self):
+        """Per Playwright, ``BrowserContext.on('request', ...)`` fires for
+        requests issued by ANY page in the context — both pre-existing
+        pages (e.g. profile-restored tabs) and pages opened later via
+        in-page ``window.open()`` or :meth:`open_tab`. We rely on this
+        single hook instead of per-page wiring + a ``page`` event hookup,
+        which used to silently miss pre-existing pages.
         """
         from src.browser.service import BrowserManager, CamoufoxInstance
 
@@ -527,27 +538,24 @@ class TestContextLevelPageListener:
         inst = CamoufoxInstance("agent1", MagicMock(), context, existing_page)
         mgr._attach_network_listeners(inst)
 
-        # Now fire a context-level "page" event with a brand-new Mock Page.
-        new_page = MagicMock()
-        new_page_handlers: dict[str, list] = {}
+        # Only context-level listeners should be wired — no per-page
+        # ``request`` hooks. The page mock should have received zero
+        # ``.on('request', ...)`` calls.
+        page_on_events = [c.args[0] for c in existing_page.on.call_args_list]
+        assert "request" not in page_on_events, (
+            "Per-page request listener was wired; "
+            f"context-level should be sufficient. Saw: {page_on_events}"
+        )
 
-        def _new_page_on(event: str, handler):
-            new_page_handlers.setdefault(event, []).append(handler)
+        # Context handlers must include both ``request`` and ``requestfailed``.
+        assert "request" in ctx_handlers
+        assert "requestfailed" in ctx_handlers
+        assert len(ctx_handlers["request"]) == 1
 
-        new_page.on = MagicMock(side_effect=_new_page_on)
-
-        # The registered context handler should attach a request handler
-        # to the new page when invoked.
-        for h in ctx_handlers["page"]:
-            h(new_page)
-
-        # The new_page now has a "request" listener registered.
-        assert "request" in new_page_handlers
-        assert len(new_page_handlers["request"]) == 1
-
-        # Firing that listener with a Mock request should record into log.
+        # Fire the context-level request handler — it should record into
+        # the network log regardless of which page emitted the request.
         req = _make_mock_request("https://newtab.example.com/asset.js")
-        new_page_handlers["request"][0](req)
+        ctx_handlers["request"][0](req)
 
         assert len(inst.network_log) == 1
         assert "/asset.js" in inst.network_log[0]["url"]
@@ -606,3 +614,215 @@ class TestSkillRegistration:
             registry_desc = fn.description  # type: ignore[attr-defined]
         haystack = " ".join([meta_text, registry_desc, decorated.__doc__ or ""])
         assert "network requests" in haystack.lower() or "adblock" in haystack.lower()
+
+
+# ───────────────────────────────────────────────────────────────────────
+# 13. Parallel identical failed requests pair to DIFFERENT entries
+# ───────────────────────────────────────────────────────────────────────
+
+
+class TestParallelFailedRequestsPairing:
+    """Two parallel ``<img>`` loads of the same blocked tracker URL each
+    record their own ``request`` and then each fire ``requestfailed``.
+
+    Naive pairing (walk newest-first, update the first match) would tag
+    the SAME entry twice and leave the older one unflagged — making one
+    of the two failures silently appear "successful" in the log. The
+    ``_failure_tagged`` sentinel + skip-already-tagged logic ensures each
+    failure pairs with a distinct request entry.
+    """
+
+    def test_two_parallel_identical_failures_tag_distinct_entries(self):
+        mgr, inst, _ctx, _page = _make_instance_with_listeners()
+        mgr._attach_network_listeners(inst)
+
+        url = "https://tracker.example.com/pixel.gif"
+        # Two parallel image loads → two ``request`` entries.
+        mgr._record_request(inst, _make_mock_request(url))
+        mgr._record_request(inst, _make_mock_request(url))
+        assert len(inst.network_log) == 2
+        assert all(not e["blocked_by_adblock"] for e in inst.network_log)
+        assert all(not e["_failure_tagged"] for e in inst.network_log)
+
+        # Both fail with adblock. Each ``requestfailed`` should pair with
+        # a different log entry.
+        mgr._record_request_failed(
+            inst,
+            _make_mock_request(url, failure_error="ERR_BLOCKED_BY_CLIENT"),
+        )
+        mgr._record_request_failed(
+            inst,
+            _make_mock_request(url, failure_error="ERR_BLOCKED_BY_CLIENT"),
+        )
+
+        # BOTH entries should now be flagged blocked. Without the
+        # ``_failure_tagged`` skip, the second pairing would have
+        # overwritten the first entry instead of finding the older one.
+        assert all(e["blocked_by_adblock"] for e in inst.network_log), (
+            "Expected both parallel failures to tag distinct entries; "
+            f"network_log={list(inst.network_log)}"
+        )
+        assert all(e["_failure_tagged"] for e in inst.network_log)
+
+    def test_third_failure_with_only_two_requests_is_dropped(self):
+        """If a third ``requestfailed`` arrives but only two matching
+        requests exist (both already tagged), the third update is
+        discarded — no phantom entry, no overwrite.
+        """
+        mgr, inst, _ctx, _page = _make_instance_with_listeners()
+        mgr._attach_network_listeners(inst)
+
+        url = "https://tracker.example.com/pixel.gif"
+        mgr._record_request(inst, _make_mock_request(url))
+        mgr._record_request(inst, _make_mock_request(url))
+        mgr._record_request_failed(
+            inst,
+            _make_mock_request(url, failure_error="ERR_BLOCKED_BY_CLIENT"),
+        )
+        mgr._record_request_failed(
+            inst,
+            _make_mock_request(url, failure_error="ERR_BLOCKED_BY_CLIENT"),
+        )
+        # A third failure for the same URL — both entries already tagged.
+        mgr._record_request_failed(
+            inst,
+            _make_mock_request(url, failure_error="ERR_BLOCKED_BY_CLIENT"),
+        )
+
+        # Length unchanged, both flags still True.
+        assert len(inst.network_log) == 2
+        assert all(e["blocked_by_adblock"] for e in inst.network_log)
+
+
+# ───────────────────────────────────────────────────────────────────────
+# 14. ``include_blocked=False`` filter happens BEFORE the ``limit`` cap
+# ───────────────────────────────────────────────────────────────────────
+
+
+class TestFilterBeforeCapOrdering:
+    """With a buffer dominated by blocked entries, filter-after-cap would
+    return near-empty results when the agent calls ``include_blocked=False,
+    limit=N`` — the cap would slice off the few non-blocked entries before
+    the filter ran. The implementation iterates newest-first, drops blocked
+    entries (incrementing ``dropped_blocked``), and only counts non-blocked
+    entries toward ``limit``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_180_blocked_of_200_returns_visible_non_blocked(self):
+        mgr, inst, _ctx, _page = _make_instance_with_listeners()
+        mgr._attach_network_listeners(inst)
+        mgr.get_or_start = AsyncMock(return_value=inst)
+
+        # 20 visible (non-blocked) + 180 blocked, interleaved so the
+        # newest 50 by timestamp would be a mix dominated by blocked.
+        # Blocked URLs go through ``_record_request`` then are flagged
+        # via ``_record_request_failed``.
+        ok_count = 0
+        blocked_count = 0
+        for i in range(200):
+            if i % 10 == 0:
+                # 1 in 10 is non-blocked.
+                mgr._record_request(
+                    inst,
+                    _make_mock_request(f"https://example.com/ok/{i}"),
+                )
+                ok_count += 1
+            else:
+                url = f"https://tracker.example.com/blocked/{i}"
+                mgr._record_request(inst, _make_mock_request(url))
+                mgr._record_request_failed(
+                    inst,
+                    _make_mock_request(
+                        url, failure_error="ERR_BLOCKED_BY_CLIENT",
+                    ),
+                )
+                blocked_count += 1
+
+        assert ok_count == 20
+        assert blocked_count == 180
+        assert len(inst.network_log) == 200
+
+        # Ask for 50 with include_blocked=False. Filter-before-cap means
+        # we should see all 20 visible entries (limit isn't reached).
+        result = await mgr.inspect_requests(
+            "agent1", include_blocked=False, limit=50,
+        )
+        assert result["success"] is True
+        data = result["data"]
+        assert data["total"] == 200
+        assert data["dropped_blocked"] == 180
+        assert len(data["requests"]) == 20, (
+            "filter-before-cap: 20 non-blocked entries should all appear "
+            f"under limit=50; got {len(data['requests'])}"
+        )
+        # Every returned entry is non-blocked.
+        assert all(
+            not r["blocked_by_adblock"] for r in data["requests"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_filter_before_cap_with_limit_smaller_than_visible(self):
+        """When non-blocked count exceeds ``limit``, cap kicks in correctly
+        AFTER the filter — newest-first selection.
+        """
+        mgr, inst, _ctx, _page = _make_instance_with_listeners()
+        mgr._attach_network_listeners(inst)
+        mgr.get_or_start = AsyncMock(return_value=inst)
+
+        # 100 non-blocked, 100 blocked, all interleaved.
+        for i in range(200):
+            if i % 2 == 0:
+                mgr._record_request(
+                    inst,
+                    _make_mock_request(f"https://example.com/ok/{i}"),
+                )
+            else:
+                url = f"https://tracker.example.com/blocked/{i}"
+                mgr._record_request(inst, _make_mock_request(url))
+                mgr._record_request_failed(
+                    inst,
+                    _make_mock_request(
+                        url, failure_error="ERR_BLOCKED_BY_CLIENT",
+                    ),
+                )
+
+        result = await mgr.inspect_requests(
+            "agent1", include_blocked=False, limit=10,
+        )
+        data = result["data"]
+        assert data["total"] == 200
+        assert data["dropped_blocked"] == 100
+        assert len(data["requests"]) == 10
+        assert all(not r["blocked_by_adblock"] for r in data["requests"])
+        # Newest-first — entry urls should reference the higher-numbered
+        # /ok/ paths.
+        assert "/ok/" in data["requests"][0]["url"]
+
+
+# ───────────────────────────────────────────────────────────────────────
+# 15. Internal ``_failure_tagged`` sentinel never leaks into responses
+# ───────────────────────────────────────────────────────────────────────
+
+
+class TestSentinelNeverLeaks:
+    @pytest.mark.asyncio
+    async def test_failure_tagged_field_stripped_from_response(self):
+        mgr, inst, _ctx, _page = _make_instance_with_listeners()
+        mgr._attach_network_listeners(inst)
+        mgr.get_or_start = AsyncMock(return_value=inst)
+
+        url = "https://tracker.example.com/pixel.gif"
+        mgr._record_request(inst, _make_mock_request(url))
+        mgr._record_request_failed(
+            inst,
+            _make_mock_request(url, failure_error="ERR_BLOCKED_BY_CLIENT"),
+        )
+
+        result = await mgr.inspect_requests(
+            "agent1", include_blocked=True, limit=10,
+        )
+        for entry in result["data"]["requests"]:
+            assert "_failure_tagged" not in entry, (
+                f"internal sentinel leaked into response: {entry}"
+            )
