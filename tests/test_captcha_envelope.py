@@ -40,6 +40,23 @@ _SELECTOR_ORDER = [
 
 def _make_manager(*, solver=None) -> BrowserManager:
     mgr = BrowserManager.__new__(BrowserManager)
+    if solver is not None:
+        # §11.16 added two sync side-channel getters on CaptchaSolver
+        # that _check_captcha consults BEFORE attempting solve(). When
+        # the test passes a raw AsyncMock as the solver, the unset
+        # attributes resolve to coroutine-returning AsyncMocks whose
+        # truthy-check trips the §11.16 short-circuit. Default both to
+        # MagicMock returning False so envelope-shape tests exercise
+        # the solve path. Tests that want to assert the short-circuit
+        # branches override these explicitly (see test_captcha_health).
+        if not hasattr(solver, "is_solver_unreachable") or not isinstance(
+            getattr(solver, "is_solver_unreachable", None), MagicMock,
+        ):
+            solver.is_solver_unreachable = MagicMock(return_value=False)
+        if not hasattr(solver, "is_breaker_open") or not isinstance(
+            getattr(solver, "is_breaker_open", None), MagicMock,
+        ):
+            solver.is_breaker_open = MagicMock(return_value=False)
     mgr._captcha_solver = solver
     return mgr
 

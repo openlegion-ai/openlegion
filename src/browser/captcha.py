@@ -14,9 +14,13 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import time
+from collections import deque
+from typing import Literal
 
 import httpx
 
+from src.shared.redaction import redact_url
 from src.shared.utils import setup_logging
 
 logger = setup_logging("browser.captcha")
@@ -24,6 +28,65 @@ logger = setup_logging("browser.captcha")
 _SOLVE_TIMEOUT = 120  # max seconds to wait for a solution
 _POLL_INTERVAL = 5    # seconds between result polls
 _SUPPORTED_PROVIDERS = ("2captcha", "capsolver")
+
+# Health check (§11.16): 5s budget per provider. Latency above the warn
+# threshold marks the solver "degraded"; the call still counts as healthy
+# but operators should route new solves to a configured secondary.
+_HEALTH_CHECK_TIMEOUT = 5.0
+_HEALTH_DEGRADED_LATENCY = 3.0
+
+# Circuit breaker (§11.16): 3 failures inside a 5-min sliding window trip
+# the breaker for 10 min. We track timestamps in a bounded deque so the
+# math is "count of entries newer than NOW-300s" — no per-failure
+# counter+timestamp pair to keep coherent.
+_BREAKER_FAILURE_WINDOW = 300.0    # 5 min
+_BREAKER_FAILURE_THRESHOLD = 3
+_BREAKER_OPEN_DURATION = 600.0      # 10 min
+
+# /getBalance endpoints — both providers expose these and accept the same
+# JSON body shape (``{"clientKey": "..."}``). Both return
+# ``{"errorId": 0, "balance": <float>}`` on success.
+_HEALTH_URLS: dict[str, str] = {
+    "2captcha": "https://api.2captcha.com/getBalance",
+    "capsolver": "https://api.capsolver.com/getBalance",
+}
+
+
+def _redact_clientkey(body: dict) -> dict:
+    """Return a shallow copy of ``body`` with ``clientKey`` masked.
+
+    Solver providers occasionally echo the ``clientKey`` field back inside
+    error responses (real, observed behavior). Anything that flows to the
+    logger — request bodies, response bodies, error tracebacks — must scrub
+    that field first. Pair with :func:`redact_url` for the request URL.
+    """
+    if not isinstance(body, dict) or "clientKey" not in body:
+        return body
+    out = dict(body)
+    out["clientKey"] = "[REDACTED]"
+    return out
+
+
+# Provider error strings sometimes embed the raw key as
+# ``clientKey=VALUE`` or ``"clientKey":"VALUE"``. Catch both spellings
+# so an exception ``str()`` doesn't leak it through the logger.
+_CLIENTKEY_IN_TEXT = re.compile(
+    r'(clientKey)\s*["\']?\s*[:=]\s*["\']?([A-Za-z0-9_\-]+)["\']?',
+    re.IGNORECASE,
+)
+
+
+def _redact_clientkey_text(text: str) -> str:
+    """Strip ``clientKey=VALUE`` / ``"clientKey":"VALUE"`` from text.
+
+    Pair with :func:`redact_url` (URL-shaped secrets) and
+    :func:`_redact_clientkey` (dict bodies) before logging anything that
+    might have come from a solver provider's error response.
+    """
+    if not text:
+        return text
+    return _CLIENTKEY_IN_TEXT.sub(r"\1=[REDACTED]", text)
+
 
 # Map from detected selector pattern to a canonical CAPTCHA type.
 _CAPTCHA_TYPE_MAP: dict[str, str] = {
@@ -82,6 +145,24 @@ class CaptchaSolver:
         self.provider = provider
         self.api_key = api_key
         self._client: httpx.AsyncClient | None = None
+        # ── §11.16 state ────────────────────────────────────────────────
+        # Per-process gate: the health check fires the first time ANY
+        # agent calls solve() in this BrowserManager session. The solver
+        # client is shared across agents in the same process, so checking
+        # once per process (not per agent) matches what we're actually
+        # verifying — a single underlying httpx client to a single
+        # provider endpoint.
+        self._solver_health_checked: bool = False
+        self._solver_unreachable: bool = False
+        self._solver_health_degraded: bool = False
+        # Sliding-window failure tracking. maxlen=10 caps memory if we
+        # ever wedge into a long failure storm; only the entries within
+        # the 5-min window matter for the breaker decision.
+        self._solver_failure_timestamps: deque[float] = deque(maxlen=10)
+        self._solver_breaker_until: float = 0.0
+        # Coordinates breaker reads/writes with health-check init across
+        # concurrent agents that share this solver instance.
+        self._state_lock: asyncio.Lock = asyncio.Lock()
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -93,6 +174,164 @@ class CaptchaSolver:
             await self._client.aclose()
             self._client = None
 
+    # ── §11.16 health check + circuit breaker ──────────────────────────
+
+    def is_solver_unreachable(self) -> bool:
+        """Sticky for the rest of the instance-session once health-check fails."""
+        return self._solver_unreachable
+
+    def is_breaker_open(self) -> bool:
+        """True iff a tripped breaker is still within its 10-min window."""
+        return self._solver_breaker_until > time.time()
+
+    async def health_check(
+        self, provider: str | None = None,
+    ) -> Literal["healthy", "degraded", "unreachable"]:
+        """Probe the solver's ``/getBalance`` endpoint with a 5s budget.
+
+        ``provider`` defaults to ``self.provider``. Returns one of:
+
+        * ``healthy`` — HTTP 200, ``balance`` is non-negative numeric, and
+          latency is under :data:`_HEALTH_DEGRADED_LATENCY`.
+        * ``degraded`` — HTTP 200 but latency exceeded the warn threshold.
+          Not fatal; logged so operators see slow upstream and can route
+          new solves to a configured secondary.
+        * ``unreachable`` — timeout, connection error, 5xx, non-200 status,
+          or a non-zero ``errorId`` in the JSON body. Caller marks the
+          solver unreachable for the rest of this instance-session.
+
+        Logging never includes the raw ``clientKey``: the URL flows
+        through :func:`redact_url`, the request body through
+        :func:`_redact_clientkey`, and exception strings through
+        :func:`_redact_clientkey_text`.
+        """
+        prov = (provider or self.provider).lower()
+        url = _HEALTH_URLS.get(prov)
+        if url is None:
+            logger.warning("health_check: unknown provider %r", prov)
+            return "unreachable"
+
+        client = self._get_client()
+        body = {"clientKey": self.api_key}
+        safe_url = redact_url(url)
+        safe_body = _redact_clientkey(body)
+        start = time.monotonic()
+        try:
+            resp = await client.post(url, json=body, timeout=_HEALTH_CHECK_TIMEOUT)
+        except (httpx.TimeoutException, asyncio.TimeoutError):
+            logger.warning(
+                "Solver health check timed out (provider=%s url=%s body=%s)",
+                prov, safe_url, safe_body,
+            )
+            return "unreachable"
+        except httpx.HTTPError as e:
+            logger.warning(
+                "Solver health check connection error (provider=%s url=%s err=%s)",
+                prov, safe_url,
+                _redact_clientkey_text(redact_url(str(e))),
+            )
+            return "unreachable"
+        except Exception as e:  # noqa: BLE001 — defensive log + return
+            logger.warning(
+                "Solver health check unexpected error (provider=%s url=%s err=%s)",
+                prov, safe_url,
+                _redact_clientkey_text(redact_url(str(e))),
+            )
+            return "unreachable"
+
+        latency = time.monotonic() - start
+
+        if resp.status_code != 200:
+            logger.warning(
+                "Solver health check non-200 (provider=%s url=%s status=%d)",
+                prov, safe_url, resp.status_code,
+            )
+            return "unreachable"
+
+        try:
+            data = resp.json()
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "Solver health check returned non-JSON (provider=%s url=%s)",
+                prov, safe_url,
+            )
+            return "unreachable"
+
+        if data.get("errorId", 0) != 0:
+            logger.warning(
+                "Solver health check error (provider=%s url=%s errorId=%s)",
+                prov, safe_url, data.get("errorId"),
+            )
+            return "unreachable"
+
+        balance = data.get("balance")
+        try:
+            balance_f = float(balance) if balance is not None else 0.0
+        except (TypeError, ValueError):
+            balance_f = 0.0
+        if balance_f < 0:
+            logger.warning(
+                "Solver health check returned negative balance (provider=%s)", prov,
+            )
+            return "unreachable"
+
+        if latency > _HEALTH_DEGRADED_LATENCY:
+            logger.warning(
+                "Solver health check degraded (provider=%s latency=%.2fs)",
+                prov, latency,
+            )
+            return "degraded"
+        logger.info(
+            "Solver health check ok (provider=%s latency=%.2fs)", prov, latency,
+        )
+        return "healthy"
+
+    async def _ensure_health_checked(self) -> None:
+        """Run the per-process health check exactly once.
+
+        Sets ``_solver_unreachable`` on a sticky basis so subsequent
+        solves skip the provider entirely without re-probing.
+        """
+        if self._solver_health_checked:
+            return
+        async with self._state_lock:
+            if self._solver_health_checked:
+                return
+            outcome = await self.health_check()
+            self._solver_health_checked = True
+            if outcome == "unreachable":
+                self._solver_unreachable = True
+            elif outcome == "degraded":
+                self._solver_health_degraded = True
+
+    async def _record_solver_outcome(self, success: bool) -> None:
+        """Update the breaker state after a solve attempt.
+
+        On success: reset both the failure window and any tripped breaker.
+        On failure: append a timestamp, prune entries older than the 5-min
+        window, then trip the breaker if 3+ entries remain.
+        """
+        async with self._state_lock:
+            now = time.time()
+            if success:
+                self._solver_failure_timestamps.clear()
+                self._solver_breaker_until = 0.0
+                return
+            self._solver_failure_timestamps.append(now)
+            cutoff = now - _BREAKER_FAILURE_WINDOW
+            while (
+                self._solver_failure_timestamps
+                and self._solver_failure_timestamps[0] < cutoff
+            ):
+                self._solver_failure_timestamps.popleft()
+            if len(self._solver_failure_timestamps) >= _BREAKER_FAILURE_THRESHOLD:
+                self._solver_breaker_until = now + _BREAKER_OPEN_DURATION
+                logger.warning(
+                    "Solver circuit breaker TRIPPED until %.0f (failures=%d)",
+                    self._solver_breaker_until,
+                    len(self._solver_failure_timestamps),
+                )
+
     async def solve(self, page, selector: str, page_url: str) -> bool:
         """Attempt to solve a CAPTCHA on the page.
 
@@ -102,14 +341,36 @@ class CaptchaSolver:
             page_url: The current page URL.
 
         Returns:
-            True if the CAPTCHA was solved and token injected, False otherwise.
+            True if the CAPTCHA was solved and token injected, False
+            otherwise. On unreachable solver / open breaker, returns False
+            without issuing a provider HTTP call. Callers should consult
+            :meth:`is_solver_unreachable` and :meth:`is_breaker_open` to
+            distinguish those cases from a genuine solve failure.
         """
+        # Per-process gate — runs at most once even under concurrent solves.
+        await self._ensure_health_checked()
+
+        if self._solver_unreachable:
+            logger.info(
+                "Skipping solve: solver marked unreachable for this session "
+                "(provider=%s)", self.provider,
+            )
+            return False
+
+        if self.is_breaker_open():
+            logger.warning(
+                "Skipping solve: solver circuit breaker open until %.0f (provider=%s)",
+                self._solver_breaker_until, self.provider,
+            )
+            return False
+
         captcha_type = _classify_captcha(selector)
         logger.info("Attempting to solve %s CAPTCHA on %s", captcha_type, page_url)
 
         sitekey = await self._extract_sitekey(page, captcha_type)
         if not sitekey:
             logger.warning("Could not extract sitekey for %s CAPTCHA", captcha_type)
+            await self._record_solver_outcome(success=False)
             return False
 
         try:
@@ -119,12 +380,15 @@ class CaptchaSolver:
             )
         except asyncio.TimeoutError:
             logger.warning("CAPTCHA solve timed out after %ds", _SOLVE_TIMEOUT)
+            await self._record_solver_outcome(success=False)
             return False
         except Exception:
             logger.exception("CAPTCHA solve failed")
+            await self._record_solver_outcome(success=False)
             return False
 
         if not token:
+            await self._record_solver_outcome(success=False)
             return False
 
         injected = await self._inject_token(page, captcha_type, token)
@@ -132,6 +396,7 @@ class CaptchaSolver:
             logger.info("CAPTCHA solved and token injected successfully")
         else:
             logger.warning("CAPTCHA solved but token injection failed")
+        await self._record_solver_outcome(success=injected)
         return injected
 
     async def _extract_sitekey(self, page, captcha_type: str) -> str | None:

@@ -7171,6 +7171,9 @@ class TestCaptchaSolverSolve:
         from src.browser.captcha import CaptchaSolver
 
         solver = CaptchaSolver("2captcha", "test-key")
+        # §11.16: skip the per-process health-check probe — these tests
+        # exercise the solve flow, not the liveness gate.
+        solver._solver_health_checked = True
 
         # Mock page
         page = AsyncMock()
@@ -7207,6 +7210,7 @@ class TestCaptchaSolverSolve:
         from src.browser.captcha import CaptchaSolver
 
         solver = CaptchaSolver("capsolver", "cap-key")
+        solver._solver_health_checked = True  # §11.16: skip probe
 
         page = AsyncMock()
         page.evaluate = AsyncMock(return_value="site-key-abc")
@@ -7239,6 +7243,7 @@ class TestCaptchaSolverSolve:
         from src.browser.captcha import CaptchaSolver
 
         solver = CaptchaSolver("2captcha", "test-key")
+        solver._solver_health_checked = True  # §11.16: skip probe
 
         page = AsyncMock()
         page.evaluate = AsyncMock(return_value="site-key-abc")
@@ -7271,6 +7276,7 @@ class TestCaptchaSolverSolve:
         from src.browser.captcha import CaptchaSolver
 
         solver = CaptchaSolver("2captcha", "test-key")
+        solver._solver_health_checked = True  # §11.16: skip probe
 
         page = AsyncMock()
         page.evaluate = AsyncMock(return_value=None)  # no sitekey found
@@ -7290,6 +7296,9 @@ class TestCheckCaptchaAutoSolve:
 
         mock_solver = AsyncMock()
         mock_solver.solve = AsyncMock(return_value=True)
+        # §11.16 sync getters — silence unawaited-coroutine warnings.
+        mock_solver.is_solver_unreachable = MagicMock(return_value=False)
+        mock_solver.is_breaker_open = MagicMock(return_value=False)
         manager._captcha_solver = mock_solver
 
         # Mock instance with a page that has a CAPTCHA (no spec — CamoufoxInstance
@@ -7313,6 +7322,11 @@ class TestCheckCaptchaAutoSolve:
 
         mock_solver = AsyncMock()
         mock_solver.solve = AsyncMock(return_value=False)
+        # §11.16: is_solver_unreachable / is_breaker_open are sync getters.
+        # Without explicit MagicMock the AsyncMock parent returns coroutines
+        # that flunk the truthy-check.
+        mock_solver.is_solver_unreachable = MagicMock(return_value=False)
+        mock_solver.is_breaker_open = MagicMock(return_value=False)
         manager._captcha_solver = mock_solver
 
         inst = MagicMock()
@@ -7326,6 +7340,11 @@ class TestCheckCaptchaAutoSolve:
         assert result["solver_attempted"] is True
         assert result["solver_outcome"] == "rejected"
         assert result["next_action"] == "notify_user"
+        # §11.16: healthy solver — no breaker decoration, and crucially
+        # ``solver_outcome`` must not be "no_solver" (that would mean the
+        # health-check skipped the solve, which it shouldn't here).
+        assert "breaker_open" not in result
+        assert result["solver_outcome"] != "no_solver"
         mock_solver.solve.assert_called_once()
 
 
