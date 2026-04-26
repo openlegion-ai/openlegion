@@ -423,3 +423,45 @@ class TestMeshDownload:
         assert not any("_download_stream" in u for u in observed)
         assert not any("_download_cleanup" in u for u in observed)
         assert not any("/artifacts/ingest" in u for u in observed)
+
+    @pytest.mark.asyncio
+    async def test_trigger_timeout_overrides_default(self, tmp_path, monkeypatch):
+        """The trigger POST overrides the proxy client's default 60s timeout
+        with a longer 180s value, since the browser-side trigger blocks until
+        the streaming write to disk finishes for large downloads."""
+        from httpx import ASGITransport, AsyncClient, Response
+
+        app = _build_app(
+            tmp_path,
+            perms_map={"worker": {"can_use_browser": True}},
+            agent_urls={"worker": "http://worker:8400"},
+        )
+
+        seen_timeouts: dict = {}
+        real_post = httpx.AsyncClient.post
+
+        async def fake_post(self, url, *args, **kwargs):
+            url_s = str(url)
+            if url_s.endswith("/browser/worker/download"):
+                seen_timeouts["trigger"] = kwargs.get("timeout")
+                # Return success=False so we bail out before stream/ingest.
+                return Response(200, json={
+                    "success": False,
+                    "error": "no-op for timeout test",
+                }, request=httpx.Request("POST", url_s))
+            return await real_post(self, url, *args, **kwargs)
+
+        monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            resp = await client.post(
+                "/mesh/browser/download",
+                json={"ref": "e1"},
+                headers={"X-Agent-ID": "worker"},
+            )
+
+        assert resp.status_code == 200, resp.text
+        # The trigger POST must override the client default with timeout=180.
+        assert seen_timeouts.get("trigger") == 180, seen_timeouts
