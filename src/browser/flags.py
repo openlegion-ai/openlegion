@@ -83,6 +83,10 @@ KNOWN_FLAGS: dict[str, str] = {
     "CAPTCHA_SOLVER_PROXY_LOGIN": "dedicated solver proxy user",
     "CAPTCHA_SOLVER_PROXY_PASSWORD": "dedicated solver proxy pass",
     "CAPTCHA_RECAPTCHA_V3_MIN_SCORE": "0.1-0.9 (default 0.7)",
+    "OPENLEGION_CAPTCHA_FORCE_SOLVE_DOMAINS":
+        "comma-separated; force normal solver flow on hardcoded-unsolvable hosts (§11.18)",
+    "OPENLEGION_CAPTCHA_SKIP_SOLVE_DOMAINS":
+        "comma-separated; force escalation-only on hosts we'd otherwise solve (§11.18)",
     # ── Observability ─────────────────────────────────────────────────────
     "BROWSER_RECORD_BEHAVIOR": "1 to enable behavior recorder (§5.3)",
 }
