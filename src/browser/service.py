@@ -5483,6 +5483,13 @@ class BrowserManager:
                 # rather than overwriting the same one. Stripped from the
                 # response payload by ``inspect_requests``.
                 "_failure_tagged": False,
+                # Pair ``requestfailed`` back to the exact Playwright
+                # Request object when possible. URL+method is retained as
+                # fallback for tests / bindings that synthesize separate
+                # objects for the failure callback, but exact object identity
+                # avoids mis-tagging a newer identical request when only an
+                # older one fails.
+                "_request_key": id(req),
             })
         except Exception as e:
             logger.debug("network listener record failed: %s", e)
@@ -5519,6 +5526,7 @@ class BrowserManager:
             err = getattr(failure, "errorText", "") if failure else ""
             if not isinstance(err, str):
                 err = str(err) if err else ""
+            request_key = id(req)
 
             blocked = False
             cancelled = False
@@ -5534,10 +5542,25 @@ class BrowserManager:
                 cancelled = True
             failed_net = not (blocked or cancelled)
 
-            # Update the newest matching entry that hasn't already been
-            # tagged. Reverse iteration so a rapid-fire request to the same
-            # URL+method picks up the freshest available slot. Skipping
-            # tagged entries makes parallel identical failures pair 1:1.
+            # Prefer the exact Request-object match. Playwright sends the
+            # same Request object to ``request`` and ``requestfailed``; using
+            # that identity prevents a failed older request from tagging a
+            # newer identical URL+method that is still in flight.
+            for entry in reversed(inst.network_log):
+                if (
+                    entry.get("_request_key") == request_key
+                    and not entry.get("_failure_tagged")
+                ):
+                    entry["blocked_by_adblock"] = blocked
+                    entry["user_cancelled"] = cancelled
+                    entry["failed_network"] = failed_net
+                    entry["_failure_tagged"] = True
+                    return
+
+            # Fallback for tests / alternate bindings that surface distinct
+            # request objects for failure events: update the newest matching
+            # entry that hasn't already been tagged. Reverse iteration keeps
+            # rapid-fire identical failures paired 1:1 via ``_failure_tagged``.
             for entry in reversed(inst.network_log):
                 if (
                     entry["url"] == url
@@ -5748,4 +5771,3 @@ class BrowserManager:
                 }
             except Exception as e:
                 return {"success": False, "error": str(e)}
-

@@ -215,6 +215,26 @@ class TestRequestFailedClassifier:
 
         assert inst.network_log[-1]["blocked_by_adblock"] is True
 
+    def test_exact_request_identity_wins_for_identical_url(self):
+        """If two same-URL requests are in flight and only the older one
+        fails, the failure must tag that exact request, not the newest
+        URL+method match.
+        """
+        mgr, inst, _ctx, _page = _make_instance_with_listeners()
+        mgr._attach_network_listeners(inst)
+
+        url = "https://tracker.example.com/pixel.gif"
+        older = _make_mock_request(url)
+        newer = _make_mock_request(url)
+        mgr._record_request(inst, older)
+        mgr._record_request(inst, newer)
+
+        older.failure = _FakeFailure("ERR_BLOCKED_BY_CLIENT")
+        mgr._record_request_failed(inst, older)
+
+        assert inst.network_log[0]["blocked_by_adblock"] is True
+        assert inst.network_log[1]["blocked_by_adblock"] is False
+
 
 # ───────────────────────────────────────────────────────────────────────
 # 4. include_blocked / dropped_blocked
@@ -825,4 +845,7 @@ class TestSentinelNeverLeaks:
         for entry in result["data"]["requests"]:
             assert "_failure_tagged" not in entry, (
                 f"internal sentinel leaked into response: {entry}"
+            )
+            assert "_request_key" not in entry, (
+                f"internal request key leaked into response: {entry}"
             )
