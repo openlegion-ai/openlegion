@@ -11,6 +11,7 @@ import asyncio
 import base64
 import contextlib
 import json
+import math
 import mimetypes
 import os
 import random
@@ -641,6 +642,95 @@ __NAME_HELPERS__
 #   page.evaluate(_JS_A11Y_TREE)          — full page tree
 #   element_handle.evaluate(_JS_A11Y_TREE) — scoped to element
 _JS_A11Y_TREE = _build_js_a11y_tree()
+
+
+# Phase 6 §9.3: viewport-relative click pre-check.
+# Returns null when document.elementFromPoint(x, y) yields no element
+# (off-page or transparent root). Otherwise returns a JSON-friendly dict
+# with the hit element's tag/role/accessible-name plus a mask trace.
+#
+# Why we walk inside-out and stop at the first ``pointer-events: auto``
+# ancestor: per the CSS spec, ``pointer-events`` does NOT inherit; an
+# inner ``pointer-events: auto`` re-enables hit-testing for that subtree
+# even when an outer ancestor is ``pointer-events: none``. Naïve
+# "scan all ancestors for pointer-events: none" would falsely flag the
+# common pattern of a ``pointer-events: none`` overlay container with
+# ``pointer-events: auto`` on its interactive children. visibility/
+# display/opacity hide the subtree outright, so any ancestor matching
+# those is reported as the masking element regardless of pointer-events.
+_JS_ELEMENT_FROM_POINT = r"""([x, y]) => {
+    const el = document.elementFromPoint(x, y);
+    if (!el) return null;
+    const elementSelector = (node) => {
+        if (!node || node.nodeType !== 1) return null;
+        const tag = node.tagName ? node.tagName.toLowerCase() : "";
+        if (node.id) return tag + "#" + node.id;
+        const cls = (node.className && typeof node.className === "string")
+            ? node.className.trim().split(/\s+/).filter(Boolean).slice(0, 2).join(".")
+            : "";
+        return cls ? tag + "." + cls : tag;
+    };
+    const accName = (node) => {
+        try {
+            const aria = node.getAttribute && node.getAttribute("aria-label");
+            if (aria) return aria;
+            const title = node.getAttribute && node.getAttribute("title");
+            if (title) return title;
+            const txt = node.innerText || node.textContent || "";
+            return txt.slice(0, 80);
+        } catch (e) { return ""; }
+    };
+    let masked_by = null;
+    let mask_reason = "";
+    let pointer_events_decided = false;
+    let cur = el;
+    while (cur && cur !== document.body && cur !== document.documentElement) {
+        let cs;
+        try { cs = window.getComputedStyle(cur); } catch (e) { cs = null; }
+        if (cs) {
+            // display:none and visibility:hidden mask the subtree
+            // regardless of pointer-events. Check these unconditionally.
+            if (cs.display === "none") {
+                masked_by = elementSelector(cur);
+                mask_reason = "display";
+                break;
+            }
+            if (cs.visibility === "hidden") {
+                masked_by = elementSelector(cur);
+                mask_reason = "visibility";
+                break;
+            }
+            // opacity:0 — fully transparent, treat as masked.
+            if (cs.opacity === "0") {
+                masked_by = elementSelector(cur);
+                mask_reason = "opacity";
+                break;
+            }
+            // pointer-events: walk inside-out. The closest ancestor to
+            // the hit element with ``pointer-events: auto`` re-enables
+            // hit-testing for everything below it; stop checking
+            // pointer-events at that boundary. A ``none`` ancestor seen
+            // before any ``auto`` boundary masks the click.
+            if (!pointer_events_decided && cs.pointerEvents) {
+                if (cs.pointerEvents === "auto") {
+                    pointer_events_decided = true;
+                } else if (cs.pointerEvents === "none") {
+                    masked_by = elementSelector(cur);
+                    mask_reason = "pointer-events";
+                    break;
+                }
+            }
+        }
+        cur = cur.parentElement;
+    }
+    return {
+        tag: el.tagName ? el.tagName.toLowerCase() : "",
+        role: (el.getAttribute && el.getAttribute("role")) || null,
+        name: accName(el),
+        masked_by: masked_by,
+        mask_reason: mask_reason,
+    };
+}"""
 
 
 # Stage-1 (walk shadow_path → return inner shadowRoot) and Stage-2
@@ -4407,6 +4497,139 @@ class BrowserManager:
                 inst.click_window.append(False)
                 inst.recorder.record_click(method="auto", success=False)
                 return {"success": False, "error": str(e)}
+
+    async def click_xy(
+        self, agent_id: str, x: float, y: float,
+    ) -> dict:
+        """Phase 6 §9.3: click at viewport-relative pixel coordinates.
+
+        ``(x, y)`` are viewport-relative pixels — origin is the top-left
+        of the rendered page area (NOT the screen, NOT including window
+        chrome). The method first calls ``document.elementFromPoint(x, y)``
+        and walks up the ancestor chain to detect overlay/visibility/
+        pointer-events masking; on a clean hit the click is dispatched via
+        ``page.mouse.click(x, y)``.
+
+        Returns a §2.3 success or error envelope. The mask walk respects
+        the CSS cascade for ``pointer-events``: an inner ancestor with
+        ``pointer-events: auto`` overrides an outer ``pointer-events: none``,
+        so we cannot naively flag any ancestor with ``none`` as masked —
+        we walk inside-out and stop the pointer-events check at the first
+        ``auto`` boundary.
+        """
+        # Reject bool first — Python's ``True == 1`` would otherwise pass
+        # the (int, float) check; a Boolean coordinate is a caller bug.
+        if isinstance(x, bool) or isinstance(y, bool):
+            return _err(
+                "invalid_input",
+                "x and y must be numbers, not booleans",
+            )
+        if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+            return _err(
+                "invalid_input",
+                "x and y must be numbers",
+            )
+        # Coerce ints to floats so downstream math is uniform.
+        x = float(x)
+        y = float(y)
+        if math.isnan(x) or math.isnan(y) or math.isinf(x) or math.isinf(y):
+            return _err(
+                "invalid_input",
+                "x and y must be finite numbers",
+            )
+
+        inst = await self.get_or_start(agent_id)
+        inst.touch()
+        async with inst.lock:
+            try:
+                if inst._user_control:
+                    return _err(
+                        "conflict",
+                        "User has browser control — action paused until "
+                        "control is released.",
+                    )
+                vp = inst.page.viewport_size or {}
+                vw = vp.get("width") if isinstance(vp, dict) else None
+                vh = vp.get("height") if isinstance(vp, dict) else None
+                if not (isinstance(vw, (int, float)) and isinstance(vh, (int, float))):
+                    return _err(
+                        "service_unavailable",
+                        "viewport size unavailable",
+                    )
+                if x < 0 or y < 0 or x >= vw or y >= vh:
+                    return _err(
+                        "invalid_input",
+                        f"coordinate (x, y) out of viewport bounds "
+                        f"({int(vw)} x {int(vh)})",
+                    )
+
+                hit = await inst.page.evaluate(_JS_ELEMENT_FROM_POINT, [x, y])
+                if hit is None:
+                    return _err(
+                        "no_element_at_point",
+                        f"no element at ({x}, {y})",
+                    )
+                masked_by = hit.get("masked_by") if isinstance(hit, dict) else None
+                if masked_by:
+                    actual = {
+                        "tag": hit.get("tag", ""),
+                        "role": hit.get("role"),
+                        "name": hit.get("name", ""),
+                    }
+                    return {
+                        "success": False,
+                        "error": {
+                            "code": "invalid_input",
+                            "message": (
+                                f"click at ({x}, {y}) would be intercepted "
+                                f"by an ancestor element"
+                            ),
+                            "retry_after_ms": None,
+                            "data": {
+                                "actual": actual,
+                                "masked_by": masked_by,
+                                "mask_reason": hit.get("mask_reason", ""),
+                            },
+                        },
+                    }
+
+                # Clean hit — dispatch the click.
+                await inst.page.mouse.click(x, y)
+                await asyncio.sleep(action_delay())
+
+                # DOM may have changed; drop the diff baseline for the
+                # active page so the next snapshot is a full re-walk
+                # rather than a stale-against-new diff.
+                active_pid = inst.last_active_page_id
+                if active_pid is not None:
+                    inst.last_snapshot.pop(active_pid, None)
+
+                # Post-click CAPTCHA re-detection — coordinate clicks
+                # frequently land on interstitial challenge widgets.
+                captcha = await self._check_captcha(inst)
+
+                inst.m_click_success += 1
+                inst.click_window.append(True)
+                inst.recorder.record_click(method="xy", success=True)
+                result = {
+                    "success": True,
+                    "data": {
+                        "clicked_at": {"x": x, "y": y},
+                        "actual_element": {
+                            "tag": hit.get("tag", ""),
+                            "role": hit.get("role"),
+                            "name": hit.get("name", ""),
+                        },
+                    },
+                }
+                if captcha:
+                    result["data"]["captcha"] = captcha
+                return result
+            except Exception as e:
+                inst.m_click_fail += 1
+                inst.click_window.append(False)
+                inst.recorder.record_click(method="xy", success=False)
+                return _err("service_unavailable", str(e))
 
     async def hover(
         self, agent_id: str, ref: str | None = None,

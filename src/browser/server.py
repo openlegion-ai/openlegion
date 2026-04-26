@@ -206,6 +206,29 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         await _apply_delay()
         return result
 
+    @app.post("/browser/{agent_id}/click_xy")
+    async def click_xy(agent_id: str, request: Request):
+        """Phase 6 §9.3: click at viewport-relative pixel coordinates.
+
+        Manager-side performs a ``document.elementFromPoint`` pre-check
+        and returns a §2.3 envelope on overlay/visibility/pointer-events
+        masking; this route only validates the JSON shape.
+        """
+        _verify_auth(request)
+        body = await request.json()
+        x = body.get("x")
+        y = body.get("y")
+        # Reject bool first — Python's ``True == 1`` would otherwise pass
+        # the (int, float) check; same gate as the manager method, but a
+        # 400 here saves a round-trip through ``get_or_start``.
+        if isinstance(x, bool) or isinstance(y, bool):
+            raise HTTPException(400, "x and y must be numbers, not booleans")
+        if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+            raise HTTPException(400, "x and y must be numbers")
+        result = await manager.click_xy(agent_id, x=float(x), y=float(y))
+        await _apply_delay()
+        return result
+
     @app.post("/browser/{agent_id}/wait_for")
     async def wait_for(agent_id: str, request: Request):
         _verify_auth(request)

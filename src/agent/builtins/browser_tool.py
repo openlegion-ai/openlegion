@@ -436,6 +436,49 @@ async def browser_click(
 
 
 @skill(
+    name="browser_click_xy",
+    description=(
+        "Click at viewport-relative pixel coordinates (x, y). Useful for "
+        "canvas, custom-rendered widgets, or non-accessible interactives "
+        "where browser_get_elements does not surface a ref. Performs a "
+        "document.elementFromPoint pre-check — if an overlay or "
+        "pointer-events:none ancestor would intercept the click, the call "
+        "returns invalid_input with the actual hit element's tag/role/name "
+        "so you can re-target. Coordinates are bounded by the current "
+        "viewport (typically 0 <= x < 1280 and 0 <= y < 800; verify via "
+        "browser_status if unsure). Prefer browser_click(ref) when "
+        "possible — coordinate clicks are brittle across resolution changes."
+    ),
+    parameters={
+        "x": {
+            "type": "number",
+            "description": (
+                "Viewport-relative x coordinate in pixels. Origin is the "
+                "top-left of the rendered page area; must satisfy "
+                "0 <= x < viewport.width."
+            ),
+        },
+        "y": {
+            "type": "number",
+            "description": (
+                "Viewport-relative y coordinate in pixels. Origin is the "
+                "top-left of the rendered page area; must satisfy "
+                "0 <= y < viewport.height."
+            ),
+        },
+    },
+    parallel_safe=False,
+)
+async def browser_click_xy(
+    x: float, y: float, *, mesh_client=None,
+) -> dict:
+    """Click at viewport-relative pixel coordinates."""
+    return await _browser_command(
+        mesh_client, "click_xy", {"x": x, "y": y},
+    )
+
+
+@skill(
     name="browser_type",
     description=(
         "Type text into a form field on the current page. Optionally clears the "
