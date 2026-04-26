@@ -33,21 +33,47 @@ Domain-match semantics
 ----------------------
 
 Hostname canonicalization: ``urllib.parse.urlsplit(url).hostname`` →
-lower-cased → leading ``www.`` stripped.
+lower-cased → leading ``www.`` stripped.  ``urlsplit`` already drops the
+port and brackets around IPv6 literals.
+
+The same matching rule applies UNIFORMLY to hardcoded entries
+(:data:`_UNSOLVABLE_DOMAINS`, :data:`_LOW_SUCCESS_DOMAINS`) and operator
+override env-var entries — there is no asymmetry between the two sources:
 
 * **Bare domain** entry (``example.com``) — matches ``example.com`` AND any
   subdomain (``foo.example.com``, ``a.b.example.com``).  Most permissive;
-  matches the operator intent of "block this org".
+  matches the operator intent of "block this org".  This is what the
+  hardcoded list uses, e.g. ``twitter.com`` matches both ``twitter.com``
+  and ``mobile.twitter.com``; ``accounts.google.com`` matches both itself
+  and any sub-host like ``foo.accounts.google.com``.
 * **Leading-dot** entry (``.example.com``) — matches subdomains ONLY
   (``foo.example.com``), NOT ``example.com`` itself.  Useful when an
   operator wants to block a tenant's subdomains but allow the apex.
 
-The hardcoded site list uses the bare-domain convention.
+Examples — operator wants Google-wide override:
+
+* ``OPENLEGION_CAPTCHA_FORCE_SOLVE_DOMAINS=accounts.google.com`` — covers
+  ``accounts.google.com`` plus any sub-host.  Same matching rule as the
+  hardcoded entry; operator just opted to override it.
+* ``OPENLEGION_CAPTCHA_FORCE_SOLVE_DOMAINS=google.com`` — covers
+  ``google.com`` plus EVERY ``*.google.com`` (mail, drive, accounts, …).
+  This works because ``google.com`` is itself a valid bare-domain entry.
 
 Operator override env vars are comma-separated.  Whitespace around entries
-is stripped.  Empty / unset env = no overrides.  Wildcard prefixes
-(``*.example.com``) are NOT supported by design — domain-suffix matching
-already covers the same intent without parser complexity.
+is stripped; empty entries dropped.  Empty / unset / whitespace-only env =
+no overrides.  Each surviving entry is lower-cased.
+
+Wildcard prefix (``*.example.com``) handling: the leading ``*.`` is
+silently stripped and the remainder is treated as a bare-domain entry
+(equivalent to writing ``example.com``).  This produces the operator's
+intended subdomain-match without crashing on a syntax that's near-
+universal in DNS / firewall config.  A single literal ``*`` token is
+ignored as malformed.
+
+IDN / punycode hosts are matched in their **literal form** as returned
+by :func:`urllib.parse.urlsplit`.  An operator who lists
+``日本.example`` will not match a page that loads as
+``xn--wgv71a.example`` and vice versa.  When in doubt list both forms.
 
 Caveat
 ------
@@ -111,16 +137,33 @@ _UNSOLVABLE_DOMAINS: frozenset[str] = frozenset({
 # Token-IP + fingerprint sensitive: solvable in principle, but solver tokens
 # minted from the provider's IP have ~50% success against the target's
 # server-side risk score. Policy: try once at low confidence, escalate on
-# failure (§11.18 + §11.13). Entries are full hostnames so adjacent
-# subdomains under the same registrable domain (``mail.google.com``,
-# ``drive.google.com``) keep the default policy — only signup / auth flows
-# are flagged.
+# failure (§11.18 + §11.13).
+#
+# Granularity rationale:
+# - ``accounts.google.com`` (subdomain-scoped) — auth flows only; sibling
+#   hosts ``mail.google.com`` / ``drive.google.com`` / ``docs.google.com``
+#   keep default policy because their captcha posture is materially
+#   different (rare, content-blocking).  Note: bare-domain matching means
+#   this also covers any deeper subdomain of accounts.google.com.
+# - ``twitter.com`` / ``x.com`` (apex-scoped) — Twitter / X serve the same
+#   high-risk signup / login flow at any sub-host (``mobile.``,
+#   ``api.``, etc.); apex-scoped is the right granularity.
+# - ``linkedin.com`` (apex-scoped) — same reasoning as twitter; auth is
+#   org-wide.
+# - ``amazon.com`` (apex-scoped) — Amazon's auth portal lives at
+#   ``amazon.com/ap/register`` and ``amazon.com/ap/signin``; there is NO
+#   ``signup.amazon.com`` host (NXDOMAIN as of 2026-04).  Apex-scoping
+#   means general retail browsing also gets low_success classification,
+#   which matches Amazon's known site-wide bot-detection posture
+#   (PerimeterX / HUMAN integration).
+# - ``instagram.com`` (apex-scoped) — Meta's anti-bot covers the whole
+#   property uniformly.
 _LOW_SUCCESS_DOMAINS: frozenset[str] = frozenset({
     "accounts.google.com",   # Google signup / login
-    "twitter.com",            # Twitter signup
-    "x.com",                  # X (Twitter rebrand) signup
+    "twitter.com",            # Twitter signup / login (legacy domain)
+    "x.com",                  # X (Twitter rebrand) signup / login
     "linkedin.com",           # LinkedIn auth
-    "signup.amazon.com",      # Amazon retail signup
+    "amazon.com",             # Amazon /ap/register + /ap/signin (apex)
     "instagram.com",          # Instagram login / signup
 })
 
@@ -136,13 +179,24 @@ def _parse_domain_list(raw: str, env_name: str) -> frozenset[str]:
     """Parse a comma-separated domain list from an env-var value.
 
     Whitespace around entries is stripped; empty entries dropped. Each
-    surviving entry is lower-cased.  Leading-dot entries are preserved
-    verbatim (their subdomain-only semantics are honored at match time).
+    surviving entry is lower-cased.  Leading-dot entries (``.foo.com``)
+    are preserved verbatim — their subdomain-only semantics are honored
+    at match time.
+
+    Wildcard-prefix entries (``*.foo.com`` / ``*foo.com``) are normalized
+    to the bare-domain form (``foo.com``).  Bare-domain matching already
+    covers the apex + every subdomain, which is what the wildcard syntax
+    almost always means in operator-facing config (DNS, firewalls, CSP).
+    Accepting it here lets operators paste from those tools without
+    surprise.  A literal ``*`` alone is dropped as meaningless.
 
     Malformed entries (containing whitespace inside the token, ``://``,
     ``/``, or ``?``) are skipped with a startup warning.  We never crash
     on bad operator config — that's a denial-of-service vector if the
     module sits on a hot path.
+
+    Empty / whitespace-only env values produce an empty frozenset
+    (``" , , "`` → no entries, no warnings).
     """
     out: set[str] = set()
     for token in raw.split(","):
@@ -161,6 +215,22 @@ def _parse_domain_list(raw: str, env_name: str) -> frozenset[str]:
         ):
             logger.warning(
                 "Ignoring malformed %s entry %r (looks like a URL or path)",
+                env_name, token,
+            )
+            continue
+        # Normalize wildcard prefix: ``*.example.com`` → ``example.com``
+        # (bare-domain match already covers apex + subdomains).  We accept
+        # both ``*.`` (canonical DNS form) and a bare leading ``*`` for
+        # operator robustness; the post-strip remainder must be a real
+        # domain — a token that's just ``*`` or starts with ``*`` and
+        # leaves nothing after the strip is dropped as malformed.
+        if entry.startswith("*."):
+            entry = entry[2:]
+        elif entry.startswith("*"):
+            entry = entry[1:]
+        if not entry or entry == ".":
+            logger.warning(
+                "Ignoring malformed %s entry %r (empty after wildcard strip)",
                 env_name, token,
             )
             continue

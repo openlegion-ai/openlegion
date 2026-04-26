@@ -97,10 +97,50 @@ class TestHardcodedClassification:
             == "low_success"
         )
 
-    def test_signup_amazon_subdomain_is_low_success(self):
+    def test_amazon_apex_is_low_success(self):
+        # Amazon's auth portal lives at amazon.com/ap/{register,signin}.
+        # There is no signup.amazon.com (NXDOMAIN); apex-scoping is the
+        # right granularity given Amazon's site-wide bot-detection posture.
         assert (
-            captcha_policy.get_site_policy("https://us.signup.amazon.com/")
+            captcha_policy.get_site_policy("https://www.amazon.com/ap/register")
             == "low_success"
+        )
+        assert (
+            captcha_policy.get_site_policy("https://amazon.com/")
+            == "low_success"
+        )
+
+    def test_accounts_google_subdomain_match(self):
+        # Hardcoded entries use the SAME bare-domain matching rule as
+        # operator overrides — they match the listed host AND any deeper
+        # subdomain.  Documenting this explicitly so future maintainers
+        # don't assume "host-exact" semantics for the hardcoded list.
+        assert (
+            captcha_policy.get_site_policy("https://foo.accounts.google.com/")
+            == "low_success"
+        )
+
+    def test_x_com_subdomain_match(self):
+        # ``x.com`` is a one-letter eTLD+1; verify single-character labels
+        # don't confuse the matcher.  ``mobile.x.com`` is intentionally
+        # classified low_success along with the apex (Twitter/X serve the
+        # same risky auth flow at any sub-host).
+        assert captcha_policy.get_site_policy("https://x.com/") == "low_success"
+        assert (
+            captcha_policy.get_site_policy("https://mobile.x.com/")
+            == "low_success"
+        )
+
+    def test_x_com_does_not_falsely_match_suffix_collisions(self):
+        # The dot-boundary check has to hold even for one-letter eTLD+1
+        # entries: ``evilx.com`` ends with ``x.com`` as a substring but
+        # not as a labeled suffix, so it must NOT match.  Same for the
+        # ``x.com.attacker.io`` shape (host that contains the entry but
+        # extends past it).
+        assert captcha_policy.get_site_policy("https://evilx.com/") == "default"
+        assert (
+            captcha_policy.get_site_policy("https://x.com.attacker.io/")
+            == "default"
         )
 
     def test_cloudflare_challenge_is_unsolvable(self):
@@ -227,6 +267,71 @@ class TestOperatorOverrides:
         assert captcha_policy.is_force_solve("https://accounts.google.com/") is False
         assert captcha_policy.is_skip_solve("https://accounts.google.com/") is False
 
+    def test_wildcard_prefix_normalized_to_bare_domain(self):
+        # ``*.example.com`` is the canonical DNS / firewall syntax for
+        # "every subdomain of example.com".  We strip the prefix and treat
+        # it as a bare-domain entry (which already covers apex + every
+        # subdomain via suffix match).  Critically, the entry must NOT be
+        # kept as the literal string ``*.example.com`` — that would never
+        # match any real page and would silently swallow operator intent.
+        m = _reload_with_env({
+            "OPENLEGION_CAPTCHA_SKIP_SOLVE_DOMAINS": "*.example.com",
+        })
+        assert "*.example.com" not in m._SKIP_SOLVE_DOMAINS
+        assert "example.com" in m._SKIP_SOLVE_DOMAINS
+        assert m.get_site_policy("https://a.example.com/") == "unsolvable"
+        assert m.get_site_policy("https://example.com/") == "unsolvable"
+
+    def test_bare_star_entry_dropped(self):
+        # A token that's just ``*`` (or ``*.``) leaves nothing after
+        # stripping — drop with a warning, don't crash, don't silently
+        # accept a frozenset entry of ``""`` that would match every host.
+        m = _reload_with_env({
+            "OPENLEGION_CAPTCHA_SKIP_SOLVE_DOMAINS": "*,*.,good.com",
+        })
+        assert "" not in m._SKIP_SOLVE_DOMAINS
+        assert "." not in m._SKIP_SOLVE_DOMAINS
+        assert "good.com" in m._SKIP_SOLVE_DOMAINS
+        # Sanity: an unrelated host should NOT match — proves ``""`` did
+        # not sneak into the frozenset (``host.endswith("")`` is True).
+        assert m.get_site_policy("https://unrelated.io/") == "default"
+
+    def test_whitespace_only_env_yields_no_entries(self):
+        # Pathological values like " , , " must parse to empty without
+        # warnings — operators commonly leave commented-out entries around.
+        m = _reload_with_env({
+            "OPENLEGION_CAPTCHA_FORCE_SOLVE_DOMAINS": " , , ",
+            "OPENLEGION_CAPTCHA_SKIP_SOLVE_DOMAINS": ",,,",
+        })
+        assert m._FORCE_SOLVE_DOMAINS == frozenset()
+        assert m._SKIP_SOLVE_DOMAINS == frozenset()
+
+    def test_force_and_skip_helpers_are_independent(self):
+        # is_force_solve / is_skip_solve return their raw membership;
+        # precedence is applied only inside get_site_policy.  When the
+        # operator lists the same host in both, both helpers say True
+        # and the policy resolves to "default" (force wins).
+        m = _reload_with_env({
+            "OPENLEGION_CAPTCHA_FORCE_SOLVE_DOMAINS": "dual.com",
+            "OPENLEGION_CAPTCHA_SKIP_SOLVE_DOMAINS": "dual.com",
+        })
+        assert m.is_force_solve("https://dual.com/") is True
+        assert m.is_skip_solve("https://dual.com/") is True
+        assert m.get_site_policy("https://dual.com/") == "default"
+
+    def test_env_override_matches_subdomains_like_hardcoded(self):
+        # Confirms the docstring's "no asymmetry" claim: an env entry
+        # ``google.com`` matches every google sub-host, exactly the same
+        # as if ``google.com`` were in the hardcoded list.
+        m = _reload_with_env({
+            "OPENLEGION_CAPTCHA_FORCE_SOLVE_DOMAINS": "google.com",
+        })
+        # accounts.google.com is a hardcoded LOW_SUCCESS entry; force-solve
+        # on the registrable domain neutralizes it.
+        assert m.get_site_policy("https://accounts.google.com/") == "default"
+        assert m.get_site_policy("https://mail.google.com/") == "default"
+        assert m.get_site_policy("https://google.com/") == "default"
+
 
 # ── URL canonicalization edge cases ────────────────────────────────────────
 
@@ -295,3 +400,26 @@ class TestURLCanonicalization:
         # urlsplit on a bare hostname yields no `hostname` attribute →
         # we treat it as unparseable and fall through to default.
         assert captcha_policy.get_site_policy("accounts.google.com/x") == "default"
+
+    def test_hostless_schemes_return_default(self):
+        # ``data:``, ``file:``, and ``about:`` have no host → default
+        # (fail-open).  Verifies _hostname() doesn't raise on these.
+        assert captcha_policy.get_site_policy("data:text/html,<p>hi</p>") == "default"
+        assert captcha_policy.get_site_policy("file:///etc/hosts") == "default"
+        assert captcha_policy.get_site_policy("about:blank") == "default"
+        # ``https://`` with no authority component also has no host.
+        assert captcha_policy.get_site_policy("https://") == "default"
+
+    def test_idn_punycode_match_literal_form(self):
+        # IDN matching is literal-form: the IDN unicode form and its
+        # punycode (``xn--``) equivalent are NOT auto-normalized to each
+        # other.  Operators who care about both forms must list both.
+        # This test pins the documented behavior so a future "helpfully"
+        # auto-IDNA-encoding change doesn't slip through unnoticed.
+        m = _reload_with_env({
+            "OPENLEGION_CAPTCHA_SKIP_SOLVE_DOMAINS": "xn--wgv71a.jp",
+        })
+        # Punycode form in URL → matches the punycode entry.
+        assert m.get_site_policy("https://xn--wgv71a.jp/") == "unsolvable"
+        # Unicode form in URL → does NOT match the punycode entry.
+        assert m.get_site_policy("https://日本.jp/") == "default"
