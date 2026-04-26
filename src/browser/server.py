@@ -206,6 +206,29 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         await _apply_delay()
         return result
 
+    @app.post("/browser/{agent_id}/click_xy")
+    async def click_xy(agent_id: str, request: Request):
+        """Phase 6 §9.3: click at viewport-relative pixel coordinates.
+
+        Manager-side performs a ``document.elementFromPoint`` pre-check
+        and returns a §2.3 envelope on overlay/visibility/pointer-events
+        masking; this route only validates the JSON shape.
+        """
+        _verify_auth(request)
+        body = await request.json()
+        x = body.get("x")
+        y = body.get("y")
+        # Reject bool first — Python's ``True == 1`` would otherwise pass
+        # the (int, float) check; same gate as the manager method, but a
+        # 400 here saves a round-trip through ``get_or_start``.
+        if isinstance(x, bool) or isinstance(y, bool):
+            raise HTTPException(400, "x and y must be numbers, not booleans")
+        if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+            raise HTTPException(400, "x and y must be numbers")
+        result = await manager.click_xy(agent_id, x=float(x), y=float(y))
+        await _apply_delay()
+        return result
+
     @app.post("/browser/{agent_id}/wait_for")
     async def wait_for(agent_id: str, request: Request):
         _verify_auth(request)
@@ -590,6 +613,24 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         await _apply_delay()
         return result
 
+    @app.post("/browser/{agent_id}/fill_form")
+    async def fill_form(agent_id: str, request: Request):
+        """Phase 6 §9.4 — fill a sequence of form fields by visible label.
+
+        Manager-side handles validation (returns ``invalid_input`` envelope
+        rather than raising HTTP 400) so the agent gets the structured
+        error taxonomy. We pass the body straight through.
+        """
+        _verify_auth(request)
+        body = await request.json()
+        fields = body.get("fields") or []
+        submit_after = bool(body.get("submit_after", False))
+        result = await manager.fill_form(
+            agent_id, fields, submit_after=submit_after,
+        )
+        await _apply_delay()
+        return result
+
     @app.post("/browser/{agent_id}/open_tab")
     async def open_tab(agent_id: str, request: Request):
         _verify_auth(request)
@@ -600,6 +641,39 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         snapshot_after = bool(body.get("snapshot_after", False))
         result = await manager.open_tab(
             agent_id, url, snapshot_after=snapshot_after,
+        )
+        await _apply_delay()
+        return result
+
+    @app.post("/browser/{agent_id}/import_cookies")
+    async def import_cookies(agent_id: str, request: Request):
+        """Phase 6 §9.2 — operator-only cookie/session import.
+
+        NOT in ``KNOWN_BROWSER_ACTIONS`` — agents cannot reach this via
+        the ``/mesh/browser/command`` proxy. The dashboard endpoint calls
+        this route directly with the browser-service bearer token.
+        Validation and shape coercion happen upstream in the dashboard.
+        """
+        _verify_auth(request)
+        body = await request.json()
+        cookies = body.get("cookies")
+        if not isinstance(cookies, list):
+            raise HTTPException(400, "cookies must be a list")
+        result = await manager.import_cookies(agent_id, cookies)
+        return result
+
+    @app.post("/browser/{agent_id}/inspect_requests")
+    async def inspect_requests(agent_id: str, request: Request):
+        """Phase 6 §9.1 — list recent (redacted) network requests for an agent."""
+        _verify_auth(request)
+        body = await request.json()
+        include_blocked = bool(body.get("include_blocked", False))
+        try:
+            limit = int(body.get("limit", 50))
+        except (TypeError, ValueError):
+            limit = 50
+        result = await manager.inspect_requests(
+            agent_id, include_blocked=include_blocked, limit=limit,
         )
         await _apply_delay()
         return result

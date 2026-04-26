@@ -11,6 +11,7 @@ import asyncio
 import base64
 import contextlib
 import json
+import math
 import mimetypes
 import os
 import random
@@ -106,6 +107,20 @@ def _resolve_filter_roles(filter_name: str | None) -> frozenset[str] | None:
             f"Unknown filter {filter_name!r}; valid options: {valid}"
         )
     return preset
+
+
+def _iso8601_utc(ts_unix: float) -> str:
+    """Format a unix timestamp as ISO-8601 UTC with seconds precision.
+
+    Returns ``""`` when ``ts_unix`` is falsy (0 / None) so callers don't
+    have to special-case the absence of a timestamp.
+    """
+    if not ts_unix:
+        return ""
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(float(ts_unix), tz=timezone.utc).isoformat(
+        timespec="seconds",
+    ).replace("+00:00", "Z")
 
 
 def _err(
@@ -641,6 +656,95 @@ __NAME_HELPERS__
 #   page.evaluate(_JS_A11Y_TREE)          — full page tree
 #   element_handle.evaluate(_JS_A11Y_TREE) — scoped to element
 _JS_A11Y_TREE = _build_js_a11y_tree()
+
+
+# Phase 6 §9.3: viewport-relative click pre-check.
+# Returns null when document.elementFromPoint(x, y) yields no element
+# (off-page or transparent root). Otherwise returns a JSON-friendly dict
+# with the hit element's tag/role/accessible-name plus a mask trace.
+#
+# Why we walk inside-out and stop at the first ``pointer-events: auto``
+# ancestor: per the CSS spec, ``pointer-events`` does NOT inherit; an
+# inner ``pointer-events: auto`` re-enables hit-testing for that subtree
+# even when an outer ancestor is ``pointer-events: none``. Naïve
+# "scan all ancestors for pointer-events: none" would falsely flag the
+# common pattern of a ``pointer-events: none`` overlay container with
+# ``pointer-events: auto`` on its interactive children. visibility/
+# display/opacity hide the subtree outright, so any ancestor matching
+# those is reported as the masking element regardless of pointer-events.
+_JS_ELEMENT_FROM_POINT = r"""([x, y]) => {
+    const el = document.elementFromPoint(x, y);
+    if (!el) return null;
+    const elementSelector = (node) => {
+        if (!node || node.nodeType !== 1) return null;
+        const tag = node.tagName ? node.tagName.toLowerCase() : "";
+        if (node.id) return tag + "#" + node.id;
+        const cls = (node.className && typeof node.className === "string")
+            ? node.className.trim().split(/\s+/).filter(Boolean).slice(0, 2).join(".")
+            : "";
+        return cls ? tag + "." + cls : tag;
+    };
+    const accName = (node) => {
+        try {
+            const aria = node.getAttribute && node.getAttribute("aria-label");
+            if (aria) return aria;
+            const title = node.getAttribute && node.getAttribute("title");
+            if (title) return title;
+            const txt = node.innerText || node.textContent || "";
+            return txt.slice(0, 80);
+        } catch (e) { return ""; }
+    };
+    let masked_by = null;
+    let mask_reason = "";
+    let pointer_events_decided = false;
+    let cur = el;
+    while (cur && cur !== document.body && cur !== document.documentElement) {
+        let cs;
+        try { cs = window.getComputedStyle(cur); } catch (e) { cs = null; }
+        if (cs) {
+            // display:none and visibility:hidden mask the subtree
+            // regardless of pointer-events. Check these unconditionally.
+            if (cs.display === "none") {
+                masked_by = elementSelector(cur);
+                mask_reason = "display";
+                break;
+            }
+            if (cs.visibility === "hidden") {
+                masked_by = elementSelector(cur);
+                mask_reason = "visibility";
+                break;
+            }
+            // opacity:0 — fully transparent, treat as masked.
+            if (cs.opacity === "0") {
+                masked_by = elementSelector(cur);
+                mask_reason = "opacity";
+                break;
+            }
+            // pointer-events: walk inside-out. The closest ancestor to
+            // the hit element with ``pointer-events: auto`` re-enables
+            // hit-testing for everything below it; stop checking
+            // pointer-events at that boundary. A ``none`` ancestor seen
+            // before any ``auto`` boundary masks the click.
+            if (!pointer_events_decided && cs.pointerEvents) {
+                if (cs.pointerEvents === "auto") {
+                    pointer_events_decided = true;
+                } else if (cs.pointerEvents === "none") {
+                    masked_by = elementSelector(cur);
+                    mask_reason = "pointer-events";
+                    break;
+                }
+            }
+        }
+        cur = cur.parentElement;
+    }
+    return {
+        tag: el.tagName ? el.tagName.toLowerCase() : "",
+        role: (el.getAttribute && el.getAttribute("role")) || null,
+        name: accName(el),
+        masked_by: masked_by,
+        mask_reason: mask_reason,
+    };
+}"""
 
 
 # Stage-1 (walk shadow_path → return inner shadowRoot) and Stage-2
@@ -1205,6 +1309,15 @@ class CamoufoxInstance:
         # exposes ``ok`` + ``mismatches`` + raw signal values for dashboard /
         # status endpoint consumers.
         self.probe_result: dict | None = None
+        # §9.1 network-inspection log. Bounded deque of recent
+        # ``request`` / ``requestfailed`` events, populated by listeners
+        # attached at the BrowserContext level so new tabs (in-page
+        # ``window.open()`` or ``browser_open_tab``) are covered too. URLs
+        # are redacted via ``shared.redaction.redact_url`` at store-time;
+        # the deque NEVER holds raw URLs. ``_network_attached`` is the
+        # idempotency flag for ``BrowserManager._attach_network_listeners``.
+        self.network_log: deque[dict] = deque(maxlen=200)
+        self._network_attached: bool = False
 
     def _register_page(self, page) -> str:
         """Assign a stable UUID to a Page if not already registered.
@@ -1837,6 +1950,13 @@ class BrowserManager:
             )
 
         inst = CamoufoxInstance(agent_id, browser, context, page)
+
+        # §9.1 wire request listeners at the BrowserContext level so new
+        # tabs (in-page ``window.open()`` or ``browser_open_tab``) inherit
+        # them automatically. Idempotent — also re-runs after browser RESET
+        # because RESET drops the whole instance and the next get_or_start
+        # creates a fresh one with ``_network_attached=False``.
+        self._attach_network_listeners(inst)
 
         # Discover the new X11 window for targeted focus
         wid = await self._discover_new_wid(wids_before)
@@ -4408,6 +4528,154 @@ class BrowserManager:
                 inst.recorder.record_click(method="auto", success=False)
                 return {"success": False, "error": str(e)}
 
+    async def click_xy(
+        self, agent_id: str, x: float, y: float,
+    ) -> dict:
+        """Phase 6 §9.3: click at viewport-relative pixel coordinates.
+
+        ``(x, y)`` are viewport-relative pixels — origin is the top-left
+        of the rendered page area (NOT the screen, NOT including window
+        chrome). The method first calls ``document.elementFromPoint(x, y)``
+        and walks up the ancestor chain to detect overlay/visibility/
+        pointer-events masking; on a clean hit the click is dispatched via
+        ``page.mouse.click(x, y)``.
+
+        Returns a §2.3 success or error envelope. The mask walk respects
+        the CSS cascade for ``pointer-events``: an inner ancestor with
+        ``pointer-events: auto`` overrides an outer ``pointer-events: none``,
+        so we cannot naively flag any ancestor with ``none`` as masked —
+        we walk inside-out and stop the pointer-events check at the first
+        ``auto`` boundary.
+        """
+        # Reject bool first — Python's ``True == 1`` would otherwise pass
+        # the (int, float) check; a Boolean coordinate is a caller bug.
+        if isinstance(x, bool) or isinstance(y, bool):
+            return _err(
+                "invalid_input",
+                "x and y must be numbers, not booleans",
+            )
+        if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+            return _err(
+                "invalid_input",
+                "x and y must be numbers",
+            )
+        # Coerce ints to floats so downstream math is uniform.
+        x = float(x)
+        y = float(y)
+        if math.isnan(x) or math.isnan(y) or math.isinf(x) or math.isinf(y):
+            return _err(
+                "invalid_input",
+                "x and y must be finite numbers",
+            )
+
+        inst = await self.get_or_start(agent_id)
+        inst.touch()
+        async with inst.lock:
+            try:
+                if inst._user_control:
+                    return _err(
+                        "conflict",
+                        "User has browser control — action paused until "
+                        "control is released.",
+                    )
+                # ``viewport_size`` is normally populated for Camoufox
+                # (fingerprint-driven, see ``stealth.pick_resolution``).
+                # Defensive: in some Playwright configurations (no explicit
+                # context viewport, e.g. tests with a default-page context)
+                # ``viewport_size`` returns ``None``. Negative coords are
+                # always invalid; for the upper bound, when viewport size
+                # is unknown skip the bounds check and let Playwright's
+                # ``mouse.click`` reject out-of-window coordinates with
+                # its own error (caught below as ``service_unavailable``).
+                if x < 0 or y < 0:
+                    return _err(
+                        "invalid_input",
+                        f"coordinate ({x}, {y}) out of viewport bounds "
+                        f"(coordinates must be non-negative)",
+                    )
+                vp = inst.page.viewport_size or {}
+                vw = vp.get("width") if isinstance(vp, dict) else None
+                vh = vp.get("height") if isinstance(vp, dict) else None
+                if (isinstance(vw, (int, float))
+                        and isinstance(vh, (int, float))
+                        and (x >= vw or y >= vh)):
+                    return _err(
+                        "invalid_input",
+                        f"coordinate ({x}, {y}) out of viewport bounds "
+                        f"({int(vw)} x {int(vh)})",
+                    )
+
+                hit = await inst.page.evaluate(_JS_ELEMENT_FROM_POINT, [x, y])
+                if hit is None:
+                    return _err(
+                        "no_element_at_point",
+                        f"no element at ({x}, {y})",
+                    )
+                masked_by = hit.get("masked_by") if isinstance(hit, dict) else None
+                if masked_by:
+                    actual = {
+                        "tag": hit.get("tag", ""),
+                        "role": hit.get("role"),
+                        "name": hit.get("name", ""),
+                    }
+                    return {
+                        "success": False,
+                        "error": {
+                            "code": "invalid_input",
+                            "message": (
+                                f"click at ({x}, {y}) would be intercepted "
+                                f"by an ancestor element"
+                            ),
+                            "retry_after_ms": None,
+                            "data": {
+                                "actual_element": actual,
+                                # Back-compat for the first branch revision;
+                                # callers should prefer ``actual_element``.
+                                "actual": actual,
+                                "masked_by": masked_by,
+                                "mask_reason": hit.get("mask_reason", ""),
+                            },
+                        },
+                    }
+
+                # Clean hit — dispatch the click.
+                await inst.page.mouse.click(x, y)
+                await asyncio.sleep(action_delay())
+
+                # DOM may have changed; drop the diff baseline for the
+                # active page so the next snapshot is a full re-walk
+                # rather than a stale-against-new diff.
+                active_pid = inst.last_active_page_id
+                if active_pid is not None:
+                    inst.last_snapshot.pop(active_pid, None)
+
+                # Post-click CAPTCHA re-detection — coordinate clicks
+                # frequently land on interstitial challenge widgets.
+                captcha = await self._check_captcha(inst)
+
+                inst.m_click_success += 1
+                inst.click_window.append(True)
+                inst.recorder.record_click(method="xy", success=True)
+                result = {
+                    "success": True,
+                    "data": {
+                        "clicked_at": {"x": x, "y": y},
+                        "actual_element": {
+                            "tag": hit.get("tag", ""),
+                            "role": hit.get("role"),
+                            "name": hit.get("name", ""),
+                        },
+                    },
+                }
+                if captcha:
+                    result["data"]["captcha"] = captcha
+                return result
+            except Exception as e:
+                inst.m_click_fail += 1
+                inst.click_window.append(False)
+                inst.recorder.record_click(method="xy", success=False)
+                return _err("service_unavailable", str(e))
+
     async def hover(
         self, agent_id: str, ref: str | None = None,
         selector: str | None = None,
@@ -5193,83 +5461,486 @@ class BrowserManager:
         inst = await self.get_or_start(agent_id)
         inst.touch()
         async with inst.lock:
-            try:
-                if inst._user_control:
-                    return _err(
-                        "conflict",
-                        "User has browser control — action paused until control is released.",
-                    )
-                snap = await self._snapshot_impl(
-                    inst, agent_id, _skip_baseline=True,
+            if inst._user_control:
+                return _err(
+                    "conflict",
+                    "User has browser control — action paused until control is released.",
                 )
-                if not snap.get("success"):
-                    return snap
+            return await self._find_text_impl(
+                inst, agent_id, query, scroll=scroll,
+            )
 
-                needle = query.casefold()
-                viewport = inst.page.viewport_size or {}
-                vw = int(viewport.get("width") or 0)
-                vh = int(viewport.get("height") or 0)
+    async def _find_text_impl(
+        self, inst: "CamoufoxInstance", agent_id: str, query: str,
+        *, scroll: bool = True,
+    ) -> dict:
+        """Lock-free body of :meth:`find_text`.
 
-                matches: list[dict] = []
-                truncated = False
-                first_locator = None
-                for ref_id, handle in inst.refs.items():
-                    name = handle.name or ""
-                    if not name or needle not in name.casefold():
-                        continue
-                    if len(matches) >= 50:
-                        truncated = True
-                        break
-                    locator = await self._locator_from_ref(inst, ref_id)
-                    in_viewport = False
-                    if locator is not None:
-                        try:
-                            visible = await locator.is_visible()
-                        except Exception:
-                            visible = False
-                        if visible and vw > 0 and vh > 0:
-                            try:
-                                box = await locator.bounding_box()
-                            except Exception:
-                                box = None
-                            if box:
-                                bx = float(box.get("x", 0))
-                                by = float(box.get("y", 0))
-                                bw = float(box.get("width", 0))
-                                bh = float(box.get("height", 0))
-                                in_viewport = (
-                                    bx + bw > 0 and by + bh > 0
-                                    and bx < vw and by < vh
-                                )
-                    redacted_name = self.redactor.redact(agent_id, name)
-                    matches.append({
-                        "ref": ref_id,
-                        "text": sanitize_for_prompt(redacted_name)[:200],
-                        "in_viewport": bool(in_viewport),
-                    })
-                    if first_locator is None and locator is not None:
-                        first_locator = locator
+        Caller must hold ``inst.lock`` and have already cleared the
+        ``inst._user_control`` gate. Extracted so compound primitives
+        (e.g. §9.4 ``fill_form``) can reuse the matching pipeline
+        without dropping and re-acquiring the per-instance lock —
+        ``asyncio.Lock`` is not reentrant, so calling :meth:`find_text`
+        directly from inside a held-lock section would deadlock.
+        """
+        try:
+            snap = await self._snapshot_impl(
+                inst, agent_id, _skip_baseline=True,
+            )
+            if not snap.get("success"):
+                return snap
 
-                if scroll and first_locator is not None:
+            needle = query.casefold()
+            viewport = inst.page.viewport_size or {}
+            vw = int(viewport.get("width") or 0)
+            vh = int(viewport.get("height") or 0)
+
+            matches: list[dict] = []
+            truncated = False
+            first_locator = None
+            for ref_id, handle in inst.refs.items():
+                name = handle.name or ""
+                if not name or needle not in name.casefold():
+                    continue
+                if len(matches) >= 50:
+                    truncated = True
+                    break
+                locator = await self._locator_from_ref(inst, ref_id)
+                in_viewport = False
+                if locator is not None:
                     try:
-                        await first_locator.scroll_into_view_if_needed(timeout=3000)
+                        visible = await locator.is_visible()
+                    except Exception:
+                        visible = False
+                    if visible and vw > 0 and vh > 0:
+                        try:
+                            box = await locator.bounding_box()
+                        except Exception:
+                            box = None
+                        if box:
+                            bx = float(box.get("x", 0))
+                            by = float(box.get("y", 0))
+                            bw = float(box.get("width", 0))
+                            bh = float(box.get("height", 0))
+                            in_viewport = (
+                                bx + bw > 0 and by + bh > 0
+                                and bx < vw and by < vh
+                            )
+                redacted_name = self.redactor.redact(agent_id, name)
+                matches.append({
+                    "ref": ref_id,
+                    "text": sanitize_for_prompt(redacted_name)[:200],
+                    "in_viewport": bool(in_viewport),
+                })
+                if first_locator is None and locator is not None:
+                    first_locator = locator
+
+            if scroll and first_locator is not None:
+                try:
+                    await first_locator.scroll_into_view_if_needed(timeout=3000)
+                except Exception as e:
+                    logger.debug(
+                        "scroll_into_view_if_needed failed for %s: %s",
+                        agent_id, e,
+                    )
+
+            return {
+                "success": True,
+                "data": {
+                    "matches": matches,
+                    "total": len(matches),
+                    "truncated": truncated,
+                },
+            }
+        except Exception as e:
+            logger.debug("find_text failed for %s: %s", agent_id, e)
+            return _err("service_unavailable", "find_text failed")
+
+    # ── §9.4 fill_form ───────────────────────────────────────────────────
+
+    # Per-field max value length. Long enough that legitimate form values
+    # (textarea bodies, etc.) fit; short enough that an unbounded
+    # prompt-injected value is rejected with a clean ``invalid_input``
+    # before reaching Playwright's ``fill`` (which has no documented cap).
+    _FILL_FORM_MAX_VALUE_CHARS = 10000
+    _FILL_FORM_MAX_LABEL_CHARS = 500
+    _FILL_FORM_MAX_FIELDS = 50
+    _FILL_FORM_PREFERRED_ROLES = frozenset({"textbox", "searchbox", "spinbutton"})
+
+    @staticmethod
+    def _classify_fill_error(exc: Exception) -> str:
+        """Map a Playwright ``locator.fill`` exception → structured reason.
+
+        Third-pass review §9.4 concern 1: ``find_text`` can return refs
+        for non-input elements (a ``<label>``, ``<span>`` containing the
+        label text, etc.). Calling ``fill()`` on those raises a Playwright
+        error like ``"Element is not an <input>, <textarea> or
+        [contenteditable]"``. Without classification the agent sees a
+        generic ``type_failed`` and can't plan a recovery — with a
+        ``not_fillable`` code it knows to fall back to
+        ``browser_get_elements`` to find the underlying input near the
+        label.
+
+        Returns one of: ``not_fillable``, ``timeout``, ``detached``,
+        ``hidden``, ``disabled``, ``other``.
+        """
+        msg = str(exc).lower()
+        # Order matters: TimeoutError is a subclass check; the string
+        # heuristics below cover both Playwright's ``Error`` class and
+        # plain Python exceptions.
+        if isinstance(exc, TimeoutError) or "timeout" in msg:
+            return "timeout"
+        if (
+            "is not an <input>" in msg
+            or "is not an <textarea>" in msg
+            or "not an editable" in msg
+            or "not editable" in msg
+            or "not fillable" in msg
+            or "[contenteditable]" in msg
+        ):
+            return "not_fillable"
+        if "detached" in msg or "not attached" in msg:
+            return "detached"
+        if "not visible" in msg or "hidden" in msg:
+            return "hidden"
+        if "disabled" in msg or "readonly" in msg or "read-only" in msg:
+            return "disabled"
+        return "other"
+
+    async def fill_form(
+        self, agent_id: str, fields: list[dict],
+        *, submit_after: bool = False,
+    ) -> dict:
+        """Sequence of find-text + fill across multiple form fields (§9.4).
+
+        For each field, locates the input by visible label (reusing
+        :meth:`_find_text_impl`), resolves the ref to a locator
+        (:meth:`_locator_from_ref`), and calls Playwright's ``fill``.
+
+        We use ``fill`` rather than the per-keystroke ``type_text``
+        because (a) ``fill`` clears existing content first, making
+        idempotent retries safe (no double-prefix on resume after
+        CAPTCHA); (b) per-key humanization across many fields is
+        excessive when the agent has explicitly chosen the compound
+        path. Agents needing per-key entropy on a sensitive field
+        (rare; mostly password fields with bot detection) should fall
+        back to ``browser_type`` field-by-field.
+
+        On CAPTCHA detection mid-flow (after any successful fill) the
+        loop stops, the remaining un-attempted fields are echoed back
+        verbatim in ``remaining`` so the agent can resume after
+        solving, and we do NOT submit even if ``submit_after=True``.
+        See §9.4 for the partial-success protocol.
+        """
+        if not isinstance(fields, list) or not fields:
+            return _err(
+                "invalid_input",
+                "fields must be a non-empty list of {label, value} entries",
+            )
+        if len(fields) > self._FILL_FORM_MAX_FIELDS:
+            return _err(
+                "invalid_input",
+                f"fields list exceeds max length {self._FILL_FORM_MAX_FIELDS}",
+            )
+
+        # Validate each field upfront so we don't half-fill the form before
+        # discovering an invalid entry deep in the list.
+        normalized: list[dict] = []
+        for idx, raw in enumerate(fields):
+            if not isinstance(raw, dict):
+                return _err(
+                    "invalid_input",
+                    f"fields[{idx}] must be an object",
+                )
+            label = raw.get("label")
+            value = raw.get("value")
+            if not isinstance(label, str) or not (
+                1 <= len(label) <= self._FILL_FORM_MAX_LABEL_CHARS
+            ):
+                return _err(
+                    "invalid_input",
+                    f"fields[{idx}].label must be a string 1–"
+                    f"{self._FILL_FORM_MAX_LABEL_CHARS} chars",
+                )
+            if (
+                not isinstance(value, str)
+                or len(value) > self._FILL_FORM_MAX_VALUE_CHARS
+            ):
+                return _err(
+                    "invalid_input",
+                    f"fields[{idx}].value must be a string up to "
+                    f"{self._FILL_FORM_MAX_VALUE_CHARS} chars",
+                )
+            # NUL bytes confuse Playwright's keyboard pipeline; reject early
+            # rather than letting fill() raise a less-clear error mid-flow.
+            if "\x00" in value:
+                return _err(
+                    "invalid_input",
+                    f"fields[{idx}].value contains null byte",
+                )
+            field_submit = raw.get("submit_after", False)
+            normalized.append({
+                "label": label,
+                "value": value,
+                "submit_after": bool(field_submit),
+            })
+
+        inst = await self.get_or_start(agent_id)
+        inst.touch()
+
+        # One lock for the entire form fill — per §2.4, ``inst.lock`` already
+        # serializes per-instance page ops; acquiring it once gives us a
+        # consistent view of the page across the find→fill→captcha-check
+        # cycle for every field. Per-field lock acquisition would let
+        # another action interleave between find_text and fill, breaking
+        # the ref freshness guarantee.
+        async with inst.lock:
+            if inst._user_control:
+                return _err(
+                    "conflict",
+                    "User has browser control — action paused until control is released.",
+                )
+
+            filled: list[dict] = []
+            last_locator = None
+            # Track whether ANY Enter press has succeeded — per-field
+            # submit_after immediately before the captcha check is the
+            # most common trigger for a mid-flow captcha (submission is
+            # often what gates the challenge). When that happens, the
+            # form may have ALREADY been submitted with partial data, so
+            # the captcha-envelope must report ``submitted=True`` rather
+            # than the agent thinking it can safely resume by re-typing.
+            submitted = False
+            for i, field in enumerate(normalized):
+                label = field["label"]
+                value = field["value"]
+                field_submit = field["submit_after"]
+
+                # 1) Locate the field via find_text. scroll=True so the
+                #    matched input is brought into view before the fill;
+                #    avoids "element not in viewport" failures on long
+                #    forms.
+                find_res = await self._find_text_impl(
+                    inst, agent_id, label, scroll=True,
+                )
+                # Output-side label hygiene: defensively redact the label
+                # echoed back in ``filled[]``. Mirrors :meth:`_find_text_impl`
+                # line ~5261, which redacts the matched ``text`` it returns.
+                # If an agent passes a label like ``"Token: abc123"`` the
+                # response should not echo the secret in plaintext into the
+                # transcript — same defense as the URL redaction in §9.1.
+                # (``remaining[]`` deliberately keeps labels & values
+                # verbatim — see :meth:`_fill_form_captcha_envelope` — so
+                # the agent can resume after solving without losing data.)
+                safe_label = sanitize_for_prompt(
+                    self.redactor.redact(agent_id, label)
+                )
+
+                if not find_res.get("success"):
+                    # Snapshot/find_text failure is service-side; surface
+                    # as type_failed so the loop continues — the agent
+                    # can re-snapshot and retry.
+                    err = find_res.get("error") or {}
+                    raw_reason = (
+                        str(err.get("message")) if isinstance(err, dict)
+                        else str(err)
+                    ) or "find_text failed"
+                    filled.append({
+                        "label": safe_label,
+                        "status": "type_failed",
+                        "reason": self.redactor.redact(agent_id, raw_reason),
+                    })
+                    continue
+
+                matches = (find_res.get("data") or {}).get("matches") or []
+                if not matches:
+                    filled.append({"label": safe_label, "status": "not_found"})
+                    # CAPTCHA may have appeared as a result of the snapshot
+                    # itself (rare — e.g. a JS challenge that injects on
+                    # every navigation). Check before continuing so we
+                    # don't keep pummeling a blocked page with snapshots.
+                    captcha = await self._check_captcha(inst)
+                    if captcha:
+                        return self._fill_form_captcha_envelope(
+                            filled, normalized[i + 1:], captcha,
+                            submitted=submitted,
+                        )
+                    continue
+
+                # Prefer fillable controls when the visible label text and
+                # the input's accessible name both match. Snapshot order can
+                # put a <label> before its <input>; picking that label first
+                # would yield a needless not_fillable failure even though the
+                # correct textbox is present in the same match set.
+                def _preferred_match(m: dict) -> bool:
+                    ref_id = m.get("ref")
+                    handle = inst.refs.get(ref_id)
+                    role = (getattr(handle, "role", "") or "").lower()
+                    disabled = bool(getattr(handle, "disabled", False))
+                    return (
+                        role in self._FILL_FORM_PREFERRED_ROLES
+                        and not disabled
+                    )
+
+                pick = (
+                    next(
+                        (
+                            m for m in matches
+                            if m.get("in_viewport") and _preferred_match(m)
+                        ),
+                        None,
+                    )
+                    or next((m for m in matches if _preferred_match(m)), None)
+                    or next((m for m in matches if m.get("in_viewport")), None)
+                    or matches[0]
+                )
+                ref = pick.get("ref")
+
+                try:
+                    locator = await self._locator_from_ref(inst, ref)
+                except RefStale as rs:
+                    filled.append({
+                        "label": safe_label,
+                        "ref": ref,
+                        "status": "type_failed",
+                        "reason": self.redactor.redact(agent_id, str(rs)),
+                    })
+                    continue
+                if locator is None:
+                    filled.append({
+                        "label": safe_label,
+                        "ref": ref,
+                        "status": "type_failed",
+                        "reason": "ref not found",
+                    })
+                    continue
+
+                try:
+                    await locator.fill(value)
+                except Exception as e:
+                    # Element no longer attached / disabled / hidden /
+                    # not-fillable (label-element returned by find_text).
+                    # Don't bail the whole form: subsequent fields may still
+                    # be reachable. ``reason`` is a structured code (see
+                    # :meth:`_classify_fill_error`) so the agent can plan a
+                    # specific recovery — e.g. re-snapshot on ``detached``,
+                    # fall back to ``browser_get_elements`` on
+                    # ``not_fillable``.
+                    reason_code = self._classify_fill_error(e)
+                    filled.append({
+                        "label": safe_label,
+                        "ref": ref,
+                        "status": "type_failed",
+                        "reason": reason_code,
+                        "detail": self.redactor.redact(agent_id, str(e))[:200],
+                    })
+                    continue
+
+                filled.append({
+                    "label": safe_label,
+                    "ref": ref,
+                    "status": "filled",
+                })
+                last_locator = locator
+
+                # Per-field submit_after fires after a successful fill but
+                # BEFORE the captcha check, because submitting can be what
+                # triggers the captcha. If the press succeeds we mark
+                # ``submitted=True`` so a follow-up captcha envelope tells
+                # the agent the form was already submitted (possibly with
+                # partial data) — the agent must NOT just resume typing
+                # the remaining fields without first re-checking page
+                # state.
+                if field_submit:
+                    try:
+                        await locator.press("Enter")
+                        submitted = True
                     except Exception as e:
                         logger.debug(
-                            "scroll_into_view_if_needed failed for %s: %s",
-                            agent_id, e,
+                            "fill_form per-field submit failed for %s "
+                            "label=%r: %s", agent_id, label, e,
                         )
 
-                return {
-                    "success": True,
-                    "data": {
-                        "matches": matches,
-                        "total": len(matches),
-                        "truncated": truncated,
-                    },
-                }
-            except Exception as e:
-                logger.debug("find_text failed for %s: %s", agent_id, e)
-                return _err("service_unavailable", "find_text failed")
+                # 2) After each successful fill (or per-field submit), check
+                #    for a captcha. If found, stop the loop and return
+                #    partial_success — the agent must solve before resuming.
+                #    Captcha mid-flow takes priority over top-level
+                #    submit_after: we never auto-submit a half-completed
+                #    form behind a captcha.
+                captcha = await self._check_captcha(inst)
+                if captcha:
+                    return self._fill_form_captcha_envelope(
+                        filled, normalized[i + 1:], captcha,
+                        submitted=submitted,
+                    )
+
+            all_filled = all(f.get("status") == "filled" for f in filled)
+            # 3) Final submit — only if no captcha interrupted us AND every
+            #    requested field was filled. Top-level submit_after is the
+            #    "submit the completed form" affordance; submitting after a
+            #    not_found/type_failed field would send partial data without
+            #    the caller explicitly opting into that via per-field
+            #    submit_after.
+            if submit_after and last_locator is not None and all_filled:
+                try:
+                    await last_locator.press("Enter")
+                    submitted = True
+                except Exception as e:
+                    logger.debug(
+                        "fill_form final submit failed for %s: %s",
+                        agent_id, e,
+                    )
+
+            partial = not all_filled
+            return {
+                "success": True,
+                "data": {
+                    "partial_success": partial,
+                    "captcha_required": False,
+                    "filled": filled,
+                    "remaining": [],
+                    "submitted": submitted,
+                },
+            }
+
+    @staticmethod
+    def _fill_form_captcha_envelope(
+        filled: list[dict], remaining_fields: list[dict], captcha: dict,
+        *, submitted: bool = False,
+    ) -> dict:
+        """Compose the §9.4 partial-success envelope on captcha mid-flow.
+
+        ``remaining`` echoes ``label`` + ``value`` + per-field
+        ``submit_after`` verbatim — the agent supplied these and needs
+        them unchanged to resume after solving. The redactor runs on
+        ``error.message`` strings but NOT on ``remaining[].value``: the
+        agent already has the value (it sent it to us); echoing it back
+        is not a leak, and stripping it would break resume.
+
+        ``submitted`` is True when a per-field ``submit_after=True``
+        Enter-press succeeded earlier in this call (and was likely the
+        trigger for the captcha). The agent uses this to decide whether
+        to plain-resume (re-type ``remaining``) or re-snapshot first to
+        check whether the partial-data submit went through.
+        """
+        return {
+            "success": True,
+            "data": {
+                "partial_success": True,
+                "captcha_required": True,
+                "filled": filled,
+                "remaining": [
+                    {
+                        "label": f["label"],
+                        "value": f["value"],
+                        "submit_after": f.get("submit_after", False),
+                    }
+                    for f in remaining_fields
+                ],
+                "captcha": captcha,
+                "submitted": submitted,
+            },
+        }
 
     async def open_tab(
         self, agent_id: str, url: str, snapshot_after: bool = False,
@@ -5389,6 +6060,231 @@ class BrowserManager:
                     pass
                 inst.page = previous_page
                 return _err("service_unavailable", "open_tab failed")
+
+    # ── §9.1 Network inspection ─────────────────────────────────
+
+    def _attach_network_listeners(self, inst: CamoufoxInstance) -> None:
+        """Wire BrowserContext-level ``request`` / ``requestfailed`` listeners.
+
+        Idempotent — second and subsequent calls return immediately. Listeners
+        are attached on the *context*. Per Playwright docs the context-level
+        ``request`` event is "emitted when a request is issued from any pages
+        created through this context", so this single hook covers:
+
+        * the initial page (``inst.page``) without a separate per-page hookup,
+        * any pre-existing pages already in ``inst.context.pages`` (e.g. a
+          Camoufox profile that restored prior tabs at launch — rare, but
+          per-page wiring used to silently miss these),
+        * tabs opened later via in-page ``window.open()`` or
+          :meth:`open_tab`.
+
+        ``requestfailed`` is similarly context-scoped.
+        """
+        if inst._network_attached:
+            return
+        try:
+            inst.context.on(
+                "request",
+                lambda req: self._record_request(inst, req),
+            )
+            inst.context.on(
+                "requestfailed",
+                lambda req: self._record_request_failed(inst, req),
+            )
+        except Exception as e:
+            # Listener wiring is best-effort: a Camoufox build that doesn't
+            # surface these events shouldn't take the browser down. The
+            # `inspect_requests` reader returns an empty list cleanly.
+            logger.debug(
+                "Network listener wiring failed for '%s': %s",
+                inst.agent_id, e,
+            )
+            return
+        inst._network_attached = True
+
+    def _record_request(self, inst: CamoufoxInstance, req) -> None:
+        """Record an outbound request. Listener; never raises."""
+        try:
+            from src.shared.redaction import redact_url
+            url = redact_url(getattr(req, "url", "") or "")
+            method = getattr(req, "method", "") or ""
+            resource_type = getattr(req, "resource_type", "") or ""
+            inst.network_log.append({
+                "url": url,
+                "method": method,
+                "resource_type": resource_type,
+                "ts": time.time(),
+                "status": None,
+                "blocked_by_adblock": False,
+                "user_cancelled": False,
+                "failed_network": False,
+                # Internal pairing sentinel — set True the first time a
+                # ``requestfailed`` matches this entry so concurrent
+                # identical-URL failures pair to DIFFERENT log entries
+                # rather than overwriting the same one. Stripped from the
+                # response payload by ``inspect_requests``.
+                "_failure_tagged": False,
+                # Pair ``requestfailed`` back to the exact Playwright
+                # Request object when possible. URL+method is retained as
+                # fallback for tests / bindings that synthesize separate
+                # objects for the failure callback, but exact object identity
+                # avoids mis-tagging a newer identical request when only an
+                # older one fails.
+                "_request_key": id(req),
+            })
+        except Exception as e:
+            logger.debug("network listener record failed: %s", e)
+
+    def _record_request_failed(self, inst: CamoufoxInstance, req) -> None:
+        """Mark the matching log entry as blocked / cancelled / failed.
+
+        Updates by URL+method match if found, else discards the failure
+        update. ``requestfailed`` fires asynchronously and may overlap with
+        the request having already scrolled out of the maxlen=200 window.
+        Creating a phantom entry would mislead operators about traffic that
+        actually happened.
+
+        When two identical-URL requests fire in parallel and both fail
+        (e.g. two ``<img>`` loads of the same blocked tracker), each
+        ``requestfailed`` event tags a *different* log entry — we walk
+        newest-first and skip entries whose ``_failure_tagged`` is already
+        True. Without this, the second ``requestfailed`` would overwrite
+        the same entry and the first request would silently appear as
+        "successful" in the log.
+        """
+        try:
+            from src.shared.redaction import redact_url
+            url = redact_url(getattr(req, "url", "") or "")
+            method = getattr(req, "method", "") or ""
+            failure = getattr(req, "failure", None)
+            # Playwright surfaces ``failure`` as a property; some bindings
+            # may expose it as a callable. Handle both.
+            if callable(failure):
+                try:
+                    failure = failure()
+                except Exception:
+                    failure = None
+            err = getattr(failure, "errorText", "") if failure else ""
+            if not isinstance(err, str):
+                err = str(err) if err else ""
+            request_key = id(req)
+
+            blocked = False
+            cancelled = False
+            for marker in ("BLOCKED_BY_CLIENT", "CONTENT_BLOCKED", "BLOCKED_BY_POLICY"):
+                if marker in err:
+                    blocked = True
+                    break
+            # Why classify BINDING_ABORTED separately from blocked: user-
+            # cancelled is a real outcome (page nav interrupted, user hit
+            # stop), not adblock — agents debugging form submits should see
+            # these distinctly.
+            if not blocked and "BINDING_ABORTED" in err:
+                cancelled = True
+            failed_net = not (blocked or cancelled)
+
+            # Prefer the exact Request-object match. Playwright sends the
+            # same Request object to ``request`` and ``requestfailed``; using
+            # that identity prevents a failed older request from tagging a
+            # newer identical URL+method that is still in flight.
+            for entry in reversed(inst.network_log):
+                if (
+                    entry.get("_request_key") == request_key
+                    and not entry.get("_failure_tagged")
+                ):
+                    entry["blocked_by_adblock"] = blocked
+                    entry["user_cancelled"] = cancelled
+                    entry["failed_network"] = failed_net
+                    entry["_failure_tagged"] = True
+                    return
+
+            # Fallback for tests / alternate bindings that surface distinct
+            # request objects for failure events: update the newest matching
+            # entry that hasn't already been tagged. Reverse iteration keeps
+            # rapid-fire identical failures paired 1:1 via ``_failure_tagged``.
+            for entry in reversed(inst.network_log):
+                if (
+                    entry["url"] == url
+                    and entry["method"] == method
+                    and not entry.get("_failure_tagged")
+                ):
+                    entry["blocked_by_adblock"] = blocked
+                    entry["user_cancelled"] = cancelled
+                    entry["failed_network"] = failed_net
+                    entry["_failure_tagged"] = True
+                    return
+            # No untagged match → discard. Do NOT append; would create a
+            # phantom entry.
+        except Exception as e:
+            logger.debug("network listener fail-record failed: %s", e)
+
+    async def inspect_requests(
+        self,
+        agent_id: str,
+        *,
+        include_blocked: bool = False,
+        limit: int = 50,
+    ) -> dict:
+        """Return a snapshot of recent network requests for ``agent_id``.
+
+        URLs in the deque are already redacted at store-time. The returned
+        ``requests`` list is sorted newest-first and capped at ``limit``
+        (which is itself capped at the deque maxlen of 200). When
+        ``include_blocked`` is False, entries flagged ``blocked_by_adblock``
+        are filtered out so agents aren't confused by adblock-suppressed
+        third-party trackers; the count of dropped entries is returned as
+        ``dropped_blocked``.
+        """
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            limit = 50
+        if limit < 1:
+            limit = 1
+        if limit > 200:
+            limit = 200
+
+        inst = await self.get_or_start(agent_id)
+        inst.touch()
+        async with inst.lock:
+            if inst._user_control:
+                return _err(
+                    "conflict",
+                    "User has browser control — action paused until control is released.",
+                )
+            # Snapshot under the lock so we don't race a concurrent listener
+            # append. The deque itself is thread-safe for single op-pends but
+            # multi-step iteration + filter benefits from the lock.
+            entries = list(inst.network_log)
+            total = len(entries)
+            dropped = 0
+            visible: list[dict] = []
+            # Iterate newest-first.
+            for entry in reversed(entries):
+                if entry.get("blocked_by_adblock") and not include_blocked:
+                    dropped += 1
+                    continue
+                if len(visible) >= limit:
+                    continue
+                ts_unix = entry.get("ts") or 0
+                visible.append({
+                    "url": entry.get("url", ""),
+                    "method": entry.get("method", ""),
+                    "resource_type": entry.get("resource_type", ""),
+                    "ts": _iso8601_utc(ts_unix),
+                    "status": entry.get("status"),
+                    "blocked_by_adblock": bool(entry.get("blocked_by_adblock")),
+                    "user_cancelled": bool(entry.get("user_cancelled")),
+                    "failed_network": bool(entry.get("failed_network")),
+                })
+            return {
+                "success": True,
+                "data": {
+                    "requests": visible,
+                    "total": total,
+                    "dropped_blocked": dropped,
+                },
+            }
 
     async def press_key(self, agent_id: str, key: str) -> dict:
         """Press a keyboard key or combination (e.g. 'Enter', 'Escape', 'Control+a').
@@ -5516,3 +6412,64 @@ class BrowserManager:
                 }
             except Exception as e:
                 return {"success": False, "error": str(e)}
+
+    async def import_cookies(
+        self, agent_id: str, cookies: list[dict],
+    ) -> dict:
+        """Phase 6 §9.2: import operator-supplied cookies into the agent's
+        browser context.
+
+        Invoked by the operator-only dashboard endpoint — agents NEVER
+        call this. Validation, format detection (Playwright vs Netscape),
+        and shape coercion happen upstream in the dashboard helper
+        :func:`_validate_cookies` so this method receives a pre-validated
+        list of Playwright-shaped cookie dicts.
+
+        Merge semantics: this calls Playwright's ``add_cookies`` which
+        MERGES with the existing context — a (name, domain, path) tuple
+        collision overwrites the prior cookie; non-colliding entries are
+        appended. There is no "wipe and replace" — operators wanting a
+        clean slate should reset the agent profile first.
+
+        At-rest leak warning: Firefox stores cookies plaintext in
+        ``cookies.sqlite`` inside the agent profile dir — operators
+        handling high-value sessions must use encrypted volumes or
+        ephemeral profiles (see plan §13 risk register).
+        """
+        if not isinstance(cookies, list):
+            return _err("invalid_input", "cookies must be a list")
+        try:
+            inst = await self.get_or_start(agent_id)
+        except Exception as e:
+            logger.warning(
+                "import_cookies: failed to start browser for '%s': %s",
+                agent_id, e,
+            )
+            return _err("service_unavailable", "Browser unavailable")
+        inst.touch()
+        async with inst.lock:
+            try:
+                # Empty list is a valid no-op (count=0).
+                if cookies:
+                    await inst.context.add_cookies(cookies)
+                return {
+                    "success": True,
+                    "data": {"imported": len(cookies)},
+                }
+            except Exception as e:
+                # Defense-in-depth: never echo a Playwright error back to
+                # the operator — earlier review noted that a substring
+                # heuristic ("value" in msg) was fragile, e.g. a future
+                # Playwright change that renamed the offending field
+                # (or used the cookie ``name``) could leak the secret.
+                # The upstream ``_validate_cookies`` already rejects
+                # malformed entries, so any error here is unexpected.
+                # Log raw error server-side ONLY; return a generic shape.
+                logger.warning(
+                    "import_cookies: Playwright add_cookies failed for "
+                    "'%s': %s", agent_id, e,
+                )
+                return _err(
+                    "invalid_input",
+                    "cookie import failed (see service logs)",
+                )
