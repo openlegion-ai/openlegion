@@ -2910,6 +2910,24 @@ def create_mesh_app(
                 except ValueError as e:
                     raise HTTPException(400, str(e))
 
+        # Phase 6 §9.1 operator kill-switch for the network-inspection
+        # surface. Mirrors the BROWSER_DOWNLOADS_DISABLED pattern so
+        # operators can disable read-only request logging fleet-wide
+        # without removing the action from `browser_actions` per agent.
+        if action == "inspect_requests":
+            from src.browser.flags import get_bool
+            if get_bool(
+                "BROWSER_NETWORK_INSPECT_DISABLED", False, agent_id=req_agent_id,
+            ):
+                raise HTTPException(403, detail={
+                    "success": False,
+                    "error": {
+                        "code": "forbidden",
+                        "message": "Network inspection disabled by operator",
+                        "retry_after_ms": None,
+                    },
+                })
+
         # Check for browser service restart — re-push proxy config for ALL agents
         try:
             restarted = await _check_browser_boot_id_changed()

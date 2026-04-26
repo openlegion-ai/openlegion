@@ -621,6 +621,22 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         result = await manager.import_cookies(agent_id, cookies)
         return result
 
+    @app.post("/browser/{agent_id}/inspect_requests")
+    async def inspect_requests(agent_id: str, request: Request):
+        """Phase 6 §9.1 — list recent (redacted) network requests for an agent."""
+        _verify_auth(request)
+        body = await request.json()
+        include_blocked = bool(body.get("include_blocked", False))
+        try:
+            limit = int(body.get("limit", 50))
+        except (TypeError, ValueError):
+            limit = 50
+        result = await manager.inspect_requests(
+            agent_id, include_blocked=include_blocked, limit=limit,
+        )
+        await _apply_delay()
+        return result
+
     # ── Settings ───────────────────────────────────────────────────────────
 
     @app.get("/browser/settings")
