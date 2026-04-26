@@ -4786,7 +4786,12 @@ class BrowserManager:
 
                 # Post-click CAPTCHA re-detection — coordinate clicks
                 # frequently land on interstitial challenge widgets.
-                captcha = await self._check_captcha(inst)
+                # _check_captcha now always returns the §11.13 envelope
+                # (truthy even with no captcha), so we must explicitly
+                # check ``captcha_found`` AND skip auto-solved cases —
+                # only surface to the agent when something actually
+                # needs their attention.
+                envelope = await self._check_captcha(inst)
 
                 inst.m_click_success += 1
                 inst.click_window.append(True)
@@ -4802,8 +4807,11 @@ class BrowserManager:
                         },
                     },
                 }
-                if captcha:
-                    result["data"]["captcha"] = captcha
+                if (
+                    envelope.get("captcha_found")
+                    and envelope.get("solver_outcome") != "solved"
+                ):
+                    result["data"]["captcha"] = _with_legacy_fields(envelope)
                 return result
             except Exception as e:
                 inst.m_click_fail += 1
@@ -5995,10 +6003,17 @@ class BrowserManager:
                     # itself (rare — e.g. a JS challenge that injects on
                     # every navigation). Check before continuing so we
                     # don't keep pummeling a blocked page with snapshots.
-                    captcha = await self._check_captcha(inst)
-                    if captcha:
+                    # _check_captcha now always returns the §11.13 envelope
+                    # (truthy even with no captcha); only stop the loop
+                    # when a captcha was actually found AND not auto-solved.
+                    envelope = await self._check_captcha(inst)
+                    if (
+                        envelope.get("captcha_found")
+                        and envelope.get("solver_outcome") != "solved"
+                    ):
                         return self._fill_form_captcha_envelope(
-                            filled, normalized[i + 1:], captcha,
+                            filled, normalized[i + 1:],
+                            _with_legacy_fields(envelope),
                             submitted=submitted,
                         )
                     continue
@@ -6103,10 +6118,17 @@ class BrowserManager:
                 #    Captcha mid-flow takes priority over top-level
                 #    submit_after: we never auto-submit a half-completed
                 #    form behind a captcha.
-                captcha = await self._check_captcha(inst)
-                if captcha:
+                #    _check_captcha now always returns the §11.13 envelope
+                #    (truthy even with no captcha); only break out when a
+                #    captcha was actually found AND not auto-solved.
+                envelope = await self._check_captcha(inst)
+                if (
+                    envelope.get("captcha_found")
+                    and envelope.get("solver_outcome") != "solved"
+                ):
                     return self._fill_form_captcha_envelope(
-                        filled, normalized[i + 1:], captcha,
+                        filled, normalized[i + 1:],
+                        _with_legacy_fields(envelope),
                         submitted=submitted,
                     )
 
