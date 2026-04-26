@@ -54,6 +54,78 @@ logger = setup_logging("browser.service")
 # enum would either need a json encoder shim or repr-leak risk. Strings
 # also keep the §11.1 / §11.3 / §11.16 / §11.18 follow-ups as pure data
 # changes — no type plumbing.
+#
+# Enum reference (kept here so future PRs editing the helpers see the full
+# vocabulary at a glance):
+#
+#   kind:
+#     "recaptcha-v2-checkbox" | "recaptcha-v2-invisible" | "recaptcha-v3"
+#     | "recaptcha-enterprise" | "hcaptcha" | "turnstile"
+#     | "cf-interstitial-auto" | "cf-interstitial-behavioral" | "unknown"
+#     §11.1 lands the four reCAPTCHA variants; §11.3 lands the CF tri-state.
+#     This PR ships the placeholder values only.
+#
+#   solver_outcome:
+#     "solved" | "timeout" | "rejected" | "injection_failed"
+#     | "no_solver" | "unsupported"
+#     - solved: token retrieved AND injected (or no injection needed).
+#     - timeout: solver did not return a verdict in time.
+#     - rejected: solver concluded the captcha cannot be solved (provider
+#       errorId, sitekey not extractable, polling exhausted, OR — until the
+#       solver API is enriched per Concern #10 below — a successful token
+#       fetch followed by a failed injection that we cannot distinguish at
+#       this layer).
+#     - injection_failed: token fetched but injection rejected.
+#       *RESERVED* — the current ``CaptchaSolver.solve()`` returns ``bool``,
+#       so this layer cannot disambiguate it from ``rejected``. Wired up
+#       once the solver returns a richer result (planned alongside §11.18).
+#     - no_solver: no provider configured (``CAPTCHA_SOLVER_PROVIDER`` empty).
+#     - unsupported: detected kind has no solver path. *RESERVED* until the
+#       kind→provider matrix lands.
+#
+#   solver_confidence:
+#     "high" | "medium" | "low" | "behavioral-only"
+#     Reflects confidence in the *report* (kind classification + outcome
+#     joint). Solved → "high"; timeout / exception / placeholder kinds →
+#     "low" or "medium". "behavioral-only" is *RESERVED* for §11.18 — used
+#     when no real captcha widget is shown and only the behavioral
+#     fingerprint is the signal.
+#
+#   next_action:
+#     "solved" | "wait" | "notify_user" | "request_captcha_help" | "ignored"
+#     - "ignored" is *RESERVED* — emitted in the future for low-importance
+#       captchas (analytics consent, ad-iframe captchas, etc.) that the
+#       agent can safely skip. No code path emits it today.
+
+# Selector-classification confidence: the two firmly-disambiguated kinds
+# below have unambiguous selectors today. The reCAPTCHA / CF placeholders
+# remain "low" until §11.1 / §11.3 land variant detection.
+_FIRM_KINDS = frozenset({"hcaptcha", "turnstile"})
+
+
+def _kind_confidence(kind: str) -> str:
+    """Default ``solver_confidence`` for a no-solver path, derived from how
+    confidently we classified the *kind*. Placeholder kinds (§11.1 / §11.3)
+    map to "low"; firmly-disambiguated kinds map to "high"; "unknown" → "low".
+    """
+    if kind in _FIRM_KINDS:
+        return "high"
+    return "low"
+
+
+def _is_httpx_timeout(exc: BaseException) -> bool:
+    """Detect httpx.TimeoutException without making httpx a hard import in
+    this module. ``httpx`` is already a transitive dep (used by the bundled
+    ``CaptchaSolver`` in src/browser/captcha.py); third-party solver
+    subclasses may also raise its exceptions. The local import keeps service
+    startup cheap when httpx hasn't been pulled in yet.
+    """
+    try:
+        import httpx  # noqa: PLC0415 — local-import is intentional
+    except Exception:
+        return False
+    return isinstance(exc, httpx.TimeoutException)
+
 
 def _captcha_envelope(
     *,
@@ -67,7 +139,9 @@ def _captcha_envelope(
     """Build the §11.13 ``data`` block for a found-captcha case.
 
     ``injection_failure_reason`` must be ``None`` unless
-    ``solver_outcome == "injection_failed"``.
+    ``solver_outcome == "injection_failed"``. The field is always present
+    (set to ``None`` rather than absent) so downstream consumers can rely
+    on a stable shape.
     """
     return {
         "captcha_found": True,
@@ -84,6 +158,10 @@ def _with_legacy_fields(envelope: dict) -> dict:
     """Soft-deprecated shim — populate the old ``type`` / ``message`` fields
     so agents whose rules still match against the freeform string keep
     working. New agents should read the structured fields directly.
+
+    Applied uniformly to BOTH the captcha-found and no-captcha cases — the
+    old shape was ``{captcha_found: false, message: "No CAPTCHA detected"}``
+    (no ``type`` field) so we only re-add ``message`` for that branch.
     """
     out = dict(envelope)
     if not out.get("captcha_found"):
@@ -5296,13 +5374,35 @@ class BrowserManager:
                                 inst.page, sel, inst.page.url,
                             )
                         except asyncio.TimeoutError:
+                            # Solver took too long — true "timeout" semantic.
                             return _captcha_envelope(
                                 kind=kind, solver_attempted=True,
                                 solver_outcome="timeout",
                                 solver_confidence="low",
                                 next_action="notify_user",
                             )
-                        except Exception:
+                        except Exception as exc:
+                            # Network / JSON-decode / programmer errors all
+                            # land here. A third-party CaptchaSolver subclass
+                            # could let httpx errors bubble up; the bundled
+                            # ``CaptchaSolver`` (src/browser/captcha.py)
+                            # swallows them and returns False instead. We
+                            # treat httpx timeouts as "timeout" and other
+                            # exceptions as "rejected" — closest fit in the
+                            # §11.13 enum (no "service_error" exists). A
+                            # richer SolverResult that distinguishes
+                            # transport vs verdict failure is planned
+                            # alongside §11.18.
+                            if _is_httpx_timeout(exc):
+                                logger.warning(
+                                    "Auto-solve timed out (httpx): %r", exc,
+                                )
+                                return _captcha_envelope(
+                                    kind=kind, solver_attempted=True,
+                                    solver_outcome="timeout",
+                                    solver_confidence="low",
+                                    next_action="notify_user",
+                                )
                             logger.exception("Auto-solve raised, falling back")
                             return _captcha_envelope(
                                 kind=kind, solver_attempted=True,
@@ -5317,6 +5417,15 @@ class BrowserManager:
                                 solver_confidence="high",
                                 next_action="solved",
                             )
+                        # solver.solve() returned False. Today this conflates
+                        # three failure modes: (a) provider verdict reject /
+                        # errorId>0, (b) sitekey not extractable, (c) token
+                        # fetched but injection failed. The §11.13 spec
+                        # reserves ``injection_failed`` for case (c), but
+                        # the solver surface returns plain bool — we cannot
+                        # distinguish without a richer return type. Map all
+                        # three to ``rejected`` for now and revisit once the
+                        # solver returns structured results.
                         logger.warning("Auto-solve failed, falling back to manual")
                         return _captcha_envelope(
                             kind=kind, solver_attempted=True,
@@ -5325,10 +5434,15 @@ class BrowserManager:
                             next_action="notify_user",
                         )
                     # No solver configured — surface to agent for manual VNC.
+                    # Confidence reflects how firmly we classified the kind:
+                    # firmly-disambiguated kinds (hcaptcha, turnstile) →
+                    # "high"; placeholders (recaptcha-v2-checkbox,
+                    # cf-interstitial-auto) and "unknown" → "low" until
+                    # §11.1 / §11.3 land variant detection.
                     return _captcha_envelope(
                         kind=kind, solver_attempted=False,
                         solver_outcome="no_solver",
-                        solver_confidence="high" if kind != "unknown" else "low",
+                        solver_confidence=_kind_confidence(kind),
                         next_action="notify_user",
                     )
         except Exception:

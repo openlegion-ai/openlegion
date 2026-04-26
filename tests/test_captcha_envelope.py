@@ -96,13 +96,16 @@ class TestRecaptchaNoSolver:
         mgr = _make_manager(solver=None)
         inst = _make_inst('iframe[src*="recaptcha"]')
         result = await mgr._check_captcha(inst)
+        # ``recaptcha-v2-checkbox`` is a §11.1 placeholder until reCAPTCHA
+        # variant disambiguation lands; we cannot vouch for the exact
+        # subtype yet, so confidence is "low".
         assert result == {
             "captcha_found": True,
             "kind": "recaptcha-v2-checkbox",
             "solver_attempted": False,
             "solver_outcome": "no_solver",
             "injection_failure_reason": None,
-            "solver_confidence": "high",
+            "solver_confidence": "low",
             "next_action": "notify_user",
         }
 
@@ -304,3 +307,265 @@ class TestJsonSerialization:
         assert result["captcha_found"] is True
         assert result["solver_outcome"] == "rejected"
         assert result["next_action"] == "notify_user"
+
+
+# ── 11. Httpx-specific exceptions map to 'timeout' not 'rejected' ────────
+
+
+class TestHttpxTimeoutMapping:
+    """Concern #1 (third-pass): a solver that lets an httpx.TimeoutException
+    bubble out should be reported as ``timeout``, not ``rejected``. The
+    bundled CaptchaSolver catches its own httpx errors and returns False,
+    but third-party subclasses may not — verify the dispatch is correct.
+    """
+
+    @pytest.mark.asyncio
+    async def test_httpx_timeout_exception_reports_timeout(self):
+        import httpx
+
+        solver = AsyncMock()
+        solver.solve = AsyncMock(
+            side_effect=httpx.ReadTimeout("upstream slow"),
+        )
+        mgr = _make_manager(solver=solver)
+        inst = _make_inst('iframe[src*="recaptcha"]')
+        result = await mgr._check_captcha(inst)
+        assert result["captcha_found"] is True
+        assert result["solver_attempted"] is True
+        assert result["solver_outcome"] == "timeout"
+        assert result["solver_confidence"] == "low"
+        assert result["next_action"] == "notify_user"
+
+    @pytest.mark.asyncio
+    async def test_httpx_connect_error_reports_rejected(self):
+        """Non-timeout httpx errors (connect refused, DNS fail) currently
+        map to 'rejected' — closest fit in the §11.13 enum, until a richer
+        SolverResult lands. Pin the behavior so a future change is
+        deliberate.
+        """
+        import httpx
+
+        solver = AsyncMock()
+        solver.solve = AsyncMock(
+            side_effect=httpx.ConnectError("refused"),
+        )
+        mgr = _make_manager(solver=solver)
+        inst = _make_inst('iframe[src*="hcaptcha"]')
+        result = await mgr._check_captcha(inst)
+        assert result["solver_outcome"] == "rejected"
+
+    @pytest.mark.asyncio
+    async def test_asyncio_timeout_still_reports_timeout(self):
+        """asyncio.TimeoutError takes the explicit branch — verify it
+        still works alongside the new httpx branch.
+        """
+        solver = AsyncMock()
+        solver.solve = AsyncMock(side_effect=asyncio.TimeoutError())
+        mgr = _make_manager(solver=solver)
+        inst = _make_inst('iframe[src*="hcaptcha"]')
+        result = await mgr._check_captcha(inst)
+        assert result["solver_outcome"] == "timeout"
+
+
+# ── 12. solver_confidence reflects kind-classification firmness ───────────
+
+
+class TestKindConfidence:
+    """Concern #2 (third-pass): no-solver + placeholder kind should not
+    return 'high' confidence. Only firmly-classified kinds (hcaptcha,
+    turnstile) earn 'high'; reCAPTCHA and CF interstitial placeholders
+    are 'low' until §11.1 / §11.3 land.
+    """
+
+    @pytest.mark.asyncio
+    async def test_hcaptcha_no_solver_high_confidence(self):
+        mgr = _make_manager(solver=None)
+        inst = _make_inst('iframe[src*="hcaptcha"]')
+        result = await mgr._check_captcha(inst)
+        assert result["solver_confidence"] == "high"
+
+    @pytest.mark.asyncio
+    async def test_turnstile_no_solver_high_confidence(self):
+        mgr = _make_manager(solver=None)
+        inst = _make_inst('[class*="cf-turnstile"]')
+        result = await mgr._check_captcha(inst)
+        assert result["solver_confidence"] == "high"
+
+    @pytest.mark.asyncio
+    async def test_recaptcha_placeholder_low_confidence(self):
+        mgr = _make_manager(solver=None)
+        inst = _make_inst('iframe[src*="recaptcha"]')
+        result = await mgr._check_captcha(inst)
+        # Placeholder kind — §11.1 will refine.
+        assert result["solver_confidence"] == "low"
+
+    @pytest.mark.asyncio
+    async def test_cf_interstitial_placeholder_low_confidence(self):
+        mgr = _make_manager(solver=None)
+        inst = _make_inst('iframe[src*="challenges.cloudflare.com"]')
+        result = await mgr._check_captcha(inst)
+        # Placeholder kind — §11.3 will refine.
+        assert result["solver_confidence"] == "low"
+
+
+# ── 13. Envelope shape is open for additive top-level fields ──────────────
+
+
+class TestEnvelopeOpenShape:
+    """Concern #8 (third-pass): §11.16 will add a top-level ``breaker_open``
+    flag alongside ``solver_outcome="timeout"``. Verify the envelope shape
+    is open — additional top-level keys survive the legacy-shim and JSON
+    round-trip.
+    """
+
+    @pytest.mark.asyncio
+    async def test_additive_top_level_field_survives_shim(self):
+        # Direct shim invocation — simulates §11.16 augmenting the envelope.
+        from src.browser.service import _captcha_envelope, _with_legacy_fields
+
+        env = _captcha_envelope(
+            kind="hcaptcha", solver_attempted=True,
+            solver_outcome="timeout", solver_confidence="low",
+            next_action="notify_user",
+        )
+        env["breaker_open"] = True  # §11.16 future field
+        out = _with_legacy_fields(env)
+        assert out["breaker_open"] is True
+        # Original structured fields preserved.
+        assert out["solver_outcome"] == "timeout"
+        # Legacy fields populated.
+        assert out["type"] == "hcaptcha"
+        assert "hcaptcha" in out["message"]
+        # JSON round-trip must preserve the additive field.
+        decoded = json.loads(json.dumps(out))
+        assert decoded["breaker_open"] is True
+
+
+# ── 14. injection_failure_reason is always present (None when N/A) ────────
+
+
+class TestInjectionFailureReasonShape:
+    """Concern #9 (third-pass): ``injection_failure_reason`` should be
+    consistently present (set to None) rather than absent when
+    solver_outcome != 'injection_failed'. Stable shape lets downstream
+    consumers do ``data['injection_failure_reason']`` without KeyError.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "selector,solver_factory,expected_outcome",
+        [
+            ('iframe[src*="hcaptcha"]', lambda: None, "no_solver"),
+            (
+                'iframe[src*="hcaptcha"]',
+                lambda: AsyncMock(solve=AsyncMock(return_value=True)),
+                "solved",
+            ),
+            (
+                'iframe[src*="hcaptcha"]',
+                lambda: AsyncMock(solve=AsyncMock(return_value=False)),
+                "rejected",
+            ),
+            (
+                'iframe[src*="hcaptcha"]',
+                lambda: AsyncMock(
+                    solve=AsyncMock(side_effect=asyncio.TimeoutError()),
+                ),
+                "timeout",
+            ),
+        ],
+    )
+    async def test_injection_failure_reason_present_as_none(
+        self, selector, solver_factory, expected_outcome,
+    ):
+        mgr = _make_manager(solver=solver_factory())
+        inst = _make_inst(selector)
+        result = await mgr._check_captcha(inst)
+        assert result["solver_outcome"] == expected_outcome
+        # Field present in dict, set to None.
+        assert "injection_failure_reason" in result
+        assert result["injection_failure_reason"] is None
+
+
+# ── 15. Solver returning False on injection-fail is conflated to rejected ─
+
+
+class TestSolverFalseConflation:
+    """Concern #10 (third-pass): when the bundled CaptchaSolver returns
+    False for an injection failure (token fetched but ``_inject_token``
+    returned False), this layer cannot distinguish from a verdict reject.
+    Both currently report ``solver_outcome='rejected'``. Pin this so a
+    future PR that adds a richer SolverResult does so deliberately.
+    """
+
+    @pytest.mark.asyncio
+    async def test_solver_false_maps_to_rejected_today(self):
+        solver = AsyncMock()
+        solver.solve = AsyncMock(return_value=False)
+        mgr = _make_manager(solver=solver)
+        inst = _make_inst('iframe[src*="hcaptcha"]')
+        result = await mgr._check_captcha(inst)
+        assert result["captcha_found"] is True
+        assert result["solver_attempted"] is True
+        # ``injection_failed`` is reserved but unreachable today — the
+        # solver returns plain bool. Both injection-fail and verdict-fail
+        # surface as ``rejected``.
+        assert result["solver_outcome"] == "rejected"
+        assert result["injection_failure_reason"] is None
+
+
+# ── 16. Concurrency: same-instance calls are serialized via inst.lock ─────
+
+
+class TestConcurrency:
+    """Concern #11 (third-pass): ``detect_captcha`` acquires ``inst.lock``
+    before calling ``_check_captcha``. The post-navigate auto-detect path
+    runs inside the same lock acquired at the top of ``navigate()``. Two
+    parallel ``detect_captcha`` calls on the same agent should serialize.
+    """
+
+    @pytest.mark.asyncio
+    async def test_two_parallel_detect_captcha_serialize(self):
+        # Build a single instance that records lock acquisitions.
+        mgr = _make_manager()
+        acquisitions: list[int] = []
+        max_concurrent = [0]
+        active = [0]
+
+        inst = _make_inst('iframe[src*="hcaptcha"]')
+
+        # Replace lock with one that tracks contention.
+        real_lock = asyncio.Lock()
+
+        class TrackingLock:
+            async def __aenter__(self_inner):
+                await real_lock.acquire()
+                active[0] += 1
+                acquisitions.append(active[0])
+                max_concurrent[0] = max(max_concurrent[0], active[0])
+                # Hold briefly so a parallel acquirer would race here.
+                await asyncio.sleep(0.005)
+                return self_inner
+
+            async def __aexit__(self_inner, *exc):
+                active[0] -= 1
+                real_lock.release()
+                return False
+
+        inst.lock = TrackingLock()
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst):
+            results = await asyncio.gather(
+                mgr.detect_captcha("a1"),
+                mgr.detect_captcha("a1"),
+            )
+        # Both succeed.
+        assert all(r["success"] is True for r in results)
+        assert all(
+            r["data"]["captcha_found"] is True for r in results
+        )
+        # Crucial: at most one detect_captcha holds the lock at a time.
+        assert max_concurrent[0] == 1, (
+            f"detect_captcha did not serialize on inst.lock "
+            f"(max concurrent = {max_concurrent[0]})"
+        )
