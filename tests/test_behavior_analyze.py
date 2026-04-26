@@ -336,6 +336,26 @@ def test_skipped_files_counted(tmp_path, capsys):
     assert report["files_skipped"] == 1
 
 
+def test_event_only_file_is_skipped_without_schema_header(tmp_path):
+    """Recorder files must start with the v1 schema header."""
+    p = _write_recording(
+        tmp_path / "event-only.jsonl",
+        events=[_make_event(1.0, None, "click", method="x11", success=True)],
+        omit_header=True,
+    )
+    fr = ba.load_file(p)
+    assert fr.skipped
+    assert fr.skip_reason == "missing or unrecognized header"
+    assert fr.events == []
+
+
+def test_cli_has_no_src_runtime_import():
+    """The analyzer is advertised as standalone pure stdlib."""
+    source = Path(ba.__file__).read_text()
+    assert "from src." not in source
+    assert "import src." not in source
+
+
 def test_baseline_deviation_zero_when_self_compared(tmp_path):
     """Comparing a recording to itself should yield 0% deltas."""
     events = [

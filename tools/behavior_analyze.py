@@ -50,10 +50,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-from src.shared.utils import setup_logging
-
-logger = setup_logging("tools.behavior_analyze")
-
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_BASELINE = _REPO_ROOT / "tools" / "behavior_baseline.jsonl"
 _DEFAULT_DUMP_DIR = Path("/data/debug")
@@ -126,18 +122,16 @@ def load_file(path: Path) -> FileLoadResult:
         res.skipped = True
         res.skip_reason = f"header line {header_n} is not valid JSON: {e}"
         return res
-    if not isinstance(header, dict) or header.get("schema") != "openlegion.browser.recorder/v1":
-        # Could be an event-only file; treat header as event if it has 'type' field.
-        if isinstance(header, dict) and "type" in header and "ts" in header:
-            res.header = None
-            event_lines = lines
-        else:
-            res.skipped = True
-            res.skip_reason = "missing or unrecognized header"
-            return res
-    else:
-        res.header = header
-        event_lines = lines[1:]
+    if (
+        not isinstance(header, dict)
+        or header.get("schema") != "openlegion.browser.recorder/v1"
+    ):
+        res.skipped = True
+        res.skip_reason = "missing or unrecognized header"
+        return res
+
+    res.header = header
+    event_lines = lines[1:]
 
     for n, raw in event_lines:
         try:
