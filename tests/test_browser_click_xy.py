@@ -294,6 +294,11 @@ class TestClickXyElementFromPoint:
         data = result["error"]["data"]
         assert data["masked_by"] == "div.overlay"
         assert data["mask_reason"] == "pointer-events"
+        assert data["actual_element"]["tag"] == "button"
+        assert data["actual_element"]["role"] == "button"
+        assert data["actual_element"]["name"] == "Hidden"
+        # Back-compat alias retained for callers from the first branch
+        # revision; the documented contract is actual_element.
         assert data["actual"]["tag"] == "button"
         assert data["actual"]["role"] == "button"
         assert data["actual"]["name"] == "Hidden"

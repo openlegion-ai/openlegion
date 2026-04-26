@@ -4598,6 +4598,9 @@ class BrowserManager:
                             ),
                             "retry_after_ms": None,
                             "data": {
+                                "actual_element": actual,
+                                # Back-compat for the first branch revision;
+                                # callers should prefer ``actual_element``.
                                 "actual": actual,
                                 "masked_by": masked_by,
                                 "mask_reason": hit.get("mask_reason", ""),
