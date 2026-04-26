@@ -227,100 +227,6 @@ class TestBrowserSidePeriodicGc:
         assert new.exists()
 
 
-class TestDownload:
-    @pytest.mark.asyncio
-    async def test_happy_path_saves_file_and_returns_path(
-        self, tmp_path, monkeypatch,
-    ):
-        mgr = BrowserManager(profiles_dir=str(tmp_path / "p"))
-        inst = _make_instance()
-        fake_locator = MagicMock()
-        fake_locator.click = AsyncMock()
-
-        # Fake the download object returned by expect_download.
-        download = MagicMock()
-        download.suggested_filename = "report.pdf"
-
-        dl_dir = tmp_path / "dl"
-
-        async def _save_as(path_str):
-            p = Path(path_str)
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_bytes(b"X" * 200)
-
-        download.save_as = AsyncMock(side_effect=_save_as)
-
-        async def _dl_value():
-            return download
-
-        inst.page.expect_download = MagicMock(
-            return_value=_async_ctx(_dl_value()),
-        )
-        monkeypatch.setattr(
-            mgr, "_locator_from_ref", AsyncMock(return_value=fake_locator),
-        )
-        monkeypatch.setattr(mgr, "get_or_start", AsyncMock(return_value=inst))
-
-        result = await mgr.download(
-            "a1", "e1", download_dir=str(dl_dir), timeout_ms=5000,
-        )
-        assert result["success"] is True, result
-        assert result["data"]["suggested_filename"] == "report.pdf"
-        assert result["data"]["size_bytes"] == 200
-        assert result["data"]["mime_type"] == "application/pdf"
-        assert Path(result["data"]["path"]).exists()
-
-    @pytest.mark.asyncio
-    async def test_oversize_download_rejected_and_file_removed(
-        self, tmp_path, monkeypatch,
-    ):
-        mgr = BrowserManager(profiles_dir=str(tmp_path / "p"))
-        inst = _make_instance()
-        fake_locator = MagicMock()
-        fake_locator.click = AsyncMock()
-
-        download = MagicMock()
-        download.suggested_filename = "big.bin"
-        dl_dir = tmp_path / "dl"
-
-        async def _save_as(path_str):
-            # Write a file larger than the cap we'll pass.
-            p = Path(path_str)
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_bytes(b"A" * 500)
-
-        download.save_as = AsyncMock(side_effect=_save_as)
-
-        async def _dl_value():
-            return download
-
-        inst.page.expect_download = MagicMock(
-            return_value=_async_ctx(_dl_value()),
-        )
-        monkeypatch.setattr(
-            mgr, "_locator_from_ref", AsyncMock(return_value=fake_locator),
-        )
-        monkeypatch.setattr(mgr, "get_or_start", AsyncMock(return_value=inst))
-
-        result = await mgr.download(
-            "a1", "e1", download_dir=str(dl_dir), max_bytes=100,
-        )
-        assert result["success"] is False
-        assert "exceeds" in result["error"]
-        # Partial file was cleaned up.
-        assert not any(p.is_file() for p in dl_dir.iterdir())
-
-    @pytest.mark.asyncio
-    async def test_user_control_blocks_download(self, tmp_path, monkeypatch):
-        mgr = BrowserManager(profiles_dir=str(tmp_path / "p"))
-        inst = _make_instance()
-        inst._user_control = True
-        monkeypatch.setattr(mgr, "get_or_start", AsyncMock(return_value=inst))
-        result = await mgr.download("a1", "e1", download_dir=str(tmp_path / "dl"))
-        assert result["success"] is False
-        assert "control" in result["error"].lower()
-
-
 class TestUploadStageIngest:
     """`/browser/{a}/_stage_upload` mesh-internal byte ingest endpoint."""
 
@@ -545,6 +451,59 @@ class TestUploadRecvGcTaskLifecycle:
             await mgr.stop_all()
         # Post: stop_all() must clear the handle and cancel the task.
         assert mgr._upload_recv_gc_task is None
+
+
+def _make_oversize_artifact_download(total_bytes: int, chunk_bytes: int):
+    """Build a Mock Playwright Download whose private artifact stream
+    yields ``total_bytes`` of data in ``chunk_bytes`` increments.
+
+    Returned tuple is ``(download_mock, stream_chan)`` — the test can
+    inspect ``stream_chan._sent`` to confirm streaming aborted before the
+    full payload was emitted.
+    """
+    import base64
+    from unittest.mock import AsyncMock as _AM
+    from unittest.mock import MagicMock as _MM
+
+    class _StreamChan:
+        def __init__(self_):
+            self_._total = total_bytes
+            self_._chunk = chunk_bytes
+            self_._sent = 0
+
+        async def send(self_, name, *_args):
+            if name != "read":
+                return None
+            if self_._sent >= self_._total:
+                return None
+            remaining = self_._total - self_._sent
+            size = min(self_._chunk, remaining)
+            self_._sent += size
+            return base64.b64encode(b"A" * size).decode()
+
+    class _Stream:
+        def __init__(self_, chan):
+            self_._channel = chan
+
+    class _ArtifactChan:
+        def __init__(self_, stream):
+            self_._stream = stream
+
+        async def send(self_, name, *_args):
+            if name == "saveAsStream":
+                return self_._stream
+            return None
+
+    stream_chan = _StreamChan()
+    stream = _Stream(stream_chan)
+    artifact = type("A", (), {"_channel": _ArtifactChan(stream)})()
+
+    download = _MM()
+    download._artifact = artifact
+    download.cancel = _AM()
+    return download, stream_chan
+
+
 class TestDownload:
     @pytest.mark.asyncio
     async def test_happy_path_saves_file_and_returns_path(
@@ -776,7 +735,9 @@ class TestDownloadFlow:
         BEFORE the on-disk path is resolved, so the GC janitor running
         between resolve() and stream-open can't reap the file."""
         from pathlib import Path as _Path
+
         from starlette.testclient import TestClient
+
         from src.browser import server as bserver
         from src.browser.service import BrowserManager
 

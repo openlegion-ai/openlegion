@@ -532,8 +532,8 @@ class TestV3UblockInstall:
         the marker to v3 — otherwise every launch re-runs the migration
         and the operator never sees forward progress."""
         from src.browser.profile_schema import (
-            PROFILE_SCHEMA_VERSION,
             _MARKER_FILENAME,
+            PROFILE_SCHEMA_VERSION,
             UBLOCK_ADDON_ID,
         )
         monkeypatch.setenv("BROWSER_ENABLE_ADBLOCK", "false")
@@ -696,8 +696,8 @@ class TestSyncAdblockExtension:
         import os
 
         from src.browser.profile_schema import (
-            UBLOCK_ADDON_ID,
             _LOCK_FILENAME,
+            UBLOCK_ADDON_ID,
             sync_adblock_extension,
         )
         # Pre-install so the contended path can find the existing XPI.

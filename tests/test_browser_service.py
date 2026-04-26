@@ -2223,7 +2223,6 @@ class TestDiffSnapshot:
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), page_a)
         mgr._instances["a1"] = inst
         await mgr.snapshot("a1")
-        page_a_id = inst.last_active_page_id
 
         # Tab B: separate Page object → different page_id.
         page_b = AsyncMock()
