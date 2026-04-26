@@ -286,6 +286,7 @@ Beyond credentials, these environment variables affect runtime behavior:
 | `BROWSER_PROXY_URL` | -- | Proxy URL for browser traffic (HTTP/HTTPS only, e.g. `http://proxy:8080`). SOCKS5 is not supported. Residential proxies recommended. |
 | `BROWSER_PROXY_USER` | -- | Proxy authentication username. |
 | `BROWSER_PROXY_PASS` | -- | Proxy authentication password. |
+| `OPENLEGION_BROWSER_MAX_CONCURRENT` | `5` | Per-service cap on simultaneous Camoufox browser instances (clamped to `[1, 64]`). **Startup-only** — runtime reconfig is unsupported (would need to bound the acquire semaphore mid-flight). Restart the browser service to change this. The legacy name `MAX_BROWSERS` is still honored as a fallback for older deployments. |
 | `OPENLEGION_SYSTEM_PROXY` | -- | System-wide outbound HTTP proxy URL for all agent traffic. Managed via the dashboard proxy settings page. |
 | `HTTP_PROXY` / `HTTPS_PROXY` | -- | Per-agent proxy URLs. Auto-injected into agent containers by the runtime when a per-agent proxy is configured. Read by the agent-side `http_request` tool. |
 | `OPENLEGION_TOOL_TIMEOUT` | `300` | Per-tool execution timeout in seconds (hard ceiling). |

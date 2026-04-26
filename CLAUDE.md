@@ -170,6 +170,7 @@ Provisioner manages engine instances via Docker/systemd on Hetzner VPS:
 - `OPENLEGION_CRED_<NAME>` env vars for agent-tier credentials
 - `OPENLEGION_MAX_AGENTS`, `OPENLEGION_MAX_PROJECTS` for plan limits
 - `OPENLEGION_LOG_FORMAT=json` for production
+- `OPENLEGION_BROWSER_MAX_CONCURRENT` (default `5`, legacy name `MAX_BROWSERS` still honored) — per-service cap on simultaneous Camoufox instances. **Startup-only**; restart the browser service to apply changes (see `src/browser/__main__.py:_resolve_max_browsers`). Runtime reconfig was deferred per plan §10.2 — bounding the acquire semaphore mid-flight is non-trivial.
 
 ### Logging
 - `logger = setup_logging("component.module")` — every module

@@ -352,6 +352,12 @@ class DashboardEvent(BaseModel):
         "browser_login_request",
         "browser_login_completed",
         "browser_login_cancelled",
+        # Phase 4 §4.6 / Phase 7 §10.1 — per-minute browser aggregates
+        # forwarded from the browser service to the dashboard via
+        # _poll_browser_metrics_once. Without these literals
+        # DashboardEvent rejects the emit and the panel never renders.
+        "browser_metrics",
+        "browser_nav_probe",
     ]
     agent: str = ""
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

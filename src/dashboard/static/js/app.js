@@ -193,6 +193,22 @@ function dashboard() {
     // emitted by BrowserManager._emit_metrics plus a receivedAt wall-clock
     // stamp the dashboard uses to flag stale rows.
     browserMetrics: {},
+    // Per-agent rolling history (Phase 7 §10.1). Keyed by agent_id; each
+    // value is an array of recent per-minute payloads (oldest → newest)
+    // capped by _BROWSER_METRICS_HISTORY_MAX. Seeded via
+    // GET /api/agents/{id}/browser/metrics on detail-panel open, then
+    // appended by the existing browser_metrics WS handler.
+    browserMetricsHistory: {},
+    // High-water seq per agent so subsequent fetches with ?since=N skip
+    // payloads we've already absorbed (panel re-open / hot reload).
+    _browserMetricsSeq: {},
+    // Boot id last seen per agent — when the browser service restarts the
+    // server-side seq counter resets, so we have to flush the local
+    // watermark to avoid missing the new payloads.
+    _browserMetricsBootId: {},
+    _browserMetricsLoading: {},
+    _browserMetricsError: {},
+    _BROWSER_METRICS_HISTORY_MAX: 60,  // ~1 hour at 60s emit cadence
 
     captchaSolverProvider: '',
     captchaSolverKeyMasked: '',
@@ -1450,6 +1466,10 @@ function dashboard() {
           ...this.browserMetrics,
           [evt.agent]: { ...evt.data, receivedAt: Date.now() },
         };
+        // Phase 7 §10.1 — also append to the per-agent rolling history so
+        // the detail panel can render trend sparklines without an extra
+        // fetch round-trip per tick.
+        this._appendBrowserMetricsHistory(evt.agent, evt.data);
       }
 
       // §6.3 navigator self-test result (one-shot per browser start).
@@ -5560,6 +5580,10 @@ function dashboard() {
       this.fetchIdentityFiles(agentId);
       this.fetchAgentConfig(agentId);
       this.fetchCronJobs();
+      // Phase 7 §10.1 — seed per-agent browser metrics history so the
+      // detail panel renders sparklines immediately on open. Subsequent
+      // updates flow through the existing browser_metrics WS handler.
+      this.fetchBrowserMetricsHistory(agentId);
       this.activeTab = 'fleet';
       if (!this._skipPush) this._pushUrl(false);
     },
@@ -5899,6 +5923,209 @@ function dashboard() {
       // Emit cadence is 60s, so a payload older than ~3 minutes means the
       // browser stopped or the poller broke.
       return receivedAt && Date.now() - receivedAt > 3 * 60 * 1000;
+    },
+
+    // ── Per-agent browser metrics panel (Phase 7 §10.1) ─────────────────
+    _appendBrowserMetricsHistory(agentId, payload) {
+      // §6.3 navigator-probe payloads also flow through `browser_metrics`
+      // when emitted as drain payloads, but the dashboard receives them as
+      // a separate `browser_nav_probe` event handled below — skip any
+      // probe-shaped payload here defensively so the trend bars only show
+      // per-minute drains.
+      if (!payload || payload.kind === 'nav_probe') return;
+      const existing = (this.browserMetricsHistory[agentId] || []).slice();
+      // Dedup by seq when present — WS replay (reconnect) plus the seed
+      // fetch both deliver the same payload; we want a single entry.
+      const seq = payload.seq;
+      if (seq != null && existing.some(p => p.seq === seq)) return;
+      existing.push({ ...payload, _receivedAt: Date.now() });
+      // Stable sort by seq (or ts as a fallback) to keep the rendered
+      // sparkline left-to-right ordered even if WS and HTTP fetch race.
+      existing.sort((a, b) => {
+        const sa = a.seq != null ? a.seq : (a.ts || 0);
+        const sb = b.seq != null ? b.seq : (b.ts || 0);
+        return sa - sb;
+      });
+      while (existing.length > this._BROWSER_METRICS_HISTORY_MAX) {
+        existing.shift();
+      }
+      this.browserMetricsHistory = {
+        ...this.browserMetricsHistory,
+        [agentId]: existing,
+      };
+      if (seq != null) {
+        this._browserMetricsSeq = {
+          ...this._browserMetricsSeq,
+          [agentId]: Math.max(this._browserMetricsSeq[agentId] || 0, seq),
+        };
+      }
+    },
+
+    async fetchBrowserMetricsHistory(agentId) {
+      // Seed the per-agent rolling history from the dashboard endpoint when
+      // the detail panel opens — WS events only deliver payloads received
+      // since this dashboard session started, so a freshly-loaded panel
+      // would otherwise show empty until the next 60s tick.
+      if (!agentId) return;
+      this._browserMetricsLoading = {
+        ...this._browserMetricsLoading,
+        [agentId]: true,
+      };
+      this._browserMetricsError = {
+        ...this._browserMetricsError,
+        [agentId]: '',
+      };
+      const since = this._browserMetricsSeq[agentId] || 0;
+      try {
+        const resp = await fetch(
+          `${window.__config.apiBase}/agents/${agentId}/browser/metrics?since=${since}`,
+        );
+        if (!resp.ok) {
+          this._browserMetricsError = {
+            ...this._browserMetricsError,
+            [agentId]: 'HTTP ' + resp.status,
+          };
+          return;
+        }
+        const data = await resp.json();
+        if (data.success === false) {
+          this._browserMetricsError = {
+            ...this._browserMetricsError,
+            [agentId]: (data.error && data.error.code) || 'unknown',
+          };
+          return;
+        }
+        // Boot-id change → server seq counter reset; flush local history
+        // so we don't render impossible gaps where seqs jumped backwards.
+        const prevBootId = this._browserMetricsBootId[agentId] || '';
+        if (data.boot_id && prevBootId && prevBootId !== data.boot_id) {
+          this.browserMetricsHistory = {
+            ...this.browserMetricsHistory,
+            [agentId]: [],
+          };
+          this._browserMetricsSeq = {
+            ...this._browserMetricsSeq,
+            [agentId]: 0,
+          };
+        }
+        this._browserMetricsBootId = {
+          ...this._browserMetricsBootId,
+          [agentId]: data.boot_id || '',
+        };
+        for (const p of data.metrics || []) {
+          this._appendBrowserMetricsHistory(agentId, p);
+        }
+        // Bump the high-water mark even when no payloads belonged to this
+        // agent so subsequent calls page forward.
+        const cs = data.current_seq || 0;
+        if (cs > (this._browserMetricsSeq[agentId] || 0)) {
+          this._browserMetricsSeq = {
+            ...this._browserMetricsSeq,
+            [agentId]: cs,
+          };
+        }
+      } catch (e) {
+        this._browserMetricsError = {
+          ...this._browserMetricsError,
+          [agentId]: 'network',
+        };
+      } finally {
+        this._browserMetricsLoading = {
+          ...this._browserMetricsLoading,
+          [agentId]: false,
+        };
+      }
+    },
+
+    browserHistoryFor(agentId) {
+      return this.browserMetricsHistory[agentId] || [];
+    },
+
+    browserHistoryClickRate(agentId) {
+      // Aggregate success rate over the rolling window — total successes /
+      // total clicks. Returns null when there's been no click traffic so
+      // the panel can render "—" instead of a misleading 0%.
+      const hist = this.browserHistoryFor(agentId);
+      let succ = 0;
+      let fail = 0;
+      for (const p of hist) {
+        succ += p.click_success || 0;
+        fail += p.click_fail || 0;
+      }
+      if (succ + fail === 0) return null;
+      return succ / (succ + fail);
+    },
+
+    browserHistorySnapshotCount(agentId) {
+      const hist = this.browserHistoryFor(agentId);
+      let total = 0;
+      for (const p of hist) total += p.snapshot_count || 0;
+      return total;
+    },
+
+    browserHistoryNavTimeouts(agentId) {
+      const hist = this.browserHistoryFor(agentId);
+      let total = 0;
+      for (const p of hist) total += p.nav_timeout || 0;
+      return total;
+    },
+
+    browserHistoryTrendArrow(agentId) {
+      // Compare the last data point's success rate to the second-to-last.
+      // Returns 'up' / 'down' / 'flat' / null. Fewer than two non-null
+      // points → null (no signal yet).
+      const hist = this.browserHistoryFor(agentId);
+      const ratios = [];
+      for (const p of hist) {
+        const denom = (p.click_success || 0) + (p.click_fail || 0);
+        if (denom > 0) {
+          ratios.push((p.click_success || 0) / denom);
+        }
+      }
+      if (ratios.length < 2) return null;
+      const last = ratios[ratios.length - 1];
+      const prev = ratios[ratios.length - 2];
+      const delta = last - prev;
+      if (Math.abs(delta) < 0.05) return 'flat';
+      return delta > 0 ? 'up' : 'down';
+    },
+
+    browserHistoryBars(agentId, field, max) {
+      // Build a list of {height, label, value} entries for the CSS sparkline.
+      // ``field`` is one of: 'snapshot_bytes_p50', 'snapshot_bytes_p95',
+      // 'snapshot_count', 'click_total' (computed). ``max`` clamps the
+      // upper bound for height normalization; null = autoscale.
+      const hist = this.browserHistoryFor(agentId);
+      if (hist.length === 0) return [];
+      const values = hist.map(p => {
+        if (field === 'click_total') {
+          return (p.click_success || 0) + (p.click_fail || 0);
+        }
+        return p[field] || 0;
+      });
+      const peak = max != null
+        ? max
+        : Math.max(1, ...values);
+      return values.map((v, i) => {
+        const heightPct = peak > 0 ? Math.min(100, (v / peak) * 100) : 0;
+        const p = hist[i];
+        return {
+          height: heightPct,
+          value: v,
+          ts: p.ts,
+          seq: p.seq,
+        };
+      });
+    },
+
+    browserHistoryActiveCount(agentId) {
+      // Active means we received a payload in the last 3 minutes (matches
+      // browserMetricsStale threshold) — instances that went idle drop to
+      // zero on the dashboard even though the BrowserManager may still
+      // hold a stopped CamoufoxInstance.
+      const last = this.browserMetrics[agentId];
+      if (!last) return 0;
+      return this.browserMetricsStale(last.receivedAt) ? 0 : 1;
     },
 
     eventDetail(evt) {
