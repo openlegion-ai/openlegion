@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -17,6 +18,7 @@ import sqlite3
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
@@ -34,6 +36,9 @@ if TYPE_CHECKING:
     from src.host.traces import TraceStore
 
 logger = setup_logging("dashboard.server")
+# Phase 6 §9.2: dedicated logger for cookie-import audit. Records domain
+# + cookie name only — NEVER the value (see _validate_cookies docstring).
+_cookie_audit_logger = setup_logging("dashboard.cookie_import")
 
 _HERE = Path(__file__).resolve().parent
 _TEMPLATES_DIR = _HERE / "templates"
@@ -125,6 +130,259 @@ def _wallet_chain_label(chain_id: str, cfg: dict) -> str:
     if "devnet" in chain_id or "sepolia" in chain_id:
         return f"{name} ({eco} Testnet)"
     return f"{name} ({eco} · {symbol})"
+
+
+# ── Phase 6 §9.2 — operator cookie/session import helpers ─────────────────
+# Pure functions split out for unit-testability. The dashboard endpoint
+# validates and shape-coerces operator-supplied cookie payloads here, then
+# hands a normalized Playwright-shaped list to the browser service.
+#
+# SECURITY INVARIANTS:
+#   • Cookie VALUES never appear in audit logs, error messages, or any
+#     return shape that crosses a process boundary. Only domain + name
+#     are logged.
+#   • Validation rejects cookies whose ``value`` is larger than 4 KiB
+#     (per cookie) and whole payloads larger than 256 KiB.
+#   • RFC 6265bis violations (`__Host-` with explicit domain) are
+#     dropped server-side; importing them is silently rejected by Firefox
+#     anyway and confuses operators.
+#   • IP-literal domains are dropped — Firefox stores them but our SSRF
+#     egress filter would block the requests, so importing is a footgun.
+
+_COOKIE_VALUE_MAX_BYTES = 4 * 1024              # per-cookie value cap
+_COOKIE_PAYLOAD_MAX_BYTES = 256 * 1024          # whole-payload cap (DoS guard)
+_COOKIE_LIST_MAX_LEN = 1000                     # max cookies per import
+
+_VALID_SAMESITE = {"Lax": "Lax", "Strict": "Strict", "None": "None"}
+
+def _is_ip_literal_domain(domain: str) -> bool:
+    """True when ``domain`` is a literal IPv4 or IPv6 address."""
+    if not domain:
+        return False
+    bare = domain.strip().lstrip(".")
+    if bare.startswith("[") and bare.endswith("]"):
+        bare = bare[1:-1]
+    try:
+        ipaddress.ip_address(bare)
+    except ValueError:
+        return False
+    return True
+
+
+def _cookie_url_host(url: str) -> str | None:
+    """Return host for an http(s) cookie URL, or None when invalid."""
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return None
+    if parsed.scheme.lower() not in ("http", "https") or not parsed.hostname:
+        return None
+    return parsed.hostname
+
+
+def _parse_netscape(
+    text: str, *, malformed: list[str] | None = None,
+) -> list[dict]:
+    """Parse Netscape ``cookies.txt`` format → Playwright-shaped dicts.
+
+    Netscape format: ``domain\tincludeSubdomains\tpath\tsecure\texpires\tname\tvalue``
+    Lines starting with ``#`` are comments and skipped, EXCEPT the special
+    ``#HttpOnly_<domain>`` prefix which marks the cookie as HttpOnly.
+
+    Malformed lines (wrong field count, non-numeric ``expires``) are
+    silently skipped. When ``malformed`` is supplied, a sentinel string
+    describing the reason is appended for each skipped line so the caller
+    can surface a ``malformed_line`` drop count to the operator. This
+    parser never raises and never echoes the bad line content (which may
+    contain a cookie value).
+    """
+    result: list[dict] = []
+    if not isinstance(text, str):
+        return result
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip("\r\n")
+        if not line.strip():
+            continue
+        http_only = False
+        if line.startswith("#HttpOnly_"):
+            http_only = True
+            line = line[len("#HttpOnly_"):]
+        elif line.startswith("#"):
+            continue
+        # Fields: domain, includeSubdomains, path, secure, expires, name, value
+        # value may itself contain tabs in some exporters, so don't split unbounded.
+        parts = line.split("\t")
+        if len(parts) < 7:
+            if malformed is not None:
+                malformed.append("field_count")
+            continue
+        domain, _include_sub, path, secure, expires, name, *value_parts = parts
+        value = "\t".join(value_parts) if value_parts else ""
+        try:
+            expires_int = int(float(expires))
+        except (ValueError, TypeError):
+            if malformed is not None:
+                malformed.append("expires")
+            continue
+        result.append({
+            "name": name,
+            "value": value,
+            "domain": domain,
+            "path": path or "/",
+            "secure": secure.strip().upper() == "TRUE",
+            "httpOnly": http_only,
+            "expires": expires_int,
+        })
+    return result
+
+
+def _validate_cookies(
+    payload: Any, *, fmt: str | None = None,
+) -> tuple[list[dict], list[dict], str | None]:
+    """Validate + normalize an operator cookie payload.
+
+    Returns ``(accepted, dropped, detected_format_or_None)``:
+      • ``accepted`` — list of Playwright-shaped cookie dicts ready to
+        push into ``BrowserContext.add_cookies``.
+      • ``dropped`` — list of ``{reason, count}`` aggregated by reason.
+      • ``detected_format_or_None`` — ``"playwright"`` | ``"netscape"`` | None.
+        ``None`` signals an unrecognized shape — callers should return a
+        400 ``invalid_input`` envelope.
+
+    Pure function: no I/O, no mutation of inputs. Suitable for unit tests
+    without HTTP plumbing.
+    """
+    detected: str | None = fmt
+    items: list[dict] = []
+
+    if detected is None:
+        if isinstance(payload, list) and (
+            not payload or isinstance(payload[0], dict)
+        ):
+            detected = "playwright"
+        elif isinstance(payload, str) and "\t" in payload:
+            detected = "netscape"
+
+    drop_counts: dict[str, int] = {}
+
+    def _drop(reason: str) -> None:
+        drop_counts[reason] = drop_counts.get(reason, 0) + 1
+
+    if detected == "playwright":
+        if not isinstance(payload, list):
+            return [], [], None
+        items = list(payload)
+    elif detected == "netscape":
+        if not isinstance(payload, str):
+            return [], [], None
+        # Capture per-line malformed reasons so the operator sees a count
+        # of dropped Netscape lines instead of a silent zero result.
+        malformed_lines: list[str] = []
+        items = _parse_netscape(payload, malformed=malformed_lines)
+        for _ in malformed_lines:
+            _drop("malformed_line")
+    else:
+        return [], [], None
+
+    accepted: list[dict] = []
+
+    for raw in items:
+        if not isinstance(raw, dict):
+            _drop("not_a_dict")
+            continue
+        name = raw.get("name", "")
+        value = raw.get("value", "")
+        domain = raw.get("domain", "")
+        url = raw.get("url")
+        path = raw.get("path", "/") or "/"
+        if not isinstance(name, str) or not name:
+            _drop("empty_name")
+            continue
+        if domain is None:
+            domain = ""
+        if not isinstance(domain, str):
+            _drop("empty_domain")
+            continue
+        if url is None:
+            url = ""
+        if not isinstance(url, str):
+            _drop("invalid_url")
+            continue
+        if domain and url:
+            _drop("domain_url_conflict")
+            continue
+        if not domain and not url:
+            _drop("empty_domain")
+            continue
+        if not isinstance(value, str):
+            _drop("invalid_value_type")
+            continue
+        if len(value.encode("utf-8")) > _COOKIE_VALUE_MAX_BYTES:
+            _drop("value_too_large")
+            continue
+        url_host: str | None = None
+        if url:
+            url_host = _cookie_url_host(url)
+            if url_host is None:
+                _drop("invalid_url")
+                continue
+            if _is_ip_literal_domain(url_host):
+                _drop("ip_domain_unsupported")
+                continue
+        if domain and _is_ip_literal_domain(domain):
+            _drop("ip_domain_unsupported")
+            continue
+        # RFC 6265bis: __Host- prefix forbids an explicit domain.
+        if name.startswith("__Host-") and domain:
+            _drop("host_prefix_with_domain")
+            continue
+        secure_raw = raw.get("secure")
+        secure = bool(secure_raw) if secure_raw is not None else False
+        if name.startswith("__Host-"):
+            if path != "/":
+                _drop("host_prefix_invalid_path")
+                continue
+            if not secure:
+                _drop("host_prefix_without_secure")
+                continue
+        normalized: dict = {"name": name, "value": value}
+        if url:
+            normalized["url"] = url
+            if path:
+                normalized["path"] = path
+        else:
+            normalized["domain"] = domain
+            normalized["path"] = path
+        # SameSite normalize (case-insensitive) — drop entry on unknown.
+        ss_raw = raw.get("sameSite")
+        if ss_raw is not None:
+            if not isinstance(ss_raw, str):
+                _drop("invalid_samesite")
+                continue
+            ss_norm = _VALID_SAMESITE.get(ss_raw.strip().capitalize())
+            if ss_norm is None:
+                _drop("invalid_samesite")
+                continue
+            normalized["sameSite"] = ss_norm
+        # expires: must be numeric (int or float). Strings rejected.
+        if "expires" in raw and raw["expires"] is not None:
+            exp = raw["expires"]
+            if isinstance(exp, bool) or not isinstance(exp, (int, float)):
+                _drop("invalid_expires")
+                continue
+            normalized["expires"] = int(exp)
+        # httpOnly / secure — coerce to bool only when explicitly present.
+        if "httpOnly" in raw:
+            normalized["httpOnly"] = bool(raw["httpOnly"])
+        if secure_raw is not None:
+            normalized["secure"] = secure
+        accepted.append(normalized)
+
+    dropped = [
+        {"reason": reason, "count": count}
+        for reason, count in sorted(drop_counts.items())
+    ]
+    return accepted, dropped, detected
 
 
 def create_dashboard_router(
@@ -471,6 +729,299 @@ def create_dashboard_router(
         except Exception as e:
             logger.warning("Browser reset failed for '%s': %s", agent_id, e)
             raise HTTPException(500, "Browser reset failed")
+
+    # ── Phase 6 §9.2 — operator cookie/session import ────────────────────
+    # In-memory rate limiter keyed by (operator_session_user, agent_id).
+    # 60-min sliding window; capacity 10. Limiter state lives on this
+    # router instance — restarting the engine resets the window which is
+    # the desired behavior (operators rarely depend on the precise number
+    # surviving a process boundary).
+    _COOKIE_IMPORT_LIMIT = 10
+    _COOKIE_IMPORT_WINDOW_S = 60 * 60
+    _cookie_import_buckets: dict[tuple[str, str], list[float]] = {}
+    _cookie_import_lock = threading.Lock()
+
+    def _cookie_import_check_rate_limit(
+        operator: str, agent_id: str,
+    ) -> tuple[bool, int]:
+        """Sliding-window rate limit. Returns (allowed, retry_after_ms).
+
+        ``retry_after_ms`` is 0 when ``allowed`` is True; otherwise it is
+        the time until the oldest event in the window expires.
+        """
+        import time as _time
+        now = _time.time()
+        cutoff = now - _COOKIE_IMPORT_WINDOW_S
+        key = (operator, agent_id)
+        with _cookie_import_lock:
+            bucket = _cookie_import_buckets.setdefault(key, [])
+            # Drop entries outside the window in-place.
+            bucket[:] = [t for t in bucket if t > cutoff]
+            if len(bucket) >= _COOKIE_IMPORT_LIMIT:
+                oldest = bucket[0]
+                retry_after_ms = max(
+                    1, int((oldest + _COOKIE_IMPORT_WINDOW_S - now) * 1000),
+                )
+                return False, retry_after_ms
+            bucket.append(now)
+            return True, 0
+
+    def _cookie_envelope_err(
+        code: str, message: str, retry_after_ms: int | None = None,
+    ) -> dict:
+        """Build a §2.3 error envelope for cookie-import responses."""
+        return {
+            "success": False,
+            "error": {
+                "code": code,
+                "message": message,
+                "retry_after_ms": retry_after_ms,
+            },
+        }
+
+    def _operator_session_id(request: Request) -> str:
+        """Derive a stable per-session identifier for rate-limiting + audit.
+
+        The ``ol_session`` cookie is an HMAC of an expiry; there is no
+        per-user identity (the engine has a single operator). We hash the
+        cookie value so the audit log records a stable identifier without
+        echoing the cookie itself. Empty cookie (dev mode) → "operator".
+        """
+        raw = request.cookies.get("ol_session", "")
+        if not raw:
+            return "operator"
+        digest = hashlib.sha256(raw.encode()).hexdigest()[:12]
+        return f"operator:{digest}"
+
+    @api_router.post("/api/agents/{agent_id}/browser/import_cookies")
+    async def api_browser_import_cookies(
+        agent_id: str, request: Request,
+    ) -> dict:
+        """Phase 6 §9.2 — operator-only cookie/session import.
+
+        Merge semantics: Playwright's ``BrowserContext.add_cookies``
+        MERGES with existing cookies. A (name, domain, path) collision
+        OVERWRITES the existing cookie; non-colliding cookies are
+        appended. There is no "wipe and replace" — to start clean,
+        reset the agent profile first.
+
+        At-rest leak warning (see plan §13 risk register row "Imported
+        cookies at rest in profile (plaintext)"): Firefox stores cookies
+        in ``cookies.sqlite`` UNENCRYPTED inside the agent profile. This
+        endpoint does NOT silently mitigate that — operators handling
+        high-value sessions are expected to use encrypted volumes or
+        ephemeral profiles. Audit log records domain + cookie name ONLY.
+        """
+        # Choice (per plan §9.2): we hit the browser service directly via
+        # `runtime.browser_service_url` rather than going through
+        # /mesh/browser/command. Rationale: this is operator-only — adding
+        # it to KNOWN_BROWSER_ACTIONS would expose it to agents.
+        from src.browser import flags as _flags
+
+        operator = _operator_session_id(request)
+
+        if agent_id not in agent_registry:
+            raise HTTPException(404, "Agent not found")
+
+        # Kill-switch ─ honor BROWSER_COOKIE_IMPORT_DISABLED.
+        if _flags.get_bool("BROWSER_COOKIE_IMPORT_DISABLED", False):
+            raise HTTPException(
+                403,
+                detail=_cookie_envelope_err(
+                    "forbidden",
+                    "Cookie import disabled by operator policy",
+                ),
+            )
+
+        # Rate-limit pre-check (10/hr per (operator, agent_id)).
+        allowed, retry_ms = _cookie_import_check_rate_limit(operator, agent_id)
+        if not allowed:
+            raise HTTPException(
+                429,
+                detail=_cookie_envelope_err(
+                    "conflict",
+                    "rate limit exceeded",
+                    retry_after_ms=retry_ms,
+                ),
+            )
+
+        # Read raw body once. Enforce 256 KiB DoS guard before JSON parse
+        # so we don't allocate a fat string for an attacker payload.
+        raw = await request.body()
+        if len(raw) > _COOKIE_PAYLOAD_MAX_BYTES:
+            raise HTTPException(
+                413,
+                detail=_cookie_envelope_err(
+                    "size_limit",
+                    f"payload exceeds {_COOKIE_PAYLOAD_MAX_BYTES} bytes",
+                ),
+            )
+
+        try:
+            body = json.loads(raw.decode("utf-8")) if raw else {}
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise HTTPException(
+                400,
+                detail=_cookie_envelope_err(
+                    "invalid_input", "request body is not valid JSON",
+                ),
+            )
+
+        if not isinstance(body, dict):
+            raise HTTPException(
+                400,
+                detail=_cookie_envelope_err(
+                    "invalid_input",
+                    "request body must be a JSON object",
+                ),
+            )
+
+        # Format detection: explicit ``format`` field overrides auto-detect.
+        # Payload may live under ``cookies`` (playwright list or netscape
+        # text) — also accept the bare list/string for back-compat with
+        # the simpler curl-style input.
+        explicit_fmt = body.get("format")
+        if explicit_fmt is not None and explicit_fmt not in ("playwright", "netscape"):
+            raise HTTPException(
+                400,
+                detail=_cookie_envelope_err(
+                    "invalid_input",
+                    "format must be 'playwright' or 'netscape'",
+                ),
+            )
+
+        payload = body.get("cookies", body)
+        if isinstance(payload, dict) and "cookies" not in payload:
+            # Caller passed the entire body as the cookies field by accident.
+            raise HTTPException(
+                400,
+                detail=_cookie_envelope_err(
+                    "invalid_input", "missing 'cookies' field",
+                ),
+            )
+
+        accepted, dropped, detected_fmt = _validate_cookies(
+            payload, fmt=explicit_fmt,
+        )
+        if detected_fmt is None:
+            raise HTTPException(
+                400,
+                detail=_cookie_envelope_err(
+                    "invalid_input",
+                    "unable to detect cookie format — supply 'format' or use "
+                    "Playwright JSON list / Netscape TSV string",
+                ),
+            )
+
+        # List-length cap applied AFTER parsing (Netscape format may have
+        # supplied >1000 lines).
+        if len(accepted) + sum(d["count"] for d in dropped) > _COOKIE_LIST_MAX_LEN:
+            raise HTTPException(
+                413,
+                detail=_cookie_envelope_err(
+                    "size_limit",
+                    f"more than {_COOKIE_LIST_MAX_LEN} cookies in payload",
+                ),
+            )
+
+        # Audit log — domain + name only. NEVER cookie values.
+        # _COOKIE_AUDIT_VALUE_EXCLUSION_GUARANTEE: the keys passed to
+        # the logger here are an explicit allowlist; cookie ``value`` is
+        # NOT included by construction. A unit test (test_audit_log_no_value)
+        # asserts this property holds against a corpus including JWT,
+        # Bearer, and SigV4-shaped values.
+        domains = sorted({c["domain"] for c in accepted if c.get("domain")})
+        names = sorted({c["name"] for c in accepted if c.get("name")})
+        _cookie_audit_logger.info(
+            "cookie_import operator=%s agent_id=%s count=%d domains=%s "
+            "names=%s format=%s dropped=%s",
+            operator, agent_id, len(accepted),
+            json.dumps(domains), json.dumps(names),
+            detected_fmt, json.dumps(dropped),
+        )
+        if blackboard is not None:
+            try:
+                blackboard.log_audit(
+                    action="cookie_import",
+                    target=agent_id,
+                    actor=operator,
+                    field=detected_fmt,
+                    after_value=json.dumps({
+                        "count": len(accepted),
+                        "domains": domains,
+                        "names": names,
+                        "dropped": dropped,
+                    }),
+                )
+            except Exception as e:
+                logger.warning("Failed to write cookie_import audit row: %s", e)
+
+        # Push to browser service.
+        if not runtime or not getattr(runtime, "browser_service_url", ""):
+            raise HTTPException(
+                503,
+                detail=_cookie_envelope_err(
+                    "service_unavailable", "Browser service not available",
+                ),
+            )
+        try:
+            browser_auth = getattr(runtime, "browser_auth_token", "")
+            headers: dict[str, str] = {}
+            if browser_auth:
+                headers["Authorization"] = f"Bearer {browser_auth}"
+            resp = await _dashboard_browser_client.post(
+                f"{runtime.browser_service_url}/browser/{agent_id}/import_cookies",
+                json={"cookies": accepted},
+                headers=headers,
+                timeout=30,
+            )
+        except Exception as e:
+            logger.warning("Cookie import push to browser service failed: %s", e)
+            raise HTTPException(
+                503,
+                detail=_cookie_envelope_err(
+                    "service_unavailable",
+                    "Browser service unreachable",
+                ),
+            )
+        if resp.status_code >= 500:
+            raise HTTPException(
+                503,
+                detail=_cookie_envelope_err(
+                    "service_unavailable",
+                    f"Browser service returned {resp.status_code}",
+                ),
+            )
+        try:
+            svc_payload = resp.json()
+        except Exception:
+            raise HTTPException(
+                503,
+                detail=_cookie_envelope_err(
+                    "service_unavailable",
+                    "Browser service returned non-JSON response",
+                ),
+            )
+        # Browser service may have its own dropped/imported counts; merge.
+        if not svc_payload.get("success"):
+            err = svc_payload.get("error") or {}
+            return {
+                "success": False,
+                "error": {
+                    "code": err.get("code", "service_unavailable"),
+                    "message": err.get("message", "import failed"),
+                    "retry_after_ms": err.get("retry_after_ms"),
+                },
+            }
+        svc_data = svc_payload.get("data") or {}
+        return {
+            "success": True,
+            "data": {
+                "imported": svc_data.get("imported", len(accepted)),
+                "dropped": dropped,
+                "format": detected_fmt,
+            },
+        }
 
     @api_router.get("/api/agent-templates")
     async def api_agent_templates() -> list:

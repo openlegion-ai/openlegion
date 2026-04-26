@@ -436,6 +436,62 @@ async def browser_click(
 
 
 @skill(
+    name="browser_click_xy",
+    description=(
+        "Click at viewport-relative CSS pixel coordinates (x, y). Useful "
+        "for canvas, custom-rendered widgets, or non-accessible "
+        "interactives where browser_get_elements does not surface a ref. "
+        "Performs a document.elementFromPoint pre-check — if an overlay "
+        "or pointer-events:none ancestor would intercept the click, the "
+        "call returns invalid_input with the actual hit element's "
+        "tag/role/name so you can re-target. "
+        "Coordinates are CSS pixels (NOT device pixels — devicePixelRatio "
+        "is ignored), viewport-relative, and bounded by the current "
+        "viewport (call browser_status for exact width/height — fleet "
+        "resolutions vary, e.g. 1920x1080, 1366x768, 1536x864). "
+        "Coordinates are NOT document-absolute: after a scroll, resize, "
+        "or any DOM-relayout interaction, the same (x, y) hits a "
+        "different element — recompute coords from a fresh snapshot. "
+        "Limitations: (a) cross-origin iframes — elementFromPoint "
+        "returns the <iframe> element, not its inner document, so "
+        "actual_element will be uninformative; (b) shadow DOM — "
+        "elementFromPoint returns the shadow host, not the inner shadow "
+        "element; (c) the post-click CAPTCHA check is best-effort and "
+        "may race the challenge render — call browser_detect_captcha "
+        "after a short delay if the click likely triggered a challenge. "
+        "Prefer browser_click(ref) when possible — coordinate clicks "
+        "are brittle across resolution changes."
+    ),
+    parameters={
+        "x": {
+            "type": "number",
+            "description": (
+                "Viewport-relative x coordinate in CSS pixels. Origin is "
+                "the top-left of the rendered page area; must satisfy "
+                "0 <= x < viewport.width."
+            ),
+        },
+        "y": {
+            "type": "number",
+            "description": (
+                "Viewport-relative y coordinate in CSS pixels. Origin is "
+                "the top-left of the rendered page area; must satisfy "
+                "0 <= y < viewport.height."
+            ),
+        },
+    },
+    parallel_safe=False,
+)
+async def browser_click_xy(
+    x: float, y: float, *, mesh_client=None,
+) -> dict:
+    """Click at viewport-relative CSS pixel coordinates."""
+    return await _browser_command(
+        mesh_client, "click_xy", {"x": x, "y": y},
+    )
+
+
+@skill(
     name="browser_type",
     description=(
         "Type text into a form field on the current page. Optionally clears the "
@@ -856,6 +912,63 @@ async def browser_open_tab(
     return await _browser_command(
         mesh_client, "open_tab",
         {"url": url, "snapshot_after": snapshot_after},
+    )
+
+
+@skill(
+    name="browser_inspect_requests",
+    description=(
+        "List recent network requests from the current browser context "
+        "(URLs only, redacted; no bodies/headers). Useful for verifying "
+        "which third-party endpoints a page hit, debugging when a page "
+        "seems broken because adblock dropped requests, or confirming a "
+        "form POST went through. Returns up to 50 most-recent entries by "
+        "default. Set include_blocked=true to include adblock-suppressed "
+        "entries (verbose; usually you don't want this).\n\n"
+        "Buffer holds the most recent 200 requests per agent; older "
+        "entries are evicted automatically. URLs are redacted at "
+        "store-time (userinfo stripped, JWT-shaped path segments masked, "
+        "sensitive query values like token/api_key replaced with "
+        "[REDACTED]).\n\n"
+        "Each entry has: url (str, redacted), method (str), "
+        "resource_type (str, one of: document, stylesheet, image, media, "
+        "font, script, texttrack, xhr, fetch, eventsource, websocket, "
+        "manifest, other), ts (str, ISO-8601 UTC like "
+        "'2026-04-26T12:34:56Z'), status (int|null — currently always "
+        "null; reserved for future response-status capture), "
+        "blocked_by_adblock (bool), user_cancelled (bool), "
+        "failed_network (bool)."
+    ),
+    parameters={
+        "include_blocked": {
+            "type": "boolean",
+            "description": (
+                "Include requests blocked by the in-browser ad-blocker. "
+                "Default false — adblock-suppressed trackers are usually "
+                "noise. Set true when debugging missing analytics or "
+                "third-party widgets."
+            ),
+            "default": False,
+        },
+        "limit": {
+            "type": "integer",
+            "description": (
+                "Max number of newest-first entries to return. Default 50, "
+                "max 200 (the underlying buffer size). Values above 200 "
+                "are coerced to 200."
+            ),
+            "default": 50,
+        },
+    },
+    parallel_safe=False,
+)
+async def browser_inspect_requests(
+    include_blocked: bool = False, limit: int = 50, *, mesh_client=None,
+) -> dict:
+    """List recent network requests for the current browser context."""
+    return await _browser_command(
+        mesh_client, "inspect_requests",
+        {"include_blocked": bool(include_blocked), "limit": int(limit)},
     )
 
 
