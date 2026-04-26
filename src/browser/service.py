@@ -5298,6 +5298,46 @@ class BrowserManager:
     _FILL_FORM_MAX_LABEL_CHARS = 500
     _FILL_FORM_MAX_FIELDS = 50
 
+    @staticmethod
+    def _classify_fill_error(exc: Exception) -> str:
+        """Map a Playwright ``locator.fill`` exception → structured reason.
+
+        Third-pass review §9.4 concern 1: ``find_text`` can return refs
+        for non-input elements (a ``<label>``, ``<span>`` containing the
+        label text, etc.). Calling ``fill()`` on those raises a Playwright
+        error like ``"Element is not an <input>, <textarea> or
+        [contenteditable]"``. Without classification the agent sees a
+        generic ``type_failed`` and can't plan a recovery — with a
+        ``not_fillable`` code it knows to fall back to
+        ``browser_get_elements`` to find the underlying input near the
+        label.
+
+        Returns one of: ``not_fillable``, ``timeout``, ``detached``,
+        ``hidden``, ``disabled``, ``other``.
+        """
+        msg = str(exc).lower()
+        # Order matters: TimeoutError is a subclass check; the string
+        # heuristics below cover both Playwright's ``Error`` class and
+        # plain Python exceptions.
+        if isinstance(exc, TimeoutError) or "timeout" in msg:
+            return "timeout"
+        if (
+            "is not an <input>" in msg
+            or "is not an <textarea>" in msg
+            or "not an editable" in msg
+            or "not editable" in msg
+            or "not fillable" in msg
+            or "[contenteditable]" in msg
+        ):
+            return "not_fillable"
+        if "detached" in msg or "not attached" in msg:
+            return "detached"
+        if "not visible" in msg or "hidden" in msg:
+            return "hidden"
+        if "disabled" in msg or "readonly" in msg or "read-only" in msg:
+            return "disabled"
+        return "other"
+
     async def fill_form(
         self, agent_id: str, fields: list[dict],
         *, submit_after: bool = False,
@@ -5414,6 +5454,19 @@ class BrowserManager:
                 find_res = await self._find_text_impl(
                     inst, agent_id, label, scroll=True,
                 )
+                # Output-side label hygiene: defensively redact the label
+                # echoed back in ``filled[]``. Mirrors :meth:`_find_text_impl`
+                # line ~5261, which redacts the matched ``text`` it returns.
+                # If an agent passes a label like ``"Token: abc123"`` the
+                # response should not echo the secret in plaintext into the
+                # transcript — same defense as the URL redaction in §9.1.
+                # (``remaining[]`` deliberately keeps labels & values
+                # verbatim — see :meth:`_fill_form_captcha_envelope` — so
+                # the agent can resume after solving without losing data.)
+                safe_label = sanitize_for_prompt(
+                    self.redactor.redact(agent_id, label)
+                )
+
                 if not find_res.get("success"):
                     # Snapshot/find_text failure is service-side; surface
                     # as type_failed so the loop continues — the agent
@@ -5424,7 +5477,7 @@ class BrowserManager:
                         else str(err)
                     ) or "find_text failed"
                     filled.append({
-                        "label": label,
+                        "label": safe_label,
                         "status": "type_failed",
                         "reason": self.redactor.redact(agent_id, raw_reason),
                     })
@@ -5432,7 +5485,7 @@ class BrowserManager:
 
                 matches = (find_res.get("data") or {}).get("matches") or []
                 if not matches:
-                    filled.append({"label": label, "status": "not_found"})
+                    filled.append({"label": safe_label, "status": "not_found"})
                     # CAPTCHA may have appeared as a result of the snapshot
                     # itself (rare — e.g. a JS challenge that injects on
                     # every navigation). Check before continuing so we
@@ -5456,7 +5509,7 @@ class BrowserManager:
                     locator = await self._locator_from_ref(inst, ref)
                 except RefStale as rs:
                     filled.append({
-                        "label": label,
+                        "label": safe_label,
                         "ref": ref,
                         "status": "type_failed",
                         "reason": self.redactor.redact(agent_id, str(rs)),
@@ -5464,7 +5517,7 @@ class BrowserManager:
                     continue
                 if locator is None:
                     filled.append({
-                        "label": label,
+                        "label": safe_label,
                         "ref": ref,
                         "status": "type_failed",
                         "reason": "ref not found",
@@ -5474,19 +5527,26 @@ class BrowserManager:
                 try:
                     await locator.fill(value)
                 except Exception as e:
-                    # Element no longer attached / disabled / hidden — record
-                    # and continue. Don't bail the whole form: subsequent
-                    # fields may still be reachable.
+                    # Element no longer attached / disabled / hidden /
+                    # not-fillable (label-element returned by find_text).
+                    # Don't bail the whole form: subsequent fields may still
+                    # be reachable. ``reason`` is a structured code (see
+                    # :meth:`_classify_fill_error`) so the agent can plan a
+                    # specific recovery — e.g. re-snapshot on ``detached``,
+                    # fall back to ``browser_get_elements`` on
+                    # ``not_fillable``.
+                    reason_code = self._classify_fill_error(e)
                     filled.append({
-                        "label": label,
+                        "label": safe_label,
                         "ref": ref,
                         "status": "type_failed",
-                        "reason": self.redactor.redact(agent_id, str(e)),
+                        "reason": reason_code,
+                        "detail": self.redactor.redact(agent_id, str(e))[:200],
                     })
                     continue
 
                 filled.append({
-                    "label": label,
+                    "label": safe_label,
                     "ref": ref,
                     "status": "filled",
                 })

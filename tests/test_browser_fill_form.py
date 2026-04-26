@@ -392,7 +392,12 @@ class TestFillFormFieldFailures:
         assert result["success"] is True
         data = result["data"]
         assert data["filled"][0]["status"] == "type_failed"
-        assert "detached" in data["filled"][0]["reason"]
+        # Structured reason code (third-pass review §9.4 concern 1) — the
+        # exception type is ``TimeoutError`` so the classifier returns
+        # ``"timeout"``. The original message ("element detached") is
+        # preserved in ``detail`` so an operator can debug.
+        assert data["filled"][0]["reason"] == "timeout"
+        assert "detached" in data["filled"][0]["detail"]
         assert data["filled"][1]["status"] == "filled"
 
 
@@ -637,3 +642,297 @@ class TestFillFormActionRegistered:
             "host/permissions.py — browser_fill_form skill will silently "
             "fail with a 400 from the mesh proxy."
         )
+
+
+# ── Third-pass review additions (§9.4 concerns 1, 6, 8, 10, 13, 15) ─────
+
+
+class TestFillFormErrorClassification:
+    """Concern 1 — Playwright fill errors classified into structured codes."""
+
+    @pytest.mark.asyncio
+    async def test_classify_not_fillable(self):
+        """Find_text returned a <label> ref → fill() raises 'not an <input>'.
+
+        Without classification the agent sees a generic ``type_failed`` and
+        can't recover. With ``reason: "not_fillable"`` it knows to fall
+        back to ``browser_get_elements`` to find the underlying input.
+        """
+        mgr = _make_manager()
+        refs = {
+            "e0": {"role": "text", "name": "Email", "index": 0, "disabled": False},
+        }
+        inst = _make_instance(refs)
+        # Playwright's actual message; classifier is case-insensitive.
+        loc = _make_locator(
+            raise_on_fill=Exception(
+                "Element is not an <input>, <textarea> or "
+                "[contenteditable] element"
+            ),
+        )
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst), \
+             patch.object(BrowserManager, "_locator_from_ref",
+                          new_callable=AsyncMock, return_value=loc), \
+             patch.object(BrowserManager, "_check_captcha",
+                          new_callable=AsyncMock, return_value=None), \
+             patch.object(BrowserManager, "_snapshot_impl", new=_fake_snapshot):
+            result = await mgr.fill_form(
+                "agent1",
+                [{"label": "Email", "value": "a@b.co"}],
+            )
+
+        f0 = result["data"]["filled"][0]
+        assert f0["status"] == "type_failed"
+        assert f0["reason"] == "not_fillable"
+
+    @pytest.mark.asyncio
+    async def test_classify_disabled(self):
+        mgr = _make_manager()
+        refs = {
+            "e0": {"role": "textbox", "name": "Email", "index": 0, "disabled": False},
+        }
+        inst = _make_instance(refs)
+        loc = _make_locator(
+            raise_on_fill=Exception("element is disabled"),
+        )
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst), \
+             patch.object(BrowserManager, "_locator_from_ref",
+                          new_callable=AsyncMock, return_value=loc), \
+             patch.object(BrowserManager, "_check_captcha",
+                          new_callable=AsyncMock, return_value=None), \
+             patch.object(BrowserManager, "_snapshot_impl", new=_fake_snapshot):
+            result = await mgr.fill_form(
+                "agent1",
+                [{"label": "Email", "value": "a@b.co"}],
+            )
+
+        assert result["data"]["filled"][0]["reason"] == "disabled"
+
+    @pytest.mark.asyncio
+    async def test_classify_other_falls_through(self):
+        """Unknown error message → reason='other' (no crash)."""
+        mgr = _make_manager()
+        refs = {
+            "e0": {"role": "textbox", "name": "Email", "index": 0, "disabled": False},
+        }
+        inst = _make_instance(refs)
+        loc = _make_locator(
+            raise_on_fill=Exception("some weird Playwright internal error"),
+        )
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst), \
+             patch.object(BrowserManager, "_locator_from_ref",
+                          new_callable=AsyncMock, return_value=loc), \
+             patch.object(BrowserManager, "_check_captcha",
+                          new_callable=AsyncMock, return_value=None), \
+             patch.object(BrowserManager, "_snapshot_impl", new=_fake_snapshot):
+            result = await mgr.fill_form(
+                "agent1",
+                [{"label": "Email", "value": "a@b.co"}],
+            )
+
+        assert result["data"]["filled"][0]["reason"] == "other"
+        # Detail preserves the underlying message for operator debugging.
+        assert "weird" in result["data"]["filled"][0]["detail"]
+
+
+class TestFillFormSubmitEdgeCases:
+    """Concerns 8 & 10 — submit_after only fires when there's an anchor."""
+
+    @pytest.mark.asyncio
+    async def test_top_level_submit_with_all_failed_fields_no_press(self):
+        """Concern 8: ``submit_after=True`` but no field filled → no Enter.
+
+        ``last_locator`` stays ``None``, so the final-submit branch must
+        be skipped. ``submitted`` must remain ``False``.
+        """
+        mgr = _make_manager()
+        # No matching ref for either label → both fields go ``not_found``.
+        refs = {
+            "e0": {"role": "button", "name": "Cancel", "index": 0, "disabled": False},
+        }
+        inst = _make_instance(refs)
+        loc = _make_locator()
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst), \
+             patch.object(BrowserManager, "_locator_from_ref",
+                          new_callable=AsyncMock, return_value=loc), \
+             patch.object(BrowserManager, "_check_captcha",
+                          new_callable=AsyncMock, return_value=None), \
+             patch.object(BrowserManager, "_snapshot_impl", new=_fake_snapshot):
+            result = await mgr.fill_form(
+                "agent1",
+                [
+                    {"label": "Email", "value": "a@b.co"},
+                    {"label": "Phone", "value": "555"},
+                ],
+                submit_after=True,
+            )
+
+        data = result["data"]
+        assert all(f["status"] == "not_found" for f in data["filled"])
+        # Critical: no anchor → no Enter pressed → submitted stays False.
+        assert data["submitted"] is False
+        assert loc.press.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_per_field_submit_on_not_found_field_no_press(self):
+        """Concern 10: per-field ``submit_after`` on not_found → no Enter.
+
+        The submit-on-field branch lives below the successful-fill path.
+        A ``not_found`` field must ``continue`` straight to the next
+        iteration without pressing Enter on a phantom locator.
+        """
+        mgr = _make_manager()
+        refs = {
+            # Matches "Phone" but NOT "Email"
+            "e0": {"role": "textbox", "name": "Phone", "index": 0, "disabled": False},
+        }
+        inst = _make_instance(refs)
+        loc = _make_locator()
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst), \
+             patch.object(BrowserManager, "_locator_from_ref",
+                          new_callable=AsyncMock, return_value=loc), \
+             patch.object(BrowserManager, "_check_captcha",
+                          new_callable=AsyncMock, return_value=None), \
+             patch.object(BrowserManager, "_snapshot_impl", new=_fake_snapshot):
+            result = await mgr.fill_form(
+                "agent1",
+                [
+                    # submit_after=True on a field that won't be found —
+                    # must NOT press Enter on anything.
+                    {"label": "Email", "value": "a@b.co", "submit_after": True},
+                    {"label": "Phone", "value": "555"},
+                ],
+            )
+
+        data = result["data"]
+        statuses = [f["status"] for f in data["filled"]]
+        assert statuses == ["not_found", "filled"]
+        # Only Phone was filled; no Enter presses anywhere.
+        assert loc.press.await_count == 0
+        assert data["submitted"] is False
+
+
+class TestFillFormValueAndLabelHandling:
+    """Concerns 6 (empty string) & 13 (label redaction in response)."""
+
+    @pytest.mark.asyncio
+    async def test_empty_string_value_clears_input(self):
+        """Concern 6: ``value=""`` is valid — fill('') clears the input."""
+        mgr = _make_manager()
+        refs = {
+            "e0": {"role": "textbox", "name": "Email", "index": 0, "disabled": False},
+        }
+        inst = _make_instance(refs)
+        loc = _make_locator()
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst), \
+             patch.object(BrowserManager, "_locator_from_ref",
+                          new_callable=AsyncMock, return_value=loc), \
+             patch.object(BrowserManager, "_check_captcha",
+                          new_callable=AsyncMock, return_value=None), \
+             patch.object(BrowserManager, "_snapshot_impl", new=_fake_snapshot):
+            result = await mgr.fill_form(
+                "agent1",
+                [{"label": "Email", "value": ""}],
+            )
+
+        assert result["success"] is True
+        assert result["data"]["filled"][0]["status"] == "filled"
+        loc.fill.assert_awaited_with("")
+
+    @pytest.mark.asyncio
+    async def test_label_with_secret_redacted_in_filled_response(self):
+        """Concern 13: ``filled[].label`` redacted on the way out.
+
+        If the agent passes a label like ``"sk-abc123def456..."`` (e.g. a
+        prompt-injected label that contains a secret pattern), the
+        echoed-back ``filled[].label`` must run through the same
+        redactor that scrubs URLs, snapshot text, and find_text matches.
+        ``remaining[].label`` deliberately keeps verbatim values for
+        resume — that path is covered by the captcha-mid-flow tests.
+        """
+        mgr = _make_manager()
+        # Use a label that ALSO matches a ref (so find_text → fill path
+        # exercises the safe_label substitution).
+        secret_label = "sk-1234567890abcdefghijklmnopqrstuv"
+        refs = {
+            "e0": {
+                "role": "textbox", "name": secret_label,
+                "index": 0, "disabled": False,
+            },
+        }
+        inst = _make_instance(refs)
+        loc = _make_locator()
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst), \
+             patch.object(BrowserManager, "_locator_from_ref",
+                          new_callable=AsyncMock, return_value=loc), \
+             patch.object(BrowserManager, "_check_captcha",
+                          new_callable=AsyncMock, return_value=None), \
+             patch.object(BrowserManager, "_snapshot_impl", new=_fake_snapshot):
+            result = await mgr.fill_form(
+                "agent1",
+                [{"label": secret_label, "value": "x"}],
+            )
+
+        echoed = result["data"]["filled"][0]["label"]
+        # Some fragment of the secret (the ``sk-`` prefix + suffix) should
+        # be redacted; we don't pin exact format because the redaction
+        # patterns may evolve. The contract is "literal echo blocked".
+        assert echoed != secret_label, (
+            "filled[].label echoed user-supplied secret verbatim — "
+            "expected redactor to mask it"
+        )
+
+
+class TestFillFormServerRoute:
+    """Concern 15 — happy-path POST /browser/{agent_id}/fill_form route test."""
+
+    def test_route_happy_path_returns_envelope(self, monkeypatch):
+        """Verify the FastAPI route shape: 200 + the manager envelope."""
+        from fastapi.testclient import TestClient
+
+        from src.browser.server import create_browser_app
+
+        monkeypatch.delenv("BROWSER_AUTH_TOKEN", raising=False)
+        monkeypatch.delenv("MESH_AUTH_TOKEN", raising=False)
+
+        mgr = MagicMock()
+        mgr.fill_form = AsyncMock(return_value={
+            "success": True,
+            "data": {
+                "partial_success": False,
+                "captcha_required": False,
+                "filled": [{"label": "Email", "ref": "e0", "status": "filled"}],
+                "remaining": [],
+                "submitted": False,
+            },
+        })
+
+        app = create_browser_app(mgr)
+        with TestClient(app) as client:
+            resp = client.post(
+                "/browser/a1/fill_form",
+                json={
+                    "fields": [{"label": "Email", "value": "a@b.co"}],
+                    "submit_after": False,
+                },
+            )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["success"] is True
+        assert body["data"]["filled"][0]["status"] == "filled"
+        # Manager called with the body's fields verbatim plus the keyword arg.
+        mgr.fill_form.assert_awaited_once()
+        args, kwargs = mgr.fill_form.await_args
+        assert args[0] == "a1"
+        assert args[1] == [{"label": "Email", "value": "a@b.co"}]
+        assert kwargs == {"submit_after": False}
+
+
