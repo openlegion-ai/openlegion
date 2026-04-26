@@ -373,3 +373,195 @@ def test_log_bin_index_extremes():
     # mid-range value lands strictly inside.
     idx = ba._log_bin_index(1.0)
     assert 0 < idx < ba._ENTROPY_BIN_COUNT - 1
+
+
+# ---------------------------------------------------------------------------
+# Third-pass review: edge cases the first two passes likely missed
+# ---------------------------------------------------------------------------
+
+
+def test_partial_files_are_skipped_during_directory_scan(tmp_path):
+    """A crashed recorder leaves ``*.jsonl.partial``; we MUST ignore them.
+
+    Otherwise an in-progress / half-written dump corrupts the report
+    with garbage events or — worse — masquerades as a valid file when
+    the recorder is mid-write.
+    """
+    # Valid finalized dump.
+    _write_recording(tmp_path / "good.jsonl", events=[
+        _make_event(1.0, None, "click", method="x11", success=True),
+    ])
+    # Looks like JSONL but has the .partial suffix — must not be picked up.
+    (tmp_path / "crashed.jsonl.partial").write_text("garbage that is not json\n")
+    (tmp_path / "another.jsonl.partial").write_text("{\"ts\": 1, \"type\": \"click\"}\n")
+
+    discovered = ba.discover_files(tmp_path)
+    names = {p.name for p in discovered}
+    assert names == {"good.jsonl"}
+
+
+def test_multiple_files_same_agent_merge_into_one_bucket(tmp_path):
+    """Two dumps for the same agent across sessions → events merged."""
+    for i in range(2):
+        events = [
+            _make_event(1000.0 + i * 100, None, "click", method="x11", success=True),
+            _make_event(1001.0 + i * 100, 1.0, "click", method="x11", success=True),
+        ]
+        _write_recording(
+            tmp_path / f"file{i}.jsonl",
+            agent="shared-agent",
+            events=events,
+        )
+    files = ba.discover_files(tmp_path)
+    results = [ba.load_file(p) for p in files]
+    report = ba.aggregate(results)
+    assert report["agents"] == ["shared-agent"]
+    assert report["files_loaded"] == 2
+    # 2 files * 2 events each.
+    assert report["per_agent"]["shared-agent"]["event_count"] == 4
+    assert report["global"]["event_count"] == 4
+
+
+def test_filter_agent_with_no_match_exits_one(tmp_path, capsys):
+    """``--filter-agent does-not-exist`` → exit 1, "No data found"."""
+    _write_recording(tmp_path / "r.jsonl", agent="real", events=[
+        _make_event(1.0, None, "click", method="x11", success=True),
+    ])
+    code = ba.main([
+        "--dir", str(tmp_path),
+        "--baseline", "none",
+        "--filter-agent", "does-not-exist",
+    ])
+    assert code == 1
+    captured = capsys.readouterr()
+    assert "No data found" in captured.err
+
+
+def test_since_is_inclusive(tmp_path):
+    """An event with ts == --since must be KEPT."""
+    p = _write_recording(tmp_path / "r.jsonl", events=[
+        _make_event(99.0, None, "click", method="x11", success=True),
+        _make_event(100.0, 1.0, "click", method="x11", success=True),
+        _make_event(101.0, 1.0, "click", method="x11", success=True),
+    ])
+    fr = ba.load_file(p)
+    report = ba.aggregate([fr], since=100.0)
+    # ts=100 inclusive plus ts=101 → 2 events.
+    assert report["global"]["event_count"] == 2
+
+
+def test_since_beyond_all_events_exits_one(tmp_path, capsys):
+    """``--since`` larger than every event → exit 1."""
+    p = _write_recording(tmp_path / "r.jsonl", events=[
+        _make_event(10.0, None, "click", method="x11", success=True),
+        _make_event(20.0, 10.0, "click", method="x11", success=True),
+    ])
+    code = ba.main([
+        "--file", str(p),
+        "--baseline", "none",
+        "--since", "9999",
+    ])
+    assert code == 1
+    captured = capsys.readouterr()
+    assert "No data found" in captured.err
+
+
+def test_negative_interval_excluded_from_stats_but_counted(tmp_path):
+    """Clock-skew negative intervals must not crash and must not pollute stats.
+
+    The recorder rounds ``now - last_ts``; if the system clock jumps
+    backward (NTP slew, VM resume) we get a negative interval. Such an
+    event must still be counted in event totals, but excluded from
+    interval-based summaries / entropy.
+    """
+    p = _write_recording(tmp_path / "r.jsonl", events=[
+        _make_event(100.0, None, "click", method="x11", success=True),
+        # Clock jumped backward.
+        _make_event(99.0, -1.0, "click", method="x11", success=True),
+        _make_event(101.0, 2.0, "click", method="x11", success=True),
+    ])
+    fr = ba.load_file(p)
+    report = ba.aggregate([fr])
+    # All 3 events counted.
+    assert report["global"]["event_count"] == 3
+    # Only the strictly-positive interval is summarized (2.0).
+    assert report["global"]["interval_summary_seconds"]["count"] == 1
+
+
+def test_scroll_event_with_null_delta_does_not_crash(tmp_path):
+    """The recorder allows ``delta: int | None``; analyzer must tolerate."""
+    p = _write_recording(tmp_path / "r.jsonl", events=[
+        _make_event(1.0, None, "scroll", direction="down", delta=None,
+                    method="x11"),
+        _make_event(2.0, 1.0, "scroll", direction="up", delta=100,
+                    method="x11"),
+    ])
+    fr = ba.load_file(p)
+    report = ba.aggregate([fr])
+    assert report["global"]["event_count"] == 2
+    assert report["global"]["type_breakdown"]["by_type"] == {"scroll": 2}
+
+
+def test_keystrokes_zero_char_count_not_divide_by_zero(tmp_path):
+    """A keystrokes event with char_count=0 must NOT raise."""
+    p = _write_recording(tmp_path / "r.jsonl", events=[
+        _make_event(1.0, None, "keystrokes", char_count=0, fast=False,
+                    method="x11"),
+        _make_event(2.0, 1.0, "keystrokes", char_count=0, fast=False,
+                    method="x11"),
+    ])
+    fr = ba.load_file(p)
+    report = ba.aggregate([fr])
+    kp = report["global"]["keystroke_per_char"]["summary_seconds_per_char"]
+    # Both events skipped from the per-char proxy.
+    assert kp["count"] == 0
+
+
+def test_json_envelope_has_top_level_schema_field(tmp_path, capsys):
+    """``--json`` output carries a stable schema tag for forward-compat."""
+    p = _write_recording(tmp_path / "r.jsonl", events=[
+        _make_event(1.0, None, "click", method="x11", success=True),
+    ])
+    code = ba.main([
+        "--file", str(p),
+        "--baseline", "none",
+        "--json",
+    ])
+    assert code == 0
+    captured = capsys.readouterr()
+    parsed = json.loads(captured.out)
+    assert parsed.get("schema") == "openlegion.behavior_analyze/v1"
+    # Forward-compat: schema field must come alongside, not replace, the
+    # report/baseline keys.
+    assert "report" in parsed and "baseline" in parsed
+
+
+def test_json_with_filter_agent_only_includes_filtered(tmp_path, capsys):
+    """``--json --filter-agent X`` lists only X under per_agent."""
+    _write_recording(tmp_path / "a.jsonl", agent="alice", events=[
+        _make_event(1.0, None, "click", method="x11", success=True),
+    ])
+    _write_recording(tmp_path / "b.jsonl", agent="bob", events=[
+        _make_event(1.0, None, "click", method="cdp", success=True),
+    ])
+    code = ba.main([
+        "--dir", str(tmp_path),
+        "--baseline", "none",
+        "--filter-agent", "alice",
+        "--json",
+    ])
+    assert code == 0
+    captured = capsys.readouterr()
+    parsed = json.loads(captured.out)
+    assert parsed["report"]["agents"] == ["alice"]
+    assert list(parsed["report"]["per_agent"].keys()) == ["alice"]
+
+
+def test_help_text_documents_inclusivity_and_partial(capsys):
+    """Operator-facing help should mention --since inclusivity + .partial."""
+    parser = ba._build_arg_parser()
+    help_text = parser.format_help()
+    # --since flag help mentions inclusivity.
+    assert "inclusive" in help_text.lower()
+    # Epilog warns about .partial files.
+    assert ".jsonl.partial" in help_text or ".partial" in help_text

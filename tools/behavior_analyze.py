@@ -58,6 +58,13 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_BASELINE = _REPO_ROOT / "tools" / "behavior_baseline.jsonl"
 _DEFAULT_DUMP_DIR = Path("/data/debug")
 
+# Schema tag for the ``--json`` envelope. Bump this if a future revision
+# changes the on-wire shape — downstream dashboard panels (per the §10.1
+# plan) and operator scripts can branch on it cleanly. Numeric metric
+# names *inside* the report are also part of the contract; if you rename
+# one, bump the schema string here too.
+_JSON_SCHEMA_VERSION = "openlegion.behavior_analyze/v1"
+
 # Log-spaced bins for cadence-entropy buckets, 10ms .. 60s. Human input
 # intervals span four-plus orders of magnitude (rapid keystrokes vs
 # pauses to read), so linear bins concentrate everything in one bucket.
@@ -613,6 +620,22 @@ def render_text(report: dict[str, Any], baseline: dict[str, Any] | None) -> str:
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
+    examples = (
+        "examples:\n"
+        "  # Analyze every dump in the default directory and compare to baseline:\n"
+        "  python -m tools.behavior_analyze\n\n"
+        "  # Single file, JSON output (for piping to jq / a dashboard panel):\n"
+        "  python -m tools.behavior_analyze --file /data/debug/agent-1-1714000000-abcd1234.jsonl --json\n\n"
+        "  # Restrict to one agent and the last hour of events:\n"
+        "  python -m tools.behavior_analyze --filter-agent agent-7 --since $(($(date +%s) - 3600))\n\n"
+        "  # Skip baseline comparison (e.g., if your synthetic baseline is misleading):\n"
+        "  python -m tools.behavior_analyze --baseline none\n\n"
+        "notes:\n"
+        "  - --since is INCLUSIVE: events with ts >= --since are kept.\n"
+        "  - .jsonl.partial files (left by a crashed dump) are intentionally ignored.\n"
+        "  - Exit code 1 means no usable data (missing dir, all files skipped, "
+        "filter excluded everything, or every event filtered by --since).\n"
+    )
     p = argparse.ArgumentParser(
         prog="behavior_analyze",
         description=(
@@ -620,6 +643,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "Reads JSONL dumps from src/browser/recorder.py and reports "
             "interval / entropy / cadence metrics."
         ),
+        epilog=examples,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     src = p.add_mutually_exclusive_group()
     src.add_argument(
@@ -649,7 +674,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--since",
         type=float,
-        help="Drop events with ts older than this Unix timestamp",
+        help=(
+            "Keep only events with ts >= this Unix timestamp (inclusive). "
+            "Negative interval_s values from clock skew are excluded from "
+            "interval-based stats but still counted as events."
+        ),
     )
     p.add_argument(
         "--json",
@@ -696,6 +725,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.json:
         out = {
+            "schema": _JSON_SCHEMA_VERSION,
             "report": report,
             "baseline": baseline_metrics,
         }
