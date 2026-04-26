@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import json
 import mimetypes
 import os
 import random
@@ -25,7 +26,7 @@ from urllib.parse import urlparse
 from src.browser.captcha import get_solver
 from src.browser.profile_schema import migrate_profile
 from src.browser.redaction import CredentialRedactor
-from src.browser.ref_handle import RefHandle, RefStale
+from src.browser.ref_handle import RefHandle, RefStale, ShadowHop
 from src.browser.stealth import build_launch_options, pick_referer, validate_referer
 from src.browser.timing import (
     action_delay,
@@ -108,6 +109,7 @@ def _resolve_filter_roles(filter_name: str | None) -> frozenset[str] | None:
 
 
 _MAX_SNAPSHOT_ELEMENTS = 200
+_MAX_WALK_DEPTH = 50
 
 
 # §7.2 v2 format — depth indent is capped so a 50-deep DOM doesn't
@@ -264,53 +266,37 @@ _MODAL_SELECTOR = (
 )
 
 
-# ── JS-based accessibility tree builder ──────────────────────────────────
-# Fallback when page.accessibility.snapshot() is unavailable (Camoufox
-# bundles a Playwright version that removed or never exposed the API).
-# Walks the DOM using standard APIs (getAttribute, getComputedStyle) and
-# returns the same {role, name, children, disabled, ...} tree structure
-# that the Python _walk() function expects.
+# Implicit role map — single source of truth shared between the JS a11y
+# walker and the Python-side shadow-path resolver. Tag names are uppercase
+# (matches DOM ``Element.tagName``). Injected into the JS body via
+# ``json.dumps()`` so the JS literally sees this Python dict's contents.
+_IMPLICIT_ROLE_MAP: dict[str, str] = {
+    "BUTTON": "button", "TEXTAREA": "textbox", "SELECT": "combobox",
+    "OPTION": "option",
+    "IMG": "img", "H1": "heading", "H2": "heading", "H3": "heading",
+    "H4": "heading", "H5": "heading", "H6": "heading", "DIALOG": "dialog",
+    "NAV": "navigation", "MAIN": "main", "HEADER": "banner",
+    "FOOTER": "contentinfo",
+    "ASIDE": "complementary", "FORM": "form",
+}
+
+
+# Shared JS source for accessible-name extraction. Injected into BOTH the
+# walker (which produces ``name`` for emitted nodes) and the Stage-2
+# resolver (which matches candidates by name inside a shadowRoot). Single
+# source of truth — if these diverged, an element snapshotted with name
+# from e.g. ``placeholder`` would never re-resolve via Stage 2 and the
+# agent would see spurious ``ref_stale``. Defines two functions:
 #
-# Called as:
-#   page.evaluate(_JS_A11Y_TREE)          — full page tree
-#   element_handle.evaluate(_JS_A11Y_TREE) — scoped to element
-_JS_A11Y_TREE = r"""(rootEl) => {
-    const ACTIONABLE = new Set([
-        'button','link','textbox','checkbox','radio','combobox','searchbox',
-        'slider','spinbutton','switch','tab','menuitem','menuitemcheckbox',
-        'menuitemradio','option','treeitem'
-    ]);
-    const CONTEXT = new Set([
-        'heading','img','dialog','alertdialog','alert',
-        'listbox','tree','grid','toolbar','menu','status'
-    ]);
-    const LANDMARK = new Set([
-        'navigation','main','complementary','banner','contentinfo',
-        'form','region','dialog','alertdialog'
-    ]);
-    // §7.7 includes LANDMARK in the set so ``filter='landmarks'``
-    // works even when ``page.accessibility.snapshot()`` is unavailable
-    // and we fall back to this JS walker. Without LANDMARK in ROLES,
-    // landmark elements collapse to ``role: 'none'`` here and never
-    // reach the Python ``_walk`` even with the right ``allowed_roles``.
-    // Default snapshot output is unaffected: Python ``_walk`` still
-    // gates on ACTIONABLE+CONTEXT unless an explicit filter is passed.
-    const ROLES = new Set([...ACTIONABLE, ...CONTEXT, ...LANDMARK]);
-    const IMPLICIT = {
-        BUTTON:'button',TEXTAREA:'textbox',SELECT:'combobox',OPTION:'option',
-        IMG:'img',H1:'heading',H2:'heading',H3:'heading',
-        H4:'heading',H5:'heading',H6:'heading',DIALOG:'dialog',
-        NAV:'navigation',MAIN:'main',HEADER:'banner',FOOTER:'contentinfo',
-        ASIDE:'complementary',FORM:'form'
-    };
-    const INPUT_ROLES = {
-        text:'textbox',email:'textbox',url:'textbox',tel:'textbox',
-        password:'textbox',search:'searchbox',
-        checkbox:'checkbox',radio:'radio',
-        range:'slider',number:'spinbutton',
-        submit:'button',reset:'button',button:'button'
-    };
-    function getRole(el) {
+#   implicitRoleFor(el)              — implicit ARIA role mapping
+#   accessibleName(el, role)         — same priority chain as W3C ACCNAME:
+#       aria-label → aria-labelledby → label[for=] / wrapping <label>
+#       → alt (img) → placeholder/title (input/textarea/select)
+#       → textContent for name-from-content roles → title fallback
+#
+# IMPLICIT and INPUT_ROLES must already be in scope at the injection site.
+_JS_NAME_HELPERS = r"""
+    function implicitRoleFor(el) {
         const r = el.getAttribute('role');
         if (r) return r.split(/\s+/)[0].toLowerCase();
         if (el.tagName === 'A') return el.hasAttribute('href') ? 'link' : null;
@@ -318,13 +304,15 @@ _JS_A11Y_TREE = r"""(rootEl) => {
         if (el.getAttribute('contenteditable') === 'true') return 'textbox';
         return IMPLICIT[el.tagName] || null;
     }
-    function getName(el, role) {
+    function accessibleName(el, role) {
         let n = el.getAttribute('aria-label');
         if (n) return n.trim();
         const by = el.getAttribute('aria-labelledby');
         if (by) {
+            const root = el.getRootNode();
+            const lookup = (root && root.getElementById) ? root : document;
             const t = by.split(/\s+/).map(id => {
-                const ref = document.getElementById(id);
+                const ref = lookup.getElementById ? lookup.getElementById(id) : document.getElementById(id);
                 return ref ? ref.textContent.trim() : '';
             }).filter(Boolean).join(' ');
             if (t) return t;
@@ -332,7 +320,9 @@ _JS_A11Y_TREE = r"""(rootEl) => {
         if (el.tagName === 'IMG') return (el.alt || '').trim();
         if (['INPUT','TEXTAREA','SELECT'].includes(el.tagName)) {
             if (el.id) {
-                const lbl = document.querySelector('label[for="' + CSS.escape(el.id) + '"]');
+                const root = el.getRootNode();
+                const scope = (root && root.querySelector) ? root : document;
+                const lbl = scope.querySelector('label[for="' + CSS.escape(el.id) + '"]');
                 if (lbl) return lbl.textContent.trim().slice(0, 200);
             }
             const wrap = el.closest('label');
@@ -353,8 +343,124 @@ _JS_A11Y_TREE = r"""(rootEl) => {
         }
         return (el.title || '').trim();
     }
+"""
+
+
+def _build_js_a11y_tree() -> str:
+    """Build the JS a11y walker source with the implicit role map injected.
+
+    The walker descends ``el.shadowRoot`` when ``shadowRoot.mode === 'open'``
+    (closed roots are unreachable per the spec). Each emitted node carries
+    a ``shadow_path`` array; on the page side this is empty for light-DOM
+    nodes and accumulates ``{selector, occurrence, discriminator}`` triples
+    as the walker crosses shadow boundaries.
+
+    Discriminator priority: ``data-testid`` > stable ``id`` (UUID-shaped
+    rejected) > structural fingerprint of host (tagName + className +
+    childElementCount). Always a string — ``ShadowHop.discriminator`` is
+    guaranteed non-empty by the JS side.
+    """
+    implicit_json = json.dumps(_IMPLICIT_ROLE_MAP)
+    return r"""((rootEl) => {
+    const MAX_WALK_DEPTH = __MAX_WALK_DEPTH__;
+    const ACTIONABLE = new Set([
+        'button','link','textbox','checkbox','radio','combobox','searchbox',
+        'slider','spinbutton','switch','tab','menuitem','menuitemcheckbox',
+        'menuitemradio','option','treeitem'
+    ]);
+    const CONTEXT = new Set([
+        'heading','img','dialog','alertdialog','alert',
+        'listbox','tree','grid','toolbar','menu','status'
+    ]);
+    const LANDMARK = new Set([
+        'navigation','main','complementary','banner','contentinfo',
+        'form','region','dialog','alertdialog'
+    ]);
+    const ROLES = new Set([...ACTIONABLE, ...CONTEXT, ...LANDMARK]);
+    const IMPLICIT = __IMPLICIT_ROLE_MAP__;
+    const INPUT_ROLES = {
+        text:'textbox',email:'textbox',url:'textbox',tel:'textbox',
+        password:'textbox',search:'searchbox',
+        checkbox:'checkbox',radio:'radio',
+        range:'slider',number:'spinbutton',
+        submit:'button',reset:'button',button:'button'
+    };
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const REACT_ID_RE = /^(:r|r:|:R)[0-9a-zA-Z]+:?$/;
+    function isStableId(id) {
+        if (!id) return false;
+        if (UUID_RE.test(id)) return false;
+        if (REACT_ID_RE.test(id)) return false;
+        if (id.length >= 16 && /^[0-9a-f]+$/i.test(id)) return false;
+        return true;
+    }
+    function bestStableId(el) {
+        const t = el.getAttribute('data-testid')
+            || el.getAttribute('data-test')
+            || el.getAttribute('data-qa');
+        if (t) return 'testid:' + t;
+        const id = el.getAttribute('id');
+        if (id && isStableId(id)) return 'id:' + id;
+        // Structural fingerprint excludes class/style/data-* —
+        // those flip on hover/focus/aria-state and would break the
+        // discriminator across snapshots. tagName + childElementCount
+        // + sorted attribute names (state-free subset) is stable.
+        const attrNames = [];
+        for (const a of el.attributes) {
+            const n = a.name;
+            if (n === 'class' || n === 'style') continue;
+            if (n.startsWith('data-')) continue;
+            attrNames.push(n);
+        }
+        attrNames.sort();
+        const fp = el.tagName + '|' + (el.childElementCount || 0)
+            + '|' + attrNames.join(',');
+        return 'fp:' + fp;
+    }
+    function cssPath(host) {
+        const tag = host.tagName.toLowerCase();
+        const id = host.getAttribute('id');
+        if (id && isStableId(id)) return tag + '#' + CSS.escape(id);
+        const t = host.getAttribute('data-testid');
+        if (t) return tag + '[data-testid="' + t.replace(/"/g, '\\"') + '"]';
+        return tag;
+    }
+    // Walk-scoped cache for ``querySelectorAll`` results so a page with
+    // N shadow hosts at the same root no longer triggers O(N²) work
+    // (each emit ran a fresh ``scopeRoot.querySelectorAll(selector)``).
+    // Keyed by (scopeRoot, selector); both keys are alive only for the
+    // duration of one walker invocation. ``Map`` keyed on the live
+    // root reference is safe because the walker runs synchronously
+    // and the scopeRoot is held by caller frames during the walk.
+    const occurrenceCache = new Map();
+    function siblingOccurrence(host, selector, scopeRoot) {
+        // Per-hop scope mirrors the stage-1 resolver: first hop uses
+        // ``document``, subsequent hops use the parent ``shadowRoot``
+        // (since stage-1 walks ``root = host.shadowRoot`` after each
+        // hop and queries ``root.querySelectorAll(hop.selector)``).
+        // Walker passes ``document`` for the top-level call and the
+        // parent shadowRoot when descending into a nested host.
+        const root = scopeRoot || document;
+        let scopeMap = occurrenceCache.get(root);
+        if (!scopeMap) {
+            scopeMap = new Map();
+            occurrenceCache.set(root, scopeMap);
+        }
+        let candidates = scopeMap.get(selector);
+        if (!candidates) {
+            candidates = Array.from(root.querySelectorAll(selector));
+            scopeMap.set(selector, candidates);
+        }
+        const idx = candidates.indexOf(host);
+        return idx === -1 ? 0 : idx;
+    }
+__NAME_HELPERS__
+    // Walker name/role wrappers — single source of truth shared with
+    // the stage-2 resolver.
+    const getRole = implicitRoleFor;
+    const getName = accessibleName;
     function isVisible(el) {
-        if (el.getAttribute('aria-hidden') === 'true') return false;
+        if (el.getAttribute && el.getAttribute('aria-hidden') === 'true') return false;
         const s = getComputedStyle(el);
         if (s.visibility === 'hidden' || s.visibility === 'collapse') return false;
         if (parseFloat(s.opacity) === 0) return false;
@@ -364,8 +470,8 @@ _JS_A11Y_TREE = r"""(rootEl) => {
         }
         return true;
     }
-    function walk(el, d, parentLandmark) {
-        if (d > 50 || !el || el.nodeType !== 1) return null;
+    function walk(el, d, parentLandmark, shadowPath, currentRoot) {
+        if (d > MAX_WALK_DEPTH || !el || el.nodeType !== 1) return null;
         const tag = el.tagName;
         if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT' || tag === 'TEMPLATE')
             return null;
@@ -378,8 +484,24 @@ _JS_A11Y_TREE = r"""(rootEl) => {
         }
         const children = [];
         for (const child of el.children) {
-            const r = walk(child, d + 1, childLandmark);
+            const r = walk(child, d + 1, childLandmark, shadowPath, currentRoot);
             if (r) children.push(r);
+        }
+        if (el.shadowRoot && el.shadowRoot.mode === 'open') {
+            const sel = cssPath(el);
+            // Scope occurrence to ``currentRoot`` (document for the
+            // first hop, parent shadowRoot for subsequent hops). Mirrors
+            // stage-1 resolver scope so nested hosts index identically
+            // on both sides.
+            const occ = siblingOccurrence(el, sel, currentRoot);
+            const disc = bestStableId(el);
+            const nextPath = shadowPath.concat([{
+                selector: sel, occurrence: occ, discriminator: disc,
+            }]);
+            for (const child of el.shadowRoot.children) {
+                const r = walk(child, d + 1, childLandmark, nextPath, el.shadowRoot);
+                if (r) children.push(r);
+            }
         }
         if (!role || !ROLES.has(role)) {
             if (!children.length) return null;
@@ -387,6 +509,7 @@ _JS_A11Y_TREE = r"""(rootEl) => {
             return { role: 'none', name: '', children };
         }
         const nd = { role, name: getName(el, role) };
+        if (shadowPath.length) nd.shadow_path = shadowPath;
         if (parentLandmark) nd.landmark = parentLandmark;
         if (el.disabled || el.getAttribute('aria-disabled') === 'true') nd.disabled = true;
         const chkRoles = ['checkbox','radio','switch','menuitemcheckbox','menuitemradio'];
@@ -405,13 +528,190 @@ _JS_A11Y_TREE = r"""(rootEl) => {
         return nd;
     }
     const start = rootEl || document.body || document.documentElement;
-    const tree = walk(start, 0, null);
+    const tree = walk(start, 0, null, [], document);
     if (rootEl) return tree || { role: 'none', name: '', children: [] };
     if (!tree) return { role: 'WebArea', name: document.title || '', children: [] };
     if (tree.role === 'none')
         return { role: 'WebArea', name: document.title || '', children: tree.children || [] };
     return { role: 'WebArea', name: document.title || '', children: [tree] };
+})""".replace(
+        "__NAME_HELPERS__", _JS_NAME_HELPERS,
+    ).replace(
+        "__IMPLICIT_ROLE_MAP__", implicit_json,
+    ).replace(
+        "__MAX_WALK_DEPTH__", str(_MAX_WALK_DEPTH),
+    )
+
+
+# ── JS-based accessibility tree builder ──────────────────────────────────
+# Fallback when page.accessibility.snapshot() is unavailable (Camoufox
+# bundles a Playwright version that removed or never exposed the API).
+# Walks the DOM using standard APIs (getAttribute, getComputedStyle) and
+# returns the same {role, name, children, disabled, ...} tree structure
+# that the Python _walk() function expects.
+#
+# Descends ``el.shadowRoot`` when ``shadowRoot.mode === 'open'``; closed
+# shadow roots are unreachable by web spec and remain invisible. Emitted
+# nodes inside shadow DOM carry a ``shadow_path`` array of
+# ``{selector, occurrence, discriminator}`` hops that the Python side
+# folds into ``RefHandle.shadow_path`` for resolution.
+#
+# Called as:
+#   page.evaluate(_JS_A11Y_TREE)          — full page tree
+#   element_handle.evaluate(_JS_A11Y_TREE) — scoped to element
+_JS_A11Y_TREE = _build_js_a11y_tree()
+
+
+# Stage-1 (walk shadow_path → return inner shadowRoot) and Stage-2
+# (role+name match inside that shadowRoot → ElementHandle) for the
+# Playwright-correct two-stage shadow resolver. ``get_by_role`` does NOT
+# pierce shadow boundaries, so non-empty ``shadow_path`` falls through
+# this evaluate_handle pair instead of the locator API.
+# Sentinel key for stage-1 errors. Uses a unique prefixed name rather than
+# bare ``error`` so a page that happens to set ``shadowRoot.error = 'foo'``
+# (or any expando the page might attach) cannot masquerade as a resolver
+# error. Stage-2 also rejects any rooted shadow root carrying this key as
+# an expando — defence-in-depth, since the property is on a ShadowRoot
+# object that the page does not normally write to.
+_JS_RESOLVER_ERROR_KEY = "__OL_RESOLVER_ERROR__"
+
+_JS_SHADOW_RESOLVE_STAGE1 = r"""(args) => {
+    const ERR_KEY = "__OL_RESOLVER_ERROR__";
+    const path = JSON.parse(args.path);
+    // ``scope_root`` (optional): when the ref was captured during a
+    // modal-scoped snapshot, ``_locator_from_ref`` patches a modal
+    // selector onto the handle. Stage-1 must start its walk at the
+    // modal element instead of ``document`` so a same-selector shadow
+    // host living *outside* the dialog cannot match. Without this,
+    // shadow refs effectively bypass modal scoping, and clicks could
+    // land on a duplicate-named element behind the overlay.
+    let root;
+    if (args.scope_root) {
+        root = document.querySelector(args.scope_root);
+        if (!root) {
+            const e = {}; e[ERR_KEY] = "scope_root_missing"; return e;
+        }
+    } else {
+        root = document;
+    }
+    for (const hop of path) {
+        const candidates = root.querySelectorAll(hop.selector);
+        const host = candidates[hop.occurrence];
+        if (!host || !host.shadowRoot) {
+            const e = {}; e[ERR_KEY] = "stale_host_missing"; return e;
+        }
+        function isStableId(id) {
+            if (!id) return false;
+            if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) return false;
+            if (/^(:r|r:|:R)[0-9a-zA-Z]+:?$/.test(id)) return false;
+            if (id.length >= 16 && /^[0-9a-f]+$/i.test(id)) return false;
+            return true;
+        }
+        function bestStableId(el) {
+            const t = el.getAttribute('data-testid')
+                || el.getAttribute('data-test')
+                || el.getAttribute('data-qa');
+            if (t) return 'testid:' + t;
+            const id = el.getAttribute('id');
+            if (id && isStableId(id)) return 'id:' + id;
+            const attrNames = [];
+            for (const a of el.attributes) {
+                const n = a.name;
+                if (n === 'class' || n === 'style') continue;
+                if (n.startsWith('data-')) continue;
+                attrNames.push(n);
+            }
+            attrNames.sort();
+            const fp = el.tagName + '|' + (el.childElementCount || 0)
+                + '|' + attrNames.join(',');
+            return 'fp:' + fp;
+        }
+        const got = bestStableId(host);
+        if (got !== hop.discriminator) {
+            const e = {}; e[ERR_KEY] = "stale_discriminator_mismatch"; return e;
+        }
+        root = host.shadowRoot;
+    }
+    return root;
 }"""
+
+
+def _build_js_shadow_resolve_stage2() -> str:
+    """Stage-2 resolver: pick the role+name match at ``occurrence`` inside
+    the ShadowRoot stage-1 returned.
+
+    Uses the SAME ``accessibleName(el, role)`` helper as the walker
+    (injected via ``__NAME_HELPERS__``). If the two diverged, an element
+    snapshotted with name from e.g. ``placeholder=Search`` would never
+    match Stage 2 here and the agent would see spurious ``ref_stale``.
+    Defence-in-depth against page-controlled expandos: rejects any
+    ``root`` carrying the resolver-error sentinel even if the call site
+    forgot to pre-check it.
+    """
+    implicit_json = json.dumps(_IMPLICIT_ROLE_MAP)
+    return r"""((root, args) => {
+    const ERR_KEY = "__OL_RESOLVER_ERROR__";
+    // TOCTOU sentinel distinct from null/undefined: caller maps this to
+    // RefStale (transient — shadow root detached between stage 1 and
+    // stage 2 evaluate_handle calls). A bare null result, by contrast,
+    // means stage 2 ran successfully but the element isn't at the
+    // requested occurrence inside an otherwise-live shadow root —
+    // that's a real "element vanished" condition.
+    if (!root) {
+        const e = {}; e[ERR_KEY] = "shadow_root_detached"; return e;
+    }
+    if (typeof root === 'object' && ERR_KEY in root) {
+        // Stage-1 already errored out; surface the same sentinel so the
+        // caller can distinguish from an element-not-found null.
+        return root;
+    }
+    const role = args.role;
+    const name = args.name;
+    const occurrence = args.occurrence;
+    const IMPLICIT = __IMPLICIT_ROLE_MAP__;
+    const INPUT_ROLES = {
+        text:'textbox',email:'textbox',url:'textbox',tel:'textbox',
+        password:'textbox',search:'searchbox',
+        checkbox:'checkbox',radio:'radio',
+        range:'slider',number:'spinbutton',
+        submit:'button',reset:'button',button:'button'
+    };
+__NAME_HELPERS__
+    // Normalize the snapshot-time name so the empty case is unambiguous:
+    // the walker buckets unnamed siblings as ``(role, "", path)``. Stage 2
+    // must match elements whose live accessible name is *also* empty when
+    // the ref carries an empty name — otherwise unnamed elements collapse
+    // with same-role *named* siblings (the previous ``if (!name) return
+    // true;`` admitted all same-role candidates, returning candidates[0]
+    // and landing the click on the wrong element).
+    const expected = (name || '').trim();
+    let candidates;
+    try {
+        candidates = Array.from(root.querySelectorAll('*')).filter(el => {
+            const r = implicitRoleFor(el);
+            if (r !== role) return false;
+            // Match using the SAME accessible-name extraction the walker
+            // ran when emitting the snapshot. Anything else (e.g. only
+            // ``aria-label || textContent``) misses elements named via
+            // ``placeholder``, ``alt``, ``aria-labelledby``, ``label[for=]``,
+            // or ``title`` — producing spurious RefStale.
+            const n = (accessibleName(el, role) || '').trim();
+            return n === expected;
+        });
+    } catch (_e) {
+        // ``querySelectorAll`` on a detached ShadowRoot can throw. Treat
+        // as a transient detach rather than an element-not-found.
+        const e = {}; e[ERR_KEY] = "shadow_root_detached"; return e;
+    }
+    return candidates[occurrence] || null;
+})""".replace(
+        "__NAME_HELPERS__", _JS_NAME_HELPERS,
+    ).replace(
+        "__IMPLICIT_ROLE_MAP__", implicit_json,
+    )
+
+
+_JS_SHADOW_RESOLVE_STAGE2 = _build_js_shadow_resolve_stage2()
 
 
 def _short_ua(ua: str) -> str:
@@ -744,7 +1044,11 @@ class CamoufoxInstance:
         self.dialog_detected: bool = False  # True when a modal was found (even if scoping failed)
         self.lock = asyncio.Lock()  # serialize page operations per instance
         self.x11_wid: int | None = None  # X11 window ID for targeted focus
-        self._js_snapshot_mode: bool = False  # True after page.accessibility permanently fails
+        # P0.3: vestigial — the snapshot tree builder always uses the JS
+        # walker now. Still consulted by ``navigate()`` for body-text
+        # extraction, where the native ``page.accessibility.snapshot()``
+        # is acceptable (no shadow descent needed for a text summary).
+        self._js_snapshot_mode: bool = False
         self._user_control: bool = False  # True when user has VNC control
         # Per-Page stable UUID maps. Page objects survive navigation within a
         # tab; UUIDs are stable for the life of the Page. Refs carry a
@@ -1900,49 +2204,33 @@ class BrowserManager:
                 return {"success": False, "error": str(e)}
 
     async def _build_a11y_tree(self, inst: CamoufoxInstance, root=None):
-        """Get accessibility tree, falling back to JS-based DOM walk.
+        """Get accessibility tree via the JS DOM walker.
 
-        Playwright's ``page.accessibility.snapshot()`` uses Firefox's native
-        ``nsIAccessibilityService`` — a browser-internal API with zero
-        JavaScript execution in the page context.  This makes it invisible
-        to anti-bot systems that hook DOM APIs via Proxy.
+        Phase 5 §8.3 collapsed the prior "native first / JS fallback"
+        dispatch into the JS walker as the sole path. Firefox's native
+        ``nsIAccessibilityService`` (exposed through Playwright's
+        ``page.accessibility.snapshot()``) is faster and more invisible
+        to anti-bot DOM proxies, but it does NOT pierce open shadow
+        boundaries — so a default Camoufox path silently lost shadow
+        content. Phase 5 (shadow + iframe support) made the JS walker
+        the canonical implementation, and the native path was retained
+        only as a perf optimisation; with shadow descent baked into the
+        JS walker, dual paths produced inconsistent snapshots depending
+        on which path won the race.
 
-        If the API is absent (``AttributeError``), permanently switches to
-        a JS-based tree builder per-instance.  Transient failures get one
-        retry before falling through to JS.
+        Always runs the JS walker now, regardless of the (now-vestigial)
+        ``inst._js_snapshot_mode`` flag. The flag remains in
+        :class:`CamoufoxInstance` for the navigate-mode body extraction
+        path that still consults ``page.accessibility.snapshot()`` for a
+        cheap text-only summary; that path is independent of the
+        snapshot tree builder.
         """
-        if not inst._js_snapshot_mode:
-            for attempt in range(2):
-                try:
-                    if root:
-                        return await inst.page.accessibility.snapshot(root=root)
-                    return await inst.page.accessibility.snapshot()
-                except AttributeError:
-                    logger.warning(
-                        "page.accessibility not available for %s — "
-                        "switching to JS-based accessibility tree",
-                        inst.agent_id,
-                    )
-                    inst._js_snapshot_mode = True
-                    break
-                except Exception:
-                    if attempt == 0:
-                        await asyncio.sleep(0.15)
-                        continue
-                    logger.warning(
-                        "page.accessibility.snapshot() failed after retry "
-                        "for %s — falling back to JS tree",
-                        inst.agent_id,
-                    )
-                    break
-
-        # JS fallback: walk DOM to build equivalent tree
         try:
             if root:
                 return await root.evaluate(_JS_A11Y_TREE)
             return await inst.page.evaluate(_JS_A11Y_TREE)
         except Exception as e:
-            logger.debug("JS a11y tree fallback failed: %s", e)
+            logger.debug("JS a11y tree builder failed: %s", e)
             return None
 
     async def snapshot(
@@ -2058,8 +2346,8 @@ class BrowserManager:
                 # contract every other ref-using path follows; surface as
                 # ref_stale so the agent re-snapshots.
                 try:
-                    locator = self._locator_from_ref(inst, from_ref)
-                    if locator is None:
+                    handle_or_loc = await self._locator_from_ref(inst, from_ref)
+                    if handle_or_loc is None:
                         return {
                             "success": False,
                             "error": {
@@ -2068,7 +2356,12 @@ class BrowserManager:
                                 "retry_after_ms": None,
                             },
                         }
-                    scoped_root_handle = await locator.element_handle(timeout=2000)
+                    if hasattr(handle_or_loc, "element_handle"):
+                        scoped_root_handle = await handle_or_loc.element_handle(
+                            timeout=2000,
+                        )
+                    else:
+                        scoped_root_handle = handle_or_loc
                 except RefStale as e:
                     return {
                         "success": False,
@@ -2110,8 +2403,6 @@ class BrowserManager:
             # disambiguate duplicate elements (e.g. X's two composer nodes).
             occurrence_counts: dict[tuple, int] = {}
 
-            _MAX_WALK_DEPTH = 50
-
             # Collect entries for §7.2 v2 rendering AND build v1 lines in
             # parallel. The entry list is a structured intermediate so we
             # can pivot between formats post-walk without a second tree
@@ -2138,7 +2429,22 @@ class BrowserManager:
                         ref_id = f"e{ref_counter[0]}"
                         ref_counter[0] += 1
 
-                        key = (role, name)
+                        # Materialize shadow_path NOW so the occurrence
+                        # key folds it: stage-2 picks candidates inside
+                        # one shadow root, so two same-named elements in
+                        # different roots must not share an occurrence
+                        # counter (would index past stage-2's candidates
+                        # array → spurious RefStale).
+                        raw_shadow = node.get("shadow_path") or ()
+                        shadow_hops: tuple[ShadowHop, ...] = tuple(
+                            ShadowHop(
+                                selector=str(hop.get("selector", "")),
+                                occurrence=int(hop.get("occurrence", 0)),
+                                discriminator=str(hop.get("discriminator", "")),
+                            )
+                            for hop in raw_shadow
+                        )
+                        key = (role, name, shadow_hops)
                         occ = occurrence_counts.get(key, 0)
                         occurrence_counts[key] = occ + 1
 
@@ -2189,33 +2495,43 @@ class BrowserManager:
                         #   reported as a remove+add pair instead of
                         #   "unchanged". Same fix: data-testid extraction.
                         from src.browser.ref_handle import compute_element_key
-                        # frame_id / shadow_path are folded in even though
-                        # they're constant defaults today (no iframe walker
-                        # until §8.4, no shadow walker until §8.3). Keeping
-                        # the kwargs explicit at this site means the §4.2
-                        # promise — "same role+name+landmark in different
-                        # frames / shadow roots get DIFFERENT keys" —
-                        # holds the moment the walkers start populating
-                        # those fields. No code change needed there.
+                        # ``shadow_hops`` already materialized above so
+                        # the occurrence key could fold it. frame_id
+                        # stays constant today (no iframe walker until
+                        # §8.4). ``compute_element_key`` folds both so
+                        # identical role+name+landmark in distinct
+                        # shadow roots produce different element_keys.
                         elem_key = compute_element_key(
                             role=role, name=name, landmark=landmark,
                             sibling_index=occ,
                             frame_id=None,
-                            shadow_path=(),
+                            shadow_path=shadow_hops,
                         )
                         # scope_root is finalized after the modal-scoping
                         # branch below. For now record the unscoped handle;
                         # we overwrite scope_root once we know the final
                         # dialog_active state (see scope-root patching below).
-                        refs[ref_id] = RefHandle.light_dom(
-                            page_id=snapshot_page_id,
-                            scope_root=None,
-                            role=role,
-                            name=name,
-                            occurrence=occ,
-                            disabled=bool(node.get("disabled")),
-                            element_key=elem_key,
-                        )
+                        if shadow_hops:
+                            refs[ref_id] = RefHandle.shadow(
+                                page_id=snapshot_page_id,
+                                scope_root=None,
+                                shadow_path=shadow_hops,
+                                role=role,
+                                name=name,
+                                occurrence=occ,
+                                disabled=bool(node.get("disabled")),
+                                element_key=elem_key,
+                            )
+                        else:
+                            refs[ref_id] = RefHandle.light_dom(
+                                page_id=snapshot_page_id,
+                                scope_root=None,
+                                role=role,
+                                name=name,
+                                occurrence=occ,
+                                disabled=bool(node.get("disabled")),
+                                element_key=elem_key,
+                            )
                         # Diff-mode summary — keyed by element_key so the
                         # next snapshot can match across re-renders that
                         # change ref ids. A duplicate key inside one
@@ -2573,32 +2889,33 @@ class BrowserManager:
         except Exception:
             return False
 
-    def _locator_from_ref(self, inst: CamoufoxInstance, ref: str):
-        """Build a Playwright locator from a stored RefHandle.
+    async def _locator_from_ref(self, inst: CamoufoxInstance, ref: str):
+        """Build a Playwright locator (or ElementHandle) from a stored RefHandle.
 
         Resolution order (§4.2):
             1. ``page_id`` → Page object (raises :class:`RefStale` if the
                tab has closed).
-            2. ``frame_id`` → Frame (None = main frame).  Always None in
-               v1.2; populated by §8.4 iframe traversal.
+            2. ``frame_id`` → Frame (None = main frame).  Always None
+               until §8.4 iframe traversal.
             3. ``scope_root`` — modal selector bound during snapshot, so
                occurrence indices match.
-            4. ``shadow_path`` — walk through open shadow roots.  Empty in
-               v1.2; populated by §8.3 shadow DOM walker.
+            4. ``shadow_path`` — walk open shadow roots via the
+               §8.3 two-stage ``evaluate_handle`` pattern. Returns an
+               :class:`ElementHandle` rather than a ``Locator`` because
+               ``get_by_role`` does not pierce shadow boundaries.
             5. ``get_by_role(role, name=name, exact=True).nth(occurrence)``.
 
         Returns ``None`` when ``ref`` isn't in ``inst.refs`` (classic
         not-found).  Raises :class:`RefStale` when the ref points to a
-        closed tab — caller should report ``ref_stale`` to the agent so
-        it knows to re-snapshot rather than retry.
+        closed tab, a missing shadow host, or a discriminator mismatch —
+        callers should report ``ref_stale`` so the agent re-snapshots.
         """
         handle = inst.refs.get(ref)
         if handle is None:
             return None
-        # Resolve Page; may raise RefStale.
         page = inst._resolve_page_id(handle.page_id)
-        # v1.2: frame/shadow always empty — light DOM, main frame. Those
-        # branches activate in §8.3 / §8.4.
+        if handle.shadow_path:
+            return await self._resolve_shadow_element(page, handle, ref)
         base = page
         if handle.scope_root:
             base = page.locator(handle.scope_root)
@@ -2607,6 +2924,137 @@ class BrowserManager:
         else:
             locator = base.get_by_role(handle.role)
         return locator.nth(handle.occurrence)
+
+    async def _resolve_shadow_element(self, page, handle: RefHandle, ref: str):
+        """Two-stage resolver for refs whose ``shadow_path`` is non-empty.
+
+        Stage 1 walks the path to the inner ``shadowRoot``, verifying
+        each host's discriminator. Stage 2 picks the role+name match at
+        the requested occurrence inside that root. Either stage can
+        raise :class:`RefStale` when the DOM has shifted since snapshot.
+
+        Error taxonomy:
+
+        * Stage-1 ``stale_host_missing``      → RefStale (host removed).
+        * Stage-1 ``stale_discriminator_mismatch`` → RefStale (host swapped).
+        * Stage-2 ``shadow_root_detached``    → RefStale (TOCTOU between
+          stage 1 succeeding and stage 2 running).
+        * Stage-2 returns null                → RefStale (element no
+          longer present at the requested occurrence inside an otherwise
+          live shadow root).
+
+        Errors are signaled via a unique ``__OL_RESOLVER_ERROR__`` key
+        rather than a plain ``error`` property so a page that happens to
+        attach an ``error`` expando to a ShadowRoot cannot masquerade as
+        a resolver failure.
+        """
+        path_payload = [
+            {
+                "selector": hop.selector,
+                "occurrence": hop.occurrence,
+                "discriminator": hop.discriminator,
+            }
+            for hop in handle.shadow_path
+        ]
+        # Defensive: shadow + iframe combination is not implemented yet
+        # (Phase 5 PR3). Threading a Frame through Stage 1 here would
+        # require cross-PR coordination; explicit error makes the seam
+        # loud so PR3's merge has to address it rather than letting a
+        # frame_id'd shadow ref silently resolve against the main frame.
+        if handle.frame_id is not None:
+            raise NotImplementedError(
+                "Shadow + iframe combination not yet supported",
+            )
+        # Pass scope_root through so Stage 1 starts its walk inside the
+        # modal subtree when a ref was captured under modal scoping.
+        # Without this, a same-selector shadow host living outside the
+        # dialog could resolve and the click would land on the wrong
+        # element entirely.
+        stage1 = await page.evaluate_handle(
+            _JS_SHADOW_RESOLVE_STAGE1,
+            {
+                "path": json.dumps(path_payload),
+                "scope_root": handle.scope_root,
+            },
+        )
+        # Stage 1 is a JSHandle that we OWN — Playwright does not GC
+        # JSHandles automatically (they pin the JS object on the page
+        # side). Wrap the entire stage-2 invocation in a try/finally so
+        # discriminator-mismatch / detach / RefStale paths don't leak
+        # the handle. Stage 2 is returned to the caller as an
+        # ElementHandle on success; ownership transfers there. On any
+        # failure path we dispose stage2 ourselves before raising so
+        # neither handle outlives this method.
+        stage2 = None
+        try:
+            # Read the stage-1 error sentinel by exact key. Page-
+            # controlled ``error`` expandos cannot match because we look
+            # up ``__OL_RESOLVER_ERROR__`` specifically.
+            try:
+                err = await stage1.evaluate(
+                    "(v) => (v && typeof v === 'object' && '__OL_RESOLVER_ERROR__' in v)"
+                    " ? v.__OL_RESOLVER_ERROR__ : null",
+                )
+            except Exception:
+                err = None
+            if err == "stale_host_missing":
+                raise RefStale("shadow host missing", ref=ref)
+            if err == "stale_discriminator_mismatch":
+                raise RefStale("shadow host discriminator changed", ref=ref)
+            if err == "scope_root_missing":
+                # Modal closed between snapshot and resolve — same RefStale
+                # contract as a missing host. Agent re-snapshots.
+                raise RefStale("modal scope_root missing", ref=ref)
+            stage2 = await stage1.evaluate_handle(
+                _JS_SHADOW_RESOLVE_STAGE2,
+                {
+                    "role": handle.role,
+                    "name": handle.name,
+                    "occurrence": handle.occurrence,
+                },
+            )
+            # Distinguish a detached shadow root (transient TOCTOU between
+            # stage 1 and stage 2) from a genuine element-not-found. The
+            # detached case surfaces as the ``shadow_root_detached``
+            # sentinel so the caller emits a transient ``ref_stale``
+            # rather than a potentially-misleading ``not_found``.
+            try:
+                stage2_err = await stage2.evaluate(
+                    "(v) => (v && typeof v === 'object' && '__OL_RESOLVER_ERROR__' in v)"
+                    " ? v.__OL_RESOLVER_ERROR__ : null",
+                )
+            except Exception:
+                stage2_err = None
+            if stage2_err == "shadow_root_detached":
+                raise RefStale("shadow root detached during resolve", ref=ref)
+            element = stage2.as_element()
+            if element is None:
+                raise RefStale(
+                    "shadow element not found at occurrence", ref=ref,
+                )
+            # Success — ownership of the underlying handle transfers to
+            # the caller via ``element``. Detach our local ``stage2``
+            # reference so the finally block below does not dispose the
+            # handle out from under the returned ElementHandle.
+            # (``as_element`` returns the same underlying handle, so
+            # disposing ``stage2`` would invalidate ``element`` too.)
+            stage2 = None
+            return element
+        except Exception:
+            # Any error path — dispose stage2 if we got that far. The
+            # outer finally takes care of stage1.
+            if stage2 is not None:
+                try:
+                    await stage2.dispose()
+                except Exception:
+                    pass
+                stage2 = None
+            raise
+        finally:
+            try:
+                await stage1.dispose()
+            except Exception:
+                pass
 
     async def _human_click(self, page, locator, *, force: bool = False,
                            timeout: int = _CLICK_TIMEOUT_MS) -> None:
@@ -3162,7 +3610,7 @@ class BrowserManager:
                             "Auto-force click on disabled %s ref=%s for '%s'",
                             ref_info.role, ref, agent_id,
                         )
-                    locator = self._locator_from_ref(inst, ref)
+                    locator = await self._locator_from_ref(inst, ref)
                     if locator:
                         if inst.x11_wid and self._is_x11_site(inst):
                             try:
@@ -3298,7 +3746,7 @@ class BrowserManager:
         async with inst.lock:
             try:
                 if ref and ref in inst.refs:
-                    locator = self._locator_from_ref(inst, ref)
+                    locator = await self._locator_from_ref(inst, ref)
                     if not locator:
                         return {"success": False, "error": f"Ref '{ref}' not found"}
                     if inst.x11_wid and self._is_x11_site(inst):
@@ -3363,7 +3811,7 @@ class BrowserManager:
                 _use_x11 = bool(inst.x11_wid) and self._is_x11_site(inst)
 
                 if ref and ref in inst.refs:
-                    locator = self._locator_from_ref(inst, ref)
+                    locator = await self._locator_from_ref(inst, ref)
                     if not locator:
                         return {"success": False, "error": f"Ref '{ref}' not found"}
                     if _use_x11:
@@ -3632,7 +4080,7 @@ class BrowserManager:
                 if ref:
                     if ref not in inst.refs:
                         return {"success": False, "error": f"Ref '{ref}' not found in snapshot"}
-                    locator = self._locator_from_ref(inst, ref)
+                    locator = await self._locator_from_ref(inst, ref)
                     if locator:
                         await locator.scroll_into_view_if_needed(timeout=5000)
                         return {"success": True, "data": {"scrolled_to_ref": ref}}
@@ -3815,7 +4263,7 @@ class BrowserManager:
                             "success": False,
                             "error": f"Upload path not found: {p}",
                         }
-                locator = self._locator_from_ref(inst, ref)
+                locator = await self._locator_from_ref(inst, ref)
                 if not locator:
                     return {"success": False, "error": f"Ref '{ref}' not found"}
                 # Race: the click that triggers the chooser must happen
@@ -3860,7 +4308,7 @@ class BrowserManager:
                         "success": False,
                         "error": "User has browser control — action paused",
                     }
-                locator = self._locator_from_ref(inst, ref)
+                locator = await self._locator_from_ref(inst, ref)
                 if not locator:
                     return {"success": False, "error": f"Ref '{ref}' not found"}
 
@@ -3942,7 +4390,7 @@ class BrowserManager:
                     if len(matches) >= 50:
                         truncated = True
                         break
-                    locator = self._locator_from_ref(inst, ref_id)
+                    locator = await self._locator_from_ref(inst, ref_id)
                     in_viewport = False
                     if locator is not None:
                         try:
