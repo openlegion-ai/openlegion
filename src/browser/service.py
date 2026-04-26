@@ -5516,3 +5516,51 @@ class BrowserManager:
                 }
             except Exception as e:
                 return {"success": False, "error": str(e)}
+
+    async def import_cookies(
+        self, agent_id: str, cookies: list[dict],
+    ) -> dict:
+        """Phase 6 §9.2: import operator-supplied cookies into the agent's
+        browser context.
+
+        Invoked by the operator-only dashboard endpoint — agents NEVER
+        call this. Validation, format detection (Playwright vs Netscape),
+        and shape coercion happen upstream in the dashboard helper
+        :func:`_validate_cookies` so this method receives a pre-validated
+        list of Playwright-shaped cookie dicts.
+
+        At-rest leak warning: Firefox stores cookies plaintext in
+        ``cookies.sqlite`` inside the agent profile dir — operators
+        handling high-value sessions must use encrypted volumes or
+        ephemeral profiles (see plan §13 risk register).
+        """
+        if not isinstance(cookies, list):
+            return _err("invalid_input", "cookies must be a list")
+        try:
+            inst = await self.get_or_start(agent_id)
+        except Exception as e:
+            logger.warning(
+                "import_cookies: failed to start browser for '%s': %s",
+                agent_id, e,
+            )
+            return _err("service_unavailable", "Browser unavailable")
+        inst.touch()
+        async with inst.lock:
+            try:
+                # Empty list is a valid no-op (count=0).
+                if cookies:
+                    await inst.context.add_cookies(cookies)
+                return {
+                    "success": True,
+                    "data": {"imported": len(cookies)},
+                }
+            except Exception as e:
+                # Playwright raises various TypeError / ValueError shapes
+                # when a cookie field is malformed. Sanitize so we never
+                # echo a cookie value back in the response. The upstream
+                # validator already rejects malformed entries; this is
+                # defense-in-depth against future Playwright shape changes.
+                msg = str(e)
+                if "value" in msg.lower():
+                    msg = "Playwright rejected cookie shape"
+                return _err("invalid_input", msg)
