@@ -5297,6 +5297,7 @@ class BrowserManager:
     _FILL_FORM_MAX_VALUE_CHARS = 10000
     _FILL_FORM_MAX_LABEL_CHARS = 500
     _FILL_FORM_MAX_FIELDS = 50
+    _FILL_FORM_PREFERRED_ROLES = frozenset({"textbox", "searchbox", "spinbutton"})
 
     @staticmethod
     def _classify_fill_error(exc: Exception) -> str:
@@ -5498,10 +5499,32 @@ class BrowserManager:
                         )
                     continue
 
-                # Pick the first in-viewport match; fall back to first match.
-                pick = next(
-                    (m for m in matches if m.get("in_viewport")),
-                    matches[0],
+                # Prefer fillable controls when the visible label text and
+                # the input's accessible name both match. Snapshot order can
+                # put a <label> before its <input>; picking that label first
+                # would yield a needless not_fillable failure even though the
+                # correct textbox is present in the same match set.
+                def _preferred_match(m: dict) -> bool:
+                    ref_id = m.get("ref")
+                    handle = inst.refs.get(ref_id)
+                    role = (getattr(handle, "role", "") or "").lower()
+                    disabled = bool(getattr(handle, "disabled", False))
+                    return (
+                        role in self._FILL_FORM_PREFERRED_ROLES
+                        and not disabled
+                    )
+
+                pick = (
+                    next(
+                        (
+                            m for m in matches
+                            if m.get("in_viewport") and _preferred_match(m)
+                        ),
+                        None,
+                    )
+                    or next((m for m in matches if _preferred_match(m)), None)
+                    or next((m for m in matches if m.get("in_viewport")), None)
+                    or matches[0]
                 )
                 ref = pick.get("ref")
 
@@ -5583,13 +5606,14 @@ class BrowserManager:
                         submitted=submitted,
                     )
 
-            # 3) Final submit — only if no captcha interrupted us. Top-level
-            #    submit_after presses Enter on the LAST filled field's
-            #    locator. If no field was successfully filled (all
-            #    not_found / type_failed) we have no anchor to press Enter
-            #    on, so submitted stays whatever it was (False unless a
-            #    per-field submit fired earlier in the same call).
-            if submit_after and last_locator is not None:
+            all_filled = all(f.get("status") == "filled" for f in filled)
+            # 3) Final submit — only if no captcha interrupted us AND every
+            #    requested field was filled. Top-level submit_after is the
+            #    "submit the completed form" affordance; submitting after a
+            #    not_found/type_failed field would send partial data without
+            #    the caller explicitly opting into that via per-field
+            #    submit_after.
+            if submit_after and last_locator is not None and all_filled:
                 try:
                     await last_locator.press("Enter")
                     submitted = True
@@ -5599,9 +5623,7 @@ class BrowserManager:
                         agent_id, e,
                     )
 
-            partial = any(
-                f.get("status") != "filled" for f in filled
-            )
+            partial = not all_filled
             return {
                 "success": True,
                 "data": {

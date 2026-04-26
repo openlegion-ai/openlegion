@@ -315,6 +315,40 @@ class TestFillFormFieldFailures:
         assert loc.fill.await_count == 1
 
     @pytest.mark.asyncio
+    async def test_prefers_textbox_over_matching_label_text(self):
+        """When both a label element and its textbox match, fill textbox."""
+        mgr = _make_manager()
+        refs = {
+            # DOM/snapshot order often sees the visible <label> first.
+            "e0": {"role": "text", "name": "Email", "index": 0, "disabled": False},
+            "e1": {"role": "textbox", "name": "Email", "index": 0, "disabled": False},
+        }
+        inst = _make_instance(refs)
+        label_loc = _make_locator(raise_on_fill=RuntimeError("not fillable"))
+        input_loc = _make_locator()
+
+        async def fake_locator(self_mgr, _inst, ref_id):
+            if ref_id == "e0":
+                return label_loc
+            return input_loc
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst), \
+             patch.object(BrowserManager, "_locator_from_ref", new=fake_locator), \
+             patch.object(BrowserManager, "_check_captcha",
+                          new_callable=AsyncMock, return_value=None), \
+             patch.object(BrowserManager, "_snapshot_impl", new=_fake_snapshot):
+            result = await mgr.fill_form(
+                "agent1",
+                [{"label": "Email", "value": "a@b.co"}],
+            )
+
+        assert result["success"] is True
+        assert result["data"]["filled"][0]["status"] == "filled"
+        assert result["data"]["filled"][0]["ref"] == "e1"
+        label_loc.fill.assert_not_awaited()
+        input_loc.fill.assert_awaited_once_with("a@b.co")
+
+    @pytest.mark.asyncio
     async def test_locator_from_ref_returns_none_marks_type_failed(self):
         """find_text yields a match, but locator resolution returns None.
 
@@ -778,6 +812,42 @@ class TestFillFormSubmitEdgeCases:
         assert loc.press.await_count == 0
 
     @pytest.mark.asyncio
+    async def test_top_level_submit_with_partial_fill_no_press(self):
+        """Top-level submit_after should not submit an incomplete form.
+
+        A caller asking for final submit expects the whole requested field
+        set to be present. If one field is missing, return partial_success
+        and leave submission to an explicit follow-up decision.
+        """
+        mgr = _make_manager()
+        refs = {
+            "e0": {"role": "textbox", "name": "Email", "index": 0, "disabled": False},
+        }
+        inst = _make_instance(refs)
+        loc = _make_locator()
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst), \
+             patch.object(BrowserManager, "_locator_from_ref",
+                          new_callable=AsyncMock, return_value=loc), \
+             patch.object(BrowserManager, "_check_captcha",
+                          new_callable=AsyncMock, return_value=None), \
+             patch.object(BrowserManager, "_snapshot_impl", new=_fake_snapshot):
+            result = await mgr.fill_form(
+                "agent1",
+                [
+                    {"label": "Email", "value": "a@b.co"},
+                    {"label": "Password", "value": "pw"},
+                ],
+                submit_after=True,
+            )
+
+        data = result["data"]
+        assert [f["status"] for f in data["filled"]] == ["filled", "not_found"]
+        assert data["partial_success"] is True
+        assert data["submitted"] is False
+        assert loc.press.await_count == 0
+
+    @pytest.mark.asyncio
     async def test_per_field_submit_on_not_found_field_no_press(self):
         """Concern 10: per-field ``submit_after`` on not_found → no Enter.
 
@@ -934,5 +1004,3 @@ class TestFillFormServerRoute:
         assert args[0] == "a1"
         assert args[1] == [{"label": "Email", "value": "a@b.co"}]
         assert kwargs == {"submit_after": False}
-
-
