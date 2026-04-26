@@ -108,6 +108,20 @@ def _resolve_filter_roles(filter_name: str | None) -> frozenset[str] | None:
     return preset
 
 
+def _iso8601_utc(ts_unix: float) -> str:
+    """Format a unix timestamp as ISO-8601 UTC with seconds precision.
+
+    Returns ``""`` when ``ts_unix`` is falsy (0 / None) so callers don't
+    have to special-case the absence of a timestamp.
+    """
+    if not ts_unix:
+        return ""
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(float(ts_unix), tz=timezone.utc).isoformat(
+        timespec="seconds",
+    ).replace("+00:00", "Z")
+
+
 def _err(
     code: str, message: str, retry_after_ms: int | None = None,
 ) -> dict:
@@ -1205,6 +1219,15 @@ class CamoufoxInstance:
         # exposes ``ok`` + ``mismatches`` + raw signal values for dashboard /
         # status endpoint consumers.
         self.probe_result: dict | None = None
+        # §9.1 network-inspection log. Bounded deque of recent
+        # ``request`` / ``requestfailed`` events, populated by listeners
+        # attached at the BrowserContext level so new tabs (in-page
+        # ``window.open()`` or ``browser_open_tab``) are covered too. URLs
+        # are redacted via ``shared.redaction.redact_url`` at store-time;
+        # the deque NEVER holds raw URLs. ``_network_attached`` is the
+        # idempotency flag for ``BrowserManager._attach_network_listeners``.
+        self.network_log: deque[dict] = deque(maxlen=200)
+        self._network_attached: bool = False
 
     def _register_page(self, page) -> str:
         """Assign a stable UUID to a Page if not already registered.
@@ -1837,6 +1860,13 @@ class BrowserManager:
             )
 
         inst = CamoufoxInstance(agent_id, browser, context, page)
+
+        # §9.1 wire request listeners at the BrowserContext level so new
+        # tabs (in-page ``window.open()`` or ``browser_open_tab``) inherit
+        # them automatically. Idempotent — also re-runs after browser RESET
+        # because RESET drops the whole instance and the next get_or_start
+        # creates a fresh one with ``_network_attached=False``.
+        self._attach_network_listeners(inst)
 
         # Discover the new X11 window for targeted focus
         wid = await self._discover_new_wid(wids_before)
@@ -5390,6 +5420,180 @@ class BrowserManager:
                 inst.page = previous_page
                 return _err("service_unavailable", "open_tab failed")
 
+    # ── §9.1 Network inspection ─────────────────────────────────
+
+    def _attach_network_listeners(self, inst: CamoufoxInstance) -> None:
+        """Wire BrowserContext-level ``request`` / ``requestfailed`` listeners.
+
+        Idempotent — second and subsequent calls return immediately. Listeners
+        are attached on the *context* so tabs opened later (via ``window.open()``
+        or :meth:`open_tab`) inherit them automatically. The current page is
+        also wired explicitly in case the context-level ``page`` event has
+        already fired for it before listeners landed.
+        """
+        if inst._network_attached:
+            return
+        try:
+            inst.context.on(
+                "page",
+                lambda p: p.on("request", lambda req: self._record_request(inst, req)),
+            )
+            if inst.page is not None:
+                inst.page.on("request", lambda req: self._record_request(inst, req))
+            inst.context.on(
+                "requestfailed",
+                lambda req: self._record_request_failed(inst, req),
+            )
+        except Exception as e:
+            # Listener wiring is best-effort: a Camoufox build that doesn't
+            # surface these events shouldn't take the browser down. The
+            # `inspect_requests` reader returns an empty list cleanly.
+            logger.debug(
+                "Network listener wiring failed for '%s': %s",
+                inst.agent_id, e,
+            )
+            return
+        inst._network_attached = True
+
+    def _record_request(self, inst: CamoufoxInstance, req) -> None:
+        """Record an outbound request. Listener; never raises."""
+        try:
+            from src.shared.redaction import redact_url
+            url = redact_url(getattr(req, "url", "") or "")
+            method = getattr(req, "method", "") or ""
+            resource_type = getattr(req, "resource_type", "") or ""
+            inst.network_log.append({
+                "url": url,
+                "method": method,
+                "resource_type": resource_type,
+                "ts": time.time(),
+                "status": None,
+                "blocked_by_adblock": False,
+                "user_cancelled": False,
+                "failed_network": False,
+            })
+        except Exception as e:
+            logger.debug("network listener record failed: %s", e)
+
+    def _record_request_failed(self, inst: CamoufoxInstance, req) -> None:
+        """Mark the matching log entry as blocked / cancelled / failed.
+
+        Updates by URL+method match if found, else discards the failure
+        update. ``requestfailed`` fires asynchronously and may overlap with
+        the request having already scrolled out of the maxlen=200 window.
+        Creating a phantom entry would mislead operators about traffic that
+        actually happened.
+        """
+        try:
+            from src.shared.redaction import redact_url
+            url = redact_url(getattr(req, "url", "") or "")
+            method = getattr(req, "method", "") or ""
+            failure = getattr(req, "failure", None)
+            # Playwright surfaces ``failure`` as a property; some bindings
+            # may expose it as a callable. Handle both.
+            if callable(failure):
+                try:
+                    failure = failure()
+                except Exception:
+                    failure = None
+            err = getattr(failure, "errorText", "") if failure else ""
+            if not isinstance(err, str):
+                err = str(err) if err else ""
+
+            blocked = False
+            cancelled = False
+            for marker in ("BLOCKED_BY_CLIENT", "CONTENT_BLOCKED", "BLOCKED_BY_POLICY"):
+                if marker in err:
+                    blocked = True
+                    break
+            # Why classify BINDING_ABORTED separately from blocked: user-
+            # cancelled is a real outcome (page nav interrupted, user hit
+            # stop), not adblock — agents debugging form submits should see
+            # these distinctly.
+            if not blocked and "BINDING_ABORTED" in err:
+                cancelled = True
+            failed_net = not (blocked or cancelled)
+
+            # Update the most recent matching entry. Reverse iteration so a
+            # rapid-fire request to the same URL+method picks up the freshest.
+            for entry in reversed(inst.network_log):
+                if entry["url"] == url and entry["method"] == method:
+                    entry["blocked_by_adblock"] = blocked
+                    entry["user_cancelled"] = cancelled
+                    entry["failed_network"] = failed_net
+                    return
+            # No match → discard. Do NOT append; would create a phantom entry.
+        except Exception as e:
+            logger.debug("network listener fail-record failed: %s", e)
+
+    async def inspect_requests(
+        self,
+        agent_id: str,
+        *,
+        include_blocked: bool = False,
+        limit: int = 50,
+    ) -> dict:
+        """Return a snapshot of recent network requests for ``agent_id``.
+
+        URLs in the deque are already redacted at store-time. The returned
+        ``requests`` list is sorted newest-first and capped at ``limit``
+        (which is itself capped at the deque maxlen of 200). When
+        ``include_blocked`` is False, entries flagged ``blocked_by_adblock``
+        are filtered out so agents aren't confused by adblock-suppressed
+        third-party trackers; the count of dropped entries is returned as
+        ``dropped_blocked``.
+        """
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            limit = 50
+        if limit < 1:
+            limit = 1
+        if limit > 200:
+            limit = 200
+
+        inst = await self.get_or_start(agent_id)
+        inst.touch()
+        async with inst.lock:
+            if inst._user_control:
+                return _err(
+                    "conflict",
+                    "User has browser control — action paused until control is released.",
+                )
+            # Snapshot under the lock so we don't race a concurrent listener
+            # append. The deque itself is thread-safe for single op-pends but
+            # multi-step iteration + filter benefits from the lock.
+            entries = list(inst.network_log)
+            total = len(entries)
+            dropped = 0
+            visible: list[dict] = []
+            # Iterate newest-first.
+            for entry in reversed(entries):
+                if entry.get("blocked_by_adblock") and not include_blocked:
+                    dropped += 1
+                    continue
+                if len(visible) >= limit:
+                    continue
+                ts_unix = entry.get("ts") or 0
+                visible.append({
+                    "url": entry.get("url", ""),
+                    "method": entry.get("method", ""),
+                    "resource_type": entry.get("resource_type", ""),
+                    "ts": _iso8601_utc(ts_unix),
+                    "status": entry.get("status"),
+                    "blocked_by_adblock": bool(entry.get("blocked_by_adblock")),
+                    "user_cancelled": bool(entry.get("user_cancelled")),
+                    "failed_network": bool(entry.get("failed_network")),
+                })
+            return {
+                "success": True,
+                "data": {
+                    "requests": visible,
+                    "total": total,
+                    "dropped_blocked": dropped,
+                },
+            }
+
     async def press_key(self, agent_id: str, key: str) -> dict:
         """Press a keyboard key or combination (e.g. 'Enter', 'Escape', 'Control+a').
 
@@ -5516,3 +5720,4 @@ class BrowserManager:
                 }
             except Exception as e:
                 return {"success": False, "error": str(e)}
+

@@ -779,6 +779,50 @@ async def browser_open_tab(
 
 
 @skill(
+    name="browser_inspect_requests",
+    description=(
+        "List recent network requests from the current browser context "
+        "(URLs only, redacted; no bodies/headers). Useful for verifying "
+        "which third-party endpoints a page hit, debugging when a page "
+        "seems broken because adblock dropped requests, or confirming a "
+        "form POST went through. Returns up to 50 most-recent entries by "
+        "default. Set include_blocked=true to include adblock-suppressed "
+        "entries (verbose; usually you don't want this)."
+    ),
+    parameters={
+        "include_blocked": {
+            "type": "boolean",
+            "description": (
+                "Include requests blocked by the in-browser ad-blocker. "
+                "Default false — adblock-suppressed trackers are usually "
+                "noise. Set true when debugging missing analytics or "
+                "third-party widgets."
+            ),
+            "default": False,
+        },
+        "limit": {
+            "type": "integer",
+            "description": (
+                "Max number of newest-first entries to return. Default 50, "
+                "max 200 (the underlying buffer size). Values above 200 "
+                "are coerced to 200."
+            ),
+            "default": 50,
+        },
+    },
+    parallel_safe=False,
+)
+async def browser_inspect_requests(
+    include_blocked: bool = False, limit: int = 50, *, mesh_client=None,
+) -> dict:
+    """List recent network requests for the current browser context."""
+    return await _browser_command(
+        mesh_client, "inspect_requests",
+        {"include_blocked": bool(include_blocked), "limit": int(limit)},
+    )
+
+
+@skill(
     name="browser_detect_captcha",
     description=(
         "Detect CAPTCHAs (reCAPTCHA, hCaptcha, Cloudflare Turnstile) on the "
