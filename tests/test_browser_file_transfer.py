@@ -515,3 +515,25 @@ class TestUploadFileStageCleanup:
         assert result["success"] is True
         assert not a.exists()
         assert not b.exists()
+
+
+class TestUploadRecvGcTaskLifecycle:
+    """§8.1 cross-PR fix — ensure the upload-recv GC task is created by
+    ``start_cleanup_loop`` AND cancelled when ``stop_all`` runs. Without
+    explicit cancellation the task leaks across manager restarts and keeps
+    polling a possibly-deleted recv dir.
+    """
+
+    @pytest.mark.asyncio
+    async def test_upload_recv_gc_task_cancelled_on_stop(self, tmp_path):
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "p"))
+        # Pre: not started yet
+        assert mgr._upload_recv_gc_task is None
+        await mgr.start_cleanup_loop()
+        try:
+            assert mgr._upload_recv_gc_task is not None
+            assert not mgr._upload_recv_gc_task.done()
+        finally:
+            await mgr.stop_all()
+        # Post: stop_all() must clear the handle and cancel the task.
+        assert mgr._upload_recv_gc_task is None

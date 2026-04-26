@@ -3329,6 +3329,7 @@ def create_mesh_app(
                         params={"suggested_filename": ingest_filename},
                         content=_stream_file(bin_path),
                         headers=ingest_headers,
+                        timeout=180,
                     )
                 except _httpx.TimeoutException as e:
                     raise HTTPException(503, f"Browser service timeout: {e}")

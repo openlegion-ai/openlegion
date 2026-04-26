@@ -1613,6 +1613,13 @@ class BrowserManager:
         """Stop all browser instances and clean up Playwright."""
         if self._cleanup_task:
             self._cleanup_task.cancel()
+        if getattr(self, "_upload_recv_gc_task", None):
+            self._upload_recv_gc_task.cancel()
+            try:
+                await self._upload_recv_gc_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._upload_recv_gc_task = None
         async with self._lock:
             for agent_id in list(self._instances.keys()):
                 await self._stop_instance(agent_id)
