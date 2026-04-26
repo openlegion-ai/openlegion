@@ -438,31 +438,44 @@ async def browser_click(
 @skill(
     name="browser_click_xy",
     description=(
-        "Click at viewport-relative pixel coordinates (x, y). Useful for "
-        "canvas, custom-rendered widgets, or non-accessible interactives "
-        "where browser_get_elements does not surface a ref. Performs a "
-        "document.elementFromPoint pre-check — if an overlay or "
-        "pointer-events:none ancestor would intercept the click, the call "
-        "returns invalid_input with the actual hit element's tag/role/name "
-        "so you can re-target. Coordinates are bounded by the current "
-        "viewport (typically 0 <= x < 1280 and 0 <= y < 800; verify via "
-        "browser_status if unsure). Prefer browser_click(ref) when "
-        "possible — coordinate clicks are brittle across resolution changes."
+        "Click at viewport-relative CSS pixel coordinates (x, y). Useful "
+        "for canvas, custom-rendered widgets, or non-accessible "
+        "interactives where browser_get_elements does not surface a ref. "
+        "Performs a document.elementFromPoint pre-check — if an overlay "
+        "or pointer-events:none ancestor would intercept the click, the "
+        "call returns invalid_input with the actual hit element's "
+        "tag/role/name so you can re-target. "
+        "Coordinates are CSS pixels (NOT device pixels — devicePixelRatio "
+        "is ignored), viewport-relative, and bounded by the current "
+        "viewport (call browser_status for exact width/height — fleet "
+        "resolutions vary, e.g. 1920x1080, 1366x768, 1536x864). "
+        "Coordinates are NOT document-absolute: after a scroll, resize, "
+        "or any DOM-relayout interaction, the same (x, y) hits a "
+        "different element — recompute coords from a fresh snapshot. "
+        "Limitations: (a) cross-origin iframes — elementFromPoint "
+        "returns the <iframe> element, not its inner document, so "
+        "actual_element will be uninformative; (b) shadow DOM — "
+        "elementFromPoint returns the shadow host, not the inner shadow "
+        "element; (c) the post-click CAPTCHA check is best-effort and "
+        "may race the challenge render — call browser_detect_captcha "
+        "after a short delay if the click likely triggered a challenge. "
+        "Prefer browser_click(ref) when possible — coordinate clicks "
+        "are brittle across resolution changes."
     ),
     parameters={
         "x": {
             "type": "number",
             "description": (
-                "Viewport-relative x coordinate in pixels. Origin is the "
-                "top-left of the rendered page area; must satisfy "
+                "Viewport-relative x coordinate in CSS pixels. Origin is "
+                "the top-left of the rendered page area; must satisfy "
                 "0 <= x < viewport.width."
             ),
         },
         "y": {
             "type": "number",
             "description": (
-                "Viewport-relative y coordinate in pixels. Origin is the "
-                "top-left of the rendered page area; must satisfy "
+                "Viewport-relative y coordinate in CSS pixels. Origin is "
+                "the top-left of the rendered page area; must satisfy "
                 "0 <= y < viewport.height."
             ),
         },
@@ -472,7 +485,7 @@ async def browser_click(
 async def browser_click_xy(
     x: float, y: float, *, mesh_client=None,
 ) -> dict:
-    """Click at viewport-relative pixel coordinates."""
+    """Click at viewport-relative CSS pixel coordinates."""
     return await _browser_command(
         mesh_client, "click_xy", {"x": x, "y": y},
     )

@@ -112,7 +112,12 @@ class TestClickXyBoundsValidation:
 
     @pytest.mark.asyncio
     async def test_negative_x_returns_invalid_input(self):
-        """Spec test #2 — x=-1 → invalid_input."""
+        """Spec test #2 — x=-1 → invalid_input.
+
+        Negative coords are rejected before viewport_size is even read,
+        so the message doesn't carry viewport dimensions — it's a
+        coordinate-domain bug, not a viewport-mismatch.
+        """
         inst = _make_inst()
         inst.page.evaluate = AsyncMock()
         mgr = _make_mgr_with(inst)
@@ -121,11 +126,22 @@ class TestClickXyBoundsValidation:
         assert result["success"] is False
         assert result["error"]["code"] == "invalid_input"
         assert "out of viewport bounds" in result["error"]["message"]
-        assert "1280" in result["error"]["message"]
-        assert "800" in result["error"]["message"]
+        assert "non-negative" in result["error"]["message"]
         # Must not have evaluated or clicked.
         inst.page.evaluate.assert_not_awaited()
         inst.page.mouse.click.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_x_at_or_above_width_carries_viewport_dims(self):
+        """Upper-bound rejection includes the viewport dims so the agent
+        can re-target. Negative-coord rejection (above) skips them."""
+        inst = _make_inst()
+        mgr = _make_mgr_with(inst)
+        result = await mgr.click_xy("a1", x=2000, y=10)
+        assert result["success"] is False
+        assert result["error"]["code"] == "invalid_input"
+        assert "1280" in result["error"]["message"]
+        assert "800" in result["error"]["message"]
 
     @pytest.mark.asyncio
     async def test_x_at_or_above_width_returns_invalid_input(self):
@@ -165,6 +181,41 @@ class TestClickXyBoundsValidation:
 
         result = await mgr.click_xy("a1", x=0, y=0)
         assert result["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_viewport_size_none_skips_upper_bound_check(self):
+        """``page.viewport_size`` is ``None`` in some Playwright configs.
+        The manager must not return ``service_unavailable`` — it should
+        skip the upper bound check and let Playwright reject out-of-window
+        coords with its own error if needed. Negative coords are still
+        rejected unconditionally."""
+        inst = _make_inst(viewport=None)
+        # Override _make_inst's default to actually set viewport_size=None
+        inst.page.viewport_size = None
+        inst.page.evaluate = AsyncMock(return_value={
+            "tag": "div", "role": None, "name": "ok",
+            "masked_by": None, "mask_reason": "",
+        })
+        mgr = _make_mgr_with(inst)
+
+        # Positive coords with no viewport metadata: click proceeds.
+        result = await mgr.click_xy("a1", x=100, y=200)
+        assert result["success"] is True
+        inst.page.mouse.click.assert_awaited_once_with(100.0, 200.0)
+
+    @pytest.mark.asyncio
+    async def test_viewport_size_none_still_rejects_negative(self):
+        """Even when viewport_size is unknown, negative coords are
+        always invalid — clamp before reading viewport_size at all."""
+        inst = _make_inst()
+        inst.page.viewport_size = None
+        inst.page.evaluate = AsyncMock()
+        mgr = _make_mgr_with(inst)
+
+        result = await mgr.click_xy("a1", x=-1, y=10)
+        assert result["success"] is False
+        assert result["error"]["code"] == "invalid_input"
+        inst.page.evaluate.assert_not_awaited()
 
 
 class TestClickXyTypeValidation:
@@ -507,3 +558,24 @@ class TestClickXyAgentSkill:
         assert meta["_parallel_safe"] is False
         assert "x" in meta["parameters"]
         assert "y" in meta["parameters"]
+
+    def test_skill_description_documents_review_caveats(self):
+        """Third-pass review locked these caveats into the description so
+        agents are warned about the non-obvious failure modes:
+          - CSS pixels (not device pixels — DPR irrelevant)
+          - viewport-relative (not document-absolute; invalid across scrolls)
+          - cross-origin iframe / shadow DOM limitations
+          - post-click CAPTCHA detection is best-effort
+        """
+        import src.agent.builtins.browser_tool  # noqa: F401
+        from src.agent.skills import _skill_staging
+
+        desc = _skill_staging["browser_click_xy"]["description"].lower()
+        assert "css pixel" in desc, "DPR clarification missing"
+        assert "scroll" in desc, "scroll-position warning missing"
+        assert "iframe" in desc, "cross-origin iframe limitation missing"
+        assert "shadow" in desc, "shadow DOM limitation missing"
+        assert "captcha" in desc, "post-click captcha caveat missing"
+        # Specific viewport literals that lie about the fleet pool must
+        # not be present — fleet uses 1920x1080, 1366x768, etc.
+        assert "1280" not in desc, "stale viewport literal in description"

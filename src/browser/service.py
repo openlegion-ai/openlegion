@@ -4548,18 +4548,30 @@ class BrowserManager:
                         "User has browser control — action paused until "
                         "control is released.",
                     )
+                # ``viewport_size`` is normally populated for Camoufox
+                # (fingerprint-driven, see ``stealth.pick_resolution``).
+                # Defensive: in some Playwright configurations (no explicit
+                # context viewport, e.g. tests with a default-page context)
+                # ``viewport_size`` returns ``None``. Negative coords are
+                # always invalid; for the upper bound, when viewport size
+                # is unknown skip the bounds check and let Playwright's
+                # ``mouse.click`` reject out-of-window coordinates with
+                # its own error (caught below as ``service_unavailable``).
+                if x < 0 or y < 0:
+                    return _err(
+                        "invalid_input",
+                        f"coordinate ({x}, {y}) out of viewport bounds "
+                        f"(coordinates must be non-negative)",
+                    )
                 vp = inst.page.viewport_size or {}
                 vw = vp.get("width") if isinstance(vp, dict) else None
                 vh = vp.get("height") if isinstance(vp, dict) else None
-                if not (isinstance(vw, (int, float)) and isinstance(vh, (int, float))):
-                    return _err(
-                        "service_unavailable",
-                        "viewport size unavailable",
-                    )
-                if x < 0 or y < 0 or x >= vw or y >= vh:
+                if (isinstance(vw, (int, float))
+                        and isinstance(vh, (int, float))
+                        and (x >= vw or y >= vh)):
                     return _err(
                         "invalid_input",
-                        f"coordinate (x, y) out of viewport bounds "
+                        f"coordinate ({x}, {y}) out of viewport bounds "
                         f"({int(vw)} x {int(vh)})",
                     )
 
