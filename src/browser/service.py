@@ -1373,11 +1373,37 @@ class BrowserManager:
         self._metrics_history: deque[dict] = deque(maxlen=1024)
         self._metrics_seq: int = 0
         self._upload_recv_gc_task: asyncio.Task | None = None
+        self._download_gc_task: asyncio.Task | None = None
+        # Nonces of downloads currently being streamed to the mesh.
+        # GC skips files whose nonce is in this set so a slow or near-TTL
+        # transfer isn't reaped mid-stream.
+        self._active_download_nonces: set[str] = set()
+        # Detect Playwright's private artifact-stream channel availability
+        # once at init. When unavailable we refuse downloads with a
+        # service_unavailable envelope rather than silently degrading to a
+        # racy drain-then-check fallback.
+        self._download_streaming_available: bool = (
+            self._detect_download_streaming()
+        )
+        if not self._download_streaming_available:
+            logger.critical(
+                "Playwright private artifact-stream API unavailable; "
+                "browser_download will return service_unavailable.",
+            )
+
+    @staticmethod
+    def _detect_download_streaming() -> bool:
+        try:
+            from playwright._impl._connection import from_channel  # noqa: F401
+        except Exception:
+            return False
+        return True
 
     async def start_cleanup_loop(self):
         """Start background task that cleans up idle browsers."""
         self._cleanup_task = asyncio.create_task(self._cleanup_loop())
         self._upload_recv_gc_task = asyncio.create_task(self._upload_recv_gc_loop())
+        self._download_gc_task = asyncio.create_task(self._download_gc_loop())
 
     async def _upload_recv_gc_once(self) -> int:
         """Reap orphan upload-recv files older than the stage TTL.
@@ -1424,6 +1450,36 @@ class BrowserManager:
             except Exception as e:
                 logger.debug("upload_recv gc tick failed: %s", e)
             await asyncio.sleep(30)
+
+    async def _download_gc_loop(self):
+        """Periodically delete stale download staging files.
+
+        The download() flow normally cleans up via the mesh-side
+        ``_download_cleanup`` call, but a mesh crash mid-stream would
+        otherwise leak files into ``BROWSER_DOWNLOAD_DIR`` until the
+        container restarts. Janitor mirrors the upload-stage GC.
+        """
+        ttl = max(1, int(os.environ.get("BROWSER_DOWNLOAD_TTL_S", "60")))
+        while True:
+            await asyncio.sleep(30)
+            try:
+                dl_dir = Path(os.environ.get("BROWSER_DOWNLOAD_DIR", "/tmp/downloads"))
+                if not dl_dir.is_dir():
+                    continue
+                now = time.time()
+                for entry in list(dl_dir.iterdir()):
+                    try:
+                        if not entry.is_file():
+                            continue
+                        nonce = entry.name.split("-", 1)[0]
+                        if nonce in self._active_download_nonces:
+                            continue
+                        if (now - entry.stat().st_mtime) > ttl:
+                            entry.unlink(missing_ok=True)
+                    except OSError:
+                        continue
+            except Exception:
+                logger.debug("Download GC pass failed", exc_info=True)
 
     async def _cleanup_loop(self):
         while True:
@@ -2026,6 +2082,13 @@ class BrowserManager:
             except (asyncio.CancelledError, Exception):
                 pass
             self._upload_recv_gc_task = None
+        if getattr(self, "_download_gc_task", None):
+            self._download_gc_task.cancel()
+            try:
+                await self._download_gc_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._download_gc_task = None
         async with self._lock:
             for agent_id in list(self._instances.keys()):
                 await self._stop_instance(agent_id)
@@ -4978,21 +5041,32 @@ class BrowserManager:
     async def download(
         self, agent_id: str, ref: str,
         *,
-        download_dir: str = "/tmp/downloads",
+        download_dir: str | None = None,
         timeout_ms: int = 30000,
         max_bytes: int = 50 * 1024 * 1024,
     ) -> dict:
         """Click ``ref`` and capture the resulting download to disk.
 
-        Uses Playwright's ``page.expect_download`` context. On download-start,
-        the file streams to ``download_dir/{nonce}-{suggested_filename}``
-        with a running byte counter that aborts if ``max_bytes`` is exceeded.
-
-        Returns ``{success, data: {path, size_bytes, suggested_filename, mime_type}}``.
-        The caller (mesh proxy) is responsible for streaming the file from
-        ``path`` to the agent's ``/artifacts/ingest`` endpoint and deleting
-        the local copy afterwards.
+        Reads the download chunk-by-chunk from Playwright's underlying
+        artifact stream. A running byte counter aborts the transfer if
+        ``max_bytes`` is exceeded — bytes never accumulate past the cap
+        on disk. Refuses with ``service_unavailable`` when the private
+        artifact-stream API is missing rather than silently degrading
+        to a racy drain-then-check fallback.
         """
+        if download_dir is None:
+            download_dir = os.environ.get("BROWSER_DOWNLOAD_DIR", "/tmp/downloads")
+        if not self._download_streaming_available:
+            return {
+                "success": False,
+                "error": {
+                    "code": "service_unavailable",
+                    "message": (
+                        "Download streaming unavailable: bounded size cap "
+                        "requires Playwright's private artifact stream API"
+                    ),
+                },
+            }
         inst = await self.get_or_start(agent_id)
         inst.touch()
         async with inst.lock:
@@ -5013,16 +5087,14 @@ class BrowserManager:
                 suggested = download.suggested_filename or "download.bin"
                 nonce = uuid.uuid4().hex[:12]
                 dest = Path(download_dir) / f"{nonce}-{suggested}"
-                await download.save_as(str(dest))
 
-                # Post-transfer size enforcement. Content-Length is a hint;
-                # streaming enforcement is the authoritative check.
-                size = dest.stat().st_size
-                if size > max_bytes:
-                    dest.unlink(missing_ok=True)
+                size = await self._stream_download_to_disk(
+                    download, dest, max_bytes,
+                )
+                if size is None:
                     return {
                         "success": False,
-                        "error": f"Download exceeds {max_bytes} bytes ({size})",
+                        "error": f"Download exceeds {max_bytes} bytes",
                     }
 
                 mime = mimetypes.guess_type(suggested)[0] or "application/octet-stream"
@@ -5030,6 +5102,7 @@ class BrowserManager:
                     "success": True,
                     "data": {
                         "path": str(dest),
+                        "nonce": nonce,
                         "size_bytes": size,
                         "suggested_filename": suggested,
                         "mime_type": mime,
@@ -5037,6 +5110,65 @@ class BrowserManager:
                 }
             except Exception as e:
                 return {"success": False, "error": str(e)}
+
+    async def _stream_download_to_disk(
+        self, download, dest: Path, max_bytes: int,
+    ) -> int | None:
+        """Drain a Playwright Download into ``dest`` in bounded chunks.
+
+        Returns the byte size on success, ``None`` if the cap was exceeded
+        (the partial file is unlinked and the artifact is cancelled before
+        Playwright fully buffers it). Raises on transport errors so the
+        caller's outer try/except returns the original message.
+
+        Uses Playwright's private ``_artifact`` channel because the public
+        Download API only exposes ``save_as()`` / ``path()``, both of which
+        wait for the full transfer to finish before returning. Without
+        chunked enforcement an attacker-controlled download could fill the
+        container's ``/tmp`` before the post-transfer size check fires.
+
+        Caller must have already verified ``_download_streaming_available``;
+        this method has no fallback. Missing private channel raises so the
+        download is aborted rather than silently degrading.
+        """
+        import base64
+
+        artifact = getattr(download, "_artifact", None)
+        channel = getattr(artifact, "_channel", None) if artifact else None
+        if channel is None:
+            with contextlib.suppress(Exception):
+                await download.cancel()
+            raise RuntimeError(
+                "Playwright artifact channel unavailable",
+            )
+        stream_channel = await channel.send("saveAsStream", None)
+        from playwright._impl._connection import from_channel
+        stream = from_channel(stream_channel)
+
+        total = 0
+        chunk_size = 64 * 1024
+        try:
+            with dest.open("wb") as out:
+                while True:
+                    binary = await stream._channel.send(
+                        "read", None, {"size": chunk_size},
+                    )
+                    if not binary:
+                        break
+                    chunk = base64.b64decode(binary)
+                    if total + len(chunk) > max_bytes:
+                        out.close()
+                        dest.unlink(missing_ok=True)
+                        with contextlib.suppress(Exception):
+                            await download.cancel()
+                        return None
+                    out.write(chunk)
+                    total += len(chunk)
+        except Exception:
+            with contextlib.suppress(Exception):
+                dest.unlink(missing_ok=True)
+            raise
+        return total
 
     async def find_text(
         self, agent_id: str, query: str, scroll: bool = True,

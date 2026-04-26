@@ -833,6 +833,51 @@ class MeshClient:
         response.raise_for_status()
         return response.json()
 
+    async def browser_download(
+        self, ref: str, timeout_ms: int = 30000,
+        target_agent_id: str | None = None,
+    ) -> dict:
+        """Trigger a browser download via mesh and ingest it as an artifact.
+
+        Mesh orchestrates the click+save in the shared browser, streams
+        the bytes into the (target) agent's ``/artifacts/ingest`` endpoint,
+        and cleans up the browser-side staging file. Returns
+        ``{success, data: {artifact_name, size_bytes, mime_type}}`` (or
+        an error envelope passed through from the browser side).
+        """
+        client = await self._get_client()
+        body: dict = {"ref": ref, "timeout_ms": timeout_ms}
+        if target_agent_id:
+            body["target_agent_id"] = target_agent_id
+        response = await client.post(
+            f"{self.mesh_url}/mesh/browser/download",
+            json=body,
+            timeout=300,
+            headers=self._trace_headers(),
+        )
+        try:
+            data = response.json()
+        except Exception:
+            response.raise_for_status()
+            raise
+        # Pass through structured error envelopes (e.g. operator kill switch
+        # returning ``BROWSER_DOWNLOADS_DISABLED``) so the calling skill can
+        # surface the reason to the LLM without an exception. FastAPI wraps
+        # HTTPException(detail=...) as ``{"detail": <envelope>}``, so unwrap.
+        if response.status_code >= 400 and isinstance(data, dict):
+            envelope = data.get("detail") if "detail" in data else data
+            if (
+                isinstance(envelope, dict)
+                and envelope.get("success") is False
+            ):
+                return envelope
+        response.raise_for_status()
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"Unexpected browser_download response: {type(data).__name__}",
+            )
+        return data
+
     # ── Operator metrics ─────────────────────────────────────────
 
     async def get_system_metrics(self) -> dict:

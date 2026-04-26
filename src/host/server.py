@@ -3487,6 +3487,173 @@ def create_mesh_app(
     async def _start_upload_stage_gc() -> None:
         asyncio.create_task(_upload_stage_gc_loop())
 
+    _ARTIFACT_NAME_SAFE_RE = re.compile(r"[^\w.\-]+")
+
+    def _sanitize_artifact_name(suggested: str) -> str:
+        """Reduce a browser-supplied filename to a safe artifact basename.
+
+        Strips path components, collapses unsafe chars to ``_``, trims
+        leading/trailing punctuation, and falls back to ``download.bin``
+        when the result would be empty.
+        """
+        name = (suggested or "").strip()
+        if "/" in name or "\\" in name:
+            name = name.replace("\\", "/").rsplit("/", 1)[-1]
+        name = _ARTIFACT_NAME_SAFE_RE.sub("_", name)
+        name = name.strip("._-")
+        if not name or len(name) > 180:
+            name = name[:180].strip("._-") if name else ""
+        if not name:
+            name = "download.bin"
+        if len(name) < 2:
+            name = name + "_"
+        return name
+
+    @app.post("/mesh/browser/download")
+    async def browser_download(request: Request) -> dict:
+        """Trigger a download in the shared browser, stream it into the
+        target agent's ``/artifacts/ingest`` endpoint, then clean up the
+        browser-side staging file.
+
+        Body: ``{ref, timeout_ms?, target_agent_id?}``. When
+        ``target_agent_id`` is set, the download lands in the target's
+        artifacts. Operator kill switch: ``BROWSER_DOWNLOADS_DISABLED``
+        returns a ``forbidden`` error envelope and never touches the
+        browser service.
+        """
+        from src.browser.flags import get_bool
+
+        caller_id = _extract_verified_agent_id(request)
+        body = await request.json()
+        req_agent_id = _resolve_browser_target(
+            caller_id, body.get("target_agent_id") or "",
+        )
+
+        if get_bool("BROWSER_DOWNLOADS_DISABLED", False, agent_id=req_agent_id):
+            raise HTTPException(403, detail={
+                "success": False,
+                "error": {
+                    "code": "forbidden",
+                    "message": "Downloads disabled by operator",
+                },
+            })
+
+        ref = body.get("ref", "")
+        if not ref:
+            raise HTTPException(400, "ref is required")
+        timeout_ms = int(body.get("timeout_ms", 30000))
+
+        if not permissions.can_browser_action(req_agent_id, "download"):
+            raise HTTPException(403, "Browser action 'download' denied")
+
+        browser_service_url = None
+        if container_manager:
+            browser_service_url = getattr(container_manager, "browser_service_url", None)
+        if not browser_service_url:
+            raise HTTPException(503, "Browser service not available")
+
+        agent_entry = router.agent_registry.get(req_agent_id)
+        if not agent_entry:
+            raise HTTPException(404, f"Agent not registered: {req_agent_id}")
+        agent_url = (
+            agent_entry.get("url", agent_entry)
+            if isinstance(agent_entry, dict) else agent_entry
+        )
+
+        browser_auth = getattr(container_manager, "browser_auth_token", "")
+        headers: dict = {}
+        if browser_auth:
+            headers["Authorization"] = f"Bearer {browser_auth}"
+        incoming_trace = request.headers.get("x-trace-id")
+        if incoming_trace:
+            headers["X-Trace-Id"] = incoming_trace
+
+        try:
+            trigger_resp = await _browser_proxy_client.post(
+                f"{browser_service_url}/browser/{req_agent_id}/download",
+                json={"ref": ref, "timeout_ms": timeout_ms},
+                headers=headers,
+                timeout=180,
+            )
+        except Exception as e:
+            logger.warning("Browser download trigger error: %s", e)
+            raise HTTPException(502, f"Browser service error: {e}")
+
+        if trigger_resp.status_code >= 400:
+            raise HTTPException(trigger_resp.status_code, trigger_resp.text)
+
+        trigger_data = trigger_resp.json()
+        if not trigger_data.get("success"):
+            return trigger_data
+
+        data = trigger_data["data"]
+        nonce = data.get("nonce", "")
+        suggested = data.get("suggested_filename", "")
+        mime_type = data.get("mime_type", "application/octet-stream")
+        sanitized_name = _sanitize_artifact_name(suggested)
+        ingest_url = f"{agent_url}/artifacts/ingest/{sanitized_name}"
+
+        ingest_data: dict = {}
+        ingest_error: Exception | None = None
+        try:
+            async with _browser_proxy_client.stream(
+                "GET",
+                f"{browser_service_url}/browser/{req_agent_id}/_download_stream",
+                params={"nonce": nonce},
+                headers=headers,
+                timeout=180,
+            ) as bsrc:
+                if bsrc.status_code >= 400:
+                    raise HTTPException(
+                        502,
+                        f"Browser stream returned {bsrc.status_code}",
+                    )
+                ingest_headers: dict = {
+                    "X-Mesh-Internal": "1",
+                    "Content-Type": "application/octet-stream",
+                }
+                if incoming_trace:
+                    ingest_headers["X-Trace-Id"] = incoming_trace
+                async with _httpx.AsyncClient(timeout=240) as agent_client:
+                    ingest_resp = await agent_client.post(
+                        ingest_url,
+                        content=bsrc.aiter_bytes(),
+                        headers=ingest_headers,
+                    )
+                    if ingest_resp.status_code >= 400:
+                        raise HTTPException(
+                            ingest_resp.status_code, ingest_resp.text,
+                        )
+                    ingest_data = ingest_resp.json()
+        except HTTPException as e:
+            ingest_error = e
+        except Exception as e:
+            ingest_error = e
+            logger.warning("Browser→agent ingest error: %s", e)
+        finally:
+            try:
+                await _browser_proxy_client.post(
+                    f"{browser_service_url}/browser/{req_agent_id}/_download_cleanup",
+                    json={"nonce": nonce},
+                    headers=headers,
+                )
+            except Exception as e:
+                logger.warning("Browser download cleanup error: %s", e)
+
+        if ingest_error is not None:
+            if isinstance(ingest_error, HTTPException):
+                raise ingest_error
+            raise HTTPException(502, f"Ingest error: {ingest_error}")
+
+        return {
+            "success": True,
+            "data": {
+                "artifact_name": ingest_data.get("artifact_name"),
+                "size_bytes": ingest_data.get("size_bytes"),
+                "mime_type": mime_type,
+            },
+        }
+
     # === Event Bus ===
 
     @app.websocket("/ws/events")

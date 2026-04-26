@@ -1019,3 +1019,44 @@ async def request_browser_login(
             f"Do NOT use browser tools until the user confirms."
         ),
     }
+
+
+@skill(
+    name="browser_download",
+    description=(
+        "Trigger a download by clicking the given ref and save the result "
+        "to your /artifacts directory. The browser captures the download "
+        "event (≤50MB) and the result becomes a normal artifact you can "
+        "read with the file/artifact tools. "
+        "Returns {success, data: {artifact_name, size_bytes, mime_type}}. "
+        "Disabled fleet-wide if BROWSER_DOWNLOADS_DISABLED is set."
+    ),
+    parameters={
+        "ref": {
+            "type": "string",
+            "description": "Element ref returned by browser_get_elements that triggers the download.",
+        },
+        "timeout_ms": {
+            "type": "integer",
+            "description": "How long to wait for the download to start (default 30000).",
+            "default": 30000,
+        },
+    },
+    parallel_safe=False,
+)
+async def browser_download(
+    ref: str, timeout_ms: int = 30000,
+    *, mesh_client=None,
+) -> dict:
+    """Trigger a download and save it as an artifact via mesh→agent ingest."""
+    if not mesh_client:
+        return {"error": "Browser download requires mesh connectivity"}
+    if not ref:
+        return {"error": "ref is required"}
+    try:
+        result = await mesh_client.browser_download(
+            ref=ref, timeout_ms=timeout_ms,
+        )
+        return _deep_redact(result)
+    except Exception as e:
+        return {"error": _deep_redact(str(e))}
