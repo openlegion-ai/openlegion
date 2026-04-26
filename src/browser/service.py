@@ -5193,83 +5193,381 @@ class BrowserManager:
         inst = await self.get_or_start(agent_id)
         inst.touch()
         async with inst.lock:
-            try:
-                if inst._user_control:
-                    return _err(
-                        "conflict",
-                        "User has browser control — action paused until control is released.",
-                    )
-                snap = await self._snapshot_impl(
-                    inst, agent_id, _skip_baseline=True,
+            if inst._user_control:
+                return _err(
+                    "conflict",
+                    "User has browser control — action paused until control is released.",
                 )
-                if not snap.get("success"):
-                    return snap
+            return await self._find_text_impl(
+                inst, agent_id, query, scroll=scroll,
+            )
 
-                needle = query.casefold()
-                viewport = inst.page.viewport_size or {}
-                vw = int(viewport.get("width") or 0)
-                vh = int(viewport.get("height") or 0)
+    async def _find_text_impl(
+        self, inst: "CamoufoxInstance", agent_id: str, query: str,
+        *, scroll: bool = True,
+    ) -> dict:
+        """Lock-free body of :meth:`find_text`.
 
-                matches: list[dict] = []
-                truncated = False
-                first_locator = None
-                for ref_id, handle in inst.refs.items():
-                    name = handle.name or ""
-                    if not name or needle not in name.casefold():
-                        continue
-                    if len(matches) >= 50:
-                        truncated = True
-                        break
-                    locator = await self._locator_from_ref(inst, ref_id)
-                    in_viewport = False
-                    if locator is not None:
-                        try:
-                            visible = await locator.is_visible()
-                        except Exception:
-                            visible = False
-                        if visible and vw > 0 and vh > 0:
-                            try:
-                                box = await locator.bounding_box()
-                            except Exception:
-                                box = None
-                            if box:
-                                bx = float(box.get("x", 0))
-                                by = float(box.get("y", 0))
-                                bw = float(box.get("width", 0))
-                                bh = float(box.get("height", 0))
-                                in_viewport = (
-                                    bx + bw > 0 and by + bh > 0
-                                    and bx < vw and by < vh
-                                )
-                    redacted_name = self.redactor.redact(agent_id, name)
-                    matches.append({
-                        "ref": ref_id,
-                        "text": sanitize_for_prompt(redacted_name)[:200],
-                        "in_viewport": bool(in_viewport),
-                    })
-                    if first_locator is None and locator is not None:
-                        first_locator = locator
+        Caller must hold ``inst.lock`` and have already cleared the
+        ``inst._user_control`` gate. Extracted so compound primitives
+        (e.g. §9.4 ``fill_form``) can reuse the matching pipeline
+        without dropping and re-acquiring the per-instance lock —
+        ``asyncio.Lock`` is not reentrant, so calling :meth:`find_text`
+        directly from inside a held-lock section would deadlock.
+        """
+        try:
+            snap = await self._snapshot_impl(
+                inst, agent_id, _skip_baseline=True,
+            )
+            if not snap.get("success"):
+                return snap
 
-                if scroll and first_locator is not None:
+            needle = query.casefold()
+            viewport = inst.page.viewport_size or {}
+            vw = int(viewport.get("width") or 0)
+            vh = int(viewport.get("height") or 0)
+
+            matches: list[dict] = []
+            truncated = False
+            first_locator = None
+            for ref_id, handle in inst.refs.items():
+                name = handle.name or ""
+                if not name or needle not in name.casefold():
+                    continue
+                if len(matches) >= 50:
+                    truncated = True
+                    break
+                locator = await self._locator_from_ref(inst, ref_id)
+                in_viewport = False
+                if locator is not None:
                     try:
-                        await first_locator.scroll_into_view_if_needed(timeout=3000)
+                        visible = await locator.is_visible()
+                    except Exception:
+                        visible = False
+                    if visible and vw > 0 and vh > 0:
+                        try:
+                            box = await locator.bounding_box()
+                        except Exception:
+                            box = None
+                        if box:
+                            bx = float(box.get("x", 0))
+                            by = float(box.get("y", 0))
+                            bw = float(box.get("width", 0))
+                            bh = float(box.get("height", 0))
+                            in_viewport = (
+                                bx + bw > 0 and by + bh > 0
+                                and bx < vw and by < vh
+                            )
+                redacted_name = self.redactor.redact(agent_id, name)
+                matches.append({
+                    "ref": ref_id,
+                    "text": sanitize_for_prompt(redacted_name)[:200],
+                    "in_viewport": bool(in_viewport),
+                })
+                if first_locator is None and locator is not None:
+                    first_locator = locator
+
+            if scroll and first_locator is not None:
+                try:
+                    await first_locator.scroll_into_view_if_needed(timeout=3000)
+                except Exception as e:
+                    logger.debug(
+                        "scroll_into_view_if_needed failed for %s: %s",
+                        agent_id, e,
+                    )
+
+            return {
+                "success": True,
+                "data": {
+                    "matches": matches,
+                    "total": len(matches),
+                    "truncated": truncated,
+                },
+            }
+        except Exception as e:
+            logger.debug("find_text failed for %s: %s", agent_id, e)
+            return _err("service_unavailable", "find_text failed")
+
+    # ── §9.4 fill_form ───────────────────────────────────────────────────
+
+    # Per-field max value length. Long enough that legitimate form values
+    # (textarea bodies, etc.) fit; short enough that an unbounded
+    # prompt-injected value is rejected with a clean ``invalid_input``
+    # before reaching Playwright's ``fill`` (which has no documented cap).
+    _FILL_FORM_MAX_VALUE_CHARS = 10000
+    _FILL_FORM_MAX_LABEL_CHARS = 500
+    _FILL_FORM_MAX_FIELDS = 50
+
+    async def fill_form(
+        self, agent_id: str, fields: list[dict],
+        *, submit_after: bool = False,
+    ) -> dict:
+        """Sequence of find-text + fill across multiple form fields (§9.4).
+
+        For each field, locates the input by visible label (reusing
+        :meth:`_find_text_impl`), resolves the ref to a locator
+        (:meth:`_locator_from_ref`), and calls Playwright's ``fill``.
+
+        We use ``fill`` rather than the per-keystroke ``type_text``
+        because (a) ``fill`` clears existing content first, making
+        idempotent retries safe (no double-prefix on resume after
+        CAPTCHA); (b) per-key humanization across many fields is
+        excessive when the agent has explicitly chosen the compound
+        path. Agents needing per-key entropy on a sensitive field
+        (rare; mostly password fields with bot detection) should fall
+        back to ``browser_type`` field-by-field.
+
+        On CAPTCHA detection mid-flow (after any successful fill) the
+        loop stops, the remaining un-attempted fields are echoed back
+        verbatim in ``remaining`` so the agent can resume after
+        solving, and we do NOT submit even if ``submit_after=True``.
+        See §9.4 for the partial-success protocol.
+        """
+        if not isinstance(fields, list) or not fields:
+            return _err(
+                "invalid_input",
+                "fields must be a non-empty list of {label, value} entries",
+            )
+        if len(fields) > self._FILL_FORM_MAX_FIELDS:
+            return _err(
+                "invalid_input",
+                f"fields list exceeds max length {self._FILL_FORM_MAX_FIELDS}",
+            )
+
+        # Validate each field upfront so we don't half-fill the form before
+        # discovering an invalid entry deep in the list.
+        normalized: list[dict] = []
+        for idx, raw in enumerate(fields):
+            if not isinstance(raw, dict):
+                return _err(
+                    "invalid_input",
+                    f"fields[{idx}] must be an object",
+                )
+            label = raw.get("label")
+            value = raw.get("value")
+            if not isinstance(label, str) or not (
+                1 <= len(label) <= self._FILL_FORM_MAX_LABEL_CHARS
+            ):
+                return _err(
+                    "invalid_input",
+                    f"fields[{idx}].label must be a string 1–"
+                    f"{self._FILL_FORM_MAX_LABEL_CHARS} chars",
+                )
+            if (
+                not isinstance(value, str)
+                or len(value) > self._FILL_FORM_MAX_VALUE_CHARS
+            ):
+                return _err(
+                    "invalid_input",
+                    f"fields[{idx}].value must be a string up to "
+                    f"{self._FILL_FORM_MAX_VALUE_CHARS} chars",
+                )
+            # NUL bytes confuse Playwright's keyboard pipeline; reject early
+            # rather than letting fill() raise a less-clear error mid-flow.
+            if "\x00" in value:
+                return _err(
+                    "invalid_input",
+                    f"fields[{idx}].value contains null byte",
+                )
+            field_submit = raw.get("submit_after", False)
+            normalized.append({
+                "label": label,
+                "value": value,
+                "submit_after": bool(field_submit),
+            })
+
+        inst = await self.get_or_start(agent_id)
+        inst.touch()
+
+        # One lock for the entire form fill — per §2.4, ``inst.lock`` already
+        # serializes per-instance page ops; acquiring it once gives us a
+        # consistent view of the page across the find→fill→captcha-check
+        # cycle for every field. Per-field lock acquisition would let
+        # another action interleave between find_text and fill, breaking
+        # the ref freshness guarantee.
+        async with inst.lock:
+            if inst._user_control:
+                return _err(
+                    "conflict",
+                    "User has browser control — action paused until control is released.",
+                )
+
+            filled: list[dict] = []
+            last_locator = None
+            for i, field in enumerate(normalized):
+                label = field["label"]
+                value = field["value"]
+                field_submit = field["submit_after"]
+
+                # 1) Locate the field via find_text. scroll=True so the
+                #    matched input is brought into view before the fill;
+                #    avoids "element not in viewport" failures on long
+                #    forms.
+                find_res = await self._find_text_impl(
+                    inst, agent_id, label, scroll=True,
+                )
+                if not find_res.get("success"):
+                    # Snapshot/find_text failure is service-side; surface
+                    # as type_failed so the loop continues — the agent
+                    # can re-snapshot and retry.
+                    err = find_res.get("error") or {}
+                    raw_reason = (
+                        str(err.get("message")) if isinstance(err, dict)
+                        else str(err)
+                    ) or "find_text failed"
+                    filled.append({
+                        "label": label,
+                        "status": "type_failed",
+                        "reason": self.redactor.redact(agent_id, raw_reason),
+                    })
+                    continue
+
+                matches = (find_res.get("data") or {}).get("matches") or []
+                if not matches:
+                    filled.append({"label": label, "status": "not_found"})
+                    # CAPTCHA may have appeared as a result of the snapshot
+                    # itself (rare — e.g. a JS challenge that injects on
+                    # every navigation). Check before continuing so we
+                    # don't keep pummeling a blocked page with snapshots.
+                    captcha = await self._check_captcha(inst)
+                    if captcha:
+                        return self._fill_form_captcha_envelope(
+                            filled, normalized[i + 1:], captcha,
+                        )
+                    continue
+
+                # Pick the first in-viewport match; fall back to first match.
+                pick = next(
+                    (m for m in matches if m.get("in_viewport")),
+                    matches[0],
+                )
+                ref = pick.get("ref")
+
+                try:
+                    locator = await self._locator_from_ref(inst, ref)
+                except RefStale as rs:
+                    filled.append({
+                        "label": label,
+                        "ref": ref,
+                        "status": "type_failed",
+                        "reason": self.redactor.redact(agent_id, str(rs)),
+                    })
+                    continue
+                if locator is None:
+                    filled.append({
+                        "label": label,
+                        "ref": ref,
+                        "status": "type_failed",
+                        "reason": "ref not found",
+                    })
+                    continue
+
+                try:
+                    await locator.fill(value)
+                except Exception as e:
+                    # Element no longer attached / disabled / hidden — record
+                    # and continue. Don't bail the whole form: subsequent
+                    # fields may still be reachable.
+                    filled.append({
+                        "label": label,
+                        "ref": ref,
+                        "status": "type_failed",
+                        "reason": self.redactor.redact(agent_id, str(e)),
+                    })
+                    continue
+
+                filled.append({
+                    "label": label,
+                    "ref": ref,
+                    "status": "filled",
+                })
+                last_locator = locator
+
+                # Per-field submit_after fires after a successful fill but
+                # BEFORE the captcha check, because submitting can be what
+                # triggers the captcha.
+                if field_submit:
+                    try:
+                        await locator.press("Enter")
                     except Exception as e:
                         logger.debug(
-                            "scroll_into_view_if_needed failed for %s: %s",
-                            agent_id, e,
+                            "fill_form per-field submit failed for %s "
+                            "label=%r: %s", agent_id, label, e,
                         )
 
-                return {
-                    "success": True,
-                    "data": {
-                        "matches": matches,
-                        "total": len(matches),
-                        "truncated": truncated,
-                    },
-                }
-            except Exception as e:
-                logger.debug("find_text failed for %s: %s", agent_id, e)
-                return _err("service_unavailable", "find_text failed")
+                # 2) After each successful fill (or per-field submit), check
+                #    for a captcha. If found, stop the loop and return
+                #    partial_success — the agent must solve before resuming.
+                #    Captcha mid-flow takes priority over top-level
+                #    submit_after: we never auto-submit a half-completed
+                #    form behind a captcha.
+                captcha = await self._check_captcha(inst)
+                if captcha:
+                    return self._fill_form_captcha_envelope(
+                        filled, normalized[i + 1:], captcha,
+                    )
+
+            # 3) Final submit — only if no captcha interrupted us. Top-level
+            #    submit_after presses Enter on the LAST filled field's
+            #    locator. If no field was successfully filled (all
+            #    not_found / type_failed) we have no anchor to press Enter
+            #    on, so submitted stays False.
+            submitted = False
+            if submit_after and last_locator is not None:
+                try:
+                    await last_locator.press("Enter")
+                    submitted = True
+                except Exception as e:
+                    logger.debug(
+                        "fill_form final submit failed for %s: %s",
+                        agent_id, e,
+                    )
+
+            partial = any(
+                f.get("status") != "filled" for f in filled
+            )
+            return {
+                "success": True,
+                "data": {
+                    "partial_success": partial,
+                    "captcha_required": False,
+                    "filled": filled,
+                    "remaining": [],
+                    "submitted": submitted,
+                },
+            }
+
+    @staticmethod
+    def _fill_form_captcha_envelope(
+        filled: list[dict], remaining_fields: list[dict], captcha: dict,
+    ) -> dict:
+        """Compose the §9.4 partial-success envelope on captcha mid-flow.
+
+        ``remaining`` echoes ``label`` + ``value`` + per-field
+        ``submit_after`` verbatim — the agent supplied these and needs
+        them unchanged to resume after solving. The redactor runs on
+        ``error.message`` strings but NOT on ``remaining[].value``: the
+        agent already has the value (it sent it to us); echoing it back
+        is not a leak, and stripping it would break resume.
+        """
+        return {
+            "success": True,
+            "data": {
+                "partial_success": True,
+                "captcha_required": True,
+                "filled": filled,
+                "remaining": [
+                    {
+                        "label": f["label"],
+                        "value": f["value"],
+                        "submit_after": f.get("submit_after", False),
+                    }
+                    for f in remaining_fields
+                ],
+                "captcha": captcha,
+                "submitted": False,
+            },
+        }
 
     async def open_tab(
         self, agent_id: str, url: str, snapshot_after: bool = False,

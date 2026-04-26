@@ -734,6 +734,82 @@ async def browser_find_text(
 
 
 @skill(
+    name="browser_fill_form",
+    description=(
+        "Fill multiple form fields by their visible labels in one call. "
+        "For each field, locates the input by label text (find_text under "
+        "the hood), then fills the value (clears existing content first). "
+        "On CAPTCHA detection mid-flow, returns partial_success with the "
+        "fields that were filled and the fields that remain — solve the "
+        "CAPTCHA, then call browser_fill_form again with the remaining "
+        "fields. Set submit_after=true (top-level OR per-field) to press "
+        "Enter after typing. Each field requires a 'label' (visible text "
+        "near the input) and 'value' (string to fill). Use this when you "
+        "have a clear list of name/email/password fields; for adaptive "
+        "flows where labels reveal themselves only after each click, use "
+        "browser_get_elements + browser_type field-by-field instead."
+    ),
+    parameters={
+        "fields": {
+            "type": "array",
+            "description": (
+                "Ordered list of fields to fill. Each entry: "
+                "{label: <visible label text>, value: <string to fill>, "
+                "submit_after?: <press Enter after this field, default "
+                "false>}. 1–50 entries; label 1–500 chars; value up to "
+                "10000 chars."
+            ),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "label": {
+                        "type": "string",
+                        "description": (
+                            "Visible label text for the input "
+                            "(case-insensitive substring match)."
+                        ),
+                    },
+                    "value": {
+                        "type": "string",
+                        "description": "Value to fill into the input.",
+                    },
+                    "submit_after": {
+                        "type": "boolean",
+                        "description": (
+                            "Press Enter on this field after filling. "
+                            "Default false."
+                        ),
+                        "default": False,
+                    },
+                },
+                "required": ["label", "value"],
+            },
+        },
+        "submit_after": {
+            "type": "boolean",
+            "description": (
+                "Press Enter on the LAST filled field after the loop "
+                "completes (skipped if a CAPTCHA stopped the flow). "
+                "Default false."
+            ),
+            "default": False,
+        },
+    },
+    parallel_safe=False,
+)
+async def browser_fill_form(
+    fields: list, submit_after: bool = False, *, mesh_client=None,
+) -> dict:
+    """Fill a sequence of form fields by visible label."""
+    if not isinstance(fields, list):
+        return {"error": "The 'fields' parameter must be an array"}
+    return await _browser_command(
+        mesh_client, "fill_form",
+        {"fields": fields, "submit_after": submit_after},
+    )
+
+
+@skill(
     name="browser_open_tab",
     description=(
         "Open a URL in a new browser tab. The new tab becomes the active "

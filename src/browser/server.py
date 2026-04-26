@@ -590,6 +590,24 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         await _apply_delay()
         return result
 
+    @app.post("/browser/{agent_id}/fill_form")
+    async def fill_form(agent_id: str, request: Request):
+        """Phase 6 §9.4 — fill a sequence of form fields by visible label.
+
+        Manager-side handles validation (returns ``invalid_input`` envelope
+        rather than raising HTTP 400) so the agent gets the structured
+        error taxonomy. We pass the body straight through.
+        """
+        _verify_auth(request)
+        body = await request.json()
+        fields = body.get("fields") or []
+        submit_after = bool(body.get("submit_after", False))
+        result = await manager.fill_form(
+            agent_id, fields, submit_after=submit_after,
+        )
+        await _apply_delay()
+        return result
+
     @app.post("/browser/{agent_id}/open_tab")
     async def open_tab(agent_id: str, request: Request):
         _verify_auth(request)

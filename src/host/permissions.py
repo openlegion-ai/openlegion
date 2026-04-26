@@ -42,6 +42,8 @@ KNOWN_BROWSER_ACTIONS: frozenset[str] = frozenset({
     "upload_file", "download",
     # Phase 5 §8.5 / §8.6 default-allow read-only / nav-equivalent actions.
     "find_text", "open_tab",
+    # Phase 6 §9.4 compound find-text+type with CAPTCHA-mid-flow partial success
+    "fill_form",
 })
 
 # Back-compat alias — retained so `host/server.py` and test fixtures that
