@@ -794,6 +794,133 @@ async def browser_detect_captcha(*, mesh_client=None) -> dict:
     return await _browser_command(mesh_client, "detect_captcha")
 
 
+def _upload_max_bytes() -> int:
+    """Per-file upload cap. Read from the same env var as the mesh +
+    browser layers so an operator override stays consistent across all
+    three. Defaults to 50 MB."""
+    import os as _os
+    raw = _os.environ.get("OPENLEGION_UPLOAD_STAGE_MAX_MB", "50")
+    try:
+        mb = max(1, int(raw))
+    except ValueError:
+        mb = 50
+    return mb * 1024 * 1024
+
+
+_UPLOAD_MAX_FILES = 5
+
+
+@skill(
+    name="browser_upload_file",
+    description=(
+        "Upload one or more workspace files to a file-input element. "
+        "Provide a `ref` from a prior browser_get_elements snapshot pointing "
+        "at an <input type=\"file\"> (or aria-equivalent). `paths` is a list "
+        "of workspace files (1..5) to upload — these are read from /data and "
+        "forwarded to the browser. Each file ≤50MB. "
+        "Optional `idempotency_key` allows the caller to dedupe retries "
+        "explicitly across calls; when omitted a fresh key is generated. "
+        "Returns {success, data: {uploaded: [path, ...]}}."
+    ),
+    parameters={
+        "ref": {
+            "type": "string",
+            "description": "Element ref (e.g. 'e7') for the file-input element.",
+        },
+        "paths": {
+            "type": "array",
+            "description": (
+                "Workspace paths under /data to upload (1..5 files). "
+                "Paths may be passed without the /data/ prefix — e.g. "
+                "'uploads/resume.pdf'. Each file must be <=50MB."
+            ),
+            "items": {"type": "string"},
+        },
+        "idempotency_key": {
+            "type": "string",
+            "description": (
+                "Optional caller-supplied key for cross-call dedupe. "
+                "Same key + same caller + same content within the stage "
+                "TTL returns the existing staged handle."
+            ),
+        },
+    },
+    parallel_safe=False,
+)
+async def browser_upload_file(
+    ref: str,
+    paths: list[str],
+    idempotency_key: str | None = None,
+    *,
+    mesh_client=None,
+) -> dict:
+    """Stage workspace files via mesh and drive the browser file-chooser."""
+    if not mesh_client:
+        return {"error": "Browser requires mesh connectivity"}
+    if not ref or not isinstance(ref, str):
+        return {"error": "ref is required"}
+    if not isinstance(paths, list) or not paths:
+        return {"error": "paths must be a non-empty list"}
+    if len(paths) > _UPLOAD_MAX_FILES:
+        return {"error": f"at most {_UPLOAD_MAX_FILES} files per upload"}
+    if not all(isinstance(p, str) and p for p in paths):
+        return {"error": "paths must be a list of non-empty strings"}
+
+    from src.agent.builtins.file_tool import _safe_path
+
+    resolved_paths: list = []
+    suggested_filenames: list[str] = []
+    for path in paths:
+        try:
+            safe = _safe_path(path)
+        except (ValueError, OSError) as e:
+            return {"error": f"Invalid workspace path '{path}': {e}"}
+        if not safe.is_file():
+            return {"error": f"Upload path not found: {path}"}
+        try:
+            size = safe.stat().st_size
+        except OSError as e:
+            return {"error": f"Cannot stat '{path}': {e}"}
+        cap = _upload_max_bytes()
+        if size > cap:
+            return {
+                "error": (
+                    f"File '{path}' is {size} bytes; per-file cap is "
+                    f"{cap} bytes ({cap // (1024 * 1024)}MB)"
+                ),
+            }
+        resolved_paths.append(safe)
+        suggested_filenames.append(safe.name)
+
+    import uuid as _uuid
+    idem_key = idempotency_key if isinstance(idempotency_key, str) and idempotency_key else _uuid.uuid4().hex
+    staged_handles: list[str] = []
+    try:
+        for i, safe_path in enumerate(resolved_paths):
+            stage_key = f"{idem_key}-{i}"
+            with open(safe_path, "rb") as fh:
+                stage_resp = await mesh_client.browser_upload_stage(
+                    fh, idempotency_key=stage_key,
+                )
+            handle = stage_resp.get("staged_handle")
+            if not handle:
+                return {"error": "Mesh did not return a staged_handle"}
+            staged_handles.append(handle)
+    except Exception as e:
+        return {"error": _deep_redact(str(e))}
+
+    try:
+        result = await mesh_client.browser_upload_apply({
+            "ref": ref,
+            "staged_handles": staged_handles,
+            "suggested_filenames": suggested_filenames,
+            "idempotency_key": idem_key,
+        })
+        return _deep_redact(result)
+    except Exception as e:
+        return {"error": _deep_redact(str(e))}
+
+
 @skill(
     name="request_browser_login",
     description=(

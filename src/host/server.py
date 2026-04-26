@@ -181,6 +181,8 @@ def create_mesh_app(
         "wallet_execute": (10, 3600),
         "image_gen": (10, 60),
         "agent_profile": (30, 60),
+        "upload_stage": (30, 60),
+        "upload_apply": (30, 60),
     }
 
     async def _check_rate_limit(endpoint: str, agent_id: str) -> None:
@@ -2948,6 +2950,542 @@ def create_mesh_app(
         except Exception as e:
             logger.warning("Browser proxy error: %s", e)
             raise HTTPException(502, f"Browser service error: {e}")
+
+    # ── §4.5 / §8.1 file-upload staging ──────────────────────────────────
+    #
+    # Two-phase mesh-mediated upload:
+    #   A) /mesh/browser/upload-stage stores raw bytes from the agent into
+    #      a tmpfs-backed staging dir keyed by an opaque handle.
+    #   B) /mesh/browser/upload_file resolves staged_handles → bytes,
+    #      streams them into the browser container's receive dir, then
+    #      drives /browser/{agent}/upload_file with the resulting paths.
+    #
+    # Stage files older than _UPLOAD_STAGE_TTL_S are reaped by a periodic
+    # garbage-collection loop scheduled at startup.
+
+    import hashlib as _hashlib
+    import os as _os
+    from pathlib import Path as _Path
+
+    _UPLOAD_STAGE_DIR = _Path(
+        _os.environ.get(
+            "OPENLEGION_UPLOAD_STAGE_DIR",
+            "/tmp/openlegion-upload-stage",
+        ),
+    )
+    try:
+        _UPLOAD_STAGE_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError as _e:
+        logger.warning(
+            "Could not create upload-stage dir %s: %s", _UPLOAD_STAGE_DIR, _e,
+        )
+
+    try:
+        _UPLOAD_STAGE_TTL_S = max(
+            5, int(_os.environ.get("OPENLEGION_UPLOAD_STAGE_TTL_S", "60")),
+        )
+    except ValueError:
+        _UPLOAD_STAGE_TTL_S = 60
+
+    try:
+        _UPLOAD_STAGE_MAX_MB = max(
+            1, int(_os.environ.get("OPENLEGION_UPLOAD_STAGE_MAX_MB", "50")),
+        )
+    except ValueError:
+        _UPLOAD_STAGE_MAX_MB = 50
+    _UPLOAD_STAGE_MAX_BYTES = _UPLOAD_STAGE_MAX_MB * 1024 * 1024
+
+    _stage_dir_resolved = _UPLOAD_STAGE_DIR.resolve()
+
+    def _stage_paths(handle: str) -> tuple[_Path, _Path]:
+        bin_path = (_UPLOAD_STAGE_DIR / f"{handle}.bin").resolve()
+        meta_path = (_UPLOAD_STAGE_DIR / f"{handle}.json").resolve()
+        if not bin_path.is_relative_to(_stage_dir_resolved):
+            raise HTTPException(400, "invalid handle")
+        if not meta_path.is_relative_to(_stage_dir_resolved):
+            raise HTTPException(400, "invalid handle")
+        return bin_path, meta_path
+
+    def _read_stage_meta(meta_path: _Path) -> dict | None:
+        try:
+            return json.loads(meta_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    def _idem_handle(caller_id: str, idem_key: str) -> str:
+        digest = _hashlib.sha256(f"{caller_id}|{idem_key}".encode()).hexdigest()
+        return f"{caller_id}-idem{digest[:24]}"
+
+    def _atomic_write_bytes(path: _Path, data: bytes) -> None:
+        partial = path.with_suffix(path.suffix + ".partial")
+        try:
+            with open(partial, "wb") as fh:
+                fh.write(data)
+            _os.replace(partial, path)
+        except OSError:
+            with contextlib.suppress(OSError):
+                partial.unlink()
+            raise
+
+    # P0.2: Per-handle async lock for stage writes. Two parallel stage
+    # requests with the same idempotency_key produce the same handle —
+    # without this lock, both would write to the partial file concurrently
+    # and corrupt the resulting bytes.
+    _stage_locks: dict[str, asyncio.Lock] = {}
+    _stage_locks_guard = asyncio.Lock()
+
+    async def _get_stage_lock(handle: str) -> asyncio.Lock:
+        async with _stage_locks_guard:
+            lock = _stage_locks.get(handle)
+            if lock is None:
+                lock = asyncio.Lock()
+                _stage_locks[handle] = lock
+            return lock
+
+    async def _release_stage_lock_if_idle(handle: str) -> None:
+        async with _stage_locks_guard:
+            lock = _stage_locks.get(handle)
+            if lock is not None and not lock.locked():
+                _stage_locks.pop(handle, None)
+
+    # P0.3: Track in-flight stage writes so the GC does not unlink a
+    # ``.partial`` mid-write for slow uploads. The set is keyed by handle.
+    _active_stage_handles: set[str] = set()
+
+    # P0.3 / GC tuning: ``.partial`` files belonging to inactive handles
+    # are reaped only when older than this longer threshold (5 × TTL),
+    # giving slow uploads room to complete even when in-flight tracking
+    # was reset by a process restart.
+    _UPLOAD_STAGE_PARTIAL_TTL_S = max(_UPLOAD_STAGE_TTL_S, _UPLOAD_STAGE_TTL_S * 5)
+
+    @app.post("/mesh/browser/upload-stage")
+    async def upload_stage(request: Request) -> dict:
+        """Phase A: stream raw bytes into the mesh staging dir.
+
+        Returns ``{staged_handle, size_bytes, expires_at}``. Bytes are
+        capped at ``_UPLOAD_STAGE_MAX_BYTES``; oversize requests return
+        413 and clean up the partial file.
+
+        Idempotency: when ``Idempotency-Key`` is supplied the staged
+        handle is derived deterministically from ``sha256(caller_id|key)``
+        so a duplicate (caller, key, sha256) within TTL returns the same
+        handle without an O(N) directory scan.
+        """
+        caller_id = _extract_verified_agent_id(request)
+        await _check_rate_limit("upload_stage", caller_id)
+        if not permissions.can_browser_action(caller_id, "upload_file"):
+            raise HTTPException(403, "Browser action 'upload_file' denied")
+
+        idem_key = request.headers.get("idempotency-key", "") or None
+        max_bytes = _UPLOAD_STAGE_MAX_BYTES
+
+        if idem_key:
+            handle = _idem_handle(caller_id, idem_key)
+        else:
+            handle = f"{caller_id}-{_uuid.uuid4().hex[:24]}"
+        bin_path, meta_path = _stage_paths(handle)
+        bin_partial = bin_path.with_suffix(".bin.partial")
+
+        lock = await _get_stage_lock(handle)
+        async with lock:
+            _active_stage_handles.add(handle)
+            try:
+                sha = _hashlib.sha256()
+                size = 0
+                try:
+                    with open(bin_partial, "wb") as fh:
+                        async for chunk in request.stream():
+                            if not chunk:
+                                continue
+                            size += len(chunk)
+                            if size > max_bytes:
+                                fh.close()
+                                with contextlib.suppress(OSError):
+                                    bin_partial.unlink()
+                                raise HTTPException(
+                                    413,
+                                    f"Upload exceeds {_UPLOAD_STAGE_MAX_MB}MB limit",
+                                )
+                            fh.write(chunk)
+                            sha.update(chunk)
+                except HTTPException:
+                    raise
+                except OSError as e:
+                    with contextlib.suppress(OSError):
+                        bin_partial.unlink()
+                    raise HTTPException(500, f"Stage write failed: {e}")
+
+                digest = sha.hexdigest()
+
+                if idem_key and meta_path.is_file() and bin_path.is_file():
+                    now = time.time()
+                    try:
+                        age = now - meta_path.stat().st_mtime
+                    except OSError:
+                        age = _UPLOAD_STAGE_TTL_S + 1
+                    existing_meta = _read_stage_meta(meta_path) if age <= _UPLOAD_STAGE_TTL_S else None
+                    if (
+                        existing_meta
+                        and existing_meta.get("caller_id") == caller_id
+                        and existing_meta.get("idempotency_key") == idem_key
+                        and existing_meta.get("sha256") == digest
+                        and existing_meta.get("status") != "consumed"
+                    ):
+                        with contextlib.suppress(OSError):
+                            bin_partial.unlink()
+                        expires_at = (
+                            datetime.fromtimestamp(
+                                meta_path.stat().st_mtime, timezone.utc,
+                            )
+                            + timedelta(seconds=_UPLOAD_STAGE_TTL_S)
+                        ).isoformat()
+                        return {
+                            "staged_handle": handle,
+                            "size_bytes": int(existing_meta.get("size_bytes", 0)),
+                            "expires_at": expires_at,
+                        }
+
+                try:
+                    _os.replace(bin_partial, bin_path)
+                except OSError as e:
+                    with contextlib.suppress(OSError):
+                        bin_partial.unlink()
+                    raise HTTPException(500, f"Stage finalize failed: {e}")
+
+                created_at = datetime.now(timezone.utc)
+                expires_at_dt = created_at + timedelta(seconds=_UPLOAD_STAGE_TTL_S)
+                meta_payload = {
+                    "caller_id": caller_id,
+                    "idempotency_key": idem_key,
+                    "created_at": created_at.isoformat(),
+                    "expires_at": expires_at_dt.isoformat(),
+                    "size_bytes": size,
+                    "sha256": digest,
+                    "status": "staged",
+                    "consumed_at": None,
+                    "last_result": None,
+                }
+                try:
+                    _atomic_write_bytes(meta_path, json.dumps(meta_payload).encode())
+                except OSError as e:
+                    with contextlib.suppress(OSError):
+                        bin_path.unlink()
+                    raise HTTPException(500, f"Stage meta write failed: {e}")
+
+                return {
+                    "staged_handle": handle,
+                    "size_bytes": size,
+                    "expires_at": expires_at_dt.isoformat(),
+                }
+            finally:
+                _active_stage_handles.discard(handle)
+                await _release_stage_lock_if_idle(handle)
+
+    @app.post("/mesh/browser/upload_file")
+    async def upload_apply(request: Request) -> dict:
+        """Phase B: forward staged bytes into the browser, drive upload_file.
+
+        Body: ``{target_agent_id?, ref, staged_handles: [str],
+        suggested_filenames?: [str], idempotency_key?}``. Resolves each
+        handle to its mesh-side bytes, streams to
+        ``/browser/{a}/_stage_upload``, then POSTs the resulting paths to
+        ``/browser/{a}/upload_file``.
+
+        Idempotency: when ``idempotency_key`` is supplied, a successful
+        apply caches its result envelope on each handle's sidecar. A
+        subsequent apply with the same ``(caller, key, handles)`` set
+        within the stage TTL returns the cached envelope — the browser
+        is NOT driven a second time. Without this, retry-after-success
+        would 404 (handles consumed) and double-upload after re-stage.
+        """
+        caller_id = _extract_verified_agent_id(request)
+        await _check_rate_limit("upload_apply", caller_id)
+        body = await request.json()
+        req_agent_id = _resolve_browser_target(
+            caller_id, body.get("target_agent_id") or "",
+        )
+
+        if not permissions.can_browser_action(req_agent_id, "upload_file"):
+            raise HTTPException(403, "Browser action 'upload_file' denied")
+
+        ref = body.get("ref", "")
+        staged_handles = body.get("staged_handles") or []
+        suggested_filenames = body.get("suggested_filenames") or []
+        idempotency_key = body.get("idempotency_key")
+        if idempotency_key is not None and not isinstance(idempotency_key, str):
+            raise HTTPException(400, "idempotency_key must be a string")
+        if not ref:
+            raise HTTPException(400, "ref required")
+        if (
+            not isinstance(staged_handles, list)
+            or not all(isinstance(h, str) and h for h in staged_handles)
+        ):
+            raise HTTPException(400, "staged_handles must be a non-empty list of strings")
+        if not staged_handles:
+            raise HTTPException(400, "staged_handles must not be empty")
+        if len(staged_handles) > 5:
+            raise HTTPException(400, "at most 5 files per upload")
+        if suggested_filenames:
+            if (
+                not isinstance(suggested_filenames, list)
+                or not all(isinstance(n, str) for n in suggested_filenames)
+            ):
+                raise HTTPException(
+                    400, "suggested_filenames must be a list of strings",
+                )
+            if len(suggested_filenames) != len(staged_handles):
+                raise HTTPException(
+                    400,
+                    "suggested_filenames length must match staged_handles",
+                )
+
+        # P0.1 — replay check. If the caller supplied an idempotency_key
+        # and EVERY referenced handle's sidecar is consumed, owned by the
+        # caller, tagged with the same key, within TTL, and carries a
+        # cached last_result — return the cached envelope. The browser
+        # is not driven again.
+        if idempotency_key:
+            cached_results: list[dict] = []
+            replay_eligible = True
+            now = time.time()
+            for handle in staged_handles:
+                _bin, meta_path = _stage_paths(handle)
+                if not meta_path.is_file():
+                    replay_eligible = False
+                    break
+                try:
+                    age = now - meta_path.stat().st_mtime
+                except OSError:
+                    replay_eligible = False
+                    break
+                if age > _UPLOAD_STAGE_TTL_S:
+                    replay_eligible = False
+                    break
+                meta = _read_stage_meta(meta_path) or {}
+                if (
+                    meta.get("caller_id") != caller_id
+                    or meta.get("status") != "consumed"
+                    or meta.get("idempotency_key") != idempotency_key
+                    or not isinstance(meta.get("last_result"), dict)
+                ):
+                    replay_eligible = False
+                    break
+                cached_results.append(meta["last_result"])
+            if replay_eligible and cached_results:
+                # All handles share the same apply call → all sidecars
+                # carry the same envelope. Return the first.
+                return cached_results[0]
+
+        resolved: list[tuple[str, _Path, dict, str]] = []
+        for i, handle in enumerate(staged_handles):
+            bin_path, meta_path = _stage_paths(handle)
+            if not bin_path.is_file() or not meta_path.is_file():
+                raise HTTPException(404, f"Unknown staged_handle: {handle}")
+            meta = _read_stage_meta(meta_path) or {}
+            if meta.get("caller_id") != caller_id:
+                raise HTTPException(403, "staged_handle does not belong to caller")
+            if meta.get("status") == "consumed":
+                # Handle was consumed by a prior apply but the replay
+                # check above did not match (key mismatch, missing key,
+                # or stale). Treat as unknown.
+                raise HTTPException(404, f"Unknown staged_handle: {handle}")
+            suggested = (
+                suggested_filenames[i] if i < len(suggested_filenames) else ""
+            )
+            resolved.append((handle, bin_path, meta, suggested))
+
+        browser_service_url = None
+        if container_manager:
+            browser_service_url = getattr(container_manager, "browser_service_url", None)
+        if not browser_service_url:
+            raise HTTPException(503, "Browser service not available")
+
+        browser_auth = getattr(container_manager, "browser_auth_token", "")
+        ingest_headers: dict = {"X-Mesh-Internal": "1"}
+        if browser_auth:
+            ingest_headers["Authorization"] = f"Bearer {browser_auth}"
+        incoming_trace = request.headers.get("x-trace-id")
+        if incoming_trace:
+            ingest_headers["X-Trace-Id"] = incoming_trace
+
+        async def _stream_file(path: _Path):
+            fh = open(path, "rb")
+            try:
+                while True:
+                    chunk = await asyncio.to_thread(fh.read, 64 * 1024)
+                    if not chunk:
+                        break
+                    yield chunk
+            finally:
+                fh.close()
+
+        browser_paths: list[str] = []
+        try:
+            for handle, bin_path, _meta, suggested in resolved:
+                ingest_filename = suggested or handle
+                try:
+                    resp = await _browser_proxy_client.post(
+                        f"{browser_service_url}/browser/{req_agent_id}/_stage_upload",
+                        params={"suggested_filename": ingest_filename},
+                        content=_stream_file(bin_path),
+                        headers=ingest_headers,
+                        timeout=180,
+                    )
+                except _httpx.TimeoutException as e:
+                    raise HTTPException(503, f"Browser service timeout: {e}")
+                except _httpx.ConnectError as e:
+                    raise HTTPException(503, f"Browser service unreachable: {e}")
+                if resp.status_code >= 400:
+                    raise HTTPException(
+                        resp.status_code,
+                        f"Browser stage ingest failed: {resp.text}",
+                    )
+                ingest = resp.json()
+                ingested_path = ingest.get("path")
+                if not ingested_path:
+                    raise HTTPException(502, "Browser stage ingest returned no path")
+                browser_paths.append(ingested_path)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.warning("Upload ingest stream error: %s", e)
+            raise HTTPException(502, f"Browser ingest error: {e}")
+
+        upload_headers: dict = {}
+        if browser_auth:
+            upload_headers["Authorization"] = f"Bearer {browser_auth}"
+        if incoming_trace:
+            upload_headers["X-Trace-Id"] = incoming_trace
+        try:
+            resp = await _browser_proxy_client.post(
+                f"{browser_service_url}/browser/{req_agent_id}/upload_file",
+                json={"ref": ref, "paths": browser_paths},
+                headers=upload_headers,
+            )
+            resp.raise_for_status()
+            result = resp.json()
+        except _httpx.TimeoutException as e:
+            raise HTTPException(503, f"Browser service timeout: {e}")
+        except _httpx.HTTPStatusError as e:
+            raise HTTPException(e.response.status_code, e.response.text)
+        except Exception as e:
+            logger.warning("Browser upload_file proxy error: %s", e)
+            raise HTTPException(502, f"Browser service error: {e}")
+
+        if result.get("success"):
+            now_iso = datetime.now(timezone.utc).isoformat()
+            for handle, _bin_path, meta, _suggested in resolved:
+                _bin, _meta_path = _stage_paths(handle)
+                with contextlib.suppress(OSError):
+                    _bin.unlink()
+                meta_consumed = dict(meta)
+                meta_consumed["status"] = "consumed"
+                meta_consumed["consumed_at"] = now_iso
+                # P0.1 — only cache the result envelope when an
+                # idempotency_key was supplied. Without a key, replay
+                # protection is impossible so don't pretend we have it.
+                if idempotency_key:
+                    meta_consumed["idempotency_key"] = idempotency_key
+                    meta_consumed["last_result"] = result
+                try:
+                    _atomic_write_bytes(_meta_path, json.dumps(meta_consumed).encode())
+                except OSError:
+                    with contextlib.suppress(OSError):
+                        _meta_path.unlink()
+        return result
+
+    async def _upload_stage_gc_once() -> int:
+        """Reap orphan stage files older than TTL. Returns reaped count.
+
+        Iterates by handle (drawn from sidecar metadata): when both ``.bin``
+        and ``.json`` exist for a handle they are considered paired; the GC
+        reaps the pair only when BOTH are older than TTL. Stray ``.partial``
+        files use a longer TTL (``_UPLOAD_STAGE_PARTIAL_TTL_S``) and are
+        skipped while the corresponding handle is in ``_active_stage_handles``
+        (P0.3 — slow uploads must not have their partial unlinked
+        mid-write). Unpaired bare ``.bin`` files are left alone — they may
+        belong to an in-progress write.
+        """
+        if not _UPLOAD_STAGE_DIR.exists():
+            return 0
+        now = time.time()
+        reaped = 0
+        try:
+            entries = list(_UPLOAD_STAGE_DIR.iterdir())
+        except OSError:
+            return 0
+
+        for child in entries:
+            if not child.name.endswith(".partial"):
+                continue
+            # ``foo.bin.partial`` → handle is ``foo``.
+            handle = child.name[: -len(".bin.partial")] if child.name.endswith(".bin.partial") else child.stem
+            if handle in _active_stage_handles:
+                continue
+            try:
+                age = now - child.stat().st_mtime
+            except OSError:
+                continue
+            if age > _UPLOAD_STAGE_PARTIAL_TTL_S:
+                try:
+                    child.unlink()
+                    reaped += 1
+                except OSError:
+                    continue
+
+        for child in entries:
+            if child.suffix != ".json":
+                continue
+            handle = child.stem
+            bin_path, meta_path = _stage_paths(handle)
+            try:
+                meta_age = now - meta_path.stat().st_mtime
+            except OSError:
+                meta_age = _UPLOAD_STAGE_TTL_S + 1
+            if bin_path.is_file():
+                try:
+                    bin_age = now - bin_path.stat().st_mtime
+                except OSError:
+                    bin_age = _UPLOAD_STAGE_TTL_S + 1
+                if meta_age > _UPLOAD_STAGE_TTL_S and bin_age > _UPLOAD_STAGE_TTL_S:
+                    try:
+                        bin_path.unlink()
+                        reaped += 1
+                    except OSError:
+                        pass
+                    try:
+                        meta_path.unlink()
+                        reaped += 1
+                    except OSError:
+                        pass
+            else:
+                if meta_age > _UPLOAD_STAGE_TTL_S:
+                    try:
+                        meta_path.unlink()
+                        reaped += 1
+                    except OSError:
+                        pass
+        return reaped
+
+    async def _upload_stage_gc_loop() -> None:
+        while True:
+            try:
+                await _upload_stage_gc_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.debug("upload_stage gc tick failed: %s", e)
+            await asyncio.sleep(max(1, _UPLOAD_STAGE_TTL_S // 2))
+
+    app.state.upload_stage_dir = _UPLOAD_STAGE_DIR
+    app.state.upload_stage_ttl_s = _UPLOAD_STAGE_TTL_S
+    app.state.upload_stage_partial_ttl_s = _UPLOAD_STAGE_PARTIAL_TTL_S
+    app.state.upload_stage_gc_once = _upload_stage_gc_once
+    app.state.upload_stage_active_handles = _active_stage_handles
+
+    @app.on_event("startup")
+    async def _start_upload_stage_gc() -> None:
+        asyncio.create_task(_upload_stage_gc_loop())
 
     # === Event Bus ===
 
