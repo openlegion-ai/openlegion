@@ -744,10 +744,15 @@ async def browser_find_text(
         "CAPTCHA, then call browser_fill_form again with the remaining "
         "fields. Set submit_after=true (top-level OR per-field) to press "
         "Enter after typing. Each field requires a 'label' (visible text "
-        "near the input) and 'value' (string to fill). Use this when you "
-        "have a clear list of name/email/password fields; for adaptive "
-        "flows where labels reveal themselves only after each click, use "
-        "browser_get_elements + browser_type field-by-field instead."
+        "near the input) and 'value' (string to fill). The response "
+        "always includes 'submitted': true if Enter was pressed (final "
+        "or per-field), false otherwise. If submitted=true alongside "
+        "captcha_required=true, the form may have ALREADY been submitted "
+        "with partial data — re-snapshot before blindly resuming. Use "
+        "this when you have a clear list of name/email/password fields; "
+        "for adaptive flows where labels reveal themselves only after "
+        "each click, use browser_get_elements + browser_type "
+        "field-by-field instead."
     ),
     parameters={
         "fields": {

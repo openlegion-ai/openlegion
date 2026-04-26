@@ -187,6 +187,56 @@ class TestFillFormCaptchaMidFlow:
         assert loc.fill.await_count == 1
 
     @pytest.mark.asyncio
+    async def test_per_field_submit_then_captcha_reports_submitted_true(self):
+        """Per-field Enter triggers the CAPTCHA → ``submitted=True``.
+
+        The plan §9.4 reviewer flagged this: pressing Enter often IS
+        what triggers the CAPTCHA, and if the press succeeded the form
+        may already have been submitted with partial data. The captcha
+        envelope must report ``submitted: true`` so the agent doesn't
+        blindly re-type the remaining fields against a navigated page.
+        """
+        mgr = _make_manager()
+        refs = {
+            "e0": {"role": "textbox", "name": "Email", "index": 0, "disabled": False},
+            "e1": {"role": "textbox", "name": "Password", "index": 0, "disabled": False},
+        }
+        inst = _make_instance(refs)
+        loc = _make_locator()
+        captcha_blob = {"type": "iframe[src*=recaptcha]", "message": "CAPTCHA"}
+
+        # No captcha after fill, captcha appears AFTER per-field Enter.
+        # _check_captcha is called once per field (after fill+optional Enter).
+        check_captcha_mock = AsyncMock(return_value=captcha_blob)
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst), \
+             patch.object(BrowserManager, "_locator_from_ref",
+                          new_callable=AsyncMock, return_value=loc), \
+             patch.object(BrowserManager, "_check_captcha",
+                          new=check_captcha_mock), \
+             patch.object(BrowserManager, "_snapshot_impl", new=_fake_snapshot):
+            result = await mgr.fill_form(
+                "agent1",
+                [
+                    {"label": "Email", "value": "a@b.co", "submit_after": True},
+                    {"label": "Password", "value": "pw"},
+                ],
+            )
+
+        assert result["success"] is True
+        data = result["data"]
+        assert data["captcha_required"] is True
+        # Critical: the per-field Enter pressed → submitted=True so the
+        # agent knows the form was already submitted with partial data.
+        assert data["submitted"] is True
+        # Enter was pressed exactly once (the per-field one).
+        assert loc.press.await_count == 1
+        loc.press.assert_awaited_with("Enter")
+        # Remaining still echoes Password un-attempted.
+        assert len(data["remaining"]) == 1
+        assert data["remaining"][0]["label"] == "Password"
+
+    @pytest.mark.asyncio
     async def test_captcha_before_any_fill_yields_empty_filled(self):
         """find_text returns no matches; captcha then detected → no fills."""
         mgr = _make_manager()

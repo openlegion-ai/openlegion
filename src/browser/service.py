@@ -5394,6 +5394,14 @@ class BrowserManager:
 
             filled: list[dict] = []
             last_locator = None
+            # Track whether ANY Enter press has succeeded — per-field
+            # submit_after immediately before the captcha check is the
+            # most common trigger for a mid-flow captcha (submission is
+            # often what gates the challenge). When that happens, the
+            # form may have ALREADY been submitted with partial data, so
+            # the captcha-envelope must report ``submitted=True`` rather
+            # than the agent thinking it can safely resume by re-typing.
+            submitted = False
             for i, field in enumerate(normalized):
                 label = field["label"]
                 value = field["value"]
@@ -5433,6 +5441,7 @@ class BrowserManager:
                     if captcha:
                         return self._fill_form_captcha_envelope(
                             filled, normalized[i + 1:], captcha,
+                            submitted=submitted,
                         )
                     continue
 
@@ -5485,10 +5494,16 @@ class BrowserManager:
 
                 # Per-field submit_after fires after a successful fill but
                 # BEFORE the captcha check, because submitting can be what
-                # triggers the captcha.
+                # triggers the captcha. If the press succeeds we mark
+                # ``submitted=True`` so a follow-up captcha envelope tells
+                # the agent the form was already submitted (possibly with
+                # partial data) — the agent must NOT just resume typing
+                # the remaining fields without first re-checking page
+                # state.
                 if field_submit:
                     try:
                         await locator.press("Enter")
+                        submitted = True
                     except Exception as e:
                         logger.debug(
                             "fill_form per-field submit failed for %s "
@@ -5505,14 +5520,15 @@ class BrowserManager:
                 if captcha:
                     return self._fill_form_captcha_envelope(
                         filled, normalized[i + 1:], captcha,
+                        submitted=submitted,
                     )
 
             # 3) Final submit — only if no captcha interrupted us. Top-level
             #    submit_after presses Enter on the LAST filled field's
             #    locator. If no field was successfully filled (all
             #    not_found / type_failed) we have no anchor to press Enter
-            #    on, so submitted stays False.
-            submitted = False
+            #    on, so submitted stays whatever it was (False unless a
+            #    per-field submit fired earlier in the same call).
             if submit_after and last_locator is not None:
                 try:
                     await last_locator.press("Enter")
@@ -5540,6 +5556,7 @@ class BrowserManager:
     @staticmethod
     def _fill_form_captcha_envelope(
         filled: list[dict], remaining_fields: list[dict], captcha: dict,
+        *, submitted: bool = False,
     ) -> dict:
         """Compose the §9.4 partial-success envelope on captcha mid-flow.
 
@@ -5549,6 +5566,12 @@ class BrowserManager:
         ``error.message`` strings but NOT on ``remaining[].value``: the
         agent already has the value (it sent it to us); echoing it back
         is not a leak, and stripping it would break resume.
+
+        ``submitted`` is True when a per-field ``submit_after=True``
+        Enter-press succeeded earlier in this call (and was likely the
+        trigger for the captcha). The agent uses this to decide whether
+        to plain-resume (re-type ``remaining``) or re-snapshot first to
+        check whether the partial-data submit went through.
         """
         return {
             "success": True,
@@ -5565,7 +5588,7 @@ class BrowserManager:
                     for f in remaining_fields
                 ],
                 "captcha": captcha,
-                "submitted": False,
+                "submitted": submitted,
             },
         }
 
