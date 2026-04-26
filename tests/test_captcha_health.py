@@ -184,6 +184,70 @@ async def test_health_check_unreachable_short_circuits_subsequent_solves():
 
 
 @pytest.mark.asyncio
+async def test_concurrent_first_solves_share_one_health_check():
+    """Three agents call solve() simultaneously on a fresh solver. The
+    health-check gate must be inside an asyncio.Lock so they all wait
+    for the SAME probe instead of each firing their own."""
+    solver = _make_solver()
+    page = _solve_page()
+
+    probe_started = asyncio.Event()
+    probe_release = asyncio.Event()
+    probe_calls = 0
+
+    async def fake_post(url, *args, **kwargs):
+        nonlocal probe_calls
+        if url.endswith("/getBalance"):
+            probe_calls += 1
+            probe_started.set()
+            await probe_release.wait()
+            return _ok_balance_resp()
+        # createTask / getTaskResult — return success immediately.
+        if "createTask" in url:
+            r = MagicMock()
+            r.json = MagicMock(return_value={"errorId": 0, "taskId": "T"})
+            r.raise_for_status = MagicMock()
+            return r
+        r = MagicMock()
+        r.json = MagicMock(return_value={
+            "errorId": 0, "status": "ready",
+            "solution": {"gRecaptchaResponse": "tok"},
+        })
+        r.raise_for_status = MagicMock()
+        return r
+
+    client = AsyncMock(spec=httpx.AsyncClient)
+    client.is_closed = False
+    client.post = AsyncMock(side_effect=fake_post)
+    solver._client = client
+
+    with patch("src.browser.captcha._POLL_INTERVAL", 0.001):
+        # Kick off three concurrent solves before the probe completes.
+        tasks = [
+            asyncio.create_task(
+                solver.solve(page, 'iframe[src*="recaptcha"]', "https://example.com"),
+            )
+            for _ in range(3)
+        ]
+
+        # Wait until ONE probe is in flight, then release it. If the gate
+        # were unlocked, multiple probes would race past the check.
+        await asyncio.wait_for(probe_started.wait(), timeout=2.0)
+        # Give the event loop a tick so any racing concurrent probe call
+        # would have entered fake_post too.
+        for _ in range(5):
+            await asyncio.sleep(0)
+        probe_release.set()
+
+        results = await asyncio.gather(*tasks)
+
+    assert all(r is True for r in results)
+    assert probe_calls == 1, (
+        f"expected exactly one health probe, got {probe_calls} — gate is racy"
+    )
+
+
+@pytest.mark.asyncio
 async def test_health_check_5xx_treated_as_unreachable():
     solver = _make_solver()
     client = AsyncMock(spec=httpx.AsyncClient)
@@ -205,6 +269,59 @@ async def test_health_check_errorid_treated_as_unreachable():
     client = AsyncMock(spec=httpx.AsyncClient)
     client.is_closed = False
     client.post = AsyncMock(return_value=_err_balance_resp(error_id=1, status=200))
+    solver._client = client
+
+    outcome = await solver.health_check()
+    assert outcome == "unreachable"
+
+
+@pytest.mark.asyncio
+async def test_health_check_missing_balance_treated_as_unreachable():
+    """Provider returned 200 + valid JSON but the expected ``balance``
+    field is absent. We don't know what that response actually means —
+    wrong endpoint, response-shape change, transparent proxy — so the
+    only safe answer is 'unreachable'."""
+    solver = _make_solver()
+    client = AsyncMock(spec=httpx.AsyncClient)
+    client.is_closed = False
+    weird = MagicMock()
+    weird.status_code = 200
+    weird.json = MagicMock(return_value={"errorId": 0, "foo": "bar"})
+    client.post = AsyncMock(return_value=weird)
+    solver._client = client
+
+    outcome = await solver.health_check()
+    assert outcome == "unreachable"
+
+
+@pytest.mark.asyncio
+async def test_health_check_non_numeric_balance_treated_as_unreachable():
+    """Provider returned a balance field but it's not numeric (e.g. a
+    string error message in place of a number). Treat as unreachable."""
+    solver = _make_solver()
+    client = AsyncMock(spec=httpx.AsyncClient)
+    client.is_closed = False
+    weird = MagicMock()
+    weird.status_code = 200
+    weird.json = MagicMock(return_value={"errorId": 0, "balance": "n/a"})
+    client.post = AsyncMock(return_value=weird)
+    solver._client = client
+
+    outcome = await solver.health_check()
+    assert outcome == "unreachable"
+
+
+@pytest.mark.asyncio
+async def test_health_check_non_json_treated_as_unreachable():
+    """Provider returned 200 with HTML / non-JSON body (rare but
+    happens behind misconfigured CDNs). Treat as unreachable."""
+    solver = _make_solver()
+    client = AsyncMock(spec=httpx.AsyncClient)
+    client.is_closed = False
+    weird = MagicMock()
+    weird.status_code = 200
+    weird.json = MagicMock(side_effect=ValueError("not JSON"))
+    client.post = AsyncMock(return_value=weird)
     solver._client = client
 
     outcome = await solver.health_check()
@@ -268,6 +385,31 @@ async def test_breaker_auto_clears_after_window():
     assert client.post.await_count == 2
 
 
+@pytest.mark.asyncio
+async def test_breaker_auto_clear_resets_failure_window():
+    """After auto-clear, the failure-window deque + breaker timestamp
+    must both be reset so a single new failure doesn't immediately
+    re-trip on stale entries."""
+    solver = _make_solver()
+    solver._solver_health_checked = True
+    base = 1_000_000.0
+
+    with patch("src.browser.captcha.time.time", return_value=base):
+        for _ in range(_BREAKER_FAILURE_THRESHOLD):
+            await solver._record_solver_outcome(success=False)
+        assert solver.is_breaker_open() is True
+        assert len(solver._solver_failure_timestamps) == _BREAKER_FAILURE_THRESHOLD
+
+    # Reading is_breaker_open() AFTER the window expires must clear state.
+    with patch(
+        "src.browser.captcha.time.time",
+        return_value=base + _BREAKER_OPEN_DURATION + 1,
+    ):
+        assert solver.is_breaker_open() is False
+        assert solver._solver_breaker_until == 0.0
+        assert len(solver._solver_failure_timestamps) == 0
+
+
 # ── 7: a single failure does NOT trip the breaker ─────────────────────
 
 
@@ -322,6 +464,37 @@ async def test_failures_outside_window_do_not_trip():
         await solver._record_solver_outcome(success=False)
         assert solver.is_breaker_open() is False
         assert len(solver._solver_failure_timestamps) == 1
+
+
+@pytest.mark.asyncio
+async def test_three_failures_staggered_inside_window_does_trip():
+    """Failures at t=0, t=200, t=400 — all three are inside a 300-s
+    sliding window viewed from t=400 (cutoff = 100, only t=0 falls
+    out). Deque keeps [200, 400] after prune + new append → len 2 < 3
+    → breaker NOT tripped. Then a fourth failure at t=450 prunes the
+    same way (cutoff=150, drops 0 if still there but it's already
+    gone): deque = [200, 400, 450], len = 3 → breaker DOES trip.
+
+    This case lives just on the boundary of the sliding-window math —
+    test it explicitly so a future deque-trim regression is caught."""
+    solver = _make_solver()
+    solver._solver_health_checked = True
+    base = 1_000_000.0
+
+    with patch("src.browser.captcha.time.time", return_value=base):
+        await solver._record_solver_outcome(success=False)  # t=0
+    with patch("src.browser.captcha.time.time", return_value=base + 200):
+        await solver._record_solver_outcome(success=False)  # t=200
+    with patch("src.browser.captcha.time.time", return_value=base + 400):
+        # cutoff = 400 - 300 = 100; t=0 pruned, t=200/400 stay → len 2
+        await solver._record_solver_outcome(success=False)
+        assert solver.is_breaker_open() is False
+        assert len(solver._solver_failure_timestamps) == 2
+
+    with patch("src.browser.captcha.time.time", return_value=base + 450):
+        # cutoff = 450 - 300 = 150; t=200/400/450 all stay → len 3 → trip
+        await solver._record_solver_outcome(success=False)
+        assert solver.is_breaker_open() is True
 
 
 # ── 10: concurrent solves while breaker open all short-circuit ────────
@@ -429,13 +602,22 @@ def test_redact_clientkey_dict_helper():
 
 
 def test_redact_clientkey_text_helper():
-    # Both spellings catch.
-    a = "connect failed using clientKey=ABC123-XYZ"
-    assert "ABC123-XYZ" not in _redact_clientkey_text(a)
-    assert "[REDACTED]" in _redact_clientkey_text(a)
+    secret = "ABC123-XYZ"
 
-    b = '{"clientKey":"ABC123-XYZ","errorId":1}'
-    assert "ABC123-XYZ" not in _redact_clientkey_text(b)
+    # Every shape we've seen (or expect to see) in solver-provider error
+    # output, request logs, and Python-side repr() / f-string traces.
+    shapes = [
+        f"connect failed using clientKey={secret}",                 # query/form
+        f"clientKey: {secret}",                                     # header
+        f'{{"clientKey": "{secret}", "errorId": 1}}',                # JSON
+        f"{{'clientKey': '{secret}', 'errorId': 1}}",                 # Python repr
+        f"clientKey={secret}&otherParam=foo",                       # mid-query
+        f'CLIENTKEY="{secret}"',                                     # case-insensitive
+    ]
+    for shape in shapes:
+        out = _redact_clientkey_text(shape)
+        assert secret not in out, f"leaked in {shape!r}: {out!r}"
+        assert "[REDACTED]" in out
 
     # No-op on safe strings.
     assert _redact_clientkey_text("plain text") == "plain text"

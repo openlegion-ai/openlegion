@@ -181,8 +181,29 @@ class CaptchaSolver:
         return self._solver_unreachable
 
     def is_breaker_open(self) -> bool:
-        """True iff a tripped breaker is still within its 10-min window."""
-        return self._solver_breaker_until > time.time()
+        """True iff a tripped breaker is still within its 10-min window.
+
+        On the first read after expiry, we proactively reset the breaker
+        timestamp AND the failure-window deque. Functionally the deque
+        prune in :meth:`_record_solver_outcome` already drops stale
+        entries before the next decision, but resetting here ensures
+        that if the next failure arrives less than 5 min after the
+        breaker auto-clears (e.g. failures at t=100/200/300 trip the
+        breaker at t=300, expires at t=900; a single new failure at
+        t=901 prunes correctly because t=300 is past 901-300=601, so
+        the deque is empty before append). The defense-in-depth is
+        cheap and prevents a future change from accidentally re-tripping
+        the breaker on stale entries.
+        """
+        if self._solver_breaker_until == 0.0:
+            return False
+        if self._solver_breaker_until > time.time():
+            return True
+        # Breaker auto-clears: drop the timestamp and the stale failure
+        # window so the solver gets a clean restart.
+        self._solver_breaker_until = 0.0
+        self._solver_failure_timestamps.clear()
+        return False
 
     async def health_check(
         self, provider: str | None = None,
@@ -264,11 +285,23 @@ class CaptchaSolver:
             )
             return "unreachable"
 
-        balance = data.get("balance")
+        # Both providers always return a numeric ``balance`` on success.
+        # A missing/non-numeric field means we hit the wrong endpoint, the
+        # provider returned an unexpected shape, or a proxy is interposing —
+        # all of which are "don't trust this solver". Treat as unreachable
+        # rather than silently passing through.
+        if "balance" not in data:
+            logger.warning(
+                "Solver health check missing balance field (provider=%s)", prov,
+            )
+            return "unreachable"
         try:
-            balance_f = float(balance) if balance is not None else 0.0
+            balance_f = float(data["balance"])
         except (TypeError, ValueError):
-            balance_f = 0.0
+            logger.warning(
+                "Solver health check non-numeric balance (provider=%s)", prov,
+            )
+            return "unreachable"
         if balance_f < 0:
             logger.warning(
                 "Solver health check returned negative balance (provider=%s)", prov,
