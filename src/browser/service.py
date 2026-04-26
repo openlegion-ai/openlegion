@@ -47,6 +47,57 @@ from src.shared.utils import sanitize_for_prompt, setup_logging
 
 logger = setup_logging("browser.service")
 
+
+# ── §11.13 structured CAPTCHA detection envelope ──────────────────────────
+# Both helpers below produce literal-string enums (see plan §11.13). We do
+# NOT use Python ``enum.Enum``: the wire format is JSON strings, and a real
+# enum would either need a json encoder shim or repr-leak risk. Strings
+# also keep the §11.1 / §11.3 / §11.16 / §11.18 follow-ups as pure data
+# changes — no type plumbing.
+
+def _captcha_envelope(
+    *,
+    kind: str,
+    solver_attempted: bool,
+    solver_outcome: str,
+    solver_confidence: str,
+    next_action: str,
+    injection_failure_reason: str | None = None,
+) -> dict:
+    """Build the §11.13 ``data`` block for a found-captcha case.
+
+    ``injection_failure_reason`` must be ``None`` unless
+    ``solver_outcome == "injection_failed"``.
+    """
+    return {
+        "captcha_found": True,
+        "kind": kind,
+        "solver_attempted": solver_attempted,
+        "solver_outcome": solver_outcome,
+        "injection_failure_reason": injection_failure_reason,
+        "solver_confidence": solver_confidence,
+        "next_action": next_action,
+    }
+
+
+def _with_legacy_fields(envelope: dict) -> dict:
+    """Soft-deprecated shim — populate the old ``type`` / ``message`` fields
+    so agents whose rules still match against the freeform string keep
+    working. New agents should read the structured fields directly.
+    """
+    out = dict(envelope)
+    if not out.get("captcha_found"):
+        out.setdefault("message", "No CAPTCHA detected")
+        return out
+    kind = out.get("kind", "unknown")
+    next_action = out.get("next_action", "notify_user")
+    out["type"] = kind  # kept for back-compat; was a CSS selector before.
+    out["message"] = (
+        f"CAPTCHA detected of kind {kind}; next_action: {next_action}"
+    )
+    return out
+
+
 _ACTIONABLE_ROLES = frozenset({
     "button", "link", "textbox", "checkbox", "radio", "combobox",
     "searchbox", "slider", "spinbutton", "switch", "tab", "menuitem",
@@ -2521,10 +2572,16 @@ class BrowserManager:
                         "body": "",
                     },
                 }
-                # Auto-detect CAPTCHAs so the agent knows immediately
-                captcha = await self._check_captcha(inst)
-                if captcha:
-                    result["captcha"] = captcha
+                # Auto-detect CAPTCHAs so the agent knows immediately.
+                # _check_captcha now always returns the §11.13 envelope:
+                # only surface to the agent when something actually needs
+                # their attention (found AND not auto-solved).
+                envelope = await self._check_captcha(inst)
+                if (
+                    envelope.get("captcha_found")
+                    and envelope.get("solver_outcome") != "solved"
+                ):
+                    result["captcha"] = _with_legacy_fields(envelope)
                 snapshot_succeeded = False
                 if snapshot_after:
                     snap = await self._snapshot_impl(inst, agent_id)
@@ -5203,11 +5260,21 @@ class BrowserManager:
             except Exception as e:
                 return {"success": False, "error": str(e)}
 
-    async def _check_captcha(self, inst: CamoufoxInstance) -> dict | None:
+    async def _check_captcha(self, inst: CamoufoxInstance) -> dict:
         """Check for CAPTCHA elements and attempt auto-solve if configured.
 
-        Returns a dict with captcha details if found and unsolved, None if
-        no CAPTCHA or if it was solved automatically.
+        Returns the §11.13 structured envelope ``data`` block in all cases:
+          - ``{"captcha_found": false}`` when no captcha selector matched.
+          - ``{"captcha_found": true, "kind": ..., "solver_attempted": ...,
+                "solver_outcome": ..., "injection_failure_reason": ...,
+                "solver_confidence": ..., "next_action": ...}`` otherwise.
+
+        Callers should treat ``solver_outcome == "solved"`` as "no agent
+        action needed" — the captcha was detected but already cleared.
+
+        NOTE: classification here is minimal — it maps the matched selector
+        onto the §11.13 ``kind`` enum. Full reCAPTCHA v2/v3/Enterprise
+        disambiguation lands in §11.1; CF interstitial tri-state in §11.3.
         """
         captcha_selectors = [
             'iframe[src*="recaptcha"]',
@@ -5221,37 +5288,92 @@ class BrowserManager:
         try:
             for sel in captcha_selectors:
                 if await inst.page.locator(sel).count() > 0:
-                    # Attempt auto-solve if a solver is configured
+                    kind = self._classify_kind(sel)
                     if self._captcha_solver:
                         logger.info("CAPTCHA detected (%s), attempting auto-solve", sel)
-                        solved = await self._captcha_solver.solve(
-                            inst.page, sel, inst.page.url,
-                        )
+                        try:
+                            solved = await self._captcha_solver.solve(
+                                inst.page, sel, inst.page.url,
+                            )
+                        except asyncio.TimeoutError:
+                            return _captcha_envelope(
+                                kind=kind, solver_attempted=True,
+                                solver_outcome="timeout",
+                                solver_confidence="low",
+                                next_action="notify_user",
+                            )
+                        except Exception:
+                            logger.exception("Auto-solve raised, falling back")
+                            return _captcha_envelope(
+                                kind=kind, solver_attempted=True,
+                                solver_outcome="rejected",
+                                solver_confidence="low",
+                                next_action="notify_user",
+                            )
                         if solved:
-                            return None  # solved — don't report to agent
+                            return _captcha_envelope(
+                                kind=kind, solver_attempted=True,
+                                solver_outcome="solved",
+                                solver_confidence="high",
+                                next_action="solved",
+                            )
                         logger.warning("Auto-solve failed, falling back to manual")
-
-                    return {
-                        "type": sel,
-                        "message": (
-                            "CAPTCHA detected — you cannot bypass this. "
-                            "Use notify_user to ask the user for help, "
-                            "then wait before retrying."
-                        ),
-                    }
+                        return _captcha_envelope(
+                            kind=kind, solver_attempted=True,
+                            solver_outcome="rejected",
+                            solver_confidence="low",
+                            next_action="notify_user",
+                        )
+                    # No solver configured — surface to agent for manual VNC.
+                    return _captcha_envelope(
+                        kind=kind, solver_attempted=False,
+                        solver_outcome="no_solver",
+                        solver_confidence="high" if kind != "unknown" else "low",
+                        next_action="notify_user",
+                    )
         except Exception:
-            pass
-        return None
+            logger.debug("captcha detection raised", exc_info=True)
+        return {"captcha_found": False}
+
+    def _classify_kind(self, selector: str) -> str:
+        """Map the matched selector onto a §11.13 ``kind`` value.
+
+        Minimal classification — see §11.1 for the full reCAPTCHA variant
+        and §11.3 for the CF interstitial tri-state work that will refine
+        these placeholders.
+        """
+        if "recaptcha" in selector:
+            # v2-checkbox is the dominant case; v2-invisible/v3/Enterprise
+            # disambiguation lives in §11.1.
+            return "recaptcha-v2-checkbox"
+        if "hcaptcha" in selector:
+            return "hcaptcha"
+        if "challenges.cloudflare.com" in selector:
+            # Default to the auto-resolving JS challenge until §11.3 lands
+            # full tri-state (auto / behavioral / turnstile-embedded)
+            # detection.
+            return "cf-interstitial-auto"
+        if "cf-turnstile" in selector:
+            return "turnstile"
+        # Generic 'captcha' selectors and #captcha fall through to unknown.
+        return "unknown"
 
     async def detect_captcha(self, agent_id: str) -> dict:
-        """Detect CAPTCHAs on the current page."""
+        """Detect CAPTCHAs on the current page.
+
+        Returns the §11.13 envelope. The legacy ``type`` and ``message``
+        fields are populated for backward compatibility with rules that
+        condition on the old shape; new agents should read the structured
+        fields directly.
+        """
         inst = await self.get_or_start(agent_id)
         inst.touch()
         async with inst.lock:
-            captcha = await self._check_captcha(inst)
-            if captcha:
-                return {"success": True, "data": {"captcha_found": True, **captcha}}
-            return {"success": True, "data": {"captcha_found": False, "message": "No CAPTCHA detected"}}
+            envelope = await self._check_captcha(inst)
+            return {
+                "success": True,
+                "data": _with_legacy_fields(envelope),
+            }
 
     # ── File transfer (Phase 1.5 infrastructure) ─────────────────────────
 
