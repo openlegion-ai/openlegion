@@ -16,6 +16,7 @@ import os
 import re
 import time
 from collections import deque
+from dataclasses import dataclass
 from typing import Literal
 
 import httpx
@@ -136,42 +137,337 @@ _CAPTCHA_TYPE_MAP: dict[str, str] = {
 # Drift here is silent (``ERROR_INVALID_TASK_TYPE``); re-verify against
 # provider docs when bumping variants.
 #
+# §11.2 — each variant entry is now ``{"proxyless": <task name>,
+# "proxy_aware": <task name> | None, "extra": {<flags>}}``. The task-body
+# builder picks ``proxy_aware`` when a dedicated solver proxy is configured
+# AND the compat table allows it; otherwise it falls back to ``proxyless``
+# and (when the fallback is *due to* a compat-table rejection) sets the
+# envelope's ``solver_confidence`` to ``"low"``. ``proxy_aware`` may be
+# ``None`` for variants where the provider does not document a
+# proxy-aware task type (e.g. 2captcha v3 has no documented proxy variant
+# as of April 2026 — only ``RecaptchaV3TaskProxyless``).
+#
 # 2Captcha
 _2CAPTCHA_TASK_TYPES: dict[str, dict[str, object]] = {
-    "recaptcha": {"type": "NormalRecaptchaTaskProxyless"},  # legacy alias
-    "hcaptcha": {"type": "HCaptchaTaskProxyless"},
-    "turnstile": {"type": "TurnstileTaskProxyless"},
-    # §11.1 reCAPTCHA variant matrix
-    "recaptcha-v2-checkbox": {"type": "RecaptchaV2TaskProxyless"},
-    "recaptcha-v2-invisible": {
-        "type": "RecaptchaV2TaskProxyless",
-        "isInvisible": True,
+    "recaptcha": {
+        "proxyless": "NormalRecaptchaTaskProxyless",  # legacy alias
+        "proxy_aware": None,
+        "extra": {},
     },
-    "recaptcha-v3": {"type": "RecaptchaV3TaskProxyless"},
-    "recaptcha-enterprise-v2": {"type": "RecaptchaV2EnterpriseTaskProxyless"},
+    "hcaptcha": {
+        "proxyless": "HCaptchaTaskProxyless",
+        "proxy_aware": "HCaptchaTask",
+        "extra": {},
+    },
+    "turnstile": {
+        "proxyless": "TurnstileTaskProxyless",
+        "proxy_aware": "TurnstileTask",
+        "extra": {},
+    },
+    # §11.1 reCAPTCHA variant matrix
+    "recaptcha-v2-checkbox": {
+        "proxyless": "RecaptchaV2TaskProxyless",
+        "proxy_aware": "RecaptchaV2Task",
+        "extra": {},
+    },
+    "recaptcha-v2-invisible": {
+        "proxyless": "RecaptchaV2TaskProxyless",
+        "proxy_aware": "RecaptchaV2Task",
+        "extra": {"isInvisible": True},
+    },
+    # 2captcha v3 has only ``RecaptchaV3TaskProxyless`` documented as of
+    # April 2026 — no proxy-aware variant is published. Solvers fall back
+    # to proxyless and surface ``solver_confidence="low"``.
+    "recaptcha-v3": {
+        "proxyless": "RecaptchaV3TaskProxyless",
+        "proxy_aware": None,
+        "extra": {},
+    },
+    "recaptcha-enterprise-v2": {
+        "proxyless": "RecaptchaV2EnterpriseTaskProxyless",
+        "proxy_aware": "RecaptchaV2EnterpriseTask",
+        "extra": {},
+    },
     # 2captcha uses the same v3 task with isEnterprise=true (no separate
-    # ``RecaptchaV3EnterpriseTaskProxyless`` type as of April 2026).
+    # ``RecaptchaV3EnterpriseTaskProxyless`` type as of April 2026); also
+    # no documented proxy-aware v3 variant.
     "recaptcha-enterprise-v3": {
-        "type": "RecaptchaV3TaskProxyless",
-        "isEnterprise": True,
+        "proxyless": "RecaptchaV3TaskProxyless",
+        "proxy_aware": None,
+        "extra": {"isEnterprise": True},
     },
 }
 
 # CapSolver
 _CAPSOLVER_TASK_TYPES: dict[str, dict[str, object]] = {
-    "recaptcha": {"type": "ReCaptchaV2TaskProxyLess"},  # legacy alias
-    "hcaptcha": {"type": "HCaptchaTaskProxyLess"},
-    "turnstile": {"type": "AntiTurnstileTaskProxyLess"},
-    # §11.1 reCAPTCHA variant matrix
-    "recaptcha-v2-checkbox": {"type": "ReCaptchaV2TaskProxyLess"},
-    "recaptcha-v2-invisible": {
-        "type": "ReCaptchaV2TaskProxyLess",
-        "isInvisible": True,
+    "recaptcha": {
+        "proxyless": "ReCaptchaV2TaskProxyLess",  # legacy alias
+        "proxy_aware": "ReCaptchaV2Task",
+        "extra": {},
     },
-    "recaptcha-v3": {"type": "ReCaptchaV3TaskProxyLess"},
-    "recaptcha-enterprise-v2": {"type": "ReCaptchaV2EnterpriseTaskProxyLess"},
-    "recaptcha-enterprise-v3": {"type": "ReCaptchaV3EnterpriseTaskProxyLess"},
+    "hcaptcha": {
+        "proxyless": "HCaptchaTaskProxyLess",
+        "proxy_aware": "HCaptchaTask",
+        "extra": {},
+    },
+    "turnstile": {
+        # CapSolver uses ``AntiTurnstileTask`` family for both proxyless
+        # and proxy-aware (drop the "ProxyLess" suffix for proxy-aware).
+        "proxyless": "AntiTurnstileTaskProxyLess",
+        "proxy_aware": "AntiTurnstileTask",
+        "extra": {},
+    },
+    # §11.1 reCAPTCHA variant matrix
+    "recaptcha-v2-checkbox": {
+        "proxyless": "ReCaptchaV2TaskProxyLess",
+        "proxy_aware": "ReCaptchaV2Task",
+        "extra": {},
+    },
+    "recaptcha-v2-invisible": {
+        "proxyless": "ReCaptchaV2TaskProxyLess",
+        "proxy_aware": "ReCaptchaV2Task",
+        "extra": {"isInvisible": True},
+    },
+    "recaptcha-v3": {
+        "proxyless": "ReCaptchaV3TaskProxyLess",
+        "proxy_aware": "ReCaptchaV3Task",
+        "extra": {},
+    },
+    "recaptcha-enterprise-v2": {
+        "proxyless": "ReCaptchaV2EnterpriseTaskProxyLess",
+        "proxy_aware": "ReCaptchaV2EnterpriseTask",
+        "extra": {},
+    },
+    "recaptcha-enterprise-v3": {
+        "proxyless": "ReCaptchaV3EnterpriseTaskProxyLess",
+        "proxy_aware": "ReCaptchaV3EnterpriseTask",
+        "extra": {},
+    },
 }
+
+
+# §11.2 — solver-proxy compatibility table.
+#
+# Hardcoded set of accepted ``proxyType`` values per (provider, variant).
+# Verified against 2captcha + CapSolver public docs in April 2026:
+#
+# * 2captcha — RecaptchaV2Task, HCaptchaTask, TurnstileTask all document
+#   ``http | socks4 | socks5`` (no ``https``). Source:
+#   https://2captcha.com/api-docs/recaptcha-v2 and the equivalent docs
+#   for hcaptcha + cloudflare-turnstile.
+# * CapSolver — all proxy-aware tasks document ``http | https | socks4 |
+#   socks5``. Source: https://docs.capsolver.com/en/guide/api-how-to-use-proxy/
+#   ("proxyType: socks5 | http | https | socks4").
+#
+# 2captcha FunCaptcha is documented to **reject SOCKS5** (FunCaptcha is
+# deferred to §11.5; this is a placeholder for when that lands):
+#   ``("2captcha", "funcaptcha"): {"http", "https", "socks4"}``
+# Add when the FunCaptcha variant is wired in §11.5.
+#
+# A variant whose ``proxy_aware`` is ``None`` (e.g. 2captcha v3) still
+# lives in the compat table for clarity, but the task-body builder
+# short-circuits to proxyless before consulting compat.
+_SOLVER_PROXY_COMPAT: dict[tuple[str, str], set[str]] = {
+    # 2captcha — uniformly {http, socks4, socks5} (NO https) on all
+    # documented proxy-aware task types.
+    ("2captcha", "recaptcha-v2-checkbox"):    {"http", "socks4", "socks5"},
+    ("2captcha", "recaptcha-v2-invisible"):   {"http", "socks4", "socks5"},
+    ("2captcha", "recaptcha-enterprise-v2"):  {"http", "socks4", "socks5"},
+    ("2captcha", "hcaptcha"):                 {"http", "socks4", "socks5"},
+    ("2captcha", "turnstile"):                {"http", "socks4", "socks5"},
+    # CapSolver — full set on all documented proxy-aware task types.
+    ("capsolver", "recaptcha-v2-checkbox"):   {"http", "https", "socks4", "socks5"},
+    ("capsolver", "recaptcha-v2-invisible"):  {"http", "https", "socks4", "socks5"},
+    ("capsolver", "recaptcha-v3"):            {"http", "https", "socks4", "socks5"},
+    ("capsolver", "recaptcha-enterprise-v2"): {"http", "https", "socks4", "socks5"},
+    ("capsolver", "recaptcha-enterprise-v3"): {"http", "https", "socks4", "socks5"},
+    ("capsolver", "hcaptcha"):                {"http", "https", "socks4", "socks5"},
+    ("capsolver", "turnstile"):               {"http", "https", "socks4", "socks5"},
+}
+
+
+_VALID_PROXY_TYPES = frozenset({"http", "https", "socks4", "socks5"})
+
+
+@dataclass(frozen=True)
+class SolverProxyConfig:
+    """Dedicated solver-side proxy.
+
+    **NOT** the agent's primary egress proxy. The agent's primary proxy
+    creds are NEVER forwarded to a solver provider — the threat model is
+    that handing your scraping proxy creds to a third-party solver is a
+    direct credential-leak vector. This struct is loaded from a
+    *separate* env-var family (``CAPTCHA_SOLVER_PROXY_*``) which an
+    operator opts into by setting all five fields.
+    """
+
+    proxy_type: str       # one of {"http", "https", "socks4", "socks5"}
+    address: str
+    port: int
+    login: str
+    password: str
+
+    def to_request_fields(self) -> dict[str, object]:
+        """Return the ``proxyType/Address/Port/Login/Password`` body fields.
+
+        Both 2captcha and CapSolver use this exact field naming in the
+        ``task`` block of ``createTask`` requests.
+        """
+        return {
+            "proxyType": self.proxy_type,
+            "proxyAddress": self.address,
+            "proxyPort": self.port,
+            "proxyLogin": self.login,
+            "proxyPassword": self.password,
+        }
+
+
+def _normalize_proxy_type(raw: str) -> str | None:
+    """Coerce ``socks5h://``/``socks5h``/``HTTP``/etc. to the canonical name.
+
+    Returns the canonical type (``"socks5"`` etc.) or ``None`` for an
+    unrecognized scheme. ``socks5h`` (DNS-via-SOCKS) collapses to
+    ``socks5`` because both providers list only ``socks5`` — the ``h``
+    variant is a client-side tunneling preference that doesn't change
+    what the provider expects.
+    """
+    if not raw:
+        return None
+    s = raw.strip().lower()
+    # Strip ``://`` if present (URL-style).
+    if "://" in s:
+        s = s.split("://", 1)[0]
+    # Collapse the ``socks5h`` (and theoretical ``socks4a``) variants to
+    # the base name documented by the providers.
+    if s == "socks5h":
+        s = "socks5"
+    if s == "socks4a":
+        s = "socks4"
+    return s if s in _VALID_PROXY_TYPES else None
+
+
+# Once-per-session warning gate (§11.16 cadence): the loader logs at most
+# one warning across the process lifetime when partial config is detected,
+# rather than spamming on every solver call.
+_proxy_config_warned: bool = False
+
+
+def _reset_proxy_config_warning() -> None:
+    """Test helper — clear the once-per-session warning flag."""
+    global _proxy_config_warned
+    _proxy_config_warned = False
+
+
+def get_solver_proxy_config(
+    *, agent_id: str | None = None,
+) -> SolverProxyConfig | None:
+    """Load the dedicated solver proxy from env via ``flags`` helpers.
+
+    Behavior:
+
+    * If ``CAPTCHA_SOLVER_PROXY_TYPE`` is unset → returns ``None``
+      (proxyless task types will be used; this is the default).
+    * If ``CAPTCHA_SOLVER_PROXY_TYPE`` is set, all five fields
+      (``TYPE``, ``ADDRESS``, ``PORT``, ``LOGIN``, ``PASSWORD``) are
+      required. Partial config logs a single warning at solver init and
+      returns ``None`` (falls back to proxyless).
+    * Bad scheme (anything other than http/https/socks4/socks5 after
+      normalization) logs a warning and returns ``None``.
+
+    Reads via ``flags.get_str``/``get_int`` so per-agent overrides and
+    operator settings.json take precedence over env vars (matches the
+    rest of the browser flag surface).
+    """
+    global _proxy_config_warned
+    # Local import — avoid circular: flags imports nothing from captcha.
+    from src.browser import flags as _flags
+
+    raw_type = _flags.get_str(
+        "CAPTCHA_SOLVER_PROXY_TYPE", "", agent_id=agent_id,
+    ).strip()
+    if not raw_type:
+        # Default off — proxyless task types are used.
+        return None
+
+    proxy_type = _normalize_proxy_type(raw_type)
+    if proxy_type is None:
+        if not _proxy_config_warned:
+            logger.warning(
+                "CAPTCHA_SOLVER_PROXY_TYPE=%r is not in {http, https, socks4, "
+                "socks5} (after socks5h→socks5 normalization); falling back "
+                "to proxyless solver tasks.",
+                raw_type,
+            )
+            _proxy_config_warned = True
+        return None
+
+    address = _flags.get_str(
+        "CAPTCHA_SOLVER_PROXY_ADDRESS", "", agent_id=agent_id,
+    ).strip()
+    # ``get_int`` returns the default when unset; use a sentinel default
+    # so we can distinguish "unset" from "explicitly 0".
+    raw_port_str = _flags.get_str(
+        "CAPTCHA_SOLVER_PROXY_PORT", "", agent_id=agent_id,
+    ).strip()
+    login = _flags.get_str(
+        "CAPTCHA_SOLVER_PROXY_LOGIN", "", agent_id=agent_id,
+    )
+    password = _flags.get_str(
+        "CAPTCHA_SOLVER_PROXY_PASSWORD", "", agent_id=agent_id,
+    )
+
+    # All 5 fields required when type is set.
+    missing: list[str] = []
+    if not address:
+        missing.append("CAPTCHA_SOLVER_PROXY_ADDRESS")
+    if not raw_port_str:
+        missing.append("CAPTCHA_SOLVER_PROXY_PORT")
+    if not login:
+        missing.append("CAPTCHA_SOLVER_PROXY_LOGIN")
+    if not password:
+        missing.append("CAPTCHA_SOLVER_PROXY_PASSWORD")
+
+    port = 0
+    if raw_port_str:
+        try:
+            port = int(raw_port_str)
+            if port <= 0 or port > 65535:
+                missing.append("CAPTCHA_SOLVER_PROXY_PORT(out-of-range)")
+        except ValueError:
+            missing.append("CAPTCHA_SOLVER_PROXY_PORT(non-integer)")
+
+    if missing:
+        if not _proxy_config_warned:
+            logger.warning(
+                "CAPTCHA_SOLVER_PROXY_TYPE is set but required fields are "
+                "missing/invalid: %s — falling back to proxyless solver "
+                "tasks. Set all 5 CAPTCHA_SOLVER_PROXY_* env vars to enable "
+                "the dedicated solver proxy.",
+                ", ".join(missing),
+            )
+            _proxy_config_warned = True
+        return None
+
+    return SolverProxyConfig(
+        proxy_type=proxy_type,
+        address=address,
+        port=port,
+        login=login,
+        password=password,
+    )
+
+
+def _solver_proxy_compatible(provider: str, captcha_type: str, proxy_type: str) -> bool:
+    """Return True iff ``(provider, captcha_type)`` documents ``proxy_type``.
+
+    Variants absent from the compat table are treated as not-compatible —
+    we'd rather fall back to proxyless than send a request shape the
+    provider hasn't documented.
+    """
+    allowed = _SOLVER_PROXY_COMPAT.get((provider.lower(), captcha_type))
+    if allowed is None:
+        return False
+    return proxy_type in allowed
 
 
 # Default ``pageAction`` when the classifier couldn't extract one. Most
@@ -610,6 +906,17 @@ class CaptchaSolver:
         # Coordinates breaker reads/writes with health-check init across
         # concurrent agents that share this solver instance.
         self._state_lock: asyncio.Lock = asyncio.Lock()
+        # ── §11.2 last-solve proxy metadata ─────────────────────────────
+        # ``solve()`` stamps these so the BrowserManager caller can pick
+        # them up without changing the public ``solve() -> bool`` return
+        # contract. ``last_used_proxy_aware`` reflects what was actually
+        # sent (proxy-aware task name + creds vs proxyless); the cost
+        # counter uses this to apply proxy-aware pricing. ``last_compat_rejected``
+        # is True when a proxy was configured but the (provider, variant,
+        # type) tuple rejected — caller downgrades ``solver_confidence``
+        # to "low".
+        self.last_used_proxy_aware: bool = False
+        self.last_compat_rejected: bool = False
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -812,13 +1119,22 @@ class CaptchaSolver:
                     len(self._solver_failure_timestamps),
                 )
 
-    async def solve(self, page, selector: str, page_url: str) -> bool:
+    async def solve(
+        self,
+        page,
+        selector: str,
+        page_url: str,
+        *,
+        agent_id: str | None = None,
+    ) -> bool:
         """Attempt to solve a CAPTCHA on the page.
 
         Args:
             page: Playwright page object.
             selector: The CSS selector that matched the CAPTCHA element.
             page_url: The current page URL.
+            agent_id: Optional — for per-agent override of solver-proxy
+                config via :func:`flags.set_agent_override`.
 
         Returns:
             True if the CAPTCHA was solved and token injected, False
@@ -826,7 +1142,18 @@ class CaptchaSolver:
             without issuing a provider HTTP call. Callers should consult
             :meth:`is_solver_unreachable` and :meth:`is_breaker_open` to
             distinguish those cases from a genuine solve failure.
+
+        After every call (success or failure) the caller may inspect
+        :attr:`last_used_proxy_aware` and :attr:`last_compat_rejected`
+        to learn whether the dedicated solver proxy was applied (drives
+        cost-counter pricing tier and ``solver_confidence`` downgrades).
         """
+        # Reset the per-call metadata up front so a short-circuit return
+        # (unreachable / breaker) doesn't carry stale flags into the
+        # caller's envelope.
+        self.last_used_proxy_aware = False
+        self.last_compat_rejected = False
+
         # Per-process gate — runs at most once even under concurrent solves.
         await self._ensure_health_checked()
 
@@ -869,10 +1196,16 @@ class CaptchaSolver:
             await self._record_solver_outcome(success=False)
             return False
 
+        # §11.2 — load the dedicated solver-proxy config (NOT the agent's
+        # primary egress proxy; see ``get_solver_proxy_config`` docstring).
+        # Loader returns ``None`` when unset → proxyless task types.
+        proxy_config = get_solver_proxy_config(agent_id=agent_id)
+
         try:
-            token = await asyncio.wait_for(
+            token, used_proxy_aware, compat_rejected = await asyncio.wait_for(
                 self._submit_and_poll(
-                    captcha_type, sitekey, page_url, page_action=page_action,
+                    captcha_type, sitekey, page_url,
+                    page_action=page_action, proxy_config=proxy_config,
                 ),
                 timeout=_SOLVE_TIMEOUT,
             )
@@ -885,13 +1218,22 @@ class CaptchaSolver:
             await self._record_solver_outcome(success=False)
             return False
 
+        # Stamp metadata before returning so the caller can read the
+        # actual task type that was sent.
+        self.last_used_proxy_aware = used_proxy_aware
+        self.last_compat_rejected = compat_rejected
+
         if not token:
             await self._record_solver_outcome(success=False)
             return False
 
         injected = await self._inject_token(page, captcha_type, token)
         if injected:
-            logger.info("CAPTCHA solved and token injected successfully")
+            logger.info(
+                "CAPTCHA solved and token injected successfully "
+                "(proxy_aware=%s compat_rejected=%s)",
+                used_proxy_aware, compat_rejected,
+            )
         else:
             logger.warning("CAPTCHA solved but token injection failed")
         await self._record_solver_outcome(success=injected)
@@ -954,7 +1296,8 @@ class CaptchaSolver:
         page_url: str,
         *,
         page_action: str | None = None,
-    ) -> str | None:
+        proxy_config: SolverProxyConfig | None = None,
+    ) -> tuple[str | None, bool, bool]:
         """Submit CAPTCHA to solving service and poll for result.
 
         ``page_action`` is the v3 action string from the classifier; it's
@@ -962,13 +1305,19 @@ class CaptchaSolver:
         variants ignore it. ``min_score`` is read inside the per-provider
         helpers from :data:`CAPTCHA_RECAPTCHA_V3_MIN_SCORE` (operator
         config, not a page property).
+
+        Returns ``(token, used_proxy_aware, compat_rejected)`` so the
+        caller (``solve``) can mark the envelope's confidence and inform
+        the cost counter whether proxy-aware pricing applies.
         """
         if self.provider == "2captcha":
             return await self._solve_2captcha(
-                captcha_type, sitekey, page_url, page_action=page_action,
+                captcha_type, sitekey, page_url,
+                page_action=page_action, proxy_config=proxy_config,
             )
         return await self._solve_capsolver(
-            captcha_type, sitekey, page_url, page_action=page_action,
+            captcha_type, sitekey, page_url,
+            page_action=page_action, proxy_config=proxy_config,
         )
 
     # ── Task-body builder ─────────────────────────────────────────────────────
@@ -981,26 +1330,62 @@ class CaptchaSolver:
         page_url: str,
         *,
         page_action: str | None,
-    ) -> dict | None:
-        """Merge provider task-type fields with v3-specific extras.
+        proxy_config: SolverProxyConfig | None = None,
+        provider_name: str | None = None,
+    ) -> tuple[dict | None, bool, bool]:
+        """Merge provider task-type fields with v3 + proxy extras.
 
-        Returns ``None`` if ``captcha_type`` isn't in the provider table
-        (caller treats as "unsupported"). For v3 and v3-enterprise the
-        function reads the operator-configured ``CAPTCHA_RECAPTCHA_V3_MIN_SCORE``
-        flag (default 0.7) and applies the permissive ``"verify"`` fallback
-        when ``page_action`` is missing — see :data:`_DEFAULT_V3_ACTION`
-        for the rationale.
+        Returns ``(body, used_proxy_aware, compat_rejected)``:
+
+        * ``body`` is the JSON ``task`` dict, or ``None`` if
+          ``captcha_type`` isn't in the provider table (caller treats as
+          "unsupported").
+        * ``used_proxy_aware`` is ``True`` iff the body uses the
+          ``proxy_aware`` task name and includes the ``proxyType/...``
+          credential fields. ``False`` for the proxyless fallback.
+        * ``compat_rejected`` is ``True`` iff a proxy was configured but
+          the (provider, variant, type) tuple was rejected by
+          :data:`_SOLVER_PROXY_COMPAT`. Callers that get back
+          ``(body, False, True)`` should still send the proxyless body
+          AND set ``solver_confidence="low"`` on the envelope so the
+          operator sees that the dedicated proxy isn't being honored
+          for this variant.
+
+        For v3 and v3-enterprise the function reads the operator-configured
+        ``CAPTCHA_RECAPTCHA_V3_MIN_SCORE`` flag (default 0.7) and applies
+        the permissive ``"verify"`` fallback when ``page_action`` is
+        missing — see :data:`_DEFAULT_V3_ACTION` for the rationale.
+
+        SECURITY: ``proxy_config`` MUST be a :class:`SolverProxyConfig`
+        loaded via :func:`get_solver_proxy_config` from the dedicated
+        ``CAPTCHA_SOLVER_PROXY_*`` env-var family. The agent's primary
+        egress proxy (per-agent state in
+        ``BrowserManager._proxy_configs``) is NEVER threaded into this
+        path — see ``test_captcha_solver_proxy.py::test_primary_proxy_creds_never_leak``.
         """
         entry = provider_table.get(captcha_type)
         if not entry:
-            return None
+            return None, False, False
+        # Tolerate the legacy flat shape (``{"type": ..., "isInvisible": ...}``)
+        # in case third-party subclasses haven't migrated. The §11.2 shape
+        # is ``{"proxyless": ..., "proxy_aware": ..., "extra": {...}}``.
+        if "proxyless" in entry:
+            proxyless_name = entry.get("proxyless")
+            proxy_aware_name = entry.get("proxy_aware")
+            static_extras = dict(entry.get("extra") or {})
+        else:
+            proxyless_name = entry.get("type")
+            proxy_aware_name = None
+            static_extras = {k: v for k, v in entry.items() if k != "type"}
+
         body: dict[str, object] = {
             "websiteURL": page_url,
             "websiteKey": sitekey,
         }
-        # Merge static extras (``isInvisible``, ``isEnterprise``, ``type``).
-        for k, v in entry.items():
+        # Merge static extras (``isInvisible``, ``isEnterprise``).
+        for k, v in static_extras.items():
             body[k] = v
+
         # v3 extras — applied to both standard and enterprise v3 task entries.
         is_v3 = captcha_type in ("recaptcha-v3", "recaptcha-enterprise-v3")
         if is_v3:
@@ -1031,7 +1416,53 @@ class CaptchaSolver:
                 )
                 action = _DEFAULT_V3_ACTION
             body["pageAction"] = action
-        return body
+
+        # ── §11.2 proxy-aware selection ────────────────────────────────
+        used_proxy_aware = False
+        compat_rejected = False
+        provider = (provider_name or self.provider).lower()
+        if proxy_config is not None:
+            if proxy_aware_name is None:
+                # No documented proxy-aware task for this variant
+                # (e.g. 2captcha v3). Fall back to proxyless and treat
+                # as a soft compat rejection so the envelope reflects
+                # reduced confidence.
+                compat_rejected = True
+                logger.warning(
+                    "Solver proxy configured but provider=%s has no "
+                    "documented proxy-aware task for variant=%s — "
+                    "falling back to proxyless task type. "
+                    "solver_confidence will be downgraded.",
+                    provider, captcha_type,
+                )
+            elif _solver_proxy_compatible(
+                provider, captcha_type, proxy_config.proxy_type,
+            ):
+                used_proxy_aware = True
+                body["type"] = proxy_aware_name
+                # Inject credential fields into the task body.
+                body.update(proxy_config.to_request_fields())
+            else:
+                compat_rejected = True
+                logger.warning(
+                    "Solver proxy type=%s not in compat-table for "
+                    "provider=%s variant=%s — falling back to proxyless. "
+                    "solver_confidence will be downgraded. Configure a "
+                    "different proxy scheme (compat: %s) or accept "
+                    "proxyless for this variant.",
+                    proxy_config.proxy_type, provider, captcha_type,
+                    sorted(_SOLVER_PROXY_COMPAT.get(
+                        (provider, captcha_type), set(),
+                    )),
+                )
+
+        if not used_proxy_aware:
+            if not proxyless_name:
+                # Defensive — every entry should declare a proxyless name.
+                return None, False, compat_rejected
+            body["type"] = proxyless_name
+
+        return body, used_proxy_aware, compat_rejected
 
     # ── 2Captcha ──────────────────────────────────────────────────────────────
 
@@ -1042,14 +1473,16 @@ class CaptchaSolver:
         page_url: str,
         *,
         page_action: str | None = None,
-    ) -> str | None:
+        proxy_config: SolverProxyConfig | None = None,
+    ) -> tuple[str | None, bool, bool]:
         client = self._get_client()
-        task = self._build_task_body(
+        task, used_proxy_aware, compat_rejected = self._build_task_body(
             _2CAPTCHA_TASK_TYPES, captcha_type, sitekey, page_url,
-            page_action=page_action,
+            page_action=page_action, proxy_config=proxy_config,
+            provider_name="2captcha",
         )
         if not task:
-            return None
+            return None, used_proxy_aware, compat_rejected
 
         # Submit task
         payload = {
@@ -1069,16 +1502,16 @@ class CaptchaSolver:
                 "2Captcha createTask failed: %s",
                 _redact_clientkey_text(redact_url(str(e))),
             )
-            return None
+            return None, used_proxy_aware, compat_rejected
         if data.get("errorId", 0) != 0:
             logger.warning(
                 "2Captcha submit error: %s",
                 _redact_clientkey_text(str(data.get("errorDescription"))),
             )
-            return None
+            return None, used_proxy_aware, compat_rejected
         task_id = data.get("taskId")
         if not task_id:
-            return None
+            return None, used_proxy_aware, compat_rejected
 
         # Poll for result
         for _ in range(int(_SOLVE_TIMEOUT / _POLL_INTERVAL)):
@@ -1095,18 +1528,19 @@ class CaptchaSolver:
                     "2Captcha getTaskResult failed: %s",
                     _redact_clientkey_text(redact_url(str(e))),
                 )
-                return None
+                return None, used_proxy_aware, compat_rejected
             if data.get("errorId", 0) != 0:
                 logger.warning(
                     "2Captcha poll error: %s",
                     _redact_clientkey_text(str(data.get("errorDescription"))),
                 )
-                return None
+                return None, used_proxy_aware, compat_rejected
             if data.get("status") == "ready":
                 solution = data.get("solution", {})
-                return solution.get("gRecaptchaResponse") or solution.get("token")
+                token = solution.get("gRecaptchaResponse") or solution.get("token")
+                return token, used_proxy_aware, compat_rejected
             # status == "processing" — keep polling
-        return None
+        return None, used_proxy_aware, compat_rejected
 
     # ── CapSolver ─────────────────────────────────────────────────────────────
 
@@ -1117,14 +1551,16 @@ class CaptchaSolver:
         page_url: str,
         *,
         page_action: str | None = None,
-    ) -> str | None:
+        proxy_config: SolverProxyConfig | None = None,
+    ) -> tuple[str | None, bool, bool]:
         client = self._get_client()
-        task = self._build_task_body(
+        task, used_proxy_aware, compat_rejected = self._build_task_body(
             _CAPSOLVER_TASK_TYPES, captcha_type, sitekey, page_url,
-            page_action=page_action,
+            page_action=page_action, proxy_config=proxy_config,
+            provider_name="capsolver",
         )
         if not task:
-            return None
+            return None, used_proxy_aware, compat_rejected
 
         # Submit task
         payload = {
@@ -1140,16 +1576,16 @@ class CaptchaSolver:
                 "CapSolver createTask failed: %s",
                 _redact_clientkey_text(redact_url(str(e))),
             )
-            return None
+            return None, used_proxy_aware, compat_rejected
         if data.get("errorId", 0) != 0:
             logger.warning(
                 "CapSolver submit error: %s",
                 _redact_clientkey_text(str(data.get("errorDescription"))),
             )
-            return None
+            return None, used_proxy_aware, compat_rejected
         task_id = data.get("taskId")
         if not task_id:
-            return None
+            return None, used_proxy_aware, compat_rejected
 
         # Poll for result
         for _ in range(int(_SOLVE_TIMEOUT / _POLL_INTERVAL)):
@@ -1166,17 +1602,18 @@ class CaptchaSolver:
                     "CapSolver getTaskResult failed: %s",
                     _redact_clientkey_text(redact_url(str(e))),
                 )
-                return None
+                return None, used_proxy_aware, compat_rejected
             if data.get("errorId", 0) != 0:
                 logger.warning(
                     "CapSolver poll error: %s",
                     _redact_clientkey_text(str(data.get("errorDescription"))),
                 )
-                return None
+                return None, used_proxy_aware, compat_rejected
             if data.get("status") == "ready":
                 solution = data.get("solution", {})
-                return solution.get("gRecaptchaResponse") or solution.get("token")
-        return None
+                token = solution.get("gRecaptchaResponse") or solution.get("token")
+                return token, used_proxy_aware, compat_rejected
+        return None, used_proxy_aware, compat_rejected
 
     # ── Token injection ───────────────────────────────────────────────────────
 

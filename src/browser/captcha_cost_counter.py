@@ -47,10 +47,18 @@ def _state_path() -> Path:
 
 
 # Published rates from 2captcha + CapSolver (April 2026), in US cents per
-# successful solve. Keys follow the convention ``{provider}-{variant}`` so a
-# future per-variant pricing tier (§11.1 reCAPTCHA v3 / Enterprise) can land
-# without re-keying. When a kind isn't priced, callers SKIP counting rather
-# than guessing — under-count > over-count for operator trust.
+# successful solve. Keys follow the convention ``{provider}-{variant}`` for
+# the proxyless tier; the proxy-aware tier uses a 3-tuple key
+# ``(provider, variant, proxy_aware=True)`` and lives in
+# :data:`PRICING_CENTS_PROXY_AWARE` below.
+#
+# Why two tables? Provider docs publish proxyless rates in a single line
+# but proxy-aware rates as "approximately 3× the base" in their pricing
+# pages. Keeping the dicts separate keeps the §11.1 string-key surface
+# untouched while letting §11.2's tuple-key path coexist.
+#
+# When a kind isn't priced, callers SKIP counting rather than guessing —
+# under-count > over-count for operator trust.
 PRICING_CENTS: dict[str, int] = {
     # 2Captcha — published https://2captcha.com/2captcha-api#solving_recaptchav2_new
     "2captcha-recaptcha-v2-checkbox": 100,        # $1.00 / 1000 = 0.10c each → 0.1¢
@@ -76,9 +84,45 @@ PRICING_CENTS: dict[str, int] = {
     "capsolver-turnstile": 60,
 }
 
+# §11.2 — proxy-aware pricing tier (~3× the proxyless rate as published
+# by both providers). Tuple key ``(provider, variant)``; ``proxy_aware``
+# flag at lookup time picks this table over :data:`PRICING_CENTS`.
+#
+# 2captcha v3 has no documented proxy-aware task type as of April 2026,
+# so its proxy-aware entries are intentionally absent — :func:`estimate_cents`
+# falls through to the proxyless price for those (the body builder
+# already falls back to proxyless when no proxy_aware task is documented,
+# so paying proxyless rate matches what the provider sees).
+PRICING_CENTS_PROXY_AWARE: dict[tuple[str, str], int] = {
+    # 2captcha — 3× the proxyless rate
+    ("2captcha", "recaptcha-v2-checkbox"):    300,
+    ("2captcha", "recaptcha-v2-invisible"):   300,
+    ("2captcha", "recaptcha-enterprise-v2"):  600,
+    ("2captcha", "hcaptcha"):                 300,
+    ("2captcha", "turnstile"):                600,
+    # CapSolver — 3× the proxyless rate
+    ("capsolver", "recaptcha-v2-checkbox"):   240,
+    ("capsolver", "recaptcha-v2-invisible"):  240,
+    ("capsolver", "recaptcha-v3"):            240,
+    ("capsolver", "recaptcha-enterprise-v2"): 600,
+    ("capsolver", "recaptcha-enterprise-v3"): 600,
+    ("capsolver", "hcaptcha"):                300,
+    ("capsolver", "turnstile"):               180,
+}
 
-def estimate_cents(provider: str, kind: str) -> int | None:
+
+def estimate_cents(
+    provider: str, kind: str, *, proxy_aware: bool = False,
+) -> int | None:
     """Return published cost (cents) for one successful solve, or ``None``.
+
+    ``proxy_aware=True`` consults :data:`PRICING_CENTS_PROXY_AWARE` first
+    (~3× the proxyless rate). When the proxy-aware table doesn't have a
+    row for the (provider, variant) tuple — e.g. 2captcha v3, where the
+    provider has no documented proxy-aware task type — we fall through to
+    the proxyless rate. That matches what the body builder did at the
+    request layer (proxyless task body), so the price billed equals the
+    request type sent.
 
     ``None`` signals the variant isn't priced; callers should log a warning
     and SKIP the increment rather than attribute a guess to the agent's
@@ -90,7 +134,15 @@ def estimate_cents(provider: str, kind: str) -> int | None:
     """
     if not provider or not kind:
         return None
-    key = f"{provider.strip().lower()}-{kind.strip().lower()}"
+    p = provider.strip().lower()
+    k = kind.strip().lower()
+    if proxy_aware:
+        cents = PRICING_CENTS_PROXY_AWARE.get((p, k))
+        if cents is not None:
+            return cents
+        # Fall through to the proxyless rate — the body builder degraded
+        # to proxyless for this variant, so the price tier matches.
+    key = f"{p}-{k}"
     return PRICING_CENTS.get(key)
 
 
