@@ -21,12 +21,39 @@ from typing import Literal
 
 import httpx
 
+from src.browser import flags, timing
 from src.shared.redaction import redact_url
 from src.shared.utils import setup_logging
 
 logger = setup_logging("browser.captcha")
 
-_SOLVE_TIMEOUT = 120  # max seconds to wait for a solution
+# §11.9 — per-type solver timeout. Each kind enum string maps to the
+# overall solve deadline in milliseconds (sitekey extract → submit →
+# poll-until-ready). The 30s ``httpx`` timeout for individual provider
+# requests stays intact (see ``_get_client``); this controls the OUTER
+# ``asyncio.wait_for(...)`` wrapping the whole solve pipeline.
+#
+# Defaults are tuned per provider documentation:
+#   * v3 / Enterprise-v3: 60s — provider-side score lookup, no human
+#     interaction; faster than v2.
+#   * v2 / hCaptcha: 120s — requires worker pool to view & click images.
+#   * Turnstile / cf-interstitial-turnstile: 180s — CF challenges
+#     occasionally chain a re-issue, longest in the wild.
+#
+# FunCaptcha / GeeTest / AWS WAF entries are reserved for §11.5 deferred
+# work and intentionally not listed; unknown kinds use ``_FALLBACK``.
+_SOLVE_TIMEOUT_DEFAULTS_MS: dict[str, int] = {
+    "recaptcha-v2-checkbox":     120_000,
+    "recaptcha-v2-invisible":    120_000,
+    "recaptcha-v3":               60_000,
+    "recaptcha-enterprise-v2":   120_000,
+    "recaptcha-enterprise-v3":    60_000,
+    "hcaptcha":                  120_000,
+    "turnstile":                 180_000,
+    "cf-interstitial-turnstile": 180_000,
+    # FunCaptcha / GeeTest / AWS WAF entries reserved for §11.5 deferred work
+}
+_SOLVE_TIMEOUT_FALLBACK_MS = 120_000  # for unknown / behavioral kinds
 _POLL_INTERVAL = 5    # seconds between result polls
 _SUPPORTED_PROVIDERS = ("2captcha", "capsolver")
 
@@ -917,6 +944,12 @@ class CaptchaSolver:
         # to "low".
         self.last_used_proxy_aware: bool = False
         self.last_compat_rejected: bool = False
+        # ── §11.9 per-type timeout table ────────────────────────────────
+        # Resolved once at solver init from the static defaults plus any
+        # ``CAPTCHA_TIMEOUT_<KIND_UPPER_UNDERSCORE>_MS`` env overrides.
+        # Operator-tunable but not per-call — restart the browser service
+        # to pick up env var changes.
+        self._solve_timeouts_ms: dict[str, int] = self._resolve_solve_timeouts()
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -927,6 +960,37 @@ class CaptchaSolver:
         if self._client and not self._client.is_closed:
             await self._client.aclose()
             self._client = None
+
+    # ── §11.9 per-type timeout resolution ──────────────────────────────
+
+    @staticmethod
+    def _resolve_solve_timeouts() -> dict[str, int]:
+        """Build the kind → timeout-ms table from defaults + env overrides.
+
+        Env override pattern: ``CAPTCHA_TIMEOUT_<KIND_UPPER_UNDERSCORE>_MS``.
+        For example ``CAPTCHA_TIMEOUT_RECAPTCHA_V3_MS=45000`` overrides the
+        v3 entry to 45 seconds. Hyphens in kind names are converted to
+        underscores when building the env-var name. Read once at solver
+        init — reconfig requires a service restart (matches the §11.9 spec
+        for solver-level constants).
+        """
+        resolved: dict[str, int] = {}
+        for kind, default_ms in _SOLVE_TIMEOUT_DEFAULTS_MS.items():
+            env_name = f"CAPTCHA_TIMEOUT_{kind.replace('-', '_').upper()}_MS"
+            resolved[kind] = flags.get_int(env_name, default_ms, min_value=1)
+        return resolved
+
+    def _timeout_seconds_for_kind(self, kind: str | None) -> float:
+        """Return the overall solve timeout (seconds) for ``kind``.
+
+        Unknown / behavioral / ``None`` kinds map to
+        :data:`_SOLVE_TIMEOUT_FALLBACK_MS`. The httpx per-request timeout
+        configured on the shared client (30s) is unrelated — this controls
+        the OUTER ``asyncio.wait_for`` deadline on the whole solve
+        pipeline (sitekey extract + submit + poll loop).
+        """
+        ms = self._solve_timeouts_ms.get(kind or "", _SOLVE_TIMEOUT_FALLBACK_MS)
+        return ms / 1000.0
 
     # ── §11.16 health check + circuit breaker ──────────────────────────
 
@@ -1126,6 +1190,7 @@ class CaptchaSolver:
         page_url: str,
         *,
         agent_id: str | None = None,
+        kind: str | None = None,
     ) -> bool:
         """Attempt to solve a CAPTCHA on the page.
 
@@ -1135,6 +1200,12 @@ class CaptchaSolver:
             page_url: The current page URL.
             agent_id: Optional — for per-agent override of solver-proxy
                 config via :func:`flags.set_agent_override`.
+            kind: §11.13 envelope kind enum string (e.g. ``"recaptcha-v3"``,
+                ``"hcaptcha"``, ``"cf-interstitial-turnstile"``). When
+                supplied, the §11.9 per-type timeout table is keyed on this
+                value; otherwise the timeout falls back to the variant
+                classifier's output (which loses the CF-bound override
+                signal). Always pass when the caller already has it.
 
         Returns:
             True if the CAPTCHA was solved and token injected, False
@@ -1201,16 +1272,29 @@ class CaptchaSolver:
         # Loader returns ``None`` when unset → proxyless task types.
         proxy_config = get_solver_proxy_config(agent_id=agent_id)
 
+        # §11.9 — pick the overall solve deadline based on the kind the
+        # caller already classified (CF-bound Turnstile, etc.) when
+        # available, falling back to the local ``captcha_type`` for direct
+        # callers that don't have envelope context. The httpx per-request
+        # 30s timeout (set on the shared client) stays — this controls only
+        # the outer ``asyncio.wait_for`` deadline on the whole pipeline.
+        timeout_kind = kind if kind is not None else captcha_type
+        timeout_s = self._timeout_seconds_for_kind(timeout_kind)
+
         try:
             token, used_proxy_aware, compat_rejected = await asyncio.wait_for(
                 self._submit_and_poll(
                     captcha_type, sitekey, page_url,
                     page_action=page_action, proxy_config=proxy_config,
+                    kind=timeout_kind,
                 ),
-                timeout=_SOLVE_TIMEOUT,
+                timeout=timeout_s,
             )
         except asyncio.TimeoutError:
-            logger.warning("CAPTCHA solve timed out after %ds", _SOLVE_TIMEOUT)
+            logger.warning(
+                "CAPTCHA solve timed out after %.1fs (kind=%s)",
+                timeout_s, timeout_kind,
+            )
             await self._record_solver_outcome(success=False)
             return False
         except Exception:
@@ -1226,6 +1310,14 @@ class CaptchaSolver:
         if not token:
             await self._record_solver_outcome(success=False)
             return False
+
+        # §11.11 — solve-pacing Gaussian delay between solver token
+        # retrieval and DOM injection. Real users take 5-15s between a
+        # captcha appearing and a form submit; instant token injection is
+        # a low-but-real anti-bot signal. Only fires on the success path —
+        # failed solves (no token, timeout, exception) skip the pacing
+        # because there's nothing to inject.
+        await timing.captcha_solve_delay()
 
         injected = await self._inject_token(page, captcha_type, token)
         if injected:
@@ -1297,6 +1389,7 @@ class CaptchaSolver:
         *,
         page_action: str | None = None,
         proxy_config: SolverProxyConfig | None = None,
+        kind: str | None = None,
     ) -> tuple[str | None, bool, bool]:
         """Submit CAPTCHA to solving service and poll for result.
 
@@ -1306,6 +1399,14 @@ class CaptchaSolver:
         helpers from :data:`CAPTCHA_RECAPTCHA_V3_MIN_SCORE` (operator
         config, not a page property).
 
+        ``kind`` is the §11.13 envelope kind (or the local ``captcha_type``
+        when the caller doesn't have envelope context). Used to size the
+        polling-loop iteration count via the §11.9 per-type timeout
+        table — the outer ``asyncio.wait_for`` in ``solve()`` is the
+        authoritative deadline; the iteration cap here just prevents an
+        infinite loop when a provider stays in ``processing`` past the
+        outer deadline.
+
         Returns ``(token, used_proxy_aware, compat_rejected)`` so the
         caller (``solve``) can mark the envelope's confidence and inform
         the cost counter whether proxy-aware pricing applies.
@@ -1314,10 +1415,12 @@ class CaptchaSolver:
             return await self._solve_2captcha(
                 captcha_type, sitekey, page_url,
                 page_action=page_action, proxy_config=proxy_config,
+                kind=kind,
             )
         return await self._solve_capsolver(
             captcha_type, sitekey, page_url,
             page_action=page_action, proxy_config=proxy_config,
+            kind=kind,
         )
 
     # ── Task-body builder ─────────────────────────────────────────────────────
@@ -1474,6 +1577,7 @@ class CaptchaSolver:
         *,
         page_action: str | None = None,
         proxy_config: SolverProxyConfig | None = None,
+        kind: str | None = None,
     ) -> tuple[str | None, bool, bool]:
         client = self._get_client()
         task, used_proxy_aware, compat_rejected = self._build_task_body(
@@ -1513,8 +1617,15 @@ class CaptchaSolver:
         if not task_id:
             return None, used_proxy_aware, compat_rejected
 
-        # Poll for result
-        for _ in range(int(_SOLVE_TIMEOUT / _POLL_INTERVAL)):
+        # Poll for result. The iteration cap is the §11.9 per-type
+        # timeout in seconds divided by the poll interval; the outer
+        # ``asyncio.wait_for`` in :meth:`solve` is the authoritative
+        # deadline (it cancels the loop mid-iteration when the budget
+        # expires) — this loop just bounds the case where a provider
+        # never returns "ready" and the task is invoked outside ``solve``
+        # (test harnesses, future direct callers).
+        max_iterations = max(1, int(self._timeout_seconds_for_kind(kind) / _POLL_INTERVAL))
+        for _ in range(max_iterations):
             await asyncio.sleep(_POLL_INTERVAL)
             try:
                 resp = await client.post(
@@ -1552,6 +1663,7 @@ class CaptchaSolver:
         *,
         page_action: str | None = None,
         proxy_config: SolverProxyConfig | None = None,
+        kind: str | None = None,
     ) -> tuple[str | None, bool, bool]:
         client = self._get_client()
         task, used_proxy_aware, compat_rejected = self._build_task_body(
@@ -1587,8 +1699,10 @@ class CaptchaSolver:
         if not task_id:
             return None, used_proxy_aware, compat_rejected
 
-        # Poll for result
-        for _ in range(int(_SOLVE_TIMEOUT / _POLL_INTERVAL)):
+        # Poll for result. See ``_solve_2captcha`` for why the loop bound
+        # is sized off the §11.9 per-type table.
+        max_iterations = max(1, int(self._timeout_seconds_for_kind(kind) / _POLL_INTERVAL))
+        for _ in range(max_iterations):
             await asyncio.sleep(_POLL_INTERVAL)
             try:
                 resp = await client.post(

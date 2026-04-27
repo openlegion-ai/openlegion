@@ -15,8 +15,11 @@ already governed by scroll_pause timing.
 
 from __future__ import annotations
 
+import asyncio
 import math
 import random
+
+from src.browser import flags
 
 # ── Speed ─────────────────────────────────────────────────────
 
@@ -205,3 +208,34 @@ def inter_action_delay() -> float:
     low = _delay * 0.3
     high = _delay * 2.0
     return _clamped_gauss(_delay, stddev, low, high)
+
+
+# ── CAPTCHA solve pacing (§11.11) ─────────────────────────────
+
+
+async def captcha_solve_delay() -> None:
+    """Gaussian-with-clamp delay between solver token retrieval and DOM injection.
+
+    Real users take 5-15s between captcha appearing and form submit.
+    Instant token injection is a low-but-real anti-bot signal. μ=6000ms,
+    σ=2500ms, clamped to [3000, 12000]. Operator override via env vars:
+
+    * ``CAPTCHA_SOLVE_PACING_MU_MS`` — Gaussian mean (default 6000).
+    * ``CAPTCHA_SOLVE_PACING_SIGMA_MS`` — Gaussian stddev (default 2500).
+    * ``CAPTCHA_PACING_MS_MIN`` — clamp lower bound (default 3000).
+    * ``CAPTCHA_PACING_MS_MAX`` — clamp upper bound (default 12000).
+
+    The existing ``human_delay`` / ``keystroke_delay`` helpers operate on
+    millisecond-scale clamps and are unsuitable for the 3-12s scale of
+    post-solve pacing — this helper exists specifically for that range.
+    Not scaled by the global ``_speed`` factor: the goal is to mimic real
+    human reading time, which is independent of the operator's "go fast"
+    knob for intra-action timing.
+    """
+    mu_ms = flags.get_int("CAPTCHA_SOLVE_PACING_MU_MS", 6000)
+    sigma_ms = flags.get_int("CAPTCHA_SOLVE_PACING_SIGMA_MS", 2500)
+    min_ms = flags.get_int("CAPTCHA_PACING_MS_MIN", 3000)
+    max_ms = flags.get_int("CAPTCHA_PACING_MS_MAX", 12000)
+    delay_ms = _clamped_gauss(float(mu_ms), float(sigma_ms),
+                              float(min_ms), float(max_ms))
+    await asyncio.sleep(delay_ms / 1000.0)

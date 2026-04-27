@@ -544,7 +544,6 @@ class TestCredentialLeakCanary:
 
         # Speed: collapse the poll interval so we don't actually wait.
         monkeypatch.setattr(cap, "_POLL_INTERVAL", 0.001)
-        monkeypatch.setattr(cap, "_SOLVE_TIMEOUT", 5.0)
 
         result = await solver.solve(
             page, 'iframe[src*="recaptcha"]', "https://example.com/login",
@@ -643,7 +642,6 @@ class TestCredentialLeakCanary:
         page.url = "https://example.com"
 
         monkeypatch.setattr(cap, "_POLL_INTERVAL", 0.001)
-        monkeypatch.setattr(cap, "_SOLVE_TIMEOUT", 5.0)
 
         await solver.solve(
             page, 'iframe[src*="recaptcha"]', "https://example.com",
@@ -717,7 +715,6 @@ class TestCredentialLeakCanary:
         page.url = "https://example.com"
 
         monkeypatch.setattr(cap, "_POLL_INTERVAL", 0.001)
-        monkeypatch.setattr(cap, "_SOLVE_TIMEOUT", 5.0)
 
         result = await solver.solve(
             page, 'iframe[src*="recaptcha"]', "https://example.com",
