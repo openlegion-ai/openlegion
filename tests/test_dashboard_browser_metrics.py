@@ -327,7 +327,14 @@ class TestFetchBrowserMetricsUpstream:
 
     def _run(self, coro):
         import asyncio
-        return asyncio.get_event_loop().run_until_complete(coro)
+        # Fresh loop per call — asyncio.get_event_loop() raises
+        # RuntimeError on Python 3.10+ when no loop is running, and
+        # asyncio.run() refuses to run inside an already-running loop.
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
 
     def test_network_failure_returns_envelope(self):
         from src.dashboard.server import _fetch_browser_metrics_upstream
