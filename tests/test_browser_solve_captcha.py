@@ -118,10 +118,12 @@ class TestSolveCaptchaSuccess:
 class TestSolveCaptchaCostCap:
     @pytest.mark.asyncio
     async def test_cost_cap_exceeded_short_circuits(self, mgr, monkeypatch):
-        # Configure the cap (USD).
+        # Configure the cap (USD). $0.50 → 50_000 millicents.
+        # The cost counter stores spend in MILLICENTS (1/1000 of a cent;
+        # 1/100_000 of a dollar) — see ``captcha_cost_counter`` docstring.
         monkeypatch.setenv("CAPTCHA_COST_LIMIT_USD_PER_AGENT_MONTH", "0.50")
-        # Pre-fill spend to exceed the cap (50 cents).
-        await cost.add_cost("agent-1", 100)
+        # Pre-fill spend to exceed the 50_000 mc cap.
+        await cost.add_cost("agent-1", 50_000)
 
         inst = _mk_inst_with_locator(captcha_present=True)
         mgr._instances["agent-1"] = inst

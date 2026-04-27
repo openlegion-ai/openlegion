@@ -195,7 +195,10 @@ class TestSolvePassesKindThrough:
         async def fake_submit(self, captcha_type, sitekey, page_url, **kwargs):
             recorded["captcha_type"] = captcha_type
             recorded["kind"] = kwargs.get("kind")
-            return ("tok-X", False, False)
+            # 4-tuple: (token, used_proxy_aware, compat_rejected, provider_contacted).
+            # ``provider_contacted=True`` mirrors a real submit that
+            # reached the upstream API.
+            return ("tok-X", False, False, True)
 
         # Patch the page-level injection so we don't need real DOM.
         async def fake_inject(self, page, captcha_type, token):
@@ -226,7 +229,7 @@ class TestSolvePassesKindThrough:
 
         async def fake_submit(self, captcha_type, sitekey, page_url, **kwargs):
             recorded["kind"] = kwargs.get("kind")
-            return ("tok-X", False, False)
+            return ("tok-X", False, False, True)
 
         async def fake_inject(self, page, captcha_type, token):
             return True
@@ -263,7 +266,7 @@ class TestOuterTimeoutEnforced:
 
         async def slow_submit(self, *a, **kw):
             await asyncio.sleep(2.0)
-            return ("tok", False, False)
+            return ("tok", False, False, True)
 
         with patch.object(CaptchaSolver, "_submit_and_poll", new=slow_submit):
             ok = await solver.solve(
@@ -284,7 +287,7 @@ class TestOuterTimeoutEnforced:
         page = _solve_page()
 
         async def fast_submit(self, *a, **kw):
-            return ("tok", False, False)
+            return ("tok", False, False, True)
 
         async def fake_inject(self, page, captcha_type, token):
             return True

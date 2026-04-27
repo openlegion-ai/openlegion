@@ -819,3 +819,118 @@ async def test_check_captcha_no_decoration_when_solver_healthy():
     # "no_solver" (that's the unreachable short-circuit). With
     # solve()==False on a healthy solver the envelope reports "rejected".
     assert out.get("solver_outcome") != "no_solver"
+
+
+# ── §11.16 Codex F3 — local failures must NOT pollute the breaker ──────
+
+
+class TestBreakerLocalVsProviderFailures:
+    """Codex F3 — pre-fix, ANY failure path inside ``solve()`` —
+    including purely-local classification failures (sitekey extraction
+    couldn't find the widget, ``_build_task_body`` rejected the variant)
+    — recorded a breaker outcome. Three unsupported captchas from one
+    agent tripped the breaker for the entire BrowserManager and blocked
+    real solves for every other agent. The fix splits the failure paths:
+    only provider-contacted failures count toward the breaker.
+    """
+
+    @pytest.mark.asyncio
+    async def test_three_sitekey_extract_failures_do_not_trip_breaker(self):
+        """Sitekey extraction failure is purely local — the page DOM
+        lacked any matching marker. The provider was never contacted.
+        The breaker must NOT count these.
+        """
+        solver = _make_solver()
+        solver._solver_health_checked = True
+
+        page = AsyncMock()
+        # Sitekey extractor returns None — our DOM-walker found nothing.
+        page.evaluate = AsyncMock(return_value=None)
+        page.url = "https://example.com"
+
+        # No HTTP client patching needed — the provider is never reached.
+        for _ in range(_BREAKER_FAILURE_THRESHOLD):
+            await solver.solve(
+                page, 'iframe[src*="recaptcha"]', "https://example.com",
+                kind="recaptcha-v2-checkbox",
+            )
+
+        assert len(solver._solver_failure_timestamps) == 0
+        assert solver.is_breaker_open() is False
+
+    @pytest.mark.asyncio
+    async def test_three_unsupported_variant_failures_do_not_trip_breaker(self):
+        """``_build_task_body`` returns ``None`` when the captcha kind
+        isn't in the per-provider task table. That's a LOCAL failure —
+        no createTask call ever fires. Breaker must not count these
+        either, otherwise three unsupported challenges from one agent
+        would block solves for the whole manager.
+        """
+        solver = _make_solver(provider="2captcha")
+        solver._solver_health_checked = True
+
+        page = _solve_page()  # sitekey extracted fine
+        client = AsyncMock(spec=httpx.AsyncClient)
+        client.is_closed = False
+        # If the test fails the wrong way, the provider would get hit.
+        client.post = AsyncMock(side_effect=AssertionError(
+            "provider must NOT be contacted for an unsupported variant",
+        ))
+        solver._client = client
+
+        # Force ``_build_task_body`` to act as if the captcha kind is
+        # missing from the provider table — return ``None``. This is
+        # the same path an unrecognized captcha takes through
+        # ``_solve_2captcha`` / ``_solve_capsolver``.
+        with patch.object(
+            solver, "_build_task_body",
+            return_value=(None, False, False),
+        ):
+            for _ in range(_BREAKER_FAILURE_THRESHOLD):
+                result = await solver.solve(
+                    page, 'iframe[src*="recaptcha"]',
+                    "https://example.com",
+                    kind="recaptcha-v2-checkbox",
+                )
+                # Each call fails (no token) but provider was untouched.
+                assert result.token is None
+
+        assert len(solver._solver_failure_timestamps) == 0
+        assert solver.is_breaker_open() is False
+        # Provider really wasn't contacted.
+        client.post.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_three_provider_500_failures_DO_trip_breaker(self):
+        """Provider-contacted failures (createTask 5xx, errorId>0,
+        timeouts during polling) MUST still trip the breaker — that's
+        the signal it was designed for."""
+        solver = _make_solver(provider="2captcha")
+        solver._solver_health_checked = True
+
+        page = _solve_page()
+
+        # createTask returns errorId>0 — provider WAS contacted.
+        err_resp = MagicMock()
+        err_resp.json = MagicMock(return_value={
+            "errorId": 1, "errorDescription": "ERROR_KEY_DOES_NOT_EXIST",
+        })
+        err_resp.raise_for_status = MagicMock()
+
+        client = AsyncMock(spec=httpx.AsyncClient)
+        client.is_closed = False
+        client.post = AsyncMock(return_value=err_resp)
+        solver._client = client
+
+        with patch("src.browser.captcha._POLL_INTERVAL", 0.001):
+            for _ in range(_BREAKER_FAILURE_THRESHOLD):
+                await solver.solve(
+                    page, 'iframe[src*="recaptcha"]',
+                    "https://example.com",
+                    kind="recaptcha-v2-checkbox",
+                )
+
+        # Breaker SHOULD have tripped — these were real provider
+        # failures, not local classification gaps.
+        assert solver.is_breaker_open() is True
+

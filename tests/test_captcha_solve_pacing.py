@@ -379,7 +379,9 @@ class TestPacingSkippedOnFailure:
 
         async def slow_submit(self, *a, **kw):
             await asyncio.sleep(2.0)
-            return ("tok", False, False)
+            # 4-tuple: (token, used_proxy_aware, compat_rejected,
+            # provider_contacted) — see ``_submit_and_poll`` docstring.
+            return ("tok", False, False, True)
 
         pace = AsyncMock(return_value=None)
         with patch.object(CaptchaSolver, "_submit_and_poll", new=slow_submit), \

@@ -63,14 +63,20 @@ class SolveResult:
             old per-instance ``last_compat_rejected`` scratch attr.
         skipped: When non-``None``, the metering layer short-circuited
             BEFORE the solver HTTP call. One of:
+              * ``"disabled"`` — ``CAPTCHA_DISABLED`` kill switch active.
+                Replaces the per-call early-return that used to live in
+                ``solve_captcha``; the auto-detect entry points
+                (navigate / click) now flow through the same gate.
               * ``"rate_limited"`` — per-agent solve-rate gate fired.
               * ``"cost_cap"`` — per-agent monthly cost-cap reached.
+              * ``"provider_missing"`` — solver lacks a string ``provider``
+                attribute AND a cost cap is configured; we fail closed
+                rather than let an untrackable charge slip past the cap.
             ``None`` for a real solver attempt (success or failure).
 
     Field-population guarantee for ``_metered_solve`` consumers:
-      * ``skipped="rate_limited"`` → ``token=None, injection_succeeded=False,
+      * Any ``skipped`` value → ``token=None, injection_succeeded=False,
         used_proxy_aware=False, compat_rejected=False``.
-      * ``skipped="cost_cap"`` → same.
       * ``skipped=None``: every other field reflects the actual solver
         attempt; ``token is None`` indicates a failed solve.
     """
@@ -1360,7 +1366,14 @@ class CaptchaSolver:
             sitekey = await self._extract_sitekey(page, captcha_type)
         if not sitekey:
             logger.warning("Could not extract sitekey for %s CAPTCHA", captcha_type)
-            await self._record_solver_outcome(success=False)
+            # LOCAL failure — sitekey couldn't be extracted from the
+            # page DOM. The provider was never contacted, so the §11.16
+            # breaker MUST NOT count this. Pre-fix, three sitekey-extraction
+            # failures from a single agent (e.g. an unsupported widget
+            # variant the DOM-extractor doesn't recognize) tripped the
+            # breaker for the entire BrowserManager and blocked real
+            # solves for every other agent. The breaker tracks PROVIDER
+            # reliability — local classifier gaps belong elsewhere.
             return SolveResult(
                 token=None, injection_succeeded=False,
                 used_proxy_aware=False, compat_rejected=False,
@@ -1381,7 +1394,12 @@ class CaptchaSolver:
         timeout_s = self._timeout_seconds_for_kind(timeout_kind)
 
         try:
-            token, used_proxy_aware, compat_rejected = await asyncio.wait_for(
+            (
+                token,
+                used_proxy_aware,
+                compat_rejected,
+                provider_contacted,
+            ) = await asyncio.wait_for(
                 self._submit_and_poll(
                     captcha_type, sitekey, page_url,
                     page_action=page_action, proxy_config=proxy_config,
@@ -1394,6 +1412,11 @@ class CaptchaSolver:
                 "CAPTCHA solve timed out after %.1fs (kind=%s)",
                 timeout_s, timeout_kind,
             )
+            # ``asyncio.wait_for`` cancelled ``_submit_and_poll`` mid-flight
+            # — by the time the outer deadline fires, ``createTask`` has
+            # already been issued (the task-body builder + provider HTTP
+            # call complete in well under a second; the deadline only
+            # bites during the poll loop). Treat as provider-contacted.
             await self._record_solver_outcome(success=False)
             return SolveResult(
                 token=None, injection_succeeded=False,
@@ -1407,6 +1430,11 @@ class CaptchaSolver:
                 "CAPTCHA solve failed: %s",
                 _redact_clientkey_text(redact_url(repr(exc))),
             )
+            # An exception bubbling out of ``_submit_and_poll`` is rare —
+            # both per-provider helpers catch and convert into ``None``
+            # tokens. When it does happen, conservatively treat it as
+            # provider-contacted so a programmer-error flood doesn't
+            # silently mask a real provider outage.
             await self._record_solver_outcome(success=False)
             return SolveResult(
                 token=None, injection_succeeded=False,
@@ -1414,7 +1442,13 @@ class CaptchaSolver:
             )
 
         if not token:
-            await self._record_solver_outcome(success=False)
+            # Token retrieval failed. Only count the breaker when a real
+            # provider request was issued. ``provider_contacted=False``
+            # means ``_build_task_body`` rejected the variant locally
+            # (no row in the per-provider task table) — the captcha is
+            # unsupported, NOT a provider outage signal.
+            if provider_contacted:
+                await self._record_solver_outcome(success=False)
             return SolveResult(
                 token=None, injection_succeeded=False,
                 used_proxy_aware=used_proxy_aware,
@@ -1508,7 +1542,7 @@ class CaptchaSolver:
         page_action: str | None = None,
         proxy_config: SolverProxyConfig | None = None,
         kind: str | None = None,
-    ) -> tuple[str | None, bool, bool]:
+    ) -> tuple[str | None, bool, bool, bool]:
         """Submit CAPTCHA to solving service and poll for result.
 
         ``page_action`` is the v3 action string from the classifier; it's
@@ -1525,9 +1559,21 @@ class CaptchaSolver:
         infinite loop when a provider stays in ``processing`` past the
         outer deadline.
 
-        Returns ``(token, used_proxy_aware, compat_rejected)`` so the
-        caller (``solve``) can mark the envelope's confidence and inform
-        the cost counter whether proxy-aware pricing applies.
+        Returns ``(token, used_proxy_aware, compat_rejected, provider_contacted)``:
+
+          * ``token`` — provider-issued solution, or ``None`` on any
+            failure (local task-body rejection, createTask error, poll
+            error, errorId>0, never-ready).
+          * ``used_proxy_aware`` / ``compat_rejected`` — see
+            ``_build_task_body``.
+          * ``provider_contacted`` — ``True`` iff a ``createTask`` HTTP
+            request was actually attempted. ``False`` for purely-local
+            failures (unknown ``captcha_type`` not in the provider table,
+            ``_build_task_body`` returning ``None``). The §11.16 circuit
+            breaker MUST only count provider-contacted failures —
+            otherwise three unsupported-variant requests from one agent
+            trip the breaker for the whole BrowserManager and block real
+            solves for every other agent.
         """
         if self.provider == "2captcha":
             return await self._solve_2captcha(
@@ -1693,7 +1739,7 @@ class CaptchaSolver:
         page_action: str | None = None,
         proxy_config: SolverProxyConfig | None = None,
         kind: str | None = None,
-    ) -> tuple[str | None, bool, bool]:
+    ) -> tuple[str | None, bool, bool, bool]:
         client = self._get_client()
         task, used_proxy_aware, compat_rejected = self._build_task_body(
             _2CAPTCHA_TASK_TYPES, captcha_type, sitekey, page_url,
@@ -1701,13 +1747,21 @@ class CaptchaSolver:
             provider_name="2captcha",
         )
         if not task:
-            return None, used_proxy_aware, compat_rejected
+            # Local failure — the variant isn't in the provider table.
+            # ``provider_contacted=False`` so the breaker is NOT polluted
+            # by unsupported-variant requests (see ``_submit_and_poll``
+            # docstring for the full rationale).
+            return None, used_proxy_aware, compat_rejected, False
 
         # Submit task
         payload = {
             "clientKey": self.api_key,
             "task": task,
         }
+        # Mark provider_contacted=True the moment we attempt the HTTP
+        # call. From here every failure path is a real provider
+        # interaction (network error, errorId>0, never-ready) and the
+        # breaker SHOULD count it.
         try:
             resp = await client.post("https://api.2captcha.com/createTask", json=payload)
             resp.raise_for_status()
@@ -1721,16 +1775,16 @@ class CaptchaSolver:
                 "2Captcha createTask failed: %s",
                 _redact_clientkey_text(redact_url(str(e))),
             )
-            return None, used_proxy_aware, compat_rejected
+            return None, used_proxy_aware, compat_rejected, True
         if data.get("errorId", 0) != 0:
             logger.warning(
                 "2Captcha submit error: %s",
                 _redact_clientkey_text(str(data.get("errorDescription"))),
             )
-            return None, used_proxy_aware, compat_rejected
+            return None, used_proxy_aware, compat_rejected, True
         task_id = data.get("taskId")
         if not task_id:
-            return None, used_proxy_aware, compat_rejected
+            return None, used_proxy_aware, compat_rejected, True
 
         # Poll for result. The iteration cap is the §11.9 per-type
         # timeout in seconds divided by the poll interval; the outer
@@ -1754,19 +1808,19 @@ class CaptchaSolver:
                     "2Captcha getTaskResult failed: %s",
                     _redact_clientkey_text(redact_url(str(e))),
                 )
-                return None, used_proxy_aware, compat_rejected
+                return None, used_proxy_aware, compat_rejected, True
             if data.get("errorId", 0) != 0:
                 logger.warning(
                     "2Captcha poll error: %s",
                     _redact_clientkey_text(str(data.get("errorDescription"))),
                 )
-                return None, used_proxy_aware, compat_rejected
+                return None, used_proxy_aware, compat_rejected, True
             if data.get("status") == "ready":
                 solution = data.get("solution", {})
                 token = solution.get("gRecaptchaResponse") or solution.get("token")
-                return token, used_proxy_aware, compat_rejected
+                return token, used_proxy_aware, compat_rejected, True
             # status == "processing" — keep polling
-        return None, used_proxy_aware, compat_rejected
+        return None, used_proxy_aware, compat_rejected, True
 
     # ── CapSolver ─────────────────────────────────────────────────────────────
 
@@ -1779,7 +1833,7 @@ class CaptchaSolver:
         page_action: str | None = None,
         proxy_config: SolverProxyConfig | None = None,
         kind: str | None = None,
-    ) -> tuple[str | None, bool, bool]:
+    ) -> tuple[str | None, bool, bool, bool]:
         client = self._get_client()
         task, used_proxy_aware, compat_rejected = self._build_task_body(
             _CAPSOLVER_TASK_TYPES, captcha_type, sitekey, page_url,
@@ -1787,7 +1841,8 @@ class CaptchaSolver:
             provider_name="capsolver",
         )
         if not task:
-            return None, used_proxy_aware, compat_rejected
+            # Local failure — see ``_solve_2captcha`` for breaker rationale.
+            return None, used_proxy_aware, compat_rejected, False
 
         # Submit task
         payload = {
@@ -1803,16 +1858,16 @@ class CaptchaSolver:
                 "CapSolver createTask failed: %s",
                 _redact_clientkey_text(redact_url(str(e))),
             )
-            return None, used_proxy_aware, compat_rejected
+            return None, used_proxy_aware, compat_rejected, True
         if data.get("errorId", 0) != 0:
             logger.warning(
                 "CapSolver submit error: %s",
                 _redact_clientkey_text(str(data.get("errorDescription"))),
             )
-            return None, used_proxy_aware, compat_rejected
+            return None, used_proxy_aware, compat_rejected, True
         task_id = data.get("taskId")
         if not task_id:
-            return None, used_proxy_aware, compat_rejected
+            return None, used_proxy_aware, compat_rejected, True
 
         # Poll for result. See ``_solve_2captcha`` for why the loop bound
         # is sized off the §11.9 per-type table.
@@ -1831,18 +1886,18 @@ class CaptchaSolver:
                     "CapSolver getTaskResult failed: %s",
                     _redact_clientkey_text(redact_url(str(e))),
                 )
-                return None, used_proxy_aware, compat_rejected
+                return None, used_proxy_aware, compat_rejected, True
             if data.get("errorId", 0) != 0:
                 logger.warning(
                     "CapSolver poll error: %s",
                     _redact_clientkey_text(str(data.get("errorDescription"))),
                 )
-                return None, used_proxy_aware, compat_rejected
+                return None, used_proxy_aware, compat_rejected, True
             if data.get("status") == "ready":
                 solution = data.get("solution", {})
                 token = solution.get("gRecaptchaResponse") or solution.get("token")
-                return token, used_proxy_aware, compat_rejected
-        return None, used_proxy_aware, compat_rejected
+                return token, used_proxy_aware, compat_rejected, True
+        return None, used_proxy_aware, compat_rejected, True
 
     # ── Token injection ───────────────────────────────────────────────────────
 

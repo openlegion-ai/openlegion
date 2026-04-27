@@ -8,16 +8,37 @@ counted spend — acceptable because the cap is per-month and a process restart
 inside a billing month is rare; the alternative (SQLite, WAL, schema-migration
 plumbing) was disproportionate to the value.
 
+UNITS — IMPORTANT.
+
+All values are stored and compared in **MILLICENTS** (1/1000 of a US cent
+= 1/100_000 of a US dollar). A 2captcha v2-checkbox solve is published at
+$1.00 per 1000 solves = $0.001 per solve = 0.1 cents = **100 millicents**.
+
+Conversion shortcuts:
+
+  * dollars → millicents: ``int(round(usd * 100_000))``
+  * millicents → cents (for human display): ``millicents / 1000.0``
+  * millicents → dollars (for human display): ``millicents / 100_000.0``
+
+Why millicents and not cents or ``Decimal``? Most published solve rates
+are sub-cent (0.06¢ – 0.6¢). Storing as integer cents would round every
+real per-solve charge to 0 or 1, blowing up the cap-tripping math. Storing
+as ``Decimal`` USD is cleaner but a wider refactor; integer millicents
+gives lossless arithmetic for the published rate table while keeping the
+existing `int` storage / JSON shape unchanged.
+
 Public surface:
-  * :func:`add_cost(agent_id, cents)` — increment a per-agent monthly bucket.
-    Resets the bucket when the calendar month rolls over.
-  * :func:`over_cap(agent_id, cap_cents)` — read-only check.
+  * :func:`add_cost(agent_id, millicents)` — increment a per-agent
+    monthly bucket. Resets when the calendar month rolls over.
+  * :func:`over_cap(agent_id, cap_millicents)` — read-only check.
   * :func:`snapshot()` / :func:`restore()` — JSON file persistence. Atomic
-    write via ``os.replace`` after ``fsync``.
-  * :func:`estimate_cents(provider, kind)` — fixed table of published rates
-    so callers don't reimplement the lookup. Returns ``None`` when the
-    variant isn't priced — caller should log a warning and skip counting
-    (over-counting is worse than under-counting for trust).
+    write via ``os.replace`` after ``fsync``. The on-disk schema migrates
+    legacy ``cents`` snapshots by multiplying ×1000 on load (logged once).
+  * :func:`estimate_millicents(provider, kind)` — fixed table of published
+    rates. Returns ``None`` when the variant isn't priced — caller should
+    log a warning and skip counting (over-counting is worse than
+    under-counting for trust).
+  * :func:`get_millicents(agent_id)` — current-month spend.
 """
 
 from __future__ import annotations
@@ -46,11 +67,11 @@ def _state_path() -> Path:
 # ── Pricing table ──────────────────────────────────────────────────────────
 
 
-# Published rates from 2captcha + CapSolver (April 2026), in US cents per
-# successful solve. Keys follow the convention ``{provider}-{variant}`` for
-# the proxyless tier; the proxy-aware tier uses a 3-tuple key
-# ``(provider, variant, proxy_aware=True)`` and lives in
-# :data:`PRICING_CENTS_PROXY_AWARE` below.
+# Published rates from 2captcha + CapSolver (April 2026), in **millicents**
+# (1/1000 of a US cent) per successful solve. Keys follow the convention
+# ``{provider}-{variant}`` for the proxyless tier; the proxy-aware tier
+# uses a 2-tuple key ``(provider, variant)`` and lives in
+# :data:`PRICING_MILLICENTS_PROXY_AWARE` below.
 #
 # Why two tables? Provider docs publish proxyless rates in a single line
 # but proxy-aware rates as "approximately 3× the base" in their pricing
@@ -59,27 +80,31 @@ def _state_path() -> Path:
 #
 # When a kind isn't priced, callers SKIP counting rather than guessing —
 # under-count > over-count for operator trust.
-PRICING_CENTS: dict[str, int] = {
+#
+# Sanity: 100 millicents = 0.1 cents = $0.001/solve. 2Captcha publishes
+# v2-checkbox at $1.00 / 1000 solves = $0.001/solve = 100 millicents.  ✓
+PRICING_MILLICENTS: dict[str, int] = {
     # 2Captcha — published https://2captcha.com/2captcha-api#solving_recaptchav2_new
-    "2captcha-recaptcha-v2-checkbox": 100,        # $1.00 / 1000 = 0.10c each → 0.1¢
+    "2captcha-recaptcha-v2-checkbox": 100,        # $1.00 / 1000 = 0.1¢ each → 100 millicents
     "2captcha-recaptcha-v2-invisible": 100,
     "2captcha-recaptcha-v3": 100,
     # §11.1 splits ``recaptcha-enterprise`` into v2/v3 enterprise variants;
     # both keep the same Enterprise rate. ``recaptcha-enterprise`` is
     # retained as a back-compat alias for any callers still emitting the
     # coarse kind from a hint override.
-    "2captcha-recaptcha-enterprise": 200,
+    "2captcha-recaptcha-enterprise": 200,         # $2.00 / 1000 = 0.2¢ each → 200 millicents
     "2captcha-recaptcha-enterprise-v2": 200,
     "2captcha-recaptcha-enterprise-v3": 200,
     "2captcha-hcaptcha": 100,
     "2captcha-turnstile": 200,
     # CF-bound Turnstile (§11.3 ``cf-interstitial-turnstile``) — solver
     # path is identical to standalone Turnstile; only the envelope ``kind``
-    # differs. Aliased here so :func:`estimate_cents` doesn't return ``None``
-    # for the CF variant and trip the spurious "no published rate" warning.
+    # differs. Aliased here so :func:`estimate_millicents` doesn't return
+    # ``None`` for the CF variant and trip the spurious "no published rate"
+    # warning.
     "2captcha-cf-interstitial-turnstile": 200,
     # CapSolver — published https://docs.capsolver.com/guide/captcha/
-    "capsolver-recaptcha-v2-checkbox": 80,
+    "capsolver-recaptcha-v2-checkbox": 80,        # $0.80 / 1000 = 0.08¢ each → 80 millicents
     "capsolver-recaptcha-v2-invisible": 80,
     "capsolver-recaptcha-v3": 80,
     "capsolver-recaptcha-enterprise": 200,
@@ -92,14 +117,15 @@ PRICING_CENTS: dict[str, int] = {
 
 # §11.2 — proxy-aware pricing tier (~3× the proxyless rate as published
 # by both providers). Tuple key ``(provider, variant)``; ``proxy_aware``
-# flag at lookup time picks this table over :data:`PRICING_CENTS`.
+# flag at lookup time picks this table over :data:`PRICING_MILLICENTS`.
 #
 # 2captcha v3 has no documented proxy-aware task type as of April 2026,
-# so its proxy-aware entries are intentionally absent — :func:`estimate_cents`
-# falls through to the proxyless price for those (the body builder
-# already falls back to proxyless when no proxy_aware task is documented,
-# so paying proxyless rate matches what the provider sees).
-PRICING_CENTS_PROXY_AWARE: dict[tuple[str, str], int] = {
+# so its proxy-aware entries are intentionally absent —
+# :func:`estimate_millicents` falls through to the proxyless price for
+# those (the body builder already falls back to proxyless when no
+# proxy_aware task is documented, so paying proxyless rate matches what
+# the provider sees).
+PRICING_MILLICENTS_PROXY_AWARE: dict[tuple[str, str], int] = {
     # 2captcha — 3× the proxyless rate
     ("2captcha", "recaptcha-v2-checkbox"):    300,
     ("2captcha", "recaptcha-v2-invisible"):   300,
@@ -120,19 +146,27 @@ PRICING_CENTS_PROXY_AWARE: dict[tuple[str, str], int] = {
     ("capsolver", "cf-interstitial-turnstile"): 180,
 }
 
+# Back-compat aliases — third-party subclasses or future callers that
+# import ``PRICING_CENTS`` will get the millicents table. Names retained
+# so an out-of-tree subclass does not break at import time even if its
+# arithmetic is now off-by-1000 (a logged warning is the worst that
+# happens; the real fix landed inside this module).
+PRICING_CENTS = PRICING_MILLICENTS
+PRICING_CENTS_PROXY_AWARE = PRICING_MILLICENTS_PROXY_AWARE
 
-def estimate_cents(
+
+def estimate_millicents(
     provider: str, kind: str, *, proxy_aware: bool = False,
 ) -> int | None:
-    """Return published cost (cents) for one successful solve, or ``None``.
+    """Return published cost (millicents) for one successful solve, or ``None``.
 
-    ``proxy_aware=True`` consults :data:`PRICING_CENTS_PROXY_AWARE` first
-    (~3× the proxyless rate). When the proxy-aware table doesn't have a
-    row for the (provider, variant) tuple — e.g. 2captcha v3, where the
-    provider has no documented proxy-aware task type — we fall through to
-    the proxyless rate. That matches what the body builder did at the
-    request layer (proxyless task body), so the price billed equals the
-    request type sent.
+    ``proxy_aware=True`` consults :data:`PRICING_MILLICENTS_PROXY_AWARE`
+    first (~3× the proxyless rate). When the proxy-aware table doesn't
+    have a row for the (provider, variant) tuple — e.g. 2captcha v3,
+    where the provider has no documented proxy-aware task type — we fall
+    through to the proxyless rate. That matches what the body builder did
+    at the request layer (proxyless task body), so the price billed
+    equals the request type sent.
 
     ``None`` signals the variant isn't priced; callers should log a warning
     and SKIP the increment rather than attribute a guess to the agent's
@@ -147,19 +181,27 @@ def estimate_cents(
     p = provider.strip().lower()
     k = kind.strip().lower()
     if proxy_aware:
-        cents = PRICING_CENTS_PROXY_AWARE.get((p, k))
-        if cents is not None:
-            return cents
+        mc = PRICING_MILLICENTS_PROXY_AWARE.get((p, k))
+        if mc is not None:
+            return mc
         # Fall through to the proxyless rate — the body builder degraded
         # to proxyless for this variant, so the price tier matches.
     key = f"{p}-{k}"
-    return PRICING_CENTS.get(key)
+    return PRICING_MILLICENTS.get(key)
+
+
+# Back-compat alias — third-party subclasses or older call sites using
+# ``estimate_cents`` get the millicents value transparently. The name is
+# off-by-1000 wrt its label but every internal caller has been migrated
+# to ``estimate_millicents`` in the same change-set; this exists so an
+# out-of-tree CaptchaSolver subclass keeps importing without a hard break.
+estimate_cents = estimate_millicents
 
 
 # ── State + lock ───────────────────────────────────────────────────────────
 
 
-# {agent_id: {"month": "YYYY-MM", "cents": int}}
+# {agent_id: {"month": "YYYY-MM", "millicents": int}}
 _state: dict[str, dict] = {}
 _lock: asyncio.Lock = asyncio.Lock()
 
@@ -178,7 +220,7 @@ def _bucket_for(agent_id: str, *, current_month: str | None = None) -> dict:
     cm = current_month or _current_month()
     bucket = _state.get(agent_id)
     if bucket is None or bucket.get("month") != cm:
-        bucket = {"month": cm, "cents": 0}
+        bucket = {"month": cm, "millicents": 0}
         _state[agent_id] = bucket
     return bucket
 
@@ -186,39 +228,52 @@ def _bucket_for(agent_id: str, *, current_month: str | None = None) -> dict:
 # ── Public mutators / readers ──────────────────────────────────────────────
 
 
-async def add_cost(agent_id: str, cents: int) -> int:
-    """Add ``cents`` to ``agent_id``'s current-month bucket. Returns new total.
+async def add_cost(agent_id: str, millicents: int) -> int:
+    """Add ``millicents`` to ``agent_id``'s current-month bucket.
 
-    Concurrent writers across asyncio tasks are serialized by ``_lock`` —
-    matters because the browser service serves multiple agents off a single
-    event loop. Negative or zero ``cents`` are silently dropped (defensive).
+    Returns the new total (millicents). Concurrent writers across asyncio
+    tasks are serialized by ``_lock`` — matters because the browser
+    service serves multiple agents off a single event loop. Non-positive
+    inputs are silently dropped (defensive).
     """
-    if cents <= 0:
-        return await get_cents(agent_id)
+    if millicents <= 0:
+        return await get_millicents(agent_id)
     async with _lock:
         bucket = _bucket_for(agent_id)
-        bucket["cents"] = int(bucket["cents"]) + int(cents)
-        return bucket["cents"]
+        bucket["millicents"] = int(bucket["millicents"]) + int(millicents)
+        return bucket["millicents"]
 
 
-async def over_cap(agent_id: str, cap_cents: int) -> bool:
-    """Return ``True`` iff this agent's current-month spend ≥ ``cap_cents``.
+async def over_cap(agent_id: str, cap_millicents: int) -> bool:
+    """Return ``True`` iff current-month spend ≥ ``cap_millicents``.
 
-    ``cap_cents <= 0`` disables the cap (returns ``False`` regardless of
-    spend) — operators set the env var to ``0`` to opt out.
+    ``cap_millicents <= 0`` disables the cap (returns ``False`` regardless
+    of spend) — operators set the env var to ``0`` to opt out.
+
+    Callers MUST pass the cap in millicents — the cap-USD env var is
+    converted at the read site (see ``src/browser/service.py:
+    _resolve_cost_cap``). Passing a cents value here would re-introduce
+    the unit-mismatch bug that this module's docstring warns against.
     """
-    if cap_cents <= 0:
+    if cap_millicents <= 0:
         return False
     async with _lock:
         bucket = _bucket_for(agent_id)
-        return int(bucket["cents"]) >= int(cap_cents)
+        return int(bucket["millicents"]) >= int(cap_millicents)
 
 
-async def get_cents(agent_id: str) -> int:
-    """Return the current-month spend for ``agent_id`` in cents."""
+async def get_millicents(agent_id: str) -> int:
+    """Return the current-month spend for ``agent_id`` in millicents."""
     async with _lock:
         bucket = _bucket_for(agent_id)
-        return int(bucket["cents"])
+        return int(bucket["millicents"])
+
+
+# Back-compat alias for an external caller that used to read cents. The
+# name is preserved but the units are now MILLICENTS — the caller almost
+# certainly wants ``get_millicents`` directly, but this avoids a hard
+# break at import. Internal call sites have been migrated.
+get_cents = get_millicents
 
 
 async def reset(agent_id: str | None = None) -> None:
@@ -301,6 +356,12 @@ async def restore(path: Path | str | None = None) -> int:
     Missing / unreadable / malformed files are non-fatal — log + start
     fresh. Buckets whose ``month`` doesn't match the current month are
     dropped (they'd reset on next access anyway; no point keeping stale).
+
+    **Schema migration.** Older snapshots stored a ``cents`` field. This
+    module now uses ``millicents`` (1/1000 of a cent) so the field was
+    renamed; legacy ``cents`` values are migrated by multiplying ×1000.
+    The migration logs once per restore so operators can correlate any
+    apparent jump in monthly spend with the unit fix.
     """
     target = Path(path) if path else _state_path()
     if not target.exists():
@@ -322,20 +383,39 @@ async def restore(path: Path | str | None = None) -> int:
 
     cm = _current_month()
     loaded = 0
+    migrated = 0
     async with _lock:
         _state.clear()
         for agent_id, bucket in buckets.items():
             if not isinstance(bucket, dict):
                 continue
             month = bucket.get("month")
-            cents = bucket.get("cents", 0)
-            if not isinstance(month, str) or not isinstance(cents, int):
+            if not isinstance(month, str):
                 continue
+            # Prefer the new-shape ``millicents`` field; fall back to the
+            # legacy ``cents`` field with a ×1000 conversion. The
+            # migration is idempotent (re-saving immediately produces a
+            # millicents-only payload) so the ``cents`` branch only ever
+            # fires once per snapshot file.
+            mc = bucket.get("millicents")
+            if not isinstance(mc, int):
+                legacy_cents = bucket.get("cents")
+                if isinstance(legacy_cents, int):
+                    mc = legacy_cents * 1000
+                    migrated += 1
+                else:
+                    continue
             if month != cm:
                 # Stale month — would reset on first access; skip restoring.
                 continue
-            _state[str(agent_id)] = {"month": month, "cents": cents}
+            _state[str(agent_id)] = {"month": month, "millicents": int(mc)}
             loaded += 1
+    if migrated:
+        logger.info(
+            "captcha_cost restore: migrated %d legacy cents bucket(s) "
+            "to millicents (×1000) from %s",
+            migrated, target,
+        )
     logger.info(
         "captcha_cost restore loaded %d/%d agent bucket(s) from %s",
         loaded, len(buckets), target,

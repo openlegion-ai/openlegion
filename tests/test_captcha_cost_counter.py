@@ -6,6 +6,9 @@ Covers:
   * snapshot / restore round-trip via JSON
   * atomic write (tmp file replaced)
   * concurrent ``add_cost`` correctness
+  * unit invariant: $1 cap allows ~1000 v2-checkbox solves before tripping
+    (regression for the cents-vs-millicents mismatch from Codex F1)
+  * legacy ``cents`` snapshots migrate to ``millicents`` (×1000) on load
 """
 
 from __future__ import annotations
@@ -30,26 +33,43 @@ async def _isolate_state(tmp_path, monkeypatch):
     await cost.reset()
 
 
-class TestEstimateCents:
+class TestEstimateMillicents:
+    """Pricing table is now in MILLICENTS (1/1000 of a cent). The legacy
+    ``estimate_cents`` is a back-compat alias to ``estimate_millicents``;
+    both names return the same integer.
+    """
+
     def test_known_2captcha_recaptcha_v2(self):
-        assert cost.estimate_cents("2captcha", "recaptcha-v2-checkbox") == 100
+        # 2captcha v2-checkbox is published at $1/1000 = $0.001/solve
+        # = 100 millicents/solve. Pre-fix this was labelled "cents" but
+        # the magnitude (100) matches millicents, not cents (which would
+        # have been a single 1¢ charge per solve).
+        assert cost.estimate_millicents("2captcha", "recaptcha-v2-checkbox") == 100
 
     def test_known_capsolver_turnstile(self):
-        assert cost.estimate_cents("capsolver", "turnstile") == 60
+        assert cost.estimate_millicents("capsolver", "turnstile") == 60
 
     def test_unknown_kind_returns_none(self):
-        assert cost.estimate_cents("2captcha", "made-up-variant") is None
+        assert cost.estimate_millicents("2captcha", "made-up-variant") is None
 
     def test_unknown_provider_returns_none(self):
-        assert cost.estimate_cents("nopal", "hcaptcha") is None
+        assert cost.estimate_millicents("nopal", "hcaptcha") is None
 
     def test_case_insensitive(self):
-        assert cost.estimate_cents("2CAPTCHA", "HCAPTCHA") == 100
-        assert cost.estimate_cents("CapSolver", "Turnstile") == 60
+        assert cost.estimate_millicents("2CAPTCHA", "HCAPTCHA") == 100
+        assert cost.estimate_millicents("CapSolver", "Turnstile") == 60
 
     def test_empty_inputs_safe(self):
-        assert cost.estimate_cents("", "hcaptcha") is None
-        assert cost.estimate_cents("2captcha", "") is None
+        assert cost.estimate_millicents("", "hcaptcha") is None
+        assert cost.estimate_millicents("2captcha", "") is None
+
+    def test_legacy_estimate_cents_alias_returns_millicents(self):
+        # Back-compat alias for out-of-tree subclasses; the unit changed
+        # under the alias but the magnitude matches what those callers
+        # were already storing — the callers' arithmetic was already
+        # off-by-1000 when treating the value as cents. The alias keeps
+        # them importing without breaking the in-tree fix.
+        assert cost.estimate_cents("2captcha", "recaptcha-v2-checkbox") == 100
 
 
 class TestAddCostAndOverCap:
@@ -57,13 +77,13 @@ class TestAddCostAndOverCap:
     async def test_add_cost_accumulates(self):
         await cost.add_cost("agent-1", 100)
         await cost.add_cost("agent-1", 50)
-        assert await cost.get_cents("agent-1") == 150
+        assert await cost.get_millicents("agent-1") == 150
 
     @pytest.mark.asyncio
     async def test_add_cost_zero_or_negative_dropped(self):
         await cost.add_cost("agent-1", 0)
         await cost.add_cost("agent-1", -10)
-        assert await cost.get_cents("agent-1") == 0
+        assert await cost.get_millicents("agent-1") == 0
 
     @pytest.mark.asyncio
     async def test_over_cap_below_threshold(self):
@@ -83,7 +103,15 @@ class TestAddCostAndOverCap:
     @pytest.mark.asyncio
     async def test_unrelated_agents_isolated(self):
         await cost.add_cost("agent-1", 200)
-        assert await cost.get_cents("agent-2") == 0
+        assert await cost.get_millicents("agent-2") == 0
+
+    @pytest.mark.asyncio
+    async def test_legacy_get_cents_alias_returns_millicents(self):
+        await cost.add_cost("agent-1", 100)
+        # Back-compat alias — same integer the new ``get_millicents``
+        # returns. The label-vs-unit mismatch is documented; out-of-tree
+        # callers' arithmetic was already off-by-1000 before this fix.
+        assert await cost.get_cents("agent-1") == 100
 
 
 class TestMonthRollover:
@@ -92,13 +120,13 @@ class TestMonthRollover:
         # Spend 200 in January.
         monkeypatch.setattr(cost, "_current_month", lambda: "2026-01")
         await cost.add_cost("agent-1", 200)
-        assert await cost.get_cents("agent-1") == 200
+        assert await cost.get_millicents("agent-1") == 200
 
         # Roll over to February — bucket should reset.
         monkeypatch.setattr(cost, "_current_month", lambda: "2026-02")
-        assert await cost.get_cents("agent-1") == 0
+        assert await cost.get_millicents("agent-1") == 0
         await cost.add_cost("agent-1", 50)
-        assert await cost.get_cents("agent-1") == 50
+        assert await cost.get_millicents("agent-1") == 50
 
     @pytest.mark.asyncio
     async def test_month_rollover_during_over_cap(self, monkeypatch):
@@ -108,6 +136,106 @@ class TestMonthRollover:
 
         monkeypatch.setattr(cost, "_current_month", lambda: "2026-02")
         assert await cost.over_cap("agent-1", 1000) is False
+
+
+class TestUnitInvariantsRegression:
+    """Regression tests for Codex F1 — cost-unit mismatch.
+
+    The pricing table comment said ``$1.00 / 1000 = 0.10c each → 0.1¢``
+    but the cap converted USD to **cents** (× 100), not millicents. So a
+    $0.50 cap on 100-millicent solves tripped after the FIRST solve
+    instead of after ~500. These tests pin the conversion math + the
+    end-to-end cap arithmetic so the unit drift can't recur.
+    """
+
+    @pytest.mark.asyncio
+    async def test_one_dollar_cap_allows_one_thousand_v2_checkbox_solves(self):
+        """$1 cap → 100_000 millicents. 2captcha v2-checkbox = 100 mc/solve.
+        100_000 / 100 = 1000 solves before the cap fires (caller reads cap
+        via _resolve_cost_cap; we exercise the bucket math directly).
+        """
+        cap_millicents = 1_00_000  # $1.00 in millicents
+        per_solve = cost.estimate_millicents(
+            "2captcha", "recaptcha-v2-checkbox",
+        )
+        assert per_solve == 100  # provider-published rate
+        # Simulate 999 solves — still under cap.
+        for _ in range(999):
+            await cost.add_cost("agent-1", per_solve)
+        assert await cost.over_cap("agent-1", cap_millicents) is False
+        # 1000th solve trips the cap.
+        await cost.add_cost("agent-1", per_solve)
+        assert await cost.over_cap("agent-1", cap_millicents) is True
+
+    def test_provider_published_rate_is_one_hundred_millicents(self):
+        """$0.001 per solve = 0.1¢ = 100 millicents. Anchors the table."""
+        assert cost.estimate_millicents(
+            "2captcha", "recaptcha-v2-checkbox",
+        ) == 100
+
+    def test_dollars_to_millicents_conversion_math(self):
+        """$0.50 → 50_000 millicents (the conversion site lives in
+        ``service.py:_resolve_cost_cap``; this test pins the arithmetic
+        that test depends on).
+        """
+        # Equivalent: int(round(0.50 * 100_000)).
+        assert int(round(0.50 * 100_000)) == 50_000
+        # Smoke-check a non-round value to catch a silent /1000 typo.
+        assert int(round(2.50 * 100_000)) == 250_000
+
+
+class TestLegacyCentsSnapshotMigration:
+    """Snapshots written before the millicents rename used a ``cents``
+    field. ``restore`` migrates them by multiplying ×1000.
+    """
+
+    @pytest.mark.asyncio
+    async def test_legacy_cents_field_migrated_on_load(
+        self, tmp_path, monkeypatch, caplog,
+    ):
+        import logging as _logging
+        path = tmp_path / "legacy.json"
+        # Pin month so the bucket isn't dropped as stale.
+        monkeypatch.setattr(cost, "_current_month", lambda: "2026-04")
+        payload = {
+            "version": 1,
+            "saved_at": 0,
+            "buckets": {
+                # Pre-fix: stored 100 cents (== 0.1¢-each × 1 solve in
+                # the broken accounting). On migration this becomes
+                # 100_000 millicents. The intent of the original write
+                # was clearly "100 of whatever-unit-we-used"; multiplying
+                # by 1000 preserves the integer count of solves rather
+                # than under-counting them post-rename.
+                "agent-old": {"month": "2026-04", "cents": 100},
+            },
+        }
+        path.write_text(json.dumps(payload))
+        with caplog.at_level(_logging.INFO, logger="browser.captcha_cost"):
+            loaded = await cost.restore(path)
+        assert loaded == 1
+        assert await cost.get_millicents("agent-old") == 100_000
+        # Migration logged once.
+        joined = "\n".join(rec.getMessage() for rec in caplog.records)
+        assert "migrated" in joined and "millicents" in joined
+
+    @pytest.mark.asyncio
+    async def test_new_millicents_field_loaded_unchanged(
+        self, tmp_path, monkeypatch,
+    ):
+        path = tmp_path / "new.json"
+        monkeypatch.setattr(cost, "_current_month", lambda: "2026-04")
+        payload = {
+            "version": 1,
+            "saved_at": 0,
+            "buckets": {
+                "agent-new": {"month": "2026-04", "millicents": 5000},
+            },
+        }
+        path.write_text(json.dumps(payload))
+        loaded = await cost.restore(path)
+        assert loaded == 1
+        assert await cost.get_millicents("agent-new") == 5000
 
 
 class TestSnapshotRestore:
@@ -123,11 +251,11 @@ class TestSnapshotRestore:
 
         # Wipe in-memory state, then restore.
         await cost.reset()
-        assert await cost.get_cents("agent-a") == 0
+        assert await cost.get_millicents("agent-a") == 0
         loaded = await cost.restore(path)
         assert loaded == 2
-        assert await cost.get_cents("agent-a") == 200
-        assert await cost.get_cents("agent-b") == 350
+        assert await cost.get_millicents("agent-a") == 200
+        assert await cost.get_millicents("agent-b") == 350
 
     @pytest.mark.asyncio
     async def test_restore_drops_stale_month(self, tmp_path, monkeypatch):
@@ -137,14 +265,14 @@ class TestSnapshotRestore:
             "version": 1,
             "saved_at": 0,
             "buckets": {
-                "agent-old": {"month": "2020-01", "cents": 999},
+                "agent-old": {"month": "2020-01", "millicents": 999},
             },
         }
         path.write_text(json.dumps(payload))
         loaded = await cost.restore(path)
         # Stale month skipped.
         assert loaded == 0
-        assert await cost.get_cents("agent-old") == 0
+        assert await cost.get_millicents("agent-old") == 0
 
     @pytest.mark.asyncio
     async def test_restore_missing_file_safe(self, tmp_path):
@@ -171,7 +299,7 @@ class TestSnapshotRestore:
         # Verify content is valid JSON with our payload.
         data = json.loads(path.read_text())
         assert "buckets" in data
-        assert data["buckets"]["agent-1"]["cents"] == 42
+        assert data["buckets"]["agent-1"]["millicents"] == 42
 
     @pytest.mark.asyncio
     async def test_snapshot_failure_returns_false(self, monkeypatch):
@@ -195,4 +323,4 @@ class TestConcurrentWrites:
             await cost.add_cost("agent-1", 1)
 
         await asyncio.gather(*(add_one() for _ in range(100)))
-        assert await cost.get_cents("agent-1") == 100
+        assert await cost.get_millicents("agent-1") == 100
