@@ -24,7 +24,12 @@ from collections import deque
 from pathlib import Path
 from urllib.parse import urlparse
 
-from src.browser.captcha import _classify_recaptcha, get_solver
+from src.browser.captcha import (
+    _classify_behavioral,
+    _classify_cf_state,
+    _classify_recaptcha,
+    get_solver,
+)
 from src.browser.profile_schema import migrate_profile
 from src.browser.redaction import CredentialRedactor
 from src.browser.ref_handle import RefHandle, RefStale, ShadowHop
@@ -61,13 +66,15 @@ logger = setup_logging("browser.service")
 #   kind:
 #     "recaptcha-v2-checkbox" | "recaptcha-v2-invisible" | "recaptcha-v3"
 #     | "recaptcha-enterprise" | "hcaptcha" | "turnstile"
-#     | "cf-interstitial-auto" | "cf-interstitial-behavioral" | "unknown"
-#     §11.1 lands the four reCAPTCHA variants; §11.3 lands the CF tri-state.
-#     This PR ships the placeholder values only.
+#     | "cf-interstitial-auto" | "cf-interstitial-behavioral"
+#     | "cf-interstitial-turnstile" | "px-press-hold"
+#     | "datadome-behavioral" | "unknown"
+#     §11.1 lands the four reCAPTCHA variants; §11.3 lands the CF tri-state
+#     plus the behavioral-only kinds (px-press-hold / datadome-behavioral).
 #
 #   solver_outcome:
 #     "solved" | "timeout" | "rejected" | "injection_failed"
-#     | "no_solver" | "unsupported"
+#     | "no_solver" | "unsupported" | "skipped_behavioral"
 #     | "rate_limited" | "cost_cap" | "captcha_during_solve"   (§11.14)
 #     - solved: token retrieved AND injected (or no injection needed).
 #     - timeout: solver did not return a verdict in time.
@@ -83,6 +90,11 @@ logger = setup_logging("browser.service")
 #     - no_solver: no provider configured (``CAPTCHA_SOLVER_PROVIDER`` empty).
 #     - unsupported: detected kind has no solver path. *RESERVED* until the
 #       kind→provider matrix lands.
+#     - skipped_behavioral: detected kind is behavioral-only (CF Under
+#       Attack, PerimeterX Press & Hold, DataDome behavioral blocker) —
+#       solver can't help; the agent should call ``request_captcha_help``.
+#       Emitted by §11.3 detection BEFORE solver health/breaker gates so
+#       behavioral-only flows don't consume health-check or breaker quota.
 #
 #   solver_confidence:
 #     "high" | "medium" | "low" | "behavioral-only"
@@ -127,8 +139,21 @@ _VALID_CAPTCHA_KINDS: frozenset[str] = frozenset({
     "recaptcha-enterprise",  # legacy alias for back-compat
     "recaptcha-enterprise-v2", "recaptcha-enterprise-v3",
     "hcaptcha", "turnstile",
-    "cf-interstitial-auto", "cf-interstitial-behavioral", "unknown",
+    # §11.3 — CF interstitial tri-state + behavioral-only kinds.
+    "cf-interstitial-auto", "cf-interstitial-behavioral",
+    "cf-interstitial-turnstile",
+    "px-press-hold", "datadome-behavioral",
+    "unknown",
 })
+
+
+# §11.3 — wait duration for CF auto-resolving JS challenge ("Just a moment").
+# Spec calls for 5–10s; we pick 8s (midpoint) as a reasonable default:
+# legitimate fingerprints typically clear in <5s, while 10s+ would stall
+# agent loops on dead pages. One wait+recheck cycle per ``_check_captcha``
+# call (no retry loop) — if the page hasn't navigated by then we fall
+# through to behavioral classification.
+_CF_AUTO_WAIT_SECONDS = 8.0
 
 
 # ── §11.14 per-agent solve rate limiter ───────────────────────────────────
@@ -5439,9 +5464,29 @@ class BrowserManager:
         Callers should treat ``solver_outcome == "solved"`` as "no agent
         action needed" — the captcha was detected but already cleared.
 
-        NOTE: classification here is minimal — it maps the matched selector
-        onto the §11.13 ``kind`` enum. Full reCAPTCHA v2/v3/Enterprise
-        disambiguation lands in §11.1; CF interstitial tri-state in §11.3.
+        Classification dispatches the matched selector through three
+        live-page classifiers in order:
+
+        1. §11.1 reCAPTCHA variant classifier (``_classify_recaptcha``) —
+           upgrades the coarse ``recaptcha-v2-checkbox`` placeholder to
+           ``recaptcha-v{2-invisible,3,enterprise-v2,enterprise-v3}``.
+        2. §11.3 behavioral-only classifier (``_classify_behavioral``) —
+           detects PerimeterX Press & Hold and DataDome ``/blocker``
+           pages. Runs **before** the §11.16 solver health/breaker gates
+           so behavioral-only flows don't consume health-check or
+           breaker quota; the solver genuinely cannot help with these.
+        3. §11.3 Cloudflare tri-state classifier (``_classify_cf_state``):
+           - ``auto``: wait :data:`_CF_AUTO_WAIT_SECONDS` once and
+             re-check the selector list. If page navigated away, return
+             ``solver_outcome="solved"``; otherwise treat as behavioral.
+           - ``behavioral``: emit ``cf-interstitial-behavioral`` with
+             ``skipped_behavioral`` outcome.
+           - ``turnstile``: route through the existing Turnstile solver
+             path with kind upgraded to ``cf-interstitial-turnstile``
+             and ``solver_confidence`` forced to ``"low"`` regardless
+             of the solver verdict (CF binds Turnstile tokens to session
+             cookies; the solve may not unblock the session).
+           - ``none``: fall through to the existing flow unchanged.
 
         §11.16 layers two solver-health side-channels on top of the §11.13
         envelope, checked BEFORE attempting ``solver.solve()``:
@@ -5493,6 +5538,122 @@ class BrowserManager:
                                 "_classify_recaptcha raised; falling back to "
                                 "coarse kind=%s", kind, exc_info=True,
                             )
+
+                    # §11.3 — behavioral-only classifier runs BEFORE the
+                    # solver health/breaker gates so behavioral-only flows
+                    # (PerimeterX Press & Hold, DataDome blocker) don't
+                    # consume health-check or breaker quota. The solver
+                    # genuinely cannot help with these challenges; the
+                    # only correct response is to escalate via
+                    # ``request_captcha_help`` (§11.14).
+                    behavioral_kind = await _classify_behavioral(inst.page)
+                    if behavioral_kind:
+                        logger.info(
+                            "Behavioral-only challenge detected (%s); "
+                            "skipping solver, escalating to request_captcha_help",
+                            behavioral_kind,
+                        )
+                        return _captcha_envelope(
+                            kind=behavioral_kind,
+                            solver_attempted=False,
+                            solver_outcome="skipped_behavioral",
+                            solver_confidence="behavioral-only",
+                            next_action="request_captcha_help",
+                        )
+
+                    # §11.3 — Cloudflare interstitial tri-state classifier.
+                    # ``auto`` waits once and re-checks; ``behavioral``
+                    # short-circuits to the behavioral envelope; ``turnstile``
+                    # falls through to the existing solver path with a
+                    # forced-``low`` confidence override; ``none`` keeps
+                    # the existing legacy fallback (for CF iframes that
+                    # don't expose any of the discriminating anchors).
+                    cf_force_low_confidence = False
+                    cf_state = await _classify_cf_state(inst.page)
+                    if cf_state == "behavioral":
+                        logger.info(
+                            "CF interstitial classified as behavioral "
+                            "(under-attack / persistent challenge); "
+                            "skipping solver",
+                        )
+                        return _captcha_envelope(
+                            kind="cf-interstitial-behavioral",
+                            solver_attempted=False,
+                            solver_outcome="skipped_behavioral",
+                            solver_confidence="behavioral-only",
+                            next_action="request_captcha_help",
+                        )
+                    if cf_state == "auto":
+                        logger.info(
+                            "CF auto-resolving challenge detected; "
+                            "waiting %.1fs for it to clear",
+                            _CF_AUTO_WAIT_SECONDS,
+                        )
+                        await asyncio.sleep(_CF_AUTO_WAIT_SECONDS)
+                        # Re-run the selector match — if the page has
+                        # navigated away from the challenge, no captcha
+                        # selector matches. If still on the challenge,
+                        # treat as behavioral (one wait+recheck cycle
+                        # only — never loop).
+                        still_present = False
+                        for recheck_sel in captcha_selectors:
+                            try:
+                                if (
+                                    await inst.page.locator(recheck_sel).count()
+                                    > 0
+                                ):
+                                    still_present = True
+                                    break
+                            except Exception:
+                                # Page closed / navigated mid-recheck —
+                                # treat as cleared.
+                                logger.debug(
+                                    "CF auto recheck locator raised; "
+                                    "treating as cleared",
+                                    exc_info=True,
+                                )
+                                break
+                        if not still_present:
+                            return _captcha_envelope(
+                                kind="cf-interstitial-auto",
+                                solver_attempted=False,
+                                solver_outcome="solved",
+                                solver_confidence="medium",
+                                next_action="solved",
+                            )
+                        logger.info(
+                            "CF auto-resolving challenge still present "
+                            "after wait; treating as behavioral",
+                        )
+                        return _captcha_envelope(
+                            kind="cf-interstitial-behavioral",
+                            solver_attempted=False,
+                            solver_outcome="skipped_behavioral",
+                            solver_confidence="behavioral-only",
+                            next_action="request_captcha_help",
+                        )
+                    if cf_state == "turnstile":
+                        # CF-bound Turnstile: existing Turnstile solver
+                        # path runs, but the resulting confidence is
+                        # forced to "low" because CF binds the token to
+                        # session cookies and the solve may not unblock
+                        # the session even when the verdict is good.
+                        kind = "cf-interstitial-turnstile"
+                        cf_force_low_confidence = True
+                    # cf_state == "none" — fall through to existing
+                    # standalone-Turnstile / generic flow unchanged.
+
+                    # Local helper applies the §11.3 CF-Turnstile
+                    # confidence override (see ``cf_force_low_confidence``)
+                    # to every return path through the solver block. Token
+                    # validity is unrelated to the per-call solve verdict
+                    # for CF-bound Turnstile, so the override fires
+                    # regardless of ``solver_outcome``.
+                    def _finalize(envelope: dict) -> dict:
+                        if cf_force_low_confidence:
+                            envelope["solver_confidence"] = "low"
+                        return envelope
+
                     if self._captcha_solver:
                         # §11.16 short-circuits — check solver health
                         # BEFORE attempting a solve. ``is_solver_unreachable``
@@ -5507,12 +5668,12 @@ class BrowserManager:
                                 "CAPTCHA detected (%s), solver marked unreachable; skipping",
                                 sel,
                             )
-                            return _captcha_envelope(
+                            return _finalize(_captcha_envelope(
                                 kind=kind, solver_attempted=False,
                                 solver_outcome="no_solver",
                                 solver_confidence=_kind_confidence(kind),
                                 next_action="request_captcha_help",
-                            )
+                            ))
                         if self._captcha_solver.is_breaker_open():
                             logger.warning(
                                 "CAPTCHA detected (%s), solver breaker open; skipping",
@@ -5529,7 +5690,7 @@ class BrowserManager:
                             # §11.13 contract while letting callers detect
                             # the breaker-open case distinctly.
                             envelope["breaker_open"] = True
-                            return envelope
+                            return _finalize(envelope)
                         logger.info("CAPTCHA detected (%s), attempting auto-solve", sel)
                         try:
                             solved = await self._captcha_solver.solve(
@@ -5537,12 +5698,12 @@ class BrowserManager:
                             )
                         except asyncio.TimeoutError:
                             # Solver took too long — true "timeout" semantic.
-                            return _captcha_envelope(
+                            return _finalize(_captcha_envelope(
                                 kind=kind, solver_attempted=True,
                                 solver_outcome="timeout",
                                 solver_confidence="low",
                                 next_action="notify_user",
-                            )
+                            ))
                         except Exception as exc:
                             # Network / JSON-decode / programmer errors all
                             # land here. A third-party CaptchaSolver subclass
@@ -5559,26 +5720,26 @@ class BrowserManager:
                                 logger.warning(
                                     "Auto-solve timed out (httpx): %r", exc,
                                 )
-                                return _captcha_envelope(
+                                return _finalize(_captcha_envelope(
                                     kind=kind, solver_attempted=True,
                                     solver_outcome="timeout",
                                     solver_confidence="low",
                                     next_action="notify_user",
-                                )
+                                ))
                             logger.exception("Auto-solve raised, falling back")
-                            return _captcha_envelope(
+                            return _finalize(_captcha_envelope(
                                 kind=kind, solver_attempted=True,
                                 solver_outcome="rejected",
                                 solver_confidence="low",
                                 next_action="notify_user",
-                            )
+                            ))
                         if solved:
-                            return _captcha_envelope(
+                            return _finalize(_captcha_envelope(
                                 kind=kind, solver_attempted=True,
                                 solver_outcome="solved",
                                 solver_confidence="high",
                                 next_action="solved",
-                            )
+                            ))
                         # solver.solve() returned False. Today this conflates
                         # three failure modes: (a) provider verdict reject /
                         # errorId>0, (b) sitekey not extractable, (c) token
@@ -5589,45 +5750,49 @@ class BrowserManager:
                         # three to ``rejected`` for now and revisit once the
                         # solver returns structured results.
                         logger.warning("Auto-solve failed, falling back to manual")
-                        return _captcha_envelope(
+                        return _finalize(_captcha_envelope(
                             kind=kind, solver_attempted=True,
                             solver_outcome="rejected",
                             solver_confidence="low",
                             next_action="notify_user",
-                        )
+                        ))
                     # No solver configured — surface to agent for manual VNC.
                     # Confidence reflects how firmly we classified the kind:
                     # firmly-disambiguated kinds (hcaptcha, turnstile) →
                     # "high"; placeholders (recaptcha-v2-checkbox,
                     # cf-interstitial-auto) and "unknown" → "low" until
                     # §11.1 / §11.3 land variant detection.
-                    return _captcha_envelope(
+                    return _finalize(_captcha_envelope(
                         kind=kind, solver_attempted=False,
                         solver_outcome="no_solver",
                         solver_confidence=_kind_confidence(kind),
                         next_action="notify_user",
-                    )
+                    ))
         except Exception:
             logger.debug("captcha detection raised", exc_info=True)
         return {"captcha_found": False}
 
     def _classify_kind(self, selector: str) -> str:
-        """Map the matched selector onto a §11.13 ``kind`` value.
+        """Map the matched selector onto the coarse §11.13 ``kind`` value.
 
-        Minimal classification — see §11.1 for the full reCAPTCHA variant
-        and §11.3 for the CF interstitial tri-state work that will refine
-        these placeholders.
+        First-pass classification only — the live-page classifiers in
+        ``_check_captcha`` (§11.1 ``_classify_recaptcha``, §11.3
+        ``_classify_cf_state`` / ``_classify_behavioral``) refine these
+        placeholders against the actual page state.
         """
         if "recaptcha" in selector:
-            # v2-checkbox is the dominant case; v2-invisible/v3/Enterprise
-            # disambiguation lives in §11.1.
+            # v2-checkbox is the safe default; the §11.1 classifier
+            # upgrades to v2-invisible / v3 / Enterprise variants when
+            # the live page exposes the disambiguating signals.
             return "recaptcha-v2-checkbox"
         if "hcaptcha" in selector:
             return "hcaptcha"
         if "challenges.cloudflare.com" in selector:
-            # Default to the auto-resolving JS challenge until §11.3 lands
-            # full tri-state (auto / behavioral / turnstile-embedded)
-            # detection.
+            # Coarse CF default. The §11.3 classifier in ``_check_captcha``
+            # routes to ``cf-interstitial-{auto,behavioral,turnstile}``
+            # based on live-page anchors (challenge frame, error 1020,
+            # embedded Turnstile widget). When the JS probe finds none
+            # of those, this placeholder stays.
             return "cf-interstitial-auto"
         if "cf-turnstile" in selector:
             return "turnstile"

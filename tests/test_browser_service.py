@@ -5022,6 +5022,125 @@ class TestCheckCaptchaUsesVariantClassifier:
         assert result["kind"] == "recaptcha-v2-checkbox"
 
 
+# ── §11.3 CF tri-state + Turnstile selector regression tests ──────────────
+
+
+class TestCheckCaptchaCfTristateSelectorRegression:
+    """Verify post-§11.3 ``_check_captcha`` keeps the existing CF / Turnstile
+    selector contracts. These tests drive ``page.evaluate`` per-JS-string
+    so the §11.3 classifiers (``_classify_behavioral``, ``_classify_cf_state``)
+    receive realistic shapes, not a single shared return value.
+    """
+
+    @staticmethod
+    def _make_inst(matching_selector: str, *, cf_probe=None, behavioral_probe=None,
+                   recaptcha_probe=None, title: str = "") -> MagicMock:
+        from src.browser.captcha import (
+            _BEHAVIORAL_PROBE_JS,
+            _CF_STATE_PROBE_JS,
+            _CLASSIFY_RECAPTCHA_JS,
+        )
+        inst = MagicMock()
+        inst.page = MagicMock()
+        inst.page.url = "https://example.com"
+        inst.page.title = AsyncMock(return_value=title)
+
+        def locator(sel: str):
+            loc = MagicMock()
+            loc.count = AsyncMock(
+                return_value=1 if sel == matching_selector else 0,
+            )
+            return loc
+
+        inst.page.locator = MagicMock(side_effect=locator)
+
+        async def evaluate(js, *args, **kwargs):
+            if js == _BEHAVIORAL_PROBE_JS:
+                return behavioral_probe if behavioral_probe is not None else {
+                    "px": False, "datadome": False,
+                }
+            if js == _CF_STATE_PROBE_JS:
+                return cf_probe if cf_probe is not None else {
+                    "has_challenge_running": False,
+                    "has_turnstile": False,
+                    "has_cf_error_1020": False,
+                    "has_challenge_error_text": False,
+                }
+            if js == _CLASSIFY_RECAPTCHA_JS:
+                return recaptcha_probe if recaptcha_probe is not None else {
+                    "enterprise": False, "v3": False, "sitekeys": [],
+                    "actions_by_key": {}, "invisible_by_key": {},
+                    "enterprise_script": False, "v3_render_param": None,
+                }
+            return None
+
+        inst.page.evaluate = evaluate
+        inst.lock = asyncio.Lock()
+        inst.touch = MagicMock()
+        return inst
+
+    @pytest.mark.asyncio
+    async def test_standalone_turnstile_kind_unchanged(self):
+        """``[class*="cf-turnstile"]`` selector with no CF challenge frame
+        keeps ``kind="turnstile"`` and ``solver_confidence="high"`` (firm
+        kind, no solver).
+        """
+        from src.browser.service import BrowserManager
+        mgr = BrowserManager.__new__(BrowserManager)
+        mgr._captcha_solver = None
+        # CF probe returns "none" (no challenge_running / no turnstile flag /
+        # no error markers) — falls through to existing flow.
+        inst = self._make_inst('[class*="cf-turnstile"]', title="Login")
+        result = await mgr._check_captcha(inst)
+        assert result["kind"] == "turnstile"
+        assert result["solver_confidence"] == "high"
+        assert result["solver_outcome"] == "no_solver"
+
+    @pytest.mark.asyncio
+    async def test_cf_iframe_with_no_anchors_falls_through_to_auto_placeholder(self):
+        """CF iframe selector match with the JS probe finding no
+        discriminating anchors → existing ``cf-interstitial-auto``
+        placeholder kind, ``solver_confidence="low"`` (placeholder).
+        """
+        from src.browser.service import BrowserManager
+        mgr = BrowserManager.__new__(BrowserManager)
+        mgr._captcha_solver = None
+        inst = self._make_inst(
+            'iframe[src*="challenges.cloudflare.com"]',
+            title="Just a moment...",
+        )
+        result = await mgr._check_captcha(inst)
+        assert result["kind"] == "cf-interstitial-auto"
+        assert result["solver_confidence"] == "low"
+
+    @pytest.mark.asyncio
+    async def test_cf_iframe_with_turnstile_widget_routes_to_cf_turnstile_kind(self):
+        """When the CF iframe selector matches AND the JS probe reports
+        a Turnstile widget AND the title is "Just a moment...", the §11.3
+        classifier returns ``"turnstile"`` and the envelope kind becomes
+        ``cf-interstitial-turnstile`` with forced-low confidence.
+        """
+        from src.browser.service import BrowserManager
+        mgr = BrowserManager.__new__(BrowserManager)
+        mgr._captcha_solver = None
+        inst = self._make_inst(
+            'iframe[src*="challenges.cloudflare.com"]',
+            cf_probe={
+                "has_challenge_running": False,
+                "has_turnstile": True,
+                "has_cf_error_1020": False,
+                "has_challenge_error_text": False,
+            },
+            title="Just a moment...",
+        )
+        result = await mgr._check_captcha(inst)
+        assert result["kind"] == "cf-interstitial-turnstile"
+        # No solver configured → no_solver outcome with low confidence
+        # (override applies regardless).
+        assert result["solver_outcome"] == "no_solver"
+        assert result["solver_confidence"] == "low"
+
+
 # ── Dialog scoping tests ──────────────────────────────────────────────────
 
 
