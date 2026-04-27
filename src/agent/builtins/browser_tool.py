@@ -975,10 +975,18 @@ async def browser_inspect_requests(
 @skill(
     name="browser_detect_captcha",
     description=(
-        "Detect CAPTCHAs (reCAPTCHA, hCaptcha, Cloudflare Turnstile) on the "
-        "current page. When a CAPTCHA solver is configured, CAPTCHAs are "
-        "solved automatically after navigation. If auto-solving fails or no "
-        "solver is configured, the CAPTCHA must be solved manually via VNC."
+        "Detect CAPTCHAs (reCAPTCHA, hCaptcha, Cloudflare Turnstile, etc.) "
+        "on the current page. When a CAPTCHA solver is configured, "
+        "CAPTCHAs are solved automatically after navigation. Returns the "
+        "structured envelope: data.captcha_found is the primary signal; "
+        "when true, also inspect data.kind (e.g. 'recaptcha-v2-checkbox', "
+        "'turnstile', 'cf-interstitial-auto', 'unknown'), "
+        "data.solver_outcome ('solved', 'no_solver', 'timeout', "
+        "'rejected', ...), and data.next_action ('solved', 'wait', "
+        "'notify_user', 'request_captcha_help', ...). The legacy "
+        "data.type and data.message fields remain for back-compat but are "
+        "deprecated — prefer the structured fields. solver_outcome=='solved' "
+        "means no agent action is required; the captcha was already cleared."
     ),
     parameters={},
     parallel_safe=False,

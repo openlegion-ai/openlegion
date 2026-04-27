@@ -77,7 +77,8 @@ class TestFillFormHappyPath:
              patch.object(BrowserManager, "_locator_from_ref",
                           new_callable=AsyncMock, return_value=loc), \
              patch.object(BrowserManager, "_check_captcha",
-                          new_callable=AsyncMock, return_value=None), \
+                          new_callable=AsyncMock,
+                          return_value={"captcha_found": False}), \
              patch.object(BrowserManager, "_snapshot_impl", new=_fake_snapshot):
             result = await mgr.fill_form(
                 "agent1",
@@ -113,7 +114,8 @@ class TestFillFormHappyPath:
              patch.object(BrowserManager, "_locator_from_ref",
                           new_callable=AsyncMock, return_value=loc), \
              patch.object(BrowserManager, "_check_captcha",
-                          new_callable=AsyncMock, return_value=None), \
+                          new_callable=AsyncMock,
+                          return_value={"captcha_found": False}), \
              patch.object(BrowserManager, "_snapshot_impl", new=_fake_snapshot):
             result = await mgr.fill_form(
                 "agent1",
@@ -136,6 +138,7 @@ class TestFillFormCaptchaMidFlow:
 
     @pytest.mark.asyncio
     async def test_captcha_after_first_field_stops_loop(self):
+        from src.browser.service import _with_legacy_fields
         mgr = _make_manager()
         refs = {
             "e0": {"role": "textbox", "name": "Email", "index": 0, "disabled": False},
@@ -144,11 +147,20 @@ class TestFillFormCaptchaMidFlow:
         }
         inst = _make_instance(refs)
         loc = _make_locator()
-        captcha_blob = {"type": "iframe[src*=recaptcha]", "message": "CAPTCHA"}
+        # §11.13 envelope shape — ``_check_captcha`` always returns this.
+        captcha_envelope = {
+            "captcha_found": True,
+            "kind": "recaptcha-v2-checkbox",
+            "solver_attempted": False,
+            "solver_outcome": "no_solver",
+            "injection_failure_reason": None,
+            "solver_confidence": "low",
+            "next_action": "notify_user",
+        }
 
         # Captcha appears after the first fill; subsequent calls would also
         # report it, but the loop should bail before the second find_text.
-        check_captcha_mock = AsyncMock(return_value=captcha_blob)
+        check_captcha_mock = AsyncMock(return_value=captcha_envelope)
 
         with patch.object(BrowserManager, "get_or_start", return_value=inst), \
              patch.object(BrowserManager, "_locator_from_ref",
@@ -181,7 +193,11 @@ class TestFillFormCaptchaMidFlow:
         assert data["remaining"][1] == {
             "label": "Phone", "value": "555", "submit_after": False,
         }
-        assert data["captcha"] == captcha_blob
+        # Captcha echoed as the §11.13 envelope with legacy ``type`` /
+        # ``message`` fields appended for back-compat.
+        assert data["captcha"] == _with_legacy_fields(captcha_envelope)
+        assert data["captcha"]["captcha_found"] is True
+        assert data["captcha"]["kind"] == "recaptcha-v2-checkbox"
         assert data["submitted"] is False
         # Only one fill should have happened — the loop bailed.
         assert loc.fill.await_count == 1
@@ -203,11 +219,19 @@ class TestFillFormCaptchaMidFlow:
         }
         inst = _make_instance(refs)
         loc = _make_locator()
-        captcha_blob = {"type": "iframe[src*=recaptcha]", "message": "CAPTCHA"}
+        captcha_envelope = {
+            "captcha_found": True,
+            "kind": "recaptcha-v2-checkbox",
+            "solver_attempted": False,
+            "solver_outcome": "no_solver",
+            "injection_failure_reason": None,
+            "solver_confidence": "low",
+            "next_action": "notify_user",
+        }
 
         # No captcha after fill, captcha appears AFTER per-field Enter.
         # _check_captcha is called once per field (after fill+optional Enter).
-        check_captcha_mock = AsyncMock(return_value=captcha_blob)
+        check_captcha_mock = AsyncMock(return_value=captcha_envelope)
 
         with patch.object(BrowserManager, "get_or_start", return_value=inst), \
              patch.object(BrowserManager, "_locator_from_ref",
@@ -246,13 +270,22 @@ class TestFillFormCaptchaMidFlow:
         }
         inst = _make_instance(refs)
         loc = _make_locator()
-        captcha_blob = {"type": "iframe[src*=hcaptcha]", "message": "CAPTCHA"}
+        captcha_envelope = {
+            "captcha_found": True,
+            "kind": "hcaptcha",
+            "solver_attempted": False,
+            "solver_outcome": "no_solver",
+            "injection_failure_reason": None,
+            "solver_confidence": "high",
+            "next_action": "notify_user",
+        }
 
         with patch.object(BrowserManager, "get_or_start", return_value=inst), \
              patch.object(BrowserManager, "_locator_from_ref",
                           new_callable=AsyncMock, return_value=loc), \
              patch.object(BrowserManager, "_check_captcha",
-                          new_callable=AsyncMock, return_value=captcha_blob), \
+                          new_callable=AsyncMock,
+                          return_value=captcha_envelope), \
              patch.object(BrowserManager, "_snapshot_impl", new=_fake_snapshot):
             result = await mgr.fill_form(
                 "agent1",
@@ -294,7 +327,8 @@ class TestFillFormFieldFailures:
              patch.object(BrowserManager, "_locator_from_ref",
                           new_callable=AsyncMock, return_value=loc), \
              patch.object(BrowserManager, "_check_captcha",
-                          new_callable=AsyncMock, return_value=None), \
+                          new_callable=AsyncMock,
+                          return_value={"captcha_found": False}), \
              patch.object(BrowserManager, "_snapshot_impl", new=_fake_snapshot):
             result = await mgr.fill_form(
                 "agent1",
@@ -335,7 +369,8 @@ class TestFillFormFieldFailures:
         with patch.object(BrowserManager, "get_or_start", return_value=inst), \
              patch.object(BrowserManager, "_locator_from_ref", new=fake_locator), \
              patch.object(BrowserManager, "_check_captcha",
-                          new_callable=AsyncMock, return_value=None), \
+                          new_callable=AsyncMock,
+                          return_value={"captcha_found": False}), \
              patch.object(BrowserManager, "_snapshot_impl", new=_fake_snapshot):
             result = await mgr.fill_form(
                 "agent1",
@@ -375,7 +410,8 @@ class TestFillFormFieldFailures:
         with patch.object(BrowserManager, "get_or_start", return_value=inst), \
              patch.object(BrowserManager, "_locator_from_ref", new=fake_locator), \
              patch.object(BrowserManager, "_check_captcha",
-                          new_callable=AsyncMock, return_value=None), \
+                          new_callable=AsyncMock,
+                          return_value={"captcha_found": False}), \
              patch.object(BrowserManager, "_snapshot_impl", new=_fake_snapshot):
             result = await mgr.fill_form(
                 "agent1",
@@ -413,7 +449,8 @@ class TestFillFormFieldFailures:
         with patch.object(BrowserManager, "get_or_start", return_value=inst), \
              patch.object(BrowserManager, "_locator_from_ref", new=fake_locator), \
              patch.object(BrowserManager, "_check_captcha",
-                          new_callable=AsyncMock, return_value=None), \
+                          new_callable=AsyncMock,
+                          return_value={"captcha_found": False}), \
              patch.object(BrowserManager, "_snapshot_impl", new=_fake_snapshot):
             result = await mgr.fill_form(
                 "agent1",
@@ -547,7 +584,8 @@ class TestFillFormPerFieldSubmit:
              patch.object(BrowserManager, "_locator_from_ref",
                           new_callable=AsyncMock, return_value=loc), \
              patch.object(BrowserManager, "_check_captcha",
-                          new_callable=AsyncMock, return_value=None), \
+                          new_callable=AsyncMock,
+                          return_value={"captcha_found": False}), \
              patch.object(BrowserManager, "_snapshot_impl", new=_fake_snapshot):
             result = await mgr.fill_form(
                 "agent1",
@@ -581,10 +619,19 @@ class TestFillFormResume:
         }
         inst = _make_instance(refs)
         loc = _make_locator()
-        captcha_blob = {"type": "iframe[src*=recaptcha]", "message": "CAPTCHA"}
+        captcha_envelope = {
+            "captcha_found": True,
+            "kind": "recaptcha-v2-checkbox",
+            "solver_attempted": False,
+            "solver_outcome": "no_solver",
+            "injection_failure_reason": None,
+            "solver_confidence": "low",
+            "next_action": "notify_user",
+        }
+        no_captcha = {"captcha_found": False}
 
         # First call: captcha appears after Email fill.
-        check_seq = iter([captcha_blob, None, None])
+        check_seq = iter([captcha_envelope, no_captcha, no_captcha])
 
         async def fake_check(_self, _inst):
             return next(check_seq)
@@ -653,7 +700,8 @@ class TestFillFormConcurrency:
              patch.object(BrowserManager, "_locator_from_ref",
                           new_callable=AsyncMock, return_value=loc), \
              patch.object(BrowserManager, "_check_captcha",
-                          new_callable=AsyncMock, return_value=None), \
+                          new_callable=AsyncMock,
+                          return_value={"captcha_found": False}), \
              patch.object(BrowserManager, "_snapshot_impl", new=_fake_snapshot):
             r1, r2 = await asyncio.gather(
                 mgr.fill_form("agent1", [{"label": "Email", "value": "a"}]),
@@ -709,7 +757,8 @@ class TestFillFormErrorClassification:
              patch.object(BrowserManager, "_locator_from_ref",
                           new_callable=AsyncMock, return_value=loc), \
              patch.object(BrowserManager, "_check_captcha",
-                          new_callable=AsyncMock, return_value=None), \
+                          new_callable=AsyncMock,
+                          return_value={"captcha_found": False}), \
              patch.object(BrowserManager, "_snapshot_impl", new=_fake_snapshot):
             result = await mgr.fill_form(
                 "agent1",
@@ -735,7 +784,8 @@ class TestFillFormErrorClassification:
              patch.object(BrowserManager, "_locator_from_ref",
                           new_callable=AsyncMock, return_value=loc), \
              patch.object(BrowserManager, "_check_captcha",
-                          new_callable=AsyncMock, return_value=None), \
+                          new_callable=AsyncMock,
+                          return_value={"captcha_found": False}), \
              patch.object(BrowserManager, "_snapshot_impl", new=_fake_snapshot):
             result = await mgr.fill_form(
                 "agent1",
@@ -760,7 +810,8 @@ class TestFillFormErrorClassification:
              patch.object(BrowserManager, "_locator_from_ref",
                           new_callable=AsyncMock, return_value=loc), \
              patch.object(BrowserManager, "_check_captcha",
-                          new_callable=AsyncMock, return_value=None), \
+                          new_callable=AsyncMock,
+                          return_value={"captcha_found": False}), \
              patch.object(BrowserManager, "_snapshot_impl", new=_fake_snapshot):
             result = await mgr.fill_form(
                 "agent1",
@@ -794,7 +845,8 @@ class TestFillFormSubmitEdgeCases:
              patch.object(BrowserManager, "_locator_from_ref",
                           new_callable=AsyncMock, return_value=loc), \
              patch.object(BrowserManager, "_check_captcha",
-                          new_callable=AsyncMock, return_value=None), \
+                          new_callable=AsyncMock,
+                          return_value={"captcha_found": False}), \
              patch.object(BrowserManager, "_snapshot_impl", new=_fake_snapshot):
             result = await mgr.fill_form(
                 "agent1",
@@ -830,7 +882,8 @@ class TestFillFormSubmitEdgeCases:
              patch.object(BrowserManager, "_locator_from_ref",
                           new_callable=AsyncMock, return_value=loc), \
              patch.object(BrowserManager, "_check_captcha",
-                          new_callable=AsyncMock, return_value=None), \
+                          new_callable=AsyncMock,
+                          return_value={"captcha_found": False}), \
              patch.object(BrowserManager, "_snapshot_impl", new=_fake_snapshot):
             result = await mgr.fill_form(
                 "agent1",
@@ -867,7 +920,8 @@ class TestFillFormSubmitEdgeCases:
              patch.object(BrowserManager, "_locator_from_ref",
                           new_callable=AsyncMock, return_value=loc), \
              patch.object(BrowserManager, "_check_captcha",
-                          new_callable=AsyncMock, return_value=None), \
+                          new_callable=AsyncMock,
+                          return_value={"captcha_found": False}), \
              patch.object(BrowserManager, "_snapshot_impl", new=_fake_snapshot):
             result = await mgr.fill_form(
                 "agent1",
@@ -904,7 +958,8 @@ class TestFillFormValueAndLabelHandling:
              patch.object(BrowserManager, "_locator_from_ref",
                           new_callable=AsyncMock, return_value=loc), \
              patch.object(BrowserManager, "_check_captcha",
-                          new_callable=AsyncMock, return_value=None), \
+                          new_callable=AsyncMock,
+                          return_value={"captcha_found": False}), \
              patch.object(BrowserManager, "_snapshot_impl", new=_fake_snapshot):
             result = await mgr.fill_form(
                 "agent1",
@@ -943,7 +998,8 @@ class TestFillFormValueAndLabelHandling:
              patch.object(BrowserManager, "_locator_from_ref",
                           new_callable=AsyncMock, return_value=loc), \
              patch.object(BrowserManager, "_check_captcha",
-                          new_callable=AsyncMock, return_value=None), \
+                          new_callable=AsyncMock,
+                          return_value={"captcha_found": False}), \
              patch.object(BrowserManager, "_snapshot_impl", new=_fake_snapshot):
             result = await mgr.fill_form(
                 "agent1",

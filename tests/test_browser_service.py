@@ -4825,7 +4825,12 @@ class TestCaptchaDetection:
 
         assert result["success"] is True
         assert result["data"]["captcha_found"] is True
-        assert "challenges.cloudflare.com" in result["data"]["type"]
+        # New §11.13 envelope: the cloudflare iframe selector classifies
+        # to the cf-interstitial-auto placeholder kind. §11.3 will refine
+        # this into the proper tri-state.
+        assert result["data"]["kind"] == "cf-interstitial-auto"
+        # Legacy field still populated as the kind value for back-compat.
+        assert result["data"]["type"] == "cf-interstitial-auto"
 
     @pytest.mark.asyncio
     async def test_no_captcha(self):
@@ -7280,7 +7285,7 @@ class TestCheckCaptchaAutoSolve:
 
     @pytest.mark.asyncio
     async def test_check_captcha_auto_solves(self):
-        """When solver succeeds, _check_captcha returns None (no CAPTCHA reported)."""
+        """When solver succeeds, the §11.13 envelope reports solver_outcome='solved'."""
         manager = BrowserManager(profiles_dir="/tmp/test_profiles_captcha1")
 
         mock_solver = AsyncMock()
@@ -7296,12 +7301,14 @@ class TestCheckCaptchaAutoSolve:
         inst.page.url = "https://example.com"
 
         result = await manager._check_captcha(inst)
-        assert result is None  # solved — not reported
+        assert result["captcha_found"] is True
+        assert result["solver_outcome"] == "solved"
+        assert result["next_action"] == "solved"
         mock_solver.solve.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_check_captcha_falls_back_on_failure(self):
-        """When solver fails, _check_captcha returns fallback dict."""
+        """When solver fails, _check_captcha reports solver_outcome='rejected'."""
         manager = BrowserManager(profiles_dir="/tmp/test_profiles_captcha2")
 
         mock_solver = AsyncMock()
@@ -7315,8 +7322,10 @@ class TestCheckCaptchaAutoSolve:
         inst.page.url = "https://example.com"
 
         result = await manager._check_captcha(inst)
-        assert result is not None
-        assert "CAPTCHA detected" in result["message"]
+        assert result["captcha_found"] is True
+        assert result["solver_attempted"] is True
+        assert result["solver_outcome"] == "rejected"
+        assert result["next_action"] == "notify_user"
         mock_solver.solve.assert_called_once()
 
 

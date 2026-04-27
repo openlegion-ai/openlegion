@@ -88,10 +88,16 @@ class TestClickXyHappyPath:
             "masked_by": None, "mask_reason": "",
         })
         mgr = _make_mgr_with(inst)
-        mgr._check_captcha = AsyncMock(return_value=None)
+        # §11.13: ``_check_captcha`` now always returns the structured
+        # envelope; the no-captcha shape is ``{"captcha_found": False}``.
+        mgr._check_captcha = AsyncMock(return_value={"captcha_found": False})
 
-        await mgr.click_xy("a1", x=1, y=1)
+        result = await mgr.click_xy("a1", x=1, y=1)
         mgr._check_captcha.assert_awaited_once_with(inst)
+        # No-captcha envelope must NOT be surfaced as ``captcha`` on the
+        # success path — that field is reserved for "agent must act".
+        assert result["success"] is True
+        assert "captcha" not in result["data"]
 
     @pytest.mark.asyncio
     async def test_click_xy_success_increments_metrics(self):
