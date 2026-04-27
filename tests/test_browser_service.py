@@ -7550,9 +7550,11 @@ class TestCaptchaSolverSolve:
         mock_client.post = AsyncMock(side_effect=[create_resp] + [poll_resp] * 100)
         solver._client = mock_client
 
-        # Patch _SOLVE_TIMEOUT to make test fast
-        with patch("src.browser.captcha._SOLVE_TIMEOUT", 0.1), \
-             patch("src.browser.captcha._POLL_INTERVAL", 0.01):
+        # §11.9 — pin the per-type timeout to ~100ms to keep the test fast
+        # without changing the legacy assertion (solve must still return
+        # False when the poll loop exhausts the budget).
+        solver._solve_timeouts_ms["recaptcha-v2-checkbox"] = 100
+        with patch("src.browser.captcha._POLL_INTERVAL", 0.01):
             result = await solver.solve(page, 'iframe[src*="recaptcha"]', "https://example.com")
         assert result is False
 

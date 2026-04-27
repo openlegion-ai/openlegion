@@ -5696,6 +5696,7 @@ class BrowserManager:
                             solved = await self._captcha_solver.solve(
                                 inst.page, sel, inst.page.url,
                                 agent_id=inst.agent_id,
+                                kind=kind,
                             )
                         except asyncio.TimeoutError:
                             # Solver took too long — true "timeout" semantic.
