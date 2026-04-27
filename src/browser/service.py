@@ -5361,6 +5361,22 @@ class BrowserManager:
         NOTE: classification here is minimal — it maps the matched selector
         onto the §11.13 ``kind`` enum. Full reCAPTCHA v2/v3/Enterprise
         disambiguation lands in §11.1; CF interstitial tri-state in §11.3.
+
+        §11.16 layers two solver-health side-channels on top of the §11.13
+        envelope, checked BEFORE attempting ``solver.solve()``:
+
+        * ``solver.is_solver_unreachable()`` — health probe marked the
+          provider unreachable for this instance-session. Short-circuits
+          to ``solver_outcome="no_solver"`` /
+          ``next_action="request_captcha_help"``; the API is never
+          contacted.
+        * ``solver.is_breaker_open()`` — sliding-window circuit breaker
+          is tripped. Short-circuits to ``solver_outcome="timeout"`` /
+          ``next_action="request_captcha_help"`` plus a top-level
+          additive ``"breaker_open": True`` flag (deliberately *not*
+          encoded as a new enum value, to avoid colliding with §11.13's
+          ``solver_outcome`` set; a richer ``service_unavailable``
+          outcome may land in a follow-up).
         """
         captcha_selectors = [
             'iframe[src*="recaptcha"]',
@@ -5376,6 +5392,42 @@ class BrowserManager:
                 if await inst.page.locator(sel).count() > 0:
                     kind = self._classify_kind(sel)
                     if self._captcha_solver:
+                        # §11.16 short-circuits — check solver health
+                        # BEFORE attempting a solve. ``is_solver_unreachable``
+                        # means the per-instance health probe failed; we
+                        # don't even try the API. ``is_breaker_open`` means
+                        # the sliding-window breaker is tripped after
+                        # repeated solve failures; treat as a transient
+                        # outage and surface a top-level ``breaker_open``
+                        # flag (additive — see §11.13 enum docstring).
+                        if self._captcha_solver.is_solver_unreachable():
+                            logger.warning(
+                                "CAPTCHA detected (%s), solver marked unreachable; skipping",
+                                sel,
+                            )
+                            return _captcha_envelope(
+                                kind=kind, solver_attempted=False,
+                                solver_outcome="no_solver",
+                                solver_confidence=_kind_confidence(kind),
+                                next_action="request_captcha_help",
+                            )
+                        if self._captcha_solver.is_breaker_open():
+                            logger.warning(
+                                "CAPTCHA detected (%s), solver breaker open; skipping",
+                                sel,
+                            )
+                            envelope = _captcha_envelope(
+                                kind=kind, solver_attempted=False,
+                                solver_outcome="timeout",
+                                solver_confidence=_kind_confidence(kind),
+                                next_action="request_captcha_help",
+                            )
+                            # Additive top-level flag — deliberately not a
+                            # new ``solver_outcome`` enum value; preserves
+                            # §11.13 contract while letting callers detect
+                            # the breaker-open case distinctly.
+                            envelope["breaker_open"] = True
+                            return envelope
                         logger.info("CAPTCHA detected (%s), attempting auto-solve", sel)
                         try:
                             solved = await self._captcha_solver.solve(
