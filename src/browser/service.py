@@ -238,11 +238,18 @@ def _resolve_rate_limit(agent_id: str) -> int:
 
 
 def _resolve_cost_cap(agent_id: str) -> int:
-    """Read the monthly per-agent cost cap (USD) and convert to cents.
+    """Read the monthly per-agent cost cap (USD) and convert to MILLICENTS.
 
     Returns 0 when unset or invalid (caller treats 0 as "no cap"). Reads
     via ``flags.get_str`` so per-agent overrides take precedence over the
     raw env var (matches the pattern used elsewhere for captcha flags).
+
+    Unit math: ``captcha_cost_counter`` stores spend in millicents
+    (1/1000 of a cent = 1/100_000 of a dollar). Convert
+    ``$X → X * 100_000``. Example: ``$0.50 → 50_000 millicents``;
+    a 2captcha v2-checkbox solve at 100 millicents lets ~500 solves
+    accumulate before the cap fires (the operator's intent), versus the
+    pre-fix ``* 100`` that tripped after the FIRST solve.
     """
     from src.browser.flags import get_str
     cap_usd_str = get_str(
@@ -251,7 +258,7 @@ def _resolve_cost_cap(agent_id: str) -> int:
     if not cap_usd_str:
         return 0
     try:
-        return int(round(float(cap_usd_str) * 100))
+        return int(round(float(cap_usd_str) * 100_000))
     except ValueError:
         logger.warning(
             "Invalid CAPTCHA_COST_LIMIT_USD_PER_AGENT_MONTH=%r — treating "
@@ -334,9 +341,16 @@ async def _drain_captcha_audit() -> list[dict]:
         _captcha_audit_buckets.clear()
     drained = []
     for (agent_id, outcome, kind), info in buckets.items():
+        # NOTE: the dashboard metrics poller (host/server.py) routes
+        # browser-service events into the EventBus keyed on the payload's
+        # ``agent_id`` field; emitting ``agent`` instead used to silently
+        # drop these events from the per-agent captcha history. The key
+        # name MUST match the poller's expectation — a regression test
+        # in test_check_captcha_metered.py asserts the payload exposes
+        # ``agent_id``, not ``agent``.
         payload = {
             "type": "captcha_gate",
-            "agent": agent_id,
+            "agent_id": agent_id,
             "outcome": outcome,
             "kind": kind,
             "count": info["count"],
@@ -2073,7 +2087,7 @@ class BrowserManager:
             except Exception as e:
                 logger.warning(
                     "captcha audit sink raised for '%s': %s",
-                    ev.get("agent", ""), e,
+                    ev.get("agent_id", ""), e,
                 )
 
     def get_recent_metrics(self, since_seq: int = 0) -> dict:
@@ -5666,9 +5680,45 @@ class BrowserManager:
         except Exception:
             page_url = ""
 
-        # Rate-limit gate. ``_check_solve_rate`` consumes a slot only on
-        # the actual-attempt path (returning False); a True return means
-        # we are over the limit, no slot consumed.
+        # Gate 0: fleet-wide kill switch. ``CAPTCHA_DISABLED`` short-circuits
+        # BEFORE any other gate so the auto-detect entry points (navigate /
+        # click) never reach the provider. The duplicate early-return inside
+        # ``solve_captcha`` was removed once this gate landed — single
+        # checkpoint inside ``_metered_solve`` covers all callers uniformly.
+        from src.browser.flags import get_bool
+        if get_bool("CAPTCHA_DISABLED", False, agent_id=agent_id):
+            await _record_captcha_audit_event(
+                agent_id, "kill_switch_active", kind, page_url,
+            )
+            return SolveResult(
+                token=None, injection_succeeded=False,
+                used_proxy_aware=False, compat_rejected=False,
+                skipped="disabled",
+            )
+
+        # Gate 1: cost-cap. Read-only — does not consume a rate-limit
+        # slot, so a cost-capped agent does NOT burn its hourly quota.
+        # ``cap_millicents`` and the bucket are both millicents
+        # (1/1000¢ = 1/100_000$); see :mod:`captcha_cost_counter`
+        # docstring for the unit invariant.  Order: cost → rate so a
+        # cost-blocked solve doesn't burn rate slots that should still
+        # be available when the cap resets.
+        cap_millicents = _resolve_cost_cap(agent_id)
+        if cap_millicents > 0:
+            from src.browser import captcha_cost_counter as _cost
+            if await _cost.over_cap(agent_id, cap_millicents):
+                await _record_captcha_audit_event(
+                    agent_id, "cost_cap", kind, page_url,
+                )
+                return SolveResult(
+                    token=None, injection_succeeded=False,
+                    used_proxy_aware=False, compat_rejected=False,
+                    skipped="cost_cap",
+                )
+
+        # Gate 2: rate-limit. ``_check_solve_rate`` consumes a slot only
+        # on the actual-attempt path (returning False); a True return
+        # means we are over the limit, no slot consumed.
         rate_limit = _resolve_rate_limit(agent_id)
         if await _check_solve_rate(agent_id, rate_limit):
             await _record_captcha_audit_event(
@@ -5680,19 +5730,41 @@ class BrowserManager:
                 skipped="rate_limited",
             )
 
-        # Cost-cap gate.
-        cap_cents = _resolve_cost_cap(agent_id)
-        if cap_cents > 0:
-            from src.browser import captcha_cost_counter as _cost
-            if await _cost.over_cap(agent_id, cap_cents):
+        # Gate 3: provider sanity. When a cost cap is configured, we
+        # MUST be able to attribute every solve to a published rate so
+        # the cap math stays honest. A solver without a string ``provider``
+        # cannot be priced; in that case we fail closed (skip the solve)
+        # rather than let an untrackable charge slip past the cap.
+        # When no cap is configured the warning still fires so operators
+        # see the misconfiguration, but we proceed with the solve — keeps
+        # tests and custom solver integrations from breaking outright.
+        provider = getattr(self._captcha_solver, "provider", "")
+        if not isinstance(provider, str) or not provider:
+            if cap_millicents > 0:
+                logger.warning(
+                    "captcha solve: solver has no string ``provider`` "
+                    "attribute; cost cap is configured (cap=%s "
+                    "millicents) — failing closed so an untracked "
+                    "charge cannot bypass the cap. Configure the "
+                    "solver with a known provider name (2captcha / "
+                    "capsolver) to proceed.",
+                    cap_millicents,
+                )
                 await _record_captcha_audit_event(
-                    agent_id, "cost_cap", kind, page_url,
+                    agent_id, "provider_missing", kind, page_url,
                 )
                 return SolveResult(
                     token=None, injection_succeeded=False,
                     used_proxy_aware=False, compat_rejected=False,
-                    skipped="cost_cap",
+                    skipped="provider_missing",
                 )
+            logger.warning(
+                "captcha solve: solver has no string ``provider`` "
+                "attribute; cost accounting will be SKIPPED for this "
+                "solve (cap not configured so the warning is "
+                "informational). Set solver.provider to a known name "
+                "to enable cost tracking.",
+            )
 
         # Run the actual solver. Any exception bubbles up so the caller can
         # build the appropriate ``timeout``/``rejected`` envelope; we don't
@@ -5708,16 +5780,17 @@ class BrowserManager:
         # provider-reject / breaker / unreachable).
         if result.token is not None:
             from src.browser import captcha_cost_counter as _cost
-            provider = getattr(self._captcha_solver, "provider", "")
             # Defensive: solver mocks in tests sometimes leave provider
             # as a MagicMock auto-spec child; only proceed when we have
-            # an actual string we can pass to ``estimate_cents``.
+            # an actual string we can pass to ``estimate_millicents``.
+            # The provider-missing case was warned above; here we just
+            # skip the increment silently.
             if isinstance(provider, str) and provider:
-                cents = _cost.estimate_cents(
+                millicents = _cost.estimate_millicents(
                     provider, kind,
                     proxy_aware=result.used_proxy_aware,
                 )
-                if cents is None:
+                if millicents is None:
                     logger.warning(
                         "captcha solve: no published rate for "
                         "provider=%s kind=%s proxy_aware=%s — "
@@ -5726,7 +5799,7 @@ class BrowserManager:
                         provider, kind, result.used_proxy_aware,
                     )
                 else:
-                    await _cost.add_cost(agent_id, cents)
+                    await _cost.add_cost(agent_id, millicents)
         return result
 
     async def _check_captcha(self, inst: CamoufoxInstance) -> dict:
@@ -6044,37 +6117,36 @@ class BrowserManager:
                     # ``next_action`` to ``request_captcha_help`` (the
                     # operator told us this host is unreliable; escalate
                     # rather than letting the agent retry).
-                    def _finalize(envelope: dict) -> dict:
+                    async def _finalize(envelope: dict) -> dict:
+                        # Async helper — used to be sync + fire-and-forget
+                        # via ``loop.create_task`` for the low_success audit
+                        # event, which silently dropped the event on
+                        # shutdown (the task was never tracked or awaited).
+                        # Now we ``await`` the audit recorder directly so
+                        # the event lands in the per-minute aggregation
+                        # bucket before the helper returns. The bucket
+                        # itself is drained on the existing 60s metrics
+                        # tick — no per-call EventBus emit, so this is
+                        # cheap (a single dict update under an asyncio
+                        # lock).
                         if cf_force_low_confidence:
                             envelope["solver_confidence"] = "low"
                         if low_success:
                             envelope["solver_confidence"] = "low"
                             outcome = envelope.get("solver_outcome")
                             if outcome and outcome != "solved":
-                                # Audit: surface the upgrade so operators see
-                                # "low-success-attempted-and-failed" distinctly
-                                # from a vanilla provider rejection. Fire-and-
-                                # forget — we're inside a sync helper so
-                                # schedule the coroutine on the running loop.
                                 envelope["next_action"] = "request_captcha_help"
                                 envelope["low_success_failed"] = True
-                                try:
-                                    asyncio.get_running_loop().create_task(
-                                        _record_captcha_audit_event(
-                                            inst.agent_id,
-                                            "low_success_failed",
-                                            envelope.get("kind", "unknown"),
-                                            page_url_for_policy,
-                                            policy="low_success",
-                                        ),
-                                    )
-                                except RuntimeError:
-                                    # No running loop (defensive — _check_captcha
-                                    # is always async).  Drop the audit event
-                                    # rather than crashing the envelope.
-                                    logger.debug(
-                                        "low_success audit skipped: no loop",
-                                    )
+                                # Audit: surface the upgrade so operators see
+                                # "low-success-attempted-and-failed" distinctly
+                                # from a vanilla provider rejection.
+                                await _record_captcha_audit_event(
+                                    inst.agent_id,
+                                    "low_success_failed",
+                                    envelope.get("kind", "unknown"),
+                                    page_url_for_policy,
+                                    policy="low_success",
+                                )
                         return envelope
 
                     if self._captcha_solver:
@@ -6091,7 +6163,7 @@ class BrowserManager:
                                 "CAPTCHA detected (%s), solver marked unreachable; skipping",
                                 sel,
                             )
-                            return _finalize(_captcha_envelope(
+                            return await _finalize(_captcha_envelope(
                                 kind=kind, solver_attempted=False,
                                 solver_outcome="no_solver",
                                 solver_confidence=_kind_confidence(kind),
@@ -6113,7 +6185,7 @@ class BrowserManager:
                             # §11.13 contract while letting callers detect
                             # the breaker-open case distinctly.
                             envelope["breaker_open"] = True
-                            return _finalize(envelope)
+                            return await _finalize(envelope)
                         logger.info("CAPTCHA detected (%s), attempting auto-solve", sel)
                         # Single entry point for solver invocation. The
                         # rate-limit + cost-cap gates fire inside
@@ -6124,7 +6196,7 @@ class BrowserManager:
                             result = await self._metered_solve(inst, sel, kind)
                         except asyncio.TimeoutError:
                             # Solver took too long — true "timeout" semantic.
-                            return _finalize(_captcha_envelope(
+                            return await _finalize(_captcha_envelope(
                                 kind=kind, solver_attempted=True,
                                 solver_outcome="timeout",
                                 solver_confidence="low",
@@ -6149,7 +6221,7 @@ class BrowserManager:
                                     "Auto-solve timed out (httpx): %s",
                                     _redact_clientkey_text(redact_url(repr(exc))),
                                 )
-                                return _finalize(_captcha_envelope(
+                                return await _finalize(_captcha_envelope(
                                     kind=kind, solver_attempted=True,
                                     solver_outcome="timeout",
                                     solver_confidence="low",
@@ -6164,7 +6236,7 @@ class BrowserManager:
                                 _redact_clientkey_text(redact_url(repr(exc))),
                                 exc_info=False,
                             )
-                            return _finalize(_captcha_envelope(
+                            return await _finalize(_captcha_envelope(
                                 kind=kind, solver_attempted=True,
                                 solver_outcome="rejected",
                                 solver_confidence="low",
@@ -6174,15 +6246,37 @@ class BrowserManager:
                         # ── Map :class:`SolveResult` to §11.13 envelope ──
                         # Gate-skipped paths return without ``solver_attempted``
                         # because no provider HTTP call ran.
+                        if result.skipped == "disabled":
+                            # ``CAPTCHA_DISABLED`` kill switch — auto-detect
+                            # and explicit ``solve_captcha`` both surface this
+                            # as the existing ``no_solver`` envelope so callers
+                            # don't have to learn a new outcome value.
+                            return await _finalize(_captcha_envelope(
+                                kind=kind, solver_attempted=False,
+                                solver_outcome="no_solver",
+                                solver_confidence=_kind_confidence(kind),
+                                next_action="request_captcha_help",
+                            ))
+                        if result.skipped == "provider_missing":
+                            # Provider sanity check (cap-on case) — same shape
+                            # as ``no_solver`` but a distinct audit event was
+                            # already emitted inside ``_metered_solve`` so
+                            # operators can see the misconfiguration.
+                            return await _finalize(_captcha_envelope(
+                                kind=kind, solver_attempted=False,
+                                solver_outcome="no_solver",
+                                solver_confidence=_kind_confidence(kind),
+                                next_action="request_captcha_help",
+                            ))
                         if result.skipped == "rate_limited":
-                            return _finalize(_captcha_envelope(
+                            return await _finalize(_captcha_envelope(
                                 kind=kind, solver_attempted=False,
                                 solver_outcome="rate_limited",
                                 solver_confidence=_kind_confidence(kind),
                                 next_action="request_captcha_help",
                             ))
                         if result.skipped == "cost_cap":
-                            return _finalize(_captcha_envelope(
+                            return await _finalize(_captcha_envelope(
                                 kind=kind, solver_attempted=False,
                                 solver_outcome="cost_cap",
                                 solver_confidence=_kind_confidence(kind),
@@ -6197,7 +6291,7 @@ class BrowserManager:
                             # captured inside ``solve()``. Map all to
                             # ``rejected`` (closest §11.13 fit).
                             logger.warning("Auto-solve failed, falling back to manual")
-                            return _finalize(_captcha_envelope(
+                            return await _finalize(_captcha_envelope(
                                 kind=kind, solver_attempted=True,
                                 solver_outcome="rejected",
                                 solver_confidence="low",
@@ -6216,7 +6310,7 @@ class BrowserManager:
                             # not found) — that's a §11.6/§11.20 deferred
                             # item; surface ``injection_failed_unspecified``
                             # for now so operators see the case distinctly.
-                            return _finalize(_captcha_envelope(
+                            return await _finalize(_captcha_envelope(
                                 kind=kind, solver_attempted=True,
                                 solver_outcome="injection_failed",
                                 solver_confidence="low",
@@ -6233,7 +6327,7 @@ class BrowserManager:
                         # pool, not the operator's. ``_finalize`` further
                         # applies the §11.3 CF-Turnstile force-low.
                         confidence = "low" if result.compat_rejected else "high"
-                        return _finalize(_captcha_envelope(
+                        return await _finalize(_captcha_envelope(
                             kind=kind, solver_attempted=True,
                             solver_outcome="solved",
                             solver_confidence=confidence,
@@ -6245,7 +6339,7 @@ class BrowserManager:
                     # "high"; placeholders (recaptcha-v2-checkbox,
                     # cf-interstitial-auto) and "unknown" → "low" until
                     # §11.1 / §11.3 land variant detection.
-                    return _finalize(_captcha_envelope(
+                    return await _finalize(_captcha_envelope(
                         kind=kind, solver_attempted=False,
                         solver_outcome="no_solver",
                         solver_confidence=_kind_confidence(kind),
@@ -6321,21 +6415,23 @@ class BrowserManager:
         click auto-detect, and explicit ``solve_captcha`` calls.
 
         Local pre-checks (cheap, no provider involvement):
-          1. ``CAPTCHA_DISABLED`` flag — early-return ``no_solver`` envelope.
-          2. ``hint`` validation — bad hint → ``invalid_input`` error.
+          1. ``hint`` validation — bad hint → ``invalid_input`` error.
              Behavioral-only kinds (PerimeterX, DataDome, CF interstitial)
              are also rejected here because the solver has no task entry
              for them; the correct path is ``request_captcha_help``.
-          3. No-captcha early return — saves a solver invocation + cost.
+          2. No-captcha early return — saves a solver invocation + cost.
              When ``retry_previous=True`` and the initial detection finds
              nothing, we wait :data:`_RETRY_PREVIOUS_RECHECK_MS` and
              re-check ONCE; this covers the "page just navigated, captcha
              is rendering" race.
-          4. Recursive-solve guard — re-entrant ``_check_captcha`` while a
+          3. Recursive-solve guard — re-entrant ``_check_captcha`` while a
              solve is in flight surfaces ``captcha_during_solve``.
 
-        Rate-limit + cost-cap fire INSIDE ``_check_captcha`` →
-        ``_metered_solve`` BEFORE the solver HTTP call.
+        ``CAPTCHA_DISABLED`` kill switch + rate-limit + cost-cap all fire
+        INSIDE ``_check_captcha`` → ``_metered_solve`` BEFORE any solver
+        HTTP call. The duplicate kill-switch check that used to live at
+        the top of this method was removed once the metered-solve path
+        landed it — keeping a second copy invited drift.
 
         ``target_ref`` accepts a snapshot ref for selecting one captcha among
         many on the same page; multi-captcha enumeration lands in §11.6.
@@ -6353,20 +6449,10 @@ class BrowserManager:
         once. Bounded by :data:`_RETRY_PREVIOUS_RECHECK_MS` so total
         latency stays predictable.
         """
-        # Gate 1: fleet-wide kill switch.
-        from src.browser.flags import get_bool
-        if get_bool("CAPTCHA_DISABLED", False, agent_id=agent_id):
-            return {
-                "success": True,
-                "data": _with_legacy_fields(_captcha_envelope(
-                    kind="unknown", solver_attempted=False,
-                    solver_outcome="no_solver",
-                    solver_confidence="low",
-                    next_action="request_captcha_help",
-                )),
-            }
-
-        # Gate 2: hint validation (cheap, before lock).
+        # Gate 1: hint validation (cheap, before lock). The fleet-wide
+        # ``CAPTCHA_DISABLED`` kill switch fires inside ``_metered_solve``
+        # so navigate / click auto-detect paths are covered too — keeping
+        # a duplicate here invited drift between entry points.
         if hint is not None:
             if not isinstance(hint, str):
                 return _err(

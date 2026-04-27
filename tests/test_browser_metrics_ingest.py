@@ -528,6 +528,79 @@ class TestMetricsPoll:
         assert probe_call.kwargs["agent"] == "a1"
 
 
+# ── Codex F4 — captcha audit events round-trip with agent_id ─────────
+
+
+class TestCaptchaGateAuditPayloadRoundTrip:
+    """Codex F4 — the captcha audit aggregator emits ``captcha_gate``
+    payloads that the dashboard metrics poller picks up via the same
+    mesh-side loop that fans browser_metrics events out. The poller
+    reads ``payload.get("agent_id")`` to key the per-agent dashboard
+    history. Pre-fix, the audit aggregator emitted ``"agent": agent_id``
+    instead of ``"agent_id": agent_id``, so the poller pulled an empty
+    string and the events were silently dropped from the per-agent
+    captcha history.
+
+    This integration test asserts the round-trip: a captcha_gate payload
+    crossing /browser/metrics shows up on the EventBus with the agent_id
+    populated correctly.
+    """
+
+    @pytest.mark.asyncio
+    async def test_captcha_gate_payload_emits_with_agent_id(
+        self, tmp_path, monkeypatch,
+    ):
+        import httpx
+
+        # Browser service responds with a captcha_gate audit drain.
+        # NOTE: the key is ``agent_id`` — not ``agent``. Pre-fix the
+        # audit drain emitted ``"agent"`` and the poller's
+        # ``payload.get("agent_id")`` returned empty, so the EventBus
+        # emit was keyed with ``agent=""`` and the dashboard's
+        # per-agent filter dropped the event.
+        canned = {
+            "current_seq": 1,
+            "boot_id": "b1",
+            "metrics": [{
+                "seq": 1,
+                "ts": 1.0,
+                "type": "captcha_gate",
+                "agent_id": "agent-1",
+                "outcome": "cost_cap",
+                "kind": "recaptcha-v2-checkbox",
+                "count": 3,
+                "first_ts": 0.0,
+                "url": "https://example.com",
+            }],
+        }
+
+        async def fake_get(self, url, *args, **kwargs):
+            req = httpx.Request("GET", url)
+            return httpx.Response(200, json=canned, request=req)
+
+        monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+
+        app, event_bus, _cm = _build_mesh(tmp_path)
+        poll = _extract_poll_fn(app)
+        await poll()
+
+        # The poller routes anything that isn't a nav_probe through
+        # ``browser_metrics``; the dashboard reads ``data.type`` to
+        # disambiguate ``captcha_gate`` from regular metrics drains.
+        emits = [c for c in event_bus.emit.call_args_list
+                 if c.args and c.args[0] == "browser_metrics"]
+        assert len(emits) == 1
+        call = emits[0]
+        # Critical: the poller keyed the emit with the correct agent_id.
+        # ``agent`` here is the EventBus emit kwarg (mesh-side keying);
+        # the source of that string is the payload's ``agent_id`` field.
+        assert call.kwargs.get("agent") == "agent-1"
+        data = call.kwargs.get("data") or {}
+        assert data.get("type") == "captcha_gate"
+        assert data.get("agent_id") == "agent-1"
+        assert data.get("outcome") == "cost_cap"
+
+
 # ── Helpers ─────────────────────────────────────────────────────────
 
 

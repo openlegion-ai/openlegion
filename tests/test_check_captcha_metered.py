@@ -119,8 +119,11 @@ class TestAutoDetectGatesEnforced:
     async def test_navigate_path_cost_cap_blocks_solver(self, mgr, monkeypatch):
         """``_check_captcha`` direct call (the navigate auto-detect path)
         respects the cost cap."""
+        # $0.50 cap → 50_000 millicents. Pre-fill 50_000+1 to clear it.
+        # The cost counter stores spend in MILLICENTS (1/1000 of a cent
+        # = 1/100_000 of a dollar); see ``captcha_cost_counter`` docstring.
         monkeypatch.setenv("CAPTCHA_COST_LIMIT_USD_PER_AGENT_MONTH", "0.50")
-        await cost.add_cost("agent-1", 100)  # already over cap
+        await cost.add_cost("agent-1", 50_000)  # already over cap
 
         solver = _mk_solver(return_value=_solved())
         mgr._captcha_solver = solver
@@ -374,8 +377,9 @@ class TestAuditLogAggregation:
 
     @pytest.mark.asyncio
     async def test_cost_cap_event_drains_via_sink(self, tmp_path, monkeypatch):
+        # $0.50 cap → 50_000 millicents.
         monkeypatch.setenv("CAPTCHA_COST_LIMIT_USD_PER_AGENT_MONTH", "0.50")
-        await cost.add_cost("agent-1", 100)
+        await cost.add_cost("agent-1", 50_000)
 
         events: list[dict] = []
         m = BrowserManager(
@@ -396,7 +400,12 @@ class TestAuditLogAggregation:
         captcha_events = [e for e in events if e.get("type") == "captcha_gate"]
         assert len(captcha_events) == 1, f"expected one aggregated event, got {captcha_events}"
         ev = captcha_events[0]
-        assert ev["agent"] == "agent-1"
+        # F4 — payload key MUST be ``agent_id`` (not ``agent``) so the
+        # dashboard metrics poller in host/server.py picks it up. The
+        # poller's per-payload filter reads ``payload.get("agent_id")``;
+        # emitting the legacy ``agent`` key silently dropped events.
+        assert ev["agent_id"] == "agent-1"
+        assert "agent" not in ev or ev.get("agent") == ev["agent_id"]
         assert ev["outcome"] == "cost_cap"
         # Aggregated count, not per-call.
         assert ev["count"] == 2
@@ -468,8 +477,9 @@ class TestAuditLogAggregation:
         cap and rate-limit events on the same agent emit two separate
         aggregated payloads.
         """
+        # $0.50 cap → 50_000 millicents.
         monkeypatch.setenv("CAPTCHA_COST_LIMIT_USD_PER_AGENT_MONTH", "0.50")
-        await cost.add_cost("agent-1", 100)
+        await cost.add_cost("agent-1", 50_000)
 
         events: list[dict] = []
         m = BrowserManager(
@@ -498,3 +508,143 @@ class TestAuditLogAggregation:
         rate_events = [e for e in events if e.get("outcome") == "rate_limited"]
         assert len(cap_events) == 1
         assert len(rate_events) == 1
+
+
+# ── 8. Codex F2 — kill-switch on auto-detect path ─────────────────────────
+
+
+class TestKillSwitchOnAutoDetect:
+    """Codex F2 — pre-fix the ``CAPTCHA_DISABLED`` flag was only checked
+    inside ``solve_captcha``. Auto-detect via navigate / click / etc.
+    bypassed the gate and still hit the provider. The fix moves the
+    check inside ``_metered_solve`` so every path sees the same
+    short-circuit, and emits a ``kill_switch_active`` audit event."""
+
+    @pytest.mark.asyncio
+    async def test_navigate_path_with_disabled_flag_skips_solver(
+        self, mgr, monkeypatch,
+    ):
+        monkeypatch.setenv("CAPTCHA_DISABLED", "true")
+        solver = _mk_solver(return_value=_solved())
+        mgr._captcha_solver = solver
+        inst = _mk_inst()
+
+        envelope = await mgr._check_captcha(inst)
+        assert envelope["captcha_found"] is True
+        # Disabled → no_solver envelope (the §11.13 enum doesn't carry a
+        # "kill_switch" outcome; reusing no_solver matches the pre-fix
+        # solve_captcha early-return shape that callers already handle).
+        assert envelope["solver_outcome"] == "no_solver"
+        assert envelope["solver_attempted"] is False
+        assert envelope["next_action"] == "request_captcha_help"
+        # Critical: the solver mock was NEVER awaited.
+        solver.solve.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_kill_switch_emits_audit_event(
+        self, tmp_path, monkeypatch,
+    ):
+        monkeypatch.setenv("CAPTCHA_DISABLED", "true")
+        events: list[dict] = []
+        m = BrowserManager(
+            profiles_dir=str(tmp_path / "profiles"),
+            metrics_sink=events.append,
+        )
+        m._captcha_solver = _mk_solver(return_value=_solved())
+        inst = _mk_inst()
+        m._instances["agent-1"] = inst
+
+        await m._check_captcha(inst)
+        await m._emit_metrics()
+
+        kill = [e for e in events
+                if e.get("type") == "captcha_gate"
+                and e.get("outcome") == "kill_switch_active"]
+        assert len(kill) == 1
+        # F4: payload uses ``agent_id`` (not the legacy ``agent`` key).
+        assert kill[0]["agent_id"] == "agent-1"
+
+
+# ── 9. Codex F5 — rate-limit slot consumed AFTER cost-cap check ───────────
+
+
+class TestGateOrderingCostBeforeRate:
+    """Codex F5 — the original implementation ran rate-limit gate first,
+    burning a per-hour slot for an agent that was already over the cost
+    cap (the cost gate would then short-circuit the solve). The fix
+    swaps the order: cost-cap (read-only) fires first, then rate-limit
+    (consumes a slot)."""
+
+    @pytest.mark.asyncio
+    async def test_cost_capped_solve_does_not_burn_rate_slot(
+        self, mgr, monkeypatch,
+    ):
+        # $0.50 cap → 50_000 mc. Pre-fill enough to clear it.
+        monkeypatch.setenv("CAPTCHA_COST_LIMIT_USD_PER_AGENT_MONTH", "0.50")
+        await cost.add_cost("agent-1", 50_000)
+        # Tight rate window so we can easily detect a slot getting burned.
+        monkeypatch.setenv("CAPTCHA_RATE_LIMIT_PER_HOUR", "5")
+        # Start with an empty rate-window for this agent.
+        svc._solve_rate_window["agent-1"] = deque()
+
+        solver = _mk_solver(return_value=_solved())
+        mgr._captcha_solver = solver
+
+        inst = _mk_inst()
+        envelope = await mgr._check_captcha(inst)
+
+        # Cost cap fired (not rate-limited).
+        assert envelope["solver_outcome"] == "cost_cap"
+        # Rate-limit window UNCHANGED — no slot consumed.
+        assert len(svc._solve_rate_window["agent-1"]) == 0
+
+
+# ── 10. Codex F7 — token-without-provider warns + (cap-on) fails closed ──
+
+
+class TestProviderMissingFailsClosedWhenCapOn:
+    @pytest.mark.asyncio
+    async def test_no_provider_with_cap_blocks_solve(
+        self, mgr, monkeypatch, caplog,
+    ):
+        import logging as _logging
+        monkeypatch.setenv("CAPTCHA_COST_LIMIT_USD_PER_AGENT_MONTH", "1.00")
+        # Solver mock with NO provider attribute (or empty string).
+        solver = _mk_solver(return_value=_solved(), provider="")
+        mgr._captcha_solver = solver
+        inst = _mk_inst()
+
+        with caplog.at_level(_logging.WARNING, logger="browser.service"):
+            envelope = await mgr._check_captcha(inst)
+
+        # Solve was blocked — no provider HTTP call.
+        solver.solve.assert_not_awaited()
+        assert envelope["solver_outcome"] == "no_solver"
+        # A warning was logged about the failing-closed decision.
+        joined = "\n".join(rec.getMessage() for rec in caplog.records)
+        assert "failing closed" in joined.lower() or "fail" in joined.lower()
+
+    @pytest.mark.asyncio
+    async def test_no_provider_without_cap_warns_and_proceeds(
+        self, mgr, monkeypatch, caplog,
+    ):
+        """No cap configured → we still warn but don't block. Custom
+        solver integrations / tests with ``provider=""`` keep working
+        (the cost increment is silently skipped — same as today)."""
+        import logging as _logging
+        monkeypatch.delenv(
+            "CAPTCHA_COST_LIMIT_USD_PER_AGENT_MONTH", raising=False,
+        )
+        solver = _mk_solver(return_value=_solved(), provider="")
+        mgr._captcha_solver = solver
+        inst = _mk_inst()
+
+        with caplog.at_level(_logging.WARNING, logger="browser.service"):
+            envelope = await mgr._check_captcha(inst)
+
+        assert envelope["solver_outcome"] == "solved"
+        # Cost was NOT incremented (provider name missing).
+        assert await cost.get_millicents("agent-1") == 0
+        # Warning was logged so operators see the misconfig.
+        joined = "\n".join(rec.getMessage() for rec in caplog.records)
+        assert "provider" in joined.lower()
