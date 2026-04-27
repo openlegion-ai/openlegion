@@ -46,6 +46,66 @@ _STATIC_DIR = _HERE / "static"
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
+async def _fetch_browser_metrics_upstream(
+    client: Any,
+    service_url: str,
+    auth_token: str,
+    since_seq: int,
+) -> dict:
+    """Call ``GET /browser/metrics?since=<seq>`` on the browser service.
+
+    Pulled out of :func:`create_dashboard_router`'s closure so tests can
+    patch it without reaching into a closure cell. Returns the §2.3 error
+    envelope on any failure (network, HTTP error, malformed JSON) and the
+    upstream payload (with ``success: True``) on success.
+    """
+    headers: dict[str, str] = {}
+    if auth_token:
+        headers["Authorization"] = f"Bearer {auth_token}"
+    try:
+        resp = await client.get(
+            f"{service_url}/browser/metrics",
+            params={"since": since_seq},
+            headers=headers,
+            timeout=10,
+        )
+    except Exception as e:
+        logger.debug("Browser metrics fetch failed: %s", e)
+        return {
+            "success": False,
+            "error": {
+                "code": "service_unavailable",
+                "message": "Browser service unreachable",
+                "retry_after_ms": 60_000,
+            },
+        }
+    if resp.status_code >= 400:
+        logger.debug(
+            "Browser metrics fetch returned HTTP %d", resp.status_code,
+        )
+        return {
+            "success": False,
+            "error": {
+                "code": "service_unavailable",
+                "message": f"Browser service returned HTTP {resp.status_code}",
+                "retry_after_ms": 60_000,
+            },
+        }
+    try:
+        data = resp.json()
+    except Exception as e:
+        logger.debug("Browser metrics JSON parse failed: %s", e)
+        return {
+            "success": False,
+            "error": {
+                "code": "service_unavailable",
+                "message": "Malformed response from browser service",
+                "retry_after_ms": None,
+            },
+        }
+    return {"success": True, "data": data}
+
+
 def _get_builtin_tool_names() -> frozenset[str]:
     """Return the names of all built-in agent tools by scanning the builtins package.
 
@@ -1021,6 +1081,76 @@ def create_dashboard_router(
                 "dropped": dropped,
                 "format": detected_fmt,
             },
+        }
+
+    @api_router.get("/api/agents/{agent_id}/browser/metrics")
+    async def api_agent_browser_metrics(
+        agent_id: str, since: int = 0,
+    ) -> dict:
+        """Return per-agent browser-metrics history (Phase 7 §10.1).
+
+        Surfaces the per-minute aggregates already collected by
+        :meth:`BrowserManager._emit_metrics` (§4.6) — click_success/fail,
+        snapshot p50/p95, nav timeouts, rolling click-success-rate. Read-only,
+        agent-scoped slice of ``/browser/metrics?since=<seq>``.
+
+        Pagination via ``since=<seq>``: client passes back the response's
+        ``current_seq`` on the next call so only new payloads are returned.
+        Buffer is bounded (1024 entries service-wide) so a long-idle dashboard
+        may miss intermediate payloads — that is by design (§2.7 forbids
+        per-call events; an hour of history per agent is more than the panel
+        renders anyway).
+
+        On error returns a §2.3 envelope: ``{success, error: {code, message,
+        retry_after_ms}}``. Per-call events are forbidden — this endpoint only
+        surfaces aggregates.
+        """
+        if agent_id not in agent_registry:
+            raise HTTPException(404, "Agent not found")
+        if (
+            not runtime
+            or not hasattr(runtime, "browser_service_url")
+            or not runtime.browser_service_url
+        ):
+            # Service unavailable rather than 404 — the agent exists, the
+            # browser service is just not configured / reachable. Use the
+            # error envelope so the panel can render a "service down" state.
+            return {
+                "success": False,
+                "error": {
+                    "code": "service_unavailable",
+                    "message": "Browser service not available",
+                    "retry_after_ms": None,
+                },
+            }
+        try:
+            since_seq = max(0, int(since))
+        except (TypeError, ValueError):
+            since_seq = 0
+
+        result = await _fetch_browser_metrics_upstream(
+            _dashboard_browser_client,
+            runtime.browser_service_url,
+            getattr(runtime, "browser_auth_token", ""),
+            since_seq,
+        )
+        if not result.get("success"):
+            return result
+        data = result["data"]
+
+        # Filter to this agent only — the upstream endpoint returns
+        # service-wide aggregates with one entry per (agent, minute, kind).
+        # ``current_seq`` is preserved as the high-water mark so pagination
+        # works even when no new payloads belong to this agent.
+        all_metrics = data.get("metrics") or []
+        agent_metrics = [
+            p for p in all_metrics if p.get("agent_id") == agent_id
+        ]
+        return {
+            "success": True,
+            "current_seq": int(data.get("current_seq", since_seq)),
+            "boot_id": data.get("boot_id") or "",
+            "metrics": agent_metrics,
         }
 
     @api_router.get("/api/agent-templates")

@@ -30,7 +30,39 @@ logger = setup_logging("browser.main")
 _DISPLAY = ":99"
 _VNC_PORT = int(os.environ.get("VNC_PORT", "6080"))
 _API_PORT = int(os.environ.get("API_PORT", "8500"))
-_MAX_BROWSERS = int(os.environ.get("MAX_BROWSERS", "5"))
+
+
+def _resolve_max_browsers() -> int:
+    """Return the per-service browser concurrency cap.
+
+    Startup-only — runtime reconfig is non-trivial (would need to bound an
+    asyncio.Semaphore mid-flight, drain over-budget instances, and unwind any
+    in-flight ``acquire`` waiters). Operators restart the browser service to
+    change this. Plan §10.2 keeps this as the explicit decision after the v3.6
+    review flagged the runtime path's complexity.
+
+    Precedence (highest → lowest):
+      1. ``OPENLEGION_BROWSER_MAX_CONCURRENT`` — canonical name, listed in
+         :data:`src.browser.flags.KNOWN_FLAGS`.
+      2. ``MAX_BROWSERS`` — legacy name kept for back-compat with existing
+         deployments / Docker compose files. Removable after one release.
+      3. Default of 5.
+    """
+    from src.browser.flags import get_int
+
+    # ``min_value=1`` rejects nonsense like ``MAX=0`` (would deadlock the
+    # acquire loop). ``max_value=64`` is a soft ceiling — a single VPS won't
+    # have RAM for that many Camoufox instances anyway.
+    legacy_default = int(os.environ.get("MAX_BROWSERS", "5"))
+    return get_int(
+        "OPENLEGION_BROWSER_MAX_CONCURRENT",
+        legacy_default,
+        min_value=1,
+        max_value=64,
+    )
+
+
+_MAX_BROWSERS = _resolve_max_browsers()
 _IDLE_TIMEOUT = int(os.environ.get("IDLE_TIMEOUT_MINUTES", "30"))
 
 

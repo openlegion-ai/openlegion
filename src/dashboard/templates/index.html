@@ -2859,6 +2859,131 @@
                 </div>
               </div>
             </div>
+            <!-- ═══ BROWSER METRICS PANEL (Phase 7 §10.1) ═══ -->
+            <!-- Per-agent rolling window of the per-minute aggregates from
+                 BrowserManager._emit_metrics. Read-only; gated on the agent
+                 having `can_use_browser`. Sparklines are pure CSS bars to
+                 stay aligned with the dashboard's no-charting-deps rule. -->
+            <template x-if="agentConfigs[selectedAgent]?.can_use_browser">
+              <div>
+                <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+                  <div class="flex items-center justify-between mb-3">
+                    <div class="text-xs text-gray-500 uppercase tracking-wider flex items-center gap-1.5">
+                      Browser Health
+                      <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Per-minute aggregate of this agent's Camoufox browser activity. Click rate is success / total over the last hour; snapshot p50/p95 show the size distribution. Updates every ~60s — per-call events are intentionally not surfaced.</span></span>
+                    </div>
+                    <div class="flex items-center gap-2 text-[10px] text-gray-600">
+                      <span class="inline-flex items-center gap-1">
+                        <span class="w-1.5 h-1.5 rounded-full"
+                          :class="browserHistoryActiveCount(detailAgent) > 0 ? 'bg-green-400' : 'bg-gray-600'"></span>
+                        <span x-text="browserHistoryActiveCount(detailAgent) > 0 ? 'active' : 'idle'"></span>
+                      </span>
+                      <span>•</span>
+                      <span>updates every 60s</span>
+                    </div>
+                  </div>
+
+                  <!-- Error envelope (§2.3) -->
+                  <template x-if="_browserMetricsError[detailAgent]">
+                    <div class="text-[11px] text-amber-400 mb-3" x-text="'Could not fetch metrics: ' + _browserMetricsError[detailAgent]"></div>
+                  </template>
+
+                  <!-- Empty state -->
+                  <template x-if="browserHistoryFor(detailAgent).length === 0 && !_browserMetricsLoading[detailAgent]">
+                    <div class="text-[11px] text-gray-600 italic py-2">
+                      No browser activity yet. Metrics appear here ~60s after the agent first opens a page.
+                    </div>
+                  </template>
+
+                  <!-- Loading state on first fetch -->
+                  <template x-if="browserHistoryFor(detailAgent).length === 0 && _browserMetricsLoading[detailAgent]">
+                    <div class="text-[11px] text-gray-600 italic py-2">Loading browser metrics history…</div>
+                  </template>
+
+                  <template x-if="browserHistoryFor(detailAgent).length > 0">
+                    <div class="space-y-4">
+                      <!-- Headline stats -->
+                      <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                        <div class="bg-gray-800/50 rounded p-2.5">
+                          <div class="text-[10px] text-gray-500 uppercase tracking-wider mb-0.5">Click rate (1h)</div>
+                          <div class="flex items-baseline gap-1.5">
+                            <span class="text-lg font-bold font-mono"
+                              :class="clickRateColor(browserHistoryClickRate(detailAgent))"
+                              x-text="fmtClickRate(browserHistoryClickRate(detailAgent))"></span>
+                            <span class="text-xs"
+                              :class="{
+                                'text-green-400': browserHistoryTrendArrow(detailAgent) === 'up',
+                                'text-red-400': browserHistoryTrendArrow(detailAgent) === 'down',
+                                'text-gray-500': browserHistoryTrendArrow(detailAgent) === 'flat' || !browserHistoryTrendArrow(detailAgent)
+                              }"
+                              x-text="{up: '↑', down: '↓', flat: '→'}[browserHistoryTrendArrow(detailAgent)] || ''"></span>
+                          </div>
+                        </div>
+                        <div class="bg-gray-800/50 rounded p-2.5">
+                          <div class="text-[10px] text-gray-500 uppercase tracking-wider mb-0.5">Snapshots / hr</div>
+                          <div class="text-lg font-bold font-mono text-gray-200" x-text="browserHistorySnapshotCount(detailAgent)"></div>
+                        </div>
+                        <div class="bg-gray-800/50 rounded p-2.5">
+                          <div class="text-[10px] text-gray-500 uppercase tracking-wider mb-0.5">Snap p95 (last)</div>
+                          <div class="text-lg font-bold font-mono text-gray-200"
+                            x-text="fmtBytes(browserMetrics[detailAgent]?.snapshot_bytes_p95)"></div>
+                        </div>
+                        <div class="bg-gray-800/50 rounded p-2.5">
+                          <div class="text-[10px] text-gray-500 uppercase tracking-wider mb-0.5">Nav timeouts (1h)</div>
+                          <div class="text-lg font-bold font-mono"
+                            :class="browserHistoryNavTimeouts(detailAgent) > 0 ? 'text-amber-400' : 'text-gray-300'"
+                            x-text="browserHistoryNavTimeouts(detailAgent)"></div>
+                        </div>
+                      </div>
+
+                      <!-- Sparkline: clicks per minute -->
+                      <div>
+                        <div class="flex items-center justify-between mb-1.5">
+                          <span class="text-[10px] text-gray-500 uppercase tracking-wider">Clicks / minute</span>
+                          <span class="text-[10px] text-gray-600" x-text="browserHistoryFor(detailAgent).length + ' samples'"></span>
+                        </div>
+                        <div class="flex items-end gap-0.5 h-10 bg-gray-800/30 rounded px-1 py-1">
+                          <template x-for="(bar, idx) in browserHistoryBars(detailAgent, 'click_total', null)" :key="bar.seq != null ? bar.seq : ('i' + idx)">
+                            <div class="flex-1 min-w-0 bg-indigo-500/70 rounded-sm hover:bg-indigo-400 transition-colors"
+                              :style="'height: ' + Math.max(4, bar.height) + '%'"
+                              :title="bar.value + ' clicks'"></div>
+                          </template>
+                        </div>
+                      </div>
+
+                      <!-- Sparkline: snapshot p50 size -->
+                      <div>
+                        <div class="flex items-center justify-between mb-1.5">
+                          <span class="text-[10px] text-gray-500 uppercase tracking-wider">Snapshot p50 size</span>
+                        </div>
+                        <div class="flex items-end gap-0.5 h-10 bg-gray-800/30 rounded px-1 py-1">
+                          <template x-for="(bar, idx) in browserHistoryBars(detailAgent, 'snapshot_bytes_p50', null)" :key="bar.seq != null ? bar.seq : ('p50i' + idx)">
+                            <div class="flex-1 min-w-0 bg-cyan-500/60 rounded-sm hover:bg-cyan-400 transition-colors"
+                              :style="'height: ' + Math.max(4, bar.height) + '%'"
+                              :title="fmtBytes(bar.value)"></div>
+                          </template>
+                        </div>
+                      </div>
+
+                      <!-- Sparkline: snapshot p95 size -->
+                      <div>
+                        <div class="flex items-center justify-between mb-1.5">
+                          <span class="text-[10px] text-gray-500 uppercase tracking-wider">Snapshot p95 size</span>
+                        </div>
+                        <div class="flex items-end gap-0.5 h-10 bg-gray-800/30 rounded px-1 py-1">
+                          <template x-for="(bar, idx) in browserHistoryBars(detailAgent, 'snapshot_bytes_p95', null)" :key="bar.seq != null ? bar.seq : ('p95i' + idx)">
+                            <div class="flex-1 min-w-0 bg-amber-500/60 rounded-sm hover:bg-amber-400 transition-colors"
+                              :style="'height: ' + Math.max(4, bar.height) + '%'"
+                              :title="fmtBytes(bar.value)"></div>
+                          </template>
+                        </div>
+                      </div>
+                    </div>
+                  </template>
+                </div>
+              </div>
+            </template>
+
             <!-- ═══ AGENT AUTOMATIONS (cron jobs for this agent) ═══ -->
             <div>
               <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
