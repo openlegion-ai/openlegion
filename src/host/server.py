@@ -1131,6 +1131,19 @@ def create_mesh_app(
             caller_id, data.get("target_agent_id") or "",
         )
 
+        # Per-action gate applies to the EFFECTIVE target (`agent_id`), same
+        # semantics as ``/mesh/browser/command``: an operator with
+        # ``browser_actions=["*"]`` cannot exercise actions the target was
+        # never granted.  Without this check, an operator who narrows a
+        # template to ``browser_actions=["navigate"]`` would see the first
+        # call (``browser_command`` → e.g. navigate) gated correctly but
+        # the dedicated handoff endpoint would still succeed — permission
+        # narrowing wouldn't actually narrow.
+        if not permissions.can_browser_action(agent_id, "request_browser_login"):
+            raise HTTPException(
+                403, "Agent not permitted to perform 'request_browser_login'",
+            )
+
         # Rate-limit on the caller, not the target — otherwise a noisy
         # caller could exhaust an unrelated worker's notify quota.
         await _check_rate_limit("notify", caller_id)
@@ -1171,6 +1184,18 @@ def create_mesh_app(
         agent_id = _resolve_browser_target(
             caller_id, data.get("target_agent_id") or "",
         )
+
+        # Per-action gate (mirrors ``browser_login_request`` and
+        # ``/mesh/browser/command``).  Without this, an operator who
+        # narrows a template's ``browser_actions`` to exclude the captcha
+        # handoff would see the ``browser_command`` route correctly
+        # rejected for ``request_captcha_help`` (PR #769) but the dedicated
+        # endpoint here would still succeed — defeating permission
+        # narrowing.
+        if not permissions.can_browser_action(agent_id, "request_captcha_help"):
+            raise HTTPException(
+                403, "Agent not permitted to perform 'request_captcha_help'",
+            )
 
         await _check_rate_limit("notify", caller_id)
 
