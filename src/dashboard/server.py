@@ -2641,6 +2641,70 @@ def create_dashboard_router(
             event_bus.emit("browser_login_completed", agent=agent_id, data={"service": service})
         return {"completed": True, "agent_id": agent_id, "service": service}
 
+    @api_router.post("/api/browser-captcha-help/complete")
+    async def api_browser_captcha_help_complete(request: Request) -> dict:
+        """Phase 8 §11.14 — operator finished a CAPTCHA handoff."""
+        body = await request.json()
+        agent_id = body.get("agent_id", "").strip()
+        service = body.get("service", "").strip()[:128]
+        if not agent_id or not service:
+            raise HTTPException(
+                status_code=400,
+                detail="agent_id and service are required",
+            )
+        if agent_id in agent_registry and lane_manager is not None:
+            from src.shared.trace import new_trace_id
+            from src.shared.utils import sanitize_for_prompt
+            try:
+                msg = sanitize_for_prompt(
+                    f"The user has completed the CAPTCHA challenge for "
+                    f"{service}. You can resume browser interaction; the "
+                    f"page should now be past the captcha."
+                )
+                await lane_manager.enqueue(
+                    agent_id, msg, mode="steer", trace_id=new_trace_id(),
+                )
+            except Exception:
+                pass
+        if event_bus:
+            event_bus.emit(
+                "browser_captcha_help_completed",
+                agent=agent_id, data={"service": service},
+            )
+        return {"completed": True, "agent_id": agent_id, "service": service}
+
+    @api_router.post("/api/browser-captcha-help/cancel")
+    async def api_browser_captcha_help_cancel(request: Request) -> dict:
+        """Phase 8 §11.14 — operator cancelled a CAPTCHA handoff."""
+        body = await request.json()
+        agent_id = body.get("agent_id", "").strip()
+        service = body.get("service", "").strip()[:128]
+        if not agent_id or not service:
+            raise HTTPException(
+                status_code=400,
+                detail="agent_id and service are required",
+            )
+        if agent_id in agent_registry and lane_manager is not None:
+            from src.shared.trace import new_trace_id
+            from src.shared.utils import sanitize_for_prompt
+            try:
+                msg = sanitize_for_prompt(
+                    f"The user cancelled the CAPTCHA help request for "
+                    f"{service}. Try a different approach (e.g. wait + "
+                    f"retry, escalate to user via notify_user)."
+                )
+                await lane_manager.enqueue(
+                    agent_id, msg, mode="steer", trace_id=new_trace_id(),
+                )
+            except Exception:
+                pass
+        if event_bus:
+            event_bus.emit(
+                "browser_captcha_help_cancelled",
+                agent=agent_id, data={"service": service},
+            )
+        return {"cancelled": True, "agent_id": agent_id, "service": service}
+
     @api_router.post("/api/browser-login/cancel")
     async def api_browser_login_cancel(request: Request) -> dict:
         """User cancelled browser login — notify the requesting agent."""

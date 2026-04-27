@@ -624,6 +624,23 @@ def test_redact_clientkey_text_helper():
     assert _redact_clientkey_text("") == ""
 
 
+def test_redact_clientkey_text_strips_taskid():
+    """§11.14 / §11.15: solver task IDs (UUIDs and integers) appear in
+    error responses. The shared redactor strips them so a hostile
+    provider error containing a stitched-together secret-like string
+    can't leak via the taskId path.
+    """
+    shapes_with_uuid = [
+        'taskId=8d2c1f3a-aaaa-4444-bbbb-1234567890ab',
+        '"taskId": "8d2c1f3a-aaaa-4444-bbbb-1234567890ab"',
+        "taskId: 9999999999",
+        "TASKID='abcdef-0123456789'",
+    ]
+    for shape in shapes_with_uuid:
+        out = _redact_clientkey_text(shape)
+        assert "[REDACTED]" in out, f"taskId not redacted in {shape!r}: {out!r}"
+
+
 # ── 12: cancellation cleans up in-flight health_check ─────────────────
 
 

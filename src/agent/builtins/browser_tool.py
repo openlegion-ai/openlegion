@@ -1124,6 +1124,151 @@ async def browser_upload_file(
 
 
 @skill(
+    name="browser_solve_captcha",
+    description=(
+        "Explicitly request a CAPTCHA solve on the current page. Use "
+        "after a click/submit if you suspect a captcha appeared. "
+        "Auto-detected captchas after navigate are already handled — "
+        "do NOT call this redundantly. Returns the §11.13 envelope; "
+        "common ``solver_outcome`` values include "
+        "``solved`` / ``timeout`` / ``rejected`` / ``no_solver`` / "
+        "``rate_limited`` / ``cost_cap`` / ``captcha_during_solve``. "
+        "When ``next_action == \"request_captcha_help\"`` you should "
+        "follow up with the ``request_captcha_help`` skill. "
+        "``target_ref`` is reserved for multi-captcha pages — accepted "
+        "but currently logged + ignored (top visible widget is solved)."
+    ),
+    parameters={
+        "hint": {
+            "type": "string",
+            "description": (
+                "Optional override for captcha kind classification. "
+                "One of: recaptcha-v2-checkbox, recaptcha-v2-invisible, "
+                "recaptcha-v3, recaptcha-enterprise, hcaptcha, turnstile, "
+                "cf-interstitial-auto, cf-interstitial-behavioral, unknown."
+            ),
+            "default": "",
+        },
+        "retry_previous": {
+            "type": "boolean",
+            "description": (
+                "Retry the most recent solve attempt on this instance "
+                "(60-second TTL). Use when a transient solver error "
+                "left the captcha unsolved and the page still shows it."
+            ),
+            "default": False,
+        },
+        "target_ref": {
+            "type": "string",
+            "description": (
+                "RESERVED for multi-captcha pages (§11.6). Currently "
+                "logged + ignored — the top-ranked visible captcha "
+                "is always solved."
+            ),
+            "default": "",
+        },
+    },
+    parallel_safe=False,
+)
+async def browser_solve_captcha(
+    hint: str = "", retry_previous: bool = False, target_ref: str = "",
+    *, mesh_client=None,
+) -> dict:
+    """Explicit CAPTCHA solve invoked by the agent."""
+    params: dict = {}
+    if hint:
+        params["hint"] = hint
+    if retry_previous:
+        params["retry_previous"] = True
+    if target_ref:
+        params["target_ref"] = target_ref
+    return await _browser_command(mesh_client, "solve_captcha", params)
+
+
+@skill(
+    name="request_captcha_help",
+    description=(
+        "Ask the user to clear a CAPTCHA via the live browser viewer in "
+        "their dashboard. Use for behavioral-only challenges (Cloudflare "
+        "Under Attack, Press & Hold), persistent rejections after several "
+        "auto-solve attempts, or when ``browser_solve_captcha`` returned "
+        "``rate_limited`` / ``cost_cap``. Mirrors ``request_browser_login`` "
+        "— a handoff card appears in the dashboard, and you receive a "
+        "steer notification when the operator finishes (success or cancel)."
+    ),
+    parameters={
+        "service": {
+            "type": "string",
+            "description": (
+                "Short name of the captcha service or page context "
+                "(e.g. 'Cloudflare Turnstile', 'PerimeterX', "
+                "'Login captcha on example.com')."
+            ),
+        },
+        "description": {
+            "type": "string",
+            "description": (
+                "Tell the user what to do (e.g. 'Click the checkbox and "
+                "complete the image challenge'). Keep it short."
+            ),
+        },
+    },
+    parallel_safe=False,
+)
+async def request_captcha_help(
+    service: str, description: str, *, mesh_client=None,
+) -> dict:
+    """Request operator help to clear a CAPTCHA via the dashboard VNC card."""
+    if not mesh_client:
+        return {"error": "Captcha help requires mesh connectivity"}
+    if not service:
+        return {"error": "service is required"}
+    if not description:
+        return {"error": "description is required"}
+
+    # Fire the browser-side action so the BrowserManager records the
+    # request (locking + page-state stamp) — mirrors how
+    # request_browser_login first navigates the browser.
+    try:
+        await mesh_client.browser_command(
+            "request_captcha_help",
+            {"service": service, "description": description},
+        )
+    except Exception as e:
+        return {"error": f"browser-side captcha-help record failed: {e}"}
+
+    # Then emit the dashboard handoff card via the mesh helper.
+    try:
+        await mesh_client.request_captcha_help(
+            service=service, description=description,
+        )
+    except Exception as e:
+        logger.warning(
+            "Failed to emit captcha help request for %s: %s", service, e,
+        )
+        return {
+            "requested": False,
+            "service": service,
+            "message": (
+                f"Browser-side request recorded but failed to show the "
+                f"captcha-help card to the user. Try notify_user as a "
+                f"fallback. Error: {e}"
+            ),
+        }
+
+    return {
+        "requested": True,
+        "service": service,
+        "message": (
+            f"Captcha help request sent to user. The dashboard is showing "
+            f"a VNC handoff card for {service}. Wait for the user to "
+            f"complete or cancel — you will be notified via a steer "
+            f"message. Do NOT use browser tools until then."
+        ),
+    }
+
+
+@skill(
     name="request_browser_login",
     description=(
         "Ask the user to log in to a website through a live browser view "

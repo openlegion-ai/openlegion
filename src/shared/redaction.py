@@ -89,6 +89,12 @@ _GENERIC = {
     "key", "token", "auth", "authorization", "access_token",
     "refresh_token", "id_token", "bearer_token", "bearertoken",
     "secret", "client_secret",
+    # 2Captcha / CapSolver share the ``clientKey`` query/body field as the
+    # raw API token. Adding it here lets ``redact_url`` strip the value
+    # from ``createTask?clientKey=SK...`` style logs uniformly with other
+    # secret-shaped query params (the captcha module's
+    # ``_redact_clientkey_text`` covers the body / exception-string case).
+    "clientkey", "client_key",
     "password", "passwd", "pwd", "assertion",
     "session", "session_id", "sessionid",
     "sig", "signature", "hash", "hmac",

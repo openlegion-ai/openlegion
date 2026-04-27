@@ -211,5 +211,33 @@
     "input": "webhook: https://hooks.slack.com/?auth=xoxp-FAKEEXAMPLEDONOTSCANUSERTOKEN",
     "expect_redacted": ["xoxp-FAKEEXAMPLEDONOTSCANUSERTOKEN"],
     "expect_preserved": ["hooks.slack.com"]
+  },
+  {
+    "name": "captcha_2captcha_create_task_with_clientkey",
+    "input": "https://api.2captcha.com/createTask?clientKey=SK0123456789abcdef0123456789abcdef0123456789abcdef",
+    "expect_redacted": ["SK0123456789abcdef0123456789abcdef0123456789abcdef"],
+    "expect_preserved": ["api.2captcha.com", "createTask", "clientKey="],
+    "note": "2Captcha echoes clientKey in error responses; key preserved for debug, value redacted."
+  },
+  {
+    "name": "captcha_capsolver_create_task_url",
+    "input": "https://api.capsolver.com/createTask",
+    "expect_redacted": [],
+    "expect_preserved": ["api.capsolver.com", "createTask"],
+    "note": "Plain URL with no secrets — verifies we don't over-redact the solver host."
+  },
+  {
+    "name": "captcha_capsolver_get_balance_clientkey",
+    "input": "https://api.capsolver.com/getBalance?clientKey=ckey0123456789abcdef0123456789abcdef0123456789",
+    "expect_redacted": ["ckey0123456789abcdef0123456789abcdef0123456789"],
+    "expect_preserved": ["api.capsolver.com", "getBalance", "clientKey="],
+    "note": "Solver provider clientKey value redacted in URL form (separate captcha-module redactor handles plain-text leak path)."
+  },
+  {
+    "name": "captcha_solver_taskid_uuid_in_url",
+    "input": "https://api.2captcha.com/getTaskResult?clientKey=ckey0123456789abcdef0123456789abcdef0123456789&taskId=8d2c1f3a-aaaa-4444-bbbb-1234567890ab",
+    "expect_redacted": ["ckey0123456789abcdef0123456789abcdef0123456789"],
+    "expect_preserved": ["api.2captcha.com", "getTaskResult", "taskId="],
+    "note": "Provider task IDs are not themselves secrets but appear in error logs; captcha module's redactor strips them in plain text. URL-form redaction here only targets clientKey."
   }
 ]

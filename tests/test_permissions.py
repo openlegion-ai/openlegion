@@ -272,6 +272,14 @@ class TestKnownBrowserActionsSet:
         assert "find_text" in KNOWN_BROWSER_ACTIONS
         assert "open_tab" in KNOWN_BROWSER_ACTIONS
 
+    def test_phase_8_captcha_actions_present(self):
+        """Phase 8 §11.14 explicit-trigger captcha skills must be in
+        KNOWN_BROWSER_ACTIONS so the mesh accepts ``solve_captcha`` and
+        ``request_captcha_help`` routed via /mesh/browser/command."""
+        from src.host.permissions import KNOWN_BROWSER_ACTIONS
+        assert "solve_captcha" in KNOWN_BROWSER_ACTIONS
+        assert "request_captcha_help" in KNOWN_BROWSER_ACTIONS
+
     def test_legacy_alias_still_exported(self):
         """Back-compat alias for callers that imported the old name."""
         from src.host.permissions import (

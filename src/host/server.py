@@ -1157,6 +1157,43 @@ def create_mesh_app(
 
         return {"requested": True, "service": service, "target_agent": agent_id}
 
+    @app.post("/mesh/browser-captcha-help-request")
+    async def browser_captcha_help_request(
+        data: dict, request: Request,
+    ) -> dict:
+        """Phase 8 §11.14 — agent requests human help for a CAPTCHA.
+
+        Mirrors :func:`browser_login_request` exactly. Emits a dashboard
+        ``browser_captcha_help_request`` event so the operator sees a
+        handoff card with the VNC viewer for the target agent's browser.
+        """
+        caller_id = _resolve_agent_id(data.get("agent_id", ""), request)
+        agent_id = _resolve_browser_target(
+            caller_id, data.get("target_agent_id") or "",
+        )
+
+        await _check_rate_limit("notify", caller_id)
+
+        service = data.get("service", "").strip()
+        description = data.get("description", "").strip()
+
+        if not service:
+            raise HTTPException(400, "Service name is required")
+        if not description:
+            raise HTTPException(400, "Description is required")
+
+        if event_bus:
+            event_bus.emit(
+                "browser_captcha_help_request",
+                agent=agent_id,
+                data={
+                    "service": service[:128],
+                    "description": description[:500],
+                },
+            )
+
+        return {"requested": True, "service": service, "target_agent": agent_id}
+
     @app.get("/mesh/agents")
     async def list_agents(request: Request, project: str = "", agent_id: str = "") -> dict:
         """List registered agents, optionally scoped by project or agent_id.

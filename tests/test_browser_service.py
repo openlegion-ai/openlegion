@@ -4035,6 +4035,18 @@ class TestAllowedBrowserActions:
         missing = required - actions
         assert not missing, f"Missing browser actions: {missing}"
 
+    def test_phase_8_captcha_skill_actions_present(self):
+        """Phase 8 §11.14 explicit-trigger captcha skills depend on these."""
+        actions = self._get_allowed_actions()
+        assert "solve_captcha" in actions, (
+            "solve_captcha missing from KNOWN_BROWSER_ACTIONS — "
+            "browser_solve_captcha skill will silently fail with 400."
+        )
+        assert "request_captcha_help" in actions, (
+            "request_captcha_help missing from KNOWN_BROWSER_ACTIONS — "
+            "request_captcha_help skill will silently fail with 400."
+        )
+
 
 class TestScrollParameterized:
     """Verify scroll uses mouse.wheel() with correct delta signs."""

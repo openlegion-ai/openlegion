@@ -68,6 +68,7 @@ logger = setup_logging("browser.service")
 #   solver_outcome:
 #     "solved" | "timeout" | "rejected" | "injection_failed"
 #     | "no_solver" | "unsupported"
+#     | "rate_limited" | "cost_cap" | "captcha_during_solve"   (§11.14)
 #     - solved: token retrieved AND injected (or no injection needed).
 #     - timeout: solver did not return a verdict in time.
 #     - rejected: solver concluded the captcha cannot be solved (provider
@@ -101,6 +102,57 @@ logger = setup_logging("browser.service")
 # below have unambiguous selectors today. The reCAPTCHA / CF placeholders
 # remain "low" until §11.1 / §11.3 land variant detection.
 _FIRM_KINDS = frozenset({"hcaptcha", "turnstile"})
+
+
+# ── §11.13 valid kind enum (for hint validation in solve_captcha) ─────────
+# Kept in sync with the docstring at the top of this module. New kinds added
+# here as §11.1 / §11.3 land richer classification.
+_VALID_CAPTCHA_KINDS: frozenset[str] = frozenset({
+    "recaptcha-v2-checkbox", "recaptcha-v2-invisible", "recaptcha-v3",
+    "recaptcha-enterprise", "hcaptcha", "turnstile",
+    "cf-interstitial-auto", "cf-interstitial-behavioral", "unknown",
+})
+
+
+# ── §11.14 per-agent solve rate limiter ───────────────────────────────────
+# Module-level dict guarded by an asyncio.Lock. Each agent gets a deque of
+# unix timestamps for solve attempts in the last hour; entries older than
+# 1h are pruned on each access. The limit is read from the
+# CAPTCHA_RATE_LIMIT_PER_HOUR flag (default 20), matching the trim spec.
+#
+# Note: shared module-level state means multi-tenant deployments where
+# different processes serve different agents won't see a unified rate
+# limit — by design (matches how the cost counter is also process-local in
+# this trim). Per-process is sufficient because the browser service is a
+# single container, and the cap is a soft anti-abuse signal not a billing
+# control (cost counter handles billing).
+_solve_rate_window: dict[str, deque[float]] = {}
+_solve_rate_lock: asyncio.Lock = asyncio.Lock()
+_SOLVE_RATE_WINDOW_SECONDS = 3600.0
+
+
+async def _check_solve_rate(agent_id: str, limit_per_hour: int) -> bool:
+    """Return ``True`` if the agent is OVER the per-hour solve limit.
+
+    Side effect on miss: records the current timestamp so the NEXT call's
+    pruning sees this attempt. Caller is expected to invoke once per
+    intended solve; double-counting would distort the rate.
+
+    ``limit_per_hour <= 0`` disables the limiter (returns False always) so
+    operators can opt out via the env var.
+    """
+    if limit_per_hour <= 0:
+        return False
+    async with _solve_rate_lock:
+        now = time.time()
+        cutoff = now - _SOLVE_RATE_WINDOW_SECONDS
+        bucket = _solve_rate_window.setdefault(agent_id, deque(maxlen=limit_per_hour * 4))
+        while bucket and bucket[0] < cutoff:
+            bucket.popleft()
+        if len(bucket) >= limit_per_hour:
+            return True
+        bucket.append(now)
+        return False
 
 
 def _kind_confidence(kind: str) -> str:
@@ -1447,6 +1499,18 @@ class CamoufoxInstance:
         # idempotency flag for ``BrowserManager._attach_network_listeners``.
         self.network_log: deque[dict] = deque(maxlen=200)
         self._network_attached: bool = False
+        # §11.14 explicit-solve guards.
+        # ``_captcha_solving`` is set for the duration of a manager-level
+        # ``solve_captcha`` invocation; if a NEW captcha is detected by
+        # ``_check_captcha`` while this flag is set we surface
+        # ``solver_outcome="captcha_during_solve"`` instead of recursing
+        # into another solve attempt (could otherwise pile up provider
+        # cost and deadlock against the per-instance lock).
+        self._captcha_solving: bool = False
+        # ``_last_solve_attempt`` records (sitekey, url, started_unix_ts)
+        # for the most recent solve so ``retry_previous=True`` can replay
+        # within a 60-second TTL. ``None`` until first attempt.
+        self._last_solve_attempt: tuple[str, str, float] | None = None
 
     def _register_page(self, page) -> str:
         """Assign a stable UUID to a Page if not already registered.
@@ -5547,6 +5611,254 @@ class BrowserManager:
             return {
                 "success": True,
                 "data": _with_legacy_fields(envelope),
+            }
+
+    # ── §11.14 explicit-trigger captcha skills ────────────────────────────
+
+    async def solve_captcha(
+        self,
+        agent_id: str,
+        *,
+        hint: str | None = None,
+        retry_previous: bool = False,
+        target_ref: str | None = None,
+    ) -> dict:
+        """Agent-triggered CAPTCHA solve.
+
+        Layered around :meth:`_check_captcha` rather than parallel to it so
+        we get §11.13 envelope semantics + §11.16 health-check / breaker
+        short-circuits for free.
+
+        Pre-solve gates (in order):
+          1. ``CAPTCHA_DISABLED`` flag — early-return ``no_solver`` envelope.
+          2. ``hint`` validation — bad hint → ``invalid_input`` error.
+          3. ``retry_previous`` TTL check — stale → ``invalid_input`` error.
+          4. No-captcha early return — saves a solver invocation + cost.
+          5. Per-agent rate limit (default 20/hr, ``CAPTCHA_RATE_LIMIT_PER_HOUR``).
+          6. Per-agent monthly cost cap (``CAPTCHA_COST_LIMIT_USD_PER_AGENT_MONTH``).
+          7. Recursive-solve guard — re-entrant ``_check_captcha`` while a
+             solve is in flight surfaces ``captcha_during_solve``.
+
+        ``target_ref`` accepts a snapshot ref for selecting one captcha among
+        many on the same page; multi-captcha enumeration lands in §11.6.
+        Until then, we LOG and IGNORE — the top-ranked visible widget gets
+        solved. Documented in the skill description so agents don't expect
+        targeting precision yet.
+        """
+        # Gate 1: fleet-wide kill switch.
+        from src.browser.flags import get_bool, get_int, get_str
+        if get_bool("CAPTCHA_DISABLED", False, agent_id=agent_id):
+            return {
+                "success": True,
+                "data": _with_legacy_fields(_captcha_envelope(
+                    kind="unknown", solver_attempted=False,
+                    solver_outcome="no_solver",
+                    solver_confidence="low",
+                    next_action="request_captcha_help",
+                )),
+            }
+
+        # Gate 2: hint validation (cheap, before lock).
+        if hint is not None:
+            if not isinstance(hint, str) or hint.strip() not in _VALID_CAPTCHA_KINDS:
+                return _err(
+                    "invalid_input",
+                    f"hint must be one of: {sorted(_VALID_CAPTCHA_KINDS)}",
+                )
+            hint = hint.strip()
+
+        if target_ref:
+            logger.warning(
+                "solve_captcha: target_ref=%r ignored — multi-captcha "
+                "enumeration is §11.6 (deferred). Top-ranked visible widget "
+                "will be solved.", target_ref,
+            )
+
+        inst = await self.get_or_start(agent_id)
+        inst.touch()
+
+        async with inst.lock:
+            # Gate 3: retry_previous TTL check.
+            if retry_previous:
+                last = inst._last_solve_attempt
+                if last is None or (time.time() - last[2]) > 60.0:
+                    return _err(
+                        "invalid_input", "no_recent_attempt_to_retry",
+                    )
+                # The retry path just re-runs the normal flow; the
+                # solver itself is idempotent against (sitekey, url),
+                # and we don't preserve the last classified kind here
+                # because the page may have changed. Stamp the
+                # restarted timestamp so further retries chain.
+                inst._last_solve_attempt = (last[0], last[1], time.time())
+
+            # Gate 4: no-captcha early return. Set the recursive-solve
+            # guard BEFORE the call so a captcha that appears during
+            # detection isn't mistaken for one we should now solve.
+            if inst._captcha_solving:
+                # Caller is reentering during an in-flight solve. Surface
+                # ``captcha_during_solve`` and let the agent escalate via
+                # request_captcha_help.
+                return {
+                    "success": True,
+                    "data": _with_legacy_fields(_captcha_envelope(
+                        kind="unknown", solver_attempted=False,
+                        solver_outcome="captcha_during_solve",
+                        solver_confidence="low",
+                        next_action="request_captcha_help",
+                    )),
+                }
+
+            inst._captcha_solving = True
+            try:
+                pre_check = await self._check_captcha(inst)
+                if not pre_check.get("captcha_found"):
+                    # No-captcha early return — short, no solver call,
+                    # no cost. Distinct from the §11.13 ``captcha_found:
+                    # false`` shape we get from the unsolicited
+                    # detection path; here we surface a top-level
+                    # ``message`` for the agent.
+                    return {
+                        "success": True,
+                        "data": {
+                            "captcha_found": False,
+                            "message": "No captcha on current page",
+                        },
+                    }
+
+                # Gate 5: rate limit (per-agent, sliding 1h window).
+                rate_limit = get_int(
+                    "CAPTCHA_RATE_LIMIT_PER_HOUR", 20,
+                    agent_id=agent_id, min_value=0, max_value=10000,
+                )
+                if await _check_solve_rate(agent_id, rate_limit):
+                    kind = pre_check.get("kind", "unknown")
+                    return {
+                        "success": True,
+                        "data": _with_legacy_fields(_captcha_envelope(
+                            kind=kind, solver_attempted=False,
+                            solver_outcome="rate_limited",
+                            solver_confidence=_kind_confidence(kind),
+                            next_action="request_captcha_help",
+                        )),
+                    }
+
+                # Gate 6: cost cap (per-agent, monthly, USD).
+                cap_usd_str = get_str(
+                    "CAPTCHA_COST_LIMIT_USD_PER_AGENT_MONTH", "",
+                    agent_id=agent_id,
+                )
+                cap_cents = 0
+                if cap_usd_str:
+                    try:
+                        cap_cents = int(round(float(cap_usd_str) * 100))
+                    except ValueError:
+                        logger.warning(
+                            "Invalid CAPTCHA_COST_LIMIT_USD_PER_AGENT_MONTH=%r"
+                            " — treating as unset", cap_usd_str,
+                        )
+                        cap_cents = 0
+                if cap_cents > 0:
+                    from src.browser import captcha_cost_counter as _cost
+                    if await _cost.over_cap(agent_id, cap_cents):
+                        kind = pre_check.get("kind", "unknown")
+                        return {
+                            "success": True,
+                            "data": _with_legacy_fields(_captcha_envelope(
+                                kind=kind, solver_attempted=False,
+                                solver_outcome="cost_cap",
+                                solver_confidence=_kind_confidence(kind),
+                                next_action="request_captcha_help",
+                            )),
+                        }
+
+                # If pre_check already attempted a solve (because
+                # ``_check_captcha`` always tries when a solver is
+                # configured), the result is what we'd return anyway.
+                # Stamp the last_solve_attempt for ``retry_previous``.
+                kind = pre_check.get("kind", "unknown")
+                if hint is not None and hint != kind:
+                    # Hint overrides the auto-classified kind in the
+                    # envelope so downstream consumers see what the
+                    # agent declared. We don't re-run the solver with
+                    # a different task type here — that's §11.1's
+                    # variant-aware solver work; the hint at this layer
+                    # is purely classification metadata until then.
+                    pre_check = dict(pre_check)
+                    pre_check["kind"] = hint
+
+                # Stamp the last attempt for ``retry_previous`` (best
+                # effort — page.url access can fail on closed contexts).
+                try:
+                    page_url = inst.page.url or ""
+                except Exception:
+                    page_url = ""
+                inst._last_solve_attempt = ("", page_url, time.time())
+
+                # Cost accounting on success: look up published rate by
+                # (provider, kind) and increment. Skip when unpriced
+                # rather than guess (under-count > over-count for trust).
+                if pre_check.get("solver_outcome") == "solved":
+                    provider = ""
+                    if self._captcha_solver is not None:
+                        provider = getattr(self._captcha_solver, "provider", "")
+                    if provider:
+                        from src.browser import captcha_cost_counter as _cost
+                        cents = _cost.estimate_cents(provider, kind)
+                        if cents is None:
+                            logger.warning(
+                                "captcha solve: no published rate for "
+                                "provider=%s kind=%s — skipping cost "
+                                "increment (under-count > over-count)",
+                                provider, kind,
+                            )
+                        else:
+                            await _cost.add_cost(agent_id, cents)
+
+                return {
+                    "success": True,
+                    "data": _with_legacy_fields(pre_check),
+                }
+            finally:
+                inst._captcha_solving = False
+
+    async def request_captcha_help(
+        self, agent_id: str, *, service: str, description: str,
+    ) -> dict:
+        """Agent-triggered request for human help on a CAPTCHA.
+
+        Mirrors the ``request_browser_login`` semantics: the BrowserManager
+        emits the dashboard handoff event and returns immediately. The
+        operator-completion path (``/api/browser-captcha-help/complete``
+        in the dashboard) enqueues a steer message to the agent — there
+        is no background blocking task in the BrowserManager itself.
+
+        Used for behavioral-only challenges (CF Under Attack, Press &
+        Hold), persistent rejections, or when ``solve_captcha`` returned
+        ``cost_cap`` / ``rate_limited``.
+        """
+        if not service:
+            return _err("invalid_input", "service is required")
+        if not description:
+            return _err("invalid_input", "description is required")
+
+        inst = await self.get_or_start(agent_id)
+        inst.touch()
+        # Acquire the lock so we present a stable page URL to the dashboard
+        # event and so a concurrent solve doesn't redirect the page mid-handoff.
+        async with inst.lock:
+            try:
+                page_url = inst.page.url or ""
+            except Exception:
+                page_url = ""
+            return {
+                "success": True,
+                "data": {
+                    "requested": True,
+                    "service": service[:128],
+                    "description": description[:500],
+                    "url": page_url[:2048],
+                },
             }
 
     # ── File transfer (Phase 1.5 infrastructure) ─────────────────────────

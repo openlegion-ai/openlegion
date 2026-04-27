@@ -75,9 +75,19 @@ _CLIENTKEY_IN_TEXT = re.compile(
     re.IGNORECASE,
 )
 
+# Solver task IDs (UUIDs and integer strings both used by 2captcha /
+# CapSolver). Echoed in error responses; redact on logging so a hostile
+# provider error containing a stitched-together credential string can't
+# leak via the task identifier path.
+_TASKID_IN_TEXT = re.compile(
+    r'(taskId)\s*["\']?\s*[:=]\s*["\']?'
+    r'([A-Za-z0-9_\-]{6,})["\']?',
+    re.IGNORECASE,
+)
+
 
 def _redact_clientkey_text(text: str) -> str:
-    """Strip ``clientKey=VALUE`` / ``"clientKey":"VALUE"`` from text.
+    """Strip ``clientKey=VALUE`` / ``"clientKey":"VALUE"`` and ``taskId=…``.
 
     Pair with :func:`redact_url` (URL-shaped secrets) and
     :func:`_redact_clientkey` (dict bodies) before logging anything that
@@ -85,7 +95,9 @@ def _redact_clientkey_text(text: str) -> str:
     """
     if not text:
         return text
-    return _CLIENTKEY_IN_TEXT.sub(r"\1=[REDACTED]", text)
+    out = _CLIENTKEY_IN_TEXT.sub(r"\1=[REDACTED]", text)
+    out = _TASKID_IN_TEXT.sub(r"\1=[REDACTED]", out)
+    return out
 
 
 # Map from detected selector pattern to a canonical CAPTCHA type.
@@ -497,11 +509,25 @@ class CaptchaSolver:
                 "websiteKey": sitekey,
             },
         }
-        resp = await client.post("https://api.2captcha.com/createTask", json=payload)
-        resp.raise_for_status()
-        data = resp.json()
+        try:
+            resp = await client.post("https://api.2captcha.com/createTask", json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            # Provider error responses sometimes echo ``clientKey`` back
+            # in the body / exception text. Strip before logging — the
+            # bundled ``_redact_clientkey_text`` is the single redactor
+            # for these strings (do NOT introduce a parallel one).
+            logger.warning(
+                "2Captcha createTask failed: %s",
+                _redact_clientkey_text(redact_url(str(e))),
+            )
+            return None
         if data.get("errorId", 0) != 0:
-            logger.warning("2Captcha submit error: %s", data.get("errorDescription"))
+            logger.warning(
+                "2Captcha submit error: %s",
+                _redact_clientkey_text(str(data.get("errorDescription"))),
+            )
             return None
         task_id = data.get("taskId")
         if not task_id:
@@ -510,14 +536,24 @@ class CaptchaSolver:
         # Poll for result
         for _ in range(int(_SOLVE_TIMEOUT / _POLL_INTERVAL)):
             await asyncio.sleep(_POLL_INTERVAL)
-            resp = await client.post(
-                "https://api.2captcha.com/getTaskResult",
-                json={"clientKey": self.api_key, "taskId": task_id},
-            )
-            resp.raise_for_status()
-            data = resp.json()
+            try:
+                resp = await client.post(
+                    "https://api.2captcha.com/getTaskResult",
+                    json={"clientKey": self.api_key, "taskId": task_id},
+                )
+                resp.raise_for_status()
+                data = resp.json()
+            except Exception as e:
+                logger.warning(
+                    "2Captcha getTaskResult failed: %s",
+                    _redact_clientkey_text(redact_url(str(e))),
+                )
+                return None
             if data.get("errorId", 0) != 0:
-                logger.warning("2Captcha poll error: %s", data.get("errorDescription"))
+                logger.warning(
+                    "2Captcha poll error: %s",
+                    _redact_clientkey_text(str(data.get("errorDescription"))),
+                )
                 return None
             if data.get("status") == "ready":
                 solution = data.get("solution", {})
@@ -542,11 +578,21 @@ class CaptchaSolver:
                 "websiteKey": sitekey,
             },
         }
-        resp = await client.post("https://api.capsolver.com/createTask", json=payload)
-        resp.raise_for_status()
-        data = resp.json()
+        try:
+            resp = await client.post("https://api.capsolver.com/createTask", json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            logger.warning(
+                "CapSolver createTask failed: %s",
+                _redact_clientkey_text(redact_url(str(e))),
+            )
+            return None
         if data.get("errorId", 0) != 0:
-            logger.warning("CapSolver submit error: %s", data.get("errorDescription"))
+            logger.warning(
+                "CapSolver submit error: %s",
+                _redact_clientkey_text(str(data.get("errorDescription"))),
+            )
             return None
         task_id = data.get("taskId")
         if not task_id:
@@ -555,14 +601,24 @@ class CaptchaSolver:
         # Poll for result
         for _ in range(int(_SOLVE_TIMEOUT / _POLL_INTERVAL)):
             await asyncio.sleep(_POLL_INTERVAL)
-            resp = await client.post(
-                "https://api.capsolver.com/getTaskResult",
-                json={"clientKey": self.api_key, "taskId": task_id},
-            )
-            resp.raise_for_status()
-            data = resp.json()
+            try:
+                resp = await client.post(
+                    "https://api.capsolver.com/getTaskResult",
+                    json={"clientKey": self.api_key, "taskId": task_id},
+                )
+                resp.raise_for_status()
+                data = resp.json()
+            except Exception as e:
+                logger.warning(
+                    "CapSolver getTaskResult failed: %s",
+                    _redact_clientkey_text(redact_url(str(e))),
+                )
+                return None
             if data.get("errorId", 0) != 0:
-                logger.warning("CapSolver poll error: %s", data.get("errorDescription"))
+                logger.warning(
+                    "CapSolver poll error: %s",
+                    _redact_clientkey_text(str(data.get("errorDescription"))),
+                )
                 return None
             if data.get("status") == "ready":
                 solution = data.get("solution", {})
