@@ -392,6 +392,54 @@ class TestTaskBody:
         )
         assert body is None
 
+    def test_password_with_newlines_round_trips_via_json(self, monkeypatch):
+        """Header-injection-style attack: an operator-supplied proxy
+        password containing newlines / control chars must end up
+        JSON-escaped in the request body, never raw-injected into the
+        outbound HTTP serialization. Per security finding F9.
+
+        ``CAPTCHA_SOLVER_PROXY_PASSWORD`` flows through ``flags.get_str``
+        (raw env-var string), into :class:`SolverProxyConfig.password`,
+        and finally into the JSON body via :meth:`to_request_fields`.
+        Because both 2captcha and CapSolver receive the body via
+        ``json=...`` (httpx's JSON encoder), control chars are escaped
+        rather than emitted as raw bytes — they cannot break out of the
+        JSON string into raw HTTP headers.
+        """
+        import json
+        _set_full_proxy_env(monkeypatch)
+        # Override the password with control chars.
+        monkeypatch.setenv(
+            "CAPTCHA_SOLVER_PROXY_PASSWORD", "p\nwith\rnewlines\t",
+        )
+        from src.browser import flags as _flags
+        _flags.reload_operator_settings()
+
+        cfg = get_solver_proxy_config()
+        assert cfg is not None
+        # Build a task body and serialize as JSON.
+        s = self._solver(provider="2captcha")
+        body, _, _ = s._build_task_body(
+            _2CAPTCHA_TASK_TYPES, "recaptcha-v2-checkbox",
+            "SITEKEY", "https://example.com",
+            page_action=None, proxy_config=cfg,
+        )
+        assert body is not None
+        # The Python dict still holds the raw control chars (correct —
+        # they're Python strings, not HTTP).
+        assert body["proxyPassword"] == "p\nwith\rnewlines\t"
+        # JSON-serialize the way httpx does; control chars MUST be
+        # escaped, never raw.
+        serialized = json.dumps(body)
+        assert "\\n" in serialized, (
+            "newline not JSON-escaped — would slip into raw HTTP headers"
+        )
+        assert "\\r" in serialized
+        assert "\\t" in serialized
+        # Raw newline characters must not survive into the wire form.
+        assert "\n" not in serialized
+        assert "\r" not in serialized
+
 
 # ── 5. Cost counter respects proxy_aware flag ─────────────────────────────
 

@@ -239,5 +239,12 @@
     "expect_redacted": ["ckey0123456789abcdef0123456789abcdef0123456789"],
     "expect_preserved": ["api.2captcha.com", "getTaskResult", "taskId="],
     "note": "Provider task IDs are not themselves secrets but appear in error logs; captcha module's redactor strips them in plain text. URL-form redaction here only targets clientKey."
+  },
+  {
+    "name": "captcha_solver_taskid_integer_in_url",
+    "input": "https://api.2captcha.com/getTaskResult?clientKey=ckey0123456789abcdef0123456789abcdef0123456789&taskId=9876543210",
+    "expect_redacted": ["ckey0123456789abcdef0123456789abcdef0123456789"],
+    "expect_preserved": ["api.2captcha.com", "getTaskResult", "taskId="],
+    "note": "2Captcha returns integer task IDs (CapSolver returns UUIDs). URL-form redaction strips clientKey; integer task IDs themselves are not secrets but the captcha module's _redact_clientkey_text scrubs them from plain-text logs (see test_redact_clientkey_text_strips_taskid)."
   }
 ]

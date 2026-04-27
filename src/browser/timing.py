@@ -213,6 +213,18 @@ def inter_action_delay() -> float:
 # ── CAPTCHA solve pacing (§11.11) ─────────────────────────────
 
 
+_CAPTCHA_PACING_DEFAULTS = {
+    "mu_ms": 6000,
+    "sigma_ms": 2500,
+    "min_ms": 3000,
+    "max_ms": 12000,
+}
+# Hard ceiling on any individual captcha-pacing knob — 10 minutes is well
+# beyond any sane operator override and prevents a misconfigured env var
+# from stalling a solve indefinitely.
+_CAPTCHA_PACING_HARD_MAX_MS = 600_000
+
+
 async def captcha_solve_delay() -> None:
     """Gaussian-with-clamp delay between solver token retrieval and DOM injection.
 
@@ -225,6 +237,13 @@ async def captcha_solve_delay() -> None:
     * ``CAPTCHA_PACING_MS_MIN`` — clamp lower bound (default 3000).
     * ``CAPTCHA_PACING_MS_MAX`` — clamp upper bound (default 12000).
 
+    Each env var is bounded to ``[0, 600_000]`` (10 minutes) at the
+    flag-loader layer to prevent a typo from producing a multi-hour
+    sleep. We additionally validate ``min_ms < max_ms`` — an inverted
+    pair (operator typo, e.g. ``MIN=20000, MAX=10000``) would silently
+    produce a degenerate clamp where every sample lands at the lower
+    bound; we log a warning and fall back to defaults instead.
+
     The existing ``human_delay`` / ``keystroke_delay`` helpers operate on
     millisecond-scale clamps and are unsuitable for the 3-12s scale of
     post-solve pacing — this helper exists specifically for that range.
@@ -232,10 +251,44 @@ async def captcha_solve_delay() -> None:
     human reading time, which is independent of the operator's "go fast"
     knob for intra-action timing.
     """
-    mu_ms = flags.get_int("CAPTCHA_SOLVE_PACING_MU_MS", 6000)
-    sigma_ms = flags.get_int("CAPTCHA_SOLVE_PACING_SIGMA_MS", 2500)
-    min_ms = flags.get_int("CAPTCHA_PACING_MS_MIN", 3000)
-    max_ms = flags.get_int("CAPTCHA_PACING_MS_MAX", 12000)
+    mu_ms = flags.get_int(
+        "CAPTCHA_SOLVE_PACING_MU_MS",
+        _CAPTCHA_PACING_DEFAULTS["mu_ms"],
+        min_value=0, max_value=_CAPTCHA_PACING_HARD_MAX_MS,
+    )
+    sigma_ms = flags.get_int(
+        "CAPTCHA_SOLVE_PACING_SIGMA_MS",
+        _CAPTCHA_PACING_DEFAULTS["sigma_ms"],
+        min_value=0, max_value=_CAPTCHA_PACING_HARD_MAX_MS,
+    )
+    min_ms = flags.get_int(
+        "CAPTCHA_PACING_MS_MIN",
+        _CAPTCHA_PACING_DEFAULTS["min_ms"],
+        min_value=0, max_value=_CAPTCHA_PACING_HARD_MAX_MS,
+    )
+    max_ms = flags.get_int(
+        "CAPTCHA_PACING_MS_MAX",
+        _CAPTCHA_PACING_DEFAULTS["max_ms"],
+        min_value=0, max_value=_CAPTCHA_PACING_HARD_MAX_MS,
+    )
+    if min_ms >= max_ms:
+        # Inverted / equal clamp — operator misconfig. Log once-shaped
+        # warning (no rate gate; this fires per-call but only when
+        # misconfigured) and fall back to the documented defaults so
+        # the solve still paces realistically rather than landing on
+        # a degenerate bound.
+        import logging
+        logging.getLogger("browser.timing").warning(
+            "CAPTCHA pacing clamp is inverted (MIN=%d, MAX=%d); "
+            "falling back to defaults [%d, %d].",
+            min_ms, max_ms,
+            _CAPTCHA_PACING_DEFAULTS["min_ms"],
+            _CAPTCHA_PACING_DEFAULTS["max_ms"],
+        )
+        mu_ms = _CAPTCHA_PACING_DEFAULTS["mu_ms"]
+        sigma_ms = _CAPTCHA_PACING_DEFAULTS["sigma_ms"]
+        min_ms = _CAPTCHA_PACING_DEFAULTS["min_ms"]
+        max_ms = _CAPTCHA_PACING_DEFAULTS["max_ms"]
     delay_ms = _clamped_gauss(float(mu_ms), float(sigma_ms),
                               float(min_ms), float(max_ms))
     await asyncio.sleep(delay_ms / 1000.0)

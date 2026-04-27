@@ -1145,18 +1145,23 @@ async def browser_upload_file(
                 "Optional override for captcha kind classification. "
                 "One of: recaptcha-v2-checkbox, recaptcha-v2-invisible, "
                 "recaptcha-v3, recaptcha-enterprise-v2, "
-                "recaptcha-enterprise-v3, recaptcha-enterprise (legacy "
-                "alias), hcaptcha, turnstile, cf-interstitial-auto, "
-                "cf-interstitial-behavioral, unknown."
+                "recaptcha-enterprise-v3, hcaptcha, turnstile, "
+                "cf-interstitial-turnstile, unknown. Behavioral-only "
+                "kinds (cf-interstitial-auto / cf-interstitial-behavioral "
+                "/ px-press-hold / datadome-behavioral) are rejected — "
+                "use request_captcha_help for those."
             ),
             "default": "",
         },
         "retry_previous": {
             "type": "boolean",
             "description": (
-                "Retry the most recent solve attempt on this instance "
-                "(60-second TTL). Use when a transient solver error "
-                "left the captcha unsolved and the page still shows it."
+                "Skip the no-captcha early-return: wait briefly and "
+                "re-check ONCE for a captcha. Use when the page just "
+                "navigated and the captcha widget may not have rendered "
+                "yet. Does NOT replay a prior solve attempt — the "
+                "solver is invoked freshly against whatever the second "
+                "detection finds."
             ),
             "default": False,
         },

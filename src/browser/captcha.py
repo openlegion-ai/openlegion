@@ -1610,22 +1610,19 @@ class CaptchaSolver:
         # v3 extras — applied to both standard and enterprise v3 task entries.
         is_v3 = captcha_type in ("recaptcha-v3", "recaptcha-enterprise-v3")
         if is_v3:
-            # Operator-configured min score. ``flags.get_float`` clamps;
-            # we additionally clamp 0.1-0.9 to match the env-var doc.
-            try:
-                from src.browser import flags as _flags
-                min_score = _flags.get_float(
-                    "CAPTCHA_RECAPTCHA_V3_MIN_SCORE",
-                    _DEFAULT_V3_MIN_SCORE,
-                    min_value=0.1,
-                    max_value=0.9,
-                )
-            except Exception:
-                # Defensive: if flags import fails (shouldn't, but the
-                # solver module is sometimes imported in test contexts
-                # without ``src.browser`` initialized) fall back to the
-                # default rather than aborting the solve.
-                min_score = _DEFAULT_V3_MIN_SCORE
+            # Operator-configured min score. ``flags.get_float`` is
+            # contracted not to raise — bad values fall back to the
+            # default at the flag-helper level. The previous defensive
+            # try/except was swallowing programmer errors in the flag
+            # module silently; let any future bug there surface
+            # immediately.
+            from src.browser import flags as _flags
+            min_score = _flags.get_float(
+                "CAPTCHA_RECAPTCHA_V3_MIN_SCORE",
+                _DEFAULT_V3_MIN_SCORE,
+                min_value=0.1,
+                max_value=0.9,
+            )
             body["minScore"] = min_score
             action = (page_action or "").strip()
             if not action:

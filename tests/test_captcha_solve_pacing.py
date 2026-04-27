@@ -194,6 +194,114 @@ class TestPacingFiresOnSuccess:
         assert bool(ok) is True
         assert pace.await_count == 1
 
+    @pytest.mark.asyncio
+    async def test_pacing_runs_before_token_injection(self):
+        """Pace MUST come before inject — otherwise the form submit lands
+        before the human-style pause and the anti-bot signal fires.
+        Witness an event list capturing the order across the live solve.
+        """
+        solver = _make_solver()
+        solver._solver_health_checked = True
+        page = _solve_page()
+
+        client = AsyncMock(spec=httpx.AsyncClient)
+        client.is_closed = False
+        client.post = AsyncMock(side_effect=_stub_create_then_ready())
+        solver._client = client
+
+        events: list[str] = []
+
+        async def record_pace():
+            events.append("pace")
+
+        async def record_inject(self_, page_, captcha_type, token):
+            events.append("inject")
+            return True
+
+        with patch("src.browser.timing.captcha_solve_delay", new=record_pace), \
+             patch("src.browser.captcha.CaptchaSolver._inject_token",
+                   new=record_inject), \
+             patch("src.browser.captcha._POLL_INTERVAL", 0.001):
+            ok = await solver.solve(
+                page, 'iframe[src*="recaptcha"]', "https://example.com",
+                kind="recaptcha-v3",
+            )
+
+        assert bool(ok) is True
+        assert events == ["pace", "inject"], (
+            f"expected pace-then-inject, got {events}"
+        )
+
+
+# ── 3b. Env-var bounds + inverted-clamp recovery ──────────────────────
+
+
+class TestEnvVarBounds:
+    @pytest.mark.asyncio
+    async def test_inverted_clamp_falls_back_to_defaults_with_warning(
+        self, monkeypatch, caplog,
+    ):
+        """Operator typo: ``MIN=20000, MAX=10000``. The clamp would
+        otherwise produce a degenerate distribution where every sample
+        lands at the lower bound. Code path: detect inversion, log a
+        warning, and use the documented defaults so the solve still
+        paces realistically.
+        """
+        monkeypatch.setenv("CAPTCHA_PACING_MS_MIN", "20000")
+        monkeypatch.setenv("CAPTCHA_PACING_MS_MAX", "10000")
+        # flags.py caches operator settings — reload after the env mutation.
+        from src.browser import flags as _flags
+        _flags.reload_operator_settings()
+
+        observed: list[float] = []
+
+        async def fake_sleep(s):
+            observed.append(s)
+
+        with patch("asyncio.sleep", new=fake_sleep), \
+             caplog.at_level("WARNING", logger="browser.timing"):
+            for _ in range(50):
+                await timing.captcha_solve_delay()
+
+        # Defaults: [3.0, 12.0].
+        for s in observed:
+            assert 3.0 <= s <= 12.0, (
+                f"inverted clamp didn't recover; got {s}s"
+            )
+        assert any("inverted" in rec.getMessage().lower()
+                   for rec in caplog.records), (
+            "inverted-clamp warning did not fire"
+        )
+
+    @pytest.mark.asyncio
+    async def test_absurd_high_value_clamped_at_loader(self, monkeypatch):
+        """A typo of 60_000_000ms (≈16h) would stall the solver. The
+        flag-loader bounds (max=600_000ms = 10min) clip it before the
+        Gaussian sampler ever sees it.
+        """
+        # MU = 60_000_000ms (16h+) — bounded to 600_000ms by the loader.
+        monkeypatch.setenv("CAPTCHA_SOLVE_PACING_MU_MS", "60000000")
+        # Open the clamp so MU isn't the limiting factor.
+        monkeypatch.setenv("CAPTCHA_PACING_MS_MIN", "1000")
+        monkeypatch.setenv("CAPTCHA_PACING_MS_MAX", "600000")
+        # Tight sigma so MU dominates.
+        monkeypatch.setenv("CAPTCHA_SOLVE_PACING_SIGMA_MS", "10")
+        from src.browser import flags as _flags
+        _flags.reload_operator_settings()
+
+        observed: list[float] = []
+
+        async def fake_sleep(s):
+            observed.append(s)
+
+        with patch("asyncio.sleep", new=fake_sleep):
+            for _ in range(20):
+                await timing.captcha_solve_delay()
+
+        # MU loader cap is 600_000ms = 600s. Every sample bounded.
+        for s in observed:
+            assert s <= 600.0, f"sample {s}s exceeded loader cap"
+
 
 # ── 4. Helper NOT called on failure paths ─────────────────────────────
 
