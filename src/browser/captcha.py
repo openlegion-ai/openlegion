@@ -109,19 +109,78 @@ _CAPTCHA_TYPE_MAP: dict[str, str] = {
     "captcha": "recaptcha",  # generic fallback — most common type
 }
 
-# 2Captcha task type mapping
-_2CAPTCHA_TASK_TYPES: dict[str, str] = {
-    "recaptcha": "NormalRecaptchaTaskProxyless",
-    "hcaptcha": "HCaptchaTaskProxyless",
-    "turnstile": "TurnstileTaskProxyless",
+
+# §11.1 — provider task-type tables, structured as
+# ``dict[variant, dict[provider_field, value]]`` so each variant can
+# declare task-specific extras (``isInvisible``, ``isEnterprise``) without
+# growing the call-site logic. The submit-task code paths merge these
+# extras into the task body alongside ``websiteURL`` / ``websiteKey``.
+#
+# Task-name verification (April 2026, against current public docs):
+#   * 2captcha — https://2captcha.com/api-docs/recaptcha-v{2,3}{,-enterprise}
+#     - v2 / v2-invisible: same task name ``RecaptchaV2TaskProxyless`` with
+#       ``isInvisible`` flag distinguishing invisible.
+#     - v3: ``RecaptchaV3TaskProxyless`` requires ``minScore`` + accepts
+#       ``pageAction``. Enterprise v3 is the same task name with
+#       ``isEnterprise: true`` — 2captcha has NO standalone
+#       ``RecaptchaV3EnterpriseTaskProxyless`` type as of April 2026
+#       (drift from the early spec; verified against the v3 doc page).
+#     - Enterprise v2: ``RecaptchaV2EnterpriseTaskProxyless`` (distinct).
+#   * CapSolver — https://docs.capsolver.com/en/guide/captcha/ReCaptchaV{2,3}/
+#     - Distinct task names for each variant. ``isInvisible`` is the v2
+#       knob; ``minScore`` is documented but score filtering may be
+#       performed downstream at validation time rather than affecting
+#       the solve itself (we still pass it; CapSolver tolerates extra
+#       fields). ``pageAction`` is documented as optional.
+#
+# Drift here is silent (``ERROR_INVALID_TASK_TYPE``); re-verify against
+# provider docs when bumping variants.
+#
+# 2Captcha
+_2CAPTCHA_TASK_TYPES: dict[str, dict[str, object]] = {
+    "recaptcha": {"type": "NormalRecaptchaTaskProxyless"},  # legacy alias
+    "hcaptcha": {"type": "HCaptchaTaskProxyless"},
+    "turnstile": {"type": "TurnstileTaskProxyless"},
+    # §11.1 reCAPTCHA variant matrix
+    "recaptcha-v2-checkbox": {"type": "RecaptchaV2TaskProxyless"},
+    "recaptcha-v2-invisible": {
+        "type": "RecaptchaV2TaskProxyless",
+        "isInvisible": True,
+    },
+    "recaptcha-v3": {"type": "RecaptchaV3TaskProxyless"},
+    "recaptcha-enterprise-v2": {"type": "RecaptchaV2EnterpriseTaskProxyless"},
+    # 2captcha uses the same v3 task with isEnterprise=true (no separate
+    # ``RecaptchaV3EnterpriseTaskProxyless`` type as of April 2026).
+    "recaptcha-enterprise-v3": {
+        "type": "RecaptchaV3TaskProxyless",
+        "isEnterprise": True,
+    },
 }
 
-# CapSolver task type mapping
-_CAPSOLVER_TASK_TYPES: dict[str, str] = {
-    "recaptcha": "ReCaptchaV2TaskProxyLess",
-    "hcaptcha": "HCaptchaTaskProxyLess",
-    "turnstile": "AntiTurnstileTaskProxyLess",
+# CapSolver
+_CAPSOLVER_TASK_TYPES: dict[str, dict[str, object]] = {
+    "recaptcha": {"type": "ReCaptchaV2TaskProxyLess"},  # legacy alias
+    "hcaptcha": {"type": "HCaptchaTaskProxyLess"},
+    "turnstile": {"type": "AntiTurnstileTaskProxyLess"},
+    # §11.1 reCAPTCHA variant matrix
+    "recaptcha-v2-checkbox": {"type": "ReCaptchaV2TaskProxyLess"},
+    "recaptcha-v2-invisible": {
+        "type": "ReCaptchaV2TaskProxyLess",
+        "isInvisible": True,
+    },
+    "recaptcha-v3": {"type": "ReCaptchaV3TaskProxyLess"},
+    "recaptcha-enterprise-v2": {"type": "ReCaptchaV2EnterpriseTaskProxyLess"},
+    "recaptcha-enterprise-v3": {"type": "ReCaptchaV3EnterpriseTaskProxyLess"},
 }
+
+
+# Default ``pageAction`` when the classifier couldn't extract one. Most
+# v3 implementations accept a generic ``"verify"`` action — solving with
+# the wrong action returns a token bound to the wrong action and the
+# verifying server may still reject the score, but it's the best
+# permissive fallback we have.
+_DEFAULT_V3_ACTION = "verify"
+_DEFAULT_V3_MIN_SCORE = 0.7
 
 
 def get_solver() -> CaptchaSolver | None:
@@ -148,6 +207,219 @@ def _classify_captcha(selector: str) -> str:
         if pattern in sel_lower:
             return captcha_type
     return "recaptcha"  # safe default
+
+
+# ── §11.1 reCAPTCHA variant classifier ───────────────────────────────────
+
+
+# Single JS probe walking ``window.___grecaptcha_cfg`` plus the script /
+# DOM signals. Returning a structured dict from one ``page.evaluate`` is
+# cheaper than five round trips and keeps the page-side logic auditable
+# in one place. Designed to never throw — every branch wraps in
+# try/catch and falls back to ``null``.
+_CLASSIFY_RECAPTCHA_JS = r"""
+() => {
+  const out = {
+    enterprise: false,
+    v3: false,
+    sitekeys: [],         // collected from registry walk
+    actions_by_key: {},   // sitekey -> action (v3 only)
+    invisible_by_key: {}, // sitekey -> bool (explicit-render size)
+    enterprise_script: false,
+    v3_render_param: null,    // sitekey from api.js?render=...
+  };
+  try {
+    // ── 1. Script-tag scan: enterprise namespace + v3 render param ──
+    const scripts = document.querySelectorAll('script[src]');
+    for (const s of scripts) {
+      const src = s.getAttribute('src') || '';
+      if (
+        src.indexOf('enterprise.recaptcha.net') !== -1 ||
+        src.indexOf('recaptcha/enterprise/') !== -1 ||
+        src.indexOf('/enterprise.js') !== -1
+      ) {
+        out.enterprise = true;
+        out.enterprise_script = true;
+      }
+      // v3-only render parameter on api.js: ?render=<sitekey>
+      const m = src.match(/[?&]render=([^&]+)/);
+      if (m && m[1] && m[1] !== 'explicit') {
+        out.v3 = true;
+        out.v3_render_param = decodeURIComponent(m[1]);
+      }
+    }
+    // ── 2. Global ``grecaptcha.enterprise`` presence ───────────────
+    try {
+      if (
+        typeof window.grecaptcha !== 'undefined' &&
+        window.grecaptcha &&
+        typeof window.grecaptcha.enterprise === 'object'
+      ) {
+        out.enterprise = true;
+      }
+    } catch (e) { /* defensive */ }
+    // ── 3. ``___grecaptcha_cfg`` registry walk ─────────────────────
+    let cfg = null;
+    try { cfg = window.___grecaptcha_cfg; } catch (e) { cfg = null; }
+    if (cfg && cfg.clients) {
+      for (const cid in cfg.clients) {
+        const client = cfg.clients[cid];
+        // The widget config is nested arbitrarily deep inside ``client``
+        // (Google obfuscates the tree). Walk shallowly looking for the
+        // canonical fields. Depth 6 is enough in practice.
+        const seen = new Set();
+        const stack = [[client, 0]];
+        let foundSitekey = null;
+        let foundAction = null;
+        let foundSize = null;
+        while (stack.length) {
+          const [node, d] = stack.pop();
+          if (!node || typeof node !== 'object' || d > 6) continue;
+          if (seen.has(node)) continue;
+          seen.add(node);
+          for (const k in node) {
+            const v = node[k];
+            if (k === 'sitekey' && typeof v === 'string' && v.length > 10) {
+              foundSitekey = foundSitekey || v;
+            }
+            if (k === 'action' && typeof v === 'string' && v.length > 0) {
+              foundAction = foundAction || v;
+            }
+            if (k === 'size' && typeof v === 'string') {
+              foundSize = foundSize || v;
+            }
+            if (v && typeof v === 'object') {
+              stack.push([v, d + 1]);
+            }
+          }
+        }
+        if (foundSitekey) {
+          out.sitekeys.push(foundSitekey);
+          if (foundAction) {
+            out.v3 = true;
+            out.actions_by_key[foundSitekey] = foundAction;
+          }
+          if (foundSize) {
+            out.invisible_by_key[foundSitekey] = (foundSize === 'invisible');
+          }
+        }
+      }
+    }
+    // ── 4. DOM ``data-sitekey`` fallback ───────────────────────────
+    if (out.sitekeys.length === 0) {
+      const el = document.querySelector('[data-sitekey]');
+      if (el) {
+        const sk = el.getAttribute('data-sitekey');
+        if (sk) out.sitekeys.push(sk);
+        // ``data-size="invisible"`` on the widget div is the v2-invisible
+        // marker for explicit-render pages.
+        const ds = el.getAttribute('data-size');
+        if (ds && sk) out.invisible_by_key[sk] = (ds === 'invisible');
+      }
+    }
+  } catch (e) { /* defensive — never throw to the page */ }
+  return out;
+}
+"""
+
+
+async def _classify_recaptcha(page) -> dict:
+    """Classify a reCAPTCHA widget into one of five variants.
+
+    Returns a dict with::
+
+        {
+          "variant": "recaptcha-v2-checkbox" | "recaptcha-v2-invisible"
+                   | "recaptcha-v3" | "recaptcha-enterprise-v2"
+                   | "recaptcha-enterprise-v3" | "unknown",
+          "sitekey": str | None,
+          "action": str | None,      # v3 only — extracted from registry
+          "min_score": float | None, # always None — operator config
+        }
+
+    Falls back gracefully:
+
+    * ``variant: "unknown"`` is returned if the page doesn't expose enough
+      signal (e.g. JS not yet loaded, registry obfuscated, no
+      ``data-sitekey``). Callers should fall through to the existing
+      v2-checkbox heuristic when they want the safe default.
+    * ``min_score`` is **never** filled here — it's an operator-tuned
+      knob (``CAPTCHA_RECAPTCHA_V3_MIN_SCORE``) read at solve time, not
+      a property of the page.
+    * ``action`` extraction is **best-effort** for v3. If the widget
+      renders explicitly via ``grecaptcha.execute(sitekey, {action: X})``
+      where ``X`` is a string literal in a separate script we don't see,
+      we return ``None`` and let ``_check_captcha`` log a warning. The
+      solver will still produce a token, but it'll be bound to a
+      different action and the target server may reject — known
+      limitation, documented at the call site.
+
+    Logging uses the existing ``browser.captcha`` logger; no new logger.
+    """
+    result: dict = {
+        "variant": "unknown",
+        "sitekey": None,
+        "action": None,
+        "min_score": None,
+    }
+    try:
+        probe = await page.evaluate(_CLASSIFY_RECAPTCHA_JS)
+    except Exception:
+        logger.debug("_classify_recaptcha: page.evaluate failed", exc_info=True)
+        return result
+    if not isinstance(probe, dict):
+        return result
+
+    enterprise = bool(probe.get("enterprise"))
+    is_v3 = bool(probe.get("v3"))
+    sitekeys = probe.get("sitekeys") or []
+    actions_by_key = probe.get("actions_by_key") or {}
+    invisible_by_key = probe.get("invisible_by_key") or {}
+    v3_render_param = probe.get("v3_render_param") or None
+
+    # Sitekey: prefer registry walk; fall back to v3 render param; then None.
+    sitekey: str | None = None
+    if sitekeys:
+        sitekey = sitekeys[0]
+    elif v3_render_param:
+        sitekey = v3_render_param
+    if isinstance(sitekey, str):
+        sitekey = sitekey.strip() or None
+
+    # Action: only meaningful for v3 widgets. Use the registry mapping
+    # for the chosen sitekey.
+    action: str | None = None
+    if is_v3 and sitekey and sitekey in actions_by_key:
+        candidate = actions_by_key.get(sitekey)
+        if isinstance(candidate, str) and candidate.strip():
+            action = candidate.strip()
+
+    # Variant decision tree.
+    if is_v3 and enterprise:
+        variant = "recaptcha-enterprise-v3"
+    elif is_v3:
+        variant = "recaptcha-v3"
+    elif enterprise:
+        variant = "recaptcha-enterprise-v2"
+    else:
+        # v2 — distinguish checkbox vs invisible.
+        invisible = False
+        if sitekey and sitekey in invisible_by_key:
+            invisible = bool(invisible_by_key.get(sitekey))
+        elif invisible_by_key:
+            # No sitekey match but some widget on the page is invisible.
+            invisible = any(bool(v) for v in invisible_by_key.values())
+        if invisible:
+            variant = "recaptcha-v2-invisible"
+        elif sitekey or v3_render_param:
+            variant = "recaptcha-v2-checkbox"
+        else:
+            variant = "unknown"
+
+    result["variant"] = variant
+    result["sitekey"] = sitekey
+    result["action"] = action
+    return result
 
 
 class CaptchaSolver:
@@ -410,9 +682,25 @@ class CaptchaSolver:
             return False
 
         captcha_type = _classify_captcha(selector)
+        # §11.1 — when the coarse selector classifier says "recaptcha", run
+        # the precise variant classifier so v3 / v2-invisible / Enterprise
+        # widgets get the right provider task type. Falls back to
+        # ``captcha_type`` when the classifier returns ``unknown`` (e.g. the
+        # registry isn't accessible from this frame); legacy selector-based
+        # behavior is preserved.
+        page_action: str | None = None
+        sitekey: str | None = None
+        if captcha_type == "recaptcha":
+            classified = await _classify_recaptcha(page)
+            variant = classified.get("variant") or "unknown"
+            if variant != "unknown":
+                captcha_type = variant
+            sitekey = classified.get("sitekey")
+            page_action = classified.get("action")
         logger.info("Attempting to solve %s CAPTCHA on %s", captcha_type, page_url)
 
-        sitekey = await self._extract_sitekey(page, captcha_type)
+        if not sitekey:
+            sitekey = await self._extract_sitekey(page, captcha_type)
         if not sitekey:
             logger.warning("Could not extract sitekey for %s CAPTCHA", captcha_type)
             await self._record_solver_outcome(success=False)
@@ -420,7 +708,9 @@ class CaptchaSolver:
 
         try:
             token = await asyncio.wait_for(
-                self._submit_and_poll(captcha_type, sitekey, page_url),
+                self._submit_and_poll(
+                    captcha_type, sitekey, page_url, page_action=page_action,
+                ),
                 timeout=_SOLVE_TIMEOUT,
             )
         except asyncio.TimeoutError:
@@ -446,6 +736,14 @@ class CaptchaSolver:
 
     async def _extract_sitekey(self, page, captcha_type: str) -> str | None:
         """Extract the sitekey from the page DOM."""
+        # All reCAPTCHA variants share the same DOM-level sitekey markers
+        # (``[data-sitekey]`` and the ``iframe[src*="recaptcha"]?k=…``
+        # parameter); collapse the family to a single iframe-fallback path
+        # so the v2-checkbox / v2-invisible / v3 / Enterprise variants
+        # don't each need their own branch here.
+        family = captcha_type
+        if captcha_type.startswith("recaptcha"):
+            family = "recaptcha"
         try:
             # Try data-sitekey attribute first (works for reCAPTCHA, hCaptcha, Turnstile)
             sitekey = await page.evaluate(
@@ -455,7 +753,7 @@ class CaptchaSolver:
                 return sitekey.strip()
 
             # Fall back to parsing iframe src for sitekey parameter
-            if captcha_type == "recaptcha":
+            if family == "recaptcha":
                 src = await page.evaluate(
                     "() => document.querySelector('iframe[src*=\"recaptcha\"]')?.src"
                 )
@@ -464,7 +762,7 @@ class CaptchaSolver:
                     if match:
                         return match.group(1)
 
-            if captcha_type == "hcaptcha":
+            if family == "hcaptcha":
                 src = await page.evaluate(
                     "() => document.querySelector('iframe[src*=\"hcaptcha\"]')?.src"
                 )
@@ -473,7 +771,7 @@ class CaptchaSolver:
                     if match:
                         return match.group(1)
 
-            if captcha_type == "turnstile":
+            if family == "turnstile":
                 # Turnstile sometimes stores config in a script or div attribute
                 sitekey = await page.evaluate("""() => {
                     const el = document.querySelector('[class*="cf-turnstile"]');
@@ -486,28 +784,114 @@ class CaptchaSolver:
             logger.debug("Error extracting sitekey", exc_info=True)
         return None
 
-    async def _submit_and_poll(self, captcha_type: str, sitekey: str, page_url: str) -> str | None:
-        """Submit CAPTCHA to solving service and poll for result."""
+    async def _submit_and_poll(
+        self,
+        captcha_type: str,
+        sitekey: str,
+        page_url: str,
+        *,
+        page_action: str | None = None,
+    ) -> str | None:
+        """Submit CAPTCHA to solving service and poll for result.
+
+        ``page_action`` is the v3 action string from the classifier; it's
+        merged into the task body for v3 / Enterprise-v3 variants. v2
+        variants ignore it. ``min_score`` is read inside the per-provider
+        helpers from :data:`CAPTCHA_RECAPTCHA_V3_MIN_SCORE` (operator
+        config, not a page property).
+        """
         if self.provider == "2captcha":
-            return await self._solve_2captcha(captcha_type, sitekey, page_url)
-        return await self._solve_capsolver(captcha_type, sitekey, page_url)
+            return await self._solve_2captcha(
+                captcha_type, sitekey, page_url, page_action=page_action,
+            )
+        return await self._solve_capsolver(
+            captcha_type, sitekey, page_url, page_action=page_action,
+        )
+
+    # ── Task-body builder ─────────────────────────────────────────────────────
+
+    def _build_task_body(
+        self,
+        provider_table: dict[str, dict[str, object]],
+        captcha_type: str,
+        sitekey: str,
+        page_url: str,
+        *,
+        page_action: str | None,
+    ) -> dict | None:
+        """Merge provider task-type fields with v3-specific extras.
+
+        Returns ``None`` if ``captcha_type`` isn't in the provider table
+        (caller treats as "unsupported"). For v3 and v3-enterprise the
+        function reads the operator-configured ``CAPTCHA_RECAPTCHA_V3_MIN_SCORE``
+        flag (default 0.7) and applies the permissive ``"verify"`` fallback
+        when ``page_action`` is missing — see :data:`_DEFAULT_V3_ACTION`
+        for the rationale.
+        """
+        entry = provider_table.get(captcha_type)
+        if not entry:
+            return None
+        body: dict[str, object] = {
+            "websiteURL": page_url,
+            "websiteKey": sitekey,
+        }
+        # Merge static extras (``isInvisible``, ``isEnterprise``, ``type``).
+        for k, v in entry.items():
+            body[k] = v
+        # v3 extras — applied to both standard and enterprise v3 task entries.
+        is_v3 = captcha_type in ("recaptcha-v3", "recaptcha-enterprise-v3")
+        if is_v3:
+            # Operator-configured min score. ``flags.get_float`` clamps;
+            # we additionally clamp 0.1-0.9 to match the env-var doc.
+            try:
+                from src.browser import flags as _flags
+                min_score = _flags.get_float(
+                    "CAPTCHA_RECAPTCHA_V3_MIN_SCORE",
+                    _DEFAULT_V3_MIN_SCORE,
+                    min_value=0.1,
+                    max_value=0.9,
+                )
+            except Exception:
+                # Defensive: if flags import fails (shouldn't, but the
+                # solver module is sometimes imported in test contexts
+                # without ``src.browser`` initialized) fall back to the
+                # default rather than aborting the solve.
+                min_score = _DEFAULT_V3_MIN_SCORE
+            body["minScore"] = min_score
+            action = (page_action or "").strip()
+            if not action:
+                logger.warning(
+                    "v3 reCAPTCHA solve: pageAction missing; falling back to "
+                    "%r — token may be bound to the wrong action and rejected "
+                    "by the target server (kind=%s sitekey=%s)",
+                    _DEFAULT_V3_ACTION, captcha_type, sitekey[:8] + "…",
+                )
+                action = _DEFAULT_V3_ACTION
+            body["pageAction"] = action
+        return body
 
     # ── 2Captcha ──────────────────────────────────────────────────────────────
 
-    async def _solve_2captcha(self, captcha_type: str, sitekey: str, page_url: str) -> str | None:
+    async def _solve_2captcha(
+        self,
+        captcha_type: str,
+        sitekey: str,
+        page_url: str,
+        *,
+        page_action: str | None = None,
+    ) -> str | None:
         client = self._get_client()
-        task_type = _2CAPTCHA_TASK_TYPES.get(captcha_type)
-        if not task_type:
+        task = self._build_task_body(
+            _2CAPTCHA_TASK_TYPES, captcha_type, sitekey, page_url,
+            page_action=page_action,
+        )
+        if not task:
             return None
 
         # Submit task
         payload = {
             "clientKey": self.api_key,
-            "task": {
-                "type": task_type,
-                "websiteURL": page_url,
-                "websiteKey": sitekey,
-            },
+            "task": task,
         }
         try:
             resp = await client.post("https://api.2captcha.com/createTask", json=payload)
@@ -563,20 +947,26 @@ class CaptchaSolver:
 
     # ── CapSolver ─────────────────────────────────────────────────────────────
 
-    async def _solve_capsolver(self, captcha_type: str, sitekey: str, page_url: str) -> str | None:
+    async def _solve_capsolver(
+        self,
+        captcha_type: str,
+        sitekey: str,
+        page_url: str,
+        *,
+        page_action: str | None = None,
+    ) -> str | None:
         client = self._get_client()
-        task_type = _CAPSOLVER_TASK_TYPES.get(captcha_type)
-        if not task_type:
+        task = self._build_task_body(
+            _CAPSOLVER_TASK_TYPES, captcha_type, sitekey, page_url,
+            page_action=page_action,
+        )
+        if not task:
             return None
 
         # Submit task
         payload = {
             "clientKey": self.api_key,
-            "task": {
-                "type": task_type,
-                "websiteURL": page_url,
-                "websiteKey": sitekey,
-            },
+            "task": task,
         }
         try:
             resp = await client.post("https://api.capsolver.com/createTask", json=payload)
@@ -628,9 +1018,18 @@ class CaptchaSolver:
     # ── Token injection ───────────────────────────────────────────────────────
 
     async def _inject_token(self, page, captcha_type: str, token: str) -> bool:
-        """Inject the solved CAPTCHA token into the page."""
+        """Inject the solved CAPTCHA token into the page.
+
+        ``captcha_type`` is matched against the variant *family* (``recaptcha``,
+        ``hcaptcha``, ``turnstile``); the §11.1 reCAPTCHA variants
+        (``recaptcha-v2-checkbox`` / ``...-v3`` / ``...-enterprise-v2`` / etc.)
+        all share the same ``g-recaptcha-response`` injection path.
+        """
+        family = captcha_type
+        if captcha_type.startswith("recaptcha"):
+            family = "recaptcha"
         try:
-            if captcha_type == "recaptcha":
+            if family == "recaptcha":
                 await page.evaluate("""(token) => {
                     const textarea = document.getElementById('g-recaptcha-response');
                     if (textarea) {
@@ -665,7 +1064,7 @@ class CaptchaSolver:
                 }""", token)
                 return True
 
-            if captcha_type == "hcaptcha":
+            if family == "hcaptcha":
                 await page.evaluate("""(token) => {
                     const textarea = document.querySelector('[name="h-captcha-response"]');
                     if (textarea) textarea.value = token;
@@ -679,7 +1078,7 @@ class CaptchaSolver:
                 }""", token)
                 return True
 
-            if captcha_type == "turnstile":
+            if family == "turnstile":
                 await page.evaluate("""(token) => {
                     // Find the Turnstile response input
                     const input = document.querySelector('[name="cf-turnstile-response"]')

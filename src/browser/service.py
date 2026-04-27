@@ -24,7 +24,7 @@ from collections import deque
 from pathlib import Path
 from urllib.parse import urlparse
 
-from src.browser.captcha import get_solver
+from src.browser.captcha import _classify_recaptcha, get_solver
 from src.browser.profile_schema import migrate_profile
 from src.browser.redaction import CredentialRedactor
 from src.browser.ref_handle import RefHandle, RefStale, ShadowHop
@@ -98,18 +98,35 @@ logger = setup_logging("browser.service")
 #       captchas (analytics consent, ad-iframe captchas, etc.) that the
 #       agent can safely skip. No code path emits it today.
 
-# Selector-classification confidence: the two firmly-disambiguated kinds
-# below have unambiguous selectors today. The reCAPTCHA / CF placeholders
-# remain "low" until §11.1 / §11.3 land variant detection.
-_FIRM_KINDS = frozenset({"hcaptcha", "turnstile"})
+# Selector-classification confidence: the kinds below are firmly
+# disambiguated either by an unambiguous selector (``hcaptcha`` /
+# ``turnstile``) or by the §11.1 reCAPTCHA variant classifier — when the
+# classifier returns one of the four precise variants (v2-invisible / v3 /
+# Enterprise-v2 / Enterprise-v3) we trust it as "high". The coarse
+# ``recaptcha-v2-checkbox`` placeholder stays "low" because it's the
+# fallback the classifier emits when it can't disambiguate. CF placeholders
+# remain "low" until §11.3 lands variant detection.
+_FIRM_KINDS = frozenset({
+    "hcaptcha", "turnstile",
+    "recaptcha-v2-invisible", "recaptcha-v3",
+    "recaptcha-enterprise-v2", "recaptcha-enterprise-v3",
+})
 
 
 # ── §11.13 valid kind enum (for hint validation in solve_captcha) ─────────
 # Kept in sync with the docstring at the top of this module. New kinds added
 # here as §11.1 / §11.3 land richer classification.
+#
+# §11.1 splits the prior coarse ``recaptcha-enterprise`` placeholder into
+# the v2/v3 enterprise variants ``recaptcha-enterprise-v{2,3}``. The old
+# ``recaptcha-enterprise`` value is kept as a back-compat alias so agents
+# whose stored hints reference the coarse kind keep working — the
+# classifier never emits it for new detections.
 _VALID_CAPTCHA_KINDS: frozenset[str] = frozenset({
     "recaptcha-v2-checkbox", "recaptcha-v2-invisible", "recaptcha-v3",
-    "recaptcha-enterprise", "hcaptcha", "turnstile",
+    "recaptcha-enterprise",  # legacy alias for back-compat
+    "recaptcha-enterprise-v2", "recaptcha-enterprise-v3",
+    "hcaptcha", "turnstile",
     "cf-interstitial-auto", "cf-interstitial-behavioral", "unknown",
 })
 
@@ -5455,6 +5472,27 @@ class BrowserManager:
             for sel in captcha_selectors:
                 if await inst.page.locator(sel).count() > 0:
                     kind = self._classify_kind(sel)
+                    # §11.1 — when the matched selector is a reCAPTCHA, run
+                    # the precise variant classifier on the live page to
+                    # disambiguate v2-checkbox / v2-invisible / v3 /
+                    # Enterprise-v2 / Enterprise-v3. The coarse selector
+                    # classifier returns ``recaptcha-v2-checkbox`` as the
+                    # safe default; the variant classifier upgrades the
+                    # ``kind`` whenever it returns anything other than
+                    # ``unknown``. Falls back silently to the coarse value
+                    # if ``page.evaluate`` fails (test mocks, frames,
+                    # registry obfuscation, etc.).
+                    if "recaptcha" in sel:
+                        try:
+                            classified = await _classify_recaptcha(inst.page)
+                            variant = classified.get("variant") or "unknown"
+                            if variant != "unknown":
+                                kind = variant
+                        except Exception:
+                            logger.debug(
+                                "_classify_recaptcha raised; falling back to "
+                                "coarse kind=%s", kind, exc_info=True,
+                            )
                     if self._captcha_solver:
                         # §11.16 short-circuits — check solver health
                         # BEFORE attempting a solve. ``is_solver_unreachable``

@@ -1144,8 +1144,10 @@ async def browser_upload_file(
             "description": (
                 "Optional override for captcha kind classification. "
                 "One of: recaptcha-v2-checkbox, recaptcha-v2-invisible, "
-                "recaptcha-v3, recaptcha-enterprise, hcaptcha, turnstile, "
-                "cf-interstitial-auto, cf-interstitial-behavioral, unknown."
+                "recaptcha-v3, recaptcha-enterprise-v2, "
+                "recaptcha-enterprise-v3, recaptcha-enterprise (legacy "
+                "alias), hcaptcha, turnstile, cf-interstitial-auto, "
+                "cf-interstitial-behavioral, unknown."
             ),
             "default": "",
         },
