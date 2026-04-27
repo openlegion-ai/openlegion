@@ -54,6 +54,16 @@ KNOWN_BROWSER_ACTIONS: frozenset[str] = frozenset({
     # narrowed ``browser_actions`` denylist (or set
     # ``CAPTCHA_DISABLED=true`` fleet-wide via flags.py).
     "solve_captcha", "request_captcha_help",
+    # Phase 8 §11.14 + browser-login handoff.  Both endpoints emit a
+    # dashboard handoff card — ``request_browser_login`` for VNC-driven
+    # interactive login, ``request_captcha_help`` for human captcha
+    # assistance — and both are now permission-gated at the dedicated
+    # mesh endpoints (``/mesh/browser-login-request``,
+    # ``/mesh/browser-captcha-help-request``).  Without these names in
+    # the validator set, an operator who narrows ``browser_actions`` to
+    # exclude the handoff would still see the second-call-to-dedicated-
+    # endpoint succeed, defeating permission narrowing.
+    "request_browser_login",
 })
 
 # Back-compat alias — retained so `host/server.py` and test fixtures that

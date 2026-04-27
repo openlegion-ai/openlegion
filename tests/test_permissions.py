@@ -325,3 +325,281 @@ class TestDefaultFallbackPropagatesBrowserActions:
         matrix = PermissionMatrix(config_path=str(path))
         for action in ("navigate", "upload_file", "download", "solve_captcha"):
             assert matrix.can_browser_action("unknown", action) is True, action
+
+
+# ── Endpoint-level gates on the dedicated handoff routes ───────────────────
+
+
+def _build_handoff_app(tmp_path, *, perms_map):
+    """Mesh app fixture for the two dedicated handoff endpoints.
+
+    Mirrors :func:`tests.test_browser_delegation._build_app` but lives here
+    so the permission tests stay co-located with the rest of the matrix
+    coverage. Both endpoints (``/mesh/browser-login-request`` and
+    ``/mesh/browser-captcha-help-request``) are gated by
+    ``can_browser_action`` post-PR, so we exercise that gate directly
+    here — the ``browser_command`` path test in ``test_browser_delegation``
+    catches the *other* bypass surface but not these two dedicated routes.
+    """
+    from unittest.mock import MagicMock
+
+    from src.host.costs import CostTracker
+    from src.host.mesh import Blackboard, MessageRouter, PubSub
+    from src.host.server import create_mesh_app
+    from src.host.traces import TraceStore
+    from src.shared.types import AgentPermissions
+
+    blackboard = Blackboard(str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    matrix = PermissionMatrix()
+    for aid, perms in perms_map.items():
+        matrix.permissions[aid] = AgentPermissions(agent_id=aid, **perms)
+    router = MessageRouter(matrix, {})
+    costs = CostTracker(str(tmp_path / "costs.db"))
+    traces = TraceStore(str(tmp_path / "traces.db"))
+
+    container_manager = MagicMock()
+    container_manager.browser_service_url = "http://browser-svc:8500"
+    container_manager.browser_auth_token = ""
+
+    event_bus = MagicMock()
+    app = create_mesh_app(
+        blackboard=blackboard,
+        pubsub=pubsub,
+        router=router,
+        permissions=matrix,
+        cost_tracker=costs,
+        trace_store=traces,
+        event_bus=event_bus,
+        container_manager=container_manager,
+    )
+    return app, event_bus
+
+
+class TestBrowserCaptchaHelpRequestPermissionGate:
+    """``/mesh/browser-captcha-help-request`` enforces
+    ``can_browser_action(agent_id, "request_captcha_help")``.
+
+    Pre-PR (Phase 8 §11.14 in PR #769) the dedicated endpoint emitted
+    the dashboard handoff card without consulting the per-action gate.
+    An operator who narrowed a template to ``browser_actions=["navigate"]``
+    saw the FIRST call (``browser_command`` → ``request_captcha_help``)
+    rejected, but the SECOND call to this endpoint succeeded — defeating
+    permission narrowing.  These tests pin that the gate now fires here.
+    """
+
+    @pytest.mark.asyncio
+    async def test_narrowed_browser_actions_rejected_403(self, tmp_path):
+        from httpx import ASGITransport, AsyncClient
+
+        app, event_bus = _build_handoff_app(
+            tmp_path,
+            perms_map={
+                "narrow-agent": {
+                    "can_use_browser": True,
+                    "browser_actions": ["navigate"],
+                },
+            },
+        )
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            resp = await client.post(
+                "/mesh/browser-captcha-help-request",
+                json={
+                    "agent_id": "narrow-agent",
+                    "service": "Cloudflare",
+                    "description": "Help me solve this CAPTCHA.",
+                },
+                headers={"X-Agent-ID": "narrow-agent"},
+            )
+        assert resp.status_code == 403, resp.text
+        assert "request_captcha_help" in resp.text
+        # Critical: the dashboard event was NOT emitted.
+        event_bus.emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_default_allow_browser_actions_succeeds(self, tmp_path):
+        """``browser_actions=None`` → default-allow → endpoint succeeds."""
+        from httpx import ASGITransport, AsyncClient
+
+        app, event_bus = _build_handoff_app(
+            tmp_path,
+            perms_map={
+                "open-agent": {"can_use_browser": True},
+            },
+        )
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            resp = await client.post(
+                "/mesh/browser-captcha-help-request",
+                json={
+                    "agent_id": "open-agent",
+                    "service": "Cloudflare",
+                    "description": "Help me solve this CAPTCHA.",
+                },
+                headers={"X-Agent-ID": "open-agent"},
+            )
+        assert resp.status_code == 200, resp.text
+        event_bus.emit.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_explicit_grant_succeeds(self, tmp_path):
+        """``browser_actions=["request_captcha_help"]`` (explicitly
+        granted) → endpoint succeeds even though everything else is
+        blocked."""
+        from httpx import ASGITransport, AsyncClient
+
+        app, event_bus = _build_handoff_app(
+            tmp_path,
+            perms_map={
+                "captcha-only-agent": {
+                    "can_use_browser": True,
+                    "browser_actions": ["request_captcha_help"],
+                },
+            },
+        )
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            resp = await client.post(
+                "/mesh/browser-captcha-help-request",
+                json={
+                    "agent_id": "captcha-only-agent",
+                    "service": "Cloudflare",
+                    "description": "Help me.",
+                },
+                headers={"X-Agent-ID": "captcha-only-agent"},
+            )
+        assert resp.status_code == 200, resp.text
+        event_bus.emit.assert_called_once()
+
+
+class TestBrowserLoginRequestPermissionGate:
+    """``/mesh/browser-login-request`` enforces
+    ``can_browser_action(agent_id, "request_browser_login")``.
+
+    Same bypass surface as the captcha-help endpoint.  Pre-PR, an
+    operator who restricted the agent's ``browser_actions`` could not
+    forbid this endpoint because the action name wasn't in
+    ``KNOWN_BROWSER_ACTIONS`` and the route did not consult the gate.
+    """
+
+    @pytest.mark.asyncio
+    async def test_narrowed_browser_actions_rejected_403(self, tmp_path):
+        from httpx import ASGITransport, AsyncClient
+
+        app, event_bus = _build_handoff_app(
+            tmp_path,
+            perms_map={
+                "narrow-agent": {
+                    "can_use_browser": True,
+                    "browser_actions": ["navigate"],
+                },
+            },
+        )
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            resp = await client.post(
+                "/mesh/browser-login-request",
+                json={
+                    "agent_id": "narrow-agent",
+                    "url": "https://x.com/login",
+                    "service": "X",
+                    "description": "Log me in.",
+                },
+                headers={"X-Agent-ID": "narrow-agent"},
+            )
+        assert resp.status_code == 403, resp.text
+        assert "request_browser_login" in resp.text
+        event_bus.emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_default_allow_browser_actions_succeeds(self, tmp_path):
+        from httpx import ASGITransport, AsyncClient
+
+        app, event_bus = _build_handoff_app(
+            tmp_path,
+            perms_map={
+                "open-agent": {"can_use_browser": True},
+            },
+        )
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            resp = await client.post(
+                "/mesh/browser-login-request",
+                json={
+                    "agent_id": "open-agent",
+                    "url": "https://x.com/login",
+                    "service": "X",
+                    "description": "Log me in.",
+                },
+                headers={"X-Agent-ID": "open-agent"},
+            )
+        assert resp.status_code == 200, resp.text
+        event_bus.emit.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_captcha_only_grant_blocks_login(self, tmp_path):
+        """Mirrors the spec scenario: an agent granted ONLY
+        ``request_captcha_help`` can use the captcha endpoint but the
+        login endpoint must 403 — separate per-action grants."""
+        from httpx import ASGITransport, AsyncClient
+
+        app, event_bus = _build_handoff_app(
+            tmp_path,
+            perms_map={
+                "captcha-only-agent": {
+                    "can_use_browser": True,
+                    "browser_actions": ["request_captcha_help"],
+                },
+            },
+        )
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            # Captcha succeeds.
+            resp_captcha = await client.post(
+                "/mesh/browser-captcha-help-request",
+                json={
+                    "agent_id": "captcha-only-agent",
+                    "service": "Cloudflare",
+                    "description": "Help me.",
+                },
+                headers={"X-Agent-ID": "captcha-only-agent"},
+            )
+            assert resp_captcha.status_code == 200, resp_captcha.text
+            # Login 403s.
+            resp_login = await client.post(
+                "/mesh/browser-login-request",
+                json={
+                    "agent_id": "captcha-only-agent",
+                    "url": "https://x.com/login",
+                    "service": "X",
+                    "description": "Log me in.",
+                },
+                headers={"X-Agent-ID": "captcha-only-agent"},
+            )
+            assert resp_login.status_code == 403, resp_login.text
+            assert "request_browser_login" in resp_login.text
+
+
+class TestRequestBrowserLoginInKnownActions:
+    """``request_browser_login`` must be in ``KNOWN_BROWSER_ACTIONS`` so
+    operators can grant it explicitly via ``browser_actions=[...]`` and
+    the mesh-side input validator on ``/mesh/browser/command`` accepts
+    it as a known action name (although the dedicated endpoint is the
+    primary call site)."""
+
+    def test_present(self):
+        from src.host.permissions import KNOWN_BROWSER_ACTIONS
+        assert "request_browser_login" in KNOWN_BROWSER_ACTIONS

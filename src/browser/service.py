@@ -24,6 +24,7 @@ from collections import deque
 from pathlib import Path
 from urllib.parse import urlparse
 
+from src.browser import captcha_policy
 from src.browser.captcha import (
     SolveResult,
     _classify_behavioral,
@@ -254,15 +255,24 @@ _captcha_audit_buckets: dict[tuple[str, str, str], dict] = {}
 
 async def _record_captcha_audit_event(
     agent_id: str, outcome: str, kind: str, page_url: str,
+    *, policy: str | None = None,
 ) -> None:
     """Aggregate a captcha gate event into the per-minute bucket.
 
-    Outcomes recorded: ``cost_cap``, ``rate_limited``, ``skipped_behavioral``.
+    Outcomes recorded: ``cost_cap``, ``rate_limited``, ``skipped_behavioral``,
+    ``low_success_failed`` (§11.18).
     Aggregation by ``(agent_id, outcome, kind)`` so a noisy retry loop on
     one agent doesn't drown out the others. ``page_url`` is redacted via
     :func:`redact_url` before storage; only the most recent redacted URL
     in the bucket is retained (the bucket is dashboard signal, not an
     audit trail).
+
+    ``policy`` (optional) records the §11.18 :func:`captcha_policy.get_site_policy`
+    classification (``"unsolvable"`` / ``"low_success"`` / ``"default"``) that
+    drove the gate decision, so operators can see WHY a solve was skipped or
+    escalated. Stored on the bucket and surfaced on the drained
+    ``captcha_gate`` payload as ``policy``. Last-write-wins within an
+    aggregation window — same convention as ``last_url``.
     """
     async with _captcha_audit_lock:
         key = (agent_id, outcome, kind)
@@ -274,10 +284,13 @@ async def _record_captcha_audit_event(
                 "count": 1,
                 "first_ts": now,
                 "last_url": safe_url,
+                "policy": policy,
             }
         else:
             bucket["count"] += 1
             bucket["last_url"] = safe_url
+            if policy is not None:
+                bucket["policy"] = policy
 
 
 async def _drain_captcha_audit() -> list[dict]:
@@ -297,7 +310,7 @@ async def _drain_captcha_audit() -> list[dict]:
         _captcha_audit_buckets.clear()
     drained = []
     for (agent_id, outcome, kind), info in buckets.items():
-        drained.append({
+        payload = {
             "type": "captcha_gate",
             "agent": agent_id,
             "outcome": outcome,
@@ -305,7 +318,14 @@ async def _drain_captcha_audit() -> list[dict]:
             "count": info["count"],
             "first_ts": info["first_ts"],
             "url": info["last_url"],
-        })
+        }
+        # §11.18 — surface the site-policy classification so operators see
+        # WHY a solve was skipped/escalated.  Older buckets created before
+        # the field was added may be missing it (back-compat with the
+        # ``policy=None`` default in :func:`_record_captcha_audit_event`).
+        if info.get("policy") is not None:
+            payload["policy"] = info["policy"]
+        drained.append(payload)
     return drained
 
 
@@ -5929,15 +5949,112 @@ class BrowserManager:
                     # cf_state == "none" — fall through to existing
                     # standalone-Turnstile / generic flow unchanged.
 
+                    # ── §11.18 — site-policy classification ──────────────
+                    # Resolve the captcha policy for the live page URL once
+                    # so we can route ``unsolvable`` hosts past the solver
+                    # entirely (saves spend on sites the solver can't
+                    # actually crack — CF Under-Attack, HUMAN Security,
+                    # DataDome) and downgrade ``low_success`` hosts to a
+                    # "try once at low confidence, escalate on failure"
+                    # flow (Google / Twitter / LinkedIn auth where token-IP
+                    # binding makes the solve unreliable).
+                    #
+                    # Hook position: AFTER §11.1 reCAPTCHA + §11.3 CF /
+                    # behavioral classifiers (so ``kind`` is precise and
+                    # ``cf_force_low_confidence`` is already known) but
+                    # BEFORE the §11.16 health/breaker gates and the
+                    # ``_metered_solve`` call — i.e. before any solver
+                    # spend.  Operator overrides
+                    # (``OPENLEGION_CAPTCHA_FORCE_SOLVE_DOMAINS`` /
+                    # ``OPENLEGION_CAPTCHA_SKIP_SOLVE_DOMAINS``) are
+                    # applied inside ``get_site_policy``.
+                    try:
+                        page_url_for_policy = inst.page.url or ""
+                    except Exception:
+                        page_url_for_policy = ""
+                    site_policy = captcha_policy.get_site_policy(
+                        page_url_for_policy,
+                    )
+                    # ``unsolvable`` short-circuits exactly like §11.3
+                    # behavioral — same envelope shape, same audit
+                    # outcome — but driven by host classification rather
+                    # than live-page selectors.  The two paths are
+                    # complementary: §11.3 catches behavioral-only
+                    # challenges by their DOM signature; §11.18 catches
+                    # them by the host even if our DOM heuristics miss
+                    # (e.g. a CF Under-Attack page rendered before our
+                    # JS probe gets a chance to run).
+                    if site_policy == "unsolvable":
+                        logger.info(
+                            "Captcha host classified as unsolvable "
+                            "(%s, kind=%s); skipping solver, escalating "
+                            "to request_captcha_help",
+                            redact_url(page_url_for_policy), kind,
+                        )
+                        await _record_captcha_audit_event(
+                            inst.agent_id, "skipped_behavioral",
+                            kind, page_url_for_policy,
+                            policy="unsolvable",
+                        )
+                        return _captcha_envelope(
+                            kind=kind,
+                            solver_attempted=False,
+                            solver_outcome="skipped_behavioral",
+                            solver_confidence="behavioral-only",
+                            next_action="request_captcha_help",
+                        )
+
+                    # ``low_success`` is NOT a short-circuit.  We continue
+                    # to the solver but force ``solver_confidence="low"``
+                    # on the result envelope and, on a non-``solved``
+                    # outcome, upgrade ``next_action`` from ``notify_user``
+                    # to ``request_captcha_help`` so the agent stops
+                    # retrying on sites where retries don't help.
+                    low_success = (site_policy == "low_success")
+
                     # Local helper applies the §11.3 CF-Turnstile
                     # confidence override (see ``cf_force_low_confidence``)
-                    # to every return path through the solver block. Token
+                    # AND the §11.18 ``low_success`` overrides to every
+                    # return path through the solver block. Token
                     # validity is unrelated to the per-call solve verdict
-                    # for CF-bound Turnstile, so the override fires
-                    # regardless of ``solver_outcome``.
+                    # for CF-bound Turnstile, so the CF override fires
+                    # regardless of ``solver_outcome``.  The ``low_success``
+                    # override always forces confidence to "low"; on a
+                    # FAILED solve outcome it ALSO upgrades
+                    # ``next_action`` to ``request_captcha_help`` (the
+                    # operator told us this host is unreliable; escalate
+                    # rather than letting the agent retry).
                     def _finalize(envelope: dict) -> dict:
                         if cf_force_low_confidence:
                             envelope["solver_confidence"] = "low"
+                        if low_success:
+                            envelope["solver_confidence"] = "low"
+                            outcome = envelope.get("solver_outcome")
+                            if outcome and outcome != "solved":
+                                # Audit: surface the upgrade so operators see
+                                # "low-success-attempted-and-failed" distinctly
+                                # from a vanilla provider rejection. Fire-and-
+                                # forget — we're inside a sync helper so
+                                # schedule the coroutine on the running loop.
+                                envelope["next_action"] = "request_captcha_help"
+                                envelope["low_success_failed"] = True
+                                try:
+                                    asyncio.get_running_loop().create_task(
+                                        _record_captcha_audit_event(
+                                            inst.agent_id,
+                                            "low_success_failed",
+                                            envelope.get("kind", "unknown"),
+                                            page_url_for_policy,
+                                            policy="low_success",
+                                        ),
+                                    )
+                                except RuntimeError:
+                                    # No running loop (defensive — _check_captcha
+                                    # is always async).  Drop the audit event
+                                    # rather than crashing the envelope.
+                                    logger.debug(
+                                        "low_success audit skipped: no loop",
+                                    )
                         return envelope
 
                     if self._captcha_solver:
