@@ -23,7 +23,27 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.browser.captcha import SolveResult
 from src.browser.service import BrowserManager
+
+
+def _solved_result(*, used_proxy_aware: bool = False, compat_rejected: bool = False) -> SolveResult:
+    return SolveResult(
+        token="tok",
+        injection_succeeded=True,
+        used_proxy_aware=used_proxy_aware,
+        compat_rejected=compat_rejected,
+    )
+
+
+def _failed_result() -> SolveResult:
+    """Solver returned no token (sitekey-fail / verdict-reject path)."""
+    return SolveResult(
+        token=None,
+        injection_succeeded=False,
+        used_proxy_aware=False,
+        compat_rejected=False,
+    )
 
 # Selectors checked in order by `_check_captcha`. We use this to drive
 # the mock such that exactly one selector "matches" per scenario.
@@ -41,21 +61,17 @@ _SELECTOR_ORDER = [
 def _make_manager(*, solver=None) -> BrowserManager:
     mgr = BrowserManager.__new__(BrowserManager)
     if solver is not None:
-        # §11.16 added two sync side-channel getters on CaptchaSolver
-        # that _check_captcha consults BEFORE attempting solve(). When
-        # the test passes a raw AsyncMock as the solver, the unset
-        # attributes resolve to coroutine-returning AsyncMocks whose
-        # truthy-check trips the §11.16 short-circuit. Default both to
-        # MagicMock returning False so envelope-shape tests exercise
-        # the solve path. Tests that want to assert the short-circuit
-        # branches override these explicitly (see test_captcha_health).
-        if not hasattr(solver, "is_solver_unreachable") or not isinstance(
-            getattr(solver, "is_solver_unreachable", None), MagicMock,
-        ):
-            solver.is_solver_unreachable = MagicMock(return_value=False)
-        if not hasattr(solver, "is_breaker_open") or not isinstance(
-            getattr(solver, "is_breaker_open", None), MagicMock,
-        ):
+        # §11.16 short-circuit getters. ``is_solver_unreachable`` is async
+        # post-refactor (lazy probe); ``is_breaker_open`` stays sync.
+        # Default both to non-tripping (False) UNLESS the test set them
+        # with an explicit bool return_value before calling us.
+        existing = getattr(solver, "is_solver_unreachable", None)
+        if not (isinstance(existing, (AsyncMock, MagicMock))
+                and isinstance(getattr(existing, "return_value", None), bool)):
+            solver.is_solver_unreachable = AsyncMock(return_value=False)
+        existing_b = getattr(solver, "is_breaker_open", None)
+        if not (isinstance(existing_b, (AsyncMock, MagicMock))
+                and isinstance(getattr(existing_b, "return_value", None), bool)):
             solver.is_breaker_open = MagicMock(return_value=False)
     mgr._captcha_solver = solver
     return mgr
@@ -134,7 +150,7 @@ class TestRecaptchaSolverSuccess:
     @pytest.mark.asyncio
     async def test_recaptcha_solved(self):
         solver = AsyncMock()
-        solver.solve = AsyncMock(return_value=True)
+        solver.solve = AsyncMock(return_value=_solved_result())
         mgr = _make_manager(solver=solver)
         inst = _make_inst('iframe[src*="recaptcha"]')
         result = await mgr._check_captcha(inst)
@@ -475,12 +491,12 @@ class TestInjectionFailureReasonShape:
             ('iframe[src*="hcaptcha"]', lambda: None, "no_solver"),
             (
                 'iframe[src*="hcaptcha"]',
-                lambda: AsyncMock(solve=AsyncMock(return_value=True)),
+                lambda: AsyncMock(solve=AsyncMock(return_value=_solved_result())),
                 "solved",
             ),
             (
                 'iframe[src*="hcaptcha"]',
-                lambda: AsyncMock(solve=AsyncMock(return_value=False)),
+                lambda: AsyncMock(solve=AsyncMock(return_value=_failed_result())),
                 "rejected",
             ),
             (
@@ -516,17 +532,22 @@ class TestSolverFalseConflation:
     """
 
     @pytest.mark.asyncio
-    async def test_solver_false_maps_to_rejected_today(self):
+    async def test_solver_no_token_maps_to_rejected(self):
+        """Solver returned no token (sitekey-fail / verdict-reject path).
+
+        The post-refactor :class:`SolveResult` distinguishes:
+          * ``token=None`` → ``rejected`` (no provider charge).
+          * ``token=non-None, injection_succeeded=False`` →
+            ``injection_failed`` (provider charged; see
+            :class:`TestInjectionFailedDistinct` below).
+        """
         solver = AsyncMock()
-        solver.solve = AsyncMock(return_value=False)
+        solver.solve = AsyncMock(return_value=_failed_result())
         mgr = _make_manager(solver=solver)
         inst = _make_inst('iframe[src*="hcaptcha"]')
         result = await mgr._check_captcha(inst)
         assert result["captcha_found"] is True
         assert result["solver_attempted"] is True
-        # ``injection_failed`` is reserved but unreachable today — the
-        # solver returns plain bool. Both injection-fail and verdict-fail
-        # surface as ``rejected``.
         assert result["solver_outcome"] == "rejected"
         assert result["injection_failure_reason"] is None
 

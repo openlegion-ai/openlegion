@@ -549,7 +549,8 @@ class TestCredentialLeakCanary:
             page, 'iframe[src*="recaptcha"]', "https://example.com/login",
             agent_id="agent-1",
         )
-        assert result is True, "solver should have succeeded under the mock"
+        assert result.token is not None, "solver should have retrieved a token"
+        assert result.injection_succeeded, "solver should have injected the token"
 
         # ── Step 5: ASSERT — the canary string must NOT appear anywhere
         # in any outbound request.
@@ -662,8 +663,8 @@ class TestCredentialLeakCanary:
     @pytest.mark.asyncio
     async def test_compat_rejection_marks_envelope_low_confidence(self, monkeypatch):
         """When a proxy is configured but the compat table rejects the
-        scheme for the variant, ``last_compat_rejected`` is True so the
-        envelope downgrades to ``solver_confidence='low'``.
+        scheme for the variant, ``SolveResult.compat_rejected`` is True so
+        the envelope downgrades to ``solver_confidence='low'``.
         """
         # 2captcha + https is rejected by the compat table.
         monkeypatch.setenv("CAPTCHA_SOLVER_PROXY_TYPE", "https")
@@ -720,9 +721,10 @@ class TestCredentialLeakCanary:
             page, 'iframe[src*="recaptcha"]', "https://example.com",
             agent_id="agent-1",
         )
-        assert result is True
-        assert solver.last_used_proxy_aware is False
-        assert solver.last_compat_rejected is True
+        assert result.token is not None
+        assert result.injection_succeeded
+        assert result.used_proxy_aware is False
+        assert result.compat_rejected is True
         # Body uses proxyless task name (no proxy creds sent).
         body = captured[0]["json"]
         task = body.get("task", {})

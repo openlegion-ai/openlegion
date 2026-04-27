@@ -27,6 +27,71 @@ from src.shared.utils import setup_logging
 
 logger = setup_logging("browser.captcha")
 
+
+# ── §11.2/§11.13 structured solver result ─────────────────────────────────
+#
+# Replaces the old ``solve() -> bool`` + per-instance scratch-pad attrs
+# (``last_used_proxy_aware`` / ``last_compat_rejected``) which raced across
+# concurrent agents sharing a single CaptchaSolver instance.
+#
+# The dataclass is frozen so callers cannot accidentally mutate it after
+# they've stamped it onto an envelope; concurrent solves on different
+# agents now each own their own SolveResult and the cross-agent clobber
+# is structurally impossible.
+@dataclass(frozen=True)
+class SolveResult:
+    """Per-call solver result.
+
+    Attributes:
+        token: Provider-issued solution token, or ``None`` when the solver
+            never retrieved one (sitekey extraction failed, provider
+            returned ``errorId>0``, the breaker / health gate fired, etc.).
+        injection_succeeded: Only meaningful when ``token`` is not ``None``.
+            ``False`` indicates the provider was paid but the token failed
+            to land in the page DOM — accounting MUST still increment
+            because the provider already charged. Caller surfaces
+            ``solver_outcome="injection_failed"`` in this case.
+        used_proxy_aware: ``True`` iff the body sent to the provider used
+            the proxy-aware task family + carried the dedicated solver-proxy
+            credential fields. Drives cost-counter pricing tier (~3× the
+            proxyless rate) and replaces the old per-instance
+            ``last_used_proxy_aware`` scratch attr.
+        compat_rejected: ``True`` iff a solver proxy was configured but the
+            (provider, variant, type) tuple was rejected by the compat
+            table — the body fell back to proxyless. Drives the
+            ``solver_confidence="low"`` envelope downgrade. Replaces the
+            old per-instance ``last_compat_rejected`` scratch attr.
+        skipped: When non-``None``, the metering layer short-circuited
+            BEFORE the solver HTTP call. One of:
+              * ``"rate_limited"`` — per-agent solve-rate gate fired.
+              * ``"cost_cap"`` — per-agent monthly cost-cap reached.
+            ``None`` for a real solver attempt (success or failure).
+
+    Field-population guarantee for ``_metered_solve`` consumers:
+      * ``skipped="rate_limited"`` → ``token=None, injection_succeeded=False,
+        used_proxy_aware=False, compat_rejected=False``.
+      * ``skipped="cost_cap"`` → same.
+      * ``skipped=None``: every other field reflects the actual solver
+        attempt; ``token is None`` indicates a failed solve.
+    """
+
+    token: str | None
+    injection_succeeded: bool
+    used_proxy_aware: bool
+    compat_rejected: bool
+    skipped: str | None = None
+
+    def __bool__(self) -> bool:
+        """Truthiness == "agent-visible success" (token retrieved AND injected).
+
+        Mirrors the old ``solve() -> bool`` semantics so existing call sites
+        that still write ``if result: ...`` keep working without code
+        changes. New code should branch on ``result.token is not None`` for
+        cost-accounting decisions and ``result.injection_succeeded`` for
+        agent-visible outcome — these two are no longer the same thing.
+        """
+        return self.token is not None and self.injection_succeeded
+
 # §11.9 — per-type solver timeout. Each kind enum string maps to the
 # overall solve deadline in milliseconds (sitekey extract → submit →
 # poll-until-ready). The 30s ``httpx`` timeout for individual provider
@@ -176,9 +241,15 @@ _CAPTCHA_TYPE_MAP: dict[str, str] = {
 #
 # 2Captcha
 _2CAPTCHA_TASK_TYPES: dict[str, dict[str, object]] = {
+    # Legacy ``"recaptcha"`` key — kept so the classifier-unknown fallback
+    # in :func:`_classify_captcha` still has somewhere to land. Previously
+    # mapped to ``NormalRecaptchaTaskProxyless`` which 2captcha retired in
+    # April 2026 (submitting it returns ``ERROR_INVALID_TASK_TYPE``).
+    # Aliased to ``RecaptchaV2TaskProxyless`` — the safe v2-checkbox default
+    # — so the legacy task name is no longer sent over the wire.
     "recaptcha": {
-        "proxyless": "NormalRecaptchaTaskProxyless",  # legacy alias
-        "proxy_aware": None,
+        "proxyless": "RecaptchaV2TaskProxyless",
+        "proxy_aware": "RecaptchaV2Task",
         "extra": {},
     },
     "hcaptcha": {
@@ -933,17 +1004,15 @@ class CaptchaSolver:
         # Coordinates breaker reads/writes with health-check init across
         # concurrent agents that share this solver instance.
         self._state_lock: asyncio.Lock = asyncio.Lock()
-        # ── §11.2 last-solve proxy metadata ─────────────────────────────
-        # ``solve()`` stamps these so the BrowserManager caller can pick
-        # them up without changing the public ``solve() -> bool`` return
-        # contract. ``last_used_proxy_aware`` reflects what was actually
-        # sent (proxy-aware task name + creds vs proxyless); the cost
-        # counter uses this to apply proxy-aware pricing. ``last_compat_rejected``
-        # is True when a proxy was configured but the (provider, variant,
-        # type) tuple rejected — caller downgrades ``solver_confidence``
-        # to "low".
-        self.last_used_proxy_aware: bool = False
-        self.last_compat_rejected: bool = False
+        # NOTE: Prior versions of this class exposed ``last_used_proxy_aware``
+        # and ``last_compat_rejected`` instance attributes that ``solve()``
+        # stamped after every call so the BrowserManager could pick up the
+        # proxy-aware billing tier. Those attrs RACED ACROSS CONCURRENT
+        # AGENTS sharing a single CaptchaSolver instance — agent A's solve
+        # could overwrite agent B's flags between B's stamp and B's read.
+        # Replaced by the per-call :class:`SolveResult` dataclass returned
+        # from :meth:`solve`. Subclasses that referenced the old attrs need
+        # to migrate to the new ``solve() -> SolveResult`` shape.
         # ── §11.9 per-type timeout table ────────────────────────────────
         # Resolved once at solver init from the static defaults plus any
         # ``CAPTCHA_TIMEOUT_<KIND_UPPER_UNDERSCORE>_MS`` env overrides.
@@ -994,8 +1063,24 @@ class CaptchaSolver:
 
     # ── §11.16 health check + circuit breaker ──────────────────────────
 
-    def is_solver_unreachable(self) -> bool:
-        """Sticky for the rest of the instance-session once health-check fails."""
+    async def is_solver_unreachable(self) -> bool:
+        """Return ``True`` iff the solver has been marked unreachable.
+
+        Lazy: when the per-process health probe hasn't fired yet, this
+        method drives it before reading the cached state. Prior versions
+        of this method were synchronous and read a pre-set flag —
+        :meth:`solve` was the *only* path that triggered the probe, so
+        the FIRST captcha of a session ALWAYS slipped past the
+        :meth:`_check_captcha` ``is_solver_unreachable()`` gate (which
+        runs BEFORE :meth:`solve`). Lazy + async closes that hole: the
+        probe fires on the gate's read, not on the eventual solve.
+
+        After the probe completes the result is sticky for the rest of
+        the instance-session — subsequent calls return the cached flag
+        without re-probing.
+        """
+        if not self._solver_health_checked:
+            await self._ensure_health_checked()
         return self._solver_unreachable
 
     def is_breaker_open(self) -> bool:
@@ -1191,7 +1276,7 @@ class CaptchaSolver:
         *,
         agent_id: str | None = None,
         kind: str | None = None,
-    ) -> bool:
+    ) -> SolveResult:
         """Attempt to solve a CAPTCHA on the page.
 
         Args:
@@ -1208,24 +1293,29 @@ class CaptchaSolver:
                 signal). Always pass when the caller already has it.
 
         Returns:
-            True if the CAPTCHA was solved and token injected, False
-            otherwise. On unreachable solver / open breaker, returns False
-            without issuing a provider HTTP call. Callers should consult
-            :meth:`is_solver_unreachable` and :meth:`is_breaker_open` to
-            distinguish those cases from a genuine solve failure.
+            :class:`SolveResult` describing the outcome. Fields:
 
-        After every call (success or failure) the caller may inspect
-        :attr:`last_used_proxy_aware` and :attr:`last_compat_rejected`
-        to learn whether the dedicated solver proxy was applied (drives
-        cost-counter pricing tier and ``solver_confidence`` downgrades).
+              * ``token`` — non-``None`` iff a token was retrieved from
+                the provider (regardless of whether injection succeeded).
+                Cost accounting MUST fire on a non-``None`` token because
+                the provider already charged.
+              * ``injection_succeeded`` — ``True`` iff the token landed
+                in the page DOM. Only meaningful when ``token`` is set.
+              * ``used_proxy_aware`` / ``compat_rejected`` — replaces the
+                old per-instance scratch attrs. Read directly off the
+                returned :class:`SolveResult`; concurrent solves on
+                different agents now own their own SolveResult objects
+                instead of racing on shared instance state.
+
+            Short-circuit returns (no provider HTTP call):
+              * solver unreachable → ``token=None, injection_succeeded=False``.
+              * breaker open → same.
         """
-        # Reset the per-call metadata up front so a short-circuit return
-        # (unreachable / breaker) doesn't carry stale flags into the
-        # caller's envelope.
-        self.last_used_proxy_aware = False
-        self.last_compat_rejected = False
-
         # Per-process gate — runs at most once even under concurrent solves.
+        # NOTE: ``is_solver_unreachable`` is the authoritative gate (now
+        # async + lazy in §11.16); awaiting the helper here is kept as a
+        # belt-and-suspenders cache primer for direct callers that don't
+        # go through the gate.
         await self._ensure_health_checked()
 
         if self._solver_unreachable:
@@ -1233,14 +1323,20 @@ class CaptchaSolver:
                 "Skipping solve: solver marked unreachable for this session "
                 "(provider=%s)", self.provider,
             )
-            return False
+            return SolveResult(
+                token=None, injection_succeeded=False,
+                used_proxy_aware=False, compat_rejected=False,
+            )
 
         if self.is_breaker_open():
             logger.warning(
                 "Skipping solve: solver circuit breaker open until %.0f (provider=%s)",
                 self._solver_breaker_until, self.provider,
             )
-            return False
+            return SolveResult(
+                token=None, injection_succeeded=False,
+                used_proxy_aware=False, compat_rejected=False,
+            )
 
         captcha_type = _classify_captcha(selector)
         # §11.1 — when the coarse selector classifier says "recaptcha", run
@@ -1265,7 +1361,10 @@ class CaptchaSolver:
         if not sitekey:
             logger.warning("Could not extract sitekey for %s CAPTCHA", captcha_type)
             await self._record_solver_outcome(success=False)
-            return False
+            return SolveResult(
+                token=None, injection_succeeded=False,
+                used_proxy_aware=False, compat_rejected=False,
+            )
 
         # §11.2 — load the dedicated solver-proxy config (NOT the agent's
         # primary egress proxy; see ``get_solver_proxy_config`` docstring).
@@ -1296,20 +1395,31 @@ class CaptchaSolver:
                 timeout_s, timeout_kind,
             )
             await self._record_solver_outcome(success=False)
-            return False
-        except Exception:
-            logger.exception("CAPTCHA solve failed")
+            return SolveResult(
+                token=None, injection_succeeded=False,
+                used_proxy_aware=False, compat_rejected=False,
+            )
+        except Exception as exc:
+            # Redact the exception text — provider error responses
+            # occasionally echo ``clientKey`` back. Pair with
+            # :func:`redact_url` for any URL-shaped data in ``repr(exc)``.
+            logger.warning(
+                "CAPTCHA solve failed: %s",
+                _redact_clientkey_text(redact_url(repr(exc))),
+            )
             await self._record_solver_outcome(success=False)
-            return False
-
-        # Stamp metadata before returning so the caller can read the
-        # actual task type that was sent.
-        self.last_used_proxy_aware = used_proxy_aware
-        self.last_compat_rejected = compat_rejected
+            return SolveResult(
+                token=None, injection_succeeded=False,
+                used_proxy_aware=False, compat_rejected=False,
+            )
 
         if not token:
             await self._record_solver_outcome(success=False)
-            return False
+            return SolveResult(
+                token=None, injection_succeeded=False,
+                used_proxy_aware=used_proxy_aware,
+                compat_rejected=compat_rejected,
+            )
 
         # §11.11 — solve-pacing Gaussian delay between solver token
         # retrieval and DOM injection. Real users take 5-15s between a
@@ -1328,8 +1438,16 @@ class CaptchaSolver:
             )
         else:
             logger.warning("CAPTCHA solved but token injection failed")
-        await self._record_solver_outcome(success=injected)
-        return injected
+        # Breaker tracks SOLVER reliability (provider returned a token), not
+        # injection success. Provider was paid the moment the token came
+        # back; injection failure is our problem, not theirs.
+        await self._record_solver_outcome(success=True)
+        return SolveResult(
+            token=token,
+            injection_succeeded=bool(injected),
+            used_proxy_aware=used_proxy_aware,
+            compat_rejected=compat_rejected,
+        )
 
     async def _extract_sitekey(self, page, captcha_type: str) -> str | None:
         """Extract the sitekey from the page DOM."""

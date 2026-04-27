@@ -40,17 +40,45 @@ def _make_manager(*, solver=None) -> BrowserManager:
     """Build a bare ``BrowserManager`` shell with optional solver mock.
 
     The §11.16 solver-health side-channels (``is_solver_unreachable`` /
-    ``is_breaker_open``) are defaulted to ``False`` so the §11.3
-    short-circuits are exercised separately from the §11.16 ones.
+    ``is_breaker_open``) are defaulted to non-tripping (return False) so
+    the §11.3 short-circuits are exercised separately from the §11.16
+    ones. Post-refactor ``is_solver_unreachable`` is async (lazy probe).
+
+    Tests that want to assert the §11.16 short-circuit branches set the
+    attributes WITH a concrete bool ``return_value`` BEFORE calling
+    _make_manager; the helper detects that and leaves them untouched.
     """
     mgr = BrowserManager.__new__(BrowserManager)
     if solver is not None:
-        if not isinstance(getattr(solver, "is_solver_unreachable", None), MagicMock):
-            solver.is_solver_unreachable = MagicMock(return_value=False)
-        if not isinstance(getattr(solver, "is_breaker_open", None), MagicMock):
+        # Detect explicit setup via concrete bool return_value. Auto-spec'd
+        # children of AsyncMock have ``return_value`` that's a Mock, not a
+        # bool — those need our defaults.
+        existing = getattr(solver, "is_solver_unreachable", None)
+        if not (isinstance(existing, (AsyncMock, MagicMock))
+                and isinstance(getattr(existing, "return_value", None), bool)):
+            solver.is_solver_unreachable = AsyncMock(return_value=False)
+        existing_b = getattr(solver, "is_breaker_open", None)
+        if not (isinstance(existing_b, (AsyncMock, MagicMock))
+                and isinstance(getattr(existing_b, "return_value", None), bool)):
             solver.is_breaker_open = MagicMock(return_value=False)
     mgr._captcha_solver = solver
     return mgr
+
+
+def _solved_sr():
+    from src.browser.captcha import SolveResult
+    return SolveResult(
+        token="tok", injection_succeeded=True,
+        used_proxy_aware=False, compat_rejected=False,
+    )
+
+
+def _failed_sr():
+    from src.browser.captcha import SolveResult
+    return SolveResult(
+        token=None, injection_succeeded=False,
+        used_proxy_aware=False, compat_rejected=False,
+    )
 
 
 def _make_inst(
@@ -179,7 +207,7 @@ class TestCfAutoStuck:
         falls through to the behavioral envelope. Solver must NOT be invoked.
         """
         solver = AsyncMock()
-        solver.solve = AsyncMock(return_value=True)
+        solver.solve = AsyncMock(return_value=_solved_sr())
         mgr = _make_manager(solver=solver)
         inst = _make_inst(
             matching_selector='iframe[src*="challenges.cloudflare.com"]',
@@ -214,7 +242,7 @@ class TestCfUnderAttack:
         Solver call would be useless — expect behavioral envelope.
         """
         solver = AsyncMock()
-        solver.solve = AsyncMock(return_value=True)
+        solver.solve = AsyncMock(return_value=_solved_sr())
         mgr = _make_manager(solver=solver)
         inst = _make_inst(
             matching_selector='iframe[src*="challenges.cloudflare.com"]',
@@ -248,7 +276,7 @@ class TestCfTurnstileEmbedded:
         ``solver_confidence`` is forced to ``"low"`` regardless of verdict.
         """
         solver = AsyncMock()
-        solver.solve = AsyncMock(return_value=True)
+        solver.solve = AsyncMock(return_value=_solved_sr())
         mgr = _make_manager(solver=solver)
         inst = _make_inst(
             matching_selector='iframe[src*="challenges.cloudflare.com"]',
@@ -273,7 +301,7 @@ class TestCfTurnstileEmbedded:
     async def test_cf_turnstile_embedded_low_confidence_on_solver_failure(self):
         """Same override applies when solver returns False (rejected)."""
         solver = AsyncMock()
-        solver.solve = AsyncMock(return_value=False)
+        solver.solve = AsyncMock(return_value=_failed_sr())
         mgr = _make_manager(solver=solver)
         inst = _make_inst(
             matching_selector='iframe[src*="challenges.cloudflare.com"]',
@@ -330,7 +358,7 @@ class TestPerimeterXBehavioral:
     async def test_px_legacy_selector_is_behavioral(self):
         """PerimeterX ``#px-captcha`` legacy selector → ``px-press-hold``."""
         solver = AsyncMock()
-        solver.solve = AsyncMock(return_value=True)
+        solver.solve = AsyncMock(return_value=_solved_sr())
         mgr = _make_manager(solver=solver)
         inst = _make_inst(
             matching_selector='[class*="captcha"]',
@@ -352,7 +380,7 @@ class TestPerimeterXBehavioral:
         family, just different DOM markers.
         """
         solver = AsyncMock()
-        solver.solve = AsyncMock(return_value=True)
+        solver.solve = AsyncMock(return_value=_solved_sr())
         mgr = _make_manager(solver=solver)
         inst = _make_inst(
             matching_selector='[class*="captcha"]',
@@ -371,7 +399,7 @@ class TestDataDome:
     async def test_datadome_blocker_is_behavioral(self):
         """``/blocker`` path on captcha-delivery.com → behavioral envelope."""
         solver = AsyncMock()
-        solver.solve = AsyncMock(return_value=True)
+        solver.solve = AsyncMock(return_value=_solved_sr())
         mgr = _make_manager(solver=solver)
         inst = _make_inst(
             matching_selector='iframe[src*="captcha"]',
@@ -447,9 +475,9 @@ class TestBehavioralBeforeSolverGate:
     @pytest.mark.asyncio
     async def test_behavioral_with_unreachable_solver(self):
         solver = AsyncMock()
-        solver.is_solver_unreachable = MagicMock(return_value=True)
+        solver.is_solver_unreachable = AsyncMock(return_value=True)
         solver.is_breaker_open = MagicMock(return_value=False)
-        solver.solve = AsyncMock(return_value=True)
+        solver.solve = AsyncMock(return_value=_solved_sr())
         mgr = _make_manager(solver=solver)
         inst = _make_inst(
             matching_selector='[class*="captcha"]',
@@ -467,9 +495,9 @@ class TestBehavioralBeforeSolverGate:
     @pytest.mark.asyncio
     async def test_behavioral_with_breaker_open(self):
         solver = AsyncMock()
-        solver.is_solver_unreachable = MagicMock(return_value=False)
+        solver.is_solver_unreachable = AsyncMock(return_value=False)
         solver.is_breaker_open = MagicMock(return_value=True)
-        solver.solve = AsyncMock(return_value=True)
+        solver.solve = AsyncMock(return_value=_solved_sr())
         mgr = _make_manager(solver=solver)
         inst = _make_inst(
             matching_selector='iframe[src*="captcha"]',
@@ -489,9 +517,9 @@ class TestBehavioralBeforeSolverGate:
         is the CF behavioral kind, not ``no_solver``.
         """
         solver = AsyncMock()
-        solver.is_solver_unreachable = MagicMock(return_value=True)
+        solver.is_solver_unreachable = AsyncMock(return_value=True)
         solver.is_breaker_open = MagicMock(return_value=False)
-        solver.solve = AsyncMock(return_value=True)
+        solver.solve = AsyncMock(return_value=_solved_sr())
         mgr = _make_manager(solver=solver)
         inst = _make_inst(
             matching_selector='iframe[src*="challenges.cloudflare.com"]',
