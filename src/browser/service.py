@@ -5695,6 +5695,7 @@ class BrowserManager:
                         try:
                             solved = await self._captcha_solver.solve(
                                 inst.page, sel, inst.page.url,
+                                agent_id=inst.agent_id,
                             )
                         except asyncio.TimeoutError:
                             # Solver took too long — true "timeout" semantic.
@@ -5734,10 +5735,30 @@ class BrowserManager:
                                 next_action="notify_user",
                             ))
                         if solved:
+                            # §11.2 — when the solver-proxy compat table
+                            # rejected the configured proxy for this
+                            # variant, we sent the proxyless task body
+                            # instead. The solve still succeeded, but the
+                            # operator's chosen IP profile didn't reach
+                            # the provider — signal "low" confidence so
+                            # downstream consumers can surface "the token
+                            # came from the provider's pool, not yours".
+                            # Strict ``is True`` so test mocks that
+                            # auto-spec attrs as MagicMocks (truthy) don't
+                            # accidentally trip the downgrade. The §11.3
+                            # ``_finalize`` helper still applies on top —
+                            # CF-Turnstile force-low override converges
+                            # naturally with the compat-rejected downgrade.
+                            confidence = "high"
+                            if getattr(
+                                self._captcha_solver,
+                                "last_compat_rejected", False,
+                            ) is True:
+                                confidence = "low"
                             return _finalize(_captcha_envelope(
                                 kind=kind, solver_attempted=True,
                                 solver_outcome="solved",
-                                solver_confidence="high",
+                                solver_confidence=confidence,
                                 next_action="solved",
                             ))
                         # solver.solve() returned False. Today this conflates
@@ -5999,21 +6020,35 @@ class BrowserManager:
                 inst._last_solve_attempt = ("", page_url, time.time())
 
                 # Cost accounting on success: look up published rate by
-                # (provider, kind) and increment. Skip when unpriced
-                # rather than guess (under-count > over-count for trust).
+                # (provider, kind, proxy_aware) and increment. Skip when
+                # unpriced rather than guess (under-count > over-count
+                # for trust). §11.2: ``proxy_aware`` is read from the
+                # solver's last-call metadata so we bill the tier that
+                # was actually sent (proxy-aware ~3× the proxyless rate).
                 if pre_check.get("solver_outcome") == "solved":
                     provider = ""
+                    proxy_aware_flag = False
                     if self._captcha_solver is not None:
                         provider = getattr(self._captcha_solver, "provider", "")
+                        # Strict ``is True`` so AsyncMock attrs (truthy
+                        # MagicMock instances) don't promote the price tier.
+                        proxy_aware_flag = getattr(
+                            self._captcha_solver,
+                            "last_used_proxy_aware",
+                            False,
+                        ) is True
                     if provider:
                         from src.browser import captcha_cost_counter as _cost
-                        cents = _cost.estimate_cents(provider, kind)
+                        cents = _cost.estimate_cents(
+                            provider, kind, proxy_aware=proxy_aware_flag,
+                        )
                         if cents is None:
                             logger.warning(
                                 "captcha solve: no published rate for "
-                                "provider=%s kind=%s — skipping cost "
-                                "increment (under-count > over-count)",
-                                provider, kind,
+                                "provider=%s kind=%s proxy_aware=%s — "
+                                "skipping cost increment "
+                                "(under-count > over-count)",
+                                provider, kind, proxy_aware_flag,
                             )
                         else:
                             await _cost.add_cost(agent_id, cents)

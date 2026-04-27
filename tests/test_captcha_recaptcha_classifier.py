@@ -351,52 +351,67 @@ class TestTaskTypeTables:
     ``RecaptchaV3EnterpriseTaskProxyless`` type).
     """
 
+    # §11.2 reshaped each entry to ``{"proxyless": ..., "proxy_aware": ...,
+    # "extra": {...}}`` so the body builder can pick a proxy-aware task name
+    # when a dedicated solver proxy is configured. The proxyless name (the
+    # one that goes to the provider when no proxy config is set) is what
+    # these tests assert.
+
     def test_2captcha_v2_checkbox(self):
         entry = _2CAPTCHA_TASK_TYPES["recaptcha-v2-checkbox"]
-        assert entry["type"] == "RecaptchaV2TaskProxyless"
-        assert "isInvisible" not in entry
-        assert "isEnterprise" not in entry
+        assert entry["proxyless"] == "RecaptchaV2TaskProxyless"
+        assert entry["proxy_aware"] == "RecaptchaV2Task"
+        assert entry["extra"] == {}
 
     def test_2captcha_v2_invisible(self):
         entry = _2CAPTCHA_TASK_TYPES["recaptcha-v2-invisible"]
-        assert entry["type"] == "RecaptchaV2TaskProxyless"
-        assert entry["isInvisible"] is True
+        assert entry["proxyless"] == "RecaptchaV2TaskProxyless"
+        assert entry["proxy_aware"] == "RecaptchaV2Task"
+        assert entry["extra"] == {"isInvisible": True}
 
     def test_2captcha_v3(self):
         entry = _2CAPTCHA_TASK_TYPES["recaptcha-v3"]
-        assert entry["type"] == "RecaptchaV3TaskProxyless"
+        assert entry["proxyless"] == "RecaptchaV3TaskProxyless"
+        # 2captcha has no documented proxy-aware v3 task as of April 2026.
+        assert entry["proxy_aware"] is None
 
     def test_2captcha_enterprise_v2(self):
         entry = _2CAPTCHA_TASK_TYPES["recaptcha-enterprise-v2"]
-        assert entry["type"] == "RecaptchaV2EnterpriseTaskProxyless"
+        assert entry["proxyless"] == "RecaptchaV2EnterpriseTaskProxyless"
+        assert entry["proxy_aware"] == "RecaptchaV2EnterpriseTask"
 
     def test_2captcha_enterprise_v3_uses_v3_with_flag(self):
         """2captcha drift: no standalone v3-Enterprise task; flag instead."""
         entry = _2CAPTCHA_TASK_TYPES["recaptcha-enterprise-v3"]
-        assert entry["type"] == "RecaptchaV3TaskProxyless"
-        assert entry["isEnterprise"] is True
+        assert entry["proxyless"] == "RecaptchaV3TaskProxyless"
+        assert entry["extra"] == {"isEnterprise": True}
 
     def test_capsolver_v2_checkbox(self):
         entry = _CAPSOLVER_TASK_TYPES["recaptcha-v2-checkbox"]
-        assert entry["type"] == "ReCaptchaV2TaskProxyLess"
-        assert "isInvisible" not in entry
+        assert entry["proxyless"] == "ReCaptchaV2TaskProxyLess"
+        assert entry["proxy_aware"] == "ReCaptchaV2Task"
+        assert entry["extra"] == {}
 
     def test_capsolver_v2_invisible(self):
         entry = _CAPSOLVER_TASK_TYPES["recaptcha-v2-invisible"]
-        assert entry["type"] == "ReCaptchaV2TaskProxyLess"
-        assert entry["isInvisible"] is True
+        assert entry["proxyless"] == "ReCaptchaV2TaskProxyLess"
+        assert entry["proxy_aware"] == "ReCaptchaV2Task"
+        assert entry["extra"] == {"isInvisible": True}
 
     def test_capsolver_v3(self):
         entry = _CAPSOLVER_TASK_TYPES["recaptcha-v3"]
-        assert entry["type"] == "ReCaptchaV3TaskProxyLess"
+        assert entry["proxyless"] == "ReCaptchaV3TaskProxyLess"
+        assert entry["proxy_aware"] == "ReCaptchaV3Task"
 
     def test_capsolver_enterprise_v2(self):
         entry = _CAPSOLVER_TASK_TYPES["recaptcha-enterprise-v2"]
-        assert entry["type"] == "ReCaptchaV2EnterpriseTaskProxyLess"
+        assert entry["proxyless"] == "ReCaptchaV2EnterpriseTaskProxyLess"
+        assert entry["proxy_aware"] == "ReCaptchaV2EnterpriseTask"
 
     def test_capsolver_enterprise_v3(self):
         entry = _CAPSOLVER_TASK_TYPES["recaptcha-enterprise-v3"]
-        assert entry["type"] == "ReCaptchaV3EnterpriseTaskProxyLess"
+        assert entry["proxyless"] == "ReCaptchaV3EnterpriseTaskProxyLess"
+        assert entry["proxy_aware"] == "ReCaptchaV3EnterpriseTask"
 
 
 # ── 9. Task-body merger ───────────────────────────────────────────────────
@@ -412,9 +427,15 @@ class TestTaskBodyMerger:
         # CaptchaSolver's __init__ does no I/O, so we can build directly.
         return CaptchaSolver(provider="2captcha", api_key="test")
 
+    # §11.2 changed ``_build_task_body`` to return
+    # ``(body, used_proxy_aware, compat_rejected)``. These tests cover the
+    # no-proxy-config path so the second/third tuple slots are always
+    # ``(False, False)``; the proxy-aware path is covered separately in
+    # ``tests/test_captcha_solver_proxy.py``.
+
     def test_v2_checkbox_body_has_no_v3_fields(self):
         s = self._solver()
-        body = s._build_task_body(
+        body, used_proxy_aware, compat_rejected = s._build_task_body(
             _2CAPTCHA_TASK_TYPES, "recaptcha-v2-checkbox",
             "SITEKEY", "https://example.com",
             page_action=None,
@@ -424,10 +445,12 @@ class TestTaskBodyMerger:
         assert body["websiteKey"] == "SITEKEY"
         assert "minScore" not in body
         assert "pageAction" not in body
+        assert used_proxy_aware is False
+        assert compat_rejected is False
 
     def test_v2_invisible_body_has_invisible_flag(self):
         s = self._solver()
-        body = s._build_task_body(
+        body, _, _ = s._build_task_body(
             _CAPSOLVER_TASK_TYPES, "recaptcha-v2-invisible",
             "SITEKEY", "https://example.com",
             page_action=None,
@@ -438,7 +461,7 @@ class TestTaskBodyMerger:
 
     def test_v3_body_has_min_score_and_action(self):
         s = self._solver()
-        body = s._build_task_body(
+        body, _, _ = s._build_task_body(
             _2CAPTCHA_TASK_TYPES, "recaptcha-v3",
             "SITEKEY", "https://example.com",
             page_action="checkout",
@@ -449,7 +472,7 @@ class TestTaskBodyMerger:
 
     def test_v3_body_action_falls_back_to_verify(self):
         s = self._solver()
-        body = s._build_task_body(
+        body, _, _ = s._build_task_body(
             _2CAPTCHA_TASK_TYPES, "recaptcha-v3",
             "SITEKEY", "https://example.com",
             page_action=None,
@@ -458,7 +481,7 @@ class TestTaskBodyMerger:
 
     def test_enterprise_v3_body_has_isEnterprise_and_v3_extras(self):
         s = self._solver()
-        body = s._build_task_body(
+        body, _, _ = s._build_task_body(
             _2CAPTCHA_TASK_TYPES, "recaptcha-enterprise-v3",
             "SITEKEY", "https://example.com",
             page_action="submit",
@@ -470,7 +493,7 @@ class TestTaskBodyMerger:
 
     def test_enterprise_v2_body_no_v3_fields(self):
         s = self._solver()
-        body = s._build_task_body(
+        body, _, _ = s._build_task_body(
             _2CAPTCHA_TASK_TYPES, "recaptcha-enterprise-v2",
             "SITEKEY", "https://example.com",
             page_action=None,
@@ -481,7 +504,7 @@ class TestTaskBodyMerger:
 
     def test_unknown_variant_returns_none(self):
         s = self._solver()
-        body = s._build_task_body(
+        body, _, _ = s._build_task_body(
             _2CAPTCHA_TASK_TYPES, "no-such-variant",
             "SITEKEY", "https://example.com",
             page_action=None,
@@ -494,7 +517,7 @@ class TestTaskBodyMerger:
         # flags loader caches; force re-read.
         from src.browser import flags as _flags
         _flags.reload_operator_settings()
-        body = s._build_task_body(
+        body, _, _ = s._build_task_body(
             _CAPSOLVER_TASK_TYPES, "recaptcha-v3",
             "SITEKEY", "https://example.com",
             page_action="x",
@@ -507,7 +530,7 @@ class TestTaskBodyMerger:
         monkeypatch.setenv("CAPTCHA_RECAPTCHA_V3_MIN_SCORE", "5.0")
         from src.browser import flags as _flags
         _flags.reload_operator_settings()
-        body = s._build_task_body(
+        body, _, _ = s._build_task_body(
             _2CAPTCHA_TASK_TYPES, "recaptcha-v3",
             "SITEKEY", "https://example.com",
             page_action="x",
