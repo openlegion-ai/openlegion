@@ -6985,12 +6985,17 @@ class BrowserManager:
                 # response payload by ``inspect_requests``.
                 "_failure_tagged": False,
                 # Pair ``requestfailed`` back to the exact Playwright
-                # Request object when possible. URL+method is retained as
-                # fallback for tests / bindings that synthesize separate
-                # objects for the failure callback, but exact object identity
-                # avoids mis-tagging a newer identical request when only an
-                # older one fails.
-                "_request_key": id(req),
+                # Request object when possible. We hold a STRONG reference
+                # to the request object (not ``id(req)``) because Python
+                # explicitly recycles ``id()`` values for non-overlapping
+                # object lifetimes — on Python 3.12 the allocator is
+                # aggressive enough that a freshly-created mock in a unit
+                # test routinely lands at the same address as a previously
+                # GC'd request, causing ``id()``-based pairing to match the
+                # wrong entry. URL+method is retained as a fallback for
+                # bindings that synthesize a distinct object for the
+                # failure callback.
+                "_request_key": req,
             })
         except Exception as e:
             logger.debug("network listener record failed: %s", e)
@@ -7027,8 +7032,6 @@ class BrowserManager:
             err = getattr(failure, "errorText", "") if failure else ""
             if not isinstance(err, str):
                 err = str(err) if err else ""
-            request_key = id(req)
-
             blocked = False
             cancelled = False
             for marker in ("BLOCKED_BY_CLIENT", "CONTENT_BLOCKED", "BLOCKED_BY_POLICY"):
@@ -7046,10 +7049,13 @@ class BrowserManager:
             # Prefer the exact Request-object match. Playwright sends the
             # same Request object to ``request`` and ``requestfailed``; using
             # that identity prevents a failed older request from tagging a
-            # newer identical URL+method that is still in flight.
+            # newer identical URL+method that is still in flight. We compare
+            # by ``is`` (object identity) on the strong reference stashed at
+            # record time — NOT by ``id()``, which CPython recycles across
+            # non-overlapping lifetimes (the original bug).
             for entry in reversed(inst.network_log):
                 if (
-                    entry.get("_request_key") == request_key
+                    entry.get("_request_key") is req
                     and not entry.get("_failure_tagged")
                 ):
                     entry["blocked_by_adblock"] = blocked

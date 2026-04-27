@@ -684,6 +684,40 @@ class TestParallelFailedRequestsPairing:
         )
         assert all(e["_failure_tagged"] for e in inst.network_log)
 
+    def test_pairing_does_not_use_recyclable_id(self):
+        """Regression: pairing must not key off ``id(req)``.
+
+        ``id(req)`` returns a memory address that CPython is free to
+        reuse for any later object once the original is GC'd. On
+        Python 3.12 the allocator recycles addresses aggressively
+        enough that a freshly-allocated failure-mock routinely lands
+        at the same address as a previously-recorded (and now GC'd)
+        request mock — making ``_request_key`` collisions cause the
+        failure to silently mis-tag an unrelated /ok/ entry.
+
+        This test inspects the implementation detail (``_request_key``)
+        rather than relying on probabilistic address collision. It
+        asserts the key is a real reference, not the integer ``id()``.
+        """
+        mgr, inst, _ctx, _page = _make_instance_with_listeners()
+        mgr._attach_network_listeners(inst)
+
+        req = _make_mock_request("https://example.com/r")
+        mgr._record_request(inst, req)
+        stored_key = inst.network_log[0]["_request_key"]
+
+        # The stashed key must BE the request, not its (recyclable) id.
+        # ``is`` rather than ``==`` because mocks compare deeply.
+        assert stored_key is req, (
+            f"_request_key must be the request object itself "
+            f"(strong reference), not a recyclable id(). Got: "
+            f"{type(stored_key).__name__}={stored_key!r}"
+        )
+        assert not isinstance(stored_key, int), (
+            "id()-style integer keys collide across non-overlapping "
+            "object lifetimes; pair-matching must use object identity."
+        )
+
     def test_third_failure_with_only_two_requests_is_dropped(self):
         """If a third ``requestfailed`` arrives but only two matching
         requests exist (both already tagged), the third update is
