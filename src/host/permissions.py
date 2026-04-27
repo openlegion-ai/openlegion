@@ -48,6 +48,12 @@ KNOWN_BROWSER_ACTIONS: frozenset[str] = frozenset({
     "click_xy",
     # Phase 6 §9.1 read-only network inspection.
     "inspect_requests",
+    # Phase 8 §11.14 explicit-trigger captcha-handling skills. Default-allow
+    # alongside the other browser actions; operators who want to forbid
+    # solver spend per-template can still add ``solve_captcha`` to a
+    # narrowed ``browser_actions`` denylist (or set
+    # ``CAPTCHA_DISABLED=true`` fleet-wide via flags.py).
+    "solve_captcha", "request_captcha_help",
 })
 
 # Back-compat alias — retained so `host/server.py` and test fixtures that

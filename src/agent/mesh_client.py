@@ -470,6 +470,34 @@ class MeshClient:
         response.raise_for_status()
         return response.json()
 
+    async def request_captcha_help(
+        self, service: str, description: str,
+        target_agent_id: str | None = None,
+    ) -> dict:
+        """Phase 8 §11.14 — emit a CAPTCHA-help handoff event.
+
+        Mirrors :meth:`request_browser_login` shape: the dashboard renders
+        a handoff card so the operator can take VNC control and clear
+        the captcha manually. ``service`` names the captcha kind/service
+        (e.g. ``"Cloudflare Turnstile"`` or ``"PerimeterX"``);
+        ``description`` is agent-supplied context for the operator.
+        """
+        client = await self._get_client()
+        body: dict = {
+            "agent_id": self.agent_id,
+            "service": service,
+            "description": description,
+        }
+        if target_agent_id:
+            body["target_agent_id"] = target_agent_id
+        response = await client.post(
+            f"{self.mesh_url}/mesh/browser-captcha-help-request",
+            json=body,
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
     async def vault_store(self, name: str, value: str) -> dict:
         """Store a credential in the mesh vault. Returns handle."""
         client = await self._get_client()

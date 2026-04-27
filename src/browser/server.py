@@ -355,6 +355,47 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         _verify_auth(request)
         return await manager.detect_captcha(agent_id)
 
+    @app.post("/browser/{agent_id}/solve_captcha")
+    async def solve_captcha(agent_id: str, request: Request):
+        """Phase 8 §11.14 — agent-triggered explicit CAPTCHA solve.
+
+        Wraps :meth:`BrowserManager.solve_captcha`; envelope shape is
+        §11.13 with the §11.14 outcome additions
+        (``rate_limited``/``cost_cap``/``captcha_during_solve``).
+        """
+        _verify_auth(request)
+        body = await request.json()
+        hint = body.get("hint")
+        retry_previous = bool(body.get("retry_previous", False))
+        target_ref = body.get("target_ref")
+        result = await manager.solve_captcha(
+            agent_id,
+            hint=hint if isinstance(hint, str) and hint else None,
+            retry_previous=retry_previous,
+            target_ref=target_ref if isinstance(target_ref, str) and target_ref else None,
+        )
+        await _apply_delay()
+        return result
+
+    @app.post("/browser/{agent_id}/request_captcha_help")
+    async def request_captcha_help(agent_id: str, request: Request):
+        """Phase 8 §11.14 — agent-triggered request for human help.
+
+        Mirrors the ``request_browser_login`` flow. The mesh side
+        (``/mesh/browser-captcha-help-request``) emits the dashboard
+        handoff event; this endpoint just records the agent's intent
+        and stamps the page state.
+        """
+        _verify_auth(request)
+        body = await request.json()
+        service = (body.get("service") or "").strip()
+        description = (body.get("description") or "").strip()
+        result = await manager.request_captcha_help(
+            agent_id, service=service, description=description,
+        )
+        await _apply_delay()
+        return result
+
     # ── File-transfer endpoints (Phase 1.5) ──────────────────────────────
     #
     # These accept already-staged local paths (for uploads) or produce a

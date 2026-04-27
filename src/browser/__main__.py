@@ -197,9 +197,21 @@ def main() -> None:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         _cleanup_orphan_downloads()
+        # §11.14 simplified cost counter — load any prior month's state on
+        # startup (skips rolled-over months). Snapshotted on shutdown below
+        # so restarts mid-month don't lose accumulated spend.
+        from src.browser import captcha_cost_counter as _cost_counter
+        try:
+            await _cost_counter.restore()
+        except Exception as exc:
+            logger.warning("captcha_cost_counter.restore failed: %s", exc)
         await manager.start_cleanup_loop()
         logger.info("Browser service ready (max=%d, idle_timeout=%dm)", _MAX_BROWSERS, _IDLE_TIMEOUT)
         yield
+        try:
+            await _cost_counter.snapshot()
+        except Exception as exc:
+            logger.warning("captcha_cost_counter.snapshot failed: %s", exc)
         await manager.stop_all()
         procs = [openbox_proc, kasmvnc_proc]
         if unclutter_proc:
