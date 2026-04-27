@@ -69,7 +69,8 @@ logger = setup_logging("browser.service")
 #
 #   kind:
 #     "recaptcha-v2-checkbox" | "recaptcha-v2-invisible" | "recaptcha-v3"
-#     | "recaptcha-enterprise" | "hcaptcha" | "turnstile"
+#     | "recaptcha-enterprise-v2" | "recaptcha-enterprise-v3"
+#     | "hcaptcha" | "turnstile"
 #     | "cf-interstitial-auto" | "cf-interstitial-behavioral"
 #     | "cf-interstitial-turnstile" | "px-press-hold"
 #     | "datadome-behavioral" | "unknown"
@@ -136,14 +137,15 @@ _FIRM_KINDS = frozenset({
 # Kept in sync with the docstring at the top of this module. New kinds added
 # here as §11.1 / §11.3 land richer classification.
 #
-# §11.1 splits the prior coarse ``recaptcha-enterprise`` placeholder into
-# the v2/v3 enterprise variants ``recaptcha-enterprise-v{2,3}``. The old
-# ``recaptcha-enterprise`` value is kept as a back-compat alias so agents
-# whose stored hints reference the coarse kind keep working — the
-# classifier never emits it for new detections.
+# §11.1 split the prior coarse ``recaptcha-enterprise`` placeholder into
+# the v2/v3 enterprise variants ``recaptcha-enterprise-v{2,3}``. The legacy
+# coarse alias was REMOVED from this enum (review polish, finding F16) — it
+# had no operational effect (no task-table entry, no pricing entry), so
+# accepting it here just papered over miswired agent hints. Agents using
+# the alias now get a clean ``invalid_input`` error pointing at the precise
+# variants.
 _VALID_CAPTCHA_KINDS: frozenset[str] = frozenset({
     "recaptcha-v2-checkbox", "recaptcha-v2-invisible", "recaptcha-v3",
-    "recaptcha-enterprise",  # legacy alias for back-compat
     "recaptcha-enterprise-v2", "recaptcha-enterprise-v3",
     "hcaptcha", "turnstile",
     # §11.3 — CF interstitial tri-state + behavioral-only kinds.
@@ -152,6 +154,28 @@ _VALID_CAPTCHA_KINDS: frozenset[str] = frozenset({
     "px-press-hold", "datadome-behavioral",
     "unknown",
 })
+
+
+# ── Behavioral-only hint rejection (§11.14 polish) ────────────────────────
+# These kinds have no task-table entry — passing them as ``hint=`` to
+# ``solve_captcha`` would cause a silent no-op (provider call skipped, the
+# envelope's auto-classified kind is overridden but the solver was never
+# going to engage anyway). Reject at the validator with a message that
+# points at the correct path (``request_captcha_help``).
+_BEHAVIORAL_KINDS: frozenset[str] = frozenset({
+    "px-press-hold",
+    "datadome-behavioral",
+    "cf-interstitial-auto",
+    "cf-interstitial-behavioral",
+})
+
+
+# Patience window for ``solve_captcha(retry_previous=True)`` (§11.14 polish).
+# When the agent says "the captcha may not have rendered yet" we wait up
+# to this many milliseconds AND re-check ONCE before returning the
+# ``no captcha on current page`` envelope. Bound at the call site so the
+# overall solve_captcha latency stays predictable.
+_RETRY_PREVIOUS_RECHECK_MS = 500
 
 
 # §11.3 — wait duration for CF auto-resolving JS challenge ("Just a moment").
@@ -1673,7 +1697,7 @@ class CamoufoxInstance:
         # idempotency flag for ``BrowserManager._attach_network_listeners``.
         self.network_log: deque[dict] = deque(maxlen=200)
         self._network_attached: bool = False
-        # §11.14 explicit-solve guards.
+        # §11.14 explicit-solve guard.
         # ``_captcha_solving`` is set for the duration of a manager-level
         # ``solve_captcha`` invocation; if a NEW captcha is detected by
         # ``_check_captcha`` while this flag is set we surface
@@ -1681,10 +1705,6 @@ class CamoufoxInstance:
         # into another solve attempt (could otherwise pile up provider
         # cost and deadlock against the per-instance lock).
         self._captcha_solving: bool = False
-        # ``_last_solve_attempt`` records (sitekey, url, started_unix_ts)
-        # for the most recent solve so ``retry_previous=True`` can replay
-        # within a 60-second TTL. ``None`` until first attempt.
-        self._last_solve_attempt: tuple[str, str, float] | None = None
 
     def _register_page(self, page) -> str:
         """Assign a stable UUID to a Page if not already registered.
@@ -6303,9 +6323,15 @@ class BrowserManager:
         Local pre-checks (cheap, no provider involvement):
           1. ``CAPTCHA_DISABLED`` flag — early-return ``no_solver`` envelope.
           2. ``hint`` validation — bad hint → ``invalid_input`` error.
-          3. ``retry_previous`` TTL check — stale → ``invalid_input`` error.
-          4. No-captcha early return — saves a solver invocation + cost.
-          5. Recursive-solve guard — re-entrant ``_check_captcha`` while a
+             Behavioral-only kinds (PerimeterX, DataDome, CF interstitial)
+             are also rejected here because the solver has no task entry
+             for them; the correct path is ``request_captcha_help``.
+          3. No-captcha early return — saves a solver invocation + cost.
+             When ``retry_previous=True`` and the initial detection finds
+             nothing, we wait :data:`_RETRY_PREVIOUS_RECHECK_MS` and
+             re-check ONCE; this covers the "page just navigated, captcha
+             is rendering" race.
+          4. Recursive-solve guard — re-entrant ``_check_captcha`` while a
              solve is in flight surfaces ``captcha_during_solve``.
 
         Rate-limit + cost-cap fire INSIDE ``_check_captcha`` →
@@ -6316,6 +6342,16 @@ class BrowserManager:
         Until then, we LOG and IGNORE — the top-ranked visible widget gets
         solved. Documented in the skill description so agents don't expect
         targeting precision yet.
+
+        ``retry_previous`` semantics (review polish): the original
+        "retry the most recent failed solve attempt against (sitekey, url)"
+        spec required tracking solver internals across calls and racing
+        with the auto-classifier on whether the displayed captcha is the
+        same one. The new, simpler semantic is: **"be patient — the
+        captcha may not have rendered yet"**. If the initial detection
+        returns ``captcha_found=False`` we sleep briefly and re-detect
+        once. Bounded by :data:`_RETRY_PREVIOUS_RECHECK_MS` so total
+        latency stays predictable.
         """
         # Gate 1: fleet-wide kill switch.
         from src.browser.flags import get_bool
@@ -6332,12 +6368,26 @@ class BrowserManager:
 
         # Gate 2: hint validation (cheap, before lock).
         if hint is not None:
-            if not isinstance(hint, str) or hint.strip() not in _VALID_CAPTCHA_KINDS:
+            if not isinstance(hint, str):
                 return _err(
                     "invalid_input",
                     f"hint must be one of: {sorted(_VALID_CAPTCHA_KINDS)}",
                 )
             hint = hint.strip()
+            # Behavioral-only kinds are valid classifier outputs but
+            # have no solver task entry — treating them as a hint would
+            # be a silent no-op on the solver path. Reject loudly so the
+            # agent sees the correct routing immediately.
+            if hint in _BEHAVIORAL_KINDS:
+                return _err(
+                    "invalid_input",
+                    f"hint={hint!r} is behavioral-only — use request_captcha_help",
+                )
+            if hint not in _VALID_CAPTCHA_KINDS:
+                return _err(
+                    "invalid_input",
+                    f"hint must be one of: {sorted(_VALID_CAPTCHA_KINDS)}",
+                )
 
         if target_ref:
             logger.warning(
@@ -6350,21 +6400,7 @@ class BrowserManager:
         inst.touch()
 
         async with inst.lock:
-            # Gate 3: retry_previous TTL check.
-            if retry_previous:
-                last = inst._last_solve_attempt
-                if last is None or (time.time() - last[2]) > 60.0:
-                    return _err(
-                        "invalid_input", "no_recent_attempt_to_retry",
-                    )
-                # The retry path just re-runs the normal flow; the
-                # solver itself is idempotent against (sitekey, url),
-                # and we don't preserve the last classified kind here
-                # because the page may have changed. Stamp the
-                # restarted timestamp so further retries chain.
-                inst._last_solve_attempt = (last[0], last[1], time.time())
-
-            # Gate 4: no-captcha early return. Set the recursive-solve
+            # Gate 3: no-captcha early return. Set the recursive-solve
             # guard BEFORE the call so a captcha that appears during
             # detection isn't mistaken for one we should now solve.
             #
@@ -6398,6 +6434,18 @@ class BrowserManager:
                 # ``_metered_solve`` so this method no longer touches
                 # the cost counter directly.
                 envelope = await self._check_captcha(inst)
+
+                # ``retry_previous`` patience window: when the agent
+                # signals "the captcha may not have rendered yet", give
+                # the page a brief moment and re-check ONCE before
+                # giving up. Bounded by ``_RETRY_PREVIOUS_RECHECK_MS``.
+                if (
+                    retry_previous
+                    and not envelope.get("captcha_found")
+                ):
+                    await asyncio.sleep(_RETRY_PREVIOUS_RECHECK_MS / 1000.0)
+                    envelope = await self._check_captcha(inst)
+
                 if not envelope.get("captcha_found"):
                     # No-captcha early return — distinct from the §11.13
                     # ``captcha_found: false`` shape; surface a friendly
@@ -6420,14 +6468,6 @@ class BrowserManager:
                     # is purely classification metadata.
                     envelope = dict(envelope)
                     envelope["kind"] = hint
-
-                # Stamp the last attempt for ``retry_previous`` (best
-                # effort — page.url access can fail on closed contexts).
-                try:
-                    page_url = inst.page.url or ""
-                except Exception:
-                    page_url = ""
-                inst._last_solve_attempt = ("", page_url, time.time())
 
                 return {
                     "success": True,

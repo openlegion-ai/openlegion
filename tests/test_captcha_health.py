@@ -629,6 +629,9 @@ def test_redact_clientkey_text_strips_taskid():
     error responses. The shared redactor strips them so a hostile
     provider error containing a stitched-together secret-like string
     can't leak via the taskId path.
+
+    2Captcha returns integer task IDs ("taskId": 9876543210); CapSolver
+    returns UUID-shape strings. Both forms must be scrubbed.
     """
     shapes_with_uuid = [
         'taskId=8d2c1f3a-aaaa-4444-bbbb-1234567890ab',
@@ -639,6 +642,21 @@ def test_redact_clientkey_text_strips_taskid():
     for shape in shapes_with_uuid:
         out = _redact_clientkey_text(shape)
         assert "[REDACTED]" in out, f"taskId not redacted in {shape!r}: {out!r}"
+
+    # Pure integer-form (2Captcha-style) — explicit coverage. Both quoted
+    # and unquoted shapes must be scrubbed.
+    integer_shapes = [
+        'taskId=9876543210',
+        'taskId="9876543210"',
+        '{"errorId": 1, "taskId": 9876543210}',
+        "got back taskId: 9876543210 from provider",
+    ]
+    for shape in integer_shapes:
+        out = _redact_clientkey_text(shape)
+        assert "9876543210" not in out, (
+            f"integer taskId leaked in {shape!r}: {out!r}"
+        )
+        assert "[REDACTED]" in out
 
 
 # ── 12: cancellation cleans up in-flight health_check ─────────────────

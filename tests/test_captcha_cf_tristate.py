@@ -590,3 +590,46 @@ class TestCfStateNone:
         assert result["solver_outcome"] == "no_solver"
         # Placeholder kind → "low" confidence per ``_kind_confidence``.
         assert result["solver_confidence"] == "low"
+
+
+# ── 12. All-three-signals precedence regression (security finding F10) ───
+
+
+class TestCfAllThreeSignals:
+    @pytest.mark.asyncio
+    async def test_cf_all_three_signals_routes_behavioral(self):
+        """Pathological CF page with EVERY discriminating signal set
+        simultaneously: ``has_cf_error_1020`` + ``has_turnstile`` +
+        ``has_challenge_running`` + ``has_challenge_error_text``.
+
+        Per ``_classify_cf_state`` precedence (highest-to-lowest):
+          1. error_1020 / challenge_error_text → behavioral
+          2. turnstile + "Just a moment" → turnstile
+          3. challenge_running + "Just a moment" → auto
+
+        Error markers win — under-attack mode is the most dangerous
+        state and the solver genuinely cannot help. This test pins
+        that precedence so a future refactor of the classifier doesn't
+        silently route an under-attack page through the Turnstile
+        solver path (which would burn provider credit + leak the
+        attempt to CF for nothing).
+        """
+        solver = AsyncMock()
+        solver.solve = AsyncMock(return_value=_solved_sr())
+        mgr = _make_manager(solver=solver)
+        inst = _make_inst(
+            matching_selector='iframe[src*="challenges.cloudflare.com"]',
+            cf_probe={
+                "has_cf_error_1020": True,
+                "has_turnstile": True,
+                "has_challenge_running": True,
+                "has_challenge_error_text": True,
+            },
+            title="Just a moment...",
+        )
+        result = await mgr._check_captcha(inst)
+        assert result["kind"] == "cf-interstitial-behavioral"
+        assert result["solver_attempted"] is False
+        assert result["solver_outcome"] == "skipped_behavioral"
+        assert result["next_action"] == "request_captcha_help"
+        solver.solve.assert_not_awaited()

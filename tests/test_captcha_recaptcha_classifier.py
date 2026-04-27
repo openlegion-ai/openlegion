@@ -158,6 +158,46 @@ class TestEnterpriseDetection:
         result = await _classify_recaptcha(page)
         assert result["variant"] == "recaptcha-enterprise-v2"
 
+    @pytest.mark.asyncio
+    async def test_classifier_consumer_plus_enterprise_picks_enterprise(self):
+        """Multi-tenant page with BOTH consumer ``api.js`` and enterprise
+        ``enterprise.js`` scripts loaded simultaneously, and BOTH a
+        consumer sitekey and an enterprise sitekey present in the registry.
+
+        Per security finding F11: the JS probe sets ``enterprise=True``
+        when ANY signal points at enterprise (script tag OR global), and
+        the first sitekey from the ``sitekeys`` list wins. This documents
+        the current behavior — when the agent is intending to solve the
+        consumer widget on a page that ALSO embeds an enterprise widget
+        for an unrelated flow, the classifier may misalign with intent.
+
+        Fix is deferred (architectural — requires per-widget targeting,
+        §11.6 territory). When the deferred-trigger fires in production
+        we'll need either snapshot-ref-based selection or a per-sitekey
+        enterprise/consumer disambiguation pass.
+        """
+        page = _make_page({
+            # Both scripts loaded → enterprise wins.
+            "enterprise": True,
+            "enterprise_script": True,
+            "v3": False,
+            # Consumer key first, enterprise key second. Current
+            # classifier picks ``sitekeys[0]`` — but classifies as
+            # enterprise based on the script signal. Misalignment risk.
+            "sitekeys": ["CONSUMER_SITEKEY", "ENTERPRISE_SITEKEY"],
+            "actions_by_key": {},
+            "invisible_by_key": {
+                "CONSUMER_SITEKEY": False,
+                "ENTERPRISE_SITEKEY": False,
+            },
+            "v3_render_param": None,
+        })
+        result = await _classify_recaptcha(page)
+        # Documented current behavior — pin so a future refactor of the
+        # classifier surfaces here, not in production.
+        assert result["variant"] == "recaptcha-enterprise-v2"
+        assert result["sitekey"] == "CONSUMER_SITEKEY"
+
 
 # ── 3. v3 detection paths ─────────────────────────────────────────────────
 
