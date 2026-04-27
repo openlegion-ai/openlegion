@@ -422,6 +422,169 @@ async def _classify_recaptcha(page) -> dict:
     return result
 
 
+# ── §11.3 Cloudflare interstitial tri-state classifier ────────────────────
+#
+# CF interstitial is not one thing. We distinguish three states so that
+# ``_check_captcha`` can route each appropriately:
+#
+#   "auto"       — CF auto-resolving JS challenge ("Checking your
+#                  browser...") with NO Turnstile widget. Wait+recheck.
+#   "behavioral" — Under Attack Mode (error 1020) or persistent challenge
+#                  with no solvable widget. Skip solver, escalate.
+#   "turnstile"  — CF interstitial with embedded Turnstile widget. Solve
+#                  via existing Turnstile path but with low confidence
+#                  (token may not unblock the session).
+#   "none"       — Doesn't match any CF interstitial pattern (caller falls
+#                  through to standalone Turnstile / other handling).
+#
+# The classifier reads ``page.title`` and runs a single lightweight JS
+# probe; both calls are wrapped in try/except so a closed page or evaluate
+# failure simply collapses the result to "none" rather than raising.
+
+_CF_STATE_PROBE_JS = r"""
+() => {
+  const out = {
+    has_challenge_running: false,
+    has_turnstile: false,
+    has_cf_error_1020: false,
+    has_challenge_error_text: false,
+  };
+  try {
+    if (document.querySelector('#challenge-running')) {
+      out.has_challenge_running = true;
+    }
+    // Accept both ``.cf-turnstile`` (new) and ``[class*="cf-turnstile"]``
+    // partial-match for safety against version drift. ``data-sitekey`` is
+    // not strictly required here — its absence is interpreted by the
+    // Python side which prefers the auto-resolving path when no widget
+    // is renderable.
+    const ts = document.querySelector('.cf-turnstile, [class*="cf-turnstile"]');
+    if (ts) out.has_turnstile = true;
+    const errEl = document.querySelector('#cf-error-details');
+    if (errEl) {
+      const txt = (errEl.textContent || '').toLowerCase();
+      // CF error code 1020 = "Access denied" / Under Attack Mode block.
+      if (txt.indexOf('1020') !== -1) out.has_cf_error_1020 = true;
+    }
+    if (document.querySelector('#challenge-error-text')) {
+      out.has_challenge_error_text = true;
+    }
+  } catch (e) { /* defensive — never throw to the page */ }
+  return out;
+}
+"""
+
+
+async def _classify_cf_state(page) -> str:
+    """Classify a CF interstitial into one of four states.
+
+    Returns one of ``"auto"`` / ``"behavioral"`` / ``"turnstile"`` /
+    ``"none"``. Never raises — any page-side failure (closed page, JS
+    sandbox error, page navigated mid-call) collapses to ``"none"``.
+
+    Detection precedence (highest to lowest):
+
+    1. ``has_cf_error_1020`` OR ``has_challenge_error_text`` →
+       ``"behavioral"``. These are the Under Attack / persistent-challenge
+       markers; the agent is being soft-blocked and a solver call won't
+       help.
+    2. ``has_turnstile`` AND title starts with "Just a moment" →
+       ``"turnstile"``. Solve via existing flow but caller marks
+       confidence low (~50% success; tokens are session-cookie bound).
+    3. ``has_challenge_running`` AND title starts with "Just a moment"
+       AND NOT ``has_turnstile`` → ``"auto"``. The classic "Checking your
+       browser..." auto-resolving JS challenge — wait then re-check.
+    4. Anything else → ``"none"``.
+    """
+    try:
+        title = await page.title()
+    except Exception:
+        title = ""
+    try:
+        probe = await page.evaluate(_CF_STATE_PROBE_JS)
+    except Exception:
+        logger.debug("_classify_cf_state: page.evaluate failed", exc_info=True)
+        return "none"
+    if not isinstance(probe, dict):
+        return "none"
+
+    title_str = title if isinstance(title, str) else ""
+    title_match = title_str.startswith("Just a moment")
+
+    if probe.get("has_cf_error_1020") or probe.get("has_challenge_error_text"):
+        return "behavioral"
+    if probe.get("has_turnstile") and title_match:
+        return "turnstile"
+    if probe.get("has_challenge_running") and title_match:
+        return "auto"
+    return "none"
+
+
+# ── §11.3 Behavioral-only challenge classifier ────────────────────────────
+#
+# Non-CF challenges that present no solvable widget — the only correct
+# response is to escalate to ``request_captcha_help``. We detect via DOM
+# query rather than touching ``page.title`` so the classifier works on
+# challenge overlays that don't change the document title.
+
+_BEHAVIORAL_PROBE_JS = r"""
+() => {
+  const out = { px: false, datadome: false };
+  try {
+    // PerimeterX / HUMAN Security "Press & Hold". Both legacy
+    // (``#px-captcha``, ``button[data-v="px-button"]``) and the modern
+    // HUMAN-rebrand selectors per §11.18 (``[data-human-security]``,
+    // ``[class*="human-challenge"]``).
+    if (
+      document.querySelector('#px-captcha') ||
+      document.querySelector('button[data-v="px-button"]') ||
+      document.querySelector('[data-human-security]') ||
+      document.querySelector('[class*="human-challenge"]')
+    ) {
+      out.px = true;
+    }
+    // DataDome behavioral blocker — only the ``/blocker`` path. The
+    // generic ``captcha-delivery.com`` host is also used by the solvable
+    // slider (deferred §11.5); we MUST NOT flag that as behavioral.
+    const ddIframes = document.querySelectorAll(
+      'iframe[src*="captcha-delivery.com/blocker"]'
+    );
+    if (ddIframes.length > 0) out.datadome = true;
+  } catch (e) { /* defensive */ }
+  return out;
+}
+"""
+
+
+async def _classify_behavioral(page) -> str | None:
+    """Detect non-CF behavioral-only challenges that should bypass the solver.
+
+    Returns the §11.13 ``kind`` enum string for the matched challenge, or
+    ``None`` if no behavioral challenge is present. Never raises.
+
+    Detection order (highest precedence first):
+      1. PerimeterX / HUMAN Security "Press & Hold" → ``"px-press-hold"``.
+      2. DataDome behavioral blocker (``/blocker`` path only) →
+         ``"datadome-behavioral"``.
+
+    The DataDome solvable-slider path (``captcha-delivery.com`` without
+    ``/blocker``) is intentionally NOT detected here — it routes through
+    §11.5 (deferred) once that solver lands.
+    """
+    try:
+        probe = await page.evaluate(_BEHAVIORAL_PROBE_JS)
+    except Exception:
+        logger.debug("_classify_behavioral: page.evaluate failed", exc_info=True)
+        return None
+    if not isinstance(probe, dict):
+        return None
+    if probe.get("px"):
+        return "px-press-hold"
+    if probe.get("datadome"):
+        return "datadome-behavioral"
+    return None
+
+
 class CaptchaSolver:
     """Async CAPTCHA solver using 2Captcha or CapSolver HTTP APIs."""
 
