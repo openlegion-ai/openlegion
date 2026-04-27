@@ -81,6 +81,7 @@ function dashboard() {
       'blackboard_write', 'health_change', 'notification', 'workspace_updated',
       'heartbeat_complete', 'cron_change', 'credit_exhausted', 'credential_request',
       'browser_login_request', 'browser_login_completed', 'browser_login_cancelled',
+      'browser_captcha_help_request', 'browser_captcha_help_completed', 'browser_captcha_help_cancelled',
     ],
 
     // Agent detail
@@ -1730,6 +1731,73 @@ function dashboard() {
           if (!hist) continue;
           for (const m of hist) {
             if (m.role === 'browser_login_request' && m.service === evt.data.service
+                && (chatId === agent || m._from_agent === agent)) {
+              m.cancelled = true;
+            }
+          }
+        }
+      }
+
+      // Surface browser CAPTCHA help requests as interactive VNC cards in chat.
+      // Mirrors the browser_login_request handler — Phase 8 §11.14.
+      if (evt.type === 'browser_captcha_help_request' && agent && evt.data && evt.data.service) {
+        const evtTs = this._normalizeEventTs(evt);
+        const captchaCard = {
+          role: 'browser_captcha_help_request',
+          content: evt.data.description || '',
+          service: evt.data.service || '',
+          url: evt.data.url || '',
+          completed: false,
+          cancelled: false,
+          ts: evtTs,
+        };
+        // Show in the requesting agent's chat
+        if (!this.chatHistories[agent]) this.chatHistories[agent] = [];
+        const isDup = this.chatHistories[agent].some(m =>
+          m.role === 'browser_captcha_help_request' && m.service === evt.data.service && Math.abs((m.ts || 0) - evtTs) < 5000
+        );
+        if (!isDup) {
+          this.chatHistories[agent].push(captchaCard);
+          if (this.activeChatId === agent) {
+            this.$nextTick(() => this._scrollChat(agent));
+          } else {
+            this.chatUnread = { ...this.chatUnread, [agent]: (this.chatUnread[agent] || 0) + 1 };
+          }
+        }
+        // Also surface in operator chat
+        if (agent !== 'operator') {
+          if (!this.chatHistories['operator']) this.chatHistories['operator'] = [];
+          const opDup = this.chatHistories['operator'].some(m =>
+            m.role === 'browser_captcha_help_request' && m._from_agent === agent && m.service === evt.data.service && Math.abs((m.ts || 0) - evtTs) < 5000
+          );
+          if (!opDup) {
+            this.chatHistories['operator'].push({ ...captchaCard, _from_agent: agent });
+            if (this.activeTab === 'chat') {
+              this.$nextTick(() => this._scrollChat('operator'));
+            }
+          }
+        }
+      }
+
+      // Sync browser CAPTCHA help card state across all copies (agent chat + operator chat).
+      if (evt.type === 'browser_captcha_help_completed' && agent && evt.data?.service) {
+        for (const chatId of [agent, 'operator']) {
+          const hist = this.chatHistories[chatId];
+          if (!hist) continue;
+          for (const m of hist) {
+            if (m.role === 'browser_captcha_help_request' && m.service === evt.data.service
+                && (chatId === agent || m._from_agent === agent)) {
+              m.completed = true;
+            }
+          }
+        }
+      }
+      if (evt.type === 'browser_captcha_help_cancelled' && agent && evt.data?.service) {
+        for (const chatId of [agent, 'operator']) {
+          const hist = this.chatHistories[chatId];
+          if (!hist) continue;
+          for (const m of hist) {
+            if (m.role === 'browser_captcha_help_request' && m.service === evt.data.service
                 && (chatId === agent || m._from_agent === agent)) {
               m.cancelled = true;
             }
@@ -4892,6 +4960,44 @@ function dashboard() {
       msg.cancelled = true;
       try {
         const resp = await fetch(window.__config.apiBase + '/browser-login/cancel', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+          body: JSON.stringify({ agent_id: agentId || '', service: msg.service }),
+        });
+        if (!resp.ok) {
+          msg.cancelled = prev.cancelled;
+          this.showToast('Failed to notify agent — please try again');
+        }
+      } catch (_) {
+        msg.cancelled = prev.cancelled;
+        this.showToast('Network error — please try again');
+      }
+    },
+
+    async _completeBrowserCaptchaHelp(msg, agentId) {
+      const prev = { completed: msg.completed, cancelled: msg.cancelled };
+      msg.completed = true;
+      try {
+        const resp = await fetch(window.__config.apiBase + '/browser-captcha-help/complete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+          body: JSON.stringify({ agent_id: agentId || '', service: msg.service }),
+        });
+        if (!resp.ok) {
+          msg.completed = prev.completed;
+          this.showToast('Failed to notify agent — please try again');
+        }
+      } catch (_) {
+        msg.completed = prev.completed;
+        this.showToast('Network error — please try again');
+      }
+    },
+
+    async _cancelBrowserCaptchaHelp(msg, agentId) {
+      const prev = { completed: msg.completed, cancelled: msg.cancelled };
+      msg.cancelled = true;
+      try {
+        const resp = await fetch(window.__config.apiBase + '/browser-captcha-help/cancel', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
           body: JSON.stringify({ agent_id: agentId || '', service: msg.service }),

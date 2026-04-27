@@ -2147,6 +2147,174 @@ class TestDashboardBrowserLoginDelegation:
         assert resp.status_code == 400
 
 
+# ── V2 Tests: Browser CAPTCHA Help Delegation (Phase 8 §11.14) ──
+
+
+class TestDashboardBrowserCaptchaHelpDelegation:
+    """The /api/browser-captcha-help/complete and /cancel endpoints mirror
+    the browser-login flow: route to the agent_id specified in the body,
+    emit dashboard events keyed by that agent so the SPA card-sync logic
+    flips both copies (operator + target chat) to resolved/cancelled.
+
+    Plan §11.14: Operator CAPTCHA handoff card. Wired into the SPA in
+    PR feat/dashboard-captcha-help-card. Server endpoints landed in #769.
+    """
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir, include_v2=True)
+        # Register the requesting agent so the lane-enqueue path is taken.
+        self.components["agent_registry"]["scraper-bot"] = "http://localhost:8403"
+        self.client = _make_client(self.components)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_complete_routes_to_specified_target(self):
+        events: list[tuple] = []
+        original_emit = self.components["event_bus"].emit
+
+        def spy(event_type, **kwargs):
+            events.append((event_type, kwargs))
+            return original_emit(event_type, **kwargs)
+
+        self.components["event_bus"].emit = spy
+
+        resp = self.client.post(
+            "/dashboard/api/browser-captcha-help/complete",
+            json={"agent_id": "scraper-bot", "service": "Cloudflare Turnstile"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["completed"] is True
+        assert body["agent_id"] == "scraper-bot"
+        assert body["service"] == "Cloudflare Turnstile"
+
+        completed = [e for e in events if e[0] == "browser_captcha_help_completed"]
+        assert len(completed) == 1
+        assert completed[0][1]["agent"] == "scraper-bot"
+        assert completed[0][1]["data"]["service"] == "Cloudflare Turnstile"
+
+    def test_cancel_routes_to_specified_target(self):
+        events: list[tuple] = []
+        original_emit = self.components["event_bus"].emit
+
+        def spy(event_type, **kwargs):
+            events.append((event_type, kwargs))
+            return original_emit(event_type, **kwargs)
+
+        self.components["event_bus"].emit = spy
+
+        resp = self.client.post(
+            "/dashboard/api/browser-captcha-help/cancel",
+            json={"agent_id": "scraper-bot", "service": "hCaptcha"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["cancelled"] is True
+        assert body["agent_id"] == "scraper-bot"
+        assert body["service"] == "hCaptcha"
+
+        cancelled = [e for e in events if e[0] == "browser_captcha_help_cancelled"]
+        assert len(cancelled) == 1
+        assert cancelled[0][1]["agent"] == "scraper-bot"
+        assert cancelled[0][1]["data"]["service"] == "hCaptcha"
+
+    def test_complete_missing_agent_id_returns_400(self):
+        resp = self.client.post(
+            "/dashboard/api/browser-captcha-help/complete",
+            json={"service": "X"},
+        )
+        assert resp.status_code == 400
+
+    def test_cancel_missing_service_returns_400(self):
+        resp = self.client.post(
+            "/dashboard/api/browser-captcha-help/cancel",
+            json={"agent_id": "scraper-bot"},
+        )
+        assert resp.status_code == 400
+
+    def test_complete_without_csrf_header_returns_403(self):
+        """CSRF gate: state-changing POST without X-Requested-With must be rejected.
+
+        Reviewer flagged this gap explicitly — the api_router's
+        Depends(_csrf_check) must be exercised by the captcha endpoints.
+        """
+        # Bypass our CSRF-injecting test client by using a raw TestClient.
+        from fastapi.testclient import TestClient as RawClient
+        raw = RawClient(self.client.app)
+        resp = raw.post(
+            "/dashboard/api/browser-captcha-help/complete",
+            json={"agent_id": "scraper-bot", "service": "X"},
+        )
+        assert resp.status_code == 403
+
+    def test_cancel_without_csrf_header_returns_403(self):
+        from fastapi.testclient import TestClient as RawClient
+        raw = RawClient(self.client.app)
+        resp = raw.post(
+            "/dashboard/api/browser-captcha-help/cancel",
+            json={"agent_id": "scraper-bot", "service": "X"},
+        )
+        assert resp.status_code == 403
+
+
+# ── SPA static-asset coverage: the captcha card is wired in app.js ──
+
+
+class TestDashboardCaptchaHelpSpaWiring:
+    """Verify the SPA actually subscribes to and renders captcha events.
+
+    The server emits ``browser_captcha_help_request`` /
+    ``..._completed`` / ``..._cancelled`` over the WebSocket; the SPA
+    must list those types in ``eventTypes`` and have a handler that
+    builds a card with ``role: 'browser_captcha_help_request'``.
+
+    We assert against the served static assets so a regression
+    (someone deleting the wiring) trips a unit test.
+    """
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir)
+        self.client = _make_client(self.components)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_app_js_subscribes_to_captcha_events(self):
+        resp = self.client.get("/dashboard/static/js/app.js")
+        assert resp.status_code == 200
+        body = resp.text
+        for evt in (
+            "browser_captcha_help_request",
+            "browser_captcha_help_completed",
+            "browser_captcha_help_cancelled",
+        ):
+            assert evt in body, f"app.js missing eventTypes entry: {evt}"
+
+    def test_app_js_has_captcha_card_handler(self):
+        resp = self.client.get("/dashboard/static/js/app.js")
+        body = resp.text
+        # Card-build site (handler creates a chat-message with this role).
+        assert "role: 'browser_captcha_help_request'" in body
+        # Endpoints the buttons POST to (CSRF-gated by _csrf_check).
+        assert "/browser-captcha-help/complete" in body
+        assert "/browser-captcha-help/cancel" in body
+
+    def test_index_html_renders_captcha_card_template(self):
+        resp = self.client.get("/dashboard/")
+        body = resp.text
+        # Alpine x-if rendering branch for the new role.
+        assert "msg.role === 'browser_captcha_help_request'" in body
+        # Card title text per scope.
+        assert "CAPTCHA help requested" in body
+        # Card must not block the chat-bubble fallback like login does.
+        assert "msg.role !== 'browser_captcha_help_request'" in body
+
+
 # ── V2 Tests: Messages ──────────────────────────────────────
 
 

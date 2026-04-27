@@ -352,6 +352,11 @@ class DashboardEvent(BaseModel):
         "browser_login_request",
         "browser_login_completed",
         "browser_login_cancelled",
+        # Phase 8 §11.14 — operator CAPTCHA handoff. Without these literals
+        # DashboardEvent rejects the emit and the SPA card never renders.
+        "browser_captcha_help_request",
+        "browser_captcha_help_completed",
+        "browser_captcha_help_cancelled",
         # Phase 4 §4.6 / Phase 7 §10.1 — per-minute browser aggregates
         # forwarded from the browser service to the dashboard via
         # _poll_browser_metrics_once. Without these literals
