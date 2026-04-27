@@ -4867,6 +4867,161 @@ class TestCaptchaDetection:
         assert result["data"]["captcha_found"] is False
 
 
+# ── §11.1 reCAPTCHA variant classifier integration with _check_captcha ───
+
+
+class TestCheckCaptchaUsesVariantClassifier:
+    """Verify ``_check_captcha`` upgrades the coarse ``recaptcha-v2-checkbox``
+    placeholder to the precise §11.1 variant when the classifier returns
+    one. Falls back silently when classification is ``unknown``.
+    """
+
+    @staticmethod
+    def _make_inst(matching_selector: str, *, classifier_result):
+        """Mock a CamoufoxInstance whose page.locator(sel).count is 1
+        for ``matching_selector`` and whose page.evaluate (used by
+        ``_classify_recaptcha``) returns ``classifier_result``.
+        """
+        inst = MagicMock()
+        inst.page = MagicMock()
+        inst.page.url = "https://example.com"
+        inst.page.title = AsyncMock(return_value="")
+
+        def locator(sel: str):
+            loc = MagicMock()
+            loc.count = AsyncMock(
+                return_value=1 if sel == matching_selector else 0,
+            )
+            return loc
+        inst.page.locator = MagicMock(side_effect=locator)
+        inst.page.evaluate = AsyncMock(return_value=classifier_result)
+        inst.lock = asyncio.Lock()
+        inst.touch = MagicMock()
+        return inst
+
+    @pytest.mark.asyncio
+    async def test_v3_variant_propagates_to_envelope(self):
+        from src.browser.service import BrowserManager
+        mgr = BrowserManager.__new__(BrowserManager)
+        mgr._captcha_solver = None
+        inst = self._make_inst(
+            'iframe[src*="recaptcha"]',
+            classifier_result={
+                "enterprise": False, "v3": True,
+                "sitekeys": ["SK"], "actions_by_key": {"SK": "homepage"},
+                "invisible_by_key": {}, "enterprise_script": False,
+                "v3_render_param": "SK",
+            },
+        )
+        result = await mgr._check_captcha(inst)
+        assert result["captcha_found"] is True
+        assert result["kind"] == "recaptcha-v3"
+        # _FIRM_KINDS includes recaptcha-v3 → confidence "high" on no-solver.
+        assert result["solver_confidence"] == "high"
+
+    @pytest.mark.asyncio
+    async def test_v2_invisible_variant_propagates(self):
+        from src.browser.service import BrowserManager
+        mgr = BrowserManager.__new__(BrowserManager)
+        mgr._captcha_solver = None
+        inst = self._make_inst(
+            'iframe[src*="recaptcha"]',
+            classifier_result={
+                "enterprise": False, "v3": False,
+                "sitekeys": ["SK"], "actions_by_key": {},
+                "invisible_by_key": {"SK": True},
+                "enterprise_script": False, "v3_render_param": None,
+            },
+        )
+        result = await mgr._check_captcha(inst)
+        assert result["kind"] == "recaptcha-v2-invisible"
+        assert result["solver_confidence"] == "high"
+
+    @pytest.mark.asyncio
+    async def test_enterprise_v2_variant_propagates(self):
+        from src.browser.service import BrowserManager
+        mgr = BrowserManager.__new__(BrowserManager)
+        mgr._captcha_solver = None
+        inst = self._make_inst(
+            'iframe[src*="recaptcha"]',
+            classifier_result={
+                "enterprise": True, "v3": False,
+                "sitekeys": ["SK"], "actions_by_key": {},
+                "invisible_by_key": {}, "enterprise_script": True,
+                "v3_render_param": None,
+            },
+        )
+        result = await mgr._check_captcha(inst)
+        assert result["kind"] == "recaptcha-enterprise-v2"
+        assert result["solver_confidence"] == "high"
+
+    @pytest.mark.asyncio
+    async def test_enterprise_v3_variant_propagates(self):
+        from src.browser.service import BrowserManager
+        mgr = BrowserManager.__new__(BrowserManager)
+        mgr._captcha_solver = None
+        inst = self._make_inst(
+            'iframe[src*="recaptcha"]',
+            classifier_result={
+                "enterprise": True, "v3": True,
+                "sitekeys": ["SK"], "actions_by_key": {"SK": "submit"},
+                "invisible_by_key": {}, "enterprise_script": True,
+                "v3_render_param": None,
+            },
+        )
+        result = await mgr._check_captcha(inst)
+        assert result["kind"] == "recaptcha-enterprise-v3"
+        assert result["solver_confidence"] == "high"
+
+    @pytest.mark.asyncio
+    async def test_unknown_classification_falls_back_to_v2_checkbox(self):
+        """Classifier returning ``variant: "unknown"`` must keep the
+        existing coarse ``recaptcha-v2-checkbox`` placeholder so legacy
+        agents still see a valid kind value.
+        """
+        from src.browser.service import BrowserManager
+        mgr = BrowserManager.__new__(BrowserManager)
+        mgr._captcha_solver = None
+        inst = self._make_inst(
+            'iframe[src*="recaptcha"]',
+            classifier_result={
+                "enterprise": False, "v3": False,
+                "sitekeys": [], "actions_by_key": {},
+                "invisible_by_key": {}, "enterprise_script": False,
+                "v3_render_param": None,
+            },
+        )
+        result = await mgr._check_captcha(inst)
+        assert result["kind"] == "recaptcha-v2-checkbox"
+
+    @pytest.mark.asyncio
+    async def test_classifier_exception_falls_back(self):
+        """page.evaluate raising must not break ``_check_captcha`` —
+        the coarse selector kind stays."""
+        from src.browser.service import BrowserManager
+        mgr = BrowserManager.__new__(BrowserManager)
+        mgr._captcha_solver = None
+        inst = MagicMock()
+        inst.page = MagicMock()
+        inst.page.url = "https://example.com"
+        inst.page.title = AsyncMock(return_value="")
+        sel = 'iframe[src*="recaptcha"]'
+
+        def locator(s):
+            loc = MagicMock()
+            loc.count = AsyncMock(return_value=1 if s == sel else 0)
+            return loc
+
+        inst.page.locator = MagicMock(side_effect=locator)
+        inst.page.evaluate = AsyncMock(side_effect=RuntimeError("frame closed"))
+        inst.lock = asyncio.Lock()
+        inst.touch = MagicMock()
+
+        result = await mgr._check_captcha(inst)
+        assert result["captcha_found"] is True
+        assert result["kind"] == "recaptcha-v2-checkbox"
+
+
 # ── Dialog scoping tests ──────────────────────────────────────────────────
 
 

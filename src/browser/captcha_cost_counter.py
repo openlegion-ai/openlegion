@@ -56,7 +56,13 @@ PRICING_CENTS: dict[str, int] = {
     "2captcha-recaptcha-v2-checkbox": 100,        # $1.00 / 1000 = 0.10c each → 0.1¢
     "2captcha-recaptcha-v2-invisible": 100,
     "2captcha-recaptcha-v3": 100,
+    # §11.1 splits ``recaptcha-enterprise`` into v2/v3 enterprise variants;
+    # both keep the same Enterprise rate. ``recaptcha-enterprise`` is
+    # retained as a back-compat alias for any callers still emitting the
+    # coarse kind from a hint override.
     "2captcha-recaptcha-enterprise": 200,
+    "2captcha-recaptcha-enterprise-v2": 200,
+    "2captcha-recaptcha-enterprise-v3": 200,
     "2captcha-hcaptcha": 100,
     "2captcha-turnstile": 200,
     # CapSolver — published https://docs.capsolver.com/guide/captcha/
@@ -64,6 +70,8 @@ PRICING_CENTS: dict[str, int] = {
     "capsolver-recaptcha-v2-invisible": 80,
     "capsolver-recaptcha-v3": 80,
     "capsolver-recaptcha-enterprise": 200,
+    "capsolver-recaptcha-enterprise-v2": 200,
+    "capsolver-recaptcha-enterprise-v3": 200,
     "capsolver-hcaptcha": 100,
     "capsolver-turnstile": 60,
 }
