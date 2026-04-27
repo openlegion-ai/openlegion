@@ -22,7 +22,18 @@ import pytest
 
 from src.browser import captcha_cost_counter as cost
 from src.browser import service as svc
+from src.browser.captcha import SolveResult
 from src.browser.service import BrowserManager, CamoufoxInstance
+
+
+def _solved_result() -> SolveResult:
+    """Standard "solved + injected" SolveResult for solver mocks."""
+    return SolveResult(
+        token="tok",
+        injection_succeeded=True,
+        used_proxy_aware=False,
+        compat_rejected=False,
+    )
 
 
 def _mk_inst_with_locator(*, captcha_present: bool, page_url: str = "https://example.com"):
@@ -79,9 +90,9 @@ class TestSolveCaptchaSuccess:
         # Configure a fake solver that succeeds, with provider=2captcha.
         solver = MagicMock()
         solver.provider = "2captcha"
-        solver.is_solver_unreachable = MagicMock(return_value=False)
+        solver.is_solver_unreachable = AsyncMock(return_value=False)
         solver.is_breaker_open = MagicMock(return_value=False)
-        solver.solve = AsyncMock(return_value=True)
+        solver.solve = AsyncMock(return_value=_solved_result())
         mgr._captcha_solver = solver
 
         # The captcha selector that matches (iframe[src*=hcaptcha]) will
@@ -114,9 +125,9 @@ class TestSolveCaptchaCostCap:
 
         solver = MagicMock()
         solver.provider = "2captcha"
-        solver.is_solver_unreachable = MagicMock(return_value=False)
+        solver.is_solver_unreachable = AsyncMock(return_value=False)
         solver.is_breaker_open = MagicMock(return_value=False)
-        solver.solve = AsyncMock(return_value=True)
+        solver.solve = AsyncMock(return_value=_solved_result())
         mgr._captcha_solver = solver
 
         result = await mgr.solve_captcha("agent-1")
@@ -139,9 +150,9 @@ class TestSolveCaptchaRateLimit:
 
         solver = MagicMock()
         solver.provider = "2captcha"
-        solver.is_solver_unreachable = MagicMock(return_value=False)
+        solver.is_solver_unreachable = AsyncMock(return_value=False)
         solver.is_breaker_open = MagicMock(return_value=False)
-        solver.solve = AsyncMock(return_value=True)
+        solver.solve = AsyncMock(return_value=_solved_result())
         mgr._captcha_solver = solver
 
         result = await mgr.solve_captcha("agent-1")
@@ -176,9 +187,9 @@ class TestSolveCaptchaRetryPrevious:
 
         solver = MagicMock()
         solver.provider = "2captcha"
-        solver.is_solver_unreachable = MagicMock(return_value=False)
+        solver.is_solver_unreachable = AsyncMock(return_value=False)
         solver.is_breaker_open = MagicMock(return_value=False)
-        solver.solve = AsyncMock(return_value=True)
+        solver.solve = AsyncMock(return_value=_solved_result())
         mgr._captcha_solver = solver
 
         result = await mgr.solve_captcha("agent-1", retry_previous=True)
@@ -243,9 +254,9 @@ class TestSolveCaptchaHealthAndBreaker:
 
         solver = MagicMock()
         solver.provider = "2captcha"
-        solver.is_solver_unreachable = MagicMock(return_value=True)
+        solver.is_solver_unreachable = AsyncMock(return_value=True)
         solver.is_breaker_open = MagicMock(return_value=False)
-        solver.solve = AsyncMock(return_value=True)
+        solver.solve = AsyncMock(return_value=_solved_result())
         mgr._captcha_solver = solver
 
         result = await mgr.solve_captcha("agent-1")
@@ -261,9 +272,9 @@ class TestSolveCaptchaHealthAndBreaker:
 
         solver = MagicMock()
         solver.provider = "2captcha"
-        solver.is_solver_unreachable = MagicMock(return_value=False)
+        solver.is_solver_unreachable = AsyncMock(return_value=False)
         solver.is_breaker_open = MagicMock(return_value=True)
-        solver.solve = AsyncMock(return_value=True)
+        solver.solve = AsyncMock(return_value=_solved_result())
         mgr._captcha_solver = solver
 
         result = await mgr.solve_captcha("agent-1")

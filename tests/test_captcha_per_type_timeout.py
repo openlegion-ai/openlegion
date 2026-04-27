@@ -210,7 +210,7 @@ class TestSolvePassesKindThrough:
                 kind="recaptcha-v3",
             )
 
-        assert ok is True
+        assert bool(ok) is True
         # The §11.13 envelope kind is preserved when the caller supplies it.
         assert recorded["kind"] == "recaptcha-v3"
 
@@ -270,7 +270,7 @@ class TestOuterTimeoutEnforced:
                 page, 'iframe[src*="recaptcha"]', "https://example.com",
                 kind="recaptcha-v3",
             )
-        assert ok is False
+        assert bool(ok) is False
         # Failure recorded → breaker counter incremented.
         assert len(solver._solver_failure_timestamps) == 1
 
@@ -297,7 +297,7 @@ class TestOuterTimeoutEnforced:
                 page, 'iframe[src*="cf-turnstile"]', "https://example.com",
                 kind="turnstile",
             )
-        assert ok is True
+        assert bool(ok) is True
 
 
 # ── 6. Polling-loop iteration count respects per-kind timeout ─────────
@@ -350,7 +350,7 @@ class TestPollingLoopIterations:
                 kind="recaptcha-v3",
             )
 
-        assert ok is False
+        assert bool(ok) is False
         # 1 createTask call + N polls (loop never returned ready).
         # The loop is bounded by ``solve()``'s outer wait_for in practice;
         # we just want to confirm the poll-loop iteration cap is FINITE.

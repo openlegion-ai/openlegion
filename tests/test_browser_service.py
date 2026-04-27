@@ -7486,7 +7486,9 @@ class TestCaptchaSolverSolve:
         solver._client = mock_client
 
         result = await solver.solve(page, 'iframe[src*="recaptcha"]', "https://example.com")
-        assert result is True
+        # ``solve()`` returns SolveResult post-refactor; ``__bool__`` is
+        # token-set + injection-success, mirroring the old bool contract.
+        assert bool(result) is True
         # Verify token was injected
         page.evaluate.assert_called()
 
@@ -7521,7 +7523,7 @@ class TestCaptchaSolverSolve:
         solver._client = mock_client
 
         result = await solver.solve(page, 'iframe[src*="hcaptcha"]', "https://example.com")
-        assert result is True
+        assert bool(result) is True
 
     @pytest.mark.asyncio
     async def test_solve_timeout(self):
@@ -7556,7 +7558,7 @@ class TestCaptchaSolverSolve:
         solver._solve_timeouts_ms["recaptcha-v2-checkbox"] = 100
         with patch("src.browser.captcha._POLL_INTERVAL", 0.01):
             result = await solver.solve(page, 'iframe[src*="recaptcha"]', "https://example.com")
-        assert result is False
+        assert bool(result) is False
 
     @pytest.mark.asyncio
     async def test_solve_no_sitekey_returns_false(self):
@@ -7571,7 +7573,7 @@ class TestCaptchaSolverSolve:
         page.url = "https://example.com"
 
         result = await solver.solve(page, 'iframe[src*="recaptcha"]', "https://example.com")
-        assert result is False
+        assert bool(result) is False
 
 
 class TestCheckCaptchaAutoSolve:
@@ -7580,12 +7582,18 @@ class TestCheckCaptchaAutoSolve:
     @pytest.mark.asyncio
     async def test_check_captcha_auto_solves(self):
         """When solver succeeds, the §11.13 envelope reports solver_outcome='solved'."""
+        from src.browser.captcha import SolveResult
+
         manager = BrowserManager(profiles_dir="/tmp/test_profiles_captcha1")
 
         mock_solver = AsyncMock()
-        mock_solver.solve = AsyncMock(return_value=True)
-        # §11.16 sync getters — silence unawaited-coroutine warnings.
-        mock_solver.is_solver_unreachable = MagicMock(return_value=False)
+        mock_solver.solve = AsyncMock(return_value=SolveResult(
+            token="tok", injection_succeeded=True,
+            used_proxy_aware=False, compat_rejected=False,
+        ))
+        # §11.16 ``is_solver_unreachable`` is now async (lazy probe);
+        # ``is_breaker_open`` stays sync.
+        mock_solver.is_solver_unreachable = AsyncMock(return_value=False)
         mock_solver.is_breaker_open = MagicMock(return_value=False)
         manager._captcha_solver = mock_solver
 
@@ -7606,14 +7614,17 @@ class TestCheckCaptchaAutoSolve:
     @pytest.mark.asyncio
     async def test_check_captcha_falls_back_on_failure(self):
         """When solver fails, _check_captcha reports solver_outcome='rejected'."""
+        from src.browser.captcha import SolveResult
+
         manager = BrowserManager(profiles_dir="/tmp/test_profiles_captcha2")
 
         mock_solver = AsyncMock()
-        mock_solver.solve = AsyncMock(return_value=False)
-        # §11.16: is_solver_unreachable / is_breaker_open are sync getters.
-        # Without explicit MagicMock the AsyncMock parent returns coroutines
-        # that flunk the truthy-check.
-        mock_solver.is_solver_unreachable = MagicMock(return_value=False)
+        # No-token failure → rejected envelope.
+        mock_solver.solve = AsyncMock(return_value=SolveResult(
+            token=None, injection_succeeded=False,
+            used_proxy_aware=False, compat_rejected=False,
+        ))
+        mock_solver.is_solver_unreachable = AsyncMock(return_value=False)
         mock_solver.is_breaker_open = MagicMock(return_value=False)
         manager._captcha_solver = mock_solver
 

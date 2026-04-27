@@ -73,6 +73,11 @@ PRICING_CENTS: dict[str, int] = {
     "2captcha-recaptcha-enterprise-v3": 200,
     "2captcha-hcaptcha": 100,
     "2captcha-turnstile": 200,
+    # CF-bound Turnstile (§11.3 ``cf-interstitial-turnstile``) — solver
+    # path is identical to standalone Turnstile; only the envelope ``kind``
+    # differs. Aliased here so :func:`estimate_cents` doesn't return ``None``
+    # for the CF variant and trip the spurious "no published rate" warning.
+    "2captcha-cf-interstitial-turnstile": 200,
     # CapSolver — published https://docs.capsolver.com/guide/captcha/
     "capsolver-recaptcha-v2-checkbox": 80,
     "capsolver-recaptcha-v2-invisible": 80,
@@ -82,6 +87,7 @@ PRICING_CENTS: dict[str, int] = {
     "capsolver-recaptcha-enterprise-v3": 200,
     "capsolver-hcaptcha": 100,
     "capsolver-turnstile": 60,
+    "capsolver-cf-interstitial-turnstile": 60,
 }
 
 # §11.2 — proxy-aware pricing tier (~3× the proxyless rate as published
@@ -100,6 +106,9 @@ PRICING_CENTS_PROXY_AWARE: dict[tuple[str, str], int] = {
     ("2captcha", "recaptcha-enterprise-v2"):  600,
     ("2captcha", "hcaptcha"):                 300,
     ("2captcha", "turnstile"):                600,
+    # CF-bound Turnstile takes the same proxy-aware tier as standalone
+    # Turnstile — the solver task is identical (§11.3).
+    ("2captcha", "cf-interstitial-turnstile"): 600,
     # CapSolver — 3× the proxyless rate
     ("capsolver", "recaptcha-v2-checkbox"):   240,
     ("capsolver", "recaptcha-v2-invisible"):  240,
@@ -108,6 +117,7 @@ PRICING_CENTS_PROXY_AWARE: dict[tuple[str, str], int] = {
     ("capsolver", "recaptcha-enterprise-v3"): 600,
     ("capsolver", "hcaptcha"):                300,
     ("capsolver", "turnstile"):               180,
+    ("capsolver", "cf-interstitial-turnstile"): 180,
 }
 
 
@@ -251,11 +261,26 @@ async def snapshot(path: Path | str | None = None) -> bool:
 
     tmp = target.with_suffix(target.suffix + ".tmp")
     try:
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh)
-            fh.flush()
-            os.fsync(fh.fileno())
+        # Open with 0o600 from the start (umask-aware) so there is no
+        # world-readable window before the explicit chmod below. The
+        # cost ledger is operator-grade billing data — same posture as
+        # ``.env`` files (CLAUDE.md §Security Boundaries).
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh)
+                fh.flush()
+                os.fsync(fh.fileno())
+        except Exception:
+            os.close(fd)
+            raise
         os.replace(tmp, target)
+        # ``os.replace`` preserves the destination's mode on most
+        # filesystems but the Python docs are not load-bearing on this;
+        # explicit chmod after replace ensures 0o600 regardless of
+        # whether the target existed (and what its prior mode was).
+        os.chmod(target, 0o600)
     except OSError as e:
         logger.warning("captcha_cost snapshot failed: %s", e)
         try:

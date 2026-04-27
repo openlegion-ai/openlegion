@@ -106,8 +106,8 @@ async def test_first_solve_runs_health_check_subsequent_do_not():
         ok1 = await solver.solve(page, 'iframe[src*="recaptcha"]', "https://example.com")
         ok2 = await solver.solve(page, 'iframe[src*="recaptcha"]', "https://example.com")
 
-    assert ok1 is True
-    assert ok2 is True
+    assert bool(ok1) is True
+    assert bool(ok2) is True
     urls_called = [c.args[0] for c in client.post.call_args_list]
     assert urls_called[0].endswith("/getBalance")
     # Only ONE getBalance — the gate is sticky.
@@ -173,13 +173,13 @@ async def test_health_check_unreachable_short_circuits_subsequent_solves():
     solver._client = client
 
     ok = await solver.solve(page, 'iframe[src*="recaptcha"]', "https://example.com")
-    assert ok is False
-    assert solver.is_solver_unreachable() is True
+    assert bool(ok) is False
+    assert await solver.is_solver_unreachable() is True
     assert client.post.await_count == 1  # only the probe
 
     # Subsequent solves don't even probe again — the gate is sticky.
     ok2 = await solver.solve(page, 'iframe[src*="recaptcha"]', "https://example.com")
-    assert ok2 is False
+    assert bool(ok2) is False
     assert client.post.await_count == 1
 
 
@@ -241,7 +241,7 @@ async def test_concurrent_first_solves_share_one_health_check():
 
         results = await asyncio.gather(*tasks)
 
-    assert all(r is True for r in results)
+    assert all(bool(r) is True for r in results)
     assert probe_calls == 1, (
         f"expected exactly one health probe, got {probe_calls} — gate is racy"
     )
@@ -380,7 +380,7 @@ async def test_breaker_auto_clears_after_window():
     ), patch("src.browser.captcha._POLL_INTERVAL", 0.001):
         ok = await solver.solve(page, 'iframe[src*="recaptcha"]', "https://example.com")
 
-    assert ok is True
+    assert bool(ok) is True
     # createTask + getTaskResult, no probe (already checked).
     assert client.post.await_count == 2
 
@@ -520,7 +520,7 @@ async def test_concurrent_solves_short_circuit_when_breaker_open():
         solver.solve(page, 'iframe[src*="recaptcha"]', "https://example.com")
         for _ in range(5)
     ))
-    assert all(r is False for r in results)
+    assert all(bool(r) is False for r in results)
     # No provider HTTP calls — breaker gate ran before any post().
     assert client.post.await_count == 0
 
@@ -679,12 +679,17 @@ async def test_health_check_cancellation_cleans_up():
 async def test_check_captcha_emits_no_solver_when_unreachable():
     """When health-check unreachable, _check_captcha decorates the result
     with solver_outcome='no_solver' + next_action='request_captcha_help'."""
+    from src.browser.captcha import SolveResult as _SR
     from src.browser.service import BrowserManager
 
     mgr = BrowserManager.__new__(BrowserManager)
     fake_solver = AsyncMock()
-    fake_solver.solve = AsyncMock(return_value=False)
-    fake_solver.is_solver_unreachable = MagicMock(return_value=True)
+    fake_solver.solve = AsyncMock(return_value=_SR(
+        token=None, injection_succeeded=False,
+        used_proxy_aware=False, compat_rejected=False,
+    ))
+    # ``is_solver_unreachable`` is now async (lazy probe).
+    fake_solver.is_solver_unreachable = AsyncMock(return_value=True)
     fake_solver.is_breaker_open = MagicMock(return_value=False)
     mgr._captcha_solver = fake_solver
 
@@ -718,12 +723,16 @@ async def test_check_captcha_emits_breaker_open_flag():
     """When breaker is open, _check_captcha sets breaker_open=True
     and solver_outcome='timeout' (the §11.13 follow-up will fold this
     into a structured ``service_unavailable`` value)."""
+    from src.browser.captcha import SolveResult as _SR
     from src.browser.service import BrowserManager
 
     mgr = BrowserManager.__new__(BrowserManager)
     fake_solver = AsyncMock()
-    fake_solver.solve = AsyncMock(return_value=False)
-    fake_solver.is_solver_unreachable = MagicMock(return_value=False)
+    fake_solver.solve = AsyncMock(return_value=_SR(
+        token=None, injection_succeeded=False,
+        used_proxy_aware=False, compat_rejected=False,
+    ))
+    fake_solver.is_solver_unreachable = AsyncMock(return_value=False)
     fake_solver.is_breaker_open = MagicMock(return_value=True)
     mgr._captcha_solver = fake_solver
 
@@ -756,12 +765,17 @@ async def test_check_captcha_no_decoration_when_solver_healthy():
     envelope WITHOUT a top-level ``breaker_open`` flag and with a
     ``solver_outcome`` other than ``no_solver`` (proves the §11.16
     short-circuits did not fire)."""
+    from src.browser.captcha import SolveResult as _SR
     from src.browser.service import BrowserManager
 
     mgr = BrowserManager.__new__(BrowserManager)
     fake_solver = AsyncMock()
-    fake_solver.solve = AsyncMock(return_value=False)  # solve fails normally
-    fake_solver.is_solver_unreachable = MagicMock(return_value=False)
+    # No-token result → "rejected" envelope on a healthy solver.
+    fake_solver.solve = AsyncMock(return_value=_SR(
+        token=None, injection_succeeded=False,
+        used_proxy_aware=False, compat_rejected=False,
+    ))
+    fake_solver.is_solver_unreachable = AsyncMock(return_value=False)
     fake_solver.is_breaker_open = MagicMock(return_value=False)
     mgr._captcha_solver = fake_solver
 

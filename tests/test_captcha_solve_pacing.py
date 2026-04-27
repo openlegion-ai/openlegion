@@ -191,7 +191,7 @@ class TestPacingFiresOnSuccess:
                 kind="recaptcha-v3",
             )
 
-        assert ok is True
+        assert bool(ok) is True
         assert pace.await_count == 1
 
 
@@ -224,7 +224,7 @@ class TestPacingSkippedOnFailure:
                 kind="recaptcha-v3",
             )
 
-        assert ok is False
+        assert bool(ok) is False
         assert pace.await_count == 0
 
     @pytest.mark.asyncio
@@ -241,7 +241,7 @@ class TestPacingSkippedOnFailure:
                 kind="recaptcha-v3",
             )
 
-        assert ok is False
+        assert bool(ok) is False
         assert pace.await_count == 0
 
     @pytest.mark.asyncio
@@ -259,7 +259,7 @@ class TestPacingSkippedOnFailure:
                 kind="recaptcha-v3",
             )
 
-        assert ok is False
+        assert bool(ok) is False
         assert pace.await_count == 0
 
     @pytest.mark.asyncio
@@ -281,7 +281,7 @@ class TestPacingSkippedOnFailure:
                 kind="recaptcha-v3",
             )
 
-        assert ok is False
+        assert bool(ok) is False
         # Outer wait_for fired BEFORE the token came back — pacing skipped.
         assert pace.await_count == 0
 
@@ -302,7 +302,7 @@ class TestPacingSkippedOnFailure:
                 kind="recaptcha-v3",
             )
 
-        assert ok is False
+        assert bool(ok) is False
         assert pace.await_count == 0
 
     @pytest.mark.asyncio
@@ -320,5 +320,5 @@ class TestPacingSkippedOnFailure:
                 kind="recaptcha-v3",
             )
 
-        assert ok is False
+        assert bool(ok) is False
         assert pace.await_count == 0
