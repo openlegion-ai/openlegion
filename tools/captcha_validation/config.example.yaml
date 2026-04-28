@@ -1,0 +1,112 @@
+# Phase 9 §18.1 validation campaign config — EXAMPLE TEMPLATE
+#
+# Operators: copy this file to ``config.local.yaml`` (which is gitignored)
+# and fill in real target URLs + creds-refs. The ``url: ...`` entries below
+# are intentionally placeholder strings ending in ``/...`` so the schema
+# validator REJECTS this file before any real run can begin.
+#
+# Workflow:
+#   1. cp tools/captcha_validation/config.example.yaml config.local.yaml
+#   2. Open config.local.yaml in your editor; fill in ``url`` for each site.
+#   3. Export CAPTCHA_SOLVER_PROXY_TYPE/ADDRESS/PORT/LOGIN/PASSWORD env vars
+#      from your dedicated solver-proxy vault entry.
+#   4. python -m tools.captcha_validation.runner config.local.yaml --dry-run
+#      → confirms the config loads + lists categories WITHOUT making any
+#      HTTP calls.
+#   5. python -m tools.captcha_validation.runner config.local.yaml
+#      → runs the campaign; outputs to data/captcha_validation/.
+
+solver_proxy_creds_ref: vault://captcha_solver_proxy
+cost_budget_usd: 5.0
+attempts_per_day: 5
+
+sites:
+  # 1. Google account flow — reCAPTCHA Enterprise v2 / v3
+  - url: https://accounts.google.com/...
+    expected_kind: recaptcha-enterprise-v3
+    category: google_signin
+    attempt_count: 10
+    interaction: navigate_then_click_submit
+    interaction_selector: "#identifierNext"
+    account_creds_ref: vault://test_google_account
+    notes: "Google signin; expect Enterprise v3 with bot-detection."
+
+  # 2. Twitter / X — FunCaptcha (Arkose); §11.5 deferred coverage
+  - url: https://twitter.com/i/flow/signup/...
+    expected_kind: funcaptcha
+    category: twitter_signup
+    attempt_count: 10
+    interaction: navigate_then_click_submit
+    interaction_selector: "[data-testid='ocfSignupNextLink']"
+    account_creds_ref: vault://test_twitter_account
+    notes: "X signup flow; surfaces FunCaptcha after the email step."
+
+  # 3. LinkedIn auth — FunCaptcha
+  - url: https://www.linkedin.com/uas/login/...
+    expected_kind: funcaptcha
+    category: linkedin_auth
+    attempt_count: 10
+    interaction: navigate_then_click_submit
+    interaction_selector: "button[type='submit']"
+    account_creds_ref: vault://test_linkedin_account
+    notes: "LinkedIn login; FunCaptcha appears on suspicious-IP login."
+
+  # 4. Cloudflare-protected SaaS — CF interstitial + Turnstile
+  - url: https://...
+    expected_kind: cf-interstitial-turnstile
+    category: cloudflare_saas
+    attempt_count: 10
+    interaction: navigate_only
+    notes: "Operator picks a CF-protected SaaS where Turnstile fires on first nav."
+
+  # 5. AWS console signin — AWS WAF CAPTCHA; §11.5 deferred
+  - url: https://signin.aws.amazon.com/...
+    expected_kind: aws-waf
+    category: aws_waf
+    attempt_count: 10
+    interaction: navigate_then_click_submit
+    interaction_selector: "input[type='submit']"
+    account_creds_ref: vault://test_aws_account
+    notes: "AWS console login; WAF CAPTCHA on flagged IPs."
+
+  # 6. GeeTest — §11.5 deferred
+  - url: https://...
+    expected_kind: geetest-v4
+    category: geetest
+    attempt_count: 10
+    interaction: navigate_then_click_submit
+    interaction_selector: "button.geetest-trigger"
+    notes: "Operator picks a GeeTest v4 site (often China-region SaaS)."
+
+  # 7. Invisible reCAPTCHA v2 — §11.7 candidate
+  - url: https://...
+    expected_kind: recaptcha-v2-invisible
+    category: invisible_v2
+    attempt_count: 10
+    interaction: navigate_then_click_submit
+    interaction_selector: "button[type='submit']"
+    notes: "SaaS with invisible v2 — token injection succeeds but app may reject."
+
+  # 8. Standard hCaptcha SaaS
+  - url: https://...
+    expected_kind: hcaptcha
+    category: hcaptcha_saas
+    attempt_count: 10
+    interaction: navigate_only
+    notes: "Operator picks a SaaS that fires hCaptcha on every visit."
+
+  # 9. HUMAN / PerimeterX — Press & Hold; §11.5 deferred
+  - url: https://...
+    expected_kind: px-press-hold
+    category: human_perimeterx
+    attempt_count: 10
+    interaction: navigate_only
+    notes: "PerimeterX-protected. Behavioral-only; expect skipped_behavioral."
+
+  # 10. DataDome
+  - url: https://...
+    expected_kind: datadome-behavioral
+    category: datadome
+    attempt_count: 10
+    interaction: navigate_only
+    notes: "DataDome-blocked target; behavioral-only outcome expected."

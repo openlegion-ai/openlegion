@@ -416,7 +416,13 @@ class TestTypeTextClearBehavior:
         # Printable chars now go through keyboard.press, not evaluate
         press_calls = [c[0][0] for c in mock_page.keyboard.press.call_args_list]
         assert all(c in press_calls for c in list("hello"))
-        assert mock_page.evaluate.await_count == 0
+        # evaluate is permitted for the §11.4/§18.2 captcha redetect probe
+        # (install + read-back) but MUST NOT carry insertText / clipboard
+        # / contenteditable patches that would bypass keystroke trust.
+        for call in mock_page.evaluate.call_args_list:
+            js = call.args[0] if call.args else ""
+            assert "insertText" not in js
+            assert "execCommand" not in js
 
     @pytest.mark.asyncio
     async def test_clear_false_types_without_select_all(self):
@@ -438,7 +444,12 @@ class TestTypeTextClearBehavior:
         assert "Control+a" not in press_calls
         # keyboard.press used for each char, not evaluate
         assert "a" in press_calls and "b" in press_calls
-        assert mock_page.evaluate.await_count == 0
+        # evaluate is permitted for the §11.4/§18.2 captcha redetect probe
+        # but MUST NOT carry insertText / execCommand patches.
+        for call in mock_page.evaluate.call_args_list:
+            js = call.args[0] if call.args else ""
+            assert "insertText" not in js
+            assert "execCommand" not in js
 
 
 class TestCamoufoxInstanceLock:
@@ -2584,7 +2595,12 @@ class TestTypeTextWithRef:
         press_calls = [c[0][0] for c in mock_page.keyboard.press.call_args_list]
         for ch in "test@example.com":
             assert ch in press_calls
-        assert mock_page.evaluate.await_count == 0
+        # evaluate is permitted for the §11.4/§18.2 captcha redetect probe
+        # but MUST NOT carry insertText / execCommand patches.
+        for call in mock_page.evaluate.call_args_list:
+            js = call.args[0] if call.args else ""
+            assert "insertText" not in js
+            assert "execCommand" not in js
 
     @pytest.mark.asyncio
     async def test_type_by_ref_no_clear(self):
@@ -2610,7 +2626,12 @@ class TestTypeTextWithRef:
         press_calls = [c[0][0] for c in mock_page.keyboard.press.call_args_list]
         assert "Control+a" not in press_calls
         assert "a" in press_calls and "b" in press_calls
-        assert mock_page.evaluate.await_count == 0
+        # evaluate is permitted for the §11.4/§18.2 captcha redetect probe
+        # but MUST NOT carry insertText / execCommand patches.
+        for call in mock_page.evaluate.call_args_list:
+            js = call.args[0] if call.args else ""
+            assert "insertText" not in js
+            assert "execCommand" not in js
 
     @pytest.mark.asyncio
     async def test_type_no_ref_or_selector(self):

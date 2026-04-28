@@ -1517,6 +1517,93 @@ def _encode_screenshot(
         return png_bytes, "png"
 
 
+# ── §11.4 / §18.2 captcha re-detection after non-navigate actions ──────────
+#
+# Two-call install/read-back pattern: install a MutationObserver before the
+# action runs, then read back any added DOM nodes after the action returns
+# and intersect them with the existing ``_check_captcha`` selector list. If
+# any added node matches a captcha selector we route through the full
+# ``_check_captcha`` → ``_metered_solve`` chain so the agent gets the §11.13
+# envelope AND every gate (rate-limit, cost-cap, kill-switch, breaker,
+# behavioral classification) fires uniformly. See plan docs §11.4 + §18.2.
+#
+# Probe attaches to ``window.__ol_captcha_probe`` so concurrent observers
+# from prior calls are overwritten cleanly. The probe is torn down in the
+# read-back (``obs.disconnect()`` + ``delete window.__ol_captcha_probe``)
+# so a navigation that happens between install and read-back leaves no
+# residue — the read-back from the new page returns ``[]`` (probe absent)
+# and the caller falls back to the navigate-time ``_check_captcha`` path.
+_JS_CAPTCHA_REDETECT_INSTALL = """
+() => {
+  try {
+    if (window.__ol_captcha_probe && window.__ol_captcha_probe.obs) {
+      try { window.__ol_captcha_probe.obs.disconnect(); } catch (e) {}
+    }
+    window.__ol_captcha_probe = { adds: [], obs: null };
+    if (!document.body) return;
+    const obs = new MutationObserver(records => {
+      for (const r of records) {
+        for (const n of r.addedNodes) {
+          if (n && n.nodeType === 1) {
+            window.__ol_captcha_probe.adds.push(n);
+          }
+        }
+      }
+    });
+    obs.observe(document.body, { childList: true, subtree: true });
+    window.__ol_captcha_probe.obs = obs;
+  } catch (e) {
+    // Swallow — install failure must never break the action.
+  }
+}
+"""
+
+_JS_CAPTCHA_REDETECT_READBACK = """
+(selectors) => {
+  const p = window.__ol_captcha_probe;
+  if (!p) return [];
+  try { if (p.obs) p.obs.disconnect(); } catch (e) {}
+  const hits = new Set();
+  try {
+    for (const n of (p.adds || [])) {
+      for (const sel of selectors) {
+        try {
+          if (n.matches && (n.matches(sel) || (n.querySelector && n.querySelector(sel)))) {
+            hits.add(sel);
+          }
+        } catch (e) {}
+      }
+    }
+  } catch (e) {}
+  try { delete window.__ol_captcha_probe; } catch (e) {}
+  return [...hits];
+}
+"""
+
+# Reused by ``_with_captcha_redetect`` so the JS read-back filter and the
+# Python ``_check_captcha`` selector list cannot drift apart. Mirrors the
+# inline list inside ``_check_captcha``.
+_CAPTCHA_REDETECT_SELECTORS: tuple[str, ...] = (
+    'iframe[src*="recaptcha"]',
+    'iframe[src*="hcaptcha"]',
+    'iframe[src*="challenges.cloudflare.com"]',
+    'iframe[src*="captcha"]',
+    '[class*="cf-turnstile"]',
+    '[class*="captcha"]',
+    '#captcha',
+)
+
+# Rate-limit window for the post-action re-detection trigger. A single
+# action that mutates the DOM heavily (SPA route change, list re-render)
+# can fire dozens of mutation records; without a per-instance throttle a
+# rapid sequence of clicks would each invoke ``_check_captcha`` in full
+# (selector probe + classifiers + locator counts). 2s matches the typical
+# captcha-render delay and keeps the steady-state cost at ≤1 probe / 2s
+# regardless of action cadence. The metered_solve gates downstream are
+# ALSO rate-limited (per-hour) so this is purely a CPU-cost throttle.
+_REDETECT_MIN_INTERVAL_S: float = 2.0
+
+
 def _classify_diff_scope(
     inst,
     *,
@@ -1813,6 +1900,18 @@ class CamoufoxInstance:
         # into another solve attempt (could otherwise pile up provider
         # cost and deadlock against the per-instance lock).
         self._captcha_solving: bool = False
+        # §11.4 / §18.2 post-action captcha re-detection state.
+        # ``_last_redetect_ts`` carries a ``time.monotonic()`` reading
+        # of the most recent successful read-back; the wrapper skips the
+        # full ``_check_captcha`` invocation when within
+        # :data:`_REDETECT_MIN_INTERVAL_S` of the previous trigger so a
+        # heavily-mutating action doesn't hammer the selector probe.
+        # ``_pending_captcha_envelope`` carries the §11.13 envelope from
+        # the most recent post-action detection; the next ``snapshot()``
+        # call surfaces and clears it so a polling agent sees the
+        # envelope even when it didn't read the action's response.
+        self._last_redetect_ts: float = 0.0
+        self._pending_captcha_envelope: dict | None = None
 
     @property
     def lock(self) -> asyncio.Lock:
@@ -3256,7 +3355,7 @@ class BrowserManager:
         inst = await self.get_or_start(agent_id)
         inst.touch()
         async with inst.lock:
-            return await self._snapshot_impl(
+            result = await self._snapshot_impl(
                 inst, agent_id,
                 filter=filter,
                 from_ref=from_ref,
@@ -3264,6 +3363,22 @@ class BrowserManager:
                 frame=frame,
                 include_frames=include_frames,
             )
+            # §11.4 / §18.2 — surface and CLEAR any pending captcha
+            # envelope captured by ``_with_captcha_redetect`` after a
+            # prior click/type/press_key/fill_form. This double-surfaces
+            # the §11.13 envelope: agents that read the action response
+            # see it inline; agents that poll via ``snapshot()`` after
+            # acting see it here. Cleared on this read so a third
+            # poll doesn't repeat the same envelope (the snapshot itself
+            # would have called ``_check_captcha`` if the captcha is
+            # still on the page — but we deliberately don't run a probe
+            # here, snapshot is supposed to be cheap).
+            pending = inst._pending_captcha_envelope
+            if pending is not None and isinstance(result, dict) and result.get("success"):
+                data = result.setdefault("data", {})
+                data.setdefault("captcha", pending)
+                inst._pending_captcha_envelope = None
+            return result
 
     async def _snapshot_impl(
         self,
@@ -4980,7 +5095,7 @@ class BrowserManager:
         inst = await self.get_or_start(agent_id)
         inst.touch()
         async with inst.lock:
-            try:
+            async def _click_body() -> dict:
                 if inst._user_control:
                     return {
                         "success": False,
@@ -5185,6 +5300,11 @@ class BrowserManager:
                     snap = await self._snapshot_impl(inst, agent_id)
                     result["snapshot"] = snap.get("data", {})
                 return result
+
+            try:
+                action_result, captcha_envelope = await self._with_captcha_redetect(
+                    inst, _click_body(),
+                )
             except NotImplementedError as e:
                 # Defensive: when PR2 (shadow DOM) merges, refs carrying
                 # both ``shadow_path`` and ``frame_id`` will hit the
@@ -5204,6 +5324,18 @@ class BrowserManager:
                 inst.click_window.append(False)
                 inst.recorder.record_click(method="auto", success=False)
                 return {"success": False, "error": str(e)}
+
+            # §11.4 / §18.2 — re-detection envelope is ADDITIVE: existing
+            # callers continue to see the original action_result shape;
+            # new agents that read ``"captcha"`` get the §11.13 envelope
+            # when a captcha appeared as a side effect of the click.
+            if (
+                captcha_envelope is not None
+                and isinstance(action_result, dict)
+                and action_result.get("success")
+            ):
+                action_result.setdefault("captcha", captcha_envelope)
+            return action_result
 
     async def click_xy(
         self, agent_id: str, x: float, y: float,
@@ -5446,7 +5578,7 @@ class BrowserManager:
         inst = await self.get_or_start(agent_id)
         inst.touch()
         async with inst.lock:
-            try:
+            async def _type_body() -> dict:
                 if inst._user_control:
                     return {
                         "success": False,
@@ -5595,6 +5727,11 @@ class BrowserManager:
                     snap = await self._snapshot_impl(inst, agent_id)
                     result["snapshot"] = snap.get("data", {})
                 return result
+
+            try:
+                action_result, captcha_envelope = await self._with_captcha_redetect(
+                    inst, _type_body(),
+                )
             except NotImplementedError as e:
                 # See click() for rationale — pre-emptive catch for PR2's
                 # shadow+iframe combination guard.
@@ -5604,6 +5741,14 @@ class BrowserManager:
                 )
             except Exception as e:
                 return {"success": False, "error": str(e)}
+
+            if (
+                captcha_envelope is not None
+                and isinstance(action_result, dict)
+                and action_result.get("success")
+            ):
+                action_result.setdefault("captcha", captcha_envelope)
+            return action_result
 
     async def evaluate(self, agent_id: str, expression: str) -> dict:
         """Execute JavaScript and return result.
@@ -5902,6 +6047,165 @@ class BrowserManager:
                 return {"success": True, "data": {"selector": selector, "state": state}}
             except Exception as e:
                 return {"success": False, "error": str(e)}
+
+    async def _with_captcha_redetect(
+        self,
+        inst: CamoufoxInstance,
+        action_coro,
+    ):
+        """§11.4 / §18.2 — wrap an action with MutationObserver-based
+        post-action captcha re-detection.
+
+        Pattern:
+
+          1. Install a ``MutationObserver`` on ``document.body`` capturing
+             every added Element node.
+          2. Run ``action_coro`` (the original action body).
+          3. Read back the captured nodes against the
+             :data:`_CAPTCHA_REDETECT_SELECTORS` list. If any node matches
+             AND we're outside the per-instance rate-limit window, route
+             through the full :meth:`_check_captcha` chain (which goes
+             through :meth:`_metered_solve` and so respects every gate:
+             rate-limit, cost-cap, kill-switch, breaker, behavioral).
+          4. Stash the resulting §11.13 envelope on
+             ``inst._pending_captcha_envelope`` AND return it alongside
+             the action result so the agent sees it inline.
+
+        **Failure modes — all swallowed.** Install failure (page closed,
+        CSP block) means we run the action with no probe. Read-back
+        failure (navigation between install and read-back, page closed)
+        treats the probe as never having fired — empty hits, no
+        ``_check_captcha`` call.
+
+        **Navigation during action.** When the page navigates away,
+        ``window.__ol_captcha_probe`` lives on the old document and is
+        torn down. The read-back from the new page returns ``[]`` and we
+        skip the auto-trigger; the navigate path's own ``_check_captcha``
+        call (in :meth:`navigate`) is the right defense for the new page.
+
+        **Rate-limit.** The wrapper checks
+        ``inst._last_redetect_ts`` against
+        :data:`_REDETECT_MIN_INTERVAL_S` BEFORE invoking
+        ``_check_captcha`` — a probe-storm during a single mutation-heavy
+        action triggers the full chain at most once per 2s. The
+        ``_metered_solve`` gates remain authoritative for solver cost /
+        rate; this throttle is a CPU-cost guard for the auto-detect path.
+
+        **Empty-probe defense.** Spec calls for triggering only on a
+        match. We respect that — pages that swap captchas via
+        ``innerHTML`` replace (rare) will miss the MutationObserver and
+        agents must fall back to the explicit ``solve_captcha`` skill.
+        Always firing ``_check_captcha`` would defeat the cost-saving
+        purpose of this wrapper (each call walks 7 selectors via
+        ``locator(...).count()``).
+
+        **Flag gate.** ``BROWSER_CAPTCHA_REDETECT_ENABLED=false`` makes
+        the wrapper a passthrough — action runs, no install/read-back,
+        no auto-trigger.
+
+        Returns ``(result, envelope_or_none)`` where ``result`` is the
+        action's own return value (passed through unchanged) and
+        ``envelope_or_none`` is the §11.13 envelope when re-detection
+        fired and matched, or ``None`` otherwise. Callers add the
+        envelope to their action response under a ``"captcha"`` key
+        when present.
+        """
+        from src.browser.flags import get_bool
+
+        agent_id = inst.agent_id
+
+        if not get_bool(
+            "BROWSER_CAPTCHA_REDETECT_ENABLED", True, agent_id=agent_id,
+        ):
+            # Passthrough — operator disabled re-detection. No probe, no
+            # read-back, no auto-trigger.
+            return await action_coro, None
+
+        # Snapshot the page object + URL up front so the read-back can
+        # detect navigation (page swap or URL change) and skip cleanly.
+        pre_page = inst.page
+        try:
+            pre_url = inst.page.url or ""
+        except Exception:
+            pre_url = ""
+
+        # 1. Install. Failures are non-fatal — we still run the action.
+        try:
+            await inst.page.evaluate(_JS_CAPTCHA_REDETECT_INSTALL)
+        except Exception as e:
+            logger.debug(
+                "captcha redetect: install failed for %s: %s",
+                agent_id, e,
+            )
+
+        # 2. Run the action. Always propagate exceptions — the wrapper
+        # exists to add detection, not to swallow action failures.
+        result = await action_coro
+
+        # 3. Read back the captured added nodes.
+        navigated = False
+        try:
+            current_url = inst.page.url or ""
+        except Exception:
+            current_url = ""
+        if inst.page is not pre_page or current_url != pre_url:
+            navigated = True
+
+        hits: list[str] = []
+        if not navigated:
+            try:
+                hits = await inst.page.evaluate(
+                    _JS_CAPTCHA_REDETECT_READBACK,
+                    list(_CAPTCHA_REDETECT_SELECTORS),
+                )
+                if not isinstance(hits, list):
+                    hits = []
+            except Exception as e:
+                logger.debug(
+                    "captcha redetect: read-back failed for %s: %s",
+                    agent_id, e,
+                )
+                hits = []
+
+        if not hits:
+            # No captcha-shaped DOM additions detected — fastest path,
+            # no further work.
+            return result, None
+
+        # 4. Per-instance rate-limit. Probe storms (heavily-mutating
+        # actions, agent loops issuing back-to-back clicks) must not
+        # invoke the full 7-selector locator probe more than
+        # ``_REDETECT_MIN_INTERVAL_S`` per instance.
+        now = time.monotonic()
+        if (now - inst._last_redetect_ts) < _REDETECT_MIN_INTERVAL_S:
+            logger.debug(
+                "captcha redetect: rate-limited for %s (%.2fs since last)",
+                agent_id, now - inst._last_redetect_ts,
+            )
+            return result, None
+        inst._last_redetect_ts = now
+
+        # 5. Full ``_check_captcha`` chain — gates fire inside.
+        try:
+            envelope = await self._check_captcha(inst)
+        except Exception as e:
+            logger.debug(
+                "captcha redetect: _check_captcha raised for %s: %s",
+                agent_id, e,
+            )
+            return result, None
+
+        if not envelope.get("captcha_found"):
+            return result, None
+        if envelope.get("solver_outcome") == "solved":
+            # Solver auto-cleared it — nothing for the agent to do.
+            return result, None
+
+        # Stash for snapshot integration AND return inline so the agent
+        # sees it on whichever code path it consults next.
+        legacy = _with_legacy_fields(envelope)
+        inst._pending_captcha_envelope = legacy
+        return result, legacy
 
     async def _metered_solve(
         self,
@@ -7391,73 +7695,189 @@ class BrowserManager:
         # another action interleave between find_text and fill, breaking
         # the ref freshness guarantee.
         async with inst.lock:
-            if inst._user_control:
-                return _err(
-                    "conflict",
-                    "User has browser control — action paused until control is released.",
-                )
+            async def _fill_body() -> dict:
+                if inst._user_control:
+                    return _err(
+                        "conflict",
+                        "User has browser control — action paused until control is released.",
+                    )
 
-            filled: list[dict] = []
-            last_locator = None
-            # Track whether ANY Enter press has succeeded — per-field
-            # submit_after immediately before the captcha check is the
-            # most common trigger for a mid-flow captcha (submission is
-            # often what gates the challenge). When that happens, the
-            # form may have ALREADY been submitted with partial data, so
-            # the captcha-envelope must report ``submitted=True`` rather
-            # than the agent thinking it can safely resume by re-typing.
-            submitted = False
-            for i, field in enumerate(normalized):
-                label = field["label"]
-                value = field["value"]
-                field_submit = field["submit_after"]
+                filled: list[dict] = []
+                last_locator = None
+                # Track whether ANY Enter press has succeeded — per-field
+                # submit_after immediately before the captcha check is the
+                # most common trigger for a mid-flow captcha (submission is
+                # often what gates the challenge). When that happens, the
+                # form may have ALREADY been submitted with partial data, so
+                # the captcha-envelope must report ``submitted=True`` rather
+                # than the agent thinking it can safely resume by re-typing.
+                submitted = False
+                for i, field in enumerate(normalized):
+                    label = field["label"]
+                    value = field["value"]
+                    field_submit = field["submit_after"]
 
-                # 1) Locate the field via find_text. scroll=True so the
-                #    matched input is brought into view before the fill;
-                #    avoids "element not in viewport" failures on long
-                #    forms.
-                find_res = await self._find_text_impl(
-                    inst, agent_id, label, scroll=True,
-                )
-                # Output-side label hygiene: defensively redact the label
-                # echoed back in ``filled[]``. Mirrors :meth:`_find_text_impl`
-                # line ~5261, which redacts the matched ``text`` it returns.
-                # If an agent passes a label like ``"Token: abc123"`` the
-                # response should not echo the secret in plaintext into the
-                # transcript — same defense as the URL redaction in §9.1.
-                # (``remaining[]`` deliberately keeps labels & values
-                # verbatim — see :meth:`_fill_form_captcha_envelope` — so
-                # the agent can resume after solving without losing data.)
-                safe_label = sanitize_for_prompt(
-                    self.redactor.redact(agent_id, label)
-                )
+                    # 1) Locate the field via find_text. scroll=True so the
+                    #    matched input is brought into view before the fill;
+                    #    avoids "element not in viewport" failures on long
+                    #    forms.
+                    find_res = await self._find_text_impl(
+                        inst, agent_id, label, scroll=True,
+                    )
+                    # Output-side label hygiene: defensively redact the label
+                    # echoed back in ``filled[]``. Mirrors :meth:`_find_text_impl`
+                    # line ~5261, which redacts the matched ``text`` it returns.
+                    # If an agent passes a label like ``"Token: abc123"`` the
+                    # response should not echo the secret in plaintext into the
+                    # transcript — same defense as the URL redaction in §9.1.
+                    # (``remaining[]`` deliberately keeps labels & values
+                    # verbatim — see :meth:`_fill_form_captcha_envelope` — so
+                    # the agent can resume after solving without losing data.)
+                    safe_label = sanitize_for_prompt(
+                        self.redactor.redact(agent_id, label)
+                    )
 
-                if not find_res.get("success"):
-                    # Snapshot/find_text failure is service-side; surface
-                    # as type_failed so the loop continues — the agent
-                    # can re-snapshot and retry.
-                    err = find_res.get("error") or {}
-                    raw_reason = (
-                        str(err.get("message")) if isinstance(err, dict)
-                        else str(err)
-                    ) or "find_text failed"
+                    if not find_res.get("success"):
+                        # Snapshot/find_text failure is service-side; surface
+                        # as type_failed so the loop continues — the agent
+                        # can re-snapshot and retry.
+                        err = find_res.get("error") or {}
+                        raw_reason = (
+                            str(err.get("message")) if isinstance(err, dict)
+                            else str(err)
+                        ) or "find_text failed"
+                        filled.append({
+                            "label": safe_label,
+                            "status": "type_failed",
+                            "reason": self.redactor.redact(agent_id, raw_reason),
+                        })
+                        continue
+
+                    matches = (find_res.get("data") or {}).get("matches") or []
+                    if not matches:
+                        filled.append({"label": safe_label, "status": "not_found"})
+                        # CAPTCHA may have appeared as a result of the snapshot
+                        # itself (rare — e.g. a JS challenge that injects on
+                        # every navigation). Check before continuing so we
+                        # don't keep pummeling a blocked page with snapshots.
+                        # _check_captcha now always returns the §11.13 envelope
+                        # (truthy even with no captcha); only stop the loop
+                        # when a captcha was actually found AND not auto-solved.
+                        envelope = await self._check_captcha(inst)
+                        if (
+                            envelope.get("captcha_found")
+                            and envelope.get("solver_outcome") != "solved"
+                        ):
+                            return self._fill_form_captcha_envelope(
+                                filled, normalized[i + 1:],
+                                _with_legacy_fields(envelope),
+                                submitted=submitted,
+                            )
+                        continue
+
+                    # Prefer fillable controls when the visible label text and
+                    # the input's accessible name both match. Snapshot order can
+                    # put a <label> before its <input>; picking that label first
+                    # would yield a needless not_fillable failure even though the
+                    # correct textbox is present in the same match set.
+                    def _preferred_match(m: dict) -> bool:
+                        ref_id = m.get("ref")
+                        handle = inst.refs.get(ref_id)
+                        role = (getattr(handle, "role", "") or "").lower()
+                        disabled = bool(getattr(handle, "disabled", False))
+                        return (
+                            role in self._FILL_FORM_PREFERRED_ROLES
+                            and not disabled
+                        )
+
+                    pick = (
+                        next(
+                            (
+                                m for m in matches
+                                if m.get("in_viewport") and _preferred_match(m)
+                            ),
+                            None,
+                        )
+                        or next((m for m in matches if _preferred_match(m)), None)
+                        or next((m for m in matches if m.get("in_viewport")), None)
+                        or matches[0]
+                    )
+                    ref = pick.get("ref")
+
+                    try:
+                        locator = await self._locator_from_ref(inst, ref)
+                    except RefStale as rs:
+                        filled.append({
+                            "label": safe_label,
+                            "ref": ref,
+                            "status": "type_failed",
+                            "reason": self.redactor.redact(agent_id, str(rs)),
+                        })
+                        continue
+                    if locator is None:
+                        filled.append({
+                            "label": safe_label,
+                            "ref": ref,
+                            "status": "type_failed",
+                            "reason": "ref not found",
+                        })
+                        continue
+
+                    try:
+                        await locator.fill(value)
+                    except Exception as e:
+                        # Element no longer attached / disabled / hidden /
+                        # not-fillable (label-element returned by find_text).
+                        # Don't bail the whole form: subsequent fields may still
+                        # be reachable. ``reason`` is a structured code (see
+                        # :meth:`_classify_fill_error`) so the agent can plan a
+                        # specific recovery — e.g. re-snapshot on ``detached``,
+                        # fall back to ``browser_get_elements`` on
+                        # ``not_fillable``.
+                        reason_code = self._classify_fill_error(e)
+                        filled.append({
+                            "label": safe_label,
+                            "ref": ref,
+                            "status": "type_failed",
+                            "reason": reason_code,
+                            "detail": self.redactor.redact(agent_id, str(e))[:200],
+                        })
+                        continue
+
                     filled.append({
                         "label": safe_label,
-                        "status": "type_failed",
-                        "reason": self.redactor.redact(agent_id, raw_reason),
+                        "ref": ref,
+                        "status": "filled",
                     })
-                    continue
+                    last_locator = locator
 
-                matches = (find_res.get("data") or {}).get("matches") or []
-                if not matches:
-                    filled.append({"label": safe_label, "status": "not_found"})
-                    # CAPTCHA may have appeared as a result of the snapshot
-                    # itself (rare — e.g. a JS challenge that injects on
-                    # every navigation). Check before continuing so we
-                    # don't keep pummeling a blocked page with snapshots.
-                    # _check_captcha now always returns the §11.13 envelope
-                    # (truthy even with no captcha); only stop the loop
-                    # when a captcha was actually found AND not auto-solved.
+                    # Per-field submit_after fires after a successful fill but
+                    # BEFORE the captcha check, because submitting can be what
+                    # triggers the captcha. If the press succeeds we mark
+                    # ``submitted=True`` so a follow-up captcha envelope tells
+                    # the agent the form was already submitted (possibly with
+                    # partial data) — the agent must NOT just resume typing
+                    # the remaining fields without first re-checking page
+                    # state.
+                    if field_submit:
+                        try:
+                            await locator.press("Enter")
+                            submitted = True
+                        except Exception as e:
+                            logger.debug(
+                                "fill_form per-field submit failed for %s "
+                                "label=%r: %s", agent_id, label, e,
+                            )
+
+                    # 2) After each successful fill (or per-field submit), check
+                    #    for a captcha. If found, stop the loop and return
+                    #    partial_success — the agent must solve before resuming.
+                    #    Captcha mid-flow takes priority over top-level
+                    #    submit_after: we never auto-submit a half-completed
+                    #    form behind a captcha.
+                    #    _check_captcha now always returns the §11.13 envelope
+                    #    (truthy even with no captcha); only break out when a
+                    #    captcha was actually found AND not auto-solved.
                     envelope = await self._check_captcha(inst)
                     if (
                         envelope.get("captcha_found")
@@ -7468,150 +7888,62 @@ class BrowserManager:
                             _with_legacy_fields(envelope),
                             submitted=submitted,
                         )
-                    continue
 
-                # Prefer fillable controls when the visible label text and
-                # the input's accessible name both match. Snapshot order can
-                # put a <label> before its <input>; picking that label first
-                # would yield a needless not_fillable failure even though the
-                # correct textbox is present in the same match set.
-                def _preferred_match(m: dict) -> bool:
-                    ref_id = m.get("ref")
-                    handle = inst.refs.get(ref_id)
-                    role = (getattr(handle, "role", "") or "").lower()
-                    disabled = bool(getattr(handle, "disabled", False))
-                    return (
-                        role in self._FILL_FORM_PREFERRED_ROLES
-                        and not disabled
-                    )
-
-                pick = (
-                    next(
-                        (
-                            m for m in matches
-                            if m.get("in_viewport") and _preferred_match(m)
-                        ),
-                        None,
-                    )
-                    or next((m for m in matches if _preferred_match(m)), None)
-                    or next((m for m in matches if m.get("in_viewport")), None)
-                    or matches[0]
-                )
-                ref = pick.get("ref")
-
-                try:
-                    locator = await self._locator_from_ref(inst, ref)
-                except RefStale as rs:
-                    filled.append({
-                        "label": safe_label,
-                        "ref": ref,
-                        "status": "type_failed",
-                        "reason": self.redactor.redact(agent_id, str(rs)),
-                    })
-                    continue
-                if locator is None:
-                    filled.append({
-                        "label": safe_label,
-                        "ref": ref,
-                        "status": "type_failed",
-                        "reason": "ref not found",
-                    })
-                    continue
-
-                try:
-                    await locator.fill(value)
-                except Exception as e:
-                    # Element no longer attached / disabled / hidden /
-                    # not-fillable (label-element returned by find_text).
-                    # Don't bail the whole form: subsequent fields may still
-                    # be reachable. ``reason`` is a structured code (see
-                    # :meth:`_classify_fill_error`) so the agent can plan a
-                    # specific recovery — e.g. re-snapshot on ``detached``,
-                    # fall back to ``browser_get_elements`` on
-                    # ``not_fillable``.
-                    reason_code = self._classify_fill_error(e)
-                    filled.append({
-                        "label": safe_label,
-                        "ref": ref,
-                        "status": "type_failed",
-                        "reason": reason_code,
-                        "detail": self.redactor.redact(agent_id, str(e))[:200],
-                    })
-                    continue
-
-                filled.append({
-                    "label": safe_label,
-                    "ref": ref,
-                    "status": "filled",
-                })
-                last_locator = locator
-
-                # Per-field submit_after fires after a successful fill but
-                # BEFORE the captcha check, because submitting can be what
-                # triggers the captcha. If the press succeeds we mark
-                # ``submitted=True`` so a follow-up captcha envelope tells
-                # the agent the form was already submitted (possibly with
-                # partial data) — the agent must NOT just resume typing
-                # the remaining fields without first re-checking page
-                # state.
-                if field_submit:
+                all_filled = all(f.get("status") == "filled" for f in filled)
+                # 3) Final submit — only if no captcha interrupted us AND every
+                #    requested field was filled. Top-level submit_after is the
+                #    "submit the completed form" affordance; submitting after a
+                #    not_found/type_failed field would send partial data without
+                #    the caller explicitly opting into that via per-field
+                #    submit_after.
+                if submit_after and last_locator is not None and all_filled:
                     try:
-                        await locator.press("Enter")
+                        await last_locator.press("Enter")
                         submitted = True
                     except Exception as e:
                         logger.debug(
-                            "fill_form per-field submit failed for %s "
-                            "label=%r: %s", agent_id, label, e,
+                            "fill_form final submit failed for %s: %s",
+                            agent_id, e,
                         )
 
-                # 2) After each successful fill (or per-field submit), check
-                #    for a captcha. If found, stop the loop and return
-                #    partial_success — the agent must solve before resuming.
-                #    Captcha mid-flow takes priority over top-level
-                #    submit_after: we never auto-submit a half-completed
-                #    form behind a captcha.
-                #    _check_captcha now always returns the §11.13 envelope
-                #    (truthy even with no captcha); only break out when a
-                #    captcha was actually found AND not auto-solved.
-                envelope = await self._check_captcha(inst)
-                if (
-                    envelope.get("captcha_found")
-                    and envelope.get("solver_outcome") != "solved"
-                ):
-                    return self._fill_form_captcha_envelope(
-                        filled, normalized[i + 1:],
-                        _with_legacy_fields(envelope),
-                        submitted=submitted,
-                    )
+                partial = not all_filled
+                return {
+                    "success": True,
+                    "data": {
+                        "partial_success": partial,
+                        "captcha_required": False,
+                        "filled": filled,
+                        "remaining": [],
+                        "submitted": submitted,
+                    },
+                }
 
-            all_filled = all(f.get("status") == "filled" for f in filled)
-            # 3) Final submit — only if no captcha interrupted us AND every
-            #    requested field was filled. Top-level submit_after is the
-            #    "submit the completed form" affordance; submitting after a
-            #    not_found/type_failed field would send partial data without
-            #    the caller explicitly opting into that via per-field
-            #    submit_after.
-            if submit_after and last_locator is not None and all_filled:
-                try:
-                    await last_locator.press("Enter")
-                    submitted = True
-                except Exception as e:
-                    logger.debug(
-                        "fill_form final submit failed for %s: %s",
-                        agent_id, e,
-                    )
+            # §11.4 / §18.2 — outer wrapper. The body itself fires
+            # ``_check_captcha`` after each field; the wrapper adds a
+            # final post-action probe so a captcha that appears AFTER
+            # the final submit (e.g. submit-triggered challenge that
+            # renders too late for the inner check) is still surfaced.
+            try:
+                action_result, captcha_envelope = await self._with_captcha_redetect(
+                    inst, _fill_body(),
+                )
+            except Exception as e:
+                return {"success": False, "error": str(e)}
 
-            partial = not all_filled
-            return {
-                "success": True,
-                "data": {
-                    "partial_success": partial,
-                    "captcha_required": False,
-                    "filled": filled,
-                    "remaining": [],
-                    "submitted": submitted,
-                },
-            }
+            # If the body already returned a captcha envelope under the
+            # §9.4 partial-success path (``data.captcha_required=True``)
+            # we leave it alone. The outer wrapper only adds the
+            # ``"captcha"`` field on the SUCCESS / no-captcha-yet path
+            # to avoid duplicating the same envelope.
+            if (
+                captcha_envelope is not None
+                and isinstance(action_result, dict)
+                and action_result.get("success")
+                and not (action_result.get("data") or {}).get("captcha_required")
+            ):
+                data = action_result.setdefault("data", {})
+                data.setdefault("captcha", captcha_envelope)
+            return action_result
 
     @staticmethod
     def _fill_form_captcha_envelope(
@@ -8015,7 +8347,7 @@ class BrowserManager:
         inst = await self.get_or_start(agent_id)
         inst.touch()
         async with inst.lock:
-            try:
+            async def _press_body() -> dict:
                 if inst._user_control:
                     return {
                         "success": False,
@@ -8035,8 +8367,21 @@ class BrowserManager:
                     await inst.page.keyboard.press(key)
                 await asyncio.sleep(action_delay())
                 return {"success": True, "data": {"pressed": key}}
+
+            try:
+                action_result, captcha_envelope = await self._with_captcha_redetect(
+                    inst, _press_body(),
+                )
             except Exception as e:
                 return {"success": False, "error": str(e)}
+
+            if (
+                captcha_envelope is not None
+                and isinstance(action_result, dict)
+                and action_result.get("success")
+            ):
+                action_result.setdefault("captcha", captcha_envelope)
+            return action_result
 
     async def go_back(self, agent_id: str) -> dict:
         """Navigate back in browser history."""

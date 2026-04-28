@@ -69,6 +69,10 @@ KNOWN_FLAGS: dict[str, str] = {
     "OPENLEGION_UPLOAD_STAGE_TTL_S": "orphan staging TTL in seconds (default 60)",
     "BROWSER_DOWNLOAD_DIR": "browser-side download dir (default /tmp/downloads)",
     "BROWSER_DOWNLOAD_TTL_S": "stale download GC TTL seconds (default 60)",
+    # ── CAPTCHA re-detection after non-navigate actions (§11.4 / §18.2) ───
+    "BROWSER_CAPTCHA_REDETECT_ENABLED":
+        "true | false (default true) — gate MutationObserver-based "
+        "post-action captcha re-detection on click/type/press_key/fill_form",
     # ── CAPTCHA solver (§11) ──────────────────────────────────────────────
     "CAPTCHA_SOLVER_PROVIDER": "2captcha | capsolver | unset",
     "CAPTCHA_SOLVER_KEY": "API key for the primary provider",
