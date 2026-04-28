@@ -1498,14 +1498,18 @@ def _encode_screenshot(
         )
         return png_bytes, "png"
 
-    # Decompression-bomb protection. A page rendering a giant <canvas>
-    # could hand us back a multi-hundred-megapixel PNG that Pillow
-    # would happily allocate. Cap at 50 MP — covers any realistic
-    # browser viewport (8K screen ≈ 33 MP) but blocks adversarial
-    # blowups. Pillow raises ``DecompressionBombError`` once the cap
-    # is exceeded; we catch and return the raw PNG bytes so the agent
-    # still gets diagnostic data.
-    Image.MAX_IMAGE_PIXELS = 50_000_000
+    # Decompression-bomb protection. Pillow's ``MAX_IMAGE_PIXELS`` is a
+    # MODULE-LEVEL global; rebinding it on every screenshot encode (the
+    # earlier placement) was both wasteful and racy with any other
+    # Pillow consumer in the process. Set once, here, immediately after
+    # the import succeeds — first encode in the process pins the cap
+    # for everyone, subsequent encodes are no-ops since the value is
+    # idempotent. 50 MP covers any realistic browser viewport (8K
+    # ≈ 33 MP) but blocks adversarial blowups; Pillow raises
+    # ``DecompressionBombError`` once exceeded and the catch-all below
+    # falls back to the raw PNG bytes.
+    if Image.MAX_IMAGE_PIXELS != 50_000_000:
+        Image.MAX_IMAGE_PIXELS = 50_000_000
 
     try:
         img = Image.open(BytesIO(png_bytes))
@@ -1947,27 +1951,29 @@ class CamoufoxInstance:
         except RuntimeError:
             loop = None
         if self._lock is None:
-            if loop is None:
-                # Python 3.9's asyncio.Lock constructor still consults
-                # the thread's current event loop. A sync test/startup
-                # thread may not have one, so install a temporary default;
-                # first async use will rebuild the lock for the running loop.
-                try:
-                    loop = asyncio.get_event_loop()
-                except RuntimeError:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
+            # ``asyncio.Lock()`` on Python 3.10+ (project minimum) does
+            # NOT consult or bind a loop at construction; first acquire
+            # binds it. Constructing one in a thread with no loop is
+            # safe — leave ``_lock_loop = None`` and pin on first real
+            # async use below. (Earlier code did
+            # ``asyncio.new_event_loop() + set_event_loop()`` here as
+            # a Python-3.9 workaround; that mutated the calling
+            # thread's current event loop as a side effect of an
+            # attribute READ, which is surprising and breaks any code
+            # that later calls ``asyncio.run`` in that thread.)
             self._lock = asyncio.Lock()
-            self._lock_loop = loop
+            self._lock_loop = loop  # may be None; pinned below on first real use
         elif loop is None:
+            # No active loop to bind against; return what we have.
             return self._lock
         elif self._lock_loop is None:
-            # Lock was set via the setter outside a running loop; pin it
-            # to the loop that's actually using it now without discarding.
+            # Lock was created (or set via the setter) outside a
+            # running loop; pin it to the loop that's actually using
+            # it now without discarding.
             self._lock_loop = loop
         elif self._lock_loop is not loop:
-            # Loop changed between uses (typically pytest spinning up a
-            # fresh loop per test). Rebuild to bind to the new loop.
+            # Loop changed between uses (typically pytest spinning up
+            # a fresh loop per test). Rebuild to bind to the new loop.
             self._lock = asyncio.Lock()
             self._lock_loop = loop
         return self._lock

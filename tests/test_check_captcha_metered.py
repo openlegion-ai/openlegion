@@ -693,6 +693,38 @@ class TestCostCapReservation:
         assert await cost.get_millicents("agent-1") == 0
 
 
+# ── 12. _max_published_solve_cost_millicents helper ──────────────────────
+
+
+class TestMaxPublishedSolveCostHelper:
+    """``_max_published_solve_cost_millicents`` returns the worst-case
+    price across the proxyless / proxy-aware tiers so the cap reservation
+    holds even when the solver flips paths mid-solve. End-to-end coverage
+    lives in the ``_metered_solve`` tests above; pin the contract here."""
+
+    def test_known_provider_returns_max_of_tiers(self):
+        # 2captcha hcaptcha: proxyless=100, proxy_aware=300 → max=300
+        from src.browser.service import _max_published_solve_cost_millicents
+        assert _max_published_solve_cost_millicents("2captcha", "hcaptcha") == 300
+
+    def test_falls_back_when_only_proxyless_tier_published(self):
+        # 2captcha recaptcha-v3 has no proxy-aware row; proxyless=100.
+        from src.browser.service import _max_published_solve_cost_millicents
+        assert _max_published_solve_cost_millicents("2captcha", "recaptcha-v3") == 100
+
+    def test_unknown_kind_returns_none(self):
+        from src.browser.service import _max_published_solve_cost_millicents
+        assert _max_published_solve_cost_millicents("2captcha", "made-up") is None
+
+    def test_unknown_provider_returns_none(self):
+        from src.browser.service import _max_published_solve_cost_millicents
+        assert _max_published_solve_cost_millicents("nopal", "hcaptcha") is None
+
+    def test_empty_provider_returns_none(self):
+        from src.browser.service import _max_published_solve_cost_millicents
+        assert _max_published_solve_cost_millicents("", "hcaptcha") is None
+
+
 # ── 11. Codex F7 — token-without-provider warns + (cap-on) fails closed ──
 
 
