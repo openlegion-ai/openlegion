@@ -3123,10 +3123,19 @@ def create_mesh_app(
     # without this lock, both would write to the partial file concurrently
     # and corrupt the resulting bytes.
     _stage_locks: dict[str, asyncio.Lock] = {}
-    _stage_locks_guard = asyncio.Lock()
+    _stage_locks_guard: asyncio.Lock | None = None
+    _stage_locks_guard_loop: asyncio.AbstractEventLoop | None = None
+
+    def _get_stage_locks_guard() -> asyncio.Lock:
+        nonlocal _stage_locks_guard, _stage_locks_guard_loop
+        loop = asyncio.get_running_loop()
+        if _stage_locks_guard is None or _stage_locks_guard_loop is not loop:
+            _stage_locks_guard = asyncio.Lock()
+            _stage_locks_guard_loop = loop
+        return _stage_locks_guard
 
     async def _get_stage_lock(handle: str) -> asyncio.Lock:
-        async with _stage_locks_guard:
+        async with _get_stage_locks_guard():
             lock = _stage_locks.get(handle)
             if lock is None:
                 lock = asyncio.Lock()
@@ -3134,7 +3143,7 @@ def create_mesh_app(
             return lock
 
     async def _release_stage_lock_if_idle(handle: str) -> None:
-        async with _stage_locks_guard:
+        async with _get_stage_locks_guard():
             lock = _stage_locks.get(handle)
             if lock is not None and not lock.locked():
                 _stage_locks.pop(handle, None)

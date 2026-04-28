@@ -63,8 +63,16 @@ class HealthMonitor:
         self._cleanup_agent = cleanup_agent_fn
         self._blackboard = blackboard
         self.agents: dict[str, AgentHealth] = {}
-        self._agent_lock = asyncio.Lock()
+        self._agent_lock: asyncio.Lock | None = None
+        self._agent_lock_loop: asyncio.AbstractEventLoop | None = None
         self._running = False
+
+    def _get_agent_lock(self) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        if self._agent_lock is None or self._agent_lock_loop is not loop:
+            self._agent_lock = asyncio.Lock()
+            self._agent_lock_loop = loop
+        return self._agent_lock
 
     def register(self, agent_id: str, url: str = "") -> None:
         self.agents[agent_id] = AgentHealth(agent_id=agent_id)
@@ -99,7 +107,7 @@ class HealthMonitor:
     async def _cleanup_ephemeral_agents(self) -> None:
         """Remove ephemeral (spawned) agents that have exceeded their TTL."""
         now = time.time()
-        async with self._agent_lock:
+        async with self._get_agent_lock():
             for agent_id in list(self.agents.keys()):
                 info = self.runtime.agents.get(agent_id, {})
                 if not info.get("ephemeral"):

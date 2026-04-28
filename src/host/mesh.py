@@ -621,13 +621,21 @@ class MessageRouter:
         self._agent_projects: dict[str, str] = agent_projects or {}
         self._registry_lock = threading.Lock()
         self._client: httpx.AsyncClient | None = None
-        self._client_lock = asyncio.Lock()
+        self._client_lock: asyncio.Lock | None = None
+        self._client_lock_loop: asyncio.AbstractEventLoop | None = None
         self._trace_store = trace_store
+
+    def _get_client_lock(self) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        if self._client_lock is None or self._client_lock_loop is not loop:
+            self._client_lock = asyncio.Lock()
+            self._client_lock_loop = loop
+        return self._client_lock
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is not None and not self._client.is_closed:
             return self._client
-        async with self._client_lock:
+        async with self._get_client_lock():
             if self._client is None or self._client.is_closed:
                 self._client = httpx.AsyncClient(timeout=30)
             return self._client

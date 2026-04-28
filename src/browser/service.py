@@ -1642,7 +1642,8 @@ class CamoufoxInstance:
         self.refs: dict[str, RefHandle] = {}
         self.dialog_active: bool = False  # True when snapshot scoped to a modal dialog
         self.dialog_detected: bool = False  # True when a modal was found (even if scoping failed)
-        self.lock = asyncio.Lock()  # serialize page operations per instance
+        self._lock: asyncio.Lock | None = None
+        self._lock_loop: asyncio.AbstractEventLoop | None = None
         self.x11_wid: int | None = None  # X11 window ID for targeted focus
         # P0.3: vestigial — the snapshot tree builder always uses the JS
         # walker now. Still consulted by ``navigate()`` for body-text
@@ -1741,6 +1742,34 @@ class CamoufoxInstance:
         # into another solve attempt (could otherwise pile up provider
         # cost and deadlock against the per-instance lock).
         self._captcha_solving: bool = False
+
+    @property
+    def lock(self) -> asyncio.Lock:
+        """Per-instance lock, bound lazily to the active event loop.
+
+        ``CamoufoxInstance`` is normally constructed inside the browser
+        service loop, but tests and setup helpers also construct it from
+        synchronous code. Python 3.9 raises when ``asyncio.Lock`` is created
+        after pytest has closed the default loop, so the lock is resolved on
+        access and refreshed if the active loop changes.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+        if self._lock is None or self._lock_loop is not loop:
+            self._lock = asyncio.Lock()
+            self._lock_loop = loop
+        return self._lock
+
+    @lock.setter
+    def lock(self, value: asyncio.Lock) -> None:
+        self._lock = value
+        self._lock_loop = getattr(value, "_loop", None)
 
     def _register_page(self, page) -> str:
         """Assign a stable UUID to a Page if not already registered.

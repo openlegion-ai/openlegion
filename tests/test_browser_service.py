@@ -9591,13 +9591,12 @@ class TestShadowDOM:
                 await browser.close()
 
     @pytest.mark.asyncio
-    async def test_resolver_rejects_frame_id_until_pr3(self):
-        """P1.7 — until iframe support lands (PR3) the resolver must
-        refuse refs with a non-None frame_id rather than silently
-        resolving against the main frame. Explicit error makes the
-        cross-PR seam loud.
+    async def test_resolver_rejects_unknown_frame_id(self):
+        """Iframe-aware resolver must reject unknown frames explicitly.
+
+        A stale frame_id must not silently resolve against the main frame.
         """
-        from src.browser.ref_handle import RefHandle, ShadowHop
+        from src.browser.ref_handle import RefHandle, RefStale, ShadowHop
         from src.browser.service import BrowserManager, CamoufoxInstance
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
 
@@ -9613,7 +9612,7 @@ class TestShadowDOM:
             frame_id="f1-deadbeef",
         )
 
-        with pytest.raises(NotImplementedError, match="iframe"):
+        with pytest.raises(RefStale, match="frame_detached"):
             await mgr._locator_from_ref(inst, "e0")
         # Stage-1 was never invoked.
         mock_page.evaluate_handle.assert_not_called()
