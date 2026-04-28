@@ -97,6 +97,7 @@ All agents share a single **browser service container** running Camoufox (a stea
 | Tool | Parameters | Description |
 |------|-----------|-------------|
 | `web_search` | `query`, `max_results` | Search via DuckDuckGo (no API key needed) |
+| `exa_search` | `query`, `max_results`, `search_type`, `content_mode`, `text_max_chars`, `category`, `include_domains`, `exclude_domains`, `include_text`, `exclude_text`, `start_published_date`, `end_published_date` | AI-powered search via Exa with highlights/text/summary, category and domain filters, date ranges. Requires `OPENLEGION_CRED_EXA_API_KEY` (or `EXA_API_KEY`) |
 
 ### Self-Extension
 
