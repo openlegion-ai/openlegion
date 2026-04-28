@@ -71,6 +71,10 @@ class SolveResult:
               * ``"provider_missing"`` — solver lacks a string ``provider``
                 attribute AND a cost cap is configured; we fail closed
                 rather than let an untrackable charge slip past the cap.
+              * ``"price_missing"`` — solver/provider exists but the
+                ``(provider, kind)`` tuple has no published cost while a
+                cost cap is configured; we fail closed for the same
+                reason.
             ``None`` for a real solver attempt (success or failure).
 
     Field-population guarantee for ``_metered_solve`` consumers:

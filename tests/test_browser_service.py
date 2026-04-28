@@ -455,6 +455,27 @@ class TestTypeTextClearBehavior:
 class TestCamoufoxInstanceLock:
     """Tests that CamoufoxInstance has a per-instance lock."""
 
+    def test_lock_property_does_not_require_current_event_loop(self):
+        errors: list[BaseException] = []
+        locks: list[asyncio.Lock] = []
+
+        def build_and_read_lock() -> None:
+            try:
+                inst = CamoufoxInstance(
+                    "a1", MagicMock(), MagicMock(), MagicMock(),
+                )
+                locks.append(inst.lock)
+            except BaseException as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(target=build_and_read_lock)
+        thread.start()
+        thread.join()
+
+        assert errors == []
+        assert len(locks) == 1
+        assert isinstance(locks[0], asyncio.Lock)
+
     @pytest.mark.asyncio
     async def test_instance_has_lock(self):
         from src.browser.service import CamoufoxInstance
@@ -10993,5 +11014,4 @@ class TestSnapshotDiffSubsetShortCircuit:
         # ``scope`` is included to signal the caller that the diff was
         # not produced.
         assert result["data"].get("scope") == "navigation"
-
 

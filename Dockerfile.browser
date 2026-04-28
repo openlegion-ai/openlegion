@@ -98,11 +98,9 @@ WORKDIR /app
 # the GitHub release page's published checksum (or PGP signature
 # verification of the corresponding ``.sig`` if upstream ships one).
 #
-# The build can be overridden via ``--build-arg UBLOCK_SHA256=...``;
-# the default below is INTENTIONALLY a placeholder so a fresh build
-# fails closed until the maintainer pins the verified hash.
+# The build can be overridden via ``--build-arg UBLOCK_SHA256=...``.
 ARG UBLOCK_VERSION=1.62.0
-ARG UBLOCK_SHA256=PLACEHOLDER_PIN_BEFORE_BUILD
+ARG UBLOCK_SHA256=8a9e02aa838c302fb14e2b5bc88a6036d36358aadd6f95168a145af2018ef1a3
 RUN mkdir -p /opt/openlegion/extensions \
     && curl -fSL -o /opt/openlegion/extensions/uBlock0.xpi \
         "https://github.com/gorhill/uBlock/releases/download/${UBLOCK_VERSION}/uBlock0_${UBLOCK_VERSION}.firefox.signed.xpi" \

@@ -16,6 +16,7 @@ rather than run a live browser — tests verify:
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -801,6 +802,8 @@ class TestDownloadFlow:
         from src.browser.service import BrowserManager
 
         monkeypatch.setenv("BROWSER_DOWNLOAD_DIR", str(tmp_path / "downloads"))
+        from src.browser import flags
+        flags.reload_operator_settings()
         mgr = BrowserManager(profiles_dir=str(tmp_path / "p"))
         return create_browser_app(mgr)
 
@@ -823,6 +826,39 @@ class TestDownloadFlow:
         assert resp.status_code == 200
         assert resp.content == b"X" * 200
         assert resp.headers["content-type"].startswith("application/octet-stream")
+
+    def test_download_stream_uses_operator_settings_dir(self, tmp_path, monkeypatch):
+        """Manager.download() reads BROWSER_DOWNLOAD_DIR through browser
+        flags, so stream/cleanup must use the same flag source. Env-only
+        lookup would 404 when the operator configured the dir in settings."""
+        from starlette.testclient import TestClient
+
+        from src.browser import flags
+        from src.browser.server import create_browser_app
+        from src.browser.service import BrowserManager
+
+        dl_dir = tmp_path / "settings-downloads"
+        settings = tmp_path / "settings.json"
+        settings.write_text(json.dumps({
+            "browser_flags": {"BROWSER_DOWNLOAD_DIR": str(dl_dir)},
+        }))
+        monkeypatch.setenv("OPENLEGION_SETTINGS_PATH", str(settings))
+        monkeypatch.delenv("BROWSER_DOWNLOAD_DIR", raising=False)
+        flags.reload_operator_settings()
+        try:
+            mgr = BrowserManager(profiles_dir=str(tmp_path / "p"))
+            app = create_browser_app(mgr)
+            nonce = "abcdef012345"
+            dl_dir.mkdir(parents=True)
+            (dl_dir / f"{nonce}-report.pdf").write_bytes(b"settings")
+            with TestClient(app) as client:
+                resp = client.get(
+                    f"/browser/a1/_download_stream?nonce={nonce}",
+                )
+            assert resp.status_code == 200
+            assert resp.content == b"settings"
+        finally:
+            flags.reload_operator_settings()
 
     def test_download_stream_unknown_nonce_404(self, tmp_path, monkeypatch):
         from starlette.testclient import TestClient
@@ -863,6 +899,16 @@ class TestDownloadFlow:
             )
         assert resp.status_code == 400
 
+    def test_download_trigger_rejects_bad_timeout(self, tmp_path, monkeypatch):
+        from starlette.testclient import TestClient
+        app = self._app(monkeypatch, tmp_path)
+        with TestClient(app) as client:
+            resp = client.post(
+                "/browser/a1/download",
+                json={"ref": "e1", "timeout_ms": "later"},
+            )
+        assert resp.status_code == 400
+
     def test_startup_cleanup_clears_orphans(self, tmp_path, monkeypatch):
         """Phase 5 §8.2: blanket-delete /tmp/downloads/* on browser boot to
         purge orphans from a crashed/restarted tab."""
@@ -873,6 +919,26 @@ class TestDownloadFlow:
         (dl / "stale2-bar.bin").write_bytes(b"old")
         from src.browser import __main__ as bmain
         bmain._cleanup_orphan_downloads()
+        assert list(dl.iterdir()) == []
+
+    def test_startup_cleanup_uses_operator_settings_dir(self, tmp_path, monkeypatch):
+        from src.browser import __main__ as bmain
+        from src.browser import flags
+
+        dl = tmp_path / "settings-downloads"
+        dl.mkdir()
+        (dl / "stale-foo.bin").write_bytes(b"old")
+        settings = tmp_path / "settings.json"
+        settings.write_text(json.dumps({
+            "browser_flags": {"BROWSER_DOWNLOAD_DIR": str(dl)},
+        }))
+        monkeypatch.setenv("OPENLEGION_SETTINGS_PATH", str(settings))
+        monkeypatch.delenv("BROWSER_DOWNLOAD_DIR", raising=False)
+        flags.reload_operator_settings()
+        try:
+            bmain._cleanup_orphan_downloads()
+        finally:
+            flags.reload_operator_settings()
         assert list(dl.iterdir()) == []
 
     def test_startup_cleanup_idempotent_when_dir_missing(self, tmp_path, monkeypatch):

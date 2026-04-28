@@ -154,7 +154,8 @@ def _cleanup_orphan_downloads() -> None:
 
     Idempotent and non-fatal; logs but never raises.
     """
-    dl_dir = Path(os.environ.get("BROWSER_DOWNLOAD_DIR", "/tmp/downloads"))
+    from src.browser.flags import get_str
+    dl_dir = Path(get_str("BROWSER_DOWNLOAD_DIR", "/tmp/downloads"))
     if not dl_dir.is_dir():
         return
     removed = 0

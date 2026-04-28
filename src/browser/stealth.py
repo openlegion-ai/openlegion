@@ -338,13 +338,12 @@ def pick_network_info(agent_id: str) -> dict:
     Picks per-agent from plausible bands:
       - downlink: 5–20 Mbps (covers home broadband, mobile 4G good signal)
       - rtt: 20–120 ms (covers wired through mobile)
-      - saveData: always False (rare on desktop; True would itself be a flag)
+      - saveData: rare True (~3%), mostly False
 
     Deterministic from ``agent_id`` so the same agent reports the same
-    network shape across browser restarts. SHA-256 splits into two
-    independent 4-byte words for downlink and rtt — using one byte each
-    would give a coarse 256-bucket distribution and visible quantisation
-    on fleet-scale analysis.
+    network shape across browser restarts. SHA-256 splits into independent
+    4-byte words for each field — using one byte each would give a coarse
+    256-bucket distribution and visible quantisation on fleet-scale analysis.
     """
     digest = hashlib.sha256(f"netinfo:{agent_id}".encode("utf-8")).digest()
     dl_unit = int.from_bytes(digest[:4], "big") / (1 << 32)   # [0, 1)

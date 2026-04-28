@@ -30,7 +30,11 @@ existing `int` storage / JSON shape unchanged.
 Public surface:
   * :func:`add_cost(agent_id, millicents)` — increment a per-agent
     monthly bucket. Resets when the calendar month rolls over.
+  * :func:`adjust_cost(agent_id, delta_millicents)` — apply a signed
+    correction, clamped at zero. Used to refund pre-solve reservations.
   * :func:`over_cap(agent_id, cap_millicents)` — read-only check.
+  * :func:`check_and_charge(agent_id, cap_millicents, millicents)` —
+    atomic under-cap reservation/charge helper.
   * :func:`snapshot()` / :func:`restore()` — JSON file persistence. Atomic
     write via ``os.replace`` after ``fsync``. The on-disk schema migrates
     legacy ``cents`` snapshots by multiplying ×1000 on load (logged once).
@@ -260,6 +264,22 @@ async def add_cost(agent_id: str, millicents: int) -> int:
         return bucket["millicents"]
 
 
+async def adjust_cost(agent_id: str, delta_millicents: int) -> int:
+    """Apply a signed correction to the current-month bucket.
+
+    Positive deltas behave like :func:`add_cost`; negative deltas refund a
+    reservation or over-estimate. The bucket is clamped at zero so a double
+    refund or process-restart mismatch cannot create negative spend.
+    """
+    if delta_millicents == 0:
+        return await get_millicents(agent_id)
+    async with _get_lock():
+        bucket = _bucket_for(agent_id)
+        current = int(bucket["millicents"])
+        bucket["millicents"] = max(0, current + int(delta_millicents))
+        return bucket["millicents"]
+
+
 async def over_cap(agent_id: str, cap_millicents: int) -> bool:
     """Return ``True`` iff current-month spend ≥ ``cap_millicents``.
 
@@ -297,7 +317,10 @@ async def check_and_charge(
     Closes the race between separate ``over_cap`` / ``add_cost`` lock
     spans where two concurrent solves could each see ``bucket < cap``,
     each call ``add_cost``, and together push the bucket above cap. Hold
-    the lock across both reads and writes here.
+    the lock across both reads and writes here. BrowserManager uses this
+    as a pre-solve reservation for the maximum published price, then calls
+    :func:`adjust_cost` to refund or correct after the provider result is
+    known.
 
     ``cap_millicents <= 0`` means "no cap": always allowed; cost is still
     charged. ``millicents <= 0`` means "free attempt": always allowed;

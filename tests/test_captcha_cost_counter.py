@@ -387,3 +387,16 @@ class TestCheckAndChargeAtomic:
         assert allowed is True
         assert total == 25
         assert await cost.get_millicents("agent-5") == 25
+
+
+class TestAdjustCost:
+    @pytest.mark.asyncio
+    async def test_positive_delta_adds_cost(self):
+        await cost.adjust_cost("agent-1", 40)
+        assert await cost.get_millicents("agent-1") == 40
+
+    @pytest.mark.asyncio
+    async def test_negative_delta_refunds_without_going_below_zero(self):
+        await cost.add_cost("agent-1", 25)
+        assert await cost.adjust_cost("agent-1", -10) == 15
+        assert await cost.adjust_cost("agent-1", -50) == 0

@@ -528,14 +528,19 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         ref = body.get("ref", "")
         if not ref:
             raise HTTPException(400, "ref required")
-        timeout_ms = int(body.get("timeout_ms", 30000))
+        try:
+            timeout_ms = int(body.get("timeout_ms", 30000))
+        except (TypeError, ValueError):
+            raise HTTPException(400, "timeout_ms must be an integer")
+        timeout_ms = max(1000, min(timeout_ms, 180000))
         result = await manager.download(agent_id, ref, timeout_ms=timeout_ms)
         return result
 
     _NONCE_RE = re.compile(r"^[a-f0-9]{12}$")
 
     def _download_dir() -> Path:
-        return Path(os.environ.get("BROWSER_DOWNLOAD_DIR", "/tmp/downloads"))
+        from src.browser.flags import get_str as _flag_str
+        return Path(_flag_str("BROWSER_DOWNLOAD_DIR", "/tmp/downloads"))
 
     def _resolve_download_path(nonce: str) -> Path | None:
         if not _NONCE_RE.match(nonce):
