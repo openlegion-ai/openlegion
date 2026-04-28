@@ -44,3 +44,8 @@ uv.lock
 .claude/
 .openlegion
 config/
+# Phase 9 §18.1 captcha-validation harness — operator-supplied configs
+# (real URLs + creds-refs) MUST NOT enter version control. The shipped
+# config.example.yaml stays tracked.
+tools/captcha_validation/config.local.yaml
+config.local.yaml
