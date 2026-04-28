@@ -1,6 +1,7 @@
 """Tests for the shared browser service (BrowserManager, server, redaction)."""
 
 import asyncio
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -7438,22 +7439,56 @@ class TestGetSolver:
     """Tests for captcha.get_solver() factory function."""
 
     def test_get_solver_returns_none_when_not_configured(self):
-        """No env vars → None."""
+        """No browser flag values → None."""
         with patch.dict("os.environ", {}, clear=True):
+            from src.browser import flags
             from src.browser.captcha import get_solver
-            assert get_solver() is None
+
+            flags.reload_operator_settings()
+            try:
+                assert get_solver() is None
+            finally:
+                flags.reload_operator_settings()
 
     def test_get_solver_returns_solver_when_configured(self):
-        """Valid provider + key → CaptchaSolver instance."""
+        """Valid provider + key env flags → CaptchaSolver instance."""
         with patch.dict("os.environ", {
             "CAPTCHA_SOLVER_PROVIDER": "2captcha",
             "CAPTCHA_SOLVER_KEY": "test-key-123",
         }):
+            from src.browser import flags
             from src.browser.captcha import CaptchaSolver, get_solver
-            solver = get_solver()
-            assert isinstance(solver, CaptchaSolver)
-            assert solver.provider == "2captcha"
-            assert solver.api_key == "test-key-123"
+
+            flags.reload_operator_settings()
+            try:
+                solver = get_solver()
+                assert isinstance(solver, CaptchaSolver)
+                assert solver.provider == "2captcha"
+                assert solver.api_key == "test-key-123"
+            finally:
+                flags.reload_operator_settings()
+
+    def test_get_solver_reads_operator_browser_flags(self, tmp_path):
+        """Operator settings browser_flags configure the solver without env."""
+        settings = tmp_path / "settings.json"
+        settings.write_text(json.dumps({
+            "browser_flags": {
+                "CAPTCHA_SOLVER_PROVIDER": "capsolver",
+                "CAPTCHA_SOLVER_KEY": "settings-key-456",
+            },
+        }))
+        with patch.dict("os.environ", {"OPENLEGION_SETTINGS_PATH": str(settings)}, clear=True):
+            from src.browser import flags
+            from src.browser.captcha import CaptchaSolver, get_solver
+
+            flags.reload_operator_settings()
+            try:
+                solver = get_solver()
+                assert isinstance(solver, CaptchaSolver)
+                assert solver.provider == "capsolver"
+                assert solver.api_key == "settings-key-456"
+            finally:
+                flags.reload_operator_settings()
 
     def test_get_solver_rejects_unknown_provider(self):
         """Unknown provider → None with warning."""
@@ -7461,8 +7496,14 @@ class TestGetSolver:
             "CAPTCHA_SOLVER_PROVIDER": "badprovider",
             "CAPTCHA_SOLVER_KEY": "key",
         }):
+            from src.browser import flags
             from src.browser.captcha import get_solver
-            assert get_solver() is None
+
+            flags.reload_operator_settings()
+            try:
+                assert get_solver() is None
+            finally:
+                flags.reload_operator_settings()
 
 
 class TestClassifyCaptcha:
