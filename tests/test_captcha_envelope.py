@@ -50,9 +50,9 @@ def _failed_result() -> SolveResult:
 _SELECTOR_ORDER = [
     'iframe[src*="recaptcha"]',
     'iframe[src*="hcaptcha"]',
+    '[class*="cf-turnstile"]',
     'iframe[src*="challenges.cloudflare.com"]',
     'iframe[src*="captcha"]',
-    '[class*="cf-turnstile"]',
     '[class*="captcha"]',
     "#captcha",
 ]
@@ -89,6 +89,26 @@ def _make_inst(matching_selector: str | None, *, title: str = "") -> MagicMock:
     def locator(sel: str):
         loc = MagicMock()
         loc.count = AsyncMock(return_value=1 if sel == matching_selector else 0)
+        return loc
+
+    inst.page.locator = MagicMock(side_effect=locator)
+    inst.lock = asyncio.Lock()
+    inst.touch = MagicMock()
+    return inst
+
+
+def _make_inst_matching(
+    matching_selectors: set[str], *, title: str = "",
+) -> MagicMock:
+    """Build an instance whose locator count matches any selector in a set."""
+    inst = MagicMock()
+    inst.page = MagicMock()
+    inst.page.url = "https://example.com"
+    inst.page.title = AsyncMock(return_value=title)
+
+    def locator(sel: str):
+        loc = MagicMock()
+        loc.count = AsyncMock(return_value=1 if sel in matching_selectors else 0)
         return loc
 
     inst.page.locator = MagicMock(side_effect=locator)
@@ -226,6 +246,22 @@ class TestTurnstile:
         assert result["captcha_found"] is True
         assert result["kind"] == "turnstile"
         assert result["solver_outcome"] == "no_solver"
+
+    @pytest.mark.asyncio
+    async def test_turnstile_wrapper_wins_over_cloudflare_iframe(self):
+        """Turnstile widgets commonly embed Cloudflare challenge iframes.
+        The standalone widget wrapper is the more precise selector and
+        must win when both are present."""
+        mgr = _make_manager()
+        inst = _make_inst_matching({
+            '[class*="cf-turnstile"]',
+            'iframe[src*="challenges.cloudflare.com"]',
+        })
+
+        result = await mgr._check_captcha(inst)
+
+        assert result["captcha_found"] is True
+        assert result["kind"] == "turnstile"
 
 
 # ── 7. hCaptcha ───────────────────────────────────────────────────────────

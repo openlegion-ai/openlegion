@@ -2440,6 +2440,37 @@ class TestDiffSnapshot:
         assert data["unchanged_count"] == 3
 
     @pytest.mark.asyncio
+    async def test_empty_filter_updates_baseline_like_default(self):
+        """``filter=""`` is normalized to no filter. It must not be treated
+        as a scoped/subset snapshot or it will leave a stale diff baseline."""
+        tree_v1 = {
+            "role": "WebArea", "name": "",
+            "children": [{"role": "button", "name": "Submit"}],
+        }
+        tree_v2 = {
+            "role": "WebArea", "name": "",
+            "children": [
+                {"role": "button", "name": "Submit"},
+                {"role": "button", "name": "Cancel"},
+            ],
+        }
+        mgr, inst, mock_page = await self._setup(tree_v1)
+        await mgr.snapshot("a1")
+        page_id = inst.last_active_page_id
+        assert page_id is not None
+        baseline_v1 = set(inst.last_snapshot[page_id]["refs_by_key"])
+        assert len(baseline_v1) == 1
+
+        mock_page.accessibility.snapshot = AsyncMock(return_value=tree_v2)
+        mock_page.evaluate = mock_page.accessibility.snapshot
+
+        result = await mgr.snapshot("a1", filter="")
+
+        assert result["success"] is True
+        baseline_v2 = set(inst.last_snapshot[page_id]["refs_by_key"])
+        assert len(baseline_v2) == 2
+
+    @pytest.mark.asyncio
     async def test_from_ref_call_does_not_pollute_baseline(self):
         """Same invariant as above but for ``from_ref`` — scoped
         snapshots are informational, not anchors."""
@@ -10662,16 +10693,10 @@ class TestIframeTraversal:
         detached.evaluate.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_click_returns_not_supported_on_shadow_in_iframe(self):
-        """Defensive: when PR2 (shadow DOM) merges, refs carrying both
-        ``shadow_path`` AND ``frame_id`` will raise ``NotImplementedError``
-        from ``_resolve_shadow_element`` (the explicit "Shadow + iframe
-        combination not yet supported" guard). The click()/type/hover/
-        scroll outer try-blocks must wrap that as a structured
-        ``not_supported`` envelope rather than letting it surface as a
-        500 from the generic ``except Exception`` catch-all.
-        """
-        from src.browser.ref_handle import RefHandle
+    async def test_locator_resolves_shadow_ref_inside_iframe(self):
+        """Shadow refs captured inside iframe snapshots must resolve
+        against that frame, not the main page."""
+        from src.browser.ref_handle import RefHandle, ShadowHop
         from src.browser.service import BrowserManager, CamoufoxInstance
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
 
@@ -10687,33 +10712,34 @@ class TestIframeTraversal:
         frame = MagicMock()
         frame_id = inst._register_frame(frame)
 
-        # Ref carries both shadow_path AND frame_id — exactly the
-        # combination PR2's guard rejects.
+        # Ref carries both shadow_path AND frame_id.
+        shadow_path = (
+            ShadowHop(
+                selector="custom-widget",
+                occurrence=0,
+                discriminator="stable-host",
+            ),
+        )
         inst.refs = {
             "e0": RefHandle(
                 page_id=page_id, frame_id=frame_id,
-                shadow_path=("div#root",), scope_root=None,
+                shadow_path=shadow_path, scope_root=None,
                 role="button", name="Submit", occurrence=0,
                 disabled=False, element_key="",
             ),
         }
 
-        # Stub the resolution path to simulate PR2's guard.
+        resolved = MagicMock()
         with patch.object(
-            BrowserManager, "_locator_from_ref",
-            side_effect=NotImplementedError(
-                "Shadow + iframe combination not yet supported",
-            ),
-        ):
-            result = await mgr.click("a1", ref="e0")
+            BrowserManager, "_resolve_shadow_element",
+            new_callable=AsyncMock,
+            return_value=resolved,
+        ) as resolve_shadow:
+            result = await mgr._locator_from_ref(inst, "e0")
 
-        assert result["success"] is False, result
-        assert isinstance(result["error"], dict)
-        assert result["error"]["code"] == "not_supported"
-        assert "Shadow + iframe" in result["error"]["message"]
-        # Click failure stats still get bumped — the action attempted
-        # and failed even if the failure mode is structured.
-        assert inst.m_click_fail == 1
+        assert result is resolved
+        resolve_shadow.assert_awaited_once()
+        assert resolve_shadow.await_args.args[0] is frame
 
 
 class TestSelectorFrameClickAndType:

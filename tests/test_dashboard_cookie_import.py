@@ -380,11 +380,9 @@ class TestValidateCookies:
         _, _, fmt = _validate_cookies(42)
         assert fmt is None
 
-    def test_secure_prefix_passes_through(self):
-        """``__Secure-`` cookies have no special validation here —
-        Playwright/Firefox enforces the ``secure=true`` rule at SET time,
-        not at import. Importing a ``__Secure-foo`` with a domain is
-        therefore expected to be ACCEPTED by ``_validate_cookies``."""
+    def test_secure_prefix_with_secure_passes_through(self):
+        """``__Secure-`` cookies require ``secure=true`` but may still
+        carry a domain."""
         accepted, dropped, fmt = _validate_cookies(
             [{"name": "__Secure-sess", "value": "x",
               "domain": ".example.com", "secure": True}],
@@ -392,6 +390,38 @@ class TestValidateCookies:
         assert fmt == "playwright"
         assert len(accepted) == 1
         assert dropped == []
+
+    def test_drops_secure_prefix_without_secure(self):
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "__Secure-sess", "value": "x",
+              "domain": ".example.com", "secure": False}],
+        )
+        assert accepted == []
+        assert dropped == [{"reason": "secure_prefix_without_secure", "count": 1}]
+
+    def test_drops_samesite_none_without_secure(self):
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "sid", "value": "x", "domain": ".example.com",
+              "sameSite": "None"}],
+        )
+        assert accepted == []
+        assert dropped == [{"reason": "samesite_none_without_secure", "count": 1}]
+
+    def test_rejects_non_boolean_secure(self):
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "sid", "value": "x", "domain": ".example.com",
+              "secure": "false"}],
+        )
+        assert accepted == []
+        assert dropped == [{"reason": "invalid_secure", "count": 1}]
+
+    def test_rejects_non_boolean_httponly(self):
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "sid", "value": "x", "domain": ".example.com",
+              "httpOnly": "false"}],
+        )
+        assert accepted == []
+        assert dropped == [{"reason": "invalid_httponly", "count": 1}]
 
     def test_netscape_malformed_lines_surface_as_drop_count(self):
         """When the input is Netscape and contains malformed lines, the

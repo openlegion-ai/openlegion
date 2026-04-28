@@ -101,6 +101,88 @@ class TestUploadFile:
         fake_locator.click.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_upload_uses_x11_click_when_available(self, tmp_path, monkeypatch):
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "p"))
+        inst = _make_instance()
+        inst.x11_wid = 12345
+
+        chooser = MagicMock()
+        chooser.set_files = AsyncMock()
+
+        async def _chooser_value():
+            return chooser
+
+        inst.page.expect_file_chooser = MagicMock(
+            return_value=_async_ctx(_chooser_value()),
+        )
+
+        fake_locator = MagicMock()
+        fake_locator.click = AsyncMock()
+        monkeypatch.setattr(
+            mgr,
+            "_locator_from_ref",
+            AsyncMock(return_value=fake_locator),
+        )
+        monkeypatch.setattr(mgr, "get_or_start", AsyncMock(return_value=inst))
+        monkeypatch.setattr(mgr, "_is_x11_site", MagicMock(return_value=True))
+        monkeypatch.setattr(mgr, "_x11_click", AsyncMock())
+        monkeypatch.setattr(mgr, "_human_click", AsyncMock())
+        monkeypatch.setattr("src.browser.service.action_delay", lambda: 0)
+
+        real_file = tmp_path / "foo.pdf"
+        real_file.write_bytes(b"fake pdf")
+
+        result = await mgr.upload_file("a1", "e1", [str(real_file)])
+
+        assert result["success"] is True
+        mgr._x11_click.assert_awaited_once_with(
+            inst, fake_locator, timeout=10000,
+        )
+        mgr._human_click.assert_not_awaited()
+        fake_locator.click.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_upload_non_int_x11_wid_uses_human_click(
+        self, tmp_path, monkeypatch,
+    ):
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "p"))
+        inst = _make_instance()
+        inst.x11_wid = MagicMock()
+
+        chooser = MagicMock()
+        chooser.set_files = AsyncMock()
+
+        async def _chooser_value():
+            return chooser
+
+        inst.page.expect_file_chooser = MagicMock(
+            return_value=_async_ctx(_chooser_value()),
+        )
+
+        fake_locator = MagicMock()
+        monkeypatch.setattr(
+            mgr,
+            "_locator_from_ref",
+            AsyncMock(return_value=fake_locator),
+        )
+        monkeypatch.setattr(mgr, "get_or_start", AsyncMock(return_value=inst))
+        monkeypatch.setattr(mgr, "_is_x11_site", MagicMock(return_value=True))
+        monkeypatch.setattr(mgr, "_x11_click", AsyncMock())
+        monkeypatch.setattr(mgr, "_human_click", AsyncMock())
+        monkeypatch.setattr("src.browser.service.action_delay", lambda: 0)
+
+        real_file = tmp_path / "foo.pdf"
+        real_file.write_bytes(b"fake pdf")
+
+        result = await mgr.upload_file("a1", "e1", [str(real_file)])
+
+        assert result["success"] is True
+        mgr._x11_click.assert_not_awaited()
+        mgr._human_click.assert_awaited_once_with(
+            inst.page, fake_locator, timeout=10000,
+        )
+
+    @pytest.mark.asyncio
     async def test_missing_local_path_returns_error_before_click(
         self, tmp_path, monkeypatch,
     ):
@@ -545,6 +627,53 @@ class TestDownload:
         assert result["data"]["size_bytes"] == 200
         assert result["data"]["mime_type"] == "application/pdf"
         assert Path(result["data"]["path"]).exists()
+
+    @pytest.mark.asyncio
+    async def test_download_uses_x11_click_when_available(
+        self, tmp_path, monkeypatch,
+    ):
+        pytest.importorskip("playwright")
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "p"))
+        mgr._download_streaming_available = True
+        inst = _make_instance()
+        inst.x11_wid = 12345
+        fake_locator = MagicMock()
+        fake_locator.click = AsyncMock()
+
+        download, _ = _make_oversize_artifact_download(
+            total_bytes=10, chunk_bytes=64 * 1024,
+        )
+        download.suggested_filename = "report.pdf"
+        dl_dir = tmp_path / "dl"
+
+        async def _dl_value():
+            return download
+
+        inst.page.expect_download = MagicMock(
+            return_value=_async_ctx(_dl_value()),
+        )
+        monkeypatch.setattr(
+            mgr, "_locator_from_ref", AsyncMock(return_value=fake_locator),
+        )
+        monkeypatch.setattr(mgr, "get_or_start", AsyncMock(return_value=inst))
+        monkeypatch.setattr(mgr, "_is_x11_site", MagicMock(return_value=True))
+        monkeypatch.setattr(mgr, "_x11_click", AsyncMock())
+        monkeypatch.setattr(mgr, "_human_click", AsyncMock())
+        monkeypatch.setattr(
+            "playwright._impl._connection.from_channel",
+            lambda ch: ch,
+        )
+
+        result = await mgr.download(
+            "a1", "e1", download_dir=str(dl_dir), timeout_ms=5000,
+        )
+
+        assert result["success"] is True, result
+        mgr._x11_click.assert_awaited_once_with(
+            inst, fake_locator, timeout=5000,
+        )
+        mgr._human_click.assert_not_awaited()
+        fake_locator.click.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_oversize_download_rejected_and_file_removed(
@@ -1606,5 +1735,3 @@ class TestMidStreamInterruption:
         # what matters is the error envelope and that cleanup ran.
         assert resp.status_code >= 400
         assert len(cleanup_called) == 1
-
-

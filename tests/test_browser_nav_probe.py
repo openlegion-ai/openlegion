@@ -8,11 +8,10 @@ import pytest
 
 
 def _make_inst(monkeypatch=None):
-    """CamoufoxInstance with async-mocked ``page.evaluate`` AND ``page.goto``.
+    """CamoufoxInstance with a mocked active page and temp probe page.
 
-    The probe pre-navigates to ``about:blank`` to isolate the read from
-    any page-script shadowing on a resumed persistent profile (P0 fix
-    from review). Tests must therefore mock ``goto`` too.
+    The probe opens a temporary ``about:blank`` page to isolate the read
+    from page-script shadowing without navigating the active/resumed tab.
     """
     if monkeypatch is not None:
         monkeypatch.delenv("BROWSER_RECORD_BEHAVIOR", raising=False)
@@ -24,7 +23,14 @@ def _make_inst(monkeypatch=None):
     page = MagicMock()
     page.evaluate = AsyncMock()
     page.goto = AsyncMock()
-    inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), page)
+    temp_page = MagicMock()
+    temp_page.evaluate = page.evaluate
+    temp_page.goto = AsyncMock()
+    temp_page.close = AsyncMock()
+    context = MagicMock()
+    context.new_page = AsyncMock(return_value=temp_page)
+    inst = CamoufoxInstance("a1", MagicMock(), context, page)
+    inst._probe_temp_page = temp_page
     return inst
 
 
@@ -125,13 +131,13 @@ class TestProbeMismatches:
 
 class TestProbeIsolation:
     @pytest.mark.asyncio
-    async def test_probe_navigates_to_about_blank_first(
+    async def test_probe_uses_temporary_about_blank_page(
         self, monkeypatch, tmp_path,
     ):
         """Persistent profiles resume to whatever page was open last
         session. That page's globals could shadow ``Navigator.prototype``
-        properties. The probe must navigate to ``about:blank`` first to
-        guarantee it reads engine signals, not page-injected ones."""
+        properties. The probe must use a temporary ``about:blank`` page
+        so it reads engine signals without clobbering the active tab."""
         from src.browser.service import BrowserManager
 
         mgr = BrowserManager(profiles_dir=str(tmp_path / "profiles"))
@@ -140,22 +146,25 @@ class TestProbeIsolation:
 
         await mgr._run_navigator_probe(inst)
 
-        inst.page.goto.assert_awaited_once()
-        call = inst.page.goto.await_args
+        inst.context.new_page.assert_awaited_once()
+        inst.page.goto.assert_not_called()
+        inst._probe_temp_page.goto.assert_awaited_once()
+        call = inst._probe_temp_page.goto.await_args
         assert call.args == ("about:blank",)
+        inst._probe_temp_page.close.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_probe_continues_when_about_blank_fails(
         self, monkeypatch, tmp_path,
     ):
-        """If ``about:blank`` itself fails to load (weird edge case),
-        probe should still attempt to read signals from whatever the
-        current page is — better partial signal than no signal."""
+        """If the temp ``about:blank`` page fails to load, probe should
+        still attempt to read signals from the current page without
+        navigating it — better partial signal than no signal."""
         from src.browser.service import BrowserManager
 
         mgr = BrowserManager(profiles_dir=str(tmp_path / "profiles"))
         inst = _make_inst(monkeypatch)
-        inst.page.goto.side_effect = RuntimeError("blank blocked")
+        inst._probe_temp_page.goto.side_effect = RuntimeError("blank blocked")
         inst.page.evaluate.return_value = _ok_signals()
 
         await mgr._run_navigator_probe(inst)
@@ -163,6 +172,8 @@ class TestProbeIsolation:
         # Despite goto failure, evaluate ran and produced a result.
         assert inst.probe_result is not None
         assert inst.probe_result["ok"] is True
+        inst.page.goto.assert_not_called()
+        inst._probe_temp_page.close.assert_awaited_once()
 
 
 class TestProbeResilience:

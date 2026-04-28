@@ -397,7 +397,14 @@ def _validate_cookies(
             _drop("host_prefix_with_domain")
             continue
         secure_raw = raw.get("secure")
-        secure = bool(secure_raw) if secure_raw is not None else False
+        if secure_raw is not None and not isinstance(secure_raw, bool):
+            _drop("invalid_secure")
+            continue
+        secure = secure_raw if secure_raw is not None else False
+        http_only_raw = raw.get("httpOnly")
+        if http_only_raw is not None and not isinstance(http_only_raw, bool):
+            _drop("invalid_httponly")
+            continue
         if name.startswith("__Host-"):
             if path != "/":
                 _drop("host_prefix_invalid_path")
@@ -405,6 +412,9 @@ def _validate_cookies(
             if not secure:
                 _drop("host_prefix_without_secure")
                 continue
+        if name.startswith("__Secure-") and not secure:
+            _drop("secure_prefix_without_secure")
+            continue
         normalized: dict = {"name": name, "value": value}
         if url:
             normalized["url"] = url
@@ -423,6 +433,9 @@ def _validate_cookies(
             if ss_norm is None:
                 _drop("invalid_samesite")
                 continue
+            if ss_norm == "None" and not secure:
+                _drop("samesite_none_without_secure")
+                continue
             normalized["sameSite"] = ss_norm
         # expires: must be numeric (int or float). Strings rejected.
         if "expires" in raw and raw["expires"] is not None:
@@ -431,9 +444,9 @@ def _validate_cookies(
                 _drop("invalid_expires")
                 continue
             normalized["expires"] = int(exp)
-        # httpOnly / secure — coerce to bool only when explicitly present.
-        if "httpOnly" in raw:
-            normalized["httpOnly"] = bool(raw["httpOnly"])
+        # httpOnly / secure — pass through only explicit JSON booleans.
+        if http_only_raw is not None:
+            normalized["httpOnly"] = http_only_raw
         if secure_raw is not None:
             normalized["secure"] = secure
         accepted.append(normalized)

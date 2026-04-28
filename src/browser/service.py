@@ -2418,13 +2418,12 @@ class BrowserManager:
         the dashboard layer this surfaces as a ``browser_nav_probe``
         event, distinct from per-minute drain payloads.
 
-        **Probes on ``about:blank``** so we read the platform / browser
-        signals as the engine sees them, not as some loaded site has
-        possibly shadowed them via an injected content script. With
-        ``persistent_context=True`` the page resumes whatever the agent
-        had open last session — that page's globals could include
-        custom getters on ``Navigator.prototype``. Forcing a navigation
-        to ``about:blank`` first eliminates that path.
+        **Probes on a temporary ``about:blank`` page** so we read the
+        platform / browser signals as the engine sees them, not as some
+        loaded site has possibly shadowed them via an injected content
+        script. With ``persistent_context=True`` the page resumes whatever
+        the agent had open last session; the probe must not clobber that
+        active tab just to get a clean diagnostic read.
 
         Mismatches the probe flags:
           * ``navigator.webdriver !== false`` — the canonical bot tell
@@ -2443,30 +2442,37 @@ class BrowserManager:
             "linux": "Linux x86_64",
         }.get(os_hint)
 
+        probe_page = inst.page
+        temp_page = None
         # Best-effort isolate the probe context. ``about:blank`` is a
         # special URL that Firefox loads instantly with a fresh,
         # script-free document — perfect for reading raw navigator
-        # signals. If the goto fails (e.g. ``about:blank`` blocked by
-        # some weird policy), we fall through and probe the current
-        # page anyway; the result will still be populated and any
-        # shadowing-induced mismatch is itself useful signal.
-        #
-        # Side-effect operators may notice: this clobbers the resumed
-        # page on a persistent-profile restart. An agent that had
-        # ``twitter.com`` open last session sees ``about:blank`` for a
-        # split second after restart, then whatever its first action
-        # navigates to. Cookies / localStorage / IndexedDB all survive
-        # — only the loaded-page URL is lost.
+        # signals. Use a temporary page so a persistent-profile restart
+        # keeps the agent's active/resumed tab intact. If a temp page
+        # cannot be opened, fall back to probing the current page without
+        # navigating it.
         try:
-            await inst.page.goto("about:blank", timeout=5000)
+            new_page = getattr(inst.context, "new_page", None)
+            if callable(new_page):
+                temp_page = await new_page()
+                probe_page = temp_page
+                await temp_page.goto("about:blank", timeout=5000)
         except Exception as e:
             logger.debug(
-                "Probe pre-nav to about:blank failed for '%s' "
-                "(continuing on current page): %s", inst.agent_id, e,
+                "Probe temporary about:blank page failed for '%s' "
+                "(continuing on current page without navigation): %s",
+                inst.agent_id, e,
             )
+            if temp_page is not None:
+                try:
+                    await temp_page.close()
+                except Exception:
+                    pass
+                temp_page = None
+            probe_page = inst.page
 
         try:
-            signals = await inst.page.evaluate(
+            signals = await probe_page.evaluate(
                 "() => ({"
                 "  webdriver: navigator.webdriver,"
                 "  plugins_len: navigator.plugins ? navigator.plugins.length : -1,"
@@ -2492,6 +2498,15 @@ class BrowserManager:
                 inst.agent_id, e,
             )
             return
+        finally:
+            if temp_page is not None:
+                try:
+                    await temp_page.close()
+                except Exception as e:
+                    logger.debug(
+                        "Probe temporary page close failed for '%s': %s",
+                        inst.agent_id, e,
+                    )
 
         mismatches: list[str] = []
         if signals.get("webdriver") is not False:
@@ -3919,8 +3934,13 @@ class BrowserManager:
             # update for scoped/filtered calls — they're informational
             # snapshots, not anchors. ``last_active_page_id`` still
             # advances so tab-change detection stays accurate.
-            _is_scoped_call = (filter is not None) or (from_ref is not None)
-            if not _is_scoped_call and not _skip_baseline:
+            is_subset_snapshot = (
+                allowed_roles is not None
+                or from_ref is not None
+                or target_frame is not None
+                or include_frames is False
+            )
+            if not is_subset_snapshot and not _skip_baseline:
                 inst.last_snapshot[snapshot_page_id] = {
                     "refs_by_key": dict(ref_summary),
                     "url": current_url,
@@ -4022,16 +4042,13 @@ class BrowserManager:
         if handle is None:
             return None
         page = inst._resolve_page_id(handle.page_id)
-        if handle.shadow_path:
-            # NOTE: shadow + iframe combination raises NotImplementedError
-            # inside ``_resolve_shadow_element``; callers (click/type/etc)
-            # catch it and surface a ``not_supported`` envelope.
-            return await self._resolve_shadow_element(page, handle, ref)
         if handle.frame_id is not None:
             frame = inst._resolve_frame_id(handle.frame_id)
             base = frame
         else:
             base = page
+        if handle.shadow_path:
+            return await self._resolve_shadow_element(base, handle, ref)
         if handle.scope_root:
             base = base.locator(handle.scope_root)
         if handle.name:
@@ -4071,15 +4088,6 @@ class BrowserManager:
             }
             for hop in handle.shadow_path
         ]
-        # Defensive: shadow + iframe combination is not implemented yet
-        # (Phase 5 PR3). Threading a Frame through Stage 1 here would
-        # require cross-PR coordination; explicit error makes the seam
-        # loud so PR3's merge has to address it rather than letting a
-        # frame_id'd shadow ref silently resolve against the main frame.
-        if handle.frame_id is not None:
-            raise NotImplementedError(
-                "Shadow + iframe combination not yet supported",
-            )
         # Pass scope_root through so Stage 1 starts its walk inside the
         # modal subtree when a ref was captured under modal scoping.
         # Without this, a same-selector shadow host living outside the
@@ -5878,9 +5886,9 @@ class BrowserManager:
         captcha_selectors = [
             'iframe[src*="recaptcha"]',
             'iframe[src*="hcaptcha"]',
+            '[class*="cf-turnstile"]',
             'iframe[src*="challenges.cloudflare.com"]',
             'iframe[src*="captcha"]',
-            '[class*="cf-turnstile"]',
             '[class*="captcha"]',
             '#captcha',
         ]
@@ -6364,6 +6372,8 @@ class BrowserManager:
             return "recaptcha-v2-checkbox"
         if "hcaptcha" in selector:
             return "hcaptcha"
+        if "cf-turnstile" in selector:
+            return "turnstile"
         if "challenges.cloudflare.com" in selector:
             # Coarse CF default. The §11.3 classifier in ``_check_captcha``
             # routes to ``cf-interstitial-{auto,behavioral,turnstile}``
@@ -6371,8 +6381,6 @@ class BrowserManager:
             # embedded Turnstile widget). When the JS probe finds none
             # of those, this placeholder stays.
             return "cf-interstitial-auto"
-        if "cf-turnstile" in selector:
-            return "turnstile"
         # Generic 'captcha' selectors and #captcha fall through to unknown.
         return "unknown"
 
@@ -6641,7 +6649,24 @@ class BrowserManager:
                 if not locator:
                     return {"success": False, "error": f"Ref '{ref}' not found"}
                 async with inst.page.expect_file_chooser(timeout=timeout_ms) as info:
-                    await locator.click(timeout=timeout_ms)
+                    if type(inst.x11_wid) is int and self._is_x11_site(inst):
+                        try:
+                            await self._x11_click(
+                                inst, locator, timeout=timeout_ms,
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                "X11 upload click failed for '%s', "
+                                "falling back to CDP: %s",
+                                agent_id, e,
+                            )
+                            await self._human_click(
+                                inst.page, locator, timeout=timeout_ms,
+                            )
+                    else:
+                        await self._human_click(
+                            inst.page, locator, timeout=timeout_ms,
+                        )
                 chooser = await info.value
                 await chooser.set_files(local_paths)
                 await asyncio.sleep(action_delay())
@@ -6702,7 +6727,24 @@ class BrowserManager:
 
                 Path(download_dir).mkdir(parents=True, exist_ok=True)
                 async with inst.page.expect_download(timeout=timeout_ms) as info:
-                    await locator.click(timeout=timeout_ms)
+                    if type(inst.x11_wid) is int and self._is_x11_site(inst):
+                        try:
+                            await self._x11_click(
+                                inst, locator, timeout=timeout_ms,
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                "X11 download click failed for '%s', "
+                                "falling back to CDP: %s",
+                                agent_id, e,
+                            )
+                            await self._human_click(
+                                inst.page, locator, timeout=timeout_ms,
+                            )
+                    else:
+                        await self._human_click(
+                            inst.page, locator, timeout=timeout_ms,
+                        )
                 download = await info.value
                 suggested = download.suggested_filename or "download.bin"
                 nonce = uuid.uuid4().hex[:12]

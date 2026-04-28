@@ -53,7 +53,7 @@ def _resolve_max_browsers() -> int:
     # ``min_value=1`` rejects nonsense like ``MAX=0`` (would deadlock the
     # acquire loop). ``max_value=64`` is a soft ceiling — a single VPS won't
     # have RAM for that many Camoufox instances anyway.
-    legacy_default = int(os.environ.get("MAX_BROWSERS", "5"))
+    legacy_default = get_int("MAX_BROWSERS", 5, min_value=1, max_value=64)
     return get_int(
         "OPENLEGION_BROWSER_MAX_CONCURRENT",
         legacy_default,

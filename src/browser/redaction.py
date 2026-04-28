@@ -14,7 +14,7 @@ from __future__ import annotations
 from src.shared.redaction import (
     _REDACT_PATTERNS,  # noqa: F401  — re-export for old imports
     deep_redact,
-    redact_string,
+    redact_url,
 )
 
 
@@ -26,8 +26,8 @@ class CredentialRedactor:
     """
 
     def redact(self, agent_id: str, text: str) -> str:
-        """Apply pattern-based redaction to ``text``."""
-        return redact_string(text)
+        """Apply URL-aware and pattern-based redaction to ``text``."""
+        return redact_url(text)
 
     def deep_redact(self, agent_id: str, obj):
         """Recursively redact credential values from a JSON-shaped structure."""

@@ -303,6 +303,20 @@ class TestBrowserRedactorShim:
             f"key={_REDACTED}"
         )
 
+    def test_redact_is_url_aware(self):
+        from src.browser.redaction import CredentialRedactor
+        r = CredentialRedactor()
+
+        out = r.redact(
+            "agent-1",
+            "https://svc.example/?api_key=mysecret&public=ok",
+        )
+
+        assert "mysecret" not in out
+        assert "api_key=" in out
+        assert "public=ok" in out
+        assert _REDACTED in out
+
     def test_deep_redact_delegates(self):
         from src.browser.redaction import CredentialRedactor
         r = CredentialRedactor()
