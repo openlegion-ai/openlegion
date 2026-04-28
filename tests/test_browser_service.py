@@ -516,21 +516,28 @@ class TestStealthConfig:
             opts = build_launch_options("agent1", "/tmp/profile")
         assert opts["os"] == "windows"
 
-    def test_webrtc_blocked_via_camoufox_toggle(self):
-        """WebRTC must be blocked via Camoufox's block_webrtc toggle, not manual prefs.
+    def test_webrtc_blocked_with_defense_in_depth(self):
+        """WebRTC must be blocked via BOTH Camoufox's ``block_webrtc``
+        toggle AND the underlying Firefox prefs.
 
-        block_webrtc=True is Camoufox's canonical way to block WebRTC — it covers
-        all relevant prefs and is more reliable than setting them manually.
-        Manual WebRTC prefs must NOT be in firefox_user_prefs (they're redundant
-        and could drift out of sync with the Camoufox implementation).
+        ``block_webrtc=True`` is Camoufox's primary toggle, but a single
+        point of failure: a future Camoufox release that silently drops
+        or renames the option would leak ICE candidates with no other
+        guard. Setting the underlying prefs explicitly is idempotent
+        with the toggle and survives any upstream rename. The earlier
+        version of this test asserted the prefs were *absent* — that
+        was the wrong shape; the right shape is belt-and-suspenders.
         """
         from src.browser.stealth import build_launch_options
         with patch.dict("os.environ", {}, clear=True):
             opts = build_launch_options("agent1", "/tmp/profile")
         assert opts["block_webrtc"] is True
-        # Manual WebRTC prefs are redundant — Camoufox's toggle handles them
         prefs = opts["firefox_user_prefs"]
-        assert "media.peerconnection.enabled" not in prefs
+        # Defense-in-depth: prefs that prevent ICE candidates from
+        # exposing the Docker container's internal IP.
+        assert prefs["media.peerconnection.enabled"] is False
+        assert prefs["media.peerconnection.ice.default_address_only"] is True
+        assert prefs["media.peerconnection.ice.no_host"] is True
 
     def test_rfp_is_off(self):
         """privacy.resistFingerprinting must be False — RFP values are detectable."""
@@ -761,6 +768,46 @@ class TestUAOverride:
 
 class TestNavigate:
     """Tests for BrowserManager.navigate()."""
+
+    @pytest.mark.asyncio
+    async def test_navigate_clears_refs_and_baseline(self):
+        """Same-tab navigation invalidates refs captured against the
+        prior document. Pre-fix, ``inst.refs`` survived; a later
+        ``click(ref="e3")`` could silently click an element with a
+        matching role/name on the new page (RefStale never fired)."""
+        from src.browser.ref_handle import RefHandle
+        from src.browser.service import BrowserManager, CamoufoxInstance
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mock_page = AsyncMock()
+        mock_page.goto = AsyncMock()
+        mock_page.title = AsyncMock(return_value="New Page")
+        mock_page.url = "https://example.com/after"
+        mock_page.evaluate = AsyncMock(return_value="body text")
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        # Seed prior refs and a stale snapshot baseline.
+        inst.refs = {
+            "e0": RefHandle(
+                page_id="p1", frame_id=None, shadow_path=(),
+                scope_root=None, role="button", name="Old", occurrence=0,
+                disabled=False, element_key="prior",
+            ),
+        }
+        inst.last_snapshot["p1"] = {
+            "refs_by_key": {"prior": {"ref_id": "e0", "role": "button"}},
+            "url": "https://example.com/before",
+            "dialog_active": False,
+        }
+        mgr._instances["a1"] = inst
+
+        result = await mgr.navigate(
+            "a1", "https://example.com/after", wait_ms=0,
+        )
+        assert result["success"] is True
+        # Both refs and the diff baseline must be wiped — same-tab
+        # navigation invalidates them.
+        assert inst.refs == {}
+        assert inst.last_snapshot == {}
 
     @pytest.mark.asyncio
     async def test_navigate_success(self):
@@ -3399,7 +3446,17 @@ class TestTypeFast:
     """Tests for _type_fast minimal-delay mode."""
 
     @pytest.mark.asyncio
-    async def test_type_fast_uses_fixed_delay(self):
+    async def test_type_fast_uses_jittered_delay(self):
+        """``_type_fast`` keystroke delay is now Gaussian (μ=8 ms,
+        σ=3 ms, floored at 1 ms) rather than a flat 8 ms. The
+        zero-variance constant cadence the prior version used was
+        FFT-detectable — every keystroke landing exactly 8 ms apart is
+        a fingerprint cluster no real human produces. Confirm:
+          * 5 keystrokes → 5 sleeps
+          * mean is approximately the configured μ
+          * NOT all delays equal (the regression we're guarding against)
+          * all delays are non-negative.
+        """
         from src.browser.service import BrowserManager
 
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
@@ -3417,7 +3474,13 @@ class TestTypeFast:
 
         assert mock_page.keyboard.press.await_count == 5
         assert len(delays) == 5
-        assert all(d == 0.008 for d in delays), f"Expected all 0.008, got {delays}"
+        # Variance: at least two distinct values across 5 samples.
+        assert len(set(delays)) > 1, f"expected jitter, got constant {delays}"
+        # All non-negative (floor at 1 ms).
+        assert all(d >= 0 for d in delays)
+        # Mean should land near the configured μ=8 ms within a wide
+        # tolerance; we're testing the SHAPE, not the RNG.
+        assert 0.001 <= sum(delays) / len(delays) <= 0.030
 
     @pytest.mark.asyncio
     async def test_type_fast_handles_special_keys(self):
@@ -3436,7 +3499,13 @@ class TestTypeFast:
 
     @pytest.mark.asyncio
     async def test_type_text_fast_flag(self):
-        """fast=True in type_text should use _type_fast, not _type_with_variance."""
+        """fast=True in type_text should use _type_fast, not _type_with_variance.
+
+        ``_type_fast`` keystrokes carry a small Gaussian jitter (μ=8 ms,
+        σ=3 ms) — confirm via "len(typing_delays) == len(text)" rather
+        than a strict equality on the constant value the prior version
+        emitted.
+        """
         from src.browser.service import BrowserManager, CamoufoxInstance
 
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
@@ -3460,7 +3529,10 @@ class TestTypeFast:
             result = await mgr.type_text("a1", ref="e0", text="test", fast=True)
 
         assert result["success"] is True
-        typing_delays = [d for d in delays if d == 0.008]
+        # All delays in ``_type_fast`` land in the Gaussian band around
+        # 8 ms; filter to just those (excluding any setup sleeps from
+        # other code paths) and confirm 4 keystrokes == 4 delays.
+        typing_delays = [d for d in delays if 0.001 <= d <= 0.030]
         assert len(typing_delays) == 4
 
 

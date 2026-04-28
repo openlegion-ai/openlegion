@@ -435,6 +435,19 @@ def _validate_cookies(
         if name.startswith("__Secure-") and url and not url.lower().startswith("https://"):
             _drop("secure_prefix_non_https_url")
             continue
+        # Per RFC 6265 §5.4, ``Secure=true`` requires an HTTPS origin.
+        # Firefox silently drops a Secure cookie set with a plain-http
+        # url at SET time. Reject up front so the operator gets a
+        # deterministic drop reason rather than an opaque "your import
+        # said success but nothing landed". Applies to ALL cookies
+        # (not just ``__Secure-``/``__Host-`` prefixed names).
+        if (
+            secure
+            and url
+            and not url.lower().startswith("https://")
+        ):
+            _drop("secure_non_https_url")
+            continue
         normalized: dict = {"name": name, "value": value}
         if url:
             normalized["url"] = url

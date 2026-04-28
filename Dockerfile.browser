@@ -15,7 +15,7 @@ FROM python:3.12-slim
 # profiles is handled by src/browser/profile_schema.py migration v2.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tini openbox wmctrl xdotool x11-xserver-utils unclutter-xfixes procps curl \
-    iptables gosu \
+    iptables gosu tzdata \
     libgtk-3-0 libatk1.0-0 libasound2 \
     libxcomposite1 libxdamage1 libxrandr2 libxkbcommon0 libgbm1 \
     libpango-1.0-0 libcairo2 libdbus-glib-1-2 \
@@ -27,6 +27,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get install -y --no-install-recommends /tmp/kasmvnc.deb \
     && rm /tmp/kasmvnc.deb \
     && rm -rf /var/lib/apt/lists/*
+
+# Pin the container timezone to a sensible en-US default. Without this,
+# ``Intl.DateTimeFormat().resolvedOptions().timeZone`` resolves to ``UTC``
+# (Docker's default), which is itself a strong fingerprint cluster: zero
+# real en-US users sit on UTC. Operators can override at runtime via
+# ``-e TZ=...`` (or via the systemd unit) to match their proxy egress
+# region. America/New_York is the most common en-US timezone by population.
+ENV TZ=America/New_York
+RUN ln -fs /usr/share/zoneinfo/${TZ} /etc/localtime \
+    && echo "${TZ}" > /etc/timezone
 
 # Install fontconfig alias file that redirects Windows typeface names to
 # the metric-compatible substitutes installed above. Must live under

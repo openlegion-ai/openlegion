@@ -2635,34 +2635,28 @@ class BrowserManager:
         pages = context.pages
         page = pages[0] if pages else await context.new_page()
 
-        # §6.6 ``navigator.connection`` fallback. We pass the spoof
-        # values via Camoufox's ``config`` dict above, but it's not
-        # documented whether Camoufox honours those keys (Firefox itself
-        # doesn't natively expose NetworkInformation). Install an
-        # ``add_init_script`` that defines ``navigator.connection`` if
-        # the property is missing — runs in every document context
-        # before page scripts. ``Object.defineProperty`` on
-        # ``Navigator.prototype`` with ``configurable: true`` matches
-        # what real Chromium-shaped Firefox extension polyfills do.
-        try:
-            from src.browser.stealth import pick_network_info
-            netinfo = pick_network_info(agent_id)
-            await context.add_init_script(
-                _NAV_CONNECTION_INIT_SCRIPT.format(
-                    effective=_js_string(netinfo["effectiveType"]),
-                    downlink=float(netinfo["downlink"]),
-                    rtt=int(netinfo["rtt"]),
-                    save_data="true" if netinfo["saveData"] else "false",
-                ),
-            )
-        except Exception as e:
-            # Non-fatal — Camoufox may already have NetworkInformation
-            # support, and the §6.3 probe will catch the gap if neither
-            # path lands.
-            logger.debug(
-                "navigator.connection init-script failed for '%s': %s",
-                agent_id, e,
-            )
+        # §6.6 ``navigator.connection`` REMOVED on the Firefox UA path.
+        #
+        # Real Firefox does NOT expose ``navigator.connection`` (the
+        # NetworkInformation API is unimplemented as of FF 138; Chromium
+        # is the only major engine shipping it on by default). Injecting
+        # a synthetic ``navigator.connection`` on a UA stamped
+        # ``Firefox/`` was itself a strong cluster signal: zero real
+        # Firefox users in the population have the API, so any Firefox-
+        # shaped client that DOES expose it is by definition spoofed.
+        # Fingerprint.com / Creep.js / DataDome key directly on this
+        # inconsistency.
+        #
+        # ``_assert_firefox_ua`` enforces a Firefox UA at startup, so
+        # the right behavior is to MATCH real-Firefox population —
+        # leave the API absent. The §6.6 plan predates this analysis;
+        # the navigator probe below was updated to stop treating a
+        # missing ``navigator.connection`` as a mismatch.
+        #
+        # If a future build moves to a Chromium-shaped UA, the spoof
+        # path can be restored (gated on UA family); the
+        # ``_NAV_CONNECTION_INIT_SCRIPT`` template is retained for that
+        # purpose.
 
         inst = CamoufoxInstance(agent_id, browser, context, page)
 
@@ -2721,10 +2715,12 @@ class BrowserManager:
           * ``navigator.platform`` doesn't match our configured ``os`` hint
           * ``navigator.userAgent`` lacks ``Firefox/`` (would mean §6.4
             tripwire was bypassed somehow at runtime)
-          * ``navigator.connection.*`` is undefined (would mean §6.6
-            override silently failed inside Camoufox)
 
         Per the plan: "WARNING if webdriver !== false or mismatch."
+
+        Note: ``navigator.connection`` is intentionally NOT checked.
+        Real Firefox doesn't expose NetworkInformation; we read the
+        signal field for diagnostics but do not flag its absence.
         """
         os_hint = os.environ.get("BROWSER_OS", "windows").lower()
         expected_platform = {
@@ -2820,13 +2816,10 @@ class BrowserManager:
         ua = signals.get("userAgent", "")
         if ua and "Firefox/" not in ua:
             mismatches.append(f"userAgent lacks 'Firefox/': {ua!r}")
-        # navigator.connection should be populated by §6.6 spoof. ``null``
-        # means the override silently failed.
-        if signals.get("conn_effective") is None:
-            mismatches.append(
-                "navigator.connection.effectiveType is null "
-                "(§6.6 override may have failed)",
-            )
+        # ``navigator.connection`` is intentionally absent on the Firefox
+        # UA path (matches real Firefox population — see comment near
+        # ``_NAV_CONNECTION_INIT_SCRIPT``). Read for diagnostics but do
+        # not flag its absence as a mismatch.
 
         ok = not mismatches
         inst.probe_result = {
@@ -3241,6 +3234,18 @@ class BrowserManager:
 
             inst.dialog_active = False
             inst.dialog_detected = False
+            # Same-tab navigation invalidates every ref captured against
+            # the prior document — the underlying elements are gone.
+            # Without clearing, a later ``click(ref="e3")`` would call
+            # ``get_by_role(role, name=name).nth(occ)`` against the NEW
+            # page; any element with matching role+name+occurrence on
+            # the new page gets silently clicked, RefStale never fires.
+            # ``open_tab`` and ``switch_tab`` already do this; navigate
+            # missed it. Also drop the diff baseline so the next snapshot
+            # is reported as ``scope="navigation"`` rather than diffed
+            # against the stale prior page.
+            inst.refs = {}
+            inst.last_snapshot.clear()
             if wait_ms > 0:
                 await asyncio.sleep(wait_ms / 1000 + navigation_jitter())
             try:
@@ -3575,7 +3580,20 @@ class BrowserManager:
                     inst, root=scoped_root_handle,
                 )
             if not tree:
-                return {"success": True, "data": {"snapshot": "(empty page)", "refs": {}}}
+                # Honor ``BROWSER_SNAPSHOT_FORMAT`` for the empty-tree
+                # short-circuit too. Pre-fix this returned a bare string
+                # regardless of format, so agents parsing on the
+                # ``# snapshot-v2`` first-line marker classified empty
+                # pages as v1 and could attempt v1-shaped re-parsing.
+                empty_text = (
+                    "# snapshot-v2\n(empty page)"
+                    if snapshot_fmt == "v2"
+                    else "(empty page)"
+                )
+                return {
+                    "success": True,
+                    "data": {"snapshot": empty_text, "refs": {}},
+                }
 
             lines: list[str] = []
             refs: dict[str, RefHandle] = {}
@@ -4064,7 +4082,20 @@ class BrowserManager:
             # When a modal dialog is open, scope to only dialog elements
             # so agents don't see/click elements behind the overlay
             # (e.g. X's sidebar "Post" button behind the compose modal).
-            modal_els = await inst.page.query_selector_all(_MODAL_SELECTOR)
+            #
+            # Skip the modal probe when ``target_frame is not None`` —
+            # the iframe-scoped snapshot reports refs from the iframe's
+            # own document, but the main-page modal probe runs against
+            # ``inst.page``. Pre-fix, a main-page-modal-open page that
+            # also took a ``frame=`` snapshot would tag every iframe-
+            # scoped ref with ``scope_root=_MODAL_SELECTOR``; the
+            # resolver would then run ``frame.locator(scope_root)``
+            # against the iframe's document and silently miss the
+            # modal that lives in the parent.
+            if target_frame is not None:
+                modal_els = []
+            else:
+                modal_els = await inst.page.query_selector_all(_MODAL_SELECTOR)
             vp = inst.page.viewport_size
             visible_modals = []
             for el in modal_els:
@@ -4902,6 +4933,44 @@ class BrowserManager:
             ),
         )
 
+    async def _x11_click_xy(
+        self, inst: CamoufoxInstance, x: float, y: float,
+    ) -> None:
+        """Click at viewport coords (x, y) via xdotool — trusted-event path.
+
+        ``click_xy`` previously dispatched ``page.mouse.click(x, y)``
+        directly, which generates a CDP-injected click with
+        ``isTrusted=false``. Bot-detection listeners check the trust
+        flag and an agent that primarily uses ref-clicks (X11) but
+        falls back to xy-clicks (CDP) emits a single
+        ``isTrusted=false`` event in an otherwise all-trusted session
+        — a sharp anti-bot cluster signal. Route through the same
+        Bezier + dwell shape ``_x11_click`` uses so the trusted-event
+        property holds across click-by-coords too.
+        """
+        wid = inst.x11_wid
+        if not wid:
+            raise RuntimeError("No X11 window ID — cannot use xdotool click")
+        await self._x11_move_to(inst, int(x), int(y))
+        wid_s = str(wid)
+        loop = asyncio.get_running_loop()
+        await asyncio.sleep(pre_click_settle())
+        await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(
+                ["xdotool", "mousedown", "--clearmodifiers", "--window", wid_s, "1"],
+                capture_output=True, timeout=3,
+            ),
+        )
+        await asyncio.sleep(click_dwell())
+        await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(
+                ["xdotool", "mouseup", "--clearmodifiers", "--window", wid_s, "1"],
+                capture_output=True, timeout=3,
+            ),
+        )
+
     async def _x11_hover(self, inst: CamoufoxInstance, locator) -> None:
         """Move mouse to element via xdotool for isTrusted=true mousemove events."""
         await self._x11_ensure_in_viewport(inst, locator)
@@ -5496,8 +5565,26 @@ class BrowserManager:
                         },
                     }
 
-                # Clean hit — dispatch the click.
-                await inst.page.mouse.click(x, y)
+                # Clean hit — dispatch the click. Prefer X11/xdotool
+                # (real kernel InputEvents → ``isTrusted=true``) when
+                # the agent has an X11 window registered; fall back to
+                # CDP only when X11 isn't usable. Pre-fix this used
+                # ``page.mouse.click`` unconditionally — a single such
+                # CDP click in an otherwise-X11 session emits an
+                # ``isTrusted=false`` event that anti-bot listeners
+                # cluster on.
+                if isinstance(inst.x11_wid, int) and self._is_x11_site(inst):
+                    try:
+                        await self._x11_click_xy(inst, x, y)
+                    except Exception as e:
+                        logger.warning(
+                            "X11 xy-click failed for '%s' at (%s, %s); "
+                            "falling back to CDP: %s",
+                            agent_id, x, y, e,
+                        )
+                        await inst.page.mouse.click(x, y)
+                else:
+                    await inst.page.mouse.click(x, y)
                 await asyncio.sleep(action_delay())
 
                 # Don't drop the diff baseline here. Ref-click / type /
@@ -5945,10 +6032,12 @@ class BrowserManager:
         """Type text with minimal delay — still fires real key events.
 
         Uses keyboard.press(char) for isTrusted=true events so React/Lexical
-        state updates work, but with a fixed 8 ms inter-key delay (no
-        variance, no think pauses).  Suitable for search queries, URLs,
-        and non-sensitive form fields where human-realistic timing is
-        unnecessary.
+        state updates work. Inter-key delay is a small Gaussian (μ≈8 ms,
+        σ≈3 ms, clamped non-negative) rather than a constant — perfectly
+        periodic 8 ms keystrokes are FFT-detectable and zero real human
+        types with that exact cadence. Suitable for search queries, URLs,
+        and non-sensitive form fields where full human-realistic timing
+        is unnecessary but a flat fingerprint is unwanted.
         """
         for char in text:
             if char == "\n":
@@ -5960,7 +6049,9 @@ class BrowserManager:
                     await page.keyboard.press(char)
                 except Exception:
                     await page.keyboard.type(char)
-            await asyncio.sleep(0.008)
+            # Gaussian jitter ~ N(8 ms, 3 ms), floor at 1 ms so we
+            # never schedule a zero-or-negative sleep.
+            await asyncio.sleep(max(0.001, random.gauss(0.008, 0.003)))
 
     async def scroll(self, agent_id: str, direction: str = "down",
                      amount: int = 0, ref: str | None = None) -> dict:
@@ -6383,91 +6474,111 @@ class BrowserManager:
                 )
             reserved_millicents = reservation
 
-        # Gate 2: rate-limit. ``_check_solve_rate`` consumes a slot only
-        # on the actual-attempt path (returning False); a True return
-        # means we are over the limit, no slot consumed.
-        rate_limit = _resolve_rate_limit(agent_id)
-        if await _check_solve_rate(agent_id, rate_limit):
-            if reserved_millicents:
-                from src.browser import captcha_cost_counter as _cost
-                await _cost.adjust_cost(agent_id, -reserved_millicents)
-            await _record_captcha_audit_event(
-                agent_id, "rate_limited", kind, page_url,
-            )
-            return SolveResult(
-                token=None, injection_succeeded=False,
-                used_proxy_aware=False, compat_rejected=False,
-                skipped="rate_limited",
-            )
-
-        # Gate 3: provider sanity. When a cost cap is configured, we
-        # MUST be able to attribute every solve to a published rate so
-        # the cap math stays honest. A solver without a string ``provider``
-        # cannot be priced; in that case we fail closed (skip the solve)
-        # rather than let an untrackable charge slip past the cap.
-        # When no cap is configured the warning still fires so operators
-        # see the misconfiguration, but we proceed with the solve — keeps
-        # tests and custom solver integrations from breaking outright.
-        if not isinstance(provider, str) or not provider:
-            logger.warning(
-                "captcha solve: solver has no string ``provider`` "
-                "attribute; cost accounting will be SKIPPED for this "
-                "solve (cap not configured so the warning is "
-                "informational). Set solver.provider to a known name "
-                "to enable cost tracking.",
-            )
-
-        # Run the actual solver. Any exception bubbles up so the caller can
-        # build the appropriate ``timeout``/``rejected`` envelope; we don't
-        # swallow them here because the envelope-mapping is caller-specific.
+        # All paths past the cost-cap gate must reconcile the
+        # reservation. Wrap the rest of the function in try/finally with
+        # a ``reservation_settled`` flag so that ANY exit (return,
+        # raise, ``CancelledError``) cleans up the reserved spend rather
+        # than leaving it stuck on the agent's bucket. Pre-fix, an
+        # ``asyncio.Task.cancel`` mid-solve (caller timed out, browser
+        # restart, container shutdown) would leave the reservation
+        # permanently committed even though no token was ever received.
+        from src.browser import captcha_cost_counter as _cost
+        reservation_settled = False
         try:
-            result = await self._captcha_solver.solve(
-                inst.page, sel, page_url,
-                agent_id=agent_id, kind=kind,
-            )
-        except Exception:
-            if reserved_millicents:
-                from src.browser import captcha_cost_counter as _cost
-                await _cost.adjust_cost(agent_id, -reserved_millicents)
-            raise
-
-        # Cost accounting fires on token retrieval, NOT on injection
-        # success — the provider already charged for the token. Skip
-        # accounting when no token came back (gates / sitekey-fail /
-        # provider-reject / breaker / unreachable).
-        if result.token is not None:
-            from src.browser import captcha_cost_counter as _cost
-            # Defensive: solver mocks in tests sometimes leave provider
-            # as a MagicMock auto-spec child; only proceed when we have
-            # an actual string we can pass to ``estimate_millicents``.
-            # The provider-missing case was warned above; here we just
-            # skip the increment silently.
-            if isinstance(provider, str) and provider:
-                millicents = _cost.estimate_millicents(
-                    provider, kind,
-                    proxy_aware=result.used_proxy_aware,
+            # Gate 2: rate-limit. ``_check_solve_rate`` consumes a slot
+            # only on the actual-attempt path (returning False); a True
+            # return means we are over the limit, no slot consumed.
+            rate_limit = _resolve_rate_limit(agent_id)
+            if await _check_solve_rate(agent_id, rate_limit):
+                await _record_captcha_audit_event(
+                    agent_id, "rate_limited", kind, page_url,
                 )
-                if millicents is None:
-                    logger.warning(
-                        "captcha solve: no published rate for "
-                        "provider=%s kind=%s proxy_aware=%s — "
-                        "skipping cost increment "
-                        "(under-count > over-count)",
-                        provider, kind, result.used_proxy_aware,
+                return SolveResult(
+                    token=None, injection_succeeded=False,
+                    used_proxy_aware=False, compat_rejected=False,
+                    skipped="rate_limited",
+                )
+
+            # Gate 3: provider sanity. When a cost cap is configured, we
+            # MUST be able to attribute every solve to a published rate
+            # so the cap math stays honest. A solver without a string
+            # ``provider`` cannot be priced; in that case we fail closed
+            # (skip the solve) rather than let an untrackable charge
+            # slip past the cap. When no cap is configured the warning
+            # still fires so operators see the misconfiguration, but we
+            # proceed with the solve — keeps tests and custom solver
+            # integrations from breaking outright.
+            if not isinstance(provider, str) or not provider:
+                logger.warning(
+                    "captcha solve: solver has no string ``provider`` "
+                    "attribute; cost accounting will be SKIPPED for "
+                    "this solve (cap not configured so the warning is "
+                    "informational). Set solver.provider to a known "
+                    "name to enable cost tracking.",
+                )
+
+            # Run the actual solver. Any exception bubbles up so the
+            # caller can build the appropriate ``timeout``/``rejected``
+            # envelope; we don't swallow them here because the
+            # envelope-mapping is caller-specific. Audit the
+            # exception-during-solve case so operator dashboards see
+            # the storm before the breaker trips.
+            try:
+                result = await self._captcha_solver.solve(
+                    inst.page, sel, page_url,
+                    agent_id=agent_id, kind=kind,
+                )
+            except Exception:
+                await _record_captcha_audit_event(
+                    agent_id, "solver_exception", kind, page_url,
+                )
+                raise
+
+            # Cost accounting fires on token retrieval, NOT on
+            # injection success — the provider already charged for the
+            # token. Skip accounting when no token came back (gates /
+            # sitekey-fail / provider-reject / breaker / unreachable).
+            if result.token is not None:
+                # Defensive: solver mocks in tests sometimes leave
+                # ``provider`` as a MagicMock auto-spec child; only
+                # proceed when we have an actual string we can pass to
+                # ``estimate_millicents``. The provider-missing case
+                # was warned above; here we just skip the increment
+                # silently and let the finally-refund clean up the
+                # reservation.
+                if isinstance(provider, str) and provider:
+                    millicents = _cost.estimate_millicents(
+                        provider, kind,
+                        proxy_aware=result.used_proxy_aware,
                     )
-                    if reserved_millicents:
-                        await _cost.adjust_cost(agent_id, -reserved_millicents)
-                else:
-                    if reserved_millicents:
-                        await _cost.adjust_cost(
-                            agent_id, millicents - reserved_millicents,
+                    if millicents is None:
+                        logger.warning(
+                            "captcha solve: no published rate for "
+                            "provider=%s kind=%s proxy_aware=%s — "
+                            "skipping cost increment "
+                            "(under-count > over-count)",
+                            provider, kind, result.used_proxy_aware,
                         )
                     else:
-                        await _cost.add_cost(agent_id, millicents)
-        elif reserved_millicents:
-            from src.browser import captcha_cost_counter as _cost
-            await _cost.adjust_cost(agent_id, -reserved_millicents)
-        return result
+                        if reserved_millicents:
+                            await _cost.adjust_cost(
+                                agent_id,
+                                millicents - reserved_millicents,
+                            )
+                        else:
+                            await _cost.add_cost(agent_id, millicents)
+                        reservation_settled = True
+            return result
+        finally:
+            # If we got here without committing the reservation (token-
+            # less return, gate-trip return, raise, cancellation),
+            # refund. ``adjust_cost`` is clamped at zero so a refund
+            # that races with another adjustment can't drive negative.
+            if reserved_millicents and not reservation_settled:
+                with contextlib.suppress(Exception):
+                    await _cost.adjust_cost(
+                        agent_id, -reserved_millicents,
+                    )
 
     async def _check_captcha(self, inst: CamoufoxInstance) -> dict:
         """Check for CAPTCHA elements and attempt auto-solve if configured.

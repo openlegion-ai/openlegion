@@ -114,10 +114,15 @@ class TestProbeMismatches:
         assert any("Firefox" in m for m in inst.probe_result["mismatches"])
 
     @pytest.mark.asyncio
-    async def test_missing_navigator_connection_flagged(
+    async def test_missing_navigator_connection_not_flagged(
         self, monkeypatch, tmp_path,
     ):
-        """§6.6 spoof not landing → conn_effective null → mismatch."""
+        """The probe was changed to stop flagging missing
+        ``navigator.connection`` — real Firefox doesn't expose
+        NetworkInformation, and emulating it on a Firefox UA was
+        itself a stronger anti-bot tell than its absence. Confirm the
+        probe is OK when ``conn_effective`` is null AND nothing else
+        is wrong."""
         from src.browser.service import BrowserManager
 
         mgr = BrowserManager(profiles_dir=str(tmp_path / "profiles"))
@@ -125,8 +130,10 @@ class TestProbeMismatches:
         inst.page.evaluate.return_value = _ok_signals(conn_effective=None)
 
         await mgr._run_navigator_probe(inst)
-        assert inst.probe_result["ok"] is False
-        assert any("connection" in m for m in inst.probe_result["mismatches"])
+        assert inst.probe_result["ok"] is True
+        assert not any(
+            "connection" in m for m in inst.probe_result["mismatches"]
+        )
 
 
 class TestProbeIsolation:

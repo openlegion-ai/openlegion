@@ -581,10 +581,31 @@ def _stealth_prefs() -> dict:
         "browser.uidensity": 1,
         "browser.tabs.inTitlebar": 1,
 
-        # ── WebRTC: handled by Camoufox block_webrtc=True ────────────────────
+        # ── WebRTC: defense in depth ─────────────────────────────────────────
         # RTCPeerConnection leaks the Docker container's internal IP via ICE
-        # candidates even when behind a proxy.  Camoufox's block_webrtc option
-        # is the canonical way to disable WebRTC — it covers all relevant prefs.
+        # candidates even when behind a proxy. Camoufox's ``block_webrtc=True``
+        # is the primary toggle, BUT a single point of failure: if a future
+        # Camoufox release silently drops or renames the option, ICE candidates
+        # leak with no other guard. Set the underlying Firefox prefs explicitly
+        # too — they're idempotent with the Camoufox toggle and survive any
+        # upstream rename.
+        #
+        # Trade-off: ``media.peerconnection.enabled=false`` makes
+        # ``RTCPeerConnection`` itself ``undefined`` — and the API's absence
+        # is itself a fingerprint cluster vs the real Firefox population
+        # (where it's overwhelmingly present). The two ``ice.*`` prefs are
+        # the better long-term shape because they keep the constructor present
+        # but prevent host candidates; flipping the master switch is the
+        # belt-and-suspenders fallback for the primary IP-leak threat. Operators
+        # who care more about cluster shape than IP leakage can override
+        # ``media.peerconnection.enabled`` to True via settings.json.
+        "media.peerconnection.enabled": False,
+        "media.peerconnection.ice.default_address_only": True,
+        "media.peerconnection.ice.no_host": True,
+        # Disable mDNS rewrite of host candidates (Firefox feature that can
+        # itself be a fingerprint-able shape if mismatched with our above
+        # settings).
+        "media.peerconnection.ice.obfuscate_host_addresses": False,
 
         # ── Geolocation ───────────────────────────────────────────────────────
         # The geo API would expose incorrect coordinates for a server IP, and

@@ -1931,13 +1931,66 @@ class CaptchaSolver:
         ``hcaptcha``, ``turnstile``); the §11.1 reCAPTCHA variants
         (``recaptcha-v2-checkbox`` / ``...-v3`` / ``...-enterprise-v2`` / etc.)
         all share the same ``g-recaptcha-response`` injection path.
+
+        Iframe handling: hCaptcha and Turnstile render their
+        ``<input name="*-response">`` element INSIDE the widget iframe.
+        Running injection JS only in the top-level document would miss
+        the response input on widgets that don't auto-mirror to a
+        parent textarea, returning ``injection_failed`` even though
+        the provider returned a valid token. Walk every frame and
+        bubble up "any frame succeeded" as the success bit.
         """
         family = captcha_type
         if captcha_type.startswith("recaptcha"):
             family = "recaptcha"
+
+        async def _eval_in_all_frames(js: str) -> list:
+            """Run ``js`` in every frame; return the list of per-frame
+            return values. Failures (cross-origin frame, frame detached,
+            ...) are swallowed per-frame so one bad frame doesn't
+            abort the rest of the walk.
+
+            Always evaluates against ``page`` first (the top-level
+            document) so existing single-frame tests/mocks still see
+            their evaluate call. Then walks ``page.frames`` if
+            available; cross-origin / mock objects that don't yield a
+            real iterable degrade cleanly to the page-only path.
+            """
+            results: list = []
+            # Always try the top-level page first — covers single-frame
+            # mocks in tests and the common case where the response
+            # input is mirrored at the top level.
+            try:
+                results.append(await page.evaluate(js, token))
+            except Exception:
+                pass
+            # Walk the frame tree if Playwright exposes one. ``frames``
+            # may be missing (test mocks), non-iterable (AsyncMock
+            # auto-attr), or include the main frame already covered
+            # above; iterating defensively skips all of those.
+            frames = getattr(page, "frames", None)
+            try:
+                frame_iter = list(frames) if frames is not None else []
+            except TypeError:
+                frame_iter = []
+            for frame in frame_iter:
+                if frame is page:
+                    continue
+                evaluator = getattr(frame, "evaluate", None)
+                if not callable(evaluator):
+                    continue
+                try:
+                    results.append(await evaluator(js, token))
+                except Exception:
+                    # Cross-origin / detached / SecurityError — common
+                    # for the captcha provider's iframe origin. Don't
+                    # propagate; one bad frame shouldn't kill the walk.
+                    continue
+            return results
+
         try:
             if family == "recaptcha":
-                injected = await page.evaluate("""(token) => {
+                results = await _eval_in_all_frames("""(token) => {
                     let updated = false;
                     const fire = (el) => {
                         try {
@@ -1983,11 +2036,20 @@ class CaptchaSolver:
                         }
                     }
                     return updated;
-                }""", token)
-                return bool(injected)
+                }""")
+                return any(bool(r) for r in results)
 
             if family == "hcaptcha":
-                injected = await page.evaluate("""(token) => {
+                # hCaptcha widget renders the response input inside its
+                # iframe. Set the textarea BEFORE calling
+                # ``hcaptcha.execute()`` would risk the SDK re-running
+                # the challenge and clobbering our token; we just set
+                # the textarea + dispatch input/change events and let
+                # the embedding form's submit handler pick it up.
+                # Real-world flow: provider verifies the token
+                # server-side from the form post; the SDK callback is
+                # not strictly required.
+                results = await _eval_in_all_frames("""(token) => {
                     let updated = false;
                     const fire = (el) => {
                         try {
@@ -2006,16 +2068,17 @@ class CaptchaSolver:
                         fire(el);
                         updated = true;
                     });
-                    // Trigger hcaptcha callback
-                    if (typeof hcaptcha !== 'undefined' && hcaptcha.getRespKey) {
-                        try { hcaptcha.execute(); } catch(e) {}
-                    }
                     return updated;
-                }""", token)
-                return bool(injected)
+                }""")
+                return any(bool(r) for r in results)
 
             if family == "turnstile":
-                injected_obj = await page.evaluate("""(token) => {
+                # Turnstile renders the response input inside the
+                # widget iframe; the embedding form often holds a
+                # mirror ``[name="cf-turnstile-response"]`` at the top
+                # level too. Walk both so we hit whichever variant the
+                # site uses.
+                per_frame = await _eval_in_all_frames("""(token) => {
                     let updated = false;
                     let widget_count = 0;
                     const fire = (el) => {
@@ -2052,23 +2115,23 @@ class CaptchaSolver:
                         } catch(e) {}
                     }
                     return { updated: updated, widget_count: widget_count };
-                }""", token)
-                if (
-                    isinstance(injected_obj, dict)
-                    and injected_obj.get("widget_count", 0) > 1
-                ):
-                    logger.info(
-                        "Turnstile injection saw %d widgets on page; "
-                        "fired callback on all (prior behavior fired only "
-                        "the first widget)",
-                        injected_obj.get("widget_count"),
-                    )
-                injected = (
-                    bool(injected_obj.get("updated"))
-                    if isinstance(injected_obj, dict)
-                    else bool(injected_obj)
+                }""")
+                total_widgets = sum(
+                    int(r.get("widget_count", 0))
+                    for r in per_frame
+                    if isinstance(r, dict)
                 )
-                return injected
+                if total_widgets > 1:
+                    logger.info(
+                        "Turnstile injection saw %d widgets across all "
+                        "frames; fired callback on all (prior behavior "
+                        "fired only the first widget)",
+                        total_widgets,
+                    )
+                return any(
+                    bool(r.get("updated") if isinstance(r, dict) else r)
+                    for r in per_frame
+                )
 
         except Exception:
             logger.debug("Token injection error", exc_info=True)

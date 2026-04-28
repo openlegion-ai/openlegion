@@ -480,6 +480,31 @@ class TestValidateCookies:
         assert accepted == []
         assert dropped == [{"reason": "secure_prefix_non_https_url", "count": 1}]
 
+    def test_drops_plain_secure_cookie_with_non_https_url(self):
+        """RFC 6265 §5.4: ``Secure=true`` requires an HTTPS origin.
+        Pre-fix the validator only enforced this on ``__Host-`` /
+        ``__Secure-`` prefixed names; a plain ``{secure:true,
+        url:"http://..."}`` was accepted but Firefox silently dropped at
+        SET time. Reject up front so operators get a deterministic
+        drop reason."""
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "sid", "value": "x", "secure": True,
+              "url": "http://example.com/"}],
+        )
+        assert accepted == []
+        assert dropped == [{"reason": "secure_non_https_url", "count": 1}]
+
+    def test_plain_insecure_cookie_with_non_https_url_passes(self):
+        """The Secure-with-HTTP rejection should not affect plain
+        ``secure=false`` cookies on http URLs — that's a normal
+        cookie."""
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "sid", "value": "x", "secure": False,
+              "url": "http://example.com/"}],
+        )
+        assert len(accepted) == 1
+        assert dropped == []
+
     def test_netscape_malformed_lines_surface_as_drop_count(self):
         """When the input is Netscape and contains malformed lines, the
         ``dropped`` aggregate must include a ``malformed_line`` entry —
