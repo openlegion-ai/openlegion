@@ -444,7 +444,8 @@ class TestTypeTextClearBehavior:
 class TestCamoufoxInstanceLock:
     """Tests that CamoufoxInstance has a per-instance lock."""
 
-    def test_instance_has_lock(self):
+    @pytest.mark.asyncio
+    async def test_instance_has_lock(self):
         from src.browser.service import CamoufoxInstance
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), MagicMock())
         assert hasattr(inst, "lock")

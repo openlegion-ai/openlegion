@@ -1747,29 +1747,38 @@ class CamoufoxInstance:
     def lock(self) -> asyncio.Lock:
         """Per-instance lock, bound lazily to the active event loop.
 
-        ``CamoufoxInstance`` is normally constructed inside the browser
-        service loop, but tests and setup helpers also construct it from
-        synchronous code. Python 3.9 raises when ``asyncio.Lock`` is created
-        after pytest has closed the default loop, so the lock is resolved on
-        access and refreshed if the active loop changes.
+        Construction may happen outside any running loop (sync FastAPI
+        startup, pytest fixtures), so the lock is created on first access
+        and refreshed if the active loop has changed since. Mirrors the
+        ``_manager_lock`` / ``_get_*_lock`` helpers elsewhere in this module.
+        Must be accessed from inside a running event loop.
         """
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-        if self._lock is None or self._lock_loop is not loop:
+        loop = asyncio.get_running_loop()
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+            self._lock_loop = loop
+        elif self._lock_loop is None:
+            # Lock was set via the setter outside a running loop; pin it
+            # to the loop that's actually using it now without discarding.
+            self._lock_loop = loop
+        elif self._lock_loop is not loop:
+            # Loop changed between uses (typically pytest spinning up a
+            # fresh loop per test). Rebuild to bind to the new loop.
             self._lock = asyncio.Lock()
             self._lock_loop = loop
         return self._lock
 
     @lock.setter
     def lock(self, value: asyncio.Lock) -> None:
+        # Tests occasionally swap in a custom lock (``TrackingLock`` /
+        # ``asyncio.Lock()``). Honor the swap; the property getter pins
+        # the loop on first use so the supplied lock is not silently
+        # replaced.
         self._lock = value
-        self._lock_loop = getattr(value, "_loop", None)
+        try:
+            self._lock_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._lock_loop = None
 
     def _register_page(self, page) -> str:
         """Assign a stable UUID to a Page if not already registered.
@@ -4089,14 +4098,18 @@ class BrowserManager:
         Resolution order (§4.2):
             1. ``page_id`` → Page object (raises :class:`RefStale` if the
                tab has closed).
-            2. ``frame_id`` → Frame (None = main frame).  Always None
-               until §8.4 iframe traversal.
-            3. ``scope_root`` — modal selector bound during snapshot, so
-               occurrence indices match.
-            4. ``shadow_path`` — walk open shadow roots via the
-               §8.3 two-stage ``evaluate_handle`` pattern. Returns an
+            2. ``frame_id`` → Frame (None = main frame). Set when the
+               ref was captured inside an iframe; the resolver then runs
+               every subsequent step against that Frame instead of the
+               top-level Page, so shadow-piercing and ``get_by_role``
+               operate inside the iframe's own document.
+            3. ``shadow_path`` — walk open shadow roots via the
+               §8.3 two-stage ``evaluate_handle`` pattern (against the
+               Frame when ``frame_id`` is set, else the Page). Returns an
                :class:`ElementHandle` rather than a ``Locator`` because
                ``get_by_role`` does not pierce shadow boundaries.
+            4. ``scope_root`` — modal selector bound during snapshot, so
+               occurrence indices match.
             5. ``get_by_role(role, name=name, exact=True).nth(occurrence)``.
 
         Returns ``None`` when ``ref`` isn't in ``inst.refs`` (classic
@@ -4123,8 +4136,14 @@ class BrowserManager:
             locator = base.get_by_role(handle.role)
         return locator.nth(handle.occurrence)
 
-    async def _resolve_shadow_element(self, page, handle: RefHandle, ref: str):
+    async def _resolve_shadow_element(self, base, handle: RefHandle, ref: str):
         """Two-stage resolver for refs whose ``shadow_path`` is non-empty.
+
+        ``base`` is the JS-evaluation root for the resolver — a Page for
+        main-frame refs, or a Frame for refs captured inside an iframe.
+        Both share ``evaluate_handle``; the JS resolver runs in whichever
+        document ``base`` represents, so an iframe-scoped ref walks the
+        shadow path inside the iframe's document, not the top page.
 
         Stage 1 walks the path to the inner ``shadowRoot``, verifying
         each host's discriminator. Stage 2 picks the role+name match at
@@ -4159,7 +4178,7 @@ class BrowserManager:
         # Without this, a same-selector shadow host living outside the
         # dialog could resolve and the click would land on the wrong
         # element entirely.
-        stage1 = await page.evaluate_handle(
+        stage1 = await base.evaluate_handle(
             _JS_SHADOW_RESOLVE_STAGE1,
             {
                 "path": json.dumps(path_payload),
@@ -6717,7 +6736,7 @@ class BrowserManager:
                 if not locator:
                     return {"success": False, "error": f"Ref '{ref}' not found"}
                 async with inst.page.expect_file_chooser(timeout=timeout_ms) as info:
-                    if type(inst.x11_wid) is int and self._is_x11_site(inst):
+                    if isinstance(inst.x11_wid, int) and self._is_x11_site(inst):
                         try:
                             await self._x11_click(
                                 inst, locator, timeout=timeout_ms,
@@ -6795,7 +6814,7 @@ class BrowserManager:
 
                 Path(download_dir).mkdir(parents=True, exist_ok=True)
                 async with inst.page.expect_download(timeout=timeout_ms) as info:
-                    if type(inst.x11_wid) is int and self._is_x11_site(inst):
+                    if isinstance(inst.x11_wid, int) and self._is_x11_site(inst):
                         try:
                             await self._x11_click(
                                 inst, locator, timeout=timeout_ms,
