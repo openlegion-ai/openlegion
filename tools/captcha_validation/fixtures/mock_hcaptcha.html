@@ -1,0 +1,18 @@
+<!--
+  Mock hCaptcha page for harness self-tests.
+  See mock_recaptcha.html for the threat-model note.
+-->
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>mock hcaptcha page</title>
+</head>
+<body>
+  <h1>mock hcaptcha page</h1>
+  <form action="/submit" method="post">
+    <div class="h-captcha" data-sitekey="00000000-0000-0000-0000-000000000000"></div>
+    <button id="submit" type="submit">Submit</button>
+  </form>
+</body>
+</html>

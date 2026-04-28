@@ -1,0 +1,18 @@
+<!--
+  Mock Cloudflare Turnstile page for harness self-tests.
+  See mock_recaptcha.html for the threat-model note.
+-->
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>mock turnstile page</title>
+</head>
+<body>
+  <h1>mock turnstile page</h1>
+  <form action="/submit" method="post">
+    <div class="cf-turnstile" data-sitekey="0x4AAAAAAAMockTurnstileTestKey"></div>
+    <button id="submit" type="submit">Submit</button>
+  </form>
+</body>
+</html>

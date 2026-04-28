@@ -1,0 +1,21 @@
+<!--
+  Mock Cloudflare Under-Attack interstitial for harness self-tests.
+  Static page only — no real challenge logic. The production
+  ``_classify_cf_state`` looks at the title + body text + Turnstile
+  presence to tri-state the page; this fixture exercises the
+  "interstitial without Turnstile widget" → behavioral-only branch.
+-->
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Just a moment...</title>
+</head>
+<body>
+  <main>
+    <h1>Checking your browser before accessing the site.</h1>
+    <p>This process is automatic. Your browser will redirect to your requested content shortly.</p>
+    <p>Please allow up to 5 seconds...</p>
+  </main>
+</body>
+</html>

@@ -1,0 +1,20 @@
+<!--
+  Mock reCAPTCHA v2 page for harness self-tests.
+  Renders the structural shape (g-recaptcha element + sitekey attribute)
+  the production captcha module looks for. NEVER served from a real
+  recaptcha.net origin — this is a local file only.
+-->
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>mock recaptcha v2 page</title>
+</head>
+<body>
+  <h1>mock recaptcha v2 page</h1>
+  <form action="/submit" method="post">
+    <div class="g-recaptcha" data-sitekey="6LfMockSitekeyForLocalHarnessTestUseOnly_AAAA"></div>
+    <button id="submit" type="submit">Submit</button>
+  </form>
+</body>
+</html>
