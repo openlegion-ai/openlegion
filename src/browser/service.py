@@ -200,8 +200,19 @@ _CF_AUTO_WAIT_SECONDS = 8.0
 # single container, and the cap is a soft anti-abuse signal not a billing
 # control (cost counter handles billing).
 _solve_rate_window: dict[str, deque[float]] = {}
-_solve_rate_lock: asyncio.Lock = asyncio.Lock()
+_solve_rate_lock: asyncio.Lock | None = None
+_solve_rate_lock_loop: asyncio.AbstractEventLoop | None = None
 _SOLVE_RATE_WINDOW_SECONDS = 3600.0
+
+
+def _get_solve_rate_lock() -> asyncio.Lock:
+    """Return a solve-rate lock bound to the active event loop."""
+    global _solve_rate_lock, _solve_rate_lock_loop
+    loop = asyncio.get_running_loop()
+    if _solve_rate_lock is None or _solve_rate_lock_loop is not loop:
+        _solve_rate_lock = asyncio.Lock()
+        _solve_rate_lock_loop = loop
+    return _solve_rate_lock
 
 
 async def _check_solve_rate(agent_id: str, limit_per_hour: int) -> bool:
@@ -216,7 +227,7 @@ async def _check_solve_rate(agent_id: str, limit_per_hour: int) -> bool:
     """
     if limit_per_hour <= 0:
         return False
-    async with _solve_rate_lock:
+    async with _get_solve_rate_lock():
         now = time.time()
         cutoff = now - _SOLVE_RATE_WINDOW_SECONDS
         bucket = _solve_rate_window.setdefault(agent_id, deque(maxlen=limit_per_hour * 4))
@@ -279,9 +290,20 @@ def _resolve_cost_cap(agent_id: str) -> int:
 # browser service container. The flush is driven from
 # :meth:`BrowserManager._emit_metrics` (already on a 60s tick); see
 # ``_drain_captcha_audit`` below.
-_captcha_audit_lock: asyncio.Lock = asyncio.Lock()
+_captcha_audit_lock: asyncio.Lock | None = None
+_captcha_audit_lock_loop: asyncio.AbstractEventLoop | None = None
 # {(agent_id, outcome, kind): {"count": int, "first_ts": float, "last_url": str}}
 _captcha_audit_buckets: dict[tuple[str, str, str], dict] = {}
+
+
+def _get_captcha_audit_lock() -> asyncio.Lock:
+    """Return a CAPTCHA audit lock bound to the active event loop."""
+    global _captcha_audit_lock, _captcha_audit_lock_loop
+    loop = asyncio.get_running_loop()
+    if _captcha_audit_lock is None or _captcha_audit_lock_loop is not loop:
+        _captcha_audit_lock = asyncio.Lock()
+        _captcha_audit_lock_loop = loop
+    return _captcha_audit_lock
 
 
 async def _record_captcha_audit_event(
@@ -305,7 +327,7 @@ async def _record_captcha_audit_event(
     ``captcha_gate`` payload as ``policy``. Last-write-wins within an
     aggregation window — same convention as ``last_url``.
     """
-    async with _captcha_audit_lock:
+    async with _get_captcha_audit_lock():
         key = (agent_id, outcome, kind)
         bucket = _captcha_audit_buckets.get(key)
         now = time.time()
@@ -331,7 +353,7 @@ async def _drain_captcha_audit() -> list[dict]:
     EventBus payload; the caller is responsible for actually emitting
     via the configured ``metrics_sink``.
     """
-    async with _captcha_audit_lock:
+    async with _get_captcha_audit_lock():
         if not _captcha_audit_buckets:
             return []
         # Snapshot copy under lock so the subsequent ``clear()`` doesn't
@@ -1874,7 +1896,8 @@ class BrowserManager:
         self.max_concurrent = max_concurrent
         self.idle_timeout = idle_timeout_minutes * 60
         self._instances: dict[str, CamoufoxInstance] = {}
-        self._lock = asyncio.Lock()
+        self._lock: asyncio.Lock | None = None
+        self._lock_loop: asyncio.AbstractEventLoop | None = None
         self._cleanup_task: asyncio.Task | None = None
         self._playwright = None
         self._user_focused_agent: str | None = None  # set by explicit focus() call
@@ -1908,6 +1931,20 @@ class BrowserManager:
                 "Playwright private artifact-stream API unavailable; "
                 "browser_download will return service_unavailable.",
             )
+
+    def _manager_lock(self) -> asyncio.Lock:
+        """Return the manager lock for the currently running event loop.
+
+        The browser manager is often constructed from synchronous FastAPI
+        setup/test code. Python 3.9 binds ``asyncio.Lock`` to the current
+        loop during construction, so creating it eagerly is fragile after
+        pytest or startup code has closed a previous default loop.
+        """
+        loop = asyncio.get_running_loop()
+        if self._lock is None or self._lock_loop is not loop:
+            self._lock = asyncio.Lock()
+            self._lock_loop = loop
+        return self._lock
 
     @staticmethod
     def _detect_download_streaming() -> bool:
@@ -2108,7 +2145,7 @@ class BrowserManager:
 
     async def _cleanup_idle(self):
         now = time.time()
-        async with self._lock:
+        async with self._manager_lock():
             to_stop = [
                 agent_id for agent_id, inst in self._instances.items()
                 if now - inst.last_activity > self.idle_timeout
@@ -2124,7 +2161,7 @@ class BrowserManager:
         display, so a watched browser is never killed by the idle cleanup.
         Returns the number of instances touched.
         """
-        async with self._lock:
+        async with self._manager_lock():
             for inst in self._instances.values():
                 inst.touch()
             return len(self._instances)
@@ -2141,7 +2178,7 @@ class BrowserManager:
         prevents background agent browser operations from stealing the
         VNC display away from what the user is watching.
         """
-        async with self._lock:
+        async with self._manager_lock():
             if not self._instances:
                 return
             # Prefer user's explicit focus over MRU
@@ -2175,7 +2212,7 @@ class BrowserManager:
         """Get existing browser or start a new one for the agent."""
         if not _AGENT_ID_RE.match(agent_id):
             raise ValueError(f"Invalid agent_id: {agent_id!r}")
-        async with self._lock:
+        async with self._manager_lock():
             if agent_id in self._instances:
                 inst = self._instances[agent_id]
                 inst.touch()
@@ -2576,11 +2613,11 @@ class BrowserManager:
 
     async def stop(self, agent_id: str) -> None:
         """Stop and clean up a specific agent's browser."""
-        async with self._lock:
+        async with self._manager_lock():
             await self._stop_instance(agent_id)
 
     async def _stop_instance(self, agent_id: str) -> None:
-        """Internal stop — caller must hold self._lock."""
+        """Internal stop — caller must hold ``self._manager_lock()``."""
         inst = self._instances.pop(agent_id, None)
         if inst is None:
             return
@@ -2652,7 +2689,7 @@ class BrowserManager:
             except (asyncio.CancelledError, Exception):
                 pass
             self._download_gc_task = None
-        async with self._lock:
+        async with self._manager_lock():
             for agent_id in list(self._instances.keys()):
                 await self._stop_instance(agent_id)
         if self._captcha_solver:
@@ -2686,7 +2723,7 @@ class BrowserManager:
         Operators polling /status see the current health signal without
         waiting for the next emit tick.
         """
-        async with self._lock:
+        async with self._manager_lock():
             inst = self._instances.get(agent_id)
             if not inst:
                 return {"running": False}
@@ -2711,7 +2748,7 @@ class BrowserManager:
 
     async def get_service_status(self) -> dict:
         """Get overall service health."""
-        async with self._lock:
+        async with self._manager_lock():
             return {
                 "healthy": True,
                 "active_browsers": len(self._instances),

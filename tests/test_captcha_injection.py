@@ -2,11 +2,28 @@
 
 from __future__ import annotations
 
+import threading
 from unittest.mock import AsyncMock
 
 import pytest
 
 from src.browser.captcha import CaptchaSolver
+
+
+def test_solver_constructor_does_not_require_current_event_loop():
+    errors: list[BaseException] = []
+
+    def build_solver() -> None:
+        try:
+            CaptchaSolver("2captcha", "key")
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=build_solver)
+    thread.start()
+    thread.join()
+
+    assert errors == []
 
 
 @pytest.mark.asyncio

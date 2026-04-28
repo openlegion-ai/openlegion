@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -44,6 +45,21 @@ class TestCredentialRedactor:
 
 class TestBrowserManagerLifecycle:
     """Tests for BrowserManager start/stop/idle logic."""
+
+    def test_constructor_does_not_require_current_event_loop(self, tmp_path):
+        errors: list[BaseException] = []
+
+        def build_manager() -> None:
+            try:
+                BrowserManager(profiles_dir=str(tmp_path / "profiles"))
+            except BaseException as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(target=build_manager)
+        thread.start()
+        thread.join()
+
+        assert errors == []
 
     @pytest.mark.asyncio
     async def test_get_status_no_browser(self):

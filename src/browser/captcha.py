@@ -1008,7 +1008,8 @@ class CaptchaSolver:
         self._solver_breaker_until: float = 0.0
         # Coordinates breaker reads/writes with health-check init across
         # concurrent agents that share this solver instance.
-        self._state_lock: asyncio.Lock = asyncio.Lock()
+        self._state_lock: asyncio.Lock | None = None
+        self._state_lock_loop: asyncio.AbstractEventLoop | None = None
         # NOTE: Prior versions of this class exposed ``last_used_proxy_aware``
         # and ``last_compat_rejected`` instance attributes that ``solve()``
         # stamped after every call so the BrowserManager could pick up the
@@ -1024,6 +1025,21 @@ class CaptchaSolver:
         # Operator-tunable but not per-call — restart the browser service
         # to pick up env var changes.
         self._solve_timeouts_ms: dict[str, int] = self._resolve_solve_timeouts()
+
+    def _get_state_lock(self) -> asyncio.Lock:
+        """Return a lock bound to the currently running event loop.
+
+        Python 3.9 binds ``asyncio.Lock`` at construction time. Creating the
+        solver from synchronous startup/test code after a previous loop closed
+        raises ``RuntimeError``. Lazily creating the lock inside async paths
+        keeps the solver safe for sync construction and normal browser-service
+        use.
+        """
+        loop = asyncio.get_running_loop()
+        if self._state_lock is None or self._state_lock_loop is not loop:
+            self._state_lock = asyncio.Lock()
+            self._state_lock_loop = loop
+        return self._state_lock
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -1235,7 +1251,7 @@ class CaptchaSolver:
         """
         if self._solver_health_checked:
             return
-        async with self._state_lock:
+        async with self._get_state_lock():
             if self._solver_health_checked:
                 return
             outcome = await self.health_check()
@@ -1252,7 +1268,7 @@ class CaptchaSolver:
         On failure: append a timestamp, prune entries older than the 5-min
         window, then trip the breaker if 3+ entries remain.
         """
-        async with self._state_lock:
+        async with self._get_state_lock():
             now = time.time()
             if success:
                 self._solver_failure_timestamps.clear()
