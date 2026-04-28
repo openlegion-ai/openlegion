@@ -1594,6 +1594,7 @@ def create_mesh_app(
 
         # Apply template to create config entries
         created_names = _apply_template(template_name, tpl)
+        permissions.reload()
         if not created_names:
             return {
                 "template": template_name,
@@ -1639,6 +1640,15 @@ def create_mesh_app(
                 val = acfg.get(cfg_key, "")
                 if val:
                     env_overrides[env_key] = val
+
+            # Inject project env vars so the agent gets its PROJECT.md
+            _proj = _agent_projects.get(agent_name)
+            if _proj:
+                from src.cli.config import PROJECTS_DIR
+                env_overrides["PROJECT_MD_PATH"] = str(
+                    PROJECTS_DIR / _proj / "project.md"
+                )
+                env_overrides["PROJECT_NAME"] = _proj
 
             try:
                 # Start container with per-agent env_overrides (not shared extra_env)
@@ -1754,6 +1764,7 @@ def create_mesh_app(
         )
         _update_agent_field(name, "avatar", random.randint(1, 50))
         _add_agent_permissions(name)
+        permissions.reload()
         skills_dir = PROJECT_ROOT / "skills" / name
         skills_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1763,6 +1774,15 @@ def create_mesh_app(
             agent_env["INITIAL_INSTRUCTIONS"] = instructions
         if soul:
             agent_env["INITIAL_SOUL"] = soul
+
+        # Inject project env vars so the agent gets its PROJECT.md
+        _proj = _agent_projects.get(name)
+        if _proj:
+            from src.cli.config import PROJECTS_DIR
+            agent_env["PROJECT_MD_PATH"] = str(
+                PROJECTS_DIR / _proj / "project.md"
+            )
+            agent_env["PROJECT_NAME"] = _proj
 
         try:
             url = container_manager.start_agent(
