@@ -60,6 +60,18 @@ def _async_ctx(awaitable_value):
 
 
 class TestUploadFile:
+    @pytest.fixture(autouse=True)
+    def _confine_upload_recv_dir(self, tmp_path, monkeypatch):
+        """``upload_file`` now confines paths to ``OPENLEGION_UPLOAD_RECV_DIR``.
+        Existing tests stage their fixtures under ``tmp_path``; point the
+        recv-dir flag at ``tmp_path`` so those paths resolve as in-bounds
+        without altering each test."""
+        monkeypatch.setenv("OPENLEGION_UPLOAD_RECV_DIR", str(tmp_path))
+        import src.browser.flags as flags
+        flags._operator_settings = None
+        yield
+        flags._operator_settings = None
+
     @pytest.mark.asyncio
     async def test_happy_path_invokes_chooser_set_files(self, tmp_path, monkeypatch):
         mgr = BrowserManager(profiles_dir=str(tmp_path / "p"))
@@ -233,7 +245,11 @@ class TestUploadFile:
         inst = _make_instance()
         inst._user_control = True
         monkeypatch.setattr(mgr, "get_or_start", AsyncMock(return_value=inst))
-        result = await mgr.upload_file("a1", "e1", ["/tmp/x"])
+        # Path must be under recv_dir (autouse fixture sets recv_dir=tmp_path)
+        # so the user-control gate is what blocks, not path validation.
+        staged = tmp_path / "staged.bin"
+        staged.write_bytes(b"x")
+        result = await mgr.upload_file("a1", "e1", [str(staged)])
         assert result["success"] is False
         assert "control" in result["error"].lower()
 
@@ -478,6 +494,14 @@ class TestUploadStageIngest:
 
 class TestUploadFileStageCleanup:
     """After `set_files` succeeds the manager removes the staged paths."""
+
+    @pytest.fixture(autouse=True)
+    def _confine_upload_recv_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("OPENLEGION_UPLOAD_RECV_DIR", str(tmp_path))
+        import src.browser.flags as flags
+        flags._operator_settings = None
+        yield
+        flags._operator_settings = None
 
     @pytest.mark.asyncio
     async def test_stage_files_unlinked_after_success(self, tmp_path, monkeypatch):
@@ -1735,3 +1759,96 @@ class TestMidStreamInterruption:
         # what matters is the error envelope and that cleanup ran.
         assert resp.status_code >= 400
         assert len(cleanup_called) == 1
+
+
+class TestSanitizeDownloadFilename:
+    """Hostile ``Content-Disposition: filename="..."`` must not escape
+    the configured download dir when joined with the per-download nonce.
+    The browser container's filesystem is writable; a traversal write
+    could clobber the persistent profile or service config files."""
+
+    def test_path_traversal_stripped(self):
+        from src.browser.service import _sanitize_download_filename
+        out = _sanitize_download_filename("../../etc/passwd")
+        assert "/" not in out and ".." not in out
+
+    def test_backslash_traversal_stripped(self):
+        from src.browser.service import _sanitize_download_filename
+        out = _sanitize_download_filename("..\\..\\windows\\system32\\foo")
+        assert "\\" not in out and "/" not in out and ".." not in out
+
+    def test_basename_extracted(self):
+        from src.browser.service import _sanitize_download_filename
+        assert "report" in _sanitize_download_filename("/abs/path/report.pdf")
+
+    def test_empty_falls_back_to_default(self):
+        from src.browser.service import _sanitize_download_filename
+        assert _sanitize_download_filename("") == "download.bin"
+        assert _sanitize_download_filename("   ") == "download.bin"
+        assert _sanitize_download_filename("...") == "download.bin"
+
+    def test_length_capped(self):
+        from src.browser.service import _sanitize_download_filename
+        out = _sanitize_download_filename("a" * 500 + ".pdf")
+        assert len(out) <= 180
+
+    def test_unsafe_chars_collapsed(self):
+        from src.browser.service import _sanitize_download_filename
+        out = _sanitize_download_filename("re port:foo*bar?.pdf")
+        # Only word/dot/dash survive; everything else collapses to _.
+        assert all(c.isalnum() or c in "._-" for c in out)
+
+
+class TestUploadFileRecvDirConfinement:
+    """``upload_file`` is called with paths supplied by the (mesh-internal)
+    bearer caller. Defense in depth: paths must resolve under
+    ``OPENLEGION_UPLOAD_RECV_DIR`` so a buggy or compromised mesh path
+    can't smuggle arbitrary filesystem reads through the chooser, nor
+    cause the cleanup ``unlink`` to remove host-mounted files."""
+
+    @pytest.mark.asyncio
+    async def test_path_outside_recv_dir_rejected_without_unlink(
+        self, tmp_path, monkeypatch,
+    ):
+        recv_dir = tmp_path / "recv"
+        recv_dir.mkdir()
+        outside = tmp_path / "outside.txt"
+        outside.write_bytes(b"sensitive")
+
+        monkeypatch.setenv("OPENLEGION_UPLOAD_RECV_DIR", str(recv_dir))
+        # Defeat the flag-loader cache so the env change applies.
+        import src.browser.flags as flags
+        flags._operator_settings = None
+
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "p"))
+        inst = _make_instance()
+        monkeypatch.setattr(mgr, "get_or_start", AsyncMock(return_value=inst))
+
+        result = await mgr.upload_file("a1", "e1", [str(outside)])
+
+        assert result["success"] is False
+        assert "outside" in result["error"]
+        # Critical: the file must NOT have been unlinked.
+        assert outside.exists()
+
+    @pytest.mark.asyncio
+    async def test_path_under_recv_dir_with_traversal_rejected(
+        self, tmp_path, monkeypatch,
+    ):
+        recv_dir = tmp_path / "recv"
+        recv_dir.mkdir()
+        sneaky = recv_dir / ".." / "outside.txt"
+        outside = tmp_path / "outside.txt"
+        outside.write_bytes(b"sensitive")
+
+        monkeypatch.setenv("OPENLEGION_UPLOAD_RECV_DIR", str(recv_dir))
+        import src.browser.flags as flags
+        flags._operator_settings = None
+
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "p"))
+        inst = _make_instance()
+        monkeypatch.setattr(mgr, "get_or_start", AsyncMock(return_value=inst))
+
+        result = await mgr.upload_file("a1", "e1", [str(sneaky)])
+        assert result["success"] is False
+        assert outside.exists()

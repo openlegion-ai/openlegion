@@ -203,7 +203,23 @@ estimate_cents = estimate_millicents
 
 # {agent_id: {"month": "YYYY-MM", "millicents": int}}
 _state: dict[str, dict] = {}
-_lock: asyncio.Lock = asyncio.Lock()
+# Created lazily inside async paths to stay loop-safe — pytest-asyncio
+# uses one event loop per test, so an import-time ``asyncio.Lock()``
+# would bind to the first loop and fail on the second. Mirrors the
+# pattern in ``service.py`` (``_get_solve_rate_lock`` etc.) and
+# ``captcha.py`` (``CaptchaSolver._get_state_lock``).
+_lock: asyncio.Lock | None = None
+_lock_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _get_lock() -> asyncio.Lock:
+    """Return a cost-counter lock bound to the active event loop."""
+    global _lock, _lock_loop
+    loop = asyncio.get_running_loop()
+    if _lock is None or _lock_loop is not loop:
+        _lock = asyncio.Lock()
+        _lock_loop = loop
+    return _lock
 
 
 def _current_month() -> str:
@@ -238,7 +254,7 @@ async def add_cost(agent_id: str, millicents: int) -> int:
     """
     if millicents <= 0:
         return await get_millicents(agent_id)
-    async with _lock:
+    async with _get_lock():
         bucket = _bucket_for(agent_id)
         bucket["millicents"] = int(bucket["millicents"]) + int(millicents)
         return bucket["millicents"]
@@ -257,14 +273,14 @@ async def over_cap(agent_id: str, cap_millicents: int) -> bool:
     """
     if cap_millicents <= 0:
         return False
-    async with _lock:
+    async with _get_lock():
         bucket = _bucket_for(agent_id)
         return int(bucket["millicents"]) >= int(cap_millicents)
 
 
 async def get_millicents(agent_id: str) -> int:
     """Return the current-month spend for ``agent_id`` in millicents."""
-    async with _lock:
+    async with _get_lock():
         bucket = _bucket_for(agent_id)
         return int(bucket["millicents"])
 
@@ -278,7 +294,7 @@ get_cents = get_millicents
 
 async def reset(agent_id: str | None = None) -> None:
     """Clear state. ``agent_id=None`` clears everything (test harness)."""
-    async with _lock:
+    async with _get_lock():
         if agent_id is None:
             _state.clear()
         else:
@@ -305,7 +321,7 @@ async def snapshot(path: Path | str | None = None) -> bool:
         logger.warning("captcha_cost snapshot: cannot create parent dir: %s", e)
         return False
 
-    async with _lock:
+    async with _get_lock():
         # JSON-serializable copy. Bucket dicts are already plain
         # ``{month, cents}`` so no custom encoder is needed.
         payload = {
@@ -384,7 +400,7 @@ async def restore(path: Path | str | None = None) -> int:
     cm = _current_month()
     loaded = 0
     migrated = 0
-    async with _lock:
+    async with _get_lock():
         _state.clear()
         for agent_id, bucket in buckets.items():
             if not isinstance(bucket, dict):

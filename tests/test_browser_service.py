@@ -8419,6 +8419,11 @@ class TestShadowDOM:
         with pytest.raises(ValueError, match="discriminator"):
             ShadowHop(selector="my-card", occurrence=0, discriminator="")
 
+    def test_shadow_hop_rejects_negative_occurrence(self):
+        from src.browser.ref_handle import ShadowHop
+        with pytest.raises(ValueError, match="occurrence"):
+            ShadowHop(selector="my-card", occurrence=-1, discriminator="testid:x")
+
     @pytest.mark.asyncio
     async def test_compute_element_key_folds_shadow_path(self):
         from src.browser.ref_handle import ShadowHop, compute_element_key

@@ -423,6 +423,40 @@ class TestValidateCookies:
         assert accepted == []
         assert dropped == [{"reason": "invalid_httponly", "count": 1}]
 
+    def test_rejects_nan_expires(self):
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "sid", "value": "x", "domain": ".example.com",
+              "expires": float("nan")}],
+        )
+        assert accepted == []
+        assert dropped == [{"reason": "invalid_expires", "count": 1}]
+
+    def test_rejects_inf_expires(self):
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "sid", "value": "x", "domain": ".example.com",
+              "expires": float("inf")}],
+        )
+        assert accepted == []
+        assert dropped == [{"reason": "invalid_expires", "count": 1}]
+
+    def test_rejects_negative_expires(self):
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "sid", "value": "x", "domain": ".example.com",
+              "expires": -1.0}],
+        )
+        assert accepted == []
+        assert dropped == [{"reason": "invalid_expires", "count": 1}]
+
+    def test_rejects_far_future_expires(self):
+        # 2200-01-01 is well past the 2100 cap; would otherwise overflow
+        # downstream Playwright/Firefox validation.
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "sid", "value": "x", "domain": ".example.com",
+              "expires": 7258118400.0}],
+        )
+        assert accepted == []
+        assert dropped == [{"reason": "invalid_expires", "count": 1}]
+
     def test_netscape_malformed_lines_surface_as_drop_count(self):
         """When the input is Netscape and contains malformed lines, the
         ``dropped`` aggregate must include a ``malformed_line`` entry —

@@ -11,6 +11,7 @@ import contextlib
 import hashlib
 import ipaddress
 import json
+import math
 import os
 import re
 import shutil
@@ -437,10 +438,22 @@ def _validate_cookies(
                 _drop("samesite_none_without_secure")
                 continue
             normalized["sameSite"] = ss_norm
-        # expires: must be numeric (int or float). Strings rejected.
+        # expires: must be a finite number (int or float). Reject
+        # bool (subclass of int), strings, NaN, ±Inf, and absurd far-
+        # future values that would overflow int conversion or fail
+        # downstream Playwright/Firefox validation. ~100 years out is a
+        # generous upper bound; cookies aren't realistically dated past
+        # that and bounding here protects the audit log too.
         if "expires" in raw and raw["expires"] is not None:
             exp = raw["expires"]
             if isinstance(exp, bool) or not isinstance(exp, (int, float)):
+                _drop("invalid_expires")
+                continue
+            if not math.isfinite(exp):
+                _drop("invalid_expires")
+                continue
+            _MAX_EXPIRES = 4102444800.0  # 2100-01-01 UTC, ~76yr buffer
+            if exp < 0 or exp > _MAX_EXPIRES:
                 _drop("invalid_expires")
                 continue
             normalized["expires"] = int(exp)

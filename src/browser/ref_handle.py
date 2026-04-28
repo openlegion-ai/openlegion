@@ -67,6 +67,14 @@ class ShadowHop:
             raise ValueError("ShadowHop.selector must be non-empty")
         if not self.discriminator:
             raise ValueError("ShadowHop.discriminator must be non-empty")
+        # ``occurrence`` flows into element-key hashing and JS selector
+        # indexing on the resolver side; a negative value silently
+        # produces a wrong resolution rather than failing fast.
+        if not isinstance(self.occurrence, int) or self.occurrence < 0:
+            raise ValueError(
+                f"ShadowHop.occurrence must be non-negative int, "
+                f"got {self.occurrence!r}",
+            )
 
 
 # ── Ref handle (the canonical identity of a snapshot ref) ───────────────────

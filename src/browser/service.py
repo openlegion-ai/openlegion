@@ -187,6 +187,36 @@ _RETRY_PREVIOUS_RECHECK_MS = 500
 _CF_AUTO_WAIT_SECONDS = 8.0
 
 
+# ── Filename sanitizer for downloads ──────────────────────────────────────
+# Browser-supplied ``Content-Disposition: filename="..."`` is attacker-
+# controlled. A response carrying ``filename="../../etc/foo"`` would
+# escape the configured download dir if joined naively. Strip path
+# components, collapse unsafe chars, and bound length. Mirrors the
+# mesh-side ``_sanitize_artifact_name`` so both sides of the transfer
+# apply the same rule (defense in depth).
+_DOWNLOAD_NAME_SAFE_RE = re.compile(r"[^\w.\-]+")
+
+
+def _sanitize_download_filename(suggested: str) -> str:
+    """Reduce a browser-supplied filename to a safe basename.
+
+    Returns ``"download.bin"`` when the result would be empty so the
+    caller never sees a path-traversal-shaped string land on disk.
+    """
+    name = (suggested or "").strip()
+    if "/" in name or "\\" in name:
+        name = name.replace("\\", "/").rsplit("/", 1)[-1]
+    name = _DOWNLOAD_NAME_SAFE_RE.sub("_", name)
+    name = name.strip("._-")
+    if len(name) > 180:
+        name = name[:180].strip("._-")
+    if not name:
+        name = "download.bin"
+    if len(name) < 2:
+        name = name + "_"
+    return name
+
+
 # ── §11.14 per-agent solve rate limiter ───────────────────────────────────
 # Module-level dict guarded by an asyncio.Lock. Each agent gets a deque of
 # unix timestamps for solve attempts in the last hour; entries older than
@@ -230,7 +260,17 @@ async def _check_solve_rate(agent_id: str, limit_per_hour: int) -> bool:
     async with _get_solve_rate_lock():
         now = time.time()
         cutoff = now - _SOLVE_RATE_WINDOW_SECONDS
-        bucket = _solve_rate_window.setdefault(agent_id, deque(maxlen=limit_per_hour * 4))
+        # ``deque(maxlen=N)`` is fixed at construction time. If the
+        # operator raises ``CAPTCHA_RATE_LIMIT_PER_HOUR`` mid-run, the
+        # existing bucket would silently drop new timestamps once it
+        # reached its old maxlen — under-reporting the rate and letting
+        # a solve through that should have been blocked. Recreate the
+        # bucket whenever the configured limit grows.
+        target_maxlen = limit_per_hour * 4
+        bucket = _solve_rate_window.get(agent_id)
+        if bucket is None or (bucket.maxlen or 0) < target_maxlen:
+            bucket = deque(bucket or (), maxlen=target_maxlen)
+            _solve_rate_window[agent_id] = bucket
         while bucket and bucket[0] < cutoff:
             bucket.popleft()
         if len(bucket) >= limit_per_hour:
@@ -1539,8 +1579,19 @@ def _compute_snapshot_diff(
     removed_keys = prev_keys - curr_keys
     common_keys = curr_keys & prev_keys
 
+    # Sort by walk-emission order using the numeric suffix of ``ref_id``.
+    # Lexicographic sort would order "e10" < "e2" — diff lists then look
+    # randomized as soon as a page emits ≥10 refs (most non-trivial
+    # pages). ``ref_id`` is always shaped ``e<int>``; fall back to lex
+    # sort defensively if the prefix ever shifts.
+    def _ref_sort_key(key: str) -> tuple:
+        rid = current[key].get("ref_id", "")
+        if isinstance(rid, str) and rid.startswith("e") and rid[1:].isdigit():
+            return (0, int(rid[1:]))
+        return (1, rid)
+
     added: list[dict] = []
-    for k in sorted(added_keys, key=lambda key: current[key]["ref_id"]):
+    for k in sorted(added_keys, key=_ref_sort_key):
         s = current[k]
         added.append({
             "ref": s["ref_id"],
@@ -2684,6 +2735,17 @@ class BrowserManager:
             )
         if self._user_focused_agent == agent_id:
             self._user_focused_agent = None
+        # Drop the agent's solve-rate bucket so a long-running deployment
+        # with rotating agent ids doesn't accumulate dead entries forever.
+        # Acquired separately because the rate-limit lock and manager
+        # lock are independent; reordering would risk a future deadlock.
+        try:
+            async with _get_solve_rate_lock():
+                _solve_rate_window.pop(agent_id, None)
+        except RuntimeError:
+            # Outside a running loop (shouldn't happen — _stop_instance
+            # is only called from async paths), best-effort.
+            _solve_rate_window.pop(agent_id, None)
         jitter = getattr(inst, '_jitter_task', None)
         if jitter:
             jitter.cancel()
@@ -3946,9 +4008,15 @@ class BrowserManager:
             # `_locator_from_ref` queries are bounded to the dialog subtree.
             # (Refs emitted before the modal branch don't have scope_root;
             # set it now that we know the final dialog_active state.)
+            #
+            # Skip iframe-scoped refs: the modal lives in the main frame
+            # (see _descend_frames; iframes aren't scoped by `dialog_active`),
+            # so applying the modal selector to a Frame in `_locator_from_ref`
+            # would query the iframe's document for a selector that lives in
+            # the parent — silent click failure.
             if inst.dialog_active:
                 for rid, handle in refs.items():
-                    if handle.scope_root is None:
+                    if handle.scope_root is None and handle.frame_id is None:
                         refs[rid] = RefHandle(
                             page_id=handle.page_id,
                             frame_id=handle.frame_id,
@@ -5136,10 +5204,19 @@ class BrowserManager:
                     )
                 masked_by = hit.get("masked_by") if isinstance(hit, dict) else None
                 if masked_by:
+                    # Redact name + role: ``elementFromPoint`` returns
+                    # raw DOM text (innerText slice). Snapshot output is
+                    # redacted; click_xy must honor the same boundary so
+                    # an agent doesn't get a privileged channel to read
+                    # credentials that leaked into element text. Role is
+                    # an attribute the page can set freely; bound length
+                    # so a malicious page can't bloat responses.
                     actual = {
-                        "tag": hit.get("tag", ""),
-                        "role": hit.get("role"),
-                        "name": hit.get("name", ""),
+                        "tag": hit.get("tag", "")[:64],
+                        "role": (hit.get("role") or "")[:64] or None,
+                        "name": self.redactor.redact(
+                            agent_id, hit.get("name", "") or "",
+                        )[:200],
                     }
                     return {
                         "success": False,
@@ -5189,9 +5266,11 @@ class BrowserManager:
                     "data": {
                         "clicked_at": {"x": x, "y": y},
                         "actual_element": {
-                            "tag": hit.get("tag", ""),
-                            "role": hit.get("role"),
-                            "name": hit.get("name", ""),
+                            "tag": hit.get("tag", "")[:64],
+                            "role": (hit.get("role") or "")[:64] or None,
+                            "name": self.redactor.redact(
+                                agent_id, hit.get("name", "") or "",
+                            )[:200],
                         },
                     },
                 }
@@ -6717,6 +6796,41 @@ class BrowserManager:
 
         Returns ``{success, data: {uploaded: [path, …]}}`` or an error envelope.
         """
+        # Defense in depth: confine ``local_paths`` to the configured
+        # upload-receive directory BEFORE entering the body of this
+        # method. The mesh-side ``upload_apply`` only forwards paths
+        # returned by ``_stage_upload`` (which writes under
+        # ``OPENLEGION_UPLOAD_RECV_DIR``), but a buggy or compromised
+        # mesh caller carrying the bearer token could otherwise smuggle
+        # arbitrary on-disk paths here — both as a read-via-chooser
+        # exfil vector AND as an unconditional unlink of any reachable
+        # file via the cleanup ``finally`` at the end of this method.
+        # Validating BEFORE the try/finally ensures a rejected path is
+        # never reached by the cleanup unlink.
+        from src.browser.flags import get_str as _flag_str
+        recv_dir = Path(
+            _flag_str("OPENLEGION_UPLOAD_RECV_DIR", "/tmp/upload-recv"),
+        ).resolve()
+        try:
+            recv_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        for p in local_paths:
+            try:
+                resolved = Path(p).resolve()
+            except (OSError, RuntimeError) as e:
+                return {
+                    "success": False,
+                    "error": f"Upload path not resolvable: {e}",
+                }
+            try:
+                resolved.relative_to(recv_dir)
+            except ValueError:
+                return {
+                    "success": False,
+                    "error": "Upload path outside receive dir",
+                }
+
         inst = await self.get_or_start(agent_id)
         inst.touch()
         async with inst.lock:
@@ -6833,7 +6947,15 @@ class BrowserManager:
                             inst.page, locator, timeout=timeout_ms,
                         )
                 download = await info.value
-                suggested = download.suggested_filename or "download.bin"
+                # Sanitize before joining — Content-Disposition is
+                # attacker-controlled and a ``../../`` escape would
+                # write outside ``download_dir`` (which is writable in
+                # the browser container). The leading nonce neutralizes
+                # leading-dot and absolute-path tricks but path
+                # separators inside ``suggested`` would still escape.
+                suggested = _sanitize_download_filename(
+                    download.suggested_filename or "download.bin",
+                )
                 nonce = uuid.uuid4().hex[:12]
                 dest = Path(download_dir) / f"{nonce}-{suggested}"
 
@@ -6977,7 +7099,14 @@ class BrowserManager:
             first_locator = None
             for ref_id, handle in inst.refs.items():
                 name = handle.name or ""
-                if not name or needle not in name.casefold():
+                # Match against the REDACTED accessible name so an
+                # agent-supplied query can't probe credentials that
+                # leaked into ``aria-label`` / tooltip text. Snapshots
+                # already redact what they emit; ``find_text`` must
+                # honor the same boundary or it becomes a confirm/deny
+                # oracle for known secret prefixes.
+                redacted_name = self.redactor.redact(agent_id, name)
+                if not name or needle not in redacted_name.casefold():
                     continue
                 if len(matches) >= 50:
                     truncated = True
@@ -7003,7 +7132,6 @@ class BrowserManager:
                                 bx + bw > 0 and by + bh > 0
                                 and bx < vw and by < vh
                             )
-                redacted_name = self.redactor.redact(agent_id, name)
                 matches.append({
                     "ref": ref_id,
                     "text": sanitize_for_prompt(redacted_name)[:200],
