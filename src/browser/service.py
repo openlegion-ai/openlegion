@@ -5659,11 +5659,13 @@ class BrowserManager:
 
         Order of operations:
 
-          1. Rate-limit gate (records a slot only on a real attempt — gates
-             that short-circuit don't burn the per-hour budget).
+          1. Fleet-wide kill switch.
           2. Cost-cap gate (read against the agent's monthly bucket).
-          3. Solver HTTP call. ``solve()`` returns :class:`SolveResult`.
-          4. Cost accounting. Increments fire when ``result.token is not
+          3. Rate-limit gate (records a slot only on a real attempt — gates
+             that short-circuit don't burn the per-hour budget).
+          4. Provider sanity when a cost cap requires priced accounting.
+          5. Solver HTTP call. ``solve()`` returns :class:`SolveResult`.
+          6. Cost accounting. Increments fire when ``result.token is not
              None`` regardless of ``injection_succeeded`` — the provider
              was paid the moment the token came back; injection failure
              is our problem, not theirs. ``solver_attempted=False`` paths

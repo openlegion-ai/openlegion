@@ -3,16 +3,15 @@
 Supports 2Captcha and CapSolver as solving providers.  Both are called via
 their public HTTP APIs using httpx — no additional dependencies required.
 
-When configured (via CAPTCHA_SOLVER_PROVIDER and CAPTCHA_SOLVER_KEY env vars),
-the browser service will automatically attempt to solve CAPTCHAs detected
-after navigation.  If solving fails or no solver is configured, the existing
-fallback (ask user via VNC) is preserved.
+When configured (via browser flags ``CAPTCHA_SOLVER_PROVIDER`` and
+``CAPTCHA_SOLVER_KEY``), the browser service will automatically attempt to
+solve CAPTCHAs detected after navigation. If solving fails or no solver is
+configured, the existing fallback (ask user via VNC) is preserved.
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
 import re
 import time
 from collections import deque
@@ -584,9 +583,9 @@ _DEFAULT_V3_MIN_SCORE = 0.7
 
 
 def get_solver() -> CaptchaSolver | None:
-    """Create a CaptchaSolver from environment variables, or None if not configured."""
-    provider = os.environ.get("CAPTCHA_SOLVER_PROVIDER", "").strip().lower()
-    api_key = os.environ.get("CAPTCHA_SOLVER_KEY", "").strip()
+    """Create a CaptchaSolver from browser flags, or None if not configured."""
+    provider = flags.get_str("CAPTCHA_SOLVER_PROVIDER", "").strip().lower()
+    api_key = flags.get_str("CAPTCHA_SOLVER_KEY", "").strip()
     if not provider or not api_key:
         return None
     if provider not in _SUPPORTED_PROVIDERS:
@@ -1360,7 +1359,11 @@ class CaptchaSolver:
                 captcha_type = variant
             sitekey = classified.get("sitekey")
             page_action = classified.get("action")
-        logger.info("Attempting to solve %s CAPTCHA on %s", captcha_type, page_url)
+        logger.info(
+            "Attempting to solve %s CAPTCHA on %s",
+            captcha_type,
+            redact_url(page_url),
+        )
 
         if not sitekey:
             sitekey = await self._extract_sitekey(page, captcha_type)
@@ -1914,15 +1917,26 @@ class CaptchaSolver:
             family = "recaptcha"
         try:
             if family == "recaptcha":
-                await page.evaluate("""(token) => {
+                injected = await page.evaluate("""(token) => {
+                    let updated = false;
+                    const fire = (el) => {
+                        try {
+                            el.dispatchEvent(new Event('input', { bubbles: true }));
+                            el.dispatchEvent(new Event('change', { bubbles: true }));
+                        } catch (e) {}
+                    };
                     const textarea = document.getElementById('g-recaptcha-response');
                     if (textarea) {
                         textarea.style.display = '';
                         textarea.value = token;
+                        fire(textarea);
+                        updated = true;
                     }
                     // Also try hidden textareas in iframes
                     document.querySelectorAll('[name="g-recaptcha-response"]').forEach(el => {
                         el.value = token;
+                        fire(el);
+                        updated = true;
                     });
                     // Trigger callback if available
                     if (typeof ___grecaptcha_cfg !== 'undefined') {
@@ -1935,7 +1949,10 @@ class CaptchaSolver:
                                     if (depth > 5 || !obj) return;
                                     for (const key in obj) {
                                         if (typeof obj[key] === 'function' && key === 'callback') {
-                                            obj[key](token);
+                                            try {
+                                                obj[key](token);
+                                                updated = true;
+                                            } catch (e) {}
                                             return;
                                         }
                                         if (typeof obj[key] === 'object') walk(obj[key], depth + 1);
@@ -1945,40 +1962,68 @@ class CaptchaSolver:
                             }
                         }
                     }
+                    return updated;
                 }""", token)
-                return True
+                return bool(injected)
 
             if family == "hcaptcha":
-                await page.evaluate("""(token) => {
+                injected = await page.evaluate("""(token) => {
+                    let updated = false;
+                    const fire = (el) => {
+                        try {
+                            el.dispatchEvent(new Event('input', { bubbles: true }));
+                            el.dispatchEvent(new Event('change', { bubbles: true }));
+                        } catch (e) {}
+                    };
                     const textarea = document.querySelector('[name="h-captcha-response"]');
-                    if (textarea) textarea.value = token;
+                    if (textarea) {
+                        textarea.value = token;
+                        fire(textarea);
+                        updated = true;
+                    }
                     document.querySelectorAll('[name="g-recaptcha-response"]').forEach(el => {
                         el.value = token;
+                        fire(el);
+                        updated = true;
                     });
                     // Trigger hcaptcha callback
                     if (typeof hcaptcha !== 'undefined' && hcaptcha.getRespKey) {
                         try { hcaptcha.execute(); } catch(e) {}
                     }
+                    return updated;
                 }""", token)
-                return True
+                return bool(injected)
 
             if family == "turnstile":
-                await page.evaluate("""(token) => {
+                injected = await page.evaluate("""(token) => {
+                    let updated = false;
+                    const fire = (el) => {
+                        try {
+                            el.dispatchEvent(new Event('input', { bubbles: true }));
+                            el.dispatchEvent(new Event('change', { bubbles: true }));
+                        } catch (e) {}
+                    };
                     // Find the Turnstile response input
                     const input = document.querySelector('[name="cf-turnstile-response"]')
                         || document.querySelector('input[name*="turnstile"]');
-                    if (input) input.value = token;
+                    if (input) {
+                        input.value = token;
+                        fire(input);
+                        updated = true;
+                    }
                     // Trigger callback if available
                     if (typeof turnstile !== 'undefined') {
                         try {
-                            const widgetId = turnstile.getResponse ? null : Object.keys(turnstile._widgets || {})[0];
-                            if (widgetId && turnstile._widgets[widgetId]?.callback) {
+                            const widgetId = Object.keys(turnstile._widgets || {})[0];
+                            if (widgetId && typeof turnstile._widgets[widgetId]?.callback === 'function') {
                                 turnstile._widgets[widgetId].callback(token);
+                                updated = true;
                             }
                         } catch(e) {}
                     }
+                    return updated;
                 }""", token)
-                return True
+                return bool(injected)
 
         except Exception:
             logger.debug("Token injection error", exc_info=True)
