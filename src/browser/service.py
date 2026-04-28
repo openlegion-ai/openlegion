@@ -1480,6 +1480,15 @@ def _encode_screenshot(
         )
         return png_bytes, "png"
 
+    # Decompression-bomb protection. A page rendering a giant <canvas>
+    # could hand us back a multi-hundred-megapixel PNG that Pillow
+    # would happily allocate. Cap at 50 MP — covers any realistic
+    # browser viewport (8K screen ≈ 33 MP) but blocks adversarial
+    # blowups. Pillow raises ``DecompressionBombError`` once the cap
+    # is exceeded; we catch and return the raw PNG bytes so the agent
+    # still gets diagnostic data.
+    Image.MAX_IMAGE_PIXELS = 50_000_000
+
     try:
         img = Image.open(BytesIO(png_bytes))
         # Downscale via Lanczos when requested. Avoids the no-op resize
@@ -1705,12 +1714,23 @@ class CamoufoxInstance:
         # Per-Page stable UUID maps. Page objects survive navigation within a
         # tab; UUIDs are stable for the life of the Page. Refs carry a
         # ``page_id`` so resolution can detect a closed tab as stale (§4.2).
+        #
+        # ``page_ids`` is a WeakKeyDictionary so closed Pages drop out of
+        # the forward map automatically. The earlier ``dict[int, str]``
+        # keyed by ``id(page)`` had a silent re-bind bug: once a Page is
+        # GC'd Python recycles its ``id()``, so a freshly-opened tab
+        # could land on the SAME ``id`` value as a closed one. The
+        # reverse map (already weak) had dropped the entry, but the
+        # forward lookup found the stale UUID and re-bound it to the
+        # new Page — so an old ref with the recycled UUID resolved to
+        # a different tab. WeakKey closes that hole.
         self._page_id_counter: int = 0
-        self.page_ids: dict = {}              # id(Page) -> str
-        # WeakValueDictionary so closed Pages (GC'd by Playwright on tab
-        # close) drop out of the reverse lookup automatically. Plain dict
-        # here would pin every Page ever opened for the lifetime of the
-        # CamoufoxInstance — a slow leak on agents that churn tabs.
+        self.page_ids: weakref.WeakKeyDictionary = (
+            weakref.WeakKeyDictionary()
+        )
+        # WeakValueDictionary so closed Pages drop out of the reverse
+        # lookup automatically. Plain dict would pin every Page ever
+        # opened for the lifetime of the CamoufoxInstance.
         self.page_ids_inv: weakref.WeakValueDictionary = (
             weakref.WeakValueDictionary()
         )
@@ -1838,12 +1858,12 @@ class CamoufoxInstance:
         Called on CamoufoxInstance creation (for the initial page) and will
         be called again by ``browser_open_tab`` (§8.6) for new tabs.
         """
-        existing = self.page_ids.get(id(page))
+        existing = self.page_ids.get(page)
         if existing is not None:
             return existing
         self._page_id_counter += 1
         new_id = f"p{self._page_id_counter}-{uuid.uuid4().hex[:8]}"
-        self.page_ids[id(page)] = new_id
+        self.page_ids[page] = new_id
         self.page_ids_inv[new_id] = page
         return new_id
 
@@ -2103,11 +2123,17 @@ class BrowserManager:
         otherwise leak files into ``BROWSER_DOWNLOAD_DIR`` until the
         container restarts. Janitor mirrors the upload-stage GC.
         """
-        ttl = max(1, int(os.environ.get("BROWSER_DOWNLOAD_TTL_S", "60")))
+        from src.browser.flags import get_int as _flag_int
+        from src.browser.flags import get_str as _flag_str
+        ttl = _flag_int(
+            "BROWSER_DOWNLOAD_TTL_S", 60, min_value=1, max_value=86400,
+        )
         while True:
             await asyncio.sleep(30)
             try:
-                dl_dir = Path(os.environ.get("BROWSER_DOWNLOAD_DIR", "/tmp/downloads"))
+                dl_dir = Path(_flag_str(
+                    "BROWSER_DOWNLOAD_DIR", "/tmp/downloads",
+                ))
                 if not dl_dir.is_dir():
                     continue
                 now = time.time()
@@ -2597,22 +2623,30 @@ class BrowserManager:
                 temp_page = None
             probe_page = inst.page
 
+        # Cap the probe so a hung renderer (rare but observed under
+        # heavy CPU pressure or stuck Camoufox stacks) cannot block
+        # ``get_or_start`` indefinitely. The probe holds the manager
+        # lock through this call site, so a stall here freezes every
+        # other agent's start/stop/touch.
         try:
-            signals = await probe_page.evaluate(
-                "() => ({"
-                "  webdriver: navigator.webdriver,"
-                "  plugins_len: navigator.plugins ? navigator.plugins.length : -1,"
-                "  mimeTypes_len: navigator.mimeTypes ? navigator.mimeTypes.length : -1,"
-                "  hardwareConcurrency: navigator.hardwareConcurrency,"
-                "  deviceMemory: navigator.deviceMemory,"
-                "  userAgent: navigator.userAgent,"
-                "  platform: navigator.platform,"
-                "  language: navigator.language,"
-                "  timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,"
-                "  conn_effective: navigator.connection ? navigator.connection.effectiveType : null,"
-                "  conn_downlink: navigator.connection ? navigator.connection.downlink : null,"
-                "  conn_rtt: navigator.connection ? navigator.connection.rtt : null"
-                "})",
+            signals = await asyncio.wait_for(
+                probe_page.evaluate(
+                    "() => ({"
+                    "  webdriver: navigator.webdriver,"
+                    "  plugins_len: navigator.plugins ? navigator.plugins.length : -1,"
+                    "  mimeTypes_len: navigator.mimeTypes ? navigator.mimeTypes.length : -1,"
+                    "  hardwareConcurrency: navigator.hardwareConcurrency,"
+                    "  deviceMemory: navigator.deviceMemory,"
+                    "  userAgent: navigator.userAgent,"
+                    "  platform: navigator.platform,"
+                    "  language: navigator.language,"
+                    "  timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,"
+                    "  conn_effective: navigator.connection ? navigator.connection.effectiveType : null,"
+                    "  conn_downlink: navigator.connection ? navigator.connection.downlink : null,"
+                    "  conn_rtt: navigator.connection ? navigator.connection.rtt : null"
+                    "})",
+                ),
+                timeout=10.0,
             )
         except Exception as e:
             inst.probe_result = {
@@ -2760,7 +2794,12 @@ class BrowserManager:
         if recorder is not None:
             try:
                 async with inst.lock:
-                    recorder.dump(reason="stop")
+                    # Recorder dump writes JSONL synchronously and the
+                    # buffer can hold ~10K events (multi-MB). Off-load
+                    # to a worker thread so the manager lock isn't held
+                    # across blocking file I/O while every other agent
+                    # waits on _emit_metrics or lifecycle ops.
+                    await asyncio.to_thread(recorder.dump, reason="stop")
             except Exception as e:
                 logger.debug(
                     "Recorder dump failed for '%s': %s", agent_id, e,
@@ -3238,6 +3277,18 @@ class BrowserManager:
         include_frames: bool = True,
     ) -> dict:
         """Snapshot implementation.  Caller must hold ``inst.lock``."""
+        # Read BROWSER_SNAPSHOT_FORMAT exactly once at entry so a flag
+        # flip mid-call (operator settings hot-reload, agent override
+        # change racing the snapshot) cannot produce mixed v1/v2 output
+        # between the from_ref early-return and the main-path return.
+        from src.browser.flags import get_str as _flag_get_str
+        snapshot_fmt = (
+            _flag_get_str(
+                "BROWSER_SNAPSHOT_FORMAT", "v1", agent_id=agent_id,
+            )
+            .strip()
+            .lower()
+        )
         # Resolve the optional filter once so the inner _walk sees a
         # frozenset rather than re-deriving on every node.
         try:
@@ -3818,22 +3869,28 @@ class BrowserManager:
                                 disabled=handle.disabled,
                                 element_key=handle.element_key,
                             )
+                # NOTE: scoped snapshots replace ``inst.refs`` because
+                # the walker assigns fresh ``e0..eN`` ids on every walk
+                # and there is no separate namespace for scoped refs.
+                # That means a prior full snapshot's refs become
+                # unresolvable after a ``snapshot(from_ref=...)``;
+                # callers should re-snapshot the full tree before
+                # operating outside the scope, or queue all scope-local
+                # actions before the next full snapshot. Documenting
+                # the contract loudly here — the docstring's
+                # "informational, not anchors" framing is aspirational;
+                # making it true requires a per-call ref namespace,
+                # which is a wire-format change.
                 inst.refs = refs
                 # Cross-PR fix (#749 ↔ #750): the from_ref early-return
                 # must honor the same v2 dispatch as the main return
-                # path. Without this, scoped snapshots stay v1 even
-                # when ``BROWSER_SNAPSHOT_FORMAT=v2`` is set — agents
+                # path. Without this, scoped snapshots stayed v1 even
+                # when ``BROWSER_SNAPSHOT_FORMAT=v2`` was set — agents
                 # parsing on the ``# snapshot-v2`` first-line marker
-                # would silently see mixed formats.
-                from src.browser.flags import get_str as _flag_get_str
-                _scoped_fmt = (
-                    _flag_get_str(
-                        "BROWSER_SNAPSHOT_FORMAT", "v1", agent_id=agent_id,
-                    )
-                    .strip()
-                    .lower()
-                )
-                if _scoped_fmt == "v2":
+                # would see mixed formats. ``snapshot_fmt`` was captured
+                # at the top of ``_snapshot_impl`` so a flag flip mid-
+                # call can't desynchronize the two return paths.
+                if snapshot_fmt == "v2":
                     snapshot_text = _format_snapshot_v2(lines, entries)
                 else:
                     snapshot_text = (
@@ -4031,15 +4088,11 @@ class BrowserManager:
 
             inst.refs = refs
             # §7.2 — choose between v1 (per-element landmark suffix) and
-            # v2 (landmark headers + capped indent). Flag default is v1
-            # for the canary period, flips to v2 once parse rate ≥99%.
-            from src.browser.flags import get_str
-            fmt = (
-                get_str("BROWSER_SNAPSHOT_FORMAT", "v1", agent_id=agent_id)
-                .strip()
-                .lower()
-            )
-            if fmt == "v2":
+            # v2 (landmark headers + capped indent). Use the snapshot_fmt
+            # captured at the top of this method so a mid-call flag flip
+            # can't desynchronize this return path with the from_ref
+            # early-return above.
+            if snapshot_fmt == "v2":
                 snapshot_text = _format_snapshot_v2(lines, entries)
             else:
                 snapshot_text = (
@@ -4093,6 +4146,23 @@ class BrowserManager:
 
             if diff_from_last and scope in ("same", "modal_opened",
                                              "modal_closed", "frame_changed"):
+                # Subset snapshot (filter / from_ref / target_frame /
+                # include_frames=False) producing a diff against a full
+                # baseline reports every filtered-out element as
+                # ``removed`` — phantom signal that misleads the agent.
+                # PR 781 already excludes subset snapshots from updating
+                # the baseline; also short-circuit the diff computation
+                # to a full-snapshot return so the agent isn't given
+                # a confidently-wrong delta.
+                if is_subset_snapshot:
+                    return {
+                        "success": True,
+                        "data": {
+                            "snapshot": snapshot_text,
+                            "refs": response_refs,
+                            "scope": "navigation",
+                        },
+                    }
                 if previous_baseline is None:
                     # No prior baseline — fall through to the full-snapshot
                     # path so the agent still gets useful output. Effective
@@ -4346,25 +4416,41 @@ class BrowserManager:
         if _FRAME_ID_RE.match(token):
             raise RefStale("frame_detached", ref=None)
         page = inst.page
-        exact = None
-        substring = None
+        # Two-pass lookup. Pass 1 prefers DIRECT children of the main
+        # frame to localize substring matches; a deeply-nested malicious
+        # iframe sharing a URL substring with a legitimate top-level
+        # frame should not be picked over the legitimate one. Pass 2
+        # falls back to the full frame tree only when no top-level
+        # match was found.
+        #
         # When two frames share the same URL exactly, the FIRST matching
-        # one wins (page.frames iteration order). Callers needing to
-        # disambiguate duplicate-URL siblings should use the frame_id
-        # token from ``RefHandle.to_agent_dict()`` instead of a URL
-        # substring.
-        for f in page.frames:
-            if f is page.main_frame:
-                continue
-            try:
-                url = f.url or ""
-            except Exception:
-                continue
-            if url == token:
-                exact = f
-                break
-            if substring is None and token in url:
-                substring = f
+        # one wins (iteration order). Callers needing to disambiguate
+        # duplicate-URL siblings should use the frame_id token from
+        # ``RefHandle.to_agent_dict()`` instead of a URL substring.
+        def _scan(frames):
+            ex = None
+            sub = None
+            for f in frames:
+                if f is page.main_frame:
+                    continue
+                try:
+                    url = f.url or ""
+                except Exception:
+                    continue
+                if url == token:
+                    ex = f
+                    break
+                if sub is None and token in url:
+                    sub = f
+            return ex, sub
+
+        try:
+            top_children = list(page.main_frame.child_frames)
+        except Exception:
+            top_children = []
+        exact, substring = _scan(top_children)
+        if exact is None and substring is None:
+            exact, substring = _scan(page.frames)
         return exact if exact is not None else substring
 
     async def _human_click(self, page, locator, *, force: bool = False,
@@ -5242,12 +5328,16 @@ class BrowserManager:
                 await inst.page.mouse.click(x, y)
                 await asyncio.sleep(action_delay())
 
-                # DOM may have changed; drop the diff baseline for the
-                # active page so the next snapshot is a full re-walk
-                # rather than a stale-against-new diff.
-                active_pid = inst.last_active_page_id
-                if active_pid is not None:
-                    inst.last_snapshot.pop(active_pid, None)
+                # Don't drop the diff baseline here. Ref-click / type /
+                # scroll / fill_form mutate the DOM identically and
+                # don't drop their baselines either; dropping only on
+                # xy-click made diff behavior depend on which click
+                # entry-point the agent used. Keeping the baseline
+                # means the next ``snapshot(diff_from_last=True)`` will
+                # surface what THIS click changed — which is what the
+                # diff feature is for. The next snapshot rebuilds the
+                # ref-summary from scratch regardless, so there's no
+                # stale-data hazard.
 
                 # Post-click CAPTCHA re-detection — coordinate clicks
                 # frequently land on interstitial challenge widgets.
@@ -6901,7 +6991,8 @@ class BrowserManager:
         to a racy drain-then-check fallback.
         """
         if download_dir is None:
-            download_dir = os.environ.get("BROWSER_DOWNLOAD_DIR", "/tmp/downloads")
+            from src.browser.flags import get_str as _flag_str
+            download_dir = _flag_str("BROWSER_DOWNLOAD_DIR", "/tmp/downloads")
         if not self._download_streaming_available:
             return {
                 "success": False,

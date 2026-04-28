@@ -359,6 +359,14 @@ def _validate_cookies(
         if not isinstance(name, str) or not name:
             _drop("empty_name")
             continue
+        # Bound the cookie name to a sane length. The wire spec doesn't
+        # mandate a cap but Firefox/Playwright treat oversized names
+        # poorly downstream; more importantly, names flow into the
+        # audit log so an unbounded payload could pollute log
+        # aggregation and disk usage.
+        if len(name) > 256:
+            _drop("invalid_name_length")
+            continue
         if domain is None:
             domain = ""
         if not isinstance(domain, str):
@@ -413,8 +421,19 @@ def _validate_cookies(
             if not secure:
                 _drop("host_prefix_without_secure")
                 continue
+            # Spec: __Host- cookies are only set over a secure origin.
+            # If the operator supplied url=http://..., Firefox will
+            # silently drop the cookie at SET time. Reject up front
+            # so the operator gets a deterministic drop reason instead
+            # of an opaque "your import looked fine but nothing landed".
+            if url and not url.lower().startswith("https://"):
+                _drop("host_prefix_non_https_url")
+                continue
         if name.startswith("__Secure-") and not secure:
             _drop("secure_prefix_without_secure")
+            continue
+        if name.startswith("__Secure-") and url and not url.lower().startswith("https://"):
+            _drop("secure_prefix_non_https_url")
             continue
         normalized: dict = {"name": name, "value": value}
         if url:
@@ -850,6 +869,17 @@ def create_dashboard_router(
                 )
                 return False, retry_after_ms
             bucket.append(now)
+            # Periodic sweep of stale buckets so the dict doesn't grow
+            # unbounded across deleted/rotated agents. Cheap because we
+            # only sweep when the table grows past a threshold; the
+            # sliding window is the only state we need to retain.
+            if len(_cookie_import_buckets) > 1024:
+                stale = [
+                    k for k, b in _cookie_import_buckets.items()
+                    if not b or b[-1] <= cutoff
+                ]
+                for k in stale:
+                    _cookie_import_buckets.pop(k, None)
             return True, 0
 
     def _cookie_envelope_err(

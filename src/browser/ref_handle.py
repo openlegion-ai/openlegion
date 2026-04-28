@@ -308,8 +308,11 @@ def _is_stable_id(candidate: str) -> bool:
     """Return True when ``candidate`` looks author-chosen, not generated."""
     if not candidate:
         return False
-    # React useId shape:  ":r0:", ":R12aB:", "r:r0:"
-    if candidate.startswith((":r", "r:", ":R")) and candidate.endswith(":"):
+    # React useId shape:  ":r0:", ":R12aB:". Real React always wraps in
+    # leading colons; an author id like ``r:radio-group:`` does not.
+    # Drop the bogus ``"r:"`` prefix that previously rejected legitimate
+    # author ids whose name happened to start with ``r:``.
+    if candidate.startswith((":r", ":R")) and candidate.endswith(":"):
         return False
     # UUID v4 shape (eight-four-four-four-twelve hex)
     if (

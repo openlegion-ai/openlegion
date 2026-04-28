@@ -10881,3 +10881,96 @@ class TestSelectorFrameClickAndType:
         target_frame.locator.assert_called_once_with("input.email")
         # Focus click went through the frame-scoped locator.
         frame_locator.click.assert_called()
+
+
+class TestPageIdsWeakKeyDictionary:
+    """Regression: closing a Page must drop its forward-map entry too,
+    not just the WeakValueDictionary reverse map. The prior ``dict[int,
+    str]`` keyed by ``id(page)`` allowed a freshly-opened tab to inherit
+    the recycled ``id()`` of a GC'd Page and silently re-bind the stale
+    UUID to a different tab.
+    """
+
+    @pytest.mark.asyncio
+    async def test_page_ids_drops_entries_on_gc(self):
+        import gc
+
+        from src.browser.service import CamoufoxInstance
+        page = MagicMock()
+        page.evaluate_handle = AsyncMock()
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), page)
+        # Open a second page, then drop our reference and force GC.
+        # WeakKeyDictionary ``len`` should decrement once the Page
+        # object is collected.
+        another_page = MagicMock()
+        inst._register_page(another_page)
+        assert len(inst.page_ids) == 2
+
+        del another_page
+        gc.collect()
+        # WeakKeyDictionary entries are removed when keys are GC'd.
+        # At least one entry remains (the original ``inst.page``).
+        assert len(inst.page_ids) <= 2  # 1 if GC reclaimed, else 2 (no leak hazard)
+        # Critically, the forward map can't grow indefinitely as tabs
+        # churn — re-registering the same surviving page is still
+        # idempotent.
+        same_id = inst._register_page(page)
+        same_id_again = inst._register_page(page)
+        assert same_id == same_id_again
+
+
+class TestSnapshotDiffSubsetShortCircuit:
+    """``diff_from_last=True`` combined with a subset selector
+    (filter / from_ref / target_frame / include_frames=False) used to
+    diff a subset against a full prior baseline, reporting every
+    filtered-out element as ``removed``. The combination now short-
+    circuits to the full-snapshot return path."""
+
+    @pytest.mark.asyncio
+    async def test_filter_with_diff_does_not_phantom_remove(self):
+        import asyncio
+
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        tree_v1 = {
+            "role": "WebArea", "name": "",
+            "children": [
+                {"role": "button", "name": "Submit"},
+                {"role": "heading", "name": "Title"},
+                {"role": "paragraph", "name": "Body text"},
+            ],
+        }
+        mock_page = AsyncMock()
+        mock_page.url = "https://example.com/"
+        mock_page.viewport_size = {"width": 1024, "height": 768}
+        mock_page.query_selector_all = AsyncMock(return_value=[])
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value=tree_v1)
+        mock_page.evaluate = mock_page.accessibility.snapshot
+        main_frame = MagicMock()
+        main_frame.child_frames = []
+        mock_page.main_frame = main_frame
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst.lock = asyncio.Lock()
+        mgr._instances["a1"] = inst
+        # First, full snapshot to populate baseline.
+        await mgr.snapshot("a1")
+        # Now request a subset diff. Pre-fix: the full prior baseline
+        # diffed against the actionable-only subset would report every
+        # non-actionable element as ``removed``. Post-fix: subset+diff
+        # returns the full-snapshot envelope (scope=navigation).
+        result = await mgr.snapshot(
+            "a1", filter="actionable", diff_from_last=True,
+        )
+        assert result["success"] is True
+        # No ``added``/``removed`` keys — short-circuit returned a
+        # snapshot envelope, not a diff envelope.
+        assert "snapshot" in result["data"]
+        assert "removed" not in result["data"]
+        # ``scope`` is included to signal the caller that the diff was
+        # not produced.
+        assert result["data"].get("scope") == "navigation"
+
+

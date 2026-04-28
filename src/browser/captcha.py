@@ -2011,8 +2011,9 @@ class CaptchaSolver:
                 return bool(injected)
 
             if family == "turnstile":
-                injected = await page.evaluate("""(token) => {
+                injected_obj = await page.evaluate("""(token) => {
                     let updated = false;
+                    let widget_count = 0;
                     const fire = (el) => {
                         try {
                             el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -2027,19 +2028,43 @@ class CaptchaSolver:
                         fire(input);
                         updated = true;
                     }
-                    // Trigger callback if available
+                    // Trigger callback if available. On pages with
+                    // multiple Turnstile widgets we fire the callback
+                    // for ALL of them — picking just the first widget
+                    // (the prior behavior) silently routed the solved
+                    // token to the wrong form on multi-form pages.
                     if (typeof turnstile !== 'undefined') {
                         try {
-                            const widgetId = Object.keys(turnstile._widgets || {})[0];
-                            if (widgetId && typeof turnstile._widgets[widgetId]?.callback === 'function') {
-                                turnstile._widgets[widgetId].callback(token);
-                                updated = true;
+                            const widgets = turnstile._widgets || {};
+                            const ids = Object.keys(widgets);
+                            widget_count = ids.length;
+                            for (const id of ids) {
+                                const cb = widgets[id]?.callback;
+                                if (typeof cb === 'function') {
+                                    try { cb(token); updated = true; }
+                                    catch (e) {}
+                                }
                             }
                         } catch(e) {}
                     }
-                    return updated;
+                    return { updated: updated, widget_count: widget_count };
                 }""", token)
-                return bool(injected)
+                if (
+                    isinstance(injected_obj, dict)
+                    and injected_obj.get("widget_count", 0) > 1
+                ):
+                    logger.info(
+                        "Turnstile injection saw %d widgets on page; "
+                        "fired callback on all (prior behavior fired only "
+                        "the first widget)",
+                        injected_obj.get("widget_count"),
+                    )
+                injected = (
+                    bool(injected_obj.get("updated"))
+                    if isinstance(injected_obj, dict)
+                    else bool(injected_obj)
+                )
+                return injected
 
         except Exception:
             logger.debug("Token injection error", exc_info=True)

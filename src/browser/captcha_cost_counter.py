@@ -285,6 +285,35 @@ async def get_millicents(agent_id: str) -> int:
         return int(bucket["millicents"])
 
 
+async def check_and_charge(
+    agent_id: str, cap_millicents: int, millicents: int,
+) -> tuple[bool, int]:
+    """Atomically gate ``millicents`` against ``cap_millicents``.
+
+    Returns ``(allowed, new_total)``:
+      * ``allowed=True``  → bucket was UNDER cap; ``millicents`` was added.
+      * ``allowed=False`` → bucket was AT/OVER cap; nothing was charged.
+
+    Closes the race between separate ``over_cap`` / ``add_cost`` lock
+    spans where two concurrent solves could each see ``bucket < cap``,
+    each call ``add_cost``, and together push the bucket above cap. Hold
+    the lock across both reads and writes here.
+
+    ``cap_millicents <= 0`` means "no cap": always allowed; cost is still
+    charged. ``millicents <= 0`` means "free attempt": always allowed;
+    nothing is charged.
+    """
+    async with _get_lock():
+        bucket = _bucket_for(agent_id)
+        current = int(bucket["millicents"])
+        if cap_millicents > 0 and current >= int(cap_millicents):
+            return False, current
+        if millicents > 0:
+            bucket["millicents"] = current + int(millicents)
+            return True, bucket["millicents"]
+        return True, current
+
+
 # Back-compat alias for an external caller that used to read cents. The
 # name is preserved but the units are now MILLICENTS — the caller almost
 # certainly wants ``get_millicents`` directly, but this avoids a hard

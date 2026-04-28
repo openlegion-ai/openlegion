@@ -457,6 +457,29 @@ class TestValidateCookies:
         assert accepted == []
         assert dropped == [{"reason": "invalid_expires", "count": 1}]
 
+    def test_rejects_oversized_name(self):
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "x" * 257, "value": "v", "domain": ".example.com"}],
+        )
+        assert accepted == []
+        assert dropped == [{"reason": "invalid_name_length", "count": 1}]
+
+    def test_drops_host_prefix_with_non_https_url(self):
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "__Host-sess", "value": "x", "secure": True,
+              "url": "http://example.com/", "path": "/"}],
+        )
+        assert accepted == []
+        assert dropped == [{"reason": "host_prefix_non_https_url", "count": 1}]
+
+    def test_drops_secure_prefix_with_non_https_url(self):
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "__Secure-sid", "value": "x", "secure": True,
+              "url": "http://example.com/"}],
+        )
+        assert accepted == []
+        assert dropped == [{"reason": "secure_prefix_non_https_url", "count": 1}]
+
     def test_netscape_malformed_lines_surface_as_drop_count(self):
         """When the input is Netscape and contains malformed lines, the
         ``dropped`` aggregate must include a ``malformed_line`` entry —

@@ -349,11 +349,28 @@ def pick_network_info(agent_id: str) -> dict:
     digest = hashlib.sha256(f"netinfo:{agent_id}".encode("utf-8")).digest()
     dl_unit = int.from_bytes(digest[:4], "big") / (1 << 32)   # [0, 1)
     rtt_unit = int.from_bytes(digest[4:8], "big") / (1 << 32)  # [0, 1)
+    et_unit = int.from_bytes(digest[8:12], "big") / (1 << 32)  # [0, 1)
+    sd_unit = int.from_bytes(digest[12:16], "big") / (1 << 32)  # [0, 1)
+    # Add light entropy on ``effectiveType`` and ``saveData`` so the fleet
+    # doesn't uniformly report ``("4g", False)`` — that's a single
+    # fingerprint cluster, opposite of §6.1's resolution-pool intent.
+    # Weights match real-world desktop populations: ``4g`` dominates
+    # but ``3g`` (mobile-tether or WAN-degraded) is non-trivial; ``2g``
+    # is plausibly rare; ``slow-2g`` is essentially never on desktop.
+    # ``saveData=True`` is rare (~3% of desktop sessions per public
+    # CrUX-style data) but not zero.
+    if et_unit < 0.92:
+        effective_type = "4g"
+    elif et_unit < 0.99:
+        effective_type = "3g"
+    else:
+        effective_type = "2g"
+    save_data = sd_unit < 0.03
     return {
-        "effectiveType": "4g",
+        "effectiveType": effective_type,
         "downlink": round(5.0 + dl_unit * 15.0, 1),
         "rtt": int(20 + rtt_unit * 100),
-        "saveData": False,
+        "saveData": save_data,
     }
 
 
@@ -524,6 +541,23 @@ def _build_ua_string(os_hint: str, version: str) -> str | None:
         logger.warning(
             "Invalid BROWSER_UA_VERSION %r (expected e.g. '138.0'), ignoring",
             version,
+        )
+        return None
+
+    # Sanity-bound the major version. A typo like "99999999.0" would
+    # produce a UA string that's a strong outlier signal — exactly the
+    # detection axis §6.4 tries to harden against. Firefox major
+    # versions are currently in the 130s; cap at 200 to leave generous
+    # headroom while rejecting nonsense.
+    try:
+        major = int(parts[0])
+    except ValueError:
+        return None
+    if major < 1 or major > 200:
+        logger.warning(
+            "BROWSER_UA_VERSION major %d is out of sane bound [1, 200]; "
+            "ignoring",
+            major,
         )
         return None
 

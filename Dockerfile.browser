@@ -80,20 +80,34 @@ WORKDIR /app
 # existing profiles re-install the new XPI on next launch.
 #
 # The ``.firefox.signed.xpi`` naming covers all stable uBO 1.x releases
-# we'd reasonably ship. Pre-release / beta builds (1.70.1b1 etc.) ship
-# only ``.firefox.xpi`` (unsigned) — fall back to that name so a tester
-# can pin to a beta without hand-editing the URL. Camoufox's patched
-# Firefox accepts unsigned XPIs because xpinstall.signatures.required
-# is set to False in stealth prefs.
+# we'd reasonably ship. Camoufox's patched Firefox loads AMO-signed
+# extensions cleanly; the unsigned ``.firefox.xpi`` fallback is removed
+# because (a) silently substituting an unsigned XPI on a tag yank made
+# the build susceptible to upstream tampering, and (b)
+# ``xpinstall.signatures.required=false`` in stealth prefs would have
+# loaded ANY tampered substitute without warning.
+#
+# Bumping ``UBLOCK_VERSION`` REQUIRES updating ``UBLOCK_SHA256`` to the
+# corresponding release's SHA-256 — recorded in upstream release notes
+# or computed via ``sha256sum`` after a verified download. The build
+# fails closed if the hash mismatches, so a compromised release-asset
+# substitution can't silently land in agent profiles.
+#
+# To compute: download the URL below, run ``sha256sum`` on the result,
+# then paste the hex digest into ``UBLOCK_SHA256``. Verify against
+# the GitHub release page's published checksum (or PGP signature
+# verification of the corresponding ``.sig`` if upstream ships one).
+#
+# The build can be overridden via ``--build-arg UBLOCK_SHA256=...``;
+# the default below is INTENTIONALLY a placeholder so a fresh build
+# fails closed until the maintainer pins the verified hash.
 ARG UBLOCK_VERSION=1.62.0
+ARG UBLOCK_SHA256=PLACEHOLDER_PIN_BEFORE_BUILD
 RUN mkdir -p /opt/openlegion/extensions \
-    && ( \
-       curl -fSL -o /opt/openlegion/extensions/uBlock0.xpi \
-          "https://github.com/gorhill/uBlock/releases/download/${UBLOCK_VERSION}/uBlock0_${UBLOCK_VERSION}.firefox.signed.xpi" \
-       || curl -fSL -o /opt/openlegion/extensions/uBlock0.xpi \
-          "https://github.com/gorhill/uBlock/releases/download/${UBLOCK_VERSION}/uBlock0_${UBLOCK_VERSION}.firefox.xpi" \
-       ) \
-    && test -s /opt/openlegion/extensions/uBlock0.xpi \
+    && curl -fSL -o /opt/openlegion/extensions/uBlock0.xpi \
+        "https://github.com/gorhill/uBlock/releases/download/${UBLOCK_VERSION}/uBlock0_${UBLOCK_VERSION}.firefox.signed.xpi" \
+    && echo "${UBLOCK_SHA256}  /opt/openlegion/extensions/uBlock0.xpi" \
+        | sha256sum -c - \
     && chmod 0644 /opt/openlegion/extensions/uBlock0.xpi
 
 # Python dependencies — upgrade pip first to avoid resolver bugs with stale base images

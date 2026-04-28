@@ -107,8 +107,12 @@ class TestStoreTimeRedaction:
         mgr, inst, _ctx, _page = _make_instance_with_listeners()
         mgr._attach_network_listeners(inst)
 
-        # userinfo + JWT in path + sensitive query (``token``)
-        jwt = "abcdefghij.klmnopqrst.uvwxyz1234"
+        # userinfo + JWT in path + sensitive query (``token``).
+        # JWT regex now anchors on the JOSE header prefix ``eyJ`` to
+        # avoid mangling benign three-dot strings (library_v1_2_3.
+        # commit_abcd.build_id etc.); use a real JWT shape with a
+        # ≥10-char first segment to match.
+        jwt = "eyJhbGciOiJIUzI1NiJ9.klmnopqrst.uvwxyz1234"
         url = (
             "https://user:secret@example.com/auth/"
             f"{jwt}/cb?token=SUPER_SECRET&keep=1"
