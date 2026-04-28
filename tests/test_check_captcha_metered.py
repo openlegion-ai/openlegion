@@ -89,12 +89,12 @@ async def _isolate_state(tmp_path, monkeypatch):
     )
     await cost.reset()
     svc._solve_rate_window.clear()
-    async with svc._captcha_audit_lock:
+    async with svc._get_captcha_audit_lock():
         svc._captcha_audit_buckets.clear()
     yield
     await cost.reset()
     svc._solve_rate_window.clear()
-    async with svc._captcha_audit_lock:
+    async with svc._get_captcha_audit_lock():
         svc._captcha_audit_buckets.clear()
 
 

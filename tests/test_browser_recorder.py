@@ -275,7 +275,7 @@ class TestDumpFromStopInstance:
         mgr._instances["bye"] = inst
 
         inst.recorder.record_click(method="cdp", success=True)
-        async with mgr._lock:
+        async with mgr._manager_lock():
             await mgr._stop_instance("bye")
 
         # One JSONL file with "bye-<ts>.jsonl" shape
@@ -322,7 +322,7 @@ class TestDumpFromStopInstance:
         await inst_lock_acquired.wait()
 
         async def do_stop():
-            async with mgr._lock:
+            async with mgr._manager_lock():
                 await mgr._stop_instance("wait")
 
         stop_task = _asyncio.create_task(do_stop())
