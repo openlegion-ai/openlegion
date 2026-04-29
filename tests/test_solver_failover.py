@@ -551,3 +551,70 @@ async def test_close_closes_both_underlying_clients():
     primary2.close = AsyncMock()
     await wrapper2.close()
     primary2.close.assert_awaited_once()
+
+
+# ── 14: post-solve provider-tier read for cost accounting ──────────────
+
+
+@pytest.mark.asyncio
+async def test_provider_property_reflects_active_solver_after_pick():
+    """Pre-solve cost-cap reservation reads ``wrapper.provider`` to pick
+    the pricing tier. When primary is unreachable and secondary is
+    healthy, the wrapper should expose secondary's provider so the
+    reservation matches the solver that will actually be charged."""
+    primary = _make_solver("2captcha")
+    primary._solver_health_checked = True
+    primary._solver_unreachable = True  # primary out
+    secondary = _make_solver("capsolver", "SECRET-S")
+    secondary._solver_health_checked = True
+
+    wrapper = MultiProviderSolver(primary, secondary)
+    chosen = await wrapper._pick_solver()
+    assert chosen is secondary
+    # Property reflects the chosen secondary so cost accounting reads
+    # capsolver's tier, not 2captcha's stale pre-failover snapshot.
+    assert wrapper.provider == "capsolver"
+
+
+@pytest.mark.asyncio
+async def test_provider_flips_on_mid_call_failover():
+    """Mid-call failover (primary returns no token + flips
+    ``_solver_unreachable``) must update ``_active_solver`` so a
+    post-solve ``wrapper.provider`` read sees the secondary that
+    served the retry."""
+    primary = _make_solver("2captcha")
+    primary._solver_health_checked = True
+    secondary = _make_solver("capsolver", "SECRET-S")
+    secondary._solver_health_checked = True
+
+    wrapper = MultiProviderSolver(primary, secondary)
+
+    # Primary's solve flips unreachable mid-call (fatal-config gate).
+    fatal_solve = AsyncMock(return_value=SolveResult(
+        token=None, injection_succeeded=False,
+        used_proxy_aware=False, compat_rejected=False,
+    ))
+
+    def _flip_then_call(*a, **kw):
+        primary._solver_unreachable = True
+        return fatal_solve(*a, **kw)
+    primary.solve = MagicMock(side_effect=_flip_then_call)
+
+    # Secondary returns a normal token.
+    secondary.solve = AsyncMock(return_value=SolveResult(
+        token="tok-from-secondary", injection_succeeded=True,
+        used_proxy_aware=False, compat_rejected=False,
+    ))
+
+    page = MagicMock()
+    page.evaluate = AsyncMock()
+    page.url = "https://example.com/"
+    result = await wrapper.solve(page, "selector", "https://example.com/")
+
+    assert result.token == "tok-from-secondary"
+    primary.solve.assert_called_once()
+    secondary.solve.assert_awaited_once()
+    # Post-solve, the wrapper exposes secondary's provider — the cost
+    # accounting in ``_metered_solve`` reads this AFTER ``solve()``
+    # returns, so secondary's pricing tier applies to the actual charge.
+    assert wrapper.provider == "capsolver"
