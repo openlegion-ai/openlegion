@@ -644,6 +644,10 @@ def _create_project(
 ) -> None:
     """Create a new project: directory, metadata.yaml, scaffold project.md."""
     name = _validate_project_name(name)
+    # Validate members upfront before any filesystem writes — prevents partial project creation.
+    members = list(members or [])
+    if "operator" in members:
+        raise ValueError("Operator is a system agent and cannot be assigned to projects")
     project_dir = PROJECTS_DIR / name
     if project_dir.exists():
         raise ValueError(f"Project '{name}' already exists")
@@ -671,7 +675,7 @@ def _create_project(
     )
 
     # Add initial members (handles removing from old projects + permissions)
-    for agent in (members or []):
+    for agent in members:
         _add_agent_to_project(name, agent)
 
 
@@ -700,6 +704,8 @@ def _delete_project(name: str) -> None:
 
 def _add_agent_to_project(project: str, agent: str) -> None:
     """Assign an agent to a project. Removes from old project if any."""
+    if agent == "operator":
+        raise ValueError("Operator is a system agent and cannot be assigned to projects")
     project_dir = PROJECTS_DIR / project
     meta_file = project_dir / "metadata.yaml"
     if not meta_file.exists():
