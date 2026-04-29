@@ -303,6 +303,20 @@ class TestBrowserRedactorShim:
             f"key={_REDACTED}"
         )
 
+    def test_redact_is_url_aware(self):
+        from src.browser.redaction import CredentialRedactor
+        r = CredentialRedactor()
+
+        out = r.redact(
+            "agent-1",
+            "https://svc.example/?api_key=mysecret&public=ok",
+        )
+
+        assert "mysecret" not in out
+        assert "api_key=" in out
+        assert "public=ok" in out
+        assert _REDACTED in out
+
     def test_deep_redact_delegates(self):
         from src.browser.redaction import CredentialRedactor
         r = CredentialRedactor()
@@ -330,3 +344,47 @@ class TestAgentBrowserToolShim:
         assert callable(_deep_redact)
         assert _redact_credentials("abc") == "abc"
         assert _deep_redact({"a": "b"}) == {"a": "b"}
+
+
+class TestJWTAnchorAvoidsFalsePositives:
+    """JWT regex now requires the JOSE header prefix ``eyJ`` so benign
+    three-dot version strings don't get mangled."""
+
+    def test_benign_version_string_not_redacted(self):
+        from src.shared.redaction import redact_string
+        # A library version + commit + build id — three dot-separated
+        # alphanumeric segments, all ≥10 chars. Pre-fix this matched
+        # the JWT shape and got REDACTED. Post-fix it survives.
+        text = "library_v1_2_3.commit_abcd1234.build_id_5678"
+        assert redact_string(text) == text
+
+    def test_real_jwt_still_redacted(self):
+        from src.shared.redaction import redact_string
+        # Real JOSE-header-prefixed JWT.
+        jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0aaaa.SflKxwRJSMeKKF2QT4f"
+        out = redact_string(f"Bearer {jwt}")
+        assert jwt not in out
+        assert "[REDACTED]" in out
+
+
+class TestRedactUrlPreservesCanonicalQuery:
+    """When NO query param is sensitive, ``redact_url`` should leave
+    the query string verbatim — round-tripping via ``parse_qsl`` +
+    ``quote_plus`` mutated non-canonical encodings (``hello world``
+    → ``hello+world``) and broke log diffs."""
+
+    def test_canonical_query_unchanged_when_no_redaction(self):
+        from src.shared.redaction import redact_url
+        url = "https://example.com/path?msg=hello+world&keep=ok"
+        out = redact_url(url)
+        # Query bytes survive when there's nothing to redact.
+        assert "msg=hello+world" in out
+        assert "keep=ok" in out
+
+    def test_sensitive_param_still_redacted(self):
+        from src.shared.redaction import redact_url
+        url = "https://example.com/?api_key=mysecret&keep=ok"
+        out = redact_url(url)
+        assert "mysecret" not in out
+        assert "[REDACTED]" in out
+        assert "keep=ok" in out

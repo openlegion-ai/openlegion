@@ -324,36 +324,56 @@ def pick_resolution(agent_id: str) -> tuple[int, int]:
     return _RESOLUTION_POOL[0][0]
 
 
-# ── §6.6 NetworkInformation per-agent fingerprint ─────────────────────────────
+# ── §6.6 NetworkInformation helper for non-Firefox future paths ───────────────
 
 
 def pick_network_info(agent_id: str) -> dict:
     """Stable per-agent ``navigator.connection`` values.
 
-    Real desktop users on broadband / 4G / 5G report
+    The current browser path is Firefox-shaped, and real Firefox does not
+    expose NetworkInformation, so ``build_launch_options`` does not apply
+    these values today. Keep the helper deterministic for a future
+    Chromium-shaped path where exposing the API would be coherent with the UA.
+
+    Real Chromium-family desktop users on broadband / 4G / 5G report
     ``effectiveType="4g"`` overwhelmingly; the variability is in
-    ``downlink`` (Mbps) and ``rtt`` (ms). Datacenter Firefox often
-    leaves all three undefined, which is itself a signal.
+    ``downlink`` (Mbps) and ``rtt`` (ms).
 
     Picks per-agent from plausible bands:
       - downlink: 5–20 Mbps (covers home broadband, mobile 4G good signal)
       - rtt: 20–120 ms (covers wired through mobile)
-      - saveData: always False (rare on desktop; True would itself be a flag)
+      - saveData: rare True (~3%), mostly False
 
     Deterministic from ``agent_id`` so the same agent reports the same
-    network shape across browser restarts. SHA-256 splits into two
-    independent 4-byte words for downlink and rtt — using one byte each
-    would give a coarse 256-bucket distribution and visible quantisation
-    on fleet-scale analysis.
+    network shape across browser restarts. SHA-256 splits into independent
+    4-byte words for each field — using one byte each would give a coarse
+    256-bucket distribution and visible quantisation on fleet-scale analysis.
     """
     digest = hashlib.sha256(f"netinfo:{agent_id}".encode("utf-8")).digest()
     dl_unit = int.from_bytes(digest[:4], "big") / (1 << 32)   # [0, 1)
     rtt_unit = int.from_bytes(digest[4:8], "big") / (1 << 32)  # [0, 1)
+    et_unit = int.from_bytes(digest[8:12], "big") / (1 << 32)  # [0, 1)
+    sd_unit = int.from_bytes(digest[12:16], "big") / (1 << 32)  # [0, 1)
+    # Add light entropy on ``effectiveType`` and ``saveData`` so the fleet
+    # doesn't uniformly report ``("4g", False)`` — that's a single
+    # fingerprint cluster, opposite of §6.1's resolution-pool intent.
+    # Weights match real-world desktop populations: ``4g`` dominates
+    # but ``3g`` (mobile-tether or WAN-degraded) is non-trivial; ``2g``
+    # is plausibly rare; ``slow-2g`` is essentially never on desktop.
+    # ``saveData=True`` is rare (~3% of desktop sessions per public
+    # CrUX-style data) but not zero.
+    if et_unit < 0.92:
+        effective_type = "4g"
+    elif et_unit < 0.99:
+        effective_type = "3g"
+    else:
+        effective_type = "2g"
+    save_data = sd_unit < 0.03
     return {
-        "effectiveType": "4g",
+        "effectiveType": effective_type,
         "downlink": round(5.0 + dl_unit * 15.0, 1),
         "rtt": int(20 + rtt_unit * 100),
-        "saveData": False,
+        "saveData": save_data,
     }
 
 
@@ -437,8 +457,9 @@ def build_launch_options(agent_id: str, profile_dir: str, proxy: dict | None = N
         "os": os_hint,
         "locale": locale,        # navigator.language / Accept-Language header
         "window": (width, height),
-        # block_webrtc: Camoufox native toggle — prevents Docker container IP
-        # from leaking via ICE candidates.  More reliable than manual prefs.
+        # block_webrtc: Camoufox native toggle — primary defense against
+        # Docker container IP leaks via ICE candidates. Firefox prefs below
+        # add defense in depth.
         "block_webrtc": True,
     }
 
@@ -468,23 +489,14 @@ def build_launch_options(agent_id: str, profile_dir: str, proxy: dict | None = N
 
     options["firefox_user_prefs"] = _stealth_prefs()
 
-    # ── §6.6 NetworkInformation spoof ────────────────────────────────────────
-    # Camoufox's ``config`` dict supports dotted keys for navigator.* override.
-    # Set per-agent stable values so ``navigator.connection.{effectiveType,
-    # downlink, rtt}`` look like a desktop on broadband. Without this Firefox
-    # leaves these undefined on Linux containers, which detection scripts use
-    # as a desktop-vs-bot tell.
-    netinfo = pick_network_info(agent_id)
-    options["config"] = {
-        "navigator.connection.effectiveType": netinfo["effectiveType"],
-        "navigator.connection.downlink": netinfo["downlink"],
-        "navigator.connection.rtt": netinfo["rtt"],
-        "navigator.connection.saveData": netinfo["saveData"],
-    }
-    # Camoufox requires this acknowledgement before applying ``config``
-    # overrides. We're past the early-return path so it's safe to set
-    # unconditionally now.
-    options["i_know_what_im_doing"] = True
+    # ── §6.6 NetworkInformation ──────────────────────────────────────────────
+    # Real Firefox does not expose ``navigator.connection``. Earlier phases
+    # injected per-agent NetworkInformation values through Camoufox config,
+    # but that made a Firefox-shaped UA expose a Chromium-only API — a stronger
+    # anti-bot signal than the API being absent. Keep ``pick_network_info`` as
+    # a deterministic helper for a future Chromium-shaped path, but do not
+    # pass any ``navigator.connection.*`` config while `_assert_firefox_ua`
+    # requires a Firefox UA.
 
     # ── User-Agent version override ──────────────────────────────────────────
     # Camoufox bundles a specific Firefox build (e.g. 135.0).  Some sites
@@ -505,7 +517,8 @@ def build_launch_options(agent_id: str, profile_dir: str, proxy: dict | None = N
             # If a future change introduces a Chromium UA, this raises so
             # the developer has to wire Sec-CH-UA-* overrides first.
             _assert_firefox_ua(ua)
-            options["config"]["navigator.userAgent"] = ua
+            options.setdefault("config", {})["navigator.userAgent"] = ua
+            options["i_know_what_im_doing"] = True
             options["firefox_user_prefs"]["general.useragent.override"] = ua
             logger.info("UA override: Firefox/%s", ua_version)
 
@@ -524,6 +537,23 @@ def _build_ua_string(os_hint: str, version: str) -> str | None:
         logger.warning(
             "Invalid BROWSER_UA_VERSION %r (expected e.g. '138.0'), ignoring",
             version,
+        )
+        return None
+
+    # Sanity-bound the major version. A typo like "99999999.0" would
+    # produce a UA string that's a strong outlier signal — exactly the
+    # detection axis §6.4 tries to harden against. Firefox major
+    # versions are currently in the 130s; cap at 200 to leave generous
+    # headroom while rejecting nonsense.
+    try:
+        major = int(parts[0])
+    except ValueError:
+        return None
+    if major < 1 or major > 200:
+        logger.warning(
+            "BROWSER_UA_VERSION major %d is out of sane bound [1, 200]; "
+            "ignoring",
+            major,
         )
         return None
 
@@ -548,10 +578,31 @@ def _stealth_prefs() -> dict:
         "browser.uidensity": 1,
         "browser.tabs.inTitlebar": 1,
 
-        # ── WebRTC: handled by Camoufox block_webrtc=True ────────────────────
+        # ── WebRTC: defense in depth ─────────────────────────────────────────
         # RTCPeerConnection leaks the Docker container's internal IP via ICE
-        # candidates even when behind a proxy.  Camoufox's block_webrtc option
-        # is the canonical way to disable WebRTC — it covers all relevant prefs.
+        # candidates even when behind a proxy. Camoufox's ``block_webrtc=True``
+        # is the primary toggle, BUT a single point of failure: if a future
+        # Camoufox release silently drops or renames the option, ICE candidates
+        # leak with no other guard. Set the underlying Firefox prefs explicitly
+        # too — they're idempotent with the Camoufox toggle and survive any
+        # upstream rename.
+        #
+        # Trade-off: ``media.peerconnection.enabled=false`` makes
+        # ``RTCPeerConnection`` itself ``undefined`` — and the API's absence
+        # is itself a fingerprint cluster vs the real Firefox population
+        # (where it's overwhelmingly present). The two ``ice.*`` prefs are
+        # the better long-term shape because they keep the constructor present
+        # but prevent host candidates; flipping the master switch is the
+        # belt-and-suspenders fallback for the primary IP-leak threat. Operators
+        # who care more about cluster shape than IP leakage can override
+        # ``media.peerconnection.enabled`` to True via settings.json.
+        "media.peerconnection.enabled": False,
+        "media.peerconnection.ice.default_address_only": True,
+        "media.peerconnection.ice.no_host": True,
+        # Disable mDNS rewrite of host candidates (Firefox feature that can
+        # itself be a fingerprint-able shape if mismatched with our above
+        # settings).
+        "media.peerconnection.ice.obfuscate_host_addresses": False,
 
         # ── Geolocation ───────────────────────────────────────────────────────
         # The geo API would expose incorrect coordinates for a server IP, and

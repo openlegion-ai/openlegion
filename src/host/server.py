@@ -352,6 +352,40 @@ def create_mesh_app(
                 return
         raise HTTPException(401, "Invalid authentication token")
 
+    def _require_operator_or_internal(request: Request) -> None:
+        """Restrict to the operator agent or localhost x-mesh-internal.
+
+        Stricter than ``_require_any_auth``: an arbitrary agent's bearer
+        token does NOT pass. Used for fleet-wide pre-computed metrics
+        endpoints that previously leaked health, costs, attention list,
+        and per-agent budgets to every authenticated agent.
+        """
+        if not _auth_tokens:
+            return
+        if request.headers.get("x-mesh-internal"):
+            client_host = request.client.host if request.client else ""
+            try:
+                import ipaddress
+                if ipaddress.ip_address(client_host).is_loopback:
+                    return
+            except (ValueError, AttributeError):
+                pass
+        auth_header = request.headers.get("authorization", "")
+        if not auth_header.startswith("Bearer "):
+            raise HTTPException(401, "Missing authentication token")
+        token = auth_header[7:]
+        operator_token = _auth_tokens.get("operator")
+        if operator_token and hmac.compare_digest(token, operator_token):
+            return
+        # Token is valid for SOME agent but not operator — return 403
+        # rather than 401 so legitimate-but-wrong-scope callers can
+        # distinguish "I'm authenticated, just not allowed here" from
+        # "my credential is bad".
+        for expected in _auth_tokens.values():
+            if hmac.compare_digest(token, expected):
+                raise HTTPException(403, "Operator-only endpoint")
+        raise HTTPException(401, "Invalid authentication token")
+
     # === System Messaging (mesh → agent) ===
 
     @app.post("/mesh/message")
@@ -2104,8 +2138,14 @@ def create_mesh_app(
 
         Pre-computes ratios and flags so the operator LLM doesn't need
         to do arithmetic.  Read-only — no mutations.
+
+        Operator-only: pre-PR this endpoint accepted any agent's bearer
+        token and leaked fleet-wide health, costs, attention list, and
+        per-agent budgets to every authenticated agent. The endpoint
+        was always intended as part of the operator heartbeat — gate it
+        accordingly.
         """
-        _require_any_auth(request)
+        _require_operator_or_internal(request)
 
         # -- Agent counts (exclude operator — it's a system agent, not a user slot) --
         agents = dict(router.agent_registry)
@@ -2181,8 +2221,10 @@ def create_mesh_app(
 
         Returns health, cost, and queue data for a single agent.
         Read-only — no mutations.
+
+        Operator-only (see ``system_metrics`` rationale).
         """
-        _require_any_auth(request)
+        _require_operator_or_internal(request)
         _validate_agent_id(agent_id)
 
         if agent_id not in router.agent_registry:
@@ -3123,10 +3165,19 @@ def create_mesh_app(
     # without this lock, both would write to the partial file concurrently
     # and corrupt the resulting bytes.
     _stage_locks: dict[str, asyncio.Lock] = {}
-    _stage_locks_guard = asyncio.Lock()
+    _stage_locks_guard: asyncio.Lock | None = None
+    _stage_locks_guard_loop: asyncio.AbstractEventLoop | None = None
+
+    def _get_stage_locks_guard() -> asyncio.Lock:
+        nonlocal _stage_locks_guard, _stage_locks_guard_loop
+        loop = asyncio.get_running_loop()
+        if _stage_locks_guard is None or _stage_locks_guard_loop is not loop:
+            _stage_locks_guard = asyncio.Lock()
+            _stage_locks_guard_loop = loop
+        return _stage_locks_guard
 
     async def _get_stage_lock(handle: str) -> asyncio.Lock:
-        async with _stage_locks_guard:
+        async with _get_stage_locks_guard():
             lock = _stage_locks.get(handle)
             if lock is None:
                 lock = asyncio.Lock()
@@ -3134,7 +3185,7 @@ def create_mesh_app(
             return lock
 
     async def _release_stage_lock_if_idle(handle: str) -> None:
-        async with _stage_locks_guard:
+        async with _get_stage_locks_guard():
             lock = _stage_locks.get(handle)
             if lock is not None and not lock.locked():
                 _stage_locks.pop(handle, None)

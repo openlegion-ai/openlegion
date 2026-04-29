@@ -3,16 +3,15 @@
 Supports 2Captcha and CapSolver as solving providers.  Both are called via
 their public HTTP APIs using httpx — no additional dependencies required.
 
-When configured (via CAPTCHA_SOLVER_PROVIDER and CAPTCHA_SOLVER_KEY env vars),
-the browser service will automatically attempt to solve CAPTCHAs detected
-after navigation.  If solving fails or no solver is configured, the existing
-fallback (ask user via VNC) is preserved.
+When configured (via browser flags ``CAPTCHA_SOLVER_PROVIDER`` and
+``CAPTCHA_SOLVER_KEY``), the browser service will automatically attempt to
+solve CAPTCHAs detected after navigation. If solving fails or no solver is
+configured, the existing fallback (ask user via VNC) is preserved.
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
 import re
 import time
 from collections import deque
@@ -72,6 +71,10 @@ class SolveResult:
               * ``"provider_missing"`` — solver lacks a string ``provider``
                 attribute AND a cost cap is configured; we fail closed
                 rather than let an untrackable charge slip past the cap.
+              * ``"price_missing"`` — solver/provider exists but the
+                ``(provider, kind)`` tuple has no published cost while a
+                cost cap is configured; we fail closed for the same
+                reason.
             ``None`` for a real solver attempt (success or failure).
 
     Field-population guarantee for ``_metered_solve`` consumers:
@@ -584,9 +587,9 @@ _DEFAULT_V3_MIN_SCORE = 0.7
 
 
 def get_solver() -> CaptchaSolver | None:
-    """Create a CaptchaSolver from environment variables, or None if not configured."""
-    provider = os.environ.get("CAPTCHA_SOLVER_PROVIDER", "").strip().lower()
-    api_key = os.environ.get("CAPTCHA_SOLVER_KEY", "").strip()
+    """Create a CaptchaSolver from browser flags, or None if not configured."""
+    provider = flags.get_str("CAPTCHA_SOLVER_PROVIDER", "").strip().lower()
+    api_key = flags.get_str("CAPTCHA_SOLVER_KEY", "").strip()
     if not provider or not api_key:
         return None
     if provider not in _SUPPORTED_PROVIDERS:
@@ -1009,7 +1012,8 @@ class CaptchaSolver:
         self._solver_breaker_until: float = 0.0
         # Coordinates breaker reads/writes with health-check init across
         # concurrent agents that share this solver instance.
-        self._state_lock: asyncio.Lock = asyncio.Lock()
+        self._state_lock: asyncio.Lock | None = None
+        self._state_lock_loop: asyncio.AbstractEventLoop | None = None
         # NOTE: Prior versions of this class exposed ``last_used_proxy_aware``
         # and ``last_compat_rejected`` instance attributes that ``solve()``
         # stamped after every call so the BrowserManager could pick up the
@@ -1025,6 +1029,21 @@ class CaptchaSolver:
         # Operator-tunable but not per-call — restart the browser service
         # to pick up env var changes.
         self._solve_timeouts_ms: dict[str, int] = self._resolve_solve_timeouts()
+
+    def _get_state_lock(self) -> asyncio.Lock:
+        """Return a lock bound to the currently running event loop.
+
+        Python 3.9 binds ``asyncio.Lock`` at construction time. Creating the
+        solver from synchronous startup/test code after a previous loop closed
+        raises ``RuntimeError``. Lazily creating the lock inside async paths
+        keeps the solver safe for sync construction and normal browser-service
+        use.
+        """
+        loop = asyncio.get_running_loop()
+        if self._state_lock is None or self._state_lock_loop is not loop:
+            self._state_lock = asyncio.Lock()
+            self._state_lock_loop = loop
+        return self._state_lock
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -1236,7 +1255,7 @@ class CaptchaSolver:
         """
         if self._solver_health_checked:
             return
-        async with self._state_lock:
+        async with self._get_state_lock():
             if self._solver_health_checked:
                 return
             outcome = await self.health_check()
@@ -1253,7 +1272,7 @@ class CaptchaSolver:
         On failure: append a timestamp, prune entries older than the 5-min
         window, then trip the breaker if 3+ entries remain.
         """
-        async with self._state_lock:
+        async with self._get_state_lock():
             now = time.time()
             if success:
                 self._solver_failure_timestamps.clear()
@@ -1360,7 +1379,11 @@ class CaptchaSolver:
                 captcha_type = variant
             sitekey = classified.get("sitekey")
             page_action = classified.get("action")
-        logger.info("Attempting to solve %s CAPTCHA on %s", captcha_type, page_url)
+        logger.info(
+            "Attempting to solve %s CAPTCHA on %s",
+            captcha_type,
+            redact_url(page_url),
+        )
 
         if not sitekey:
             sitekey = await self._extract_sitekey(page, captcha_type)
@@ -1908,21 +1931,88 @@ class CaptchaSolver:
         ``hcaptcha``, ``turnstile``); the §11.1 reCAPTCHA variants
         (``recaptcha-v2-checkbox`` / ``...-v3`` / ``...-enterprise-v2`` / etc.)
         all share the same ``g-recaptcha-response`` injection path.
+
+        Iframe handling: hCaptcha and Turnstile render their
+        ``<input name="*-response">`` element INSIDE the widget iframe.
+        Running injection JS only in the top-level document would miss
+        the response input on widgets that don't auto-mirror to a
+        parent textarea, returning ``injection_failed`` even though
+        the provider returned a valid token. Walk every frame and
+        bubble up "any frame succeeded" as the success bit.
         """
         family = captcha_type
         if captcha_type.startswith("recaptcha"):
             family = "recaptcha"
+
+        async def _eval_in_all_frames(js: str) -> list:
+            """Run ``js`` in every frame; return the list of per-frame
+            return values. Failures (cross-origin frame, frame detached,
+            ...) are swallowed per-frame so one bad frame doesn't
+            abort the rest of the walk.
+
+            Always evaluates against ``page`` first (the top-level
+            document) so existing single-frame tests/mocks still see
+            their evaluate call. Then walks ``page.frames`` if
+            available; cross-origin / mock objects that don't yield a
+            real iterable degrade cleanly to the page-only path.
+            """
+            results: list = []
+            # Always try the top-level page first — covers single-frame
+            # mocks in tests and the common case where the response
+            # input is mirrored at the top level.
+            try:
+                results.append(await page.evaluate(js, token))
+            except Exception:
+                pass
+            # Walk the frame tree if Playwright exposes one. ``frames``
+            # may be missing (test mocks), non-iterable (AsyncMock
+            # auto-attr), or include the main frame already covered
+            # above; iterating defensively skips all of those. Playwright
+            # includes ``page.main_frame`` in ``page.frames``; skip it so
+            # callbacks do not fire twice in the top-level document.
+            frames = getattr(page, "frames", None)
+            try:
+                frame_iter = list(frames) if frames is not None else []
+            except TypeError:
+                frame_iter = []
+            main_frame = getattr(page, "main_frame", None)
+            for frame in frame_iter:
+                if frame is page or frame is main_frame:
+                    continue
+                evaluator = getattr(frame, "evaluate", None)
+                if not callable(evaluator):
+                    continue
+                try:
+                    results.append(await evaluator(js, token))
+                except Exception:
+                    # Cross-origin / detached / SecurityError — common
+                    # for the captcha provider's iframe origin. Don't
+                    # propagate; one bad frame shouldn't kill the walk.
+                    continue
+            return results
+
         try:
             if family == "recaptcha":
-                await page.evaluate("""(token) => {
+                results = await _eval_in_all_frames("""(token) => {
+                    let updated = false;
+                    const fire = (el) => {
+                        try {
+                            el.dispatchEvent(new Event('input', { bubbles: true }));
+                            el.dispatchEvent(new Event('change', { bubbles: true }));
+                        } catch (e) {}
+                    };
                     const textarea = document.getElementById('g-recaptcha-response');
                     if (textarea) {
                         textarea.style.display = '';
                         textarea.value = token;
+                        fire(textarea);
+                        updated = true;
                     }
                     // Also try hidden textareas in iframes
                     document.querySelectorAll('[name="g-recaptcha-response"]').forEach(el => {
                         el.value = token;
+                        fire(el);
+                        updated = true;
                     });
                     // Trigger callback if available
                     if (typeof ___grecaptcha_cfg !== 'undefined') {
@@ -1935,7 +2025,10 @@ class CaptchaSolver:
                                     if (depth > 5 || !obj) return;
                                     for (const key in obj) {
                                         if (typeof obj[key] === 'function' && key === 'callback') {
-                                            obj[key](token);
+                                            try {
+                                                obj[key](token);
+                                                updated = true;
+                                            } catch (e) {}
                                             return;
                                         }
                                         if (typeof obj[key] === 'object') walk(obj[key], depth + 1);
@@ -1945,40 +2038,103 @@ class CaptchaSolver:
                             }
                         }
                     }
-                }""", token)
-                return True
+                    return updated;
+                }""")
+                return any(bool(r) for r in results)
 
             if family == "hcaptcha":
-                await page.evaluate("""(token) => {
+                # hCaptcha widget renders the response input inside its
+                # iframe. Set the textarea BEFORE calling
+                # ``hcaptcha.execute()`` would risk the SDK re-running
+                # the challenge and clobbering our token; we just set
+                # the textarea + dispatch input/change events and let
+                # the embedding form's submit handler pick it up.
+                # Real-world flow: provider verifies the token
+                # server-side from the form post; the SDK callback is
+                # not strictly required.
+                results = await _eval_in_all_frames("""(token) => {
+                    let updated = false;
+                    const fire = (el) => {
+                        try {
+                            el.dispatchEvent(new Event('input', { bubbles: true }));
+                            el.dispatchEvent(new Event('change', { bubbles: true }));
+                        } catch (e) {}
+                    };
                     const textarea = document.querySelector('[name="h-captcha-response"]');
-                    if (textarea) textarea.value = token;
+                    if (textarea) {
+                        textarea.value = token;
+                        fire(textarea);
+                        updated = true;
+                    }
                     document.querySelectorAll('[name="g-recaptcha-response"]').forEach(el => {
                         el.value = token;
+                        fire(el);
+                        updated = true;
                     });
-                    // Trigger hcaptcha callback
-                    if (typeof hcaptcha !== 'undefined' && hcaptcha.getRespKey) {
-                        try { hcaptcha.execute(); } catch(e) {}
-                    }
-                }""", token)
-                return True
+                    return updated;
+                }""")
+                return any(bool(r) for r in results)
 
             if family == "turnstile":
-                await page.evaluate("""(token) => {
+                # Turnstile renders the response input inside the
+                # widget iframe; the embedding form often holds a
+                # mirror ``[name="cf-turnstile-response"]`` at the top
+                # level too. Walk both so we hit whichever variant the
+                # site uses.
+                per_frame = await _eval_in_all_frames("""(token) => {
+                    let updated = false;
+                    let widget_count = 0;
+                    const fire = (el) => {
+                        try {
+                            el.dispatchEvent(new Event('input', { bubbles: true }));
+                            el.dispatchEvent(new Event('change', { bubbles: true }));
+                        } catch (e) {}
+                    };
                     // Find the Turnstile response input
                     const input = document.querySelector('[name="cf-turnstile-response"]')
                         || document.querySelector('input[name*="turnstile"]');
-                    if (input) input.value = token;
-                    // Trigger callback if available
+                    if (input) {
+                        input.value = token;
+                        fire(input);
+                        updated = true;
+                    }
+                    // Trigger callback if available. On pages with
+                    // multiple Turnstile widgets we fire the callback
+                    // for ALL of them — picking just the first widget
+                    // (the prior behavior) silently routed the solved
+                    // token to the wrong form on multi-form pages.
                     if (typeof turnstile !== 'undefined') {
                         try {
-                            const widgetId = turnstile.getResponse ? null : Object.keys(turnstile._widgets || {})[0];
-                            if (widgetId && turnstile._widgets[widgetId]?.callback) {
-                                turnstile._widgets[widgetId].callback(token);
+                            const widgets = turnstile._widgets || {};
+                            const ids = Object.keys(widgets);
+                            widget_count = ids.length;
+                            for (const id of ids) {
+                                const cb = widgets[id]?.callback;
+                                if (typeof cb === 'function') {
+                                    try { cb(token); updated = true; }
+                                    catch (e) {}
+                                }
                             }
                         } catch(e) {}
                     }
-                }""", token)
-                return True
+                    return { updated: updated, widget_count: widget_count };
+                }""")
+                total_widgets = sum(
+                    int(r.get("widget_count", 0))
+                    for r in per_frame
+                    if isinstance(r, dict)
+                )
+                if total_widgets > 1:
+                    logger.info(
+                        "Turnstile injection saw %d widgets across all "
+                        "frames; fired callback on all (prior behavior "
+                        "fired only the first widget)",
+                        total_widgets,
+                    )
+                return any(
+                    bool(r.get("updated") if isinstance(r, dict) else r)
+                    for r in per_frame
+                )
 
         except Exception:
             logger.debug("Token injection error", exc_info=True)

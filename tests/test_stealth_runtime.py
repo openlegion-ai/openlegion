@@ -1,4 +1,4 @@
-"""Phase 3 §6.4 / §6.6 — UA guard + NetworkInformation per-agent fingerprint."""
+"""Phase 3 §6.4 / §6.6 — UA guard + Firefox NetworkInformation contract."""
 
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ class TestFirefoxUAGuard:
         assert ua and "Firefox/138.0" in ua
 
 
-# ── §6.6 NetworkInformation per-agent stable values ──────────────────────────
+# ── §6.6 NetworkInformation helper + Firefox absence contract ────────────────
 
 
 class TestNetworkInformation:
@@ -73,39 +73,47 @@ class TestNetworkInformation:
         assert len(picks) >= 30
 
     def test_pick_network_info_in_band(self):
-        """Stay within plausible desktop broadband ranges."""
+        """Stay within plausible desktop broadband ranges. ``effectiveType``
+        and ``saveData`` carry light entropy now (matches real-world fleet
+        diversity) — accept the documented value sets rather than the
+        prior fixed pair."""
         from src.browser.stealth import pick_network_info
 
+        et_counts = {"4g": 0, "3g": 0, "2g": 0}
+        save_data_seen = {True: 0, False: 0}
         for i in range(200):
             ni = pick_network_info(f"agent-{i}")
-            assert ni["effectiveType"] == "4g"
+            assert ni["effectiveType"] in ("4g", "3g", "2g")
+            assert isinstance(ni["saveData"], bool)
             assert 5.0 <= ni["downlink"] <= 20.0
             assert 20 <= ni["rtt"] <= 120
-            assert ni["saveData"] is False
+            et_counts[ni["effectiveType"]] += 1
+            save_data_seen[ni["saveData"]] += 1
+        # 4g should be the dominant value (≥80% per the weighting).
+        assert et_counts["4g"] / 200 >= 0.80
+        # saveData=False is the overwhelming majority (≥90%).
+        assert save_data_seen[False] / 200 >= 0.90
 
-    def test_build_launch_options_writes_navigator_connection(self, monkeypatch):
-        from src.browser.stealth import build_launch_options, pick_network_info
+    def test_firefox_launch_options_do_not_write_navigator_connection(
+        self, monkeypatch,
+    ):
+        from src.browser.stealth import build_launch_options
 
         with patch.dict("os.environ", {}, clear=True):
             opts = build_launch_options("agent-x", "/tmp/profile")
         cfg = opts.get("config") or {}
-        expected = pick_network_info("agent-x")
-        assert cfg["navigator.connection.effectiveType"] == expected["effectiveType"]
-        assert cfg["navigator.connection.downlink"] == expected["downlink"]
-        assert cfg["navigator.connection.rtt"] == expected["rtt"]
-        assert cfg["navigator.connection.saveData"] is False
-        assert opts["i_know_what_im_doing"] is True
+        assert not any(k.startswith("navigator.connection.") for k in cfg)
+        assert "config" not in opts
+        assert "i_know_what_im_doing" not in opts
 
-    def test_ua_override_does_not_clobber_netinfo(self, monkeypatch):
-        """Setting BROWSER_UA_VERSION used to overwrite the whole config
-        dict — must not regress now that we share the dict with §6.6
-        keys."""
-        from src.browser.stealth import build_launch_options, pick_network_info
+    def test_ua_override_config_stays_firefox_only(self, monkeypatch):
+        """UA override still uses Camoufox config, but must not bring back
+        ``navigator.connection`` on the Firefox-shaped path."""
+        from src.browser.stealth import build_launch_options
 
         monkeypatch.setenv("BROWSER_UA_VERSION", "138.0")
         opts = build_launch_options("agent-y", "/tmp/profile")
         cfg = opts["config"]
-        expected = pick_network_info("agent-y")
-        # Both kinds of override coexist
         assert cfg["navigator.userAgent"].endswith("Firefox/138.0")
-        assert cfg["navigator.connection.downlink"] == expected["downlink"]
+        assert not any(k.startswith("navigator.connection.") for k in cfg)
+        assert opts["i_know_what_im_doing"] is True

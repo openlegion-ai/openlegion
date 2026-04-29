@@ -95,8 +95,9 @@ def _adblock_enabled() -> bool:
     extension (cleanly uninstalling Firefox extensions in-place is
     fragile; operators wanting a hard reset should ``openlegion reset``).
     """
-    raw = os.environ.get("BROWSER_ENABLE_ADBLOCK", "true").strip().lower()
-    return raw not in ("false", "0", "no", "off", "")
+    from src.browser.flags import get_bool
+
+    return get_bool("BROWSER_ENABLE_ADBLOCK", True)
 
 
 def _v2_clear_font_caches(profile: Path) -> None:

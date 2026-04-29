@@ -324,3 +324,79 @@ class TestConcurrentWrites:
 
         await asyncio.gather(*(add_one() for _ in range(100)))
         assert await cost.get_millicents("agent-1") == 100
+
+
+class TestCheckAndChargeAtomic:
+    """``check_and_charge`` closes the race between separate
+    ``over_cap`` / ``add_cost`` lock spans where two concurrent solves
+    could both pass the cap check and together push the bucket above
+    cap. Note: by design, a SINGLE call from below-cap is always
+    allowed — the cap is `current >= cap → deny`, not `current +
+    charge > cap → deny`. The race protection is about preventing
+    multiple in-flight calls from each individually passing the
+    below-cap test when only ONE should.
+    """
+
+    @pytest.mark.asyncio
+    async def test_concurrent_at_boundary_only_one_succeeds(self):
+        # Pre-load to one charge below cap. Two concurrent calls then
+        # race against the cap. Pre-fix (separate over_cap / add_cost
+        # spans), both could see ``current < cap`` and both charge —
+        # total would land at cap + charge. Post-fix, only the first
+        # to acquire the lock sees ``current < cap``; the second sees
+        # ``current >= cap`` after the first commits, and is denied.
+        await cost.add_cost("agent-1", 70)
+        results = await asyncio.gather(*(
+            cost.check_and_charge("agent-1", 100, 30) for _ in range(2)
+        ))
+        allowed = [r for r in results if r[0]]
+        denied = [r for r in results if not r[0]]
+        assert len(allowed) == 1
+        assert len(denied) == 1
+        # Total must be exactly 100 — no overshoot.
+        assert await cost.get_millicents("agent-1") == 100
+
+    @pytest.mark.asyncio
+    async def test_below_cap_always_allowed(self):
+        # 10 attempts each charging 5; cap is 1000 (huge).
+        results = await asyncio.gather(*(
+            cost.check_and_charge("agent-2", 1000, 5) for _ in range(10)
+        ))
+        assert all(r[0] for r in results)
+        assert await cost.get_millicents("agent-2") == 50
+
+    @pytest.mark.asyncio
+    async def test_returns_false_when_already_at_cap(self):
+        await cost.add_cost("agent-3", 100)
+        allowed, total = await cost.check_and_charge("agent-3", 100, 50)
+        assert allowed is False
+        assert total == 100
+        # Nothing was charged when denied.
+        assert await cost.get_millicents("agent-3") == 100
+
+    @pytest.mark.asyncio
+    async def test_no_cap_always_allowed(self):
+        allowed, total = await cost.check_and_charge("agent-4", 0, 50)
+        assert allowed is True
+        assert total == 50
+
+    @pytest.mark.asyncio
+    async def test_zero_charge_does_not_mutate(self):
+        await cost.add_cost("agent-5", 25)
+        allowed, total = await cost.check_and_charge("agent-5", 100, 0)
+        assert allowed is True
+        assert total == 25
+        assert await cost.get_millicents("agent-5") == 25
+
+
+class TestAdjustCost:
+    @pytest.mark.asyncio
+    async def test_positive_delta_adds_cost(self):
+        await cost.adjust_cost("agent-1", 40)
+        assert await cost.get_millicents("agent-1") == 40
+
+    @pytest.mark.asyncio
+    async def test_negative_delta_refunds_without_going_below_zero(self):
+        await cost.add_cost("agent-1", 25)
+        assert await cost.adjust_cost("agent-1", -10) == 15
+        assert await cost.adjust_cost("agent-1", -50) == 0

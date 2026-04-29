@@ -142,12 +142,12 @@ async def _isolate_state(tmp_path, monkeypatch):
     )
     await cost.reset()
     svc._solve_rate_window.clear()
-    async with svc._captcha_audit_lock:
+    async with svc._get_captcha_audit_lock():
         svc._captcha_audit_buckets.clear()
     yield
     await cost.reset()
     svc._solve_rate_window.clear()
-    async with svc._captcha_audit_lock:
+    async with svc._get_captcha_audit_lock():
         svc._captcha_audit_buckets.clear()
 
 
@@ -348,7 +348,12 @@ class TestRedetectNavigationDuringAction:
 class TestRedetectInstallFailure:
     @pytest.mark.asyncio
     async def test_install_evaluate_raises(self, mgr):
-        page = _mk_page(install_raises=True, redetect_hits=[])
+        # Even if read-back would report stale hits, install failure means
+        # the probe state is not trustworthy and must not trigger solving.
+        page = _mk_page(
+            install_raises=True,
+            redetect_hits=['iframe[src*="recaptcha"]'],
+        )
         inst = _mk_inst(page=page)
         with patch.object(mgr, "_check_captcha", new=AsyncMock()) as cc:
             async with inst.lock:
@@ -430,6 +435,37 @@ class TestRedetectRateLimit:
         assert env1 is not None
         assert env2 is None
         assert check_spy.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_first_redetect_not_suppressed_when_monotonic_near_zero(
+        self, mgr,
+    ):
+        """``_last_redetect_ts=0`` is the sentinel for "never fired".
+        Some Python/runtime combinations expose small monotonic values at
+        process start, so the first call must not compare ``now - 0`` and
+        accidentally suppress itself."""
+        sel = 'iframe[src*="recaptcha"]'
+        page = _mk_page(redetect_hits=[sel], captcha_locator_for=sel)
+        envelope = {
+            "captcha_found": True,
+            "kind": "recaptcha-v2-checkbox",
+            "solver_attempted": False,
+            "solver_outcome": "no_solver",
+            "next_action": "request_captcha_help",
+        }
+        check_spy = AsyncMock(return_value=envelope)
+        inst = _mk_inst(page=page)
+        with patch.object(mgr, "_check_captcha", new=check_spy), \
+             patch.object(svc.time, "monotonic", return_value=1.0):
+            async with inst.lock:
+                async def _do():
+                    return {"success": True}
+
+                _, env = await mgr._with_captcha_redetect(inst, _do())
+
+        assert env is not None
+        assert inst._last_redetect_ts == 1.0
+        check_spy.assert_awaited_once()
 
 
 # ── 8. Flag-disabled — wrapper is a passthrough, no JS install/readback ───

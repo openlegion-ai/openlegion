@@ -19,6 +19,7 @@ import re
 import subprocess
 import time
 import uuid
+import warnings
 import weakref
 from collections import deque
 from pathlib import Path
@@ -187,6 +188,36 @@ _RETRY_PREVIOUS_RECHECK_MS = 500
 _CF_AUTO_WAIT_SECONDS = 8.0
 
 
+# ── Filename sanitizer for downloads ──────────────────────────────────────
+# Browser-supplied ``Content-Disposition: filename="..."`` is attacker-
+# controlled. A response carrying ``filename="../../etc/foo"`` would
+# escape the configured download dir if joined naively. Strip path
+# components, collapse unsafe chars, and bound length. Mirrors the
+# mesh-side ``_sanitize_artifact_name`` so both sides of the transfer
+# apply the same rule (defense in depth).
+_DOWNLOAD_NAME_SAFE_RE = re.compile(r"[^\w.\-]+")
+
+
+def _sanitize_download_filename(suggested: str) -> str:
+    """Reduce a browser-supplied filename to a safe basename.
+
+    Returns ``"download.bin"`` when the result would be empty so the
+    caller never sees a path-traversal-shaped string land on disk.
+    """
+    name = (suggested or "").strip()
+    if "/" in name or "\\" in name:
+        name = name.replace("\\", "/").rsplit("/", 1)[-1]
+    name = _DOWNLOAD_NAME_SAFE_RE.sub("_", name)
+    name = name.strip("._-")
+    if len(name) > 180:
+        name = name[:180].strip("._-")
+    if not name:
+        name = "download.bin"
+    if len(name) < 2:
+        name = name + "_"
+    return name
+
+
 # ── §11.14 per-agent solve rate limiter ───────────────────────────────────
 # Module-level dict guarded by an asyncio.Lock. Each agent gets a deque of
 # unix timestamps for solve attempts in the last hour; entries older than
@@ -200,8 +231,19 @@ _CF_AUTO_WAIT_SECONDS = 8.0
 # single container, and the cap is a soft anti-abuse signal not a billing
 # control (cost counter handles billing).
 _solve_rate_window: dict[str, deque[float]] = {}
-_solve_rate_lock: asyncio.Lock = asyncio.Lock()
+_solve_rate_lock: asyncio.Lock | None = None
+_solve_rate_lock_loop: asyncio.AbstractEventLoop | None = None
 _SOLVE_RATE_WINDOW_SECONDS = 3600.0
+
+
+def _get_solve_rate_lock() -> asyncio.Lock:
+    """Return a solve-rate lock bound to the active event loop."""
+    global _solve_rate_lock, _solve_rate_lock_loop
+    loop = asyncio.get_running_loop()
+    if _solve_rate_lock is None or _solve_rate_lock_loop is not loop:
+        _solve_rate_lock = asyncio.Lock()
+        _solve_rate_lock_loop = loop
+    return _solve_rate_lock
 
 
 async def _check_solve_rate(agent_id: str, limit_per_hour: int) -> bool:
@@ -216,10 +258,20 @@ async def _check_solve_rate(agent_id: str, limit_per_hour: int) -> bool:
     """
     if limit_per_hour <= 0:
         return False
-    async with _solve_rate_lock:
+    async with _get_solve_rate_lock():
         now = time.time()
         cutoff = now - _SOLVE_RATE_WINDOW_SECONDS
-        bucket = _solve_rate_window.setdefault(agent_id, deque(maxlen=limit_per_hour * 4))
+        # ``deque(maxlen=N)`` is fixed at construction time. If the
+        # operator raises ``CAPTCHA_RATE_LIMIT_PER_HOUR`` mid-run, the
+        # existing bucket would silently drop new timestamps once it
+        # reached its old maxlen — under-reporting the rate and letting
+        # a solve through that should have been blocked. Recreate the
+        # bucket whenever the configured limit grows.
+        target_maxlen = limit_per_hour * 4
+        bucket = _solve_rate_window.get(agent_id)
+        if bucket is None or (bucket.maxlen or 0) < target_maxlen:
+            bucket = deque(bucket or (), maxlen=target_maxlen)
+            _solve_rate_window[agent_id] = bucket
         while bucket and bucket[0] < cutoff:
             bucket.popleft()
         if len(bucket) >= limit_per_hour:
@@ -267,6 +319,24 @@ def _resolve_cost_cap(agent_id: str) -> int:
         return 0
 
 
+def _max_published_solve_cost_millicents(provider: str, kind: str) -> int | None:
+    """Return the max known price for ``(provider, kind)``.
+
+    A solve can end up proxy-aware or proxyless depending on solver-proxy
+    compatibility. For cost-cap reservations we reserve the maximum
+    published tier up front, then refund any difference after the provider
+    result reports the actual path used.
+    """
+    from src.browser import captcha_cost_counter as _cost
+
+    candidates = [
+        _cost.estimate_millicents(provider, kind, proxy_aware=False),
+        _cost.estimate_millicents(provider, kind, proxy_aware=True),
+    ]
+    priced = [c for c in candidates if c is not None]
+    return max(priced) if priced else None
+
+
 # ── §11.14 / §2.7 audit-log aggregator ────────────────────────────────────
 #
 # Operators need to see when the cost-cap / rate-limit / behavioral-skip
@@ -279,9 +349,20 @@ def _resolve_cost_cap(agent_id: str) -> int:
 # browser service container. The flush is driven from
 # :meth:`BrowserManager._emit_metrics` (already on a 60s tick); see
 # ``_drain_captcha_audit`` below.
-_captcha_audit_lock: asyncio.Lock = asyncio.Lock()
+_captcha_audit_lock: asyncio.Lock | None = None
+_captcha_audit_lock_loop: asyncio.AbstractEventLoop | None = None
 # {(agent_id, outcome, kind): {"count": int, "first_ts": float, "last_url": str}}
 _captcha_audit_buckets: dict[tuple[str, str, str], dict] = {}
+
+
+def _get_captcha_audit_lock() -> asyncio.Lock:
+    """Return a CAPTCHA audit lock bound to the active event loop."""
+    global _captcha_audit_lock, _captcha_audit_lock_loop
+    loop = asyncio.get_running_loop()
+    if _captcha_audit_lock is None or _captcha_audit_lock_loop is not loop:
+        _captcha_audit_lock = asyncio.Lock()
+        _captcha_audit_lock_loop = loop
+    return _captcha_audit_lock
 
 
 async def _record_captcha_audit_event(
@@ -305,7 +386,7 @@ async def _record_captcha_audit_event(
     ``captcha_gate`` payload as ``policy``. Last-write-wins within an
     aggregation window — same convention as ``last_url``.
     """
-    async with _captcha_audit_lock:
+    async with _get_captcha_audit_lock():
         key = (agent_id, outcome, kind)
         bucket = _captcha_audit_buckets.get(key)
         now = time.time()
@@ -331,7 +412,7 @@ async def _drain_captcha_audit() -> list[dict]:
     EventBus payload; the caller is responsible for actually emitting
     via the configured ``metrics_sink``.
     """
-    async with _captcha_audit_lock:
+    async with _get_captcha_audit_lock():
         if not _captcha_audit_buckets:
             return []
         # Snapshot copy under lock so the subsequent ``clear()`` doesn't
@@ -1418,6 +1499,19 @@ def _encode_screenshot(
         )
         return png_bytes, "png"
 
+    # Decompression-bomb protection. Pillow's ``MAX_IMAGE_PIXELS`` is a
+    # MODULE-LEVEL global; rebinding it on every screenshot encode (the
+    # earlier placement) was both wasteful and racy with any other
+    # Pillow consumer in the process. Set once, here, immediately after
+    # the import succeeds — first encode in the process pins the cap
+    # for everyone, subsequent encodes are no-ops since the value is
+    # idempotent. 50 MP covers any realistic browser viewport (8K
+    # ≈ 33 MP) but blocks adversarial blowups; Pillow raises
+    # ``DecompressionBombError`` once exceeded and the catch-all below
+    # falls back to the raw PNG bytes.
+    if Image.MAX_IMAGE_PIXELS != 50_000_000:
+        Image.MAX_IMAGE_PIXELS = 50_000_000
+
     try:
         img = Image.open(BytesIO(png_bytes))
         # Downscale via Lanczos when requested. Avoids the no-op resize
@@ -1515,9 +1609,9 @@ _JS_CAPTCHA_REDETECT_READBACK = """
 _CAPTCHA_REDETECT_SELECTORS: tuple[str, ...] = (
     'iframe[src*="recaptcha"]',
     'iframe[src*="hcaptcha"]',
+    '[class*="cf-turnstile"]',
     'iframe[src*="challenges.cloudflare.com"]',
     'iframe[src*="captcha"]',
-    '[class*="cf-turnstile"]',
     '[class*="captcha"]',
     '#captcha',
 )
@@ -1604,8 +1698,19 @@ def _compute_snapshot_diff(
     removed_keys = prev_keys - curr_keys
     common_keys = curr_keys & prev_keys
 
+    # Sort by walk-emission order using the numeric suffix of ``ref_id``.
+    # Lexicographic sort would order "e10" < "e2" — diff lists then look
+    # randomized as soon as a page emits ≥10 refs (most non-trivial
+    # pages). ``ref_id`` is always shaped ``e<int>``; fall back to lex
+    # sort defensively if the prefix ever shifts.
+    def _ref_sort_key(key: str) -> tuple:
+        rid = current[key].get("ref_id", "")
+        if isinstance(rid, str) and rid.startswith("e") and rid[1:].isdigit():
+            return (0, int(rid[1:]))
+        return (1, rid)
+
     added: list[dict] = []
-    for k in sorted(added_keys, key=lambda key: current[key]["ref_id"]):
+    for k in sorted(added_keys, key=_ref_sort_key):
         s = current[k]
         added.append({
             "ref": s["ref_id"],
@@ -1707,7 +1812,8 @@ class CamoufoxInstance:
         self.refs: dict[str, RefHandle] = {}
         self.dialog_active: bool = False  # True when snapshot scoped to a modal dialog
         self.dialog_detected: bool = False  # True when a modal was found (even if scoping failed)
-        self.lock = asyncio.Lock()  # serialize page operations per instance
+        self._lock: asyncio.Lock | None = None
+        self._lock_loop: asyncio.AbstractEventLoop | None = None
         self.x11_wid: int | None = None  # X11 window ID for targeted focus
         # P0.3: vestigial — the snapshot tree builder always uses the JS
         # walker now. Still consulted by ``navigate()`` for body-text
@@ -1718,12 +1824,23 @@ class CamoufoxInstance:
         # Per-Page stable UUID maps. Page objects survive navigation within a
         # tab; UUIDs are stable for the life of the Page. Refs carry a
         # ``page_id`` so resolution can detect a closed tab as stale (§4.2).
+        #
+        # ``page_ids`` is a WeakKeyDictionary so closed Pages drop out of
+        # the forward map automatically. The earlier ``dict[int, str]``
+        # keyed by ``id(page)`` had a silent re-bind bug: once a Page is
+        # GC'd Python recycles its ``id()``, so a freshly-opened tab
+        # could land on the SAME ``id`` value as a closed one. The
+        # reverse map (already weak) had dropped the entry, but the
+        # forward lookup found the stale UUID and re-bound it to the
+        # new Page — so an old ref with the recycled UUID resolved to
+        # a different tab. WeakKey closes that hole.
         self._page_id_counter: int = 0
-        self.page_ids: dict = {}              # id(Page) -> str
-        # WeakValueDictionary so closed Pages (GC'd by Playwright on tab
-        # close) drop out of the reverse lookup automatically. Plain dict
-        # here would pin every Page ever opened for the lifetime of the
-        # CamoufoxInstance — a slow leak on agents that churn tabs.
+        self.page_ids: weakref.WeakKeyDictionary = (
+            weakref.WeakKeyDictionary()
+        )
+        # WeakValueDictionary so closed Pages drop out of the reverse
+        # lookup automatically. Plain dict would pin every Page ever
+        # opened for the lifetime of the CamoufoxInstance.
         self.page_ids_inv: weakref.WeakValueDictionary = (
             weakref.WeakValueDictionary()
         )
@@ -1819,6 +1936,73 @@ class CamoufoxInstance:
         self._last_redetect_ts: float = 0.0
         self._pending_captcha_envelope: dict | None = None
 
+    @property
+    def lock(self) -> asyncio.Lock:
+        """Per-instance lock, bound lazily to the active event loop.
+
+        Construction may happen outside any running loop (sync FastAPI
+        startup, pytest fixtures), so the lock is created on first access
+        and refreshed if the active loop has changed since. Mirrors the
+        ``_manager_lock`` / ``_get_*_lock`` helpers elsewhere in this module.
+        Synchronous inspection is supported; the first real async use pins
+        or refreshes the lock for that running loop.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if self._lock is None:
+            if loop is None:
+                try:
+                    # Python 3.10+ creates an unbound lock here without
+                    # touching thread-local event-loop state.
+                    self._lock = asyncio.Lock()
+                    self._lock_loop = None
+                except RuntimeError:
+                    # Python 3.9 still calls get_event_loop() during
+                    # Lock construction. Use an explicit throwaway loop
+                    # without setting it as the thread default; first
+                    # real async use will rebuild for the running loop.
+                    tmp_loop = asyncio.new_event_loop()
+                    try:
+                        with warnings.catch_warnings():
+                            warnings.simplefilter(
+                                "ignore", DeprecationWarning,
+                            )
+                            self._lock = asyncio.Lock(loop=tmp_loop)
+                    finally:
+                        tmp_loop.close()
+                    self._lock_loop = tmp_loop
+            else:
+                self._lock = asyncio.Lock()
+                self._lock_loop = loop
+        elif loop is None:
+            # No active loop to bind against; return what we have.
+            return self._lock
+        elif self._lock_loop is None:
+            # Lock was created (or set via the setter) outside a
+            # running loop; pin it to the loop that's actually using
+            # it now without discarding.
+            self._lock_loop = loop
+        elif self._lock_loop is not loop:
+            # Loop changed between uses (typically pytest spinning up
+            # a fresh loop per test). Rebuild to bind to the new loop.
+            self._lock = asyncio.Lock()
+            self._lock_loop = loop
+        return self._lock
+
+    @lock.setter
+    def lock(self, value: asyncio.Lock) -> None:
+        # Tests occasionally swap in a custom lock (``TrackingLock`` /
+        # ``asyncio.Lock()``). Honor the swap; the property getter pins
+        # the loop on first use so the supplied lock is not silently
+        # replaced.
+        self._lock = value
+        try:
+            self._lock_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._lock_loop = None
+
     def _register_page(self, page) -> str:
         """Assign a stable UUID to a Page if not already registered.
 
@@ -1826,12 +2010,12 @@ class CamoufoxInstance:
         Called on CamoufoxInstance creation (for the initial page) and will
         be called again by ``browser_open_tab`` (§8.6) for new tabs.
         """
-        existing = self.page_ids.get(id(page))
+        existing = self.page_ids.get(page)
         if existing is not None:
             return existing
         self._page_id_counter += 1
         new_id = f"p{self._page_id_counter}-{uuid.uuid4().hex[:8]}"
-        self.page_ids[id(page)] = new_id
+        self.page_ids[page] = new_id
         self.page_ids_inv[new_id] = page
         return new_id
 
@@ -1973,7 +2157,8 @@ class BrowserManager:
         self.max_concurrent = max_concurrent
         self.idle_timeout = idle_timeout_minutes * 60
         self._instances: dict[str, CamoufoxInstance] = {}
-        self._lock = asyncio.Lock()
+        self._lock: asyncio.Lock | None = None
+        self._lock_loop: asyncio.AbstractEventLoop | None = None
         self._cleanup_task: asyncio.Task | None = None
         self._playwright = None
         self._user_focused_agent: str | None = None  # set by explicit focus() call
@@ -2007,6 +2192,20 @@ class BrowserManager:
                 "Playwright private artifact-stream API unavailable; "
                 "browser_download will return service_unavailable.",
             )
+
+    def _manager_lock(self) -> asyncio.Lock:
+        """Return the manager lock for the currently running event loop.
+
+        The browser manager is often constructed from synchronous FastAPI
+        setup/test code. Python 3.9 binds ``asyncio.Lock`` to the current
+        loop during construction, so creating it eagerly is fragile after
+        pytest or startup code has closed a previous default loop.
+        """
+        loop = asyncio.get_running_loop()
+        if self._lock is None or self._lock_loop is not loop:
+            self._lock = asyncio.Lock()
+            self._lock_loop = loop
+        return self._lock
 
     @staticmethod
     def _detect_download_streaming() -> bool:
@@ -2076,11 +2275,17 @@ class BrowserManager:
         otherwise leak files into ``BROWSER_DOWNLOAD_DIR`` until the
         container restarts. Janitor mirrors the upload-stage GC.
         """
-        ttl = max(1, int(os.environ.get("BROWSER_DOWNLOAD_TTL_S", "60")))
+        from src.browser.flags import get_int as _flag_int
+        from src.browser.flags import get_str as _flag_str
+        ttl = _flag_int(
+            "BROWSER_DOWNLOAD_TTL_S", 60, min_value=1, max_value=86400,
+        )
         while True:
             await asyncio.sleep(30)
             try:
-                dl_dir = Path(os.environ.get("BROWSER_DOWNLOAD_DIR", "/tmp/downloads"))
+                dl_dir = Path(_flag_str(
+                    "BROWSER_DOWNLOAD_DIR", "/tmp/downloads",
+                ))
                 if not dl_dir.is_dir():
                     continue
                 now = time.time()
@@ -2207,7 +2412,7 @@ class BrowserManager:
 
     async def _cleanup_idle(self):
         now = time.time()
-        async with self._lock:
+        async with self._manager_lock():
             to_stop = [
                 agent_id for agent_id, inst in self._instances.items()
                 if now - inst.last_activity > self.idle_timeout
@@ -2223,7 +2428,7 @@ class BrowserManager:
         display, so a watched browser is never killed by the idle cleanup.
         Returns the number of instances touched.
         """
-        async with self._lock:
+        async with self._manager_lock():
             for inst in self._instances.values():
                 inst.touch()
             return len(self._instances)
@@ -2240,7 +2445,7 @@ class BrowserManager:
         prevents background agent browser operations from stealing the
         VNC display away from what the user is watching.
         """
-        async with self._lock:
+        async with self._manager_lock():
             if not self._instances:
                 return
             # Prefer user's explicit focus over MRU
@@ -2274,7 +2479,7 @@ class BrowserManager:
         """Get existing browser or start a new one for the agent."""
         if not _AGENT_ID_RE.match(agent_id):
             raise ValueError(f"Invalid agent_id: {agent_id!r}")
-        async with self._lock:
+        async with self._manager_lock():
             if agent_id in self._instances:
                 inst = self._instances[agent_id]
                 inst.touch()
@@ -2443,34 +2648,28 @@ class BrowserManager:
         pages = context.pages
         page = pages[0] if pages else await context.new_page()
 
-        # §6.6 ``navigator.connection`` fallback. We pass the spoof
-        # values via Camoufox's ``config`` dict above, but it's not
-        # documented whether Camoufox honours those keys (Firefox itself
-        # doesn't natively expose NetworkInformation). Install an
-        # ``add_init_script`` that defines ``navigator.connection`` if
-        # the property is missing — runs in every document context
-        # before page scripts. ``Object.defineProperty`` on
-        # ``Navigator.prototype`` with ``configurable: true`` matches
-        # what real Chromium-shaped Firefox extension polyfills do.
-        try:
-            from src.browser.stealth import pick_network_info
-            netinfo = pick_network_info(agent_id)
-            await context.add_init_script(
-                _NAV_CONNECTION_INIT_SCRIPT.format(
-                    effective=_js_string(netinfo["effectiveType"]),
-                    downlink=float(netinfo["downlink"]),
-                    rtt=int(netinfo["rtt"]),
-                    save_data="false",
-                ),
-            )
-        except Exception as e:
-            # Non-fatal — Camoufox may already have NetworkInformation
-            # support, and the §6.3 probe will catch the gap if neither
-            # path lands.
-            logger.debug(
-                "navigator.connection init-script failed for '%s': %s",
-                agent_id, e,
-            )
+        # §6.6 ``navigator.connection`` REMOVED on the Firefox UA path.
+        #
+        # Real Firefox does NOT expose ``navigator.connection`` (the
+        # NetworkInformation API is unimplemented as of FF 138; Chromium
+        # is the only major engine shipping it on by default). Injecting
+        # a synthetic ``navigator.connection`` on a UA stamped
+        # ``Firefox/`` was itself a strong cluster signal: zero real
+        # Firefox users in the population have the API, so any Firefox-
+        # shaped client that DOES expose it is by definition spoofed.
+        # Fingerprint.com / Creep.js / DataDome key directly on this
+        # inconsistency.
+        #
+        # ``_assert_firefox_ua`` enforces a Firefox UA at startup, so
+        # the right behavior is to MATCH real-Firefox population —
+        # leave the API absent. The §6.6 plan predates this analysis;
+        # the navigator probe below was updated to stop treating a
+        # missing ``navigator.connection`` as a mismatch.
+        #
+        # If a future build moves to a Chromium-shaped UA, the spoof
+        # path can be restored (gated on UA family); the
+        # ``_NAV_CONNECTION_INIT_SCRIPT`` template is retained for that
+        # purpose.
 
         inst = CamoufoxInstance(agent_id, browser, context, page)
 
@@ -2517,23 +2716,24 @@ class BrowserManager:
         the dashboard layer this surfaces as a ``browser_nav_probe``
         event, distinct from per-minute drain payloads.
 
-        **Probes on ``about:blank``** so we read the platform / browser
-        signals as the engine sees them, not as some loaded site has
-        possibly shadowed them via an injected content script. With
-        ``persistent_context=True`` the page resumes whatever the agent
-        had open last session — that page's globals could include
-        custom getters on ``Navigator.prototype``. Forcing a navigation
-        to ``about:blank`` first eliminates that path.
+        **Probes on a temporary ``about:blank`` page** so we read the
+        platform / browser signals as the engine sees them, not as some
+        loaded site has possibly shadowed them via an injected content
+        script. With ``persistent_context=True`` the page resumes whatever
+        the agent had open last session; the probe must not clobber that
+        active tab just to get a clean diagnostic read.
 
         Mismatches the probe flags:
           * ``navigator.webdriver !== false`` — the canonical bot tell
           * ``navigator.platform`` doesn't match our configured ``os`` hint
           * ``navigator.userAgent`` lacks ``Firefox/`` (would mean §6.4
             tripwire was bypassed somehow at runtime)
-          * ``navigator.connection.*`` is undefined (would mean §6.6
-            override silently failed inside Camoufox)
 
         Per the plan: "WARNING if webdriver !== false or mismatch."
+
+        Note: ``navigator.connection`` is intentionally NOT checked.
+        Real Firefox doesn't expose NetworkInformation; we read the
+        signal field for diagnostics but do not flag its absence.
         """
         os_hint = os.environ.get("BROWSER_OS", "windows").lower()
         expected_platform = {
@@ -2542,44 +2742,59 @@ class BrowserManager:
             "linux": "Linux x86_64",
         }.get(os_hint)
 
+        probe_page = inst.page
+        temp_page = None
         # Best-effort isolate the probe context. ``about:blank`` is a
         # special URL that Firefox loads instantly with a fresh,
         # script-free document — perfect for reading raw navigator
-        # signals. If the goto fails (e.g. ``about:blank`` blocked by
-        # some weird policy), we fall through and probe the current
-        # page anyway; the result will still be populated and any
-        # shadowing-induced mismatch is itself useful signal.
-        #
-        # Side-effect operators may notice: this clobbers the resumed
-        # page on a persistent-profile restart. An agent that had
-        # ``twitter.com`` open last session sees ``about:blank`` for a
-        # split second after restart, then whatever its first action
-        # navigates to. Cookies / localStorage / IndexedDB all survive
-        # — only the loaded-page URL is lost.
+        # signals. Use a temporary page so a persistent-profile restart
+        # keeps the agent's active/resumed tab intact. If a temp page
+        # cannot be opened, fall back to probing the current page without
+        # navigating it.
         try:
-            await inst.page.goto("about:blank", timeout=5000)
+            new_page = getattr(inst.context, "new_page", None)
+            if callable(new_page):
+                temp_page = await new_page()
+                probe_page = temp_page
+                await temp_page.goto("about:blank", timeout=5000)
         except Exception as e:
             logger.debug(
-                "Probe pre-nav to about:blank failed for '%s' "
-                "(continuing on current page): %s", inst.agent_id, e,
+                "Probe temporary about:blank page failed for '%s' "
+                "(continuing on current page without navigation): %s",
+                inst.agent_id, e,
             )
+            if temp_page is not None:
+                try:
+                    await temp_page.close()
+                except Exception:
+                    pass
+                temp_page = None
+            probe_page = inst.page
 
+        # Cap the probe so a hung renderer (rare but observed under
+        # heavy CPU pressure or stuck Camoufox stacks) cannot block
+        # ``get_or_start`` indefinitely. The probe holds the manager
+        # lock through this call site, so a stall here freezes every
+        # other agent's start/stop/touch.
         try:
-            signals = await inst.page.evaluate(
-                "() => ({"
-                "  webdriver: navigator.webdriver,"
-                "  plugins_len: navigator.plugins ? navigator.plugins.length : -1,"
-                "  mimeTypes_len: navigator.mimeTypes ? navigator.mimeTypes.length : -1,"
-                "  hardwareConcurrency: navigator.hardwareConcurrency,"
-                "  deviceMemory: navigator.deviceMemory,"
-                "  userAgent: navigator.userAgent,"
-                "  platform: navigator.platform,"
-                "  language: navigator.language,"
-                "  timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,"
-                "  conn_effective: navigator.connection ? navigator.connection.effectiveType : null,"
-                "  conn_downlink: navigator.connection ? navigator.connection.downlink : null,"
-                "  conn_rtt: navigator.connection ? navigator.connection.rtt : null"
-                "})",
+            signals = await asyncio.wait_for(
+                probe_page.evaluate(
+                    "() => ({"
+                    "  webdriver: navigator.webdriver,"
+                    "  plugins_len: navigator.plugins ? navigator.plugins.length : -1,"
+                    "  mimeTypes_len: navigator.mimeTypes ? navigator.mimeTypes.length : -1,"
+                    "  hardwareConcurrency: navigator.hardwareConcurrency,"
+                    "  deviceMemory: navigator.deviceMemory,"
+                    "  userAgent: navigator.userAgent,"
+                    "  platform: navigator.platform,"
+                    "  language: navigator.language,"
+                    "  timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,"
+                    "  conn_effective: navigator.connection ? navigator.connection.effectiveType : null,"
+                    "  conn_downlink: navigator.connection ? navigator.connection.downlink : null,"
+                    "  conn_rtt: navigator.connection ? navigator.connection.rtt : null"
+                    "})",
+                ),
+                timeout=10.0,
             )
         except Exception as e:
             inst.probe_result = {
@@ -2591,6 +2806,15 @@ class BrowserManager:
                 inst.agent_id, e,
             )
             return
+        finally:
+            if temp_page is not None:
+                try:
+                    await temp_page.close()
+                except Exception as e:
+                    logger.debug(
+                        "Probe temporary page close failed for '%s': %s",
+                        inst.agent_id, e,
+                    )
 
         mismatches: list[str] = []
         if signals.get("webdriver") is not False:
@@ -2605,13 +2829,10 @@ class BrowserManager:
         ua = signals.get("userAgent", "")
         if ua and "Firefox/" not in ua:
             mismatches.append(f"userAgent lacks 'Firefox/': {ua!r}")
-        # navigator.connection should be populated by §6.6 spoof. ``null``
-        # means the override silently failed.
-        if signals.get("conn_effective") is None:
-            mismatches.append(
-                "navigator.connection.effectiveType is null "
-                "(§6.6 override may have failed)",
-            )
+        # ``navigator.connection`` is intentionally absent on the Firefox
+        # UA path (matches real Firefox population — see comment near
+        # ``_NAV_CONNECTION_INIT_SCRIPT``). Read for diagnostics but do
+        # not flag its absence as a mismatch.
 
         ok = not mismatches
         inst.probe_result = {
@@ -2660,11 +2881,11 @@ class BrowserManager:
 
     async def stop(self, agent_id: str) -> None:
         """Stop and clean up a specific agent's browser."""
-        async with self._lock:
+        async with self._manager_lock():
             await self._stop_instance(agent_id)
 
     async def _stop_instance(self, agent_id: str) -> None:
-        """Internal stop — caller must hold self._lock."""
+        """Internal stop — caller must hold ``self._manager_lock()``."""
         inst = self._instances.pop(agent_id, None)
         if inst is None:
             return
@@ -2693,6 +2914,17 @@ class BrowserManager:
             )
         if self._user_focused_agent == agent_id:
             self._user_focused_agent = None
+        # Drop the agent's solve-rate bucket so a long-running deployment
+        # with rotating agent ids doesn't accumulate dead entries forever.
+        # Acquired separately because the rate-limit lock and manager
+        # lock are independent; reordering would risk a future deadlock.
+        try:
+            async with _get_solve_rate_lock():
+                _solve_rate_window.pop(agent_id, None)
+        except RuntimeError:
+            # Outside a running loop (shouldn't happen — _stop_instance
+            # is only called from async paths), best-effort.
+            _solve_rate_window.pop(agent_id, None)
         jitter = getattr(inst, '_jitter_task', None)
         if jitter:
             jitter.cancel()
@@ -2707,7 +2939,12 @@ class BrowserManager:
         if recorder is not None:
             try:
                 async with inst.lock:
-                    recorder.dump(reason="stop")
+                    # Recorder dump writes JSONL synchronously and the
+                    # buffer can hold ~10K events (multi-MB). Off-load
+                    # to a worker thread so the manager lock isn't held
+                    # across blocking file I/O while every other agent
+                    # waits on _emit_metrics or lifecycle ops.
+                    await asyncio.to_thread(recorder.dump, reason="stop")
             except Exception as e:
                 logger.debug(
                     "Recorder dump failed for '%s': %s", agent_id, e,
@@ -2736,7 +2973,7 @@ class BrowserManager:
             except (asyncio.CancelledError, Exception):
                 pass
             self._download_gc_task = None
-        async with self._lock:
+        async with self._manager_lock():
             for agent_id in list(self._instances.keys()):
                 await self._stop_instance(agent_id)
         if self._captcha_solver:
@@ -2770,7 +3007,7 @@ class BrowserManager:
         Operators polling /status see the current health signal without
         waiting for the next emit tick.
         """
-        async with self._lock:
+        async with self._manager_lock():
             inst = self._instances.get(agent_id)
             if not inst:
                 return {"running": False}
@@ -2795,7 +3032,7 @@ class BrowserManager:
 
     async def get_service_status(self) -> dict:
         """Get overall service health."""
-        async with self._lock:
+        async with self._manager_lock():
             return {
                 "healthy": True,
                 "active_browsers": len(self._instances),
@@ -3010,6 +3247,18 @@ class BrowserManager:
 
             inst.dialog_active = False
             inst.dialog_detected = False
+            # Same-tab navigation invalidates every ref captured against
+            # the prior document — the underlying elements are gone.
+            # Without clearing, a later ``click(ref="e3")`` would call
+            # ``get_by_role(role, name=name).nth(occ)`` against the NEW
+            # page; any element with matching role+name+occurrence on
+            # the new page gets silently clicked, RefStale never fires.
+            # ``open_tab`` and ``switch_tab`` already do this; navigate
+            # missed it. Also drop the diff baseline so the next snapshot
+            # is reported as ``scope="navigation"`` rather than diffed
+            # against the stale prior page.
+            inst.refs = {}
+            inst.last_snapshot.clear()
             if wait_ms > 0:
                 await asyncio.sleep(wait_ms / 1000 + navigation_jitter())
             try:
@@ -3201,6 +3450,18 @@ class BrowserManager:
         include_frames: bool = True,
     ) -> dict:
         """Snapshot implementation.  Caller must hold ``inst.lock``."""
+        # Read BROWSER_SNAPSHOT_FORMAT exactly once at entry so a flag
+        # flip mid-call (operator settings hot-reload, agent override
+        # change racing the snapshot) cannot produce mixed v1/v2 output
+        # between the from_ref early-return and the main-path return.
+        from src.browser.flags import get_str as _flag_get_str
+        snapshot_fmt = (
+            _flag_get_str(
+                "BROWSER_SNAPSHOT_FORMAT", "v1", agent_id=agent_id,
+            )
+            .strip()
+            .lower()
+        )
         # Resolve the optional filter once so the inner _walk sees a
         # frozenset rather than re-deriving on every node.
         try:
@@ -3332,7 +3593,20 @@ class BrowserManager:
                     inst, root=scoped_root_handle,
                 )
             if not tree:
-                return {"success": True, "data": {"snapshot": "(empty page)", "refs": {}}}
+                # Honor ``BROWSER_SNAPSHOT_FORMAT`` for the empty-tree
+                # short-circuit too. Pre-fix this returned a bare string
+                # regardless of format, so agents parsing on the
+                # ``# snapshot-v2`` first-line marker classified empty
+                # pages as v1 and could attempt v1-shaped re-parsing.
+                empty_text = (
+                    "# snapshot-v2\n(empty page)"
+                    if snapshot_fmt == "v2"
+                    else "(empty page)"
+                )
+                return {
+                    "success": True,
+                    "data": {"snapshot": empty_text, "refs": {}},
+                }
 
             lines: list[str] = []
             refs: dict[str, RefHandle] = {}
@@ -3781,22 +4055,28 @@ class BrowserManager:
                                 disabled=handle.disabled,
                                 element_key=handle.element_key,
                             )
+                # NOTE: scoped snapshots replace ``inst.refs`` because
+                # the walker assigns fresh ``e0..eN`` ids on every walk
+                # and there is no separate namespace for scoped refs.
+                # That means a prior full snapshot's refs become
+                # unresolvable after a ``snapshot(from_ref=...)``;
+                # callers should re-snapshot the full tree before
+                # operating outside the scope, or queue all scope-local
+                # actions before the next full snapshot. Documenting
+                # the contract loudly here — the docstring's
+                # "informational, not anchors" framing is aspirational;
+                # making it true requires a per-call ref namespace,
+                # which is a wire-format change.
                 inst.refs = refs
                 # Cross-PR fix (#749 ↔ #750): the from_ref early-return
                 # must honor the same v2 dispatch as the main return
-                # path. Without this, scoped snapshots stay v1 even
-                # when ``BROWSER_SNAPSHOT_FORMAT=v2`` is set — agents
+                # path. Without this, scoped snapshots stayed v1 even
+                # when ``BROWSER_SNAPSHOT_FORMAT=v2`` was set — agents
                 # parsing on the ``# snapshot-v2`` first-line marker
-                # would silently see mixed formats.
-                from src.browser.flags import get_str as _flag_get_str
-                _scoped_fmt = (
-                    _flag_get_str(
-                        "BROWSER_SNAPSHOT_FORMAT", "v1", agent_id=agent_id,
-                    )
-                    .strip()
-                    .lower()
-                )
-                if _scoped_fmt == "v2":
+                # would see mixed formats. ``snapshot_fmt`` was captured
+                # at the top of ``_snapshot_impl`` so a flag flip mid-
+                # call can't desynchronize the two return paths.
+                if snapshot_fmt == "v2":
                     snapshot_text = _format_snapshot_v2(lines, entries)
                 else:
                     snapshot_text = (
@@ -3815,7 +4095,20 @@ class BrowserManager:
             # When a modal dialog is open, scope to only dialog elements
             # so agents don't see/click elements behind the overlay
             # (e.g. X's sidebar "Post" button behind the compose modal).
-            modal_els = await inst.page.query_selector_all(_MODAL_SELECTOR)
+            #
+            # Skip the modal probe when ``target_frame is not None`` —
+            # the iframe-scoped snapshot reports refs from the iframe's
+            # own document, but the main-page modal probe runs against
+            # ``inst.page``. Pre-fix, a main-page-modal-open page that
+            # also took a ``frame=`` snapshot would tag every iframe-
+            # scoped ref with ``scope_root=_MODAL_SELECTOR``; the
+            # resolver would then run ``frame.locator(scope_root)``
+            # against the iframe's document and silently miss the
+            # modal that lives in the parent.
+            if target_frame is not None:
+                modal_els = []
+            else:
+                modal_els = await inst.page.query_selector_all(_MODAL_SELECTOR)
             vp = inst.page.viewport_size
             visible_modals = []
             for el in modal_els:
@@ -3971,9 +4264,15 @@ class BrowserManager:
             # `_locator_from_ref` queries are bounded to the dialog subtree.
             # (Refs emitted before the modal branch don't have scope_root;
             # set it now that we know the final dialog_active state.)
+            #
+            # Skip iframe-scoped refs: the modal lives in the main frame
+            # (see _descend_frames; iframes aren't scoped by `dialog_active`),
+            # so applying the modal selector to a Frame in `_locator_from_ref`
+            # would query the iframe's document for a selector that lives in
+            # the parent — silent click failure.
             if inst.dialog_active:
                 for rid, handle in refs.items():
-                    if handle.scope_root is None:
+                    if handle.scope_root is None and handle.frame_id is None:
                         refs[rid] = RefHandle(
                             page_id=handle.page_id,
                             frame_id=handle.frame_id,
@@ -3988,15 +4287,11 @@ class BrowserManager:
 
             inst.refs = refs
             # §7.2 — choose between v1 (per-element landmark suffix) and
-            # v2 (landmark headers + capped indent). Flag default is v1
-            # for the canary period, flips to v2 once parse rate ≥99%.
-            from src.browser.flags import get_str
-            fmt = (
-                get_str("BROWSER_SNAPSHOT_FORMAT", "v1", agent_id=agent_id)
-                .strip()
-                .lower()
-            )
-            if fmt == "v2":
+            # v2 (landmark headers + capped indent). Use the snapshot_fmt
+            # captured at the top of this method so a mid-call flag flip
+            # can't desynchronize this return path with the from_ref
+            # early-return above.
+            if snapshot_fmt == "v2":
                 snapshot_text = _format_snapshot_v2(lines, entries)
             else:
                 snapshot_text = (
@@ -4034,8 +4329,13 @@ class BrowserManager:
             # update for scoped/filtered calls — they're informational
             # snapshots, not anchors. ``last_active_page_id`` still
             # advances so tab-change detection stays accurate.
-            _is_scoped_call = (filter is not None) or (from_ref is not None)
-            if not _is_scoped_call and not _skip_baseline:
+            is_subset_snapshot = (
+                allowed_roles is not None
+                or from_ref is not None
+                or target_frame is not None
+                or include_frames is False
+            )
+            if not is_subset_snapshot and not _skip_baseline:
                 inst.last_snapshot[snapshot_page_id] = {
                     "refs_by_key": dict(ref_summary),
                     "url": current_url,
@@ -4045,6 +4345,23 @@ class BrowserManager:
 
             if diff_from_last and scope in ("same", "modal_opened",
                                              "modal_closed", "frame_changed"):
+                # Subset snapshot (filter / from_ref / target_frame /
+                # include_frames=False) producing a diff against a full
+                # baseline reports every filtered-out element as
+                # ``removed`` — phantom signal that misleads the agent.
+                # PR 781 already excludes subset snapshots from updating
+                # the baseline; also short-circuit the diff computation
+                # to a full-snapshot return so the agent isn't given
+                # a confidently-wrong delta.
+                if is_subset_snapshot:
+                    return {
+                        "success": True,
+                        "data": {
+                            "snapshot": snapshot_text,
+                            "refs": response_refs,
+                            "scope": "navigation",
+                        },
+                    }
                 if previous_baseline is None:
                     # No prior baseline — fall through to the full-snapshot
                     # path so the agent still gets useful output. Effective
@@ -4118,14 +4435,18 @@ class BrowserManager:
         Resolution order (§4.2):
             1. ``page_id`` → Page object (raises :class:`RefStale` if the
                tab has closed).
-            2. ``frame_id`` → Frame (None = main frame).  Always None
-               until §8.4 iframe traversal.
-            3. ``scope_root`` — modal selector bound during snapshot, so
-               occurrence indices match.
-            4. ``shadow_path`` — walk open shadow roots via the
-               §8.3 two-stage ``evaluate_handle`` pattern. Returns an
+            2. ``frame_id`` → Frame (None = main frame). Set when the
+               ref was captured inside an iframe; the resolver then runs
+               every subsequent step against that Frame instead of the
+               top-level Page, so shadow-piercing and ``get_by_role``
+               operate inside the iframe's own document.
+            3. ``shadow_path`` — walk open shadow roots via the
+               §8.3 two-stage ``evaluate_handle`` pattern (against the
+               Frame when ``frame_id`` is set, else the Page). Returns an
                :class:`ElementHandle` rather than a ``Locator`` because
                ``get_by_role`` does not pierce shadow boundaries.
+            4. ``scope_root`` — modal selector bound during snapshot, so
+               occurrence indices match.
             5. ``get_by_role(role, name=name, exact=True).nth(occurrence)``.
 
         Returns ``None`` when ``ref`` isn't in ``inst.refs`` (classic
@@ -4137,16 +4458,13 @@ class BrowserManager:
         if handle is None:
             return None
         page = inst._resolve_page_id(handle.page_id)
-        if handle.shadow_path:
-            # NOTE: shadow + iframe combination raises NotImplementedError
-            # inside ``_resolve_shadow_element``; callers (click/type/etc)
-            # catch it and surface a ``not_supported`` envelope.
-            return await self._resolve_shadow_element(page, handle, ref)
         if handle.frame_id is not None:
             frame = inst._resolve_frame_id(handle.frame_id)
             base = frame
         else:
             base = page
+        if handle.shadow_path:
+            return await self._resolve_shadow_element(base, handle, ref)
         if handle.scope_root:
             base = base.locator(handle.scope_root)
         if handle.name:
@@ -4155,8 +4473,14 @@ class BrowserManager:
             locator = base.get_by_role(handle.role)
         return locator.nth(handle.occurrence)
 
-    async def _resolve_shadow_element(self, page, handle: RefHandle, ref: str):
+    async def _resolve_shadow_element(self, base, handle: RefHandle, ref: str):
         """Two-stage resolver for refs whose ``shadow_path`` is non-empty.
+
+        ``base`` is the JS-evaluation root for the resolver — a Page for
+        main-frame refs, or a Frame for refs captured inside an iframe.
+        Both share ``evaluate_handle``; the JS resolver runs in whichever
+        document ``base`` represents, so an iframe-scoped ref walks the
+        shadow path inside the iframe's document, not the top page.
 
         Stage 1 walks the path to the inner ``shadowRoot``, verifying
         each host's discriminator. Stage 2 picks the role+name match at
@@ -4186,21 +4510,12 @@ class BrowserManager:
             }
             for hop in handle.shadow_path
         ]
-        # Defensive: shadow + iframe combination is not implemented yet
-        # (Phase 5 PR3). Threading a Frame through Stage 1 here would
-        # require cross-PR coordination; explicit error makes the seam
-        # loud so PR3's merge has to address it rather than letting a
-        # frame_id'd shadow ref silently resolve against the main frame.
-        if handle.frame_id is not None:
-            raise NotImplementedError(
-                "Shadow + iframe combination not yet supported",
-            )
         # Pass scope_root through so Stage 1 starts its walk inside the
         # modal subtree when a ref was captured under modal scoping.
         # Without this, a same-selector shadow host living outside the
         # dialog could resolve and the click would land on the wrong
         # element entirely.
-        stage1 = await page.evaluate_handle(
+        stage1 = await base.evaluate_handle(
             _JS_SHADOW_RESOLVE_STAGE1,
             {
                 "path": json.dumps(path_payload),
@@ -4300,25 +4615,41 @@ class BrowserManager:
         if _FRAME_ID_RE.match(token):
             raise RefStale("frame_detached", ref=None)
         page = inst.page
-        exact = None
-        substring = None
+        # Two-pass lookup. Pass 1 prefers DIRECT children of the main
+        # frame to localize substring matches; a deeply-nested malicious
+        # iframe sharing a URL substring with a legitimate top-level
+        # frame should not be picked over the legitimate one. Pass 2
+        # falls back to the full frame tree only when no top-level
+        # match was found.
+        #
         # When two frames share the same URL exactly, the FIRST matching
-        # one wins (page.frames iteration order). Callers needing to
-        # disambiguate duplicate-URL siblings should use the frame_id
-        # token from ``RefHandle.to_agent_dict()`` instead of a URL
-        # substring.
-        for f in page.frames:
-            if f is page.main_frame:
-                continue
-            try:
-                url = f.url or ""
-            except Exception:
-                continue
-            if url == token:
-                exact = f
-                break
-            if substring is None and token in url:
-                substring = f
+        # one wins (iteration order). Callers needing to disambiguate
+        # duplicate-URL siblings should use the frame_id token from
+        # ``RefHandle.to_agent_dict()`` instead of a URL substring.
+        def _scan(frames):
+            ex = None
+            sub = None
+            for f in frames:
+                if f is page.main_frame:
+                    continue
+                try:
+                    url = f.url or ""
+                except Exception:
+                    continue
+                if url == token:
+                    ex = f
+                    break
+                if sub is None and token in url:
+                    sub = f
+            return ex, sub
+
+        try:
+            top_children = list(page.main_frame.child_frames)
+        except Exception:
+            top_children = []
+        exact, substring = _scan(top_children)
+        if exact is None and substring is None:
+            exact, substring = _scan(page.frames)
         return exact if exact is not None else substring
 
     async def _human_click(self, page, locator, *, force: bool = False,
@@ -4596,6 +4927,44 @@ class BrowserManager:
         await self._x11_move_to(inst, target_x, target_y)
 
         # 4. Click with human-like dwell time (mousedown -> hold -> mouseup)
+        wid_s = str(wid)
+        loop = asyncio.get_running_loop()
+        await asyncio.sleep(pre_click_settle())
+        await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(
+                ["xdotool", "mousedown", "--clearmodifiers", "--window", wid_s, "1"],
+                capture_output=True, timeout=3,
+            ),
+        )
+        await asyncio.sleep(click_dwell())
+        await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(
+                ["xdotool", "mouseup", "--clearmodifiers", "--window", wid_s, "1"],
+                capture_output=True, timeout=3,
+            ),
+        )
+
+    async def _x11_click_xy(
+        self, inst: CamoufoxInstance, x: float, y: float,
+    ) -> None:
+        """Click at viewport coords (x, y) via xdotool — trusted-event path.
+
+        ``click_xy`` previously dispatched ``page.mouse.click(x, y)``
+        directly, which generates a CDP-injected click with
+        ``isTrusted=false``. Bot-detection listeners check the trust
+        flag and an agent that primarily uses ref-clicks (X11) but
+        falls back to xy-clicks (CDP) emits a single
+        ``isTrusted=false`` event in an otherwise all-trusted session
+        — a sharp anti-bot cluster signal. Route through the same
+        Bezier + dwell shape ``_x11_click`` uses so the trusted-event
+        property holds across click-by-coords too.
+        """
+        wid = inst.x11_wid
+        if not wid:
+            raise RuntimeError("No X11 window ID — cannot use xdotool click")
+        await self._x11_move_to(inst, int(x), int(y))
         wid_s = str(wid)
         loop = asyncio.get_running_loop()
         await asyncio.sleep(pre_click_settle())
@@ -5175,10 +5544,19 @@ class BrowserManager:
                     )
                 masked_by = hit.get("masked_by") if isinstance(hit, dict) else None
                 if masked_by:
+                    # Redact name + role: ``elementFromPoint`` returns
+                    # raw DOM text (innerText slice). Snapshot output is
+                    # redacted; click_xy must honor the same boundary so
+                    # an agent doesn't get a privileged channel to read
+                    # credentials that leaked into element text. Role is
+                    # an attribute the page can set freely; bound length
+                    # so a malicious page can't bloat responses.
                     actual = {
-                        "tag": hit.get("tag", ""),
-                        "role": hit.get("role"),
-                        "name": hit.get("name", ""),
+                        "tag": hit.get("tag", "")[:64],
+                        "role": (hit.get("role") or "")[:64] or None,
+                        "name": self.redactor.redact(
+                            agent_id, hit.get("name", "") or "",
+                        )[:200],
                     }
                     return {
                         "success": False,
@@ -5200,16 +5578,38 @@ class BrowserManager:
                         },
                     }
 
-                # Clean hit — dispatch the click.
-                await inst.page.mouse.click(x, y)
+                # Clean hit — dispatch the click. Prefer X11/xdotool
+                # (real kernel InputEvents → ``isTrusted=true``) when
+                # the agent has an X11 window registered; fall back to
+                # CDP only when X11 isn't usable. Pre-fix this used
+                # ``page.mouse.click`` unconditionally — a single such
+                # CDP click in an otherwise-X11 session emits an
+                # ``isTrusted=false`` event that anti-bot listeners
+                # cluster on.
+                if isinstance(inst.x11_wid, int) and self._is_x11_site(inst):
+                    try:
+                        await self._x11_click_xy(inst, x, y)
+                    except Exception as e:
+                        logger.warning(
+                            "X11 xy-click failed for '%s' at (%s, %s); "
+                            "falling back to CDP: %s",
+                            agent_id, x, y, e,
+                        )
+                        await inst.page.mouse.click(x, y)
+                else:
+                    await inst.page.mouse.click(x, y)
                 await asyncio.sleep(action_delay())
 
-                # DOM may have changed; drop the diff baseline for the
-                # active page so the next snapshot is a full re-walk
-                # rather than a stale-against-new diff.
-                active_pid = inst.last_active_page_id
-                if active_pid is not None:
-                    inst.last_snapshot.pop(active_pid, None)
+                # Don't drop the diff baseline here. Ref-click / type /
+                # scroll / fill_form mutate the DOM identically and
+                # don't drop their baselines either; dropping only on
+                # xy-click made diff behavior depend on which click
+                # entry-point the agent used. Keeping the baseline
+                # means the next ``snapshot(diff_from_last=True)`` will
+                # surface what THIS click changed — which is what the
+                # diff feature is for. The next snapshot rebuilds the
+                # ref-summary from scratch regardless, so there's no
+                # stale-data hazard.
 
                 # Post-click CAPTCHA re-detection — coordinate clicks
                 # frequently land on interstitial challenge widgets.
@@ -5228,9 +5628,11 @@ class BrowserManager:
                     "data": {
                         "clicked_at": {"x": x, "y": y},
                         "actual_element": {
-                            "tag": hit.get("tag", ""),
-                            "role": hit.get("role"),
-                            "name": hit.get("name", ""),
+                            "tag": hit.get("tag", "")[:64],
+                            "role": (hit.get("role") or "")[:64] or None,
+                            "name": self.redactor.redact(
+                                agent_id, hit.get("name", "") or "",
+                            )[:200],
                         },
                     },
                 }
@@ -5643,10 +6045,12 @@ class BrowserManager:
         """Type text with minimal delay — still fires real key events.
 
         Uses keyboard.press(char) for isTrusted=true events so React/Lexical
-        state updates work, but with a fixed 8 ms inter-key delay (no
-        variance, no think pauses).  Suitable for search queries, URLs,
-        and non-sensitive form fields where human-realistic timing is
-        unnecessary.
+        state updates work. Inter-key delay is a small Gaussian (μ≈8 ms,
+        σ≈3 ms, clamped non-negative) rather than a constant — perfectly
+        periodic 8 ms keystrokes are FFT-detectable and zero real human
+        types with that exact cadence. Suitable for search queries, URLs,
+        and non-sensitive form fields where full human-realistic timing
+        is unnecessary but a flat fingerprint is unwanted.
         """
         for char in text:
             if char == "\n":
@@ -5658,7 +6062,9 @@ class BrowserManager:
                     await page.keyboard.press(char)
                 except Exception:
                     await page.keyboard.type(char)
-            await asyncio.sleep(0.008)
+            # Gaussian jitter ~ N(8 ms, 3 ms), floor at 1 ms so we
+            # never schedule a zero-or-negative sleep.
+            await asyncio.sleep(max(0.001, random.gauss(0.008, 0.003)))
 
     async def scroll(self, agent_id: str, direction: str = "down",
                      amount: int = 0, ref: str | None = None) -> dict:
@@ -5868,8 +6274,12 @@ class BrowserManager:
             pre_url = ""
 
         # 1. Install. Failures are non-fatal — we still run the action.
+        # Do not run read-back unless install succeeded; a failed install
+        # could otherwise read stale probe state left by a prior action.
+        probe_installed = False
         try:
             await inst.page.evaluate(_JS_CAPTCHA_REDETECT_INSTALL)
+            probe_installed = True
         except Exception as e:
             logger.debug(
                 "captcha redetect: install failed for %s: %s",
@@ -5877,8 +6287,19 @@ class BrowserManager:
             )
 
         # 2. Run the action. Always propagate exceptions — the wrapper
-        # exists to add detection, not to swallow action failures.
-        result = await action_coro
+        # exists to add detection, not to swallow action failures. When
+        # the action fails after a successful install, best-effort tear
+        # down the observer so a later flag-disabled path cannot inherit
+        # stale probe state.
+        try:
+            result = await action_coro
+        except Exception:
+            if probe_installed:
+                with contextlib.suppress(Exception):
+                    await inst.page.evaluate(
+                        _JS_CAPTCHA_REDETECT_READBACK, [],
+                    )
+            raise
 
         # 3. Read back the captured added nodes.
         navigated = False
@@ -5890,7 +6311,7 @@ class BrowserManager:
             navigated = True
 
         hits: list[str] = []
-        if not navigated:
+        if probe_installed and not navigated:
             try:
                 hits = await inst.page.evaluate(
                     _JS_CAPTCHA_REDETECT_READBACK,
@@ -5915,7 +6336,10 @@ class BrowserManager:
         # invoke the full 7-selector locator probe more than
         # ``_REDETECT_MIN_INTERVAL_S`` per instance.
         now = time.monotonic()
-        if (now - inst._last_redetect_ts) < _REDETECT_MIN_INTERVAL_S:
+        if (
+            inst._last_redetect_ts > 0
+            and (now - inst._last_redetect_ts) < _REDETECT_MIN_INTERVAL_S
+        ):
             logger.debug(
                 "captcha redetect: rate-limited for %s (%.2fs since last)",
                 agent_id, now - inst._last_redetect_ts,
@@ -5963,16 +6387,17 @@ class BrowserManager:
 
         Order of operations:
 
-          1. Rate-limit gate (records a slot only on a real attempt — gates
+          1. Fleet-wide kill switch.
+          2. Cost-cap gate (reserve maximum published price under lock).
+          3. Rate-limit gate (records a slot only on a real attempt — gates
              that short-circuit don't burn the per-hour budget).
-          2. Cost-cap gate (read against the agent's monthly bucket).
-          3. Solver HTTP call. ``solve()`` returns :class:`SolveResult`.
-          4. Cost accounting. Increments fire when ``result.token is not
-             None`` regardless of ``injection_succeeded`` — the provider
-             was paid the moment the token came back; injection failure
-             is our problem, not theirs. ``solver_attempted=False`` paths
-             (gates, behavioral, no-solver) skip accounting AND skip the
-             "no published rate" warning (it's not a billing event).
+          4. Provider/pricing sanity when a cost cap requires accounting.
+          5. Solver HTTP call. ``solve()`` returns :class:`SolveResult`.
+          6. Cost accounting. The reservation is corrected/refunded when
+             ``result.token`` is known. Actual increments fire when a token
+             was retrieved regardless of ``injection_succeeded`` — the
+             provider was paid the moment the token came back; injection
+             failure is our problem, not theirs.
 
         Returns the :class:`SolveResult` so the caller (``_check_captcha``)
         can build the §11.13 envelope from the per-call data — no shared
@@ -6000,51 +6425,20 @@ class BrowserManager:
                 skipped="disabled",
             )
 
-        # Gate 1: cost-cap. Read-only — does not consume a rate-limit
-        # slot, so a cost-capped agent does NOT burn its hourly quota.
-        # ``cap_millicents`` and the bucket are both millicents
-        # (1/1000¢ = 1/100_000$); see :mod:`captcha_cost_counter`
-        # docstring for the unit invariant.  Order: cost → rate so a
-        # cost-blocked solve doesn't burn rate slots that should still
-        # be available when the cap resets.
+        provider = getattr(self._captcha_solver, "provider", "")
+        reserved_millicents = 0
+
+        # Gate 1: cost-cap. Reserve the maximum published price under the
+        # counter lock before the provider HTTP call. That makes concurrent
+        # solves for the same agent see in-flight spend and prevents each
+        # request from independently passing a read-only ``over_cap`` check.
+        # We refund or correct the reservation after the provider result is
+        # known. Order stays cost → rate so a cost-blocked solve doesn't
+        # burn rate slots that should still be available when the cap resets.
         cap_millicents = _resolve_cost_cap(agent_id)
         if cap_millicents > 0:
             from src.browser import captcha_cost_counter as _cost
-            if await _cost.over_cap(agent_id, cap_millicents):
-                await _record_captcha_audit_event(
-                    agent_id, "cost_cap", kind, page_url,
-                )
-                return SolveResult(
-                    token=None, injection_succeeded=False,
-                    used_proxy_aware=False, compat_rejected=False,
-                    skipped="cost_cap",
-                )
-
-        # Gate 2: rate-limit. ``_check_solve_rate`` consumes a slot only
-        # on the actual-attempt path (returning False); a True return
-        # means we are over the limit, no slot consumed.
-        rate_limit = _resolve_rate_limit(agent_id)
-        if await _check_solve_rate(agent_id, rate_limit):
-            await _record_captcha_audit_event(
-                agent_id, "rate_limited", kind, page_url,
-            )
-            return SolveResult(
-                token=None, injection_succeeded=False,
-                used_proxy_aware=False, compat_rejected=False,
-                skipped="rate_limited",
-            )
-
-        # Gate 3: provider sanity. When a cost cap is configured, we
-        # MUST be able to attribute every solve to a published rate so
-        # the cap math stays honest. A solver without a string ``provider``
-        # cannot be priced; in that case we fail closed (skip the solve)
-        # rather than let an untrackable charge slip past the cap.
-        # When no cap is configured the warning still fires so operators
-        # see the misconfiguration, but we proceed with the solve — keeps
-        # tests and custom solver integrations from breaking outright.
-        provider = getattr(self._captcha_solver, "provider", "")
-        if not isinstance(provider, str) or not provider:
-            if cap_millicents > 0:
+            if not isinstance(provider, str) or not provider:
                 logger.warning(
                     "captcha solve: solver has no string ``provider`` "
                     "attribute; cost cap is configured (cap=%s "
@@ -6062,49 +6456,151 @@ class BrowserManager:
                     used_proxy_aware=False, compat_rejected=False,
                     skipped="provider_missing",
                 )
-            logger.warning(
-                "captcha solve: solver has no string ``provider`` "
-                "attribute; cost accounting will be SKIPPED for this "
-                "solve (cap not configured so the warning is "
-                "informational). Set solver.provider to a known name "
-                "to enable cost tracking.",
-            )
-
-        # Run the actual solver. Any exception bubbles up so the caller can
-        # build the appropriate ``timeout``/``rejected`` envelope; we don't
-        # swallow them here because the envelope-mapping is caller-specific.
-        result = await self._captcha_solver.solve(
-            inst.page, sel, page_url,
-            agent_id=agent_id, kind=kind,
-        )
-
-        # Cost accounting fires on token retrieval, NOT on injection
-        # success — the provider already charged for the token. Skip
-        # accounting when no token came back (gates / sitekey-fail /
-        # provider-reject / breaker / unreachable).
-        if result.token is not None:
-            from src.browser import captcha_cost_counter as _cost
-            # Defensive: solver mocks in tests sometimes leave provider
-            # as a MagicMock auto-spec child; only proceed when we have
-            # an actual string we can pass to ``estimate_millicents``.
-            # The provider-missing case was warned above; here we just
-            # skip the increment silently.
-            if isinstance(provider, str) and provider:
-                millicents = _cost.estimate_millicents(
-                    provider, kind,
-                    proxy_aware=result.used_proxy_aware,
+            reservation = _max_published_solve_cost_millicents(provider, kind)
+            if reservation is None:
+                logger.warning(
+                    "captcha solve: no published rate for provider=%s "
+                    "kind=%s while cost cap is configured (cap=%s "
+                    "millicents) — failing closed so an untracked charge "
+                    "cannot bypass the cap.",
+                    provider, kind, cap_millicents,
                 )
-                if millicents is None:
-                    logger.warning(
-                        "captcha solve: no published rate for "
-                        "provider=%s kind=%s proxy_aware=%s — "
-                        "skipping cost increment "
-                        "(under-count > over-count)",
-                        provider, kind, result.used_proxy_aware,
+                await _record_captcha_audit_event(
+                    agent_id, "price_missing", kind, page_url,
+                )
+                return SolveResult(
+                    token=None, injection_succeeded=False,
+                    used_proxy_aware=False, compat_rejected=False,
+                    skipped="price_missing",
+                )
+            allowed, _total = await _cost.check_and_charge(
+                agent_id, cap_millicents, reservation,
+            )
+            if not allowed:
+                await _record_captcha_audit_event(
+                    agent_id, "cost_cap", kind, page_url,
+                )
+                return SolveResult(
+                    token=None, injection_succeeded=False,
+                    used_proxy_aware=False, compat_rejected=False,
+                    skipped="cost_cap",
+                )
+            reserved_millicents = reservation
+
+        # All paths past the cost-cap gate must reconcile the
+        # reservation. Wrap the rest of the function in try/finally with
+        # a ``reservation_settled`` flag so that ANY exit (return,
+        # raise, ``CancelledError``) cleans up the reserved spend rather
+        # than leaving it stuck on the agent's bucket. Pre-fix, an
+        # ``asyncio.Task.cancel`` mid-solve (caller timed out, browser
+        # restart, container shutdown) would leave the reservation
+        # permanently committed even though no token was ever received.
+        from src.browser import captcha_cost_counter as _cost
+        reservation_settled = False
+        try:
+            # Gate 2: rate-limit. ``_check_solve_rate`` consumes a slot
+            # only on the actual-attempt path (returning False); a True
+            # return means we are over the limit, no slot consumed.
+            rate_limit = _resolve_rate_limit(agent_id)
+            if await _check_solve_rate(agent_id, rate_limit):
+                await _record_captcha_audit_event(
+                    agent_id, "rate_limited", kind, page_url,
+                )
+                return SolveResult(
+                    token=None, injection_succeeded=False,
+                    used_proxy_aware=False, compat_rejected=False,
+                    skipped="rate_limited",
+                )
+
+            # Gate 3: provider sanity. When a cost cap is configured, we
+            # MUST be able to attribute every solve to a published rate
+            # so the cap math stays honest. A solver without a string
+            # ``provider`` cannot be priced; in that case we fail closed
+            # (skip the solve) rather than let an untrackable charge
+            # slip past the cap. When no cap is configured the warning
+            # still fires so operators see the misconfiguration, but we
+            # proceed with the solve — keeps tests and custom solver
+            # integrations from breaking outright.
+            if not isinstance(provider, str) or not provider:
+                logger.warning(
+                    "captcha solve: solver has no string ``provider`` "
+                    "attribute; cost accounting will be SKIPPED for "
+                    "this solve (cap not configured so the warning is "
+                    "informational). Set solver.provider to a known "
+                    "name to enable cost tracking.",
+                )
+
+            # Run the actual solver. Any exception bubbles up so the
+            # caller can build the appropriate ``timeout``/``rejected``
+            # envelope; we don't swallow them here because the
+            # envelope-mapping is caller-specific. Audit the
+            # exception-during-solve case so operator dashboards see
+            # the storm before the breaker trips.
+            try:
+                result = await self._captcha_solver.solve(
+                    inst.page, sel, page_url,
+                    agent_id=agent_id, kind=kind,
+                )
+            except Exception:
+                await _record_captcha_audit_event(
+                    agent_id, "solver_exception", kind, page_url,
+                )
+                raise
+
+            # Cost accounting fires on token retrieval, NOT on
+            # injection success — the provider already charged for the
+            # token. Skip accounting when no token came back (gates /
+            # sitekey-fail / provider-reject / breaker / unreachable).
+            if result.token is not None:
+                # Defensive: solver mocks in tests sometimes leave
+                # ``provider`` as a MagicMock auto-spec child; only
+                # proceed when we have an actual string we can pass to
+                # ``estimate_millicents``. The provider-missing case
+                # was warned above; here we just skip the increment
+                # silently and let the finally-refund clean up the
+                # reservation.
+                if isinstance(provider, str) and provider:
+                    millicents = _cost.estimate_millicents(
+                        provider, kind,
+                        proxy_aware=result.used_proxy_aware,
                     )
-                else:
-                    await _cost.add_cost(agent_id, millicents)
-        return result
+                    if millicents is None:
+                        logger.warning(
+                            "captcha solve: no published rate for "
+                            "provider=%s kind=%s proxy_aware=%s — "
+                            "keeping any reserved cost-cap charge; "
+                            "otherwise skipping cost increment "
+                            "(under-count > over-count)",
+                            provider, kind, result.used_proxy_aware,
+                        )
+                        # With a configured cap, we reserved the max
+                        # published tier before the provider call. If
+                        # the solver reports an unpriced actual tier
+                        # after returning a token, keep that reservation
+                        # instead of refunding it; refunding would let an
+                        # untracked provider charge bypass the cap.
+                        if reserved_millicents:
+                            reservation_settled = True
+                    else:
+                        if reserved_millicents:
+                            await _cost.adjust_cost(
+                                agent_id,
+                                millicents - reserved_millicents,
+                            )
+                        else:
+                            await _cost.add_cost(agent_id, millicents)
+                        reservation_settled = True
+            return result
+        finally:
+            # If we got here without committing the reservation (token-
+            # less return, gate-trip return, raise, cancellation),
+            # refund. ``adjust_cost`` is clamped at zero so a refund
+            # that races with another adjustment can't drive negative.
+            if reserved_millicents and not reservation_settled:
+                with contextlib.suppress(Exception):
+                    await _cost.adjust_cost(
+                        agent_id, -reserved_millicents,
+                    )
 
     async def _check_captcha(self, inst: CamoufoxInstance) -> dict:
         """Check for CAPTCHA elements and attempt auto-solve if configured.
@@ -6182,9 +6678,9 @@ class BrowserManager:
         captcha_selectors = [
             'iframe[src*="recaptcha"]',
             'iframe[src*="hcaptcha"]',
+            '[class*="cf-turnstile"]',
             'iframe[src*="challenges.cloudflare.com"]',
             'iframe[src*="captcha"]',
-            '[class*="cf-turnstile"]',
             '[class*="captcha"]',
             '#captcha',
         ]
@@ -6572,6 +7068,16 @@ class BrowserManager:
                                 solver_confidence=_kind_confidence(kind),
                                 next_action="request_captcha_help",
                             ))
+                        if result.skipped == "price_missing":
+                            # Published-rate sanity check (cap-on case).
+                            # Same agent-facing shape as no_solver; the
+                            # audit outcome distinguishes it for operators.
+                            return await _finalize(_captcha_envelope(
+                                kind=kind, solver_attempted=False,
+                                solver_outcome="no_solver",
+                                solver_confidence=_kind_confidence(kind),
+                                next_action="request_captcha_help",
+                            ))
                         if result.skipped == "rate_limited":
                             return await _finalize(_captcha_envelope(
                                 kind=kind, solver_attempted=False,
@@ -6668,6 +7174,8 @@ class BrowserManager:
             return "recaptcha-v2-checkbox"
         if "hcaptcha" in selector:
             return "hcaptcha"
+        if "cf-turnstile" in selector:
+            return "turnstile"
         if "challenges.cloudflare.com" in selector:
             # Coarse CF default. The §11.3 classifier in ``_check_captcha``
             # routes to ``cf-interstitial-{auto,behavioral,turnstile}``
@@ -6675,8 +7183,6 @@ class BrowserManager:
             # embedded Turnstile widget). When the JS probe finds none
             # of those, this placeholder stays.
             return "cf-interstitial-auto"
-        if "cf-turnstile" in selector:
-            return "turnstile"
         # Generic 'captcha' selectors and #captcha fall through to unknown.
         return "unknown"
 
@@ -6926,6 +7432,41 @@ class BrowserManager:
 
         Returns ``{success, data: {uploaded: [path, …]}}`` or an error envelope.
         """
+        # Defense in depth: confine ``local_paths`` to the configured
+        # upload-receive directory BEFORE entering the body of this
+        # method. The mesh-side ``upload_apply`` only forwards paths
+        # returned by ``_stage_upload`` (which writes under
+        # ``OPENLEGION_UPLOAD_RECV_DIR``), but a buggy or compromised
+        # mesh caller carrying the bearer token could otherwise smuggle
+        # arbitrary on-disk paths here — both as a read-via-chooser
+        # exfil vector AND as an unconditional unlink of any reachable
+        # file via the cleanup ``finally`` at the end of this method.
+        # Validating BEFORE the try/finally ensures a rejected path is
+        # never reached by the cleanup unlink.
+        from src.browser.flags import get_str as _flag_str
+        recv_dir = Path(
+            _flag_str("OPENLEGION_UPLOAD_RECV_DIR", "/tmp/upload-recv"),
+        ).resolve()
+        try:
+            recv_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        for p in local_paths:
+            try:
+                resolved = Path(p).resolve()
+            except (OSError, RuntimeError) as e:
+                return {
+                    "success": False,
+                    "error": f"Upload path not resolvable: {e}",
+                }
+            try:
+                resolved.relative_to(recv_dir)
+            except ValueError:
+                return {
+                    "success": False,
+                    "error": "Upload path outside receive dir",
+                }
+
         inst = await self.get_or_start(agent_id)
         inst.touch()
         async with inst.lock:
@@ -6945,7 +7486,24 @@ class BrowserManager:
                 if not locator:
                     return {"success": False, "error": f"Ref '{ref}' not found"}
                 async with inst.page.expect_file_chooser(timeout=timeout_ms) as info:
-                    await locator.click(timeout=timeout_ms)
+                    if isinstance(inst.x11_wid, int) and self._is_x11_site(inst):
+                        try:
+                            await self._x11_click(
+                                inst, locator, timeout=timeout_ms,
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                "X11 upload click failed for '%s', "
+                                "falling back to CDP: %s",
+                                agent_id, e,
+                            )
+                            await self._human_click(
+                                inst.page, locator, timeout=timeout_ms,
+                            )
+                    else:
+                        await self._human_click(
+                            inst.page, locator, timeout=timeout_ms,
+                        )
                 chooser = await info.value
                 await chooser.set_files(local_paths)
                 await asyncio.sleep(action_delay())
@@ -6979,7 +7537,8 @@ class BrowserManager:
         to a racy drain-then-check fallback.
         """
         if download_dir is None:
-            download_dir = os.environ.get("BROWSER_DOWNLOAD_DIR", "/tmp/downloads")
+            from src.browser.flags import get_str as _flag_str
+            download_dir = _flag_str("BROWSER_DOWNLOAD_DIR", "/tmp/downloads")
         if not self._download_streaming_available:
             return {
                 "success": False,
@@ -7006,9 +7565,34 @@ class BrowserManager:
 
                 Path(download_dir).mkdir(parents=True, exist_ok=True)
                 async with inst.page.expect_download(timeout=timeout_ms) as info:
-                    await locator.click(timeout=timeout_ms)
+                    if isinstance(inst.x11_wid, int) and self._is_x11_site(inst):
+                        try:
+                            await self._x11_click(
+                                inst, locator, timeout=timeout_ms,
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                "X11 download click failed for '%s', "
+                                "falling back to CDP: %s",
+                                agent_id, e,
+                            )
+                            await self._human_click(
+                                inst.page, locator, timeout=timeout_ms,
+                            )
+                    else:
+                        await self._human_click(
+                            inst.page, locator, timeout=timeout_ms,
+                        )
                 download = await info.value
-                suggested = download.suggested_filename or "download.bin"
+                # Sanitize before joining — Content-Disposition is
+                # attacker-controlled and a ``../../`` escape would
+                # write outside ``download_dir`` (which is writable in
+                # the browser container). The leading nonce neutralizes
+                # leading-dot and absolute-path tricks but path
+                # separators inside ``suggested`` would still escape.
+                suggested = _sanitize_download_filename(
+                    download.suggested_filename or "download.bin",
+                )
                 nonce = uuid.uuid4().hex[:12]
                 dest = Path(download_dir) / f"{nonce}-{suggested}"
 
@@ -7152,7 +7736,14 @@ class BrowserManager:
             first_locator = None
             for ref_id, handle in inst.refs.items():
                 name = handle.name or ""
-                if not name or needle not in name.casefold():
+                # Match against the REDACTED accessible name so an
+                # agent-supplied query can't probe credentials that
+                # leaked into ``aria-label`` / tooltip text. Snapshots
+                # already redact what they emit; ``find_text`` must
+                # honor the same boundary or it becomes a confirm/deny
+                # oracle for known secret prefixes.
+                redacted_name = self.redactor.redact(agent_id, name)
+                if not name or needle not in redacted_name.casefold():
                     continue
                 if len(matches) >= 50:
                     truncated = True
@@ -7178,7 +7769,6 @@ class BrowserManager:
                                 bx + bw > 0 and by + bh > 0
                                 and bx < vw and by < vh
                             )
-                redacted_name = self.redactor.redact(agent_id, name)
                 matches.append({
                     "ref": ref_id,
                     "text": sanitize_for_prompt(redacted_name)[:200],

@@ -67,6 +67,8 @@ KNOWN_FLAGS: dict[str, str] = {
     "OPENLEGION_UPLOAD_STAGE_DIR": "mesh staging dir (default /tmp/openlegion-upload-stage)",
     "OPENLEGION_UPLOAD_RECV_DIR": "browser receive dir (default /tmp/upload-recv)",
     "OPENLEGION_UPLOAD_STAGE_TTL_S": "orphan staging TTL in seconds (default 60)",
+    "BROWSER_DOWNLOAD_DIR": "browser-side download dir (default /tmp/downloads)",
+    "BROWSER_DOWNLOAD_TTL_S": "stale download GC TTL seconds (default 60)",
     # ── CAPTCHA re-detection after non-navigate actions (§11.4 / §18.2) ───
     "BROWSER_CAPTCHA_REDETECT_ENABLED":
         "true | false (default true) — gate MutationObserver-based "
@@ -210,6 +212,28 @@ def _lookup_raw(name: str, agent_id: str | None) -> str | None:
     return os.environ.get(name)
 
 
+def _lookup_raw_candidates(name: str, agent_id: str | None) -> list[tuple[str, str]]:
+    """Return all configured values in precedence order.
+
+    Typed accessors use this to fall through when a higher-precedence
+    value is malformed. A bad per-agent override should not mask a valid
+    operator setting or environment fallback.
+    """
+    candidates: list[tuple[str, str]] = []
+    with _lock:
+        if agent_id is not None:
+            bucket = _agent_overrides.get(agent_id)
+            if bucket and name in bucket:
+                candidates.append(("agent_override", bucket[name]))
+        settings = _load_operator_settings()
+        if name in settings:
+            candidates.append(("operator_settings", settings[name]))
+    raw_env = os.environ.get(name)
+    if raw_env is not None:
+        candidates.append(("environment", raw_env))
+    return candidates
+
+
 # ── Typed accessors ────────────────────────────────────────────────────────
 
 
@@ -228,19 +252,18 @@ _FALSE = frozenset({"false", "0", "no", "off", ""})
 def get_bool(name: str, default: bool, *, agent_id: str | None = None) -> bool:
     """Return the boolean value for ``name``, coercing ``true|1|yes|on`` to
     ``True`` and ``false|0|no|off|<empty>`` to ``False``. Anything else logs
-    a warning and returns ``default``."""
-    raw = _lookup_raw(name, agent_id)
-    if raw is None:
-        return default
-    lowered = raw.strip().lower()
-    if lowered in _TRUE:
-        return True
-    if lowered in _FALSE:
-        return False
-    logger.warning(
-        "Flag %s has non-boolean value %r; falling back to default %r",
-        name, raw, default,
-    )
+    a warning and falls through to the next precedence layer."""
+    for source, raw in _lookup_raw_candidates(name, agent_id):
+        lowered = raw.strip().lower()
+        if lowered in _TRUE:
+            return True
+        if lowered in _FALSE:
+            return False
+        logger.warning(
+            "Flag %s from %s has non-boolean value %r; "
+            "falling through to next layer",
+            name, source, raw,
+        )
     return default
 
 
@@ -254,23 +277,23 @@ def get_int(
 ) -> int:
     """Return the integer value for ``name``, clamped to
     ``[min_value, max_value]`` when bounds are provided. Invalid ints log
-    a warning and return ``default``."""
-    raw = _lookup_raw(name, agent_id)
-    if raw is None:
-        return default
-    try:
-        value = int(raw.strip())
-    except (ValueError, AttributeError):
-        logger.warning(
-            "Flag %s has non-integer value %r; falling back to default %d",
-            name, raw, default,
-        )
-        return default
-    if min_value is not None and value < min_value:
-        return min_value
-    if max_value is not None and value > max_value:
-        return max_value
-    return value
+    a warning and fall through to the next precedence layer."""
+    for source, raw in _lookup_raw_candidates(name, agent_id):
+        try:
+            value = int(raw.strip())
+        except (ValueError, AttributeError):
+            logger.warning(
+                "Flag %s from %s has non-integer value %r; "
+                "falling through to next layer",
+                name, source, raw,
+            )
+            continue
+        if min_value is not None and value < min_value:
+            return min_value
+        if max_value is not None and value > max_value:
+            return max_value
+        return value
+    return default
 
 
 def get_float(
@@ -282,22 +305,22 @@ def get_float(
     max_value: float | None = None,
 ) -> float:
     """Return the float value for ``name``, clamped to bounds when provided."""
-    raw = _lookup_raw(name, agent_id)
-    if raw is None:
-        return default
-    try:
-        value = float(raw.strip())
-    except (ValueError, AttributeError):
-        logger.warning(
-            "Flag %s has non-float value %r; falling back to default %r",
-            name, raw, default,
-        )
-        return default
-    if min_value is not None and value < min_value:
-        return min_value
-    if max_value is not None and value > max_value:
-        return max_value
-    return value
+    for source, raw in _lookup_raw_candidates(name, agent_id):
+        try:
+            value = float(raw.strip())
+        except (ValueError, AttributeError):
+            logger.warning(
+                "Flag %s from %s has non-float value %r; "
+                "falling through to next layer",
+                name, source, raw,
+            )
+            continue
+        if min_value is not None and value < min_value:
+            return min_value
+        if max_value is not None and value > max_value:
+            return max_value
+        return value
+    return default
 
 
 def snapshot_all(*, agent_id: str | None = None) -> dict[str, Any]:

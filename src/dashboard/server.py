@@ -11,6 +11,7 @@ import contextlib
 import hashlib
 import ipaddress
 import json
+import math
 import os
 import re
 import shutil
@@ -358,6 +359,14 @@ def _validate_cookies(
         if not isinstance(name, str) or not name:
             _drop("empty_name")
             continue
+        # Bound the cookie name to a sane length. The wire spec doesn't
+        # mandate a cap but Firefox/Playwright treat oversized names
+        # poorly downstream; more importantly, names flow into the
+        # audit log so an unbounded payload could pollute log
+        # aggregation and disk usage.
+        if len(name) > 256:
+            _drop("invalid_name_length")
+            continue
         if domain is None:
             domain = ""
         if not isinstance(domain, str):
@@ -397,7 +406,14 @@ def _validate_cookies(
             _drop("host_prefix_with_domain")
             continue
         secure_raw = raw.get("secure")
-        secure = bool(secure_raw) if secure_raw is not None else False
+        if secure_raw is not None and not isinstance(secure_raw, bool):
+            _drop("invalid_secure")
+            continue
+        secure = secure_raw if secure_raw is not None else False
+        http_only_raw = raw.get("httpOnly")
+        if http_only_raw is not None and not isinstance(http_only_raw, bool):
+            _drop("invalid_httponly")
+            continue
         if name.startswith("__Host-"):
             if path != "/":
                 _drop("host_prefix_invalid_path")
@@ -405,6 +421,33 @@ def _validate_cookies(
             if not secure:
                 _drop("host_prefix_without_secure")
                 continue
+            # Spec: __Host- cookies are only set over a secure origin.
+            # If the operator supplied url=http://..., Firefox will
+            # silently drop the cookie at SET time. Reject up front
+            # so the operator gets a deterministic drop reason instead
+            # of an opaque "your import looked fine but nothing landed".
+            if url and not url.lower().startswith("https://"):
+                _drop("host_prefix_non_https_url")
+                continue
+        if name.startswith("__Secure-") and not secure:
+            _drop("secure_prefix_without_secure")
+            continue
+        if name.startswith("__Secure-") and url and not url.lower().startswith("https://"):
+            _drop("secure_prefix_non_https_url")
+            continue
+        # Per RFC 6265 §5.4, ``Secure=true`` requires an HTTPS origin.
+        # Firefox silently drops a Secure cookie set with a plain-http
+        # url at SET time. Reject up front so the operator gets a
+        # deterministic drop reason rather than an opaque "your import
+        # said success but nothing landed". Applies to ALL cookies
+        # (not just ``__Secure-``/``__Host-`` prefixed names).
+        if (
+            secure
+            and url
+            and not url.lower().startswith("https://")
+        ):
+            _drop("secure_non_https_url")
+            continue
         normalized: dict = {"name": name, "value": value}
         if url:
             normalized["url"] = url
@@ -423,17 +466,32 @@ def _validate_cookies(
             if ss_norm is None:
                 _drop("invalid_samesite")
                 continue
+            if ss_norm == "None" and not secure:
+                _drop("samesite_none_without_secure")
+                continue
             normalized["sameSite"] = ss_norm
-        # expires: must be numeric (int or float). Strings rejected.
+        # expires: must be a finite number (int or float). Reject
+        # bool (subclass of int), strings, NaN, ±Inf, and absurd far-
+        # future values that would overflow int conversion or fail
+        # downstream Playwright/Firefox validation. ~100 years out is a
+        # generous upper bound; cookies aren't realistically dated past
+        # that and bounding here protects the audit log too.
         if "expires" in raw and raw["expires"] is not None:
             exp = raw["expires"]
             if isinstance(exp, bool) or not isinstance(exp, (int, float)):
                 _drop("invalid_expires")
                 continue
+            if not math.isfinite(exp):
+                _drop("invalid_expires")
+                continue
+            _MAX_EXPIRES = 4102444800.0  # 2100-01-01 UTC, ~76yr buffer
+            if exp < 0 or exp > _MAX_EXPIRES:
+                _drop("invalid_expires")
+                continue
             normalized["expires"] = int(exp)
-        # httpOnly / secure — coerce to bool only when explicitly present.
-        if "httpOnly" in raw:
-            normalized["httpOnly"] = bool(raw["httpOnly"])
+        # httpOnly / secure — pass through only explicit JSON booleans.
+        if http_only_raw is not None:
+            normalized["httpOnly"] = http_only_raw
         if secure_raw is not None:
             normalized["secure"] = secure
         accepted.append(normalized)
@@ -824,6 +882,17 @@ def create_dashboard_router(
                 )
                 return False, retry_after_ms
             bucket.append(now)
+            # Periodic sweep of stale buckets so the dict doesn't grow
+            # unbounded across deleted/rotated agents. Cheap because we
+            # only sweep when the table grows past a threshold; the
+            # sliding window is the only state we need to retain.
+            if len(_cookie_import_buckets) > 1024:
+                stale = [
+                    k for k, b in _cookie_import_buckets.items()
+                    if not b or b[-1] <= cutoff
+                ]
+                for k in stale:
+                    _cookie_import_buckets.pop(k, None)
             return True, 0
 
     def _cookie_envelope_err(

@@ -109,6 +109,32 @@ class TestBoolAccessor:
         # Warning emitted so operators know their env var is malformed.
         assert any("non-boolean" in r.message for r in caplog.records)
 
+    def test_bad_agent_override_falls_through_to_operator(
+        self, settings_file, caplog,
+    ):
+        path = settings_file({"browser_flags": {"BROWSER_CANARY_ENABLED": "true"}})
+        with mock.patch.dict(os.environ, {"OPENLEGION_SETTINGS_PATH": path}):
+            flags.reload_operator_settings()
+            flags.set_agent_override("a1", "BROWSER_CANARY_ENABLED", "maybe")
+
+            assert flags.get_bool(
+                "BROWSER_CANARY_ENABLED", False, agent_id="a1",
+            ) is True
+        assert any("non-boolean" in r.message for r in caplog.records)
+
+    def test_bad_operator_value_falls_through_to_env(
+        self, settings_file, caplog,
+    ):
+        path = settings_file({"browser_flags": {"BROWSER_CANARY_ENABLED": "maybe"}})
+        with mock.patch.dict(os.environ, {
+            "OPENLEGION_SETTINGS_PATH": path,
+            "BROWSER_CANARY_ENABLED": "true",
+        }):
+            flags.reload_operator_settings()
+
+            assert flags.get_bool("BROWSER_CANARY_ENABLED", False) is True
+        assert any("non-boolean" in r.message for r in caplog.records)
+
 
 class TestIntAccessor:
     def test_valid_int(self):
@@ -126,6 +152,19 @@ class TestIntAccessor:
             assert flags.get_int("FLAG", 5) == 5
         assert any("non-integer" in r.message for r in caplog.records)
 
+    def test_bad_operator_int_falls_through_to_env(
+        self, settings_file, caplog,
+    ):
+        path = settings_file({"browser_flags": {"FLAG": "twelve"}})
+        with mock.patch.dict(os.environ, {
+            "OPENLEGION_SETTINGS_PATH": path,
+            "FLAG": "12",
+        }):
+            flags.reload_operator_settings()
+
+            assert flags.get_int("FLAG", 5) == 12
+        assert any("non-integer" in r.message for r in caplog.records)
+
 
 class TestFloatAccessor:
     def test_valid_float(self):
@@ -135,6 +174,13 @@ class TestFloatAccessor:
     def test_bounds(self):
         with mock.patch.dict(os.environ, {"FLAG": "2.5"}):
             assert flags.get_float("FLAG", 0.5, min_value=0.1, max_value=0.9) == 0.9
+
+    def test_bad_agent_float_falls_through_to_env(self, caplog):
+        with mock.patch.dict(os.environ, {"FLAG": "0.75"}):
+            flags.set_agent_override("a1", "FLAG", "high")
+
+            assert flags.get_float("FLAG", 0.5, agent_id="a1") == 0.75
+        assert any("non-float" in r.message for r in caplog.records)
 
 
 class TestStrAccessor:

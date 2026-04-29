@@ -652,6 +652,13 @@ class TestMaxConcurrentEnvVar:
             # when MAX_BROWSERS is also absent.
             assert _resolve_max_browsers() == 5
 
+    def test_garbage_legacy_var_does_not_crash_import(self):
+        with mock.patch.dict(os.environ, {"MAX_BROWSERS": "not-a-number"}):
+            os.environ.pop("OPENLEGION_BROWSER_MAX_CONCURRENT", None)
+            from src.browser.__main__ import _resolve_max_browsers
+
+            assert _resolve_max_browsers() == 5
+
     def test_env_var_documented_in_known_flags(self):
         from src.browser.flags import KNOWN_FLAGS
         assert "OPENLEGION_BROWSER_MAX_CONCURRENT" in KNOWN_FLAGS

@@ -380,16 +380,128 @@ class TestValidateCookies:
         _, _, fmt = _validate_cookies(42)
         assert fmt is None
 
-    def test_secure_prefix_passes_through(self):
-        """``__Secure-`` cookies have no special validation here —
-        Playwright/Firefox enforces the ``secure=true`` rule at SET time,
-        not at import. Importing a ``__Secure-foo`` with a domain is
-        therefore expected to be ACCEPTED by ``_validate_cookies``."""
+    def test_secure_prefix_with_secure_passes_through(self):
+        """``__Secure-`` cookies require ``secure=true`` but may still
+        carry a domain."""
         accepted, dropped, fmt = _validate_cookies(
             [{"name": "__Secure-sess", "value": "x",
               "domain": ".example.com", "secure": True}],
         )
         assert fmt == "playwright"
+        assert len(accepted) == 1
+        assert dropped == []
+
+    def test_drops_secure_prefix_without_secure(self):
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "__Secure-sess", "value": "x",
+              "domain": ".example.com", "secure": False}],
+        )
+        assert accepted == []
+        assert dropped == [{"reason": "secure_prefix_without_secure", "count": 1}]
+
+    def test_drops_samesite_none_without_secure(self):
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "sid", "value": "x", "domain": ".example.com",
+              "sameSite": "None"}],
+        )
+        assert accepted == []
+        assert dropped == [{"reason": "samesite_none_without_secure", "count": 1}]
+
+    def test_rejects_non_boolean_secure(self):
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "sid", "value": "x", "domain": ".example.com",
+              "secure": "false"}],
+        )
+        assert accepted == []
+        assert dropped == [{"reason": "invalid_secure", "count": 1}]
+
+    def test_rejects_non_boolean_httponly(self):
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "sid", "value": "x", "domain": ".example.com",
+              "httpOnly": "false"}],
+        )
+        assert accepted == []
+        assert dropped == [{"reason": "invalid_httponly", "count": 1}]
+
+    def test_rejects_nan_expires(self):
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "sid", "value": "x", "domain": ".example.com",
+              "expires": float("nan")}],
+        )
+        assert accepted == []
+        assert dropped == [{"reason": "invalid_expires", "count": 1}]
+
+    def test_rejects_inf_expires(self):
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "sid", "value": "x", "domain": ".example.com",
+              "expires": float("inf")}],
+        )
+        assert accepted == []
+        assert dropped == [{"reason": "invalid_expires", "count": 1}]
+
+    def test_rejects_negative_expires(self):
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "sid", "value": "x", "domain": ".example.com",
+              "expires": -1.0}],
+        )
+        assert accepted == []
+        assert dropped == [{"reason": "invalid_expires", "count": 1}]
+
+    def test_rejects_far_future_expires(self):
+        # 2200-01-01 is well past the 2100 cap; would otherwise overflow
+        # downstream Playwright/Firefox validation.
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "sid", "value": "x", "domain": ".example.com",
+              "expires": 7258118400.0}],
+        )
+        assert accepted == []
+        assert dropped == [{"reason": "invalid_expires", "count": 1}]
+
+    def test_rejects_oversized_name(self):
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "x" * 257, "value": "v", "domain": ".example.com"}],
+        )
+        assert accepted == []
+        assert dropped == [{"reason": "invalid_name_length", "count": 1}]
+
+    def test_drops_host_prefix_with_non_https_url(self):
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "__Host-sess", "value": "x", "secure": True,
+              "url": "http://example.com/", "path": "/"}],
+        )
+        assert accepted == []
+        assert dropped == [{"reason": "host_prefix_non_https_url", "count": 1}]
+
+    def test_drops_secure_prefix_with_non_https_url(self):
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "__Secure-sid", "value": "x", "secure": True,
+              "url": "http://example.com/"}],
+        )
+        assert accepted == []
+        assert dropped == [{"reason": "secure_prefix_non_https_url", "count": 1}]
+
+    def test_drops_plain_secure_cookie_with_non_https_url(self):
+        """RFC 6265 §5.4: ``Secure=true`` requires an HTTPS origin.
+        Pre-fix the validator only enforced this on ``__Host-`` /
+        ``__Secure-`` prefixed names; a plain ``{secure:true,
+        url:"http://..."}`` was accepted but Firefox silently dropped at
+        SET time. Reject up front so operators get a deterministic
+        drop reason."""
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "sid", "value": "x", "secure": True,
+              "url": "http://example.com/"}],
+        )
+        assert accepted == []
+        assert dropped == [{"reason": "secure_non_https_url", "count": 1}]
+
+    def test_plain_insecure_cookie_with_non_https_url_passes(self):
+        """The Secure-with-HTTP rejection should not affect plain
+        ``secure=false`` cookies on http URLs — that's a normal
+        cookie."""
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "sid", "value": "x", "secure": False,
+              "url": "http://example.com/"}],
+        )
         assert len(accepted) == 1
         assert dropped == []
 

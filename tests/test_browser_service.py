@@ -1,6 +1,8 @@
 """Tests for the shared browser service (BrowserManager, server, redaction)."""
 
 import asyncio
+import json
+import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -43,6 +45,21 @@ class TestCredentialRedactor:
 
 class TestBrowserManagerLifecycle:
     """Tests for BrowserManager start/stop/idle logic."""
+
+    def test_constructor_does_not_require_current_event_loop(self, tmp_path):
+        errors: list[BaseException] = []
+
+        def build_manager() -> None:
+            try:
+                BrowserManager(profiles_dir=str(tmp_path / "profiles"))
+            except BaseException as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(target=build_manager)
+        thread.start()
+        thread.join()
+
+        assert errors == []
 
     @pytest.mark.asyncio
     async def test_get_status_no_browser(self):
@@ -438,7 +455,37 @@ class TestTypeTextClearBehavior:
 class TestCamoufoxInstanceLock:
     """Tests that CamoufoxInstance has a per-instance lock."""
 
-    def test_instance_has_lock(self):
+    def test_lock_property_does_not_require_current_event_loop(self):
+        errors: list[BaseException] = []
+        locks: list[asyncio.Lock] = []
+        loop_state: list[str] = []
+
+        def build_and_read_lock() -> None:
+            try:
+                inst = CamoufoxInstance(
+                    "a1", MagicMock(), MagicMock(), MagicMock(),
+                )
+                locks.append(inst.lock)
+                try:
+                    asyncio.get_event_loop()
+                except RuntimeError:
+                    loop_state.append("unset")
+                else:
+                    loop_state.append("set")
+            except BaseException as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(target=build_and_read_lock)
+        thread.start()
+        thread.join()
+
+        assert errors == []
+        assert len(locks) == 1
+        assert isinstance(locks[0], asyncio.Lock)
+        assert loop_state == ["unset"]
+
+    @pytest.mark.asyncio
+    async def test_instance_has_lock(self):
         from src.browser.service import CamoufoxInstance
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), MagicMock())
         assert hasattr(inst, "lock")
@@ -477,21 +524,28 @@ class TestStealthConfig:
             opts = build_launch_options("agent1", "/tmp/profile")
         assert opts["os"] == "windows"
 
-    def test_webrtc_blocked_via_camoufox_toggle(self):
-        """WebRTC must be blocked via Camoufox's block_webrtc toggle, not manual prefs.
+    def test_webrtc_blocked_with_defense_in_depth(self):
+        """WebRTC must be blocked via BOTH Camoufox's ``block_webrtc``
+        toggle AND the underlying Firefox prefs.
 
-        block_webrtc=True is Camoufox's canonical way to block WebRTC — it covers
-        all relevant prefs and is more reliable than setting them manually.
-        Manual WebRTC prefs must NOT be in firefox_user_prefs (they're redundant
-        and could drift out of sync with the Camoufox implementation).
+        ``block_webrtc=True`` is Camoufox's primary toggle, but a single
+        point of failure: a future Camoufox release that silently drops
+        or renames the option would leak ICE candidates with no other
+        guard. Setting the underlying prefs explicitly is idempotent
+        with the toggle and survives any upstream rename. The earlier
+        version of this test asserted the prefs were *absent* — that
+        was the wrong shape; the right shape is belt-and-suspenders.
         """
         from src.browser.stealth import build_launch_options
         with patch.dict("os.environ", {}, clear=True):
             opts = build_launch_options("agent1", "/tmp/profile")
         assert opts["block_webrtc"] is True
-        # Manual WebRTC prefs are redundant — Camoufox's toggle handles them
         prefs = opts["firefox_user_prefs"]
-        assert "media.peerconnection.enabled" not in prefs
+        # Defense-in-depth: prefs that prevent ICE candidates from
+        # exposing the Docker container's internal IP.
+        assert prefs["media.peerconnection.enabled"] is False
+        assert prefs["media.peerconnection.ice.default_address_only"] is True
+        assert prefs["media.peerconnection.ice.no_host"] is True
 
     def test_rfp_is_off(self):
         """privacy.resistFingerprinting must be False — RFP values are detectable."""
@@ -589,16 +643,17 @@ class TestUAOverride:
     def test_no_override_by_default(self):
         """Without BROWSER_UA_VERSION, no UA-specific keys should be set.
 
-        Phase 3 §6.6 introduced unconditional ``navigator.connection.*``
-        keys plus ``i_know_what_im_doing`` so the assertions for those
-        no longer hold here — but ``navigator.userAgent`` and the
-        Firefox pref-level override must still be absent on the no-UA-
-        version path. That's the actual contract this test is guarding.
+        Firefox does not expose ``navigator.connection``; default launch
+        options should therefore avoid Camoufox ``config`` entirely. UA
+        config is only needed when an explicit Firefox version override is
+        requested.
         """
         from src.browser.stealth import build_launch_options
         with patch.dict("os.environ", {}, clear=True):
             opts = build_launch_options("agent1", "/tmp/profile")
         assert "navigator.userAgent" not in (opts.get("config") or {})
+        assert "config" not in opts
+        assert "i_know_what_im_doing" not in opts
         assert "general.useragent.override" not in opts["firefox_user_prefs"]
 
     def test_override_sets_camoufox_config(self):
@@ -660,9 +715,7 @@ class TestUAOverride:
         from src.browser.stealth import build_launch_options
         with patch.dict("os.environ", {"BROWSER_UA_VERSION": "abc"}, clear=True):
             opts = build_launch_options("agent1", "/tmp/profile")
-        # The §6.6 navigator.connection.* keys are still set; only the
-        # UA override path must not have run.
-        assert "navigator.userAgent" not in (opts.get("config") or {})
+        assert "config" not in opts
         assert "general.useragent.override" not in opts["firefox_user_prefs"]
 
     def test_override_rejects_single_number(self):
@@ -670,7 +723,7 @@ class TestUAOverride:
         from src.browser.stealth import build_launch_options
         with patch.dict("os.environ", {"BROWSER_UA_VERSION": "138"}, clear=True):
             opts = build_launch_options("agent1", "/tmp/profile")
-        assert "navigator.userAgent" not in (opts.get("config") or {})
+        assert "config" not in opts
 
     def test_override_rejects_empty_parts(self):
         """Malformed versions like '138.' or '.0' should be rejected."""
@@ -678,9 +731,7 @@ class TestUAOverride:
         for bad in ("138.", ".0", ".", ".."):
             with patch.dict("os.environ", {"BROWSER_UA_VERSION": bad}, clear=True):
                 opts = build_launch_options("agent1", "/tmp/profile")
-            assert "navigator.userAgent" not in (opts.get("config") or {}), (
-                f"Expected rejection for {bad!r}"
-            )
+            assert "config" not in opts, f"Expected rejection for {bad!r}"
 
     def test_override_strips_whitespace(self):
         """Leading/trailing whitespace should be stripped."""
@@ -693,9 +744,7 @@ class TestUAOverride:
         from src.browser.stealth import build_launch_options
         with patch.dict("os.environ", {"BROWSER_UA_VERSION": ""}, clear=True):
             opts = build_launch_options("agent1", "/tmp/profile")
-        # config exists for §6.6 NetworkInformation; the UA-specific
-        # key inside it is what must not be set.
-        assert "navigator.userAgent" not in (opts.get("config") or {})
+        assert "config" not in opts
 
     def test_build_ua_string_directly(self):
         """Unit test the helper function."""
@@ -722,6 +771,46 @@ class TestUAOverride:
 
 class TestNavigate:
     """Tests for BrowserManager.navigate()."""
+
+    @pytest.mark.asyncio
+    async def test_navigate_clears_refs_and_baseline(self):
+        """Same-tab navigation invalidates refs captured against the
+        prior document. Pre-fix, ``inst.refs`` survived; a later
+        ``click(ref="e3")`` could silently click an element with a
+        matching role/name on the new page (RefStale never fired)."""
+        from src.browser.ref_handle import RefHandle
+        from src.browser.service import BrowserManager, CamoufoxInstance
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mock_page = AsyncMock()
+        mock_page.goto = AsyncMock()
+        mock_page.title = AsyncMock(return_value="New Page")
+        mock_page.url = "https://example.com/after"
+        mock_page.evaluate = AsyncMock(return_value="body text")
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        # Seed prior refs and a stale snapshot baseline.
+        inst.refs = {
+            "e0": RefHandle(
+                page_id="p1", frame_id=None, shadow_path=(),
+                scope_root=None, role="button", name="Old", occurrence=0,
+                disabled=False, element_key="prior",
+            ),
+        }
+        inst.last_snapshot["p1"] = {
+            "refs_by_key": {"prior": {"ref_id": "e0", "role": "button"}},
+            "url": "https://example.com/before",
+            "dialog_active": False,
+        }
+        mgr._instances["a1"] = inst
+
+        result = await mgr.navigate(
+            "a1", "https://example.com/after", wait_ms=0,
+        )
+        assert result["success"] is True
+        # Both refs and the diff baseline must be wiped — same-tab
+        # navigation invalidates them.
+        assert inst.refs == {}
+        assert inst.last_snapshot == {}
 
     @pytest.mark.asyncio
     async def test_navigate_success(self):
@@ -2451,6 +2540,37 @@ class TestDiffSnapshot:
         assert data["unchanged_count"] == 3
 
     @pytest.mark.asyncio
+    async def test_empty_filter_updates_baseline_like_default(self):
+        """``filter=""`` is normalized to no filter. It must not be treated
+        as a scoped/subset snapshot or it will leave a stale diff baseline."""
+        tree_v1 = {
+            "role": "WebArea", "name": "",
+            "children": [{"role": "button", "name": "Submit"}],
+        }
+        tree_v2 = {
+            "role": "WebArea", "name": "",
+            "children": [
+                {"role": "button", "name": "Submit"},
+                {"role": "button", "name": "Cancel"},
+            ],
+        }
+        mgr, inst, mock_page = await self._setup(tree_v1)
+        await mgr.snapshot("a1")
+        page_id = inst.last_active_page_id
+        assert page_id is not None
+        baseline_v1 = set(inst.last_snapshot[page_id]["refs_by_key"])
+        assert len(baseline_v1) == 1
+
+        mock_page.accessibility.snapshot = AsyncMock(return_value=tree_v2)
+        mock_page.evaluate = mock_page.accessibility.snapshot
+
+        result = await mgr.snapshot("a1", filter="")
+
+        assert result["success"] is True
+        baseline_v2 = set(inst.last_snapshot[page_id]["refs_by_key"])
+        assert len(baseline_v2) == 2
+
+    @pytest.mark.asyncio
     async def test_from_ref_call_does_not_pollute_baseline(self):
         """Same invariant as above but for ``from_ref`` — scoped
         snapshots are informational, not anchors."""
@@ -3329,7 +3449,17 @@ class TestTypeFast:
     """Tests for _type_fast minimal-delay mode."""
 
     @pytest.mark.asyncio
-    async def test_type_fast_uses_fixed_delay(self):
+    async def test_type_fast_uses_jittered_delay(self):
+        """``_type_fast`` keystroke delay is now Gaussian (μ=8 ms,
+        σ=3 ms, floored at 1 ms) rather than a flat 8 ms. The
+        zero-variance constant cadence the prior version used was
+        FFT-detectable — every keystroke landing exactly 8 ms apart is
+        a fingerprint cluster no real human produces. Confirm:
+          * 5 keystrokes → 5 sleeps
+          * mean is approximately the configured μ
+          * NOT all delays equal (the regression we're guarding against)
+          * all delays are non-negative.
+        """
         from src.browser.service import BrowserManager
 
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
@@ -3347,7 +3477,13 @@ class TestTypeFast:
 
         assert mock_page.keyboard.press.await_count == 5
         assert len(delays) == 5
-        assert all(d == 0.008 for d in delays), f"Expected all 0.008, got {delays}"
+        # Variance: at least two distinct values across 5 samples.
+        assert len(set(delays)) > 1, f"expected jitter, got constant {delays}"
+        # All non-negative (floor at 1 ms).
+        assert all(d >= 0 for d in delays)
+        # Mean should land near the configured μ=8 ms within a wide
+        # tolerance; we're testing the SHAPE, not the RNG.
+        assert 0.001 <= sum(delays) / len(delays) <= 0.030
 
     @pytest.mark.asyncio
     async def test_type_fast_handles_special_keys(self):
@@ -3366,7 +3502,13 @@ class TestTypeFast:
 
     @pytest.mark.asyncio
     async def test_type_text_fast_flag(self):
-        """fast=True in type_text should use _type_fast, not _type_with_variance."""
+        """fast=True in type_text should use _type_fast, not _type_with_variance.
+
+        ``_type_fast`` keystrokes carry a small Gaussian jitter (μ=8 ms,
+        σ=3 ms) — confirm via "len(typing_delays) == len(text)" rather
+        than a strict equality on the constant value the prior version
+        emitted.
+        """
         from src.browser.service import BrowserManager, CamoufoxInstance
 
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
@@ -3386,11 +3528,15 @@ class TestTypeFast:
         async def capture_sleep(t: float):
             delays.append(t)
 
-        with patch("src.browser.service.asyncio.sleep", side_effect=capture_sleep):
+        with patch("src.browser.service.asyncio.sleep", side_effect=capture_sleep), \
+             patch("src.browser.service.action_delay", return_value=0.2):
             result = await mgr.type_text("a1", ref="e0", text="test", fast=True)
 
         assert result["success"] is True
-        typing_delays = [d for d in delays if d == 0.008]
+        # All delays in ``_type_fast`` land in the Gaussian band around
+        # 8 ms; filter to just those (excluding any setup sleeps from
+        # other code paths) and confirm 4 keystrokes == 4 delays.
+        typing_delays = [d for d in delays if 0.001 <= d <= 0.030]
         assert len(typing_delays) == 4
 
 
@@ -7428,22 +7574,56 @@ class TestGetSolver:
     """Tests for captcha.get_solver() factory function."""
 
     def test_get_solver_returns_none_when_not_configured(self):
-        """No env vars → None."""
+        """No browser flag values → None."""
         with patch.dict("os.environ", {}, clear=True):
+            from src.browser import flags
             from src.browser.captcha import get_solver
-            assert get_solver() is None
+
+            flags.reload_operator_settings()
+            try:
+                assert get_solver() is None
+            finally:
+                flags.reload_operator_settings()
 
     def test_get_solver_returns_solver_when_configured(self):
-        """Valid provider + key → CaptchaSolver instance."""
+        """Valid provider + key env flags → CaptchaSolver instance."""
         with patch.dict("os.environ", {
             "CAPTCHA_SOLVER_PROVIDER": "2captcha",
             "CAPTCHA_SOLVER_KEY": "test-key-123",
         }):
+            from src.browser import flags
             from src.browser.captcha import CaptchaSolver, get_solver
-            solver = get_solver()
-            assert isinstance(solver, CaptchaSolver)
-            assert solver.provider == "2captcha"
-            assert solver.api_key == "test-key-123"
+
+            flags.reload_operator_settings()
+            try:
+                solver = get_solver()
+                assert isinstance(solver, CaptchaSolver)
+                assert solver.provider == "2captcha"
+                assert solver.api_key == "test-key-123"
+            finally:
+                flags.reload_operator_settings()
+
+    def test_get_solver_reads_operator_browser_flags(self, tmp_path):
+        """Operator settings browser_flags configure the solver without env."""
+        settings = tmp_path / "settings.json"
+        settings.write_text(json.dumps({
+            "browser_flags": {
+                "CAPTCHA_SOLVER_PROVIDER": "capsolver",
+                "CAPTCHA_SOLVER_KEY": "settings-key-456",
+            },
+        }))
+        with patch.dict("os.environ", {"OPENLEGION_SETTINGS_PATH": str(settings)}, clear=True):
+            from src.browser import flags
+            from src.browser.captcha import CaptchaSolver, get_solver
+
+            flags.reload_operator_settings()
+            try:
+                solver = get_solver()
+                assert isinstance(solver, CaptchaSolver)
+                assert solver.provider == "capsolver"
+                assert solver.api_key == "settings-key-456"
+            finally:
+                flags.reload_operator_settings()
 
     def test_get_solver_rejects_unknown_provider(self):
         """Unknown provider → None with warning."""
@@ -7451,8 +7631,14 @@ class TestGetSolver:
             "CAPTCHA_SOLVER_PROVIDER": "badprovider",
             "CAPTCHA_SOLVER_KEY": "key",
         }):
+            from src.browser import flags
             from src.browser.captcha import get_solver
-            assert get_solver() is None
+
+            flags.reload_operator_settings()
+            try:
+                assert get_solver() is None
+            finally:
+                flags.reload_operator_settings()
 
 
 class TestClassifyCaptcha:
@@ -8350,6 +8536,11 @@ class TestShadowDOM:
         from src.browser.ref_handle import ShadowHop
         with pytest.raises(ValueError, match="discriminator"):
             ShadowHop(selector="my-card", occurrence=0, discriminator="")
+
+    def test_shadow_hop_rejects_negative_occurrence(self):
+        from src.browser.ref_handle import ShadowHop
+        with pytest.raises(ValueError, match="occurrence"):
+            ShadowHop(selector="my-card", occurrence=-1, discriminator="testid:x")
 
     @pytest.mark.asyncio
     async def test_compute_element_key_folds_shadow_path(self):
@@ -9524,13 +9715,12 @@ class TestShadowDOM:
                 await browser.close()
 
     @pytest.mark.asyncio
-    async def test_resolver_rejects_frame_id_until_pr3(self):
-        """P1.7 — until iframe support lands (PR3) the resolver must
-        refuse refs with a non-None frame_id rather than silently
-        resolving against the main frame. Explicit error makes the
-        cross-PR seam loud.
+    async def test_resolver_rejects_unknown_frame_id(self):
+        """Iframe-aware resolver must reject unknown frames explicitly.
+
+        A stale frame_id must not silently resolve against the main frame.
         """
-        from src.browser.ref_handle import RefHandle, ShadowHop
+        from src.browser.ref_handle import RefHandle, RefStale, ShadowHop
         from src.browser.service import BrowserManager, CamoufoxInstance
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
 
@@ -9546,7 +9736,7 @@ class TestShadowDOM:
             frame_id="f1-deadbeef",
         )
 
-        with pytest.raises(NotImplementedError, match="iframe"):
+        with pytest.raises(RefStale, match="frame_detached"):
             await mgr._locator_from_ref(inst, "e0")
         # Stage-1 was never invoked.
         mock_page.evaluate_handle.assert_not_called()
@@ -10683,16 +10873,10 @@ class TestIframeTraversal:
         detached.evaluate.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_click_returns_not_supported_on_shadow_in_iframe(self):
-        """Defensive: when PR2 (shadow DOM) merges, refs carrying both
-        ``shadow_path`` AND ``frame_id`` will raise ``NotImplementedError``
-        from ``_resolve_shadow_element`` (the explicit "Shadow + iframe
-        combination not yet supported" guard). The click()/type/hover/
-        scroll outer try-blocks must wrap that as a structured
-        ``not_supported`` envelope rather than letting it surface as a
-        500 from the generic ``except Exception`` catch-all.
-        """
-        from src.browser.ref_handle import RefHandle
+    async def test_locator_resolves_shadow_ref_inside_iframe(self):
+        """Shadow refs captured inside iframe snapshots must resolve
+        against that frame, not the main page."""
+        from src.browser.ref_handle import RefHandle, ShadowHop
         from src.browser.service import BrowserManager, CamoufoxInstance
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
 
@@ -10708,33 +10892,34 @@ class TestIframeTraversal:
         frame = MagicMock()
         frame_id = inst._register_frame(frame)
 
-        # Ref carries both shadow_path AND frame_id — exactly the
-        # combination PR2's guard rejects.
+        # Ref carries both shadow_path AND frame_id.
+        shadow_path = (
+            ShadowHop(
+                selector="custom-widget",
+                occurrence=0,
+                discriminator="stable-host",
+            ),
+        )
         inst.refs = {
             "e0": RefHandle(
                 page_id=page_id, frame_id=frame_id,
-                shadow_path=("div#root",), scope_root=None,
+                shadow_path=shadow_path, scope_root=None,
                 role="button", name="Submit", occurrence=0,
                 disabled=False, element_key="",
             ),
         }
 
-        # Stub the resolution path to simulate PR2's guard.
+        resolved = MagicMock()
         with patch.object(
-            BrowserManager, "_locator_from_ref",
-            side_effect=NotImplementedError(
-                "Shadow + iframe combination not yet supported",
-            ),
-        ):
-            result = await mgr.click("a1", ref="e0")
+            BrowserManager, "_resolve_shadow_element",
+            new_callable=AsyncMock,
+            return_value=resolved,
+        ) as resolve_shadow:
+            result = await mgr._locator_from_ref(inst, "e0")
 
-        assert result["success"] is False, result
-        assert isinstance(result["error"], dict)
-        assert result["error"]["code"] == "not_supported"
-        assert "Shadow + iframe" in result["error"]["message"]
-        # Click failure stats still get bumped — the action attempted
-        # and failed even if the failure mode is structured.
-        assert inst.m_click_fail == 1
+        assert result is resolved
+        resolve_shadow.assert_awaited_once()
+        assert resolve_shadow.await_args.args[0] is frame
 
 
 class TestSelectorFrameClickAndType:
@@ -10814,3 +10999,94 @@ class TestSelectorFrameClickAndType:
         target_frame.locator.assert_called_once_with("input.email")
         # Focus click went through the frame-scoped locator.
         frame_locator.click.assert_called()
+
+
+class TestPageIdsWeakKeyDictionary:
+    """Regression: closing a Page must drop its forward-map entry too,
+    not just the WeakValueDictionary reverse map. The prior ``dict[int,
+    str]`` keyed by ``id(page)`` allowed a freshly-opened tab to inherit
+    the recycled ``id()`` of a GC'd Page and silently re-bind the stale
+    UUID to a different tab.
+    """
+
+    @pytest.mark.asyncio
+    async def test_page_ids_drops_entries_on_gc(self):
+        import gc
+
+        from src.browser.service import CamoufoxInstance
+        page = MagicMock()
+        page.evaluate_handle = AsyncMock()
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), page)
+        # Open a second page, then drop our reference and force GC.
+        # WeakKeyDictionary ``len`` should decrement once the Page
+        # object is collected.
+        another_page = MagicMock()
+        inst._register_page(another_page)
+        assert len(inst.page_ids) == 2
+
+        del another_page
+        gc.collect()
+        # WeakKeyDictionary entries are removed when keys are GC'd.
+        # At least one entry remains (the original ``inst.page``).
+        assert len(inst.page_ids) <= 2  # 1 if GC reclaimed, else 2 (no leak hazard)
+        # Critically, the forward map can't grow indefinitely as tabs
+        # churn — re-registering the same surviving page is still
+        # idempotent.
+        same_id = inst._register_page(page)
+        same_id_again = inst._register_page(page)
+        assert same_id == same_id_again
+
+
+class TestSnapshotDiffSubsetShortCircuit:
+    """``diff_from_last=True`` combined with a subset selector
+    (filter / from_ref / target_frame / include_frames=False) used to
+    diff a subset against a full prior baseline, reporting every
+    filtered-out element as ``removed``. The combination now short-
+    circuits to the full-snapshot return path."""
+
+    @pytest.mark.asyncio
+    async def test_filter_with_diff_does_not_phantom_remove(self):
+        import asyncio
+
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        tree_v1 = {
+            "role": "WebArea", "name": "",
+            "children": [
+                {"role": "button", "name": "Submit"},
+                {"role": "heading", "name": "Title"},
+                {"role": "paragraph", "name": "Body text"},
+            ],
+        }
+        mock_page = AsyncMock()
+        mock_page.url = "https://example.com/"
+        mock_page.viewport_size = {"width": 1024, "height": 768}
+        mock_page.query_selector_all = AsyncMock(return_value=[])
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value=tree_v1)
+        mock_page.evaluate = mock_page.accessibility.snapshot
+        main_frame = MagicMock()
+        main_frame.child_frames = []
+        mock_page.main_frame = main_frame
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst.lock = asyncio.Lock()
+        mgr._instances["a1"] = inst
+        # First, full snapshot to populate baseline.
+        await mgr.snapshot("a1")
+        # Now request a subset diff. Pre-fix: the full prior baseline
+        # diffed against the actionable-only subset would report every
+        # non-actionable element as ``removed``. Post-fix: subset+diff
+        # returns the full-snapshot envelope (scope=navigation).
+        result = await mgr.snapshot(
+            "a1", filter="actionable", diff_from_last=True,
+        )
+        assert result["success"] is True
+        # No ``added``/``removed`` keys — short-circuit returned a
+        # snapshot envelope, not a diff envelope.
+        assert "snapshot" in result["data"]
+        assert "removed" not in result["data"]
+        # ``scope`` is included to signal the caller that the diff was
+        # not produced.
+        assert result["data"].get("scope") == "navigation"

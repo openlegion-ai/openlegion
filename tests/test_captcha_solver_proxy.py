@@ -585,8 +585,8 @@ class TestCredentialLeakCanary:
                 "invisible_by_key": {"SITEKEY-canary": False},
                 "enterprise_script": False, "v3_render_param": None,
             },
-            # any additional evaluate() (token injection JS) — return None
-            None, None, None, None, None,
+            # token injection JS reports whether it actually applied the token
+            True, None, None, None, None,
         ])
         page.url = "https://example.com/login"
 
@@ -686,7 +686,7 @@ class TestCredentialLeakCanary:
                 "invisible_by_key": {"SITEKEY-x": False},
                 "enterprise_script": False, "v3_render_param": None,
             },
-            None, None, None, None, None,
+            True, None, None, None, None,
         ])
         page.url = "https://example.com"
 
@@ -759,7 +759,7 @@ class TestCredentialLeakCanary:
                 "invisible_by_key": {"SITEKEY-x": False},
                 "enterprise_script": False, "v3_render_param": None,
             },
-            None, None, None, None, None,
+            True, None, None, None, None,
         ])
         page.url = "https://example.com"
 

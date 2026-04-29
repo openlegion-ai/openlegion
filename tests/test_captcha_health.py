@@ -529,6 +529,34 @@ async def test_concurrent_solves_short_circuit_when_breaker_open():
 
 
 @pytest.mark.asyncio
+async def test_solve_log_redacts_page_url_query(caplog):
+    raw_url = "https://example.com/login?clientKey=SECRET-CLIENT-KEY&session=abc123"
+    solver = _make_solver()
+    solver._solver_health_checked = True
+    page = AsyncMock()
+
+    with (
+        patch(
+            "src.browser.captcha._classify_recaptcha",
+            AsyncMock(return_value={
+                "variant": "recaptcha-v2-checkbox",
+                "sitekey": None,
+                "action": None,
+            }),
+        ),
+        patch.object(solver, "_extract_sitekey", AsyncMock(return_value=None)),
+        caplog.at_level(logging.INFO, logger="browser.captcha"),
+    ):
+        await solver.solve(page, 'iframe[src*="recaptcha"]', raw_url)
+
+    rendered = "\n".join(record.getMessage() for record in caplog.records)
+    assert "SECRET-CLIENT-KEY" not in rendered
+    assert "session=abc123" not in rendered
+    assert "clientKey=" in rendered
+    assert "session=" in rendered
+
+
+@pytest.mark.asyncio
 async def test_health_check_logs_redact_clientkey(caplog):
     raw_key = "SECRET-KEY-DO-NOT-LEAK-1234567890"
     solver = _make_solver(key=raw_key)
@@ -933,4 +961,3 @@ class TestBreakerLocalVsProviderFailures:
         # Breaker SHOULD have tripped — these were real provider
         # failures, not local classification gaps.
         assert solver.is_breaker_open() is True
-

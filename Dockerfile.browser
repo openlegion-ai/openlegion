@@ -15,7 +15,7 @@ FROM python:3.12-slim
 # profiles is handled by src/browser/profile_schema.py migration v2.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tini openbox wmctrl xdotool x11-xserver-utils unclutter-xfixes procps curl \
-    iptables gosu \
+    iptables gosu tzdata \
     libgtk-3-0 libatk1.0-0 libasound2 \
     libxcomposite1 libxdamage1 libxrandr2 libxkbcommon0 libgbm1 \
     libpango-1.0-0 libcairo2 libdbus-glib-1-2 \
@@ -27,6 +27,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get install -y --no-install-recommends /tmp/kasmvnc.deb \
     && rm /tmp/kasmvnc.deb \
     && rm -rf /var/lib/apt/lists/*
+
+# Pin the container timezone to a sensible en-US default. Without this,
+# ``Intl.DateTimeFormat().resolvedOptions().timeZone`` resolves to ``UTC``
+# (Docker's default), which is itself a strong fingerprint cluster: zero
+# real en-US users sit on UTC. Operators can override at runtime via
+# ``-e TZ=...`` (or via the systemd unit) to match their proxy egress
+# region. America/New_York is the most common en-US timezone by population.
+ENV TZ=America/New_York
+RUN ln -fs /usr/share/zoneinfo/${TZ} /etc/localtime \
+    && echo "${TZ}" > /etc/timezone
 
 # Install fontconfig alias file that redirects Windows typeface names to
 # the metric-compatible substitutes installed above. Must live under
@@ -80,20 +90,32 @@ WORKDIR /app
 # existing profiles re-install the new XPI on next launch.
 #
 # The ``.firefox.signed.xpi`` naming covers all stable uBO 1.x releases
-# we'd reasonably ship. Pre-release / beta builds (1.70.1b1 etc.) ship
-# only ``.firefox.xpi`` (unsigned) — fall back to that name so a tester
-# can pin to a beta without hand-editing the URL. Camoufox's patched
-# Firefox accepts unsigned XPIs because xpinstall.signatures.required
-# is set to False in stealth prefs.
+# we'd reasonably ship. Camoufox's patched Firefox loads AMO-signed
+# extensions cleanly; the unsigned ``.firefox.xpi`` fallback is removed
+# because (a) silently substituting an unsigned XPI on a tag yank made
+# the build susceptible to upstream tampering, and (b)
+# ``xpinstall.signatures.required=false`` in stealth prefs would have
+# loaded ANY tampered substitute without warning.
+#
+# Bumping ``UBLOCK_VERSION`` REQUIRES updating ``UBLOCK_SHA256`` to the
+# corresponding release's SHA-256 — recorded in upstream release notes
+# or computed via ``sha256sum`` after a verified download. The build
+# fails closed if the hash mismatches, so a compromised release-asset
+# substitution can't silently land in agent profiles.
+#
+# To compute: download the URL below, run ``sha256sum`` on the result,
+# then paste the hex digest into ``UBLOCK_SHA256``. Verify against
+# the GitHub release page's published checksum (or PGP signature
+# verification of the corresponding ``.sig`` if upstream ships one).
+#
+# The build can be overridden via ``--build-arg UBLOCK_SHA256=...``.
 ARG UBLOCK_VERSION=1.62.0
+ARG UBLOCK_SHA256=8a9e02aa838c302fb14e2b5bc88a6036d36358aadd6f95168a145af2018ef1a3
 RUN mkdir -p /opt/openlegion/extensions \
-    && ( \
-       curl -fSL -o /opt/openlegion/extensions/uBlock0.xpi \
-          "https://github.com/gorhill/uBlock/releases/download/${UBLOCK_VERSION}/uBlock0_${UBLOCK_VERSION}.firefox.signed.xpi" \
-       || curl -fSL -o /opt/openlegion/extensions/uBlock0.xpi \
-          "https://github.com/gorhill/uBlock/releases/download/${UBLOCK_VERSION}/uBlock0_${UBLOCK_VERSION}.firefox.xpi" \
-       ) \
-    && test -s /opt/openlegion/extensions/uBlock0.xpi \
+    && curl -fSL -o /opt/openlegion/extensions/uBlock0.xpi \
+        "https://github.com/gorhill/uBlock/releases/download/${UBLOCK_VERSION}/uBlock0_${UBLOCK_VERSION}.firefox.signed.xpi" \
+    && echo "${UBLOCK_SHA256}  /opt/openlegion/extensions/uBlock0.xpi" \
+        | sha256sum -c - \
     && chmod 0644 /opt/openlegion/extensions/uBlock0.xpi
 
 # Python dependencies — upgrade pip first to avoid resolver bugs with stale base images

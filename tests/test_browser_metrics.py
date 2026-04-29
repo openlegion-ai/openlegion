@@ -216,7 +216,7 @@ class TestStopInstanceDrainsCounters:
         inst.m_snapshot_bytes = [100, 200]
 
         # Stop under the manager's lock as callers do.
-        async with mgr._lock:
+        async with mgr._manager_lock():
             await mgr._stop_instance("bye")
 
         # Instance removed AND its counters made it to the sink.
@@ -238,7 +238,7 @@ class TestStopInstanceDrainsCounters:
         inst.context.close = AsyncMock()
         mgr._instances["bye"] = inst
         inst.m_click_success = 5
-        async with mgr._lock:
+        async with mgr._manager_lock():
             await mgr._stop_instance("bye")
         assert "bye" not in mgr._instances
 
@@ -371,7 +371,7 @@ class TestMetricsHistoryBuffer:
         inst.context.close = AsyncMock()
         mgr._instances["goodbye"] = inst
         inst.m_click_success = 9
-        async with mgr._lock:
+        async with mgr._manager_lock():
             await mgr._stop_instance("goodbye")
 
         snap = mgr.get_recent_metrics(since_seq=0)

@@ -30,7 +30,11 @@ existing `int` storage / JSON shape unchanged.
 Public surface:
   * :func:`add_cost(agent_id, millicents)` — increment a per-agent
     monthly bucket. Resets when the calendar month rolls over.
+  * :func:`adjust_cost(agent_id, delta_millicents)` — apply a signed
+    correction, clamped at zero. Used to refund pre-solve reservations.
   * :func:`over_cap(agent_id, cap_millicents)` — read-only check.
+  * :func:`check_and_charge(agent_id, cap_millicents, millicents)` —
+    atomic under-cap reservation/charge helper.
   * :func:`snapshot()` / :func:`restore()` — JSON file persistence. Atomic
     write via ``os.replace`` after ``fsync``. The on-disk schema migrates
     legacy ``cents`` snapshots by multiplying ×1000 on load (logged once).
@@ -203,7 +207,23 @@ estimate_cents = estimate_millicents
 
 # {agent_id: {"month": "YYYY-MM", "millicents": int}}
 _state: dict[str, dict] = {}
-_lock: asyncio.Lock = asyncio.Lock()
+# Created lazily inside async paths to stay loop-safe — pytest-asyncio
+# uses one event loop per test, so an import-time ``asyncio.Lock()``
+# would bind to the first loop and fail on the second. Mirrors the
+# pattern in ``service.py`` (``_get_solve_rate_lock`` etc.) and
+# ``captcha.py`` (``CaptchaSolver._get_state_lock``).
+_lock: asyncio.Lock | None = None
+_lock_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _get_lock() -> asyncio.Lock:
+    """Return a cost-counter lock bound to the active event loop."""
+    global _lock, _lock_loop
+    loop = asyncio.get_running_loop()
+    if _lock is None or _lock_loop is not loop:
+        _lock = asyncio.Lock()
+        _lock_loop = loop
+    return _lock
 
 
 def _current_month() -> str:
@@ -238,9 +258,25 @@ async def add_cost(agent_id: str, millicents: int) -> int:
     """
     if millicents <= 0:
         return await get_millicents(agent_id)
-    async with _lock:
+    async with _get_lock():
         bucket = _bucket_for(agent_id)
         bucket["millicents"] = int(bucket["millicents"]) + int(millicents)
+        return bucket["millicents"]
+
+
+async def adjust_cost(agent_id: str, delta_millicents: int) -> int:
+    """Apply a signed correction to the current-month bucket.
+
+    Positive deltas behave like :func:`add_cost`; negative deltas refund a
+    reservation or over-estimate. The bucket is clamped at zero so a double
+    refund or process-restart mismatch cannot create negative spend.
+    """
+    if delta_millicents == 0:
+        return await get_millicents(agent_id)
+    async with _get_lock():
+        bucket = _bucket_for(agent_id)
+        current = int(bucket["millicents"])
+        bucket["millicents"] = max(0, current + int(delta_millicents))
         return bucket["millicents"]
 
 
@@ -257,16 +293,48 @@ async def over_cap(agent_id: str, cap_millicents: int) -> bool:
     """
     if cap_millicents <= 0:
         return False
-    async with _lock:
+    async with _get_lock():
         bucket = _bucket_for(agent_id)
         return int(bucket["millicents"]) >= int(cap_millicents)
 
 
 async def get_millicents(agent_id: str) -> int:
     """Return the current-month spend for ``agent_id`` in millicents."""
-    async with _lock:
+    async with _get_lock():
         bucket = _bucket_for(agent_id)
         return int(bucket["millicents"])
+
+
+async def check_and_charge(
+    agent_id: str, cap_millicents: int, millicents: int,
+) -> tuple[bool, int]:
+    """Atomically gate ``millicents`` against ``cap_millicents``.
+
+    Returns ``(allowed, new_total)``:
+      * ``allowed=True``  → bucket was UNDER cap; ``millicents`` was added.
+      * ``allowed=False`` → bucket was AT/OVER cap; nothing was charged.
+
+    Closes the race between separate ``over_cap`` / ``add_cost`` lock
+    spans where two concurrent solves could each see ``bucket < cap``,
+    each call ``add_cost``, and together push the bucket above cap. Hold
+    the lock across both reads and writes here. BrowserManager uses this
+    as a pre-solve reservation for the maximum published price, then calls
+    :func:`adjust_cost` to refund or correct after the provider result is
+    known.
+
+    ``cap_millicents <= 0`` means "no cap": always allowed; cost is still
+    charged. ``millicents <= 0`` means "free attempt": always allowed;
+    nothing is charged.
+    """
+    async with _get_lock():
+        bucket = _bucket_for(agent_id)
+        current = int(bucket["millicents"])
+        if cap_millicents > 0 and current >= int(cap_millicents):
+            return False, current
+        if millicents > 0:
+            bucket["millicents"] = current + int(millicents)
+            return True, bucket["millicents"]
+        return True, current
 
 
 # Back-compat alias for an external caller that used to read cents. The
@@ -278,7 +346,7 @@ get_cents = get_millicents
 
 async def reset(agent_id: str | None = None) -> None:
     """Clear state. ``agent_id=None`` clears everything (test harness)."""
-    async with _lock:
+    async with _get_lock():
         if agent_id is None:
             _state.clear()
         else:
@@ -305,7 +373,7 @@ async def snapshot(path: Path | str | None = None) -> bool:
         logger.warning("captcha_cost snapshot: cannot create parent dir: %s", e)
         return False
 
-    async with _lock:
+    async with _get_lock():
         # JSON-serializable copy. Bucket dicts are already plain
         # ``{month, cents}`` so no custom encoder is needed.
         payload = {
@@ -384,7 +452,7 @@ async def restore(path: Path | str | None = None) -> int:
     cm = _current_month()
     loaded = 0
     migrated = 0
-    async with _lock:
+    async with _get_lock():
         _state.clear()
         for agent_id, bucket in buckets.items():
             if not isinstance(bucket, dict):

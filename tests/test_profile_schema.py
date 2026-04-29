@@ -524,6 +524,27 @@ class TestV3UblockInstall:
         _v3_install_ublock(profile)
         assert not (profile / "extensions").exists()
 
+    def test_skipped_when_operator_setting_disables_adblock(
+        self, profile, fake_xpi, monkeypatch, tmp_path,
+    ):
+        import json
+
+        from src.browser import flags
+        from src.browser.profile_schema import _v3_install_ublock
+
+        settings = tmp_path / "settings.json"
+        settings.write_text(json.dumps({
+            "browser_flags": {"BROWSER_ENABLE_ADBLOCK": "false"},
+        }))
+        monkeypatch.setenv("OPENLEGION_SETTINGS_PATH", str(settings))
+        monkeypatch.setenv("BROWSER_ENABLE_ADBLOCK", "true")
+        flags.reload_operator_settings()
+        try:
+            _v3_install_ublock(profile)
+        finally:
+            flags.reload_operator_settings()
+        assert not (profile / "extensions").exists()
+
     def test_full_migration_with_flag_disabled_still_stamps_v3(
         self, profile, fake_xpi, monkeypatch,
     ):

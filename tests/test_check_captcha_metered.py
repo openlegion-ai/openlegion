@@ -89,12 +89,12 @@ async def _isolate_state(tmp_path, monkeypatch):
     )
     await cost.reset()
     svc._solve_rate_window.clear()
-    async with svc._captcha_audit_lock:
+    async with svc._get_captcha_audit_lock():
         svc._captcha_audit_buckets.clear()
     yield
     await cost.reset()
     svc._solve_rate_window.clear()
-    async with svc._captcha_audit_lock:
+    async with svc._get_captcha_audit_lock():
         svc._captcha_audit_buckets.clear()
 
 
@@ -229,7 +229,7 @@ class TestInjectionFailedCountsCost:
         assert envelope["injection_failure_reason"] == "injection_failed_unspecified"
         # Cost IS counted — provider was paid.
         # First selector match is recaptcha → kind=recaptcha-v2-checkbox →
-        # 100¢ at 2captcha proxyless.
+        # 100 millicents at 2captcha proxyless.
         assert await cost.get_cents("agent-1") == 100
 
 
@@ -275,7 +275,7 @@ class TestCfTurnstilePricing:
         envelope = await mgr._check_captcha(inst)
         assert envelope["kind"] == "cf-interstitial-turnstile"
         assert envelope["solver_outcome"] == "solved"
-        # 2captcha turnstile = 200¢. CF-bound alias picks up the same rate.
+        # 2captcha turnstile = 200 millicents. CF-bound alias picks up the same rate.
         assert await cost.get_cents("agent-1") == 200
 
 
@@ -289,7 +289,7 @@ class TestCfAutoNoPriceWarning:
         ``solver_attempted=False`` paths must NOT trigger the cost
         counter's "no published rate" warning. Pre-refactor a CF-auto
         clear path could trip the warning if any code path tried to
-        estimate cents on a non-priced kind."""
+        estimate cost on a non-priced kind."""
         # Drive the CF classifier to "auto" + still_present=False so the
         # path returns the "solved" envelope without any solver call.
         async def fake_cf_state(page):
@@ -599,7 +599,157 @@ class TestGateOrderingCostBeforeRate:
         assert len(svc._solve_rate_window["agent-1"]) == 0
 
 
-# ── 10. Codex F7 — token-without-provider warns + (cap-on) fails closed ──
+# ── 10. Cost-cap reservation closes concurrent solve race ─────────────────
+
+
+class TestCostCapReservation:
+    @pytest.mark.asyncio
+    async def test_concurrent_solves_reserve_cost_before_provider_call(
+        self, mgr, monkeypatch,
+    ):
+        """Two concurrent solves at the cap boundary should not both call
+        the provider. The first reserves the published price; the second
+        sees the in-flight reservation and returns ``cost_cap``."""
+        monkeypatch.setenv("CAPTCHA_COST_LIMIT_USD_PER_AGENT_MONTH", "0.001")
+
+        async def _slow_solve(*args, **kwargs):
+            await asyncio.sleep(0.05)
+            return _solved()
+
+        solver = _mk_solver(return_value=_solved(), provider="2captcha")
+        solver.solve = AsyncMock(side_effect=_slow_solve)
+        mgr._captcha_solver = solver
+        inst = _mk_inst()
+
+        results = await asyncio.gather(
+            mgr._metered_solve(inst, 'iframe[src*="recaptcha"]',
+                               "recaptcha-v2-checkbox"),
+            mgr._metered_solve(inst, 'iframe[src*="recaptcha"]',
+                               "recaptcha-v2-checkbox"),
+        )
+
+        assert sum(1 for r in results if r.token == "tok") == 1
+        assert sum(1 for r in results if r.skipped == "cost_cap") == 1
+        assert solver.solve.await_count == 1
+        assert await cost.get_millicents("agent-1") == 100
+
+    @pytest.mark.asyncio
+    async def test_reservation_refunded_when_solver_returns_no_token(
+        self, mgr, monkeypatch,
+    ):
+        monkeypatch.setenv("CAPTCHA_COST_LIMIT_USD_PER_AGENT_MONTH", "0.001")
+        solver = _mk_solver(
+            return_value=SolveResult(
+                token=None, injection_succeeded=False,
+                used_proxy_aware=False, compat_rejected=False,
+            ),
+            provider="2captcha",
+        )
+        mgr._captcha_solver = solver
+        inst = _mk_inst()
+
+        result = await mgr._metered_solve(
+            inst, 'iframe[src*="recaptcha"]', "recaptcha-v2-checkbox",
+        )
+
+        assert result.token is None
+        assert result.skipped is None
+        assert await cost.get_millicents("agent-1") == 0
+
+    @pytest.mark.asyncio
+    async def test_proxy_aware_reservation_refunds_to_actual_cost(
+        self, mgr, monkeypatch,
+    ):
+        monkeypatch.setenv("CAPTCHA_COST_LIMIT_USD_PER_AGENT_MONTH", "1.00")
+        solver = _mk_solver(
+            return_value=_solved(used_proxy_aware=False),
+            provider="2captcha",
+        )
+        mgr._captcha_solver = solver
+        inst = _mk_inst()
+
+        result = await mgr._metered_solve(
+            inst, 'iframe[src*="hcaptcha"]', "hcaptcha",
+        )
+
+        assert result.token == "tok"
+        # 2captcha hcaptcha proxy-aware reservation is 300 mc; actual
+        # proxyless result should settle back to 100 mc.
+        assert await cost.get_millicents("agent-1") == 100
+
+    @pytest.mark.asyncio
+    async def test_unpriced_actual_tier_keeps_reservation_under_cap(
+        self, mgr, monkeypatch,
+    ):
+        """If the solver returns a token on a tier without a published
+        actual rate, do not refund the cost-cap reservation. Refunding
+        would let an untracked provider charge bypass the cap."""
+        monkeypatch.setenv("CAPTCHA_COST_LIMIT_USD_PER_AGENT_MONTH", "1.00")
+        solver = _mk_solver(
+            return_value=_solved(used_proxy_aware=True),
+            provider="2captcha",
+        )
+        mgr._captcha_solver = solver
+        inst = _mk_inst()
+
+        result = await mgr._metered_solve(
+            inst, 'iframe[src*="recaptcha"]', "recaptcha-v3",
+        )
+
+        assert result.token == "tok"
+        # 2captcha recaptcha-v3 has a proxyless published reservation of
+        # 100 mc but no proxy-aware published row. Keep the reservation.
+        assert await cost.get_millicents("agent-1") == 100
+
+    @pytest.mark.asyncio
+    async def test_unpriced_kind_with_cap_fails_closed(
+        self, mgr, monkeypatch,
+    ):
+        monkeypatch.setenv("CAPTCHA_COST_LIMIT_USD_PER_AGENT_MONTH", "1.00")
+        solver = _mk_solver(return_value=_solved(), provider="2captcha")
+        mgr._captcha_solver = solver
+        inst = _mk_inst()
+
+        result = await mgr._metered_solve(inst, "#captcha", "unknown")
+
+        assert result.skipped == "price_missing"
+        solver.solve.assert_not_awaited()
+        assert await cost.get_millicents("agent-1") == 0
+
+
+# ── 12. _max_published_solve_cost_millicents helper ──────────────────────
+
+
+class TestMaxPublishedSolveCostHelper:
+    """``_max_published_solve_cost_millicents`` returns the worst-case
+    price across the proxyless / proxy-aware tiers so the cap reservation
+    holds even when the solver flips paths mid-solve. End-to-end coverage
+    lives in the ``_metered_solve`` tests above; pin the contract here."""
+
+    def test_known_provider_returns_max_of_tiers(self):
+        # 2captcha hcaptcha: proxyless=100, proxy_aware=300 → max=300
+        from src.browser.service import _max_published_solve_cost_millicents
+        assert _max_published_solve_cost_millicents("2captcha", "hcaptcha") == 300
+
+    def test_falls_back_when_only_proxyless_tier_published(self):
+        # 2captcha recaptcha-v3 has no proxy-aware row; proxyless=100.
+        from src.browser.service import _max_published_solve_cost_millicents
+        assert _max_published_solve_cost_millicents("2captcha", "recaptcha-v3") == 100
+
+    def test_unknown_kind_returns_none(self):
+        from src.browser.service import _max_published_solve_cost_millicents
+        assert _max_published_solve_cost_millicents("2captcha", "made-up") is None
+
+    def test_unknown_provider_returns_none(self):
+        from src.browser.service import _max_published_solve_cost_millicents
+        assert _max_published_solve_cost_millicents("nopal", "hcaptcha") is None
+
+    def test_empty_provider_returns_none(self):
+        from src.browser.service import _max_published_solve_cost_millicents
+        assert _max_published_solve_cost_millicents("", "hcaptcha") is None
+
+
+# ── 11. Codex F7 — token-without-provider warns + (cap-on) fails closed ──
 
 
 class TestProviderMissingFailsClosedWhenCapOn:

@@ -66,8 +66,14 @@ SECRET_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"(?<![A-Za-z0-9/+=])[A-Za-z0-9+/]{40,}={0,2}(?![A-Za-z0-9/+=])"),
     # JWT (three base64-url segments separated by dots, ≥10 chars each).
     # Matches bearer JWTs in logs, auth headers, signed URLs.
+    #
+    # Anchor on the JOSE header prefix ``eyJ`` (base64-url of ``{"``).
+    # Without this anchor the previous shape match flagged benign
+    # three-dot strings like ``library_v1_2_3.commit_abcd1234.build_id``
+    # — every JWT in real use begins with ``eyJ``, so the anchor adds
+    # no false negatives while killing the false-positive class.
     re.compile(r"(?<![A-Za-z0-9._-])"
-               r"[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"
+               r"eyJ[A-Za-z0-9_-]{7,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"
                r"(?![A-Za-z0-9._-])"),
 ]
 
@@ -130,12 +136,22 @@ SENSITIVE_QUERY_PARAMS: frozenset[str] = frozenset(
 
 
 # JWT in a path segment — common for password reset / unsubscribe links.
+# Same ``eyJ`` JOSE-header anchor as the SECRET_PATTERNS version;
+# unanchored shape would match benign three-dot version strings like
+# ``library_v1_2_3.commit_abcd1234.build_id``.
 _JWT_IN_PATH = re.compile(
-    r"^[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}$"
+    r"^eyJ[A-Za-z0-9_-]{7,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}$"
 )
 
 
 _REDACTED_VALUE = "[REDACTED]"
+
+
+# Cached operator allowlist. ``redact_url`` parses every query string
+# pair-by-pair and previously called ``_operator_allowlist`` per pair —
+# a URL with N params triggered N env reads + N frozenset constructions.
+# Cache by raw env string so a runtime change still takes effect.
+_ALLOWLIST_CACHE: tuple[str, frozenset[str]] | None = None
 
 
 def _operator_allowlist() -> frozenset[str]:
@@ -143,12 +159,21 @@ def _operator_allowlist() -> frozenset[str]:
 
     Intended for specific integrations where the operator has verified the
     value is non-sensitive in their deployment. Default empty =
-    strict deny-by-default.
+    strict deny-by-default. Cached so per-pair redaction in ``redact_url``
+    doesn't re-parse the env var on every query parameter.
     """
+    global _ALLOWLIST_CACHE
     raw = os.environ.get("OPENLEGION_REDACTION_URL_QUERY_ALLOW", "").strip()
+    if _ALLOWLIST_CACHE is not None and _ALLOWLIST_CACHE[0] == raw:
+        return _ALLOWLIST_CACHE[1]
     if not raw:
-        return frozenset()
-    return frozenset(p.strip().lower() for p in raw.split(",") if p.strip())
+        result: frozenset[str] = frozenset()
+    else:
+        result = frozenset(
+            p.strip().lower() for p in raw.split(",") if p.strip()
+        )
+    _ALLOWLIST_CACHE = (raw, result)
+    return result
 
 
 def _should_redact_query(key: str) -> bool:
@@ -238,15 +263,27 @@ def redact_url(url: str) -> str:
     if query:
         # keep_blank_values=True so we don't lose shape on empty params
         pairs = parse_qsl(query, keep_blank_values=True)
-        parts_out: list[str] = []
-        for k, v in pairs:
-            enc_key = quote_plus(k)
-            if _should_redact_query(k):
-                # Literal sentinel, no encoding — ``[`` and ``]`` stay visible.
-                parts_out.append(f"{enc_key}={_REDACTED_VALUE}")
-            else:
-                parts_out.append(f"{enc_key}={quote_plus(v)}")
-        query = "&".join(parts_out)
+        # If NO key in this URL is sensitive AND we're not flipping any
+        # values, preserve the original query string verbatim. Round-
+        # tripping via parse_qsl + quote_plus mutates non-canonical
+        # encodings (e.g. ``msg=hello world`` decodes to ``hello world``
+        # then re-encodes to ``hello+world``); idempotency held only for
+        # already-canonical inputs. Operators relying on log diffs and
+        # exact substring matches need stable strings when nothing is
+        # being redacted.
+        if not any(_should_redact_query(k) for k, _ in pairs):
+            pass  # query already correct; no rewrite needed
+        else:
+            parts_out: list[str] = []
+            for k, v in pairs:
+                enc_key = quote_plus(k)
+                if _should_redact_query(k):
+                    # Literal sentinel, no encoding — ``[`` and ``]``
+                    # stay visible.
+                    parts_out.append(f"{enc_key}={_REDACTED_VALUE}")
+                else:
+                    parts_out.append(f"{enc_key}={quote_plus(v)}")
+            query = "&".join(parts_out)
 
     # 4. Fragment: drop entirely
     rebuilt = urlunsplit(SplitResult(parts.scheme, netloc, path, query, ""))

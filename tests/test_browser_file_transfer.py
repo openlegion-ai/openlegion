@@ -16,6 +16,7 @@ rather than run a live browser — tests verify:
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -60,6 +61,18 @@ def _async_ctx(awaitable_value):
 
 
 class TestUploadFile:
+    @pytest.fixture(autouse=True)
+    def _confine_upload_recv_dir(self, tmp_path, monkeypatch):
+        """``upload_file`` now confines paths to ``OPENLEGION_UPLOAD_RECV_DIR``.
+        Existing tests stage their fixtures under ``tmp_path``; point the
+        recv-dir flag at ``tmp_path`` so those paths resolve as in-bounds
+        without altering each test."""
+        monkeypatch.setenv("OPENLEGION_UPLOAD_RECV_DIR", str(tmp_path))
+        import src.browser.flags as flags
+        flags._operator_settings = None
+        yield
+        flags._operator_settings = None
+
     @pytest.mark.asyncio
     async def test_happy_path_invokes_chooser_set_files(self, tmp_path, monkeypatch):
         mgr = BrowserManager(profiles_dir=str(tmp_path / "p"))
@@ -99,6 +112,88 @@ class TestUploadFile:
         assert result["data"]["uploaded"] == [str(real_file)]
         chooser.set_files.assert_awaited_once_with([str(real_file)])
         fake_locator.click.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_upload_uses_x11_click_when_available(self, tmp_path, monkeypatch):
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "p"))
+        inst = _make_instance()
+        inst.x11_wid = 12345
+
+        chooser = MagicMock()
+        chooser.set_files = AsyncMock()
+
+        async def _chooser_value():
+            return chooser
+
+        inst.page.expect_file_chooser = MagicMock(
+            return_value=_async_ctx(_chooser_value()),
+        )
+
+        fake_locator = MagicMock()
+        fake_locator.click = AsyncMock()
+        monkeypatch.setattr(
+            mgr,
+            "_locator_from_ref",
+            AsyncMock(return_value=fake_locator),
+        )
+        monkeypatch.setattr(mgr, "get_or_start", AsyncMock(return_value=inst))
+        monkeypatch.setattr(mgr, "_is_x11_site", MagicMock(return_value=True))
+        monkeypatch.setattr(mgr, "_x11_click", AsyncMock())
+        monkeypatch.setattr(mgr, "_human_click", AsyncMock())
+        monkeypatch.setattr("src.browser.service.action_delay", lambda: 0)
+
+        real_file = tmp_path / "foo.pdf"
+        real_file.write_bytes(b"fake pdf")
+
+        result = await mgr.upload_file("a1", "e1", [str(real_file)])
+
+        assert result["success"] is True
+        mgr._x11_click.assert_awaited_once_with(
+            inst, fake_locator, timeout=10000,
+        )
+        mgr._human_click.assert_not_awaited()
+        fake_locator.click.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_upload_non_int_x11_wid_uses_human_click(
+        self, tmp_path, monkeypatch,
+    ):
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "p"))
+        inst = _make_instance()
+        inst.x11_wid = MagicMock()
+
+        chooser = MagicMock()
+        chooser.set_files = AsyncMock()
+
+        async def _chooser_value():
+            return chooser
+
+        inst.page.expect_file_chooser = MagicMock(
+            return_value=_async_ctx(_chooser_value()),
+        )
+
+        fake_locator = MagicMock()
+        monkeypatch.setattr(
+            mgr,
+            "_locator_from_ref",
+            AsyncMock(return_value=fake_locator),
+        )
+        monkeypatch.setattr(mgr, "get_or_start", AsyncMock(return_value=inst))
+        monkeypatch.setattr(mgr, "_is_x11_site", MagicMock(return_value=True))
+        monkeypatch.setattr(mgr, "_x11_click", AsyncMock())
+        monkeypatch.setattr(mgr, "_human_click", AsyncMock())
+        monkeypatch.setattr("src.browser.service.action_delay", lambda: 0)
+
+        real_file = tmp_path / "foo.pdf"
+        real_file.write_bytes(b"fake pdf")
+
+        result = await mgr.upload_file("a1", "e1", [str(real_file)])
+
+        assert result["success"] is True
+        mgr._x11_click.assert_not_awaited()
+        mgr._human_click.assert_awaited_once_with(
+            inst.page, fake_locator, timeout=10000,
+        )
 
     @pytest.mark.asyncio
     async def test_missing_local_path_returns_error_before_click(
@@ -151,7 +246,11 @@ class TestUploadFile:
         inst = _make_instance()
         inst._user_control = True
         monkeypatch.setattr(mgr, "get_or_start", AsyncMock(return_value=inst))
-        result = await mgr.upload_file("a1", "e1", ["/tmp/x"])
+        # Path must be under recv_dir (autouse fixture sets recv_dir=tmp_path)
+        # so the user-control gate is what blocks, not path validation.
+        staged = tmp_path / "staged.bin"
+        staged.write_bytes(b"x")
+        result = await mgr.upload_file("a1", "e1", [str(staged)])
         assert result["success"] is False
         assert "control" in result["error"].lower()
 
@@ -397,6 +496,14 @@ class TestUploadStageIngest:
 class TestUploadFileStageCleanup:
     """After `set_files` succeeds the manager removes the staged paths."""
 
+    @pytest.fixture(autouse=True)
+    def _confine_upload_recv_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("OPENLEGION_UPLOAD_RECV_DIR", str(tmp_path))
+        import src.browser.flags as flags
+        flags._operator_settings = None
+        yield
+        flags._operator_settings = None
+
     @pytest.mark.asyncio
     async def test_stage_files_unlinked_after_success(self, tmp_path, monkeypatch):
         mgr = BrowserManager(profiles_dir=str(tmp_path / "p"))
@@ -547,6 +654,53 @@ class TestDownload:
         assert Path(result["data"]["path"]).exists()
 
     @pytest.mark.asyncio
+    async def test_download_uses_x11_click_when_available(
+        self, tmp_path, monkeypatch,
+    ):
+        pytest.importorskip("playwright")
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "p"))
+        mgr._download_streaming_available = True
+        inst = _make_instance()
+        inst.x11_wid = 12345
+        fake_locator = MagicMock()
+        fake_locator.click = AsyncMock()
+
+        download, _ = _make_oversize_artifact_download(
+            total_bytes=10, chunk_bytes=64 * 1024,
+        )
+        download.suggested_filename = "report.pdf"
+        dl_dir = tmp_path / "dl"
+
+        async def _dl_value():
+            return download
+
+        inst.page.expect_download = MagicMock(
+            return_value=_async_ctx(_dl_value()),
+        )
+        monkeypatch.setattr(
+            mgr, "_locator_from_ref", AsyncMock(return_value=fake_locator),
+        )
+        monkeypatch.setattr(mgr, "get_or_start", AsyncMock(return_value=inst))
+        monkeypatch.setattr(mgr, "_is_x11_site", MagicMock(return_value=True))
+        monkeypatch.setattr(mgr, "_x11_click", AsyncMock())
+        monkeypatch.setattr(mgr, "_human_click", AsyncMock())
+        monkeypatch.setattr(
+            "playwright._impl._connection.from_channel",
+            lambda ch: ch,
+        )
+
+        result = await mgr.download(
+            "a1", "e1", download_dir=str(dl_dir), timeout_ms=5000,
+        )
+
+        assert result["success"] is True, result
+        mgr._x11_click.assert_awaited_once_with(
+            inst, fake_locator, timeout=5000,
+        )
+        mgr._human_click.assert_not_awaited()
+        fake_locator.click.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_oversize_download_rejected_and_file_removed(
         self, tmp_path, monkeypatch,
     ):
@@ -648,6 +802,8 @@ class TestDownloadFlow:
         from src.browser.service import BrowserManager
 
         monkeypatch.setenv("BROWSER_DOWNLOAD_DIR", str(tmp_path / "downloads"))
+        from src.browser import flags
+        flags.reload_operator_settings()
         mgr = BrowserManager(profiles_dir=str(tmp_path / "p"))
         return create_browser_app(mgr)
 
@@ -670,6 +826,39 @@ class TestDownloadFlow:
         assert resp.status_code == 200
         assert resp.content == b"X" * 200
         assert resp.headers["content-type"].startswith("application/octet-stream")
+
+    def test_download_stream_uses_operator_settings_dir(self, tmp_path, monkeypatch):
+        """Manager.download() reads BROWSER_DOWNLOAD_DIR through browser
+        flags, so stream/cleanup must use the same flag source. Env-only
+        lookup would 404 when the operator configured the dir in settings."""
+        from starlette.testclient import TestClient
+
+        from src.browser import flags
+        from src.browser.server import create_browser_app
+        from src.browser.service import BrowserManager
+
+        dl_dir = tmp_path / "settings-downloads"
+        settings = tmp_path / "settings.json"
+        settings.write_text(json.dumps({
+            "browser_flags": {"BROWSER_DOWNLOAD_DIR": str(dl_dir)},
+        }))
+        monkeypatch.setenv("OPENLEGION_SETTINGS_PATH", str(settings))
+        monkeypatch.delenv("BROWSER_DOWNLOAD_DIR", raising=False)
+        flags.reload_operator_settings()
+        try:
+            mgr = BrowserManager(profiles_dir=str(tmp_path / "p"))
+            app = create_browser_app(mgr)
+            nonce = "abcdef012345"
+            dl_dir.mkdir(parents=True)
+            (dl_dir / f"{nonce}-report.pdf").write_bytes(b"settings")
+            with TestClient(app) as client:
+                resp = client.get(
+                    f"/browser/a1/_download_stream?nonce={nonce}",
+                )
+            assert resp.status_code == 200
+            assert resp.content == b"settings"
+        finally:
+            flags.reload_operator_settings()
 
     def test_download_stream_unknown_nonce_404(self, tmp_path, monkeypatch):
         from starlette.testclient import TestClient
@@ -710,6 +899,16 @@ class TestDownloadFlow:
             )
         assert resp.status_code == 400
 
+    def test_download_trigger_rejects_bad_timeout(self, tmp_path, monkeypatch):
+        from starlette.testclient import TestClient
+        app = self._app(monkeypatch, tmp_path)
+        with TestClient(app) as client:
+            resp = client.post(
+                "/browser/a1/download",
+                json={"ref": "e1", "timeout_ms": "later"},
+            )
+        assert resp.status_code == 400
+
     def test_startup_cleanup_clears_orphans(self, tmp_path, monkeypatch):
         """Phase 5 §8.2: blanket-delete /tmp/downloads/* on browser boot to
         purge orphans from a crashed/restarted tab."""
@@ -720,6 +919,26 @@ class TestDownloadFlow:
         (dl / "stale2-bar.bin").write_bytes(b"old")
         from src.browser import __main__ as bmain
         bmain._cleanup_orphan_downloads()
+        assert list(dl.iterdir()) == []
+
+    def test_startup_cleanup_uses_operator_settings_dir(self, tmp_path, monkeypatch):
+        from src.browser import __main__ as bmain
+        from src.browser import flags
+
+        dl = tmp_path / "settings-downloads"
+        dl.mkdir()
+        (dl / "stale-foo.bin").write_bytes(b"old")
+        settings = tmp_path / "settings.json"
+        settings.write_text(json.dumps({
+            "browser_flags": {"BROWSER_DOWNLOAD_DIR": str(dl)},
+        }))
+        monkeypatch.setenv("OPENLEGION_SETTINGS_PATH", str(settings))
+        monkeypatch.delenv("BROWSER_DOWNLOAD_DIR", raising=False)
+        flags.reload_operator_settings()
+        try:
+            bmain._cleanup_orphan_downloads()
+        finally:
+            flags.reload_operator_settings()
         assert list(dl.iterdir()) == []
 
     def test_startup_cleanup_idempotent_when_dir_missing(self, tmp_path, monkeypatch):
@@ -1608,3 +1827,94 @@ class TestMidStreamInterruption:
         assert len(cleanup_called) == 1
 
 
+class TestSanitizeDownloadFilename:
+    """Hostile ``Content-Disposition: filename="..."`` must not escape
+    the configured download dir when joined with the per-download nonce.
+    The browser container's filesystem is writable; a traversal write
+    could clobber the persistent profile or service config files."""
+
+    def test_path_traversal_stripped(self):
+        from src.browser.service import _sanitize_download_filename
+        out = _sanitize_download_filename("../../etc/passwd")
+        assert "/" not in out and ".." not in out
+
+    def test_backslash_traversal_stripped(self):
+        from src.browser.service import _sanitize_download_filename
+        out = _sanitize_download_filename("..\\..\\windows\\system32\\foo")
+        assert "\\" not in out and "/" not in out and ".." not in out
+
+    def test_basename_extracted(self):
+        from src.browser.service import _sanitize_download_filename
+        assert "report" in _sanitize_download_filename("/abs/path/report.pdf")
+
+    def test_empty_falls_back_to_default(self):
+        from src.browser.service import _sanitize_download_filename
+        assert _sanitize_download_filename("") == "download.bin"
+        assert _sanitize_download_filename("   ") == "download.bin"
+        assert _sanitize_download_filename("...") == "download.bin"
+
+    def test_length_capped(self):
+        from src.browser.service import _sanitize_download_filename
+        out = _sanitize_download_filename("a" * 500 + ".pdf")
+        assert len(out) <= 180
+
+    def test_unsafe_chars_collapsed(self):
+        from src.browser.service import _sanitize_download_filename
+        out = _sanitize_download_filename("re port:foo*bar?.pdf")
+        # Only word/dot/dash survive; everything else collapses to _.
+        assert all(c.isalnum() or c in "._-" for c in out)
+
+
+class TestUploadFileRecvDirConfinement:
+    """``upload_file`` is called with paths supplied by the (mesh-internal)
+    bearer caller. Defense in depth: paths must resolve under
+    ``OPENLEGION_UPLOAD_RECV_DIR`` so a buggy or compromised mesh path
+    can't smuggle arbitrary filesystem reads through the chooser, nor
+    cause the cleanup ``unlink`` to remove host-mounted files."""
+
+    @pytest.mark.asyncio
+    async def test_path_outside_recv_dir_rejected_without_unlink(
+        self, tmp_path, monkeypatch,
+    ):
+        recv_dir = tmp_path / "recv"
+        recv_dir.mkdir()
+        outside = tmp_path / "outside.txt"
+        outside.write_bytes(b"sensitive")
+
+        monkeypatch.setenv("OPENLEGION_UPLOAD_RECV_DIR", str(recv_dir))
+        # Defeat the flag-loader cache so the env change applies.
+        import src.browser.flags as flags
+        flags._operator_settings = None
+
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "p"))
+        inst = _make_instance()
+        monkeypatch.setattr(mgr, "get_or_start", AsyncMock(return_value=inst))
+
+        result = await mgr.upload_file("a1", "e1", [str(outside)])
+
+        assert result["success"] is False
+        assert "outside" in result["error"]
+        # Critical: the file must NOT have been unlinked.
+        assert outside.exists()
+
+    @pytest.mark.asyncio
+    async def test_path_under_recv_dir_with_traversal_rejected(
+        self, tmp_path, monkeypatch,
+    ):
+        recv_dir = tmp_path / "recv"
+        recv_dir.mkdir()
+        sneaky = recv_dir / ".." / "outside.txt"
+        outside = tmp_path / "outside.txt"
+        outside.write_bytes(b"sensitive")
+
+        monkeypatch.setenv("OPENLEGION_UPLOAD_RECV_DIR", str(recv_dir))
+        import src.browser.flags as flags
+        flags._operator_settings = None
+
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "p"))
+        inst = _make_instance()
+        monkeypatch.setattr(mgr, "get_or_start", AsyncMock(return_value=inst))
+
+        result = await mgr.upload_file("a1", "e1", [str(sneaky)])
+        assert result["success"] is False
+        assert outside.exists()
