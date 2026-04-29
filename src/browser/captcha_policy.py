@@ -127,6 +127,20 @@ SitePolicy = Literal["unsolvable", "low_success", "default"]
 #   indicates behavioral; the ``/solver`` path is solvable. Domain-level
 #   policy is conservative: any DataDome iframe is treated as unsolvable
 #   here, with the per-iframe path check living in §11.3.
+#
+# §19 follow-up — known JS-challenge sites (Akamai Bot Manager, Kasada,
+# FingerprintJS Pro, Imperva ABP, F5 Bot Defense customers) are NOT
+# hardcoded here.  JS-challenge detection runs at the page level via
+# :func:`src.browser.js_challenge.classify_js_challenge` (DOM / cookie
+# anchors), which is more accurate than a static host list — these
+# vendors are deployed across thousands of customer domains and the
+# anchor-based detection picks up any of them without operator-curation.
+# TODO(operator): if specific JS-challenge customer domains accumulate
+# enough false-negatives at the page-level classifier (anchor obfuscation,
+# vendor SDK rotation), surface them as operator-curated entries via the
+# existing ``OPENLEGION_CAPTCHA_SKIP_SOLVE_DOMAINS`` env var rather than
+# growing this hardcoded list.  Hardcoding customer hosts is an
+# operations problem with quarterly drift; keep it operator-driven.
 _UNSOLVABLE_DOMAINS: frozenset[str] = frozenset({
     "challenges.cloudflare.com",
     "humansecurity.com",
