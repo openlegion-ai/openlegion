@@ -2893,6 +2893,105 @@ class BrowserManager:
                     ev.get("agent_id", ""), e,
                 )
 
+        # Phase 10 §24 — per-tenant spend-threshold alerts. Walks every
+        # tenant currently active in the cost counter, asks the threshold
+        # tracker which percentages crossed THIS tick, and ships a
+        # ``tenant_spend_threshold`` payload through the same metrics_sink.
+        # Keeping it on the metrics tick (not on every ``add_cost``) avoids
+        # firing a flag-load + project-config read on the hot solve path.
+        try:
+            await self._emit_tenant_threshold_alerts(now)
+        except Exception as e:
+            logger.warning("tenant threshold emit error: %s", e)
+
+    async def _emit_tenant_threshold_alerts(self, now: float) -> None:
+        """Emit ``tenant_spend_threshold`` payloads for newly-crossed caps.
+
+        For each tenant currently visible in the per-agent cost counter,
+        reads ``CAPTCHA_COST_LIMIT_USD_PER_TENANT_MONTH`` (treating the
+        tenant ID as the ``agent_id`` arg to ``flags.get_int`` so per-
+        tenant overrides land on the same precedence chain operators
+        already use), converts to millicents, and asks the cost counter
+        which threshold percentages crossed since the last tick. Each
+        crossing produces ONE ``tenant_spend_threshold`` payload routed
+        through the metrics_sink + history buffer.
+        """
+        from src.browser import captcha_cost_counter as ccc
+        from src.browser import flags as _flags
+
+        # Snapshot the current set of agents → tenants from the cost
+        # counter's state. Inlining the walk avoids exposing ``_state``
+        # publicly; the lock is acquired by ``get_tenant_total`` below.
+        async with ccc._get_lock():
+            agent_ids = list(ccc._state.keys())
+
+        tenants: set[str] = set()
+        for agent_id in agent_ids:
+            tid = ccc._tenant_for(agent_id)
+            if tid:
+                tenants.add(tid)
+
+        if not tenants:
+            return
+
+        for tenant_id in tenants:
+            # Per-tenant cap, in USD. Treat the tenant ID like an agent
+            # ID for flag-precedence purposes — operators set per-tenant
+            # caps via the same ``set_agent_override`` machinery they
+            # already use for per-agent flags. Default 0 means "no cap"
+            # which short-circuits inside ``record_tenant_threshold_alerts``.
+            cap_usd = _flags.get_int(
+                "CAPTCHA_COST_LIMIT_USD_PER_TENANT_MONTH",
+                0,
+                agent_id=tenant_id,
+                min_value=0,
+            )
+            cap_millicents = cap_usd * 100_000
+            if cap_millicents <= 0:
+                continue
+
+            captured: list[dict] = []
+
+            def _capture(payload: dict, _bucket: list = captured) -> None:
+                _bucket.append(payload)
+
+            try:
+                fired = await ccc.record_tenant_threshold_alerts(
+                    tenant_id, cap_millicents, _capture,
+                )
+            except Exception as e:
+                logger.warning(
+                    "tenant threshold check failed for %s: %s", tenant_id, e,
+                )
+                continue
+            if not fired:
+                continue
+
+            for payload in captured:
+                event = {
+                    "type": "tenant_spend_threshold",
+                    # ``agent_id`` carries the tenant — the dashboard's
+                    # event router keys EventBus payloads on
+                    # ``payload['agent_id']`` so dropping this off in the
+                    # tenant slot lets the existing relay surface the
+                    # event without a special case.
+                    "agent_id": tenant_id,
+                    **payload,
+                }
+                self._metrics_seq += 1
+                event["seq"] = self._metrics_seq
+                event["ts"] = now
+                self._metrics_history.append(event)
+                if self._metrics_sink is None:
+                    continue
+                try:
+                    self._metrics_sink(event)
+                except Exception as e:
+                    logger.warning(
+                        "tenant threshold sink raised for '%s': %s",
+                        tenant_id, e,
+                    )
+
     async def _periodic_session_snapshots(self) -> None:
         """§20 — opportunistically snapshot live session state mid-flight.
 

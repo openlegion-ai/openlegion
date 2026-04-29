@@ -3,6 +3,24 @@
 Serves the SPA template and static files, plus JSON API endpoints
 consumed by the Alpine.js frontend.  All data comes from live Python
 objects — no HTTP round-trips through mesh endpoints.
+
+Phase 10 §24 — billing-export endpoint.
+
+  ``GET /dashboard/api/billing/captcha-rollup?tenant=<id>&period=<period>``
+  returns a CSV of CAPTCHA-solver spend rolled up across every agent
+  inside the named tenant (project). Operator-only: gated by the same
+  ``ol_session`` cookie + ``X-Requested-With`` posture as every other
+  ``/dashboard/*`` endpoint (CSRF unnecessary on GET, but auth is still
+  enforced via the ``_verify_dashboard_auth`` dependency on the router).
+  ``period`` is one of ``daily`` (today UTC), ``weekly`` (rolling 7d), or
+  ``monthly`` (current calendar month). Each CSV row is
+  ``period_start, agent_id, millicents, dollars, data_scope`` plus a
+  final ``__tenant_total__`` synthetic row carrying the rolled-up total.
+  The ``data_scope`` column is ``monthly_actual`` when the period is
+  ``monthly`` (live state IS current-month so the number is correct);
+  for ``daily`` / ``weekly`` it is ``current_month_aggregate`` because
+  the in-memory state is month-granularity only — finance reconciliation
+  tooling reads the column to flag period-imprecise numbers.
 """
 
 from __future__ import annotations
@@ -3445,6 +3463,123 @@ def create_dashboard_router(
             "month_total": month_total,
             "month_tokens": month_tokens,
         }
+
+    # ── Phase 10 §24 — per-tenant CAPTCHA cost rollup (CSV export) ──────
+    #
+    # Operator-facing billing reconciliation. Returns the sum of CAPTCHA
+    # solver spend across every agent inside the requested tenant
+    # (project), broken down per-agent + a rolled-up total row. CSV is
+    # the lingua franca for finance/billing tooling — keep the schema
+    # stable and the column names self-explanatory.
+    #
+    # Auth posture: this endpoint inherits ``_verify_dashboard_auth`` and
+    # ``_csrf_check`` from the router-level dependencies. ``_csrf_check``
+    # is a no-op on GET (per its own docstring) so this endpoint is
+    # callable from a plain browser tab as long as the operator is
+    # logged in via ``ol_session``. State-changing endpoints in the same
+    # router DO require ``X-Requested-With``.
+    _VALID_BILLING_PERIODS = {"daily", "weekly", "monthly"}
+
+    @api_router.get("/api/billing/captcha-rollup")
+    async def api_billing_captcha_rollup(
+        tenant: str = "", period: str = "monthly",
+    ):
+        """CSV export of per-tenant CAPTCHA spend rollup."""
+        from datetime import datetime, timedelta, timezone
+
+        from starlette.responses import PlainTextResponse
+
+        from src.browser import captcha_cost_counter as _ccc
+
+        if not tenant:
+            raise HTTPException(400, "Missing required query param: tenant")
+        if period not in _VALID_BILLING_PERIODS:
+            raise HTTPException(
+                400,
+                f"Invalid period {period!r}; "
+                f"expected one of {sorted(_VALID_BILLING_PERIODS)}",
+            )
+
+        # Resolve the period_start timestamp — used as the first column
+        # of every row so the export is self-describing (a row carries
+        # its own period without relying on filename context).
+        now = datetime.now(timezone.utc)
+        if period == "daily":
+            period_start = now.replace(
+                hour=0, minute=0, second=0, microsecond=0,
+            )
+        elif period == "weekly":
+            period_start = (now - timedelta(days=7)).replace(
+                hour=0, minute=0, second=0, microsecond=0,
+            )
+        else:  # monthly
+            period_start = now.replace(
+                day=1, hour=0, minute=0, second=0, microsecond=0,
+            )
+
+        # Walk per-agent buckets via the new tenant helpers. The
+        # in-memory state is current-month only (see captcha_cost_counter
+        # docstring for the trim rationale), so for ``daily`` and
+        # ``weekly`` we still report the same per-agent monthly buckets
+        # — operators get a month-to-date number with a ``data_scope``
+        # column flagging that the data IS NOT period-correct.  Older
+        # buckets would require persisted snapshots, deferred per
+        # §11.10's SQLite trim.  The honest column on every row beats
+        # a billing footgun where finance reconciles a "daily" CSV
+        # against month-to-date numbers.
+        breakdown = await _ccc.get_tenant_breakdown(tenant)
+        total_millicents = await _ccc.get_tenant_total(
+            tenant, since=period_start,
+        )
+        # ``monthly_actual`` for monthly (the in-memory state IS the
+        # current month, so the number is correct for the requested
+        # period); ``current_month_aggregate`` for daily/weekly since
+        # we surface month-to-date data with the requested period_start.
+        data_scope = (
+            "monthly_actual" if period == "monthly"
+            else "current_month_aggregate"
+        )
+
+        # CSV assembly — manual rather than ``csv`` module so we can
+        # guarantee the row order (sorted agent_id, then synthetic
+        # total) and avoid the implicit dialect quoting around plain
+        # IDs. Agent IDs use ``[A-Za-z0-9_-]`` per AGENT_ID_RE_PATTERN
+        # so no quoting is needed for the agent_id column.  ``data_scope``
+        # values are static literals — also no quoting needed.
+        period_start_iso = period_start.isoformat().replace("+00:00", "Z")
+        lines: list[str] = [
+            "period_start,agent_id,millicents,dollars,data_scope"
+        ]
+        for agent_id in sorted(breakdown):
+            mc = breakdown[agent_id]
+            dollars = mc / 100_000.0
+            lines.append(
+                f"{period_start_iso},{agent_id},{mc},{dollars:.5f},"
+                f"{data_scope}"
+            )
+        # Synthetic tenant-total row — operators reading the CSV in a
+        # spreadsheet immediately see the rolled-up number without
+        # having to re-sum. Prefix the agent_id column with double
+        # underscores so it sorts after real agent IDs and is visually
+        # distinct.
+        lines.append(
+            f"{period_start_iso},__tenant_total__,{total_millicents},"
+            f"{total_millicents / 100_000.0:.5f},{data_scope}"
+        )
+        body = "\n".join(lines) + "\n"
+        # Sanitize the tenant for the Content-Disposition filename —
+        # AGENT_ID_RE_PATTERN-style chars only; everything else collapses
+        # to underscore so we never echo arbitrary path/quote bytes
+        # into a header.
+        safe_tenant = re.sub(r"[^A-Za-z0-9_.-]", "_", tenant)[:64]
+        filename = f"captcha-rollup-{safe_tenant}-{period}.csv"
+        return PlainTextResponse(
+            content=body,
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+            },
+        )
 
     # ── Projects ──────────────────────────────────────────────
 
