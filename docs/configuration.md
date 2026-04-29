@@ -282,7 +282,8 @@ Beyond credentials, these environment variables affect runtime behavior:
 | `OPENLEGION_SYSTEM_WALLET_MASTER_SEED` | -- | BIP-39 mnemonic (24 words) for HD wallet key derivation. Required to enable wallet features. Generate with `openlegion wallet init`. |
 | `BROWSER_OS` | `windows` | OS fingerprint for Camoufox browser: `windows`, `macos`, or `linux`. Windows is recommended (≈70% desktop market share; Linux is a datacenter signal). |
 | `BROWSER_LOCALE` | `en-US` | BCP-47 locale tag for browser fingerprint (e.g. `en-US`, `de-DE`). |
-| `BROWSER_UA_VERSION` | -- | Override Firefox version in User-Agent string (e.g. `138.0`). Useful when Camoufox's bundled Firefox is too old for sites that enforce minimum browser versions (e.g. Shopify). Uses Camoufox's native config system. |
+| `BROWSER_UA_VERSION` | -- | Override Firefox version in User-Agent string (e.g. `138.0`). Useful when Camoufox's bundled Firefox is too old for sites that enforce minimum browser versions (e.g. Shopify). Uses Camoufox's native config system. Ignored when a non-default `BROWSER_DEVICE_PROFILE` pins its own UA. |
+| `BROWSER_DEVICE_PROFILE` | `desktop-windows` | Device emulation profile for Camoufox. One of `desktop-windows` (default), `desktop-macos`, `mobile-ios`, `mobile-android`. Controls UA, viewport, device-pixel-ratio, `is_mobile`, `has_touch`, and the navigator-override init script. Per-agent overrides supported via the operator settings layer. See **Device Profiles** below. |
 | `BROWSER_PROXY_URL` | -- | Proxy URL for browser traffic (HTTP/HTTPS only, e.g. `http://proxy:8080`). SOCKS5 is not supported. Residential proxies recommended. |
 | `BROWSER_PROXY_USER` | -- | Proxy authentication username. |
 | `BROWSER_PROXY_PASS` | -- | Proxy authentication password. |
@@ -295,3 +296,53 @@ Beyond credentials, these environment variables affect runtime behavior:
 | `OPENLEGION_CHAT_MAX_TOTAL_ROUNDS` | `200` | Maximum total chat rounds before session auto-continuation (clamped 1–1000). |
 
 The mesh port is configured in `config/mesh.yaml` (`mesh.port`), not via environment variable.
+
+## Browser Device Profiles
+
+The shared Camoufox browser ships four device-emulation profiles, selected via `BROWSER_DEVICE_PROFILE`:
+
+| Profile | UA family | Viewport | DPR | `is_mobile` | `has_touch` | `platform` | When to use |
+|---|---|---|---|---|---|---|---|
+| `desktop-windows` (default) | Firefox / Win64 | per-agent pool (1280×720 → 1920×1080) | 1.0 | false | false | `Win32` | Default for most sites; ≈70% real desktop market share. |
+| `desktop-macos` | Firefox / macOS | per-agent pool | 2.0 | false | false | `MacIntel` | Targeting US/Western-Europe consumer sites that risk-score Mac users more leniently. |
+| `mobile-ios` | Mobile Safari 17.5 / iPhone 14 Pro | 393×852 | 3.0 | true | true | `iPhone` | Site serves a better mobile experience; geography skewed mobile (mobile-first markets); detection systems calibrated for desktop bots. |
+| `mobile-android` | Chrome 124 / Pixel 8 / Android 14 | 412×915 | 2.625 | true | true | `Linux armv8l` | Same as `mobile-ios`, alternative shape. Ships `navigator.userAgentData` with `mobile=true` (Mobile Safari does not). |
+
+### When to choose mobile
+
+- **Geography**: target audiences in markets where >70% of real traffic is mobile (most of South / Southeast Asia, Latin America, sub-Saharan Africa, mobile-only social platforms).
+- **Site behavior**: target site serves a richer or simpler experience to mobile UAs (login flows, content pagination, ad load), or the desktop site is more aggressively bot-protected than the mobile site.
+- **Detection profile**: some bot-detection vendors calibrate primarily on desktop fingerprint clusters; a clean mobile fingerprint can side-step desktop-only heuristics.
+
+### Tradeoffs
+
+- **Desktop-only forms reject mobile UAs**: enterprise SaaS and admin consoles often refuse mobile UAs entirely. Don't pick a mobile profile for those.
+- **Different content**: many sites serve fewer features (less DOM, simplified menus) to mobile UAs — the agent's snapshot/find_text pipeline still works but the surface is smaller.
+- **Camoufox compatibility**: Camoufox is built on Firefox, so mobile profiles ship a UA-engine mismatch (UA claims WebKit/Blink, engine is still Gecko). We mitigate at the surface layer (UA string, viewport, DPR, `is_mobile`, `has_touch`, `navigator.userAgentData`, `navigator.maxTouchPoints`, `navigator.platform`) but cannot spoof every nested API to fully match the claimed device. Sites that probe deep WebGL renderer strings, codec quirks, or vendor-specific CSS feature flags can still tell something is off. For high-accuracy mobile spoofing, a Chromium-based stack would be required; this implementation gives operators a usable mobile fingerprint for sites that gate on the easy-to-check signals.
+- **Client Hints (`Sec-CH-UA-*`)**: Firefox doesn't send these and Camoufox can't synthesize them. Sites that key on Client Hints will see no mobile-specific Client Hints even with `mobile-android` selected.
+
+### Per-agent override
+
+`BROWSER_DEVICE_PROFILE` is a [unified flag](../src/browser/flags.py) — every read goes through the standard precedence chain:
+
+1. Per-agent override (registered via `flags.set_agent_override(agent_id, "BROWSER_DEVICE_PROFILE", "mobile-ios")`)
+2. Operator settings (`config/settings.json` → `browser_flags.BROWSER_DEVICE_PROFILE`)
+3. Environment variable (`BROWSER_DEVICE_PROFILE=mobile-ios`)
+4. Hardcoded default (`desktop-windows`)
+
+This means an operator can default the fleet to `desktop-windows` while pinning specific agents to `mobile-ios` for sites where mobile works better. Unknown values log a warning and fall back to `desktop-windows`.
+
+```json
+// config/settings.json — operator-wide default
+{
+  "browser_flags": {
+    "BROWSER_DEVICE_PROFILE": "desktop-windows"
+  }
+}
+```
+
+```python
+# Per-agent override (typically wired from the dashboard flags panel)
+from src.browser import flags
+flags.set_agent_override("agent-mobile-scout", "BROWSER_DEVICE_PROFILE", "mobile-ios")
+```

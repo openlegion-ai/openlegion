@@ -23,6 +23,33 @@ consistent and realistic:
   - WebRTC fully disabled — Docker internal IPs leak via ICE otherwise
   - privacy.resistFingerprinting OFF — RFP produces detectable sentinel values
   - All background noise (telemetry, prefetch, crash reports) suppressed
+
+Device profiles (§19.3 — Phase 10 §21)
+--------------------------------------
+The default profile is ``desktop-windows`` (the historical behavior). Two
+mobile profiles + a desktop-macOS variant are available via the
+``BROWSER_DEVICE_PROFILE`` flag:
+
+  * ``desktop-windows`` — Firefox on Windows 10/11 (≈70% market share)
+  * ``desktop-macos``   — Firefox on macOS (≈10% market share)
+  * ``mobile-ios``      — Mobile Safari on iPhone 14 Pro
+  * ``mobile-android``  — Chrome on Pixel 8
+
+Mobile profiles are useful when the target site serves a mobile-friendly
+version (or when geographies dominated by mobile traffic make a mobile
+fingerprint less suspicious). Tradeoff: some desktop-only forms reject
+mobile UAs; some sites serve different content / fewer features to mobile.
+
+Camoufox compatibility caveats: Camoufox is built on Firefox, so the iOS
+profile (Mobile Safari UA) and Android profile (Chrome UA) ship a UA-engine
+mismatch — the underlying engine is still Gecko/Firefox even when the UA
+string says WebKit/Blink. We mitigate at the surface layer (UA string,
+viewport, DPR, ``has_touch``, ``is_mobile``, ``navigator.userAgentData``)
+but cannot spoof every nested API (e.g. WebGL renderer strings, codec
+support quirks, deep CSS feature queries) to fully match the claimed
+device. For high-accuracy mobile spoofing, a Chromium-based stack would
+be required; this implementation gives operators a usable mobile
+fingerprint for sites that gate on the easy-to-check signals.
 """
 
 from __future__ import annotations
@@ -35,6 +62,157 @@ from urllib.parse import urlparse
 from src.shared.utils import setup_logging
 
 logger = setup_logging("browser.stealth")
+
+# ── §19.3 Device profiles (Phase 10 §21) ─────────────────────────────────────
+
+
+# Each profile bundles the surface-layer fingerprint signals needed to
+# present as a particular device class. Consumers (``build_launch_options``,
+# the BrowserContext factory in ``service.py``) read these dicts to populate
+# UA, viewport, device-scale-factor, ``is_mobile`` / ``has_touch`` flags,
+# and the init-script that overrides ``navigator.userAgentData`` /
+# ``navigator.maxTouchPoints``.
+#
+# Profile values are chosen against the current real-world UA matrix
+# (April 2026 snapshot):
+#
+#   * ``desktop-windows`` — Firefox 138 on Windows 10/11. Matches the
+#     existing default; UA is built dynamically from ``BROWSER_UA_VERSION``
+#     when set.
+#   * ``desktop-macos``   — Firefox 138 on macOS 14 (Sonoma). Mac users
+#     skew higher-trust on some risk models (consumer rather than
+#     datacenter); useful when targeting US/Western-Europe sites.
+#   * ``mobile-ios``      — iOS 17.5 / Safari 17.5 on iPhone 14 Pro.
+#     iOS 17.x is the dominant iOS major as of early 2026; iPhone 14 Pro
+#     is a high-share device with a 393×852 logical viewport at 3.0 DPR
+#     (1179×2556 physical). UA matches Apple's WebKit User-Agent for
+#     Mobile Safari on iOS 17.5 (build 15E148, Version/17.5).
+#   * ``mobile-android``  — Android 14 / Chrome 124 on Pixel 8. Pixel 8
+#     uses a 412×915 logical viewport at 2.625 DPR (1080×2400 physical).
+#     Chrome 124 corresponds to Chrome's April 2026 stable channel; Mobile
+#     Safari/537.36 build literal matches Chrome's standard mobile UA shape.
+#
+# When picking new profiles, keep three invariants:
+#   1. UA, viewport, DPR, ``platform_navigator``, and ``user_agent_data_mobile``
+#      must internally agree (mismatch is itself a fingerprint signal).
+#   2. Touch capability + max touch points: real iOS / Android ship 5; real
+#      desktops ship 0 (or 10 on touch-screen Windows laptops).
+#   3. WebRTC stays disabled across all profiles — the ICE-leak risk is
+#      device-independent.
+_DESKTOP_WINDOWS_PROFILE: dict = {
+    # UA, viewport, and DPR for desktop-windows are NOT pinned in the
+    # profile: ``build_launch_options`` lets Camoufox + the existing
+    # per-agent ``pick_resolution`` pool drive these for the default
+    # profile. Profile metadata still recorded so consumers can branch
+    # on shape (e.g. has_touch=False → suppress mobile init script).
+    "user_agent": None,  # built from BROWSER_UA_VERSION or Camoufox default
+    "viewport": None,    # picked per-agent via pick_resolution
+    "device_scale_factor": 1.0,
+    "is_mobile": False,
+    "has_touch": False,
+    "platform_navigator": "Win32",
+    "max_touch_points": 0,
+    "user_agent_data_mobile": False,
+    "camoufox_os": "windows",
+}
+
+_DESKTOP_MACOS_PROFILE: dict = {
+    # Same shape as Windows but with macOS UA + platform — still allows
+    # the per-agent resolution pool to drive viewport/DPR. macOS desktop
+    # users overwhelmingly run native (non-Retina-doubled) DPR=2 on the
+    # browser side; Camoufox handles this when ``os=macos`` is set.
+    "user_agent": None,
+    "viewport": None,
+    "device_scale_factor": 2.0,
+    "is_mobile": False,
+    "has_touch": False,
+    "platform_navigator": "MacIntel",
+    "max_touch_points": 0,
+    "user_agent_data_mobile": False,
+    "camoufox_os": "macos",
+}
+
+_MOBILE_IOS_PROFILE: dict = {
+    # iOS 17.5 / Safari 17.5 / iPhone 14 Pro. UA string sourced from
+    # Apple's published WebKit User-Agents for iOS 17.5 (released
+    # 2024-05-13; still common on the in-field installed base in 2026).
+    # Build literal "15E148" + "Version/17.5" + "Mobile/15E148" matches
+    # Safari's standard format.
+    "user_agent": (
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) "
+        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 "
+        "Mobile/15E148 Safari/604.1"
+    ),
+    "viewport": {"width": 393, "height": 852},  # iPhone 14 Pro logical
+    "device_scale_factor": 3.0,                  # 1179×2556 physical
+    "is_mobile": True,
+    "has_touch": True,
+    "platform_navigator": "iPhone",
+    "max_touch_points": 5,
+    "user_agent_data_mobile": True,
+    # Camoufox is Firefox-based; the closest OS analogue for fingerprint
+    # plumbing (font stack, etc.) is macOS — iOS Safari shares the
+    # Apple/Cocoa side but has a distinct mobile-engine path.
+    "camoufox_os": "macos",
+}
+
+_MOBILE_ANDROID_PROFILE: dict = {
+    # Android 14 / Chrome 124 / Pixel 8. UA matches Chrome's April 2026
+    # stable channel mobile UA shape ("AppleWebKit/537.36 ... Chrome/124
+    # ... Mobile Safari/537.36" — the WebKit literal is historical, kept
+    # for compatibility with sites that pattern-match on it).
+    "user_agent": (
+        "Mozilla/5.0 (Linux; Android 14; Pixel 8) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 "
+        "Mobile Safari/537.36"
+    ),
+    "viewport": {"width": 412, "height": 915},   # Pixel 8 logical
+    "device_scale_factor": 2.625,                # 1080×2400 physical
+    "is_mobile": True,
+    "has_touch": True,
+    "platform_navigator": "Linux armv8l",
+    "max_touch_points": 5,
+    "user_agent_data_mobile": True,
+    "camoufox_os": "linux",
+}
+
+# Dispatch table consumed by :func:`get_device_profile`. Keep
+# ``desktop-windows`` first so iteration / tooling sees the default at
+# the head of the list.
+_DEVICE_PROFILES: dict[str, dict] = {
+    "desktop-windows": _DESKTOP_WINDOWS_PROFILE,
+    "desktop-macos": _DESKTOP_MACOS_PROFILE,
+    "mobile-ios": _MOBILE_IOS_PROFILE,
+    "mobile-android": _MOBILE_ANDROID_PROFILE,
+}
+
+DEFAULT_DEVICE_PROFILE: str = "desktop-windows"
+
+
+def get_device_profile(name: str | None = None) -> dict:
+    """Return the device profile dict for ``name``.
+
+    Resolution rules:
+      * ``None`` or empty string → default (``desktop-windows``).
+      * Known name → that profile.
+      * Unknown name → log a warning and fall back to default.
+
+    The returned dict is the live module-level constant — do not mutate.
+    Callers that want to layer per-agent overrides on top should
+    ``copy()`` the result first.
+    """
+    if not name:
+        return _DEVICE_PROFILES[DEFAULT_DEVICE_PROFILE]
+    profile = _DEVICE_PROFILES.get(name)
+    if profile is None:
+        logger.warning(
+            "Unknown BROWSER_DEVICE_PROFILE %r; allowed values are %s. "
+            "Falling back to %r.",
+            name, sorted(_DEVICE_PROFILES.keys()), DEFAULT_DEVICE_PROFILE,
+        )
+        return _DEVICE_PROFILES[DEFAULT_DEVICE_PROFILE]
+    return profile
+
 
 # ── §6.5 Referrer realism on navigate ─────────────────────────────────────────
 
@@ -409,31 +587,59 @@ def _assert_firefox_ua(ua: str) -> None:
 # ── Launch options ─────────────────────────────────────────────────────────────
 
 
-def build_launch_options(agent_id: str, profile_dir: str, proxy: dict | None = None) -> dict:
+def build_launch_options(
+    agent_id: str,
+    profile_dir: str,
+    proxy: dict | None = None,
+    *,
+    device_profile: str | None = None,
+) -> dict:
     """Build Camoufox AsyncNewBrowser kwargs for an agent.
 
     Args:
         proxy: Camoufox proxy dict (server, username, password) or None.
                Proxy is always resolved per-agent by the mesh host and pushed
                to the browser service — callers must pass it explicitly.
+        device_profile: Name of a profile from :data:`_DEVICE_PROFILES`
+               (``desktop-windows`` | ``desktop-macos`` | ``mobile-ios`` |
+               ``mobile-android``) or ``None`` for the default
+               (``desktop-windows``). Mobile profiles pin UA + viewport +
+               DPR + ``is_mobile``/``has_touch`` from the profile dict;
+               desktop profiles still use the per-agent resolution pool.
 
     Environment variables (all optional):
-      BROWSER_OS     — "windows" (default) | "macos" | "linux"
+      BROWSER_OS     — "windows" (default) | "macos" | "linux".
+                       Ignored when ``device_profile`` is non-default — the
+                       profile's ``camoufox_os`` field takes precedence so
+                       e.g. ``mobile-ios`` uses macOS plumbing regardless
+                       of operator BROWSER_OS.
       BROWSER_LOCALE — BCP-47 locale tag, e.g. "en-US" (default)
       BROWSER_UA_VERSION — Firefox version to report in User-Agent, e.g. "138.0".
                            If set, overrides the UA string to spoof a newer Firefox.
                            Useful when Camoufox's bundled Firefox is too old for
                            sites that enforce minimum browser versions (e.g. Shopify).
+                           Ignored when a mobile profile pins its own UA.
     """
+    profile = get_device_profile(device_profile)
+    profile_name = device_profile or DEFAULT_DEVICE_PROFILE
+    if profile_name not in _DEVICE_PROFILES:
+        profile_name = DEFAULT_DEVICE_PROFILE
 
     # ── OS fingerprint ────────────────────────────────────────────────────────
-    # Default to Windows: it has ≈70 % desktop market share and produces the
-    # least suspicious fingerprint for server-hosted automation.  Linux is an
-    # immediate datacenter/bot signal for sites that check navigator.platform.
-    os_hint = os.environ.get("BROWSER_OS", "windows").lower()
-    if os_hint not in ("windows", "macos", "linux"):
-        logger.warning("Invalid BROWSER_OS %r, defaulting to 'windows'", os_hint)
-        os_hint = "windows"
+    # Default profile: read BROWSER_OS env (Windows = ≈70% desktop market
+    # share, the least-suspicious server-hosted fingerprint). Non-default
+    # profiles pin ``camoufox_os`` directly so the OS plumbing (font stack,
+    # platform string) matches the device class regardless of operator
+    # BROWSER_OS.  Linux is an immediate datacenter/bot signal for sites
+    # that check navigator.platform — only allowed when explicitly chosen
+    # (mobile-android profile uses it deliberately).
+    if profile_name == DEFAULT_DEVICE_PROFILE:
+        os_hint = os.environ.get("BROWSER_OS", "windows").lower()
+        if os_hint not in ("windows", "macos", "linux"):
+            logger.warning("Invalid BROWSER_OS %r, defaulting to 'windows'", os_hint)
+            os_hint = "windows"
+    else:
+        os_hint = profile["camoufox_os"]
 
     locale = os.environ.get("BROWSER_LOCALE", "en-US")
 
@@ -448,8 +654,22 @@ def build_launch_options(agent_id: str, profile_dir: str, proxy: dict | None = N
     # alongside this feature. Otherwise the window would end up at full
     # display size while the fingerprint reported 1280×720, a detectable
     # mismatch.
-    width, height = pick_resolution(agent_id)
-    logger.debug("Agent '%s' resolution: %dx%d", agent_id, width, height)
+    #
+    # Mobile profiles override the resolution pool: a mobile fingerprint
+    # claiming 1920×1080 would itself be a dead giveaway, so we use the
+    # profile's pinned viewport instead. Desktop profiles still use the
+    # per-agent pool for fleet-scale diversity.
+    profile_viewport = profile.get("viewport")
+    if profile_viewport:
+        width = int(profile_viewport["width"])
+        height = int(profile_viewport["height"])
+        logger.debug(
+            "Agent '%s' device-profile %r viewport: %dx%d",
+            agent_id, profile_name, width, height,
+        )
+    else:
+        width, height = pick_resolution(agent_id)
+        logger.debug("Agent '%s' resolution: %dx%d", agent_id, width, height)
 
     options: dict = {
         "headless": False,
@@ -498,31 +718,59 @@ def build_launch_options(agent_id: str, profile_dir: str, proxy: dict | None = N
     # pass any ``navigator.connection.*`` config while `_assert_firefox_ua`
     # requires a Firefox UA.
 
-    # ── User-Agent version override ──────────────────────────────────────────
-    # Camoufox bundles a specific Firefox build (e.g. 135.0).  Some sites
-    # (Shopify, etc.) enforce minimum browser versions and block old Firefox.
-    # BROWSER_UA_VERSION overrides the reported version without upgrading the
-    # Camoufox binary.
+    # ── User-Agent override ──────────────────────────────────────────────────
+    # Two paths:
     #
-    # Primary mechanism: Camoufox's `config` dict with `navigator.userAgent`.
-    # This feeds into Camoufox's fingerprint injection system, which controls
-    # both navigator.userAgent (JS) and the User-Agent HTTP header.
-    # Fallback: `general.useragent.override` Firefox pref, in case an older
-    # Camoufox version doesn't honour the config dict.
-    ua_version = os.environ.get("BROWSER_UA_VERSION", "")
-    if ua_version:
-        ua = _build_ua_string(os_hint, ua_version)
-        if ua:
-            # §6.4 tripwire — the UA we're about to ship MUST be Firefox.
-            # If a future change introduces a Chromium UA, this raises so
-            # the developer has to wire Sec-CH-UA-* overrides first.
-            _assert_firefox_ua(ua)
-            options.setdefault("config", {})["navigator.userAgent"] = ua
-            options["i_know_what_im_doing"] = True
-            options["firefox_user_prefs"]["general.useragent.override"] = ua
-            logger.info("UA override: Firefox/%s", ua_version)
+    # 1. Mobile / non-Firefox device profile pins a UA on the profile dict.
+    #    This is the §19.3 mobile-emulation case — the UA is Mobile Safari
+    #    (iOS) or Chrome Mobile (Android). The §6.4 ``_assert_firefox_ua``
+    #    tripwire is intentionally bypassed here: the operator has chosen a
+    #    non-default device profile knowing the UA-engine mismatch. Sites
+    #    that key on Sec-CH-UA-* will see no Client Hints (Firefox-engine
+    #    behavior) — that's the documented trade-off.
+    #
+    # 2. Desktop profile + ``BROWSER_UA_VERSION`` env. Camoufox bundles a
+    #    specific Firefox build (e.g. 135.0).  Some sites (Shopify, etc.)
+    #    enforce minimum browser versions and block old Firefox.
+    #    BROWSER_UA_VERSION overrides the reported version without upgrading
+    #    the Camoufox binary.
+    #
+    # Primary mechanism for both: Camoufox's `config` dict with
+    # ``navigator.userAgent``. This feeds into Camoufox's fingerprint
+    # injection system, which controls both navigator.userAgent (JS) and
+    # the User-Agent HTTP header. Fallback: ``general.useragent.override``
+    # Firefox pref, in case an older Camoufox version doesn't honour the
+    # config dict.
+    profile_ua = profile.get("user_agent")
+    if profile_ua:
+        # §19.3: mobile / non-Firefox profile UA. Skip the Firefox tripwire.
+        options.setdefault("config", {})["navigator.userAgent"] = profile_ua
+        options["i_know_what_im_doing"] = True
+        options["firefox_user_prefs"]["general.useragent.override"] = profile_ua
+        logger.info(
+            "Device profile %r UA pinned: %s",
+            profile_name, _short_ua(profile_ua),
+        )
+    else:
+        ua_version = os.environ.get("BROWSER_UA_VERSION", "")
+        if ua_version:
+            ua = _build_ua_string(os_hint, ua_version)
+            if ua:
+                # §6.4 tripwire — the UA we're about to ship MUST be Firefox.
+                # If a future change introduces a Chromium UA, this raises so
+                # the developer has to wire Sec-CH-UA-* overrides first.
+                _assert_firefox_ua(ua)
+                options.setdefault("config", {})["navigator.userAgent"] = ua
+                options["i_know_what_im_doing"] = True
+                options["firefox_user_prefs"]["general.useragent.override"] = ua
+                logger.info("UA override: Firefox/%s", ua_version)
 
     return options
+
+
+def _short_ua(ua: str, *, limit: int = 80) -> str:
+    """Return a truncated UA for human-readable log lines."""
+    return ua if len(ua) <= limit else ua[: limit - 1] + "…"
 
 
 def _build_ua_string(os_hint: str, version: str) -> str | None:
@@ -713,3 +961,111 @@ def _stealth_prefs() -> dict:
         "browser.tabs.warnOnClose": False,
         "browser.tabs.warnOnCloseOtherTabs": False,
     }
+
+
+# ── §19.3 Navigator override init script (Phase 10 §21) ──────────────────────
+
+
+# Wired by ``BrowserManager._start_browser`` at context creation via
+# ``BrowserContext.add_init_script``.  Runs at ``document_start`` on every
+# page and frame BEFORE any site script has a chance to read these
+# properties — that's the only point at which we can shape the values
+# the page sees without leaving a tell-tale "page-script came back with a
+# different value than the runtime exposes" inconsistency.
+#
+# Only emitted for profiles where ``user_agent_data_mobile`` is True
+# (the two mobile profiles). Desktop profiles let Camoufox + the BrowserForge
+# fingerprint drive these values; injecting an override would itself be
+# a fingerprint anomaly versus the real desktop population.
+_MOBILE_NAVIGATOR_INIT_SCRIPT = """
+(() => {
+  try {
+    // navigator.userAgentData: Chromium-only API today, but Mobile Safari
+    // doesn't expose it either, so emitting it for mobile-android is the
+    // right shape and emitting an absence for mobile-ios matches real
+    // iOS Safari. We define both behaviors below — service.py picks which
+    // to inject based on the profile.
+    if (typeof navigator !== 'undefined') {
+      try {
+        Object.defineProperty(navigator, 'maxTouchPoints', {
+          get: () => __MAX_TOUCH_POINTS__,
+          configurable: true,
+        });
+      } catch (_e) { /* ignore */ }
+      try {
+        Object.defineProperty(navigator, 'platform', {
+          get: () => '__PLATFORM__',
+          configurable: true,
+        });
+      } catch (_e) { /* ignore */ }
+      // userAgentData: only emit when the profile claims a Chromium-shaped
+      // engine (mobile-android). For Mobile Safari we leave it undefined,
+      // matching the real-Safari population.
+      if (__EMIT_USER_AGENT_DATA__) {
+        try {
+          const data = Object.freeze({
+            mobile: __MOBILE__,
+            platform: '__UA_DATA_PLATFORM__',
+            brands: [],
+            getHighEntropyValues: () => Promise.resolve({
+              mobile: __MOBILE__,
+              platform: '__UA_DATA_PLATFORM__',
+            }),
+            toJSON: () => ({
+              mobile: __MOBILE__,
+              platform: '__UA_DATA_PLATFORM__',
+            }),
+          });
+          Object.defineProperty(navigator, 'userAgentData', {
+            get: () => data,
+            configurable: true,
+            enumerable: true,
+          });
+        } catch (_e) { /* ignore */ }
+      }
+    }
+  } catch (_e) {
+    // Defensive: any failure here is operator-debuggable via the §6.3
+    // navigator self-test, which will flag a platform mismatch.
+  }
+})();
+"""
+
+
+def build_mobile_init_script(profile: dict) -> str | None:
+    """Return the JS init-script body to inject for a mobile profile.
+
+    Returns ``None`` when the profile does not need mobile overrides
+    (any desktop profile). The returned string is a complete
+    ``add_init_script``-ready snippet — the caller passes it directly to
+    ``BrowserContext.add_init_script(script=...)``.
+
+    Two mobile shapes diverge on ``navigator.userAgentData``:
+      * Android profile (Chromium-shaped UA): emits a frozen
+        ``userAgentData`` object with ``mobile=true``.
+      * iOS profile (Safari-shaped UA): leaves ``userAgentData``
+        absent (matches real iOS Safari, which doesn't expose Client
+        Hints).
+
+    Both shapes inject ``maxTouchPoints`` and ``platform``.
+    """
+    if not profile.get("is_mobile"):
+        return None
+
+    platform = profile.get("platform_navigator") or "iPhone"
+    max_touch_points = int(profile.get("max_touch_points") or 5)
+
+    # iOS profile: real Safari hides userAgentData. Android: emit it.
+    # Heuristic: emit userAgentData iff the platform string looks
+    # Linux-/Android-shaped. iPhone / iPad / Mac platforms get nothing.
+    is_chromium_shaped = "Linux" in platform or "Android" in platform
+    ua_data_platform = "Android" if "Linux" in platform or "Android" in platform else "iOS"
+
+    return (
+        _MOBILE_NAVIGATOR_INIT_SCRIPT
+        .replace("__MAX_TOUCH_POINTS__", str(max_touch_points))
+        .replace("__PLATFORM__", platform)
+        .replace("__EMIT_USER_AGENT_DATA__", "true" if is_chromium_shaped else "false")
+        .replace("__UA_DATA_PLATFORM__", ua_data_platform)
+        .replace("__MOBILE__", "true")
+    )
