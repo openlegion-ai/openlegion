@@ -91,17 +91,38 @@ def canonical_host(value: str) -> str | None:
     return host or None
 
 
+# Multi-segment public suffixes ("effective TLDs"). When a host's last
+# two labels match one of these, the label is the THIRD-from-last
+# component instead of the second. Without this, ``bbc.co.uk`` would
+# label as ``co`` rather than ``bbc``. Kept short and operator-curated
+# rather than pulling in the full publicsuffix list — operators who
+# need exhaustive coverage can add to this set; the wrong label is a
+# cosmetic dashboard issue, not a correctness problem.
+_MULTI_SEGMENT_TLDS: frozenset[str] = frozenset({
+    "co.uk", "co.jp", "co.kr", "co.nz", "co.za",
+    "com.au", "com.br", "com.cn", "com.hk", "com.mx", "com.sg", "com.tw",
+    "ac.uk", "gov.uk", "org.uk", "ne.jp", "or.jp",
+})
+
+
 def _platform_label(host: str) -> str:
     """Compress a host into a short label for display.
 
     ``linkedin.com`` → ``linkedin``; ``api.example.com`` →
-    ``example``.  Falls back to the full host for single-segment
-    inputs (``localhost``).
+    ``example``; ``bbc.co.uk`` → ``bbc`` (multi-segment TLD aware).
+    Falls back to the full host for single-segment inputs
+    (``localhost``).
     """
     parts = host.split(".")
-    if len(parts) >= 2:
-        return parts[-2]
-    return host
+    if len(parts) < 2:
+        return host
+    # Multi-segment TLD: ``bbc.co.uk`` → split is
+    # ["bbc", "co", "uk"], last two joined = "co.uk" → label is parts[-3].
+    if len(parts) >= 3:
+        suffix = ".".join(parts[-2:])
+        if suffix in _MULTI_SEGMENT_TLDS:
+            return parts[-3]
+    return parts[-2]
 
 
 # ── State ────────────────────────────────────────────────────────────────

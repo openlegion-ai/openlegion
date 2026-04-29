@@ -590,3 +590,42 @@ class TestSuccessRateExcludesGateSkips:
         assert row["captcha_attempted"] == 0
         assert row["captcha_other"] == 10
         assert row["success_rate"] is None
+
+
+# ── _platform_label edge cases (multi-segment TLDs) ───────────────────
+
+
+class TestPlatformLabel:
+    def test_two_segment_host(self):
+        from src.dashboard.platform_success import _platform_label
+        assert _platform_label("linkedin.com") == "linkedin"
+
+    def test_subdomain_resolves_to_apex(self):
+        from src.dashboard.platform_success import _platform_label
+        assert _platform_label("api.example.com") == "example"
+        assert _platform_label("mobile.linkedin.com") == "linkedin"
+
+    def test_multi_segment_tld_uk(self):
+        """``bbc.co.uk`` → ``bbc`` (not ``co``).  Pre-fix this was
+        labelling every UK site as "co" which made the dashboard
+        useless for UK fleets."""
+        from src.dashboard.platform_success import _platform_label
+        assert _platform_label("bbc.co.uk") == "bbc"
+        assert _platform_label("guardian.co.uk") == "guardian"
+
+    def test_multi_segment_tld_australia(self):
+        from src.dashboard.platform_success import _platform_label
+        assert _platform_label("news.com.au") == "news"
+
+    def test_subdomain_under_multi_segment_tld(self):
+        """``api.bbc.co.uk`` → ``bbc`` (label is the registrable
+        domain, not the closest subdomain)."""
+        from src.dashboard.platform_success import _platform_label
+        # api.bbc.co.uk splits to [api, bbc, co, uk]; suffix = "co.uk"
+        # is in the multi-segment set; with len >= 3 we look at
+        # parts[-3] = "bbc". That's the correct label.
+        assert _platform_label("api.bbc.co.uk") == "bbc"
+
+    def test_single_segment_falls_back(self):
+        from src.dashboard.platform_success import _platform_label
+        assert _platform_label("localhost") == "localhost"
