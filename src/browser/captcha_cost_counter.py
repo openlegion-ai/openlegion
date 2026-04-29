@@ -136,6 +136,23 @@ PRICING_MILLICENTS: dict[str, int] = {
     "capsolver-hcaptcha": 100,
     "capsolver-turnstile": 60,
     "capsolver-cf-interstitial-turnstile": 60,
+    # §22 — anti-bot platform task types (CapSolver only).
+    # Published as "approximately $3 / 1000 solves" on
+    # https://docs.capsolver.com/en/guide/captcha/ for the AntiBot
+    # family; we encode 300 millicents = $0.003/solve. CapSolver's
+    # actual rate fluctuates ($2.50–$5/1000) so this is the midpoint
+    # high-end. Entries are proxyless-keyed for parity with the rest
+    # of the table; the proxy-aware tier inherits the same value via
+    # :data:`PRICING_MILLICENTS_PROXY_AWARE` below (anti-bot tasks
+    # have no proxyless variant — every solve is proxy-aware). The
+    # entry on the proxyless table is what
+    # ``_max_published_solve_cost_millicents`` reads to compute the
+    # cost-cap reservation BEFORE the solver call (when the actual
+    # tier isn't yet known).
+    "capsolver-js-challenge-akamai": 300,
+    "capsolver-js-challenge-imperva": 300,
+    "capsolver-js-challenge-kasada": 300,
+    "capsolver-datadome-behavioral": 300,
 }
 
 # §11.2 — proxy-aware pricing tier (~3× the proxyless rate as published
@@ -167,6 +184,17 @@ PRICING_MILLICENTS_PROXY_AWARE: dict[tuple[str, str], int] = {
     ("capsolver", "hcaptcha"):                300,
     ("capsolver", "turnstile"):               180,
     ("capsolver", "cf-interstitial-turnstile"): 180,
+    # §22 — anti-bot platform task types are proxy-aware ONLY (no
+    # proxyless variant published). Pricing matches the proxyless table
+    # — CapSolver doesn't differentiate proxy vs non-proxy tiers for
+    # the AntiBot family because the proxy is required by the task type
+    # itself (the operator's bring-your-own proxy, not CapSolver's
+    # pool). 300 millicents = $0.003/solve; see comment block on the
+    # proxyless table for the source.
+    ("capsolver", "js-challenge-akamai"):     300,
+    ("capsolver", "js-challenge-imperva"):    300,
+    ("capsolver", "js-challenge-kasada"):     300,
+    ("capsolver", "datadome-behavioral"):     300,
 }
 
 # Back-compat aliases — third-party subclasses or future callers that
