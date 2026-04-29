@@ -118,6 +118,20 @@ _agent_overrides: dict[str, dict[str, str]] = {}     # agent_id -> name -> value
 _operator_settings: dict[str, str] | None = None     # lazy-loaded from disk
 
 
+# Sensitive flags that MUST come from the environment (or a secrets
+# manager that injects into the env at process start). ``config/settings.json``
+# is plaintext at rest with no inherent chmod / encryption — accepting
+# solver creds there would expose them to anyone with read access to
+# the config dir. We strip these keys from the operator-settings layer
+# at load time and warn so the operator notices the misconfig.
+_ENV_ONLY_FLAGS: frozenset[str] = frozenset({
+    "CAPTCHA_SOLVER_KEY",
+    "CAPTCHA_SOLVER_KEY_SECONDARY",
+    "CAPTCHA_SOLVER_PROXY_PASSWORD",
+    "CAPTCHA_SOLVER_PROXY_LOGIN",
+})
+
+
 def _settings_path() -> Path:
     """Location of the operator settings file. Override-able via env for
     tests + containerized deployments."""
@@ -152,7 +166,22 @@ def _load_operator_settings() -> dict[str, str]:
             logger.warning("browser_flags in %s is not a dict; ignoring", path)
             flags = {}
         # Coerce keys/values to str for uniform lookup.
-        _operator_settings = {str(k): str(v) for k, v in flags.items()}
+        parsed = {str(k): str(v) for k, v in flags.items()}
+        # Strip env-only sensitive keys with a one-time warning. The
+        # ``set`` intersection avoids leaking the actual configured keys
+        # to the log when none of them appear.
+        removed = sorted(set(parsed) & _ENV_ONLY_FLAGS)
+        if removed:
+            logger.warning(
+                "Operator settings at %s contained env-only sensitive "
+                "flags %s — IGNORED. Provide these via environment "
+                "variables, not config/settings.json (plaintext at "
+                "rest with no inherent chmod / encryption).",
+                path, removed,
+            )
+            for sensitive in removed:
+                parsed.pop(sensitive, None)
+        _operator_settings = parsed
         return _operator_settings
 
 

@@ -405,13 +405,39 @@ def _validate_cookies(
         if name.startswith("__Host-") and domain:
             _drop("host_prefix_with_domain")
             continue
+        # Accept ``secure`` as a JSON bool, the integers ``0``/``1``
+        # (Chrome devtools "Copy as cURL", older Chromium JSON exports,
+        # Curl bridge tooling), or absent. When absent we infer secure
+        # from the URL scheme — real-browser cookie exports often omit
+        # the attribute when present in the source, and silently
+        # downgrading every cookie to non-secure breaks cross-site auth
+        # imports. NB: ``isinstance(x, bool)`` is checked BEFORE the
+        # ``in (0, 1)`` branch because ``True/False`` are themselves
+        # ``int`` subclasses.
         secure_raw = raw.get("secure")
-        if secure_raw is not None and not isinstance(secure_raw, bool):
+        if secure_raw is None:
+            secure = bool(url and url.lower().startswith("https://"))
+        elif isinstance(secure_raw, bool):
+            secure = secure_raw
+        elif isinstance(secure_raw, int) and secure_raw in (0, 1):
+            secure = bool(secure_raw)
+        else:
             _drop("invalid_secure")
             continue
-        secure = secure_raw if secure_raw is not None else False
+        # ``httpOnly`` accepts the same bool/0/1/absent shape as
+        # ``secure``. Unlike ``secure``, we do NOT default-set it from
+        # any URL property — httpOnly should be explicit so the operator
+        # signals the import faithfully (a default-True would lock down
+        # cookies that the source intended client-readable; a default-
+        # False would accidentally expose session cookies).
         http_only_raw = raw.get("httpOnly")
-        if http_only_raw is not None and not isinstance(http_only_raw, bool):
+        if http_only_raw is None:
+            pass
+        elif isinstance(http_only_raw, bool):
+            pass
+        elif isinstance(http_only_raw, int) and http_only_raw in (0, 1):
+            http_only_raw = bool(http_only_raw)
+        else:
             _drop("invalid_httponly")
             continue
         if name.startswith("__Host-"):
@@ -489,10 +515,14 @@ def _validate_cookies(
                 _drop("invalid_expires")
                 continue
             normalized["expires"] = int(exp)
-        # httpOnly / secure — pass through only explicit JSON booleans.
+        # httpOnly / secure — pass through only when known. ``secure``
+        # was inferred above from the URL scheme when the source omitted
+        # the attribute; emit it so the downstream Playwright/Firefox
+        # call captures the resolved value rather than defaulting to
+        # ``False`` again.
         if http_only_raw is not None:
             normalized["httpOnly"] = http_only_raw
-        if secure_raw is not None:
+        if secure_raw is not None or url:
             normalized["secure"] = secure
         accepted.append(normalized)
 

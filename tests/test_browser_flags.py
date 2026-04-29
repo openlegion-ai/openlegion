@@ -247,3 +247,86 @@ class TestSnapshotAll:
         flags.set_agent_override("a", "BROWSER_DOWNLOADS_DISABLED", "true")
         snap = flags.snapshot_all(agent_id="a")
         assert snap["BROWSER_DOWNLOADS_DISABLED"] == "true"
+
+
+# ── A7: env-only flags must NOT come from operator settings ────────────────
+
+
+class TestEnvOnlyFlagsRejectedFromSettings:
+    """Sensitive flags (solver creds, proxy creds) MUST come from the
+    environment. ``config/settings.json`` is plaintext at rest with no
+    inherent chmod / encryption; accepting solver creds there would
+    expose them to anyone with read access to the config dir. The
+    loader strips these keys at load time and warns once."""
+
+    def test_solver_key_in_settings_dropped_with_warning(
+        self, tmp_path, caplog,
+    ):
+        import logging as _logging
+        path = tmp_path / "s.json"
+        path.write_text(json.dumps({
+            "browser_flags": {
+                "CAPTCHA_SOLVER_PROVIDER": "2captcha",
+                "CAPTCHA_SOLVER_KEY": "secret-from-disk",
+            },
+        }))
+        with mock.patch.dict(os.environ, {
+            "OPENLEGION_SETTINGS_PATH": str(path),
+        }, clear=True):
+            flags.reload_operator_settings()
+            with caplog.at_level(_logging.WARNING, logger="browser.flags"):
+                key = flags.get_str("CAPTCHA_SOLVER_KEY")
+            # No env var → default empty string. Settings.json key was
+            # stripped, so the resolved value must be the default.
+            assert key == ""
+            # Provider survives — it's NOT in _ENV_ONLY_FLAGS.
+            assert flags.get_str("CAPTCHA_SOLVER_PROVIDER") == "2captcha"
+        # Warning was logged identifying the stripped key.
+        joined = "\n".join(rec.getMessage() for rec in caplog.records)
+        assert "CAPTCHA_SOLVER_KEY" in joined
+        assert "env-only" in joined.lower() or "ignored" in joined.lower()
+
+    def test_env_var_wins_when_settings_file_also_has_key(self, tmp_path):
+        path = tmp_path / "s.json"
+        path.write_text(json.dumps({
+            "browser_flags": {
+                "CAPTCHA_SOLVER_KEY": "settings-key",
+            },
+        }))
+        with mock.patch.dict(os.environ, {
+            "OPENLEGION_SETTINGS_PATH": str(path),
+            "CAPTCHA_SOLVER_KEY": "env-key",
+        }, clear=True):
+            flags.reload_operator_settings()
+            # Settings.json key was stripped at load time; env-var
+            # CAPTCHA_SOLVER_KEY wins.
+            assert flags.get_str("CAPTCHA_SOLVER_KEY") == "env-key"
+
+    def test_proxy_credentials_also_stripped(self, tmp_path):
+        path = tmp_path / "s.json"
+        path.write_text(json.dumps({
+            "browser_flags": {
+                "CAPTCHA_SOLVER_PROXY_LOGIN": "user-from-disk",
+                "CAPTCHA_SOLVER_PROXY_PASSWORD": "pass-from-disk",
+            },
+        }))
+        with mock.patch.dict(os.environ, {
+            "OPENLEGION_SETTINGS_PATH": str(path),
+        }, clear=True):
+            flags.reload_operator_settings()
+            # Both are env-only — settings.json values dropped.
+            assert flags.get_str("CAPTCHA_SOLVER_PROXY_LOGIN") == ""
+            assert flags.get_str("CAPTCHA_SOLVER_PROXY_PASSWORD") == ""
+
+    def test_secondary_solver_key_also_env_only(self, tmp_path):
+        path = tmp_path / "s.json"
+        path.write_text(json.dumps({
+            "browser_flags": {
+                "CAPTCHA_SOLVER_KEY_SECONDARY": "fallback-from-disk",
+            },
+        }))
+        with mock.patch.dict(os.environ, {
+            "OPENLEGION_SETTINGS_PATH": str(path),
+        }, clear=True):
+            flags.reload_operator_settings()
+            assert flags.get_str("CAPTCHA_SOLVER_KEY_SECONDARY") == ""

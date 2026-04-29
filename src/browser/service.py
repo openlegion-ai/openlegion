@@ -19,7 +19,6 @@ import re
 import subprocess
 import time
 import uuid
-import warnings
 import weakref
 from collections import deque
 from pathlib import Path
@@ -1550,31 +1549,41 @@ def _encode_screenshot(
 # envelope AND every gate (rate-limit, cost-cap, kill-switch, breaker,
 # behavioral classification) fires uniformly. See plan docs §11.4 + §18.2.
 #
-# Probe attaches to ``window.__ol_captcha_probe`` so concurrent observers
-# from prior calls are overwritten cleanly. The probe is torn down in the
-# read-back (``obs.disconnect()`` + ``delete window.__ol_captcha_probe``)
-# so a navigation that happens between install and read-back leaves no
-# residue — the read-back from the new page returns ``[]`` (probe absent)
-# and the caller falls back to the navigate-time ``_check_captcha`` path.
+# Probe attaches to a per-instance randomised window property
+# (``inst._captcha_probe_var``, e.g. ``__telemetry_a1b2c3d4``) so
+# concurrent observers from prior calls are overwritten cleanly. The
+# property is defined ``enumerable: false`` so it does NOT show up
+# in ``Object.keys(window)`` / ``for..in window`` walks — anti-bot
+# scripts looking for unfamiliar ``__ol_*`` (or any other prefix)
+# globals cannot fingerprint our automation. The probe is torn down
+# in the read-back (``obs.disconnect()`` + ``delete window[probeVar]``)
+# so a navigation between install and read-back leaves no residue.
 _JS_CAPTCHA_REDETECT_INSTALL = """
-() => {
+(probeVar) => {
   try {
-    if (window.__ol_captcha_probe && window.__ol_captcha_probe.obs) {
-      try { window.__ol_captcha_probe.obs.disconnect(); } catch (e) {}
+    const existing = window[probeVar];
+    if (existing && existing.obs) {
+      try { existing.obs.disconnect(); } catch (e) {}
     }
-    window.__ol_captcha_probe = { adds: [], obs: null };
+    const state = { adds: [], obs: null };
+    Object.defineProperty(window, probeVar, {
+      value: state,
+      enumerable: false,
+      configurable: true,
+      writable: true,
+    });
     if (!document.body) return;
     const obs = new MutationObserver(records => {
       for (const r of records) {
         for (const n of r.addedNodes) {
           if (n && n.nodeType === 1) {
-            window.__ol_captcha_probe.adds.push(n);
+            state.adds.push(n);
           }
         }
       }
     });
     obs.observe(document.body, { childList: true, subtree: true });
-    window.__ol_captcha_probe.obs = obs;
+    state.obs = obs;
   } catch (e) {
     // Swallow — install failure must never break the action.
   }
@@ -1582,8 +1591,10 @@ _JS_CAPTCHA_REDETECT_INSTALL = """
 """
 
 _JS_CAPTCHA_REDETECT_READBACK = """
-(selectors) => {
-  const p = window.__ol_captcha_probe;
+(args) => {
+  const probeVar = args[0];
+  const selectors = args[1] || [];
+  const p = window[probeVar];
   if (!p) return [];
   try { if (p.obs) p.obs.disconnect(); } catch (e) {}
   const hits = new Set();
@@ -1598,7 +1609,7 @@ _JS_CAPTCHA_REDETECT_READBACK = """
       }
     }
   } catch (e) {}
-  try { delete window.__ol_captcha_probe; } catch (e) {}
+  try { delete window[probeVar]; } catch (e) {}
   return [...hits];
 }
 """
@@ -1813,7 +1824,6 @@ class CamoufoxInstance:
         self.dialog_active: bool = False  # True when snapshot scoped to a modal dialog
         self.dialog_detected: bool = False  # True when a modal was found (even if scoping failed)
         self._lock: asyncio.Lock | None = None
-        self._lock_loop: asyncio.AbstractEventLoop | None = None
         self.x11_wid: int | None = None  # X11 window ID for targeted focus
         # P0.3: vestigial — the snapshot tree builder always uses the JS
         # walker now. Still consulted by ``navigate()`` for body-text
@@ -1935,73 +1945,39 @@ class CamoufoxInstance:
         # envelope even when it didn't read the action's response.
         self._last_redetect_ts: float = 0.0
         self._pending_captcha_envelope: dict | None = None
+        # Per-instance random property name for the captcha re-detection
+        # MutationObserver state. Anti-bot scripts that walk
+        # ``Object.keys(window)`` looking for unfamiliar ``__ol_*``
+        # patterns can fingerprint our automation; randomising the name
+        # AND defining the property as non-enumerable (see
+        # ``_JS_CAPTCHA_REDETECT_INSTALL``) keeps the probe out of
+        # generic enumeration. The shape ``__telemetry_<8-hex>`` mimics
+        # ad-tech / RUM globals that real sites carry, so a passive
+        # observer cannot trivially distinguish ours from a third-party
+        # SDK. ``secrets.token_hex`` is stdlib, no extra dependency.
+        import secrets
+        self._captcha_probe_var: str = f"__telemetry_{secrets.token_hex(4)}"
 
     @property
     def lock(self) -> asyncio.Lock:
-        """Per-instance lock, bound lazily to the active event loop.
+        """Per-instance lock, lazily initialized on first async access.
 
-        Construction may happen outside any running loop (sync FastAPI
-        startup, pytest fixtures), so the lock is created on first access
-        and refreshed if the active loop has changed since. Mirrors the
-        ``_manager_lock`` / ``_get_*_lock`` helpers elsewhere in this module.
-        Synchronous inspection is supported; the first real async use pins
-        or refreshes the lock for that running loop.
+        Loop binding is fixed once initialized; cross-loop access raises
+        ``RuntimeError`` (from the underlying ``asyncio.Lock``) loudly
+        rather than silently re-creating the lock — silently swapping
+        the lock under a coroutine that already holds the previous
+        instance breaks mutual exclusion. Production runs single-loop
+        per :class:`BrowserManager`; cross-loop is a test-isolation
+        concern that should fail loud.
         """
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
         if self._lock is None:
-            if loop is None:
-                try:
-                    # Python 3.10+ creates an unbound lock here without
-                    # touching thread-local event-loop state.
-                    self._lock = asyncio.Lock()
-                    self._lock_loop = None
-                except RuntimeError:
-                    # Python 3.9 still calls get_event_loop() during
-                    # Lock construction. Use an explicit throwaway loop
-                    # without setting it as the thread default; first
-                    # real async use will rebuild for the running loop.
-                    tmp_loop = asyncio.new_event_loop()
-                    try:
-                        with warnings.catch_warnings():
-                            warnings.simplefilter(
-                                "ignore", DeprecationWarning,
-                            )
-                            self._lock = asyncio.Lock(loop=tmp_loop)
-                    finally:
-                        tmp_loop.close()
-                    self._lock_loop = tmp_loop
-            else:
-                self._lock = asyncio.Lock()
-                self._lock_loop = loop
-        elif loop is None:
-            # No active loop to bind against; return what we have.
-            return self._lock
-        elif self._lock_loop is None:
-            # Lock was created (or set via the setter) outside a
-            # running loop; pin it to the loop that's actually using
-            # it now without discarding.
-            self._lock_loop = loop
-        elif self._lock_loop is not loop:
-            # Loop changed between uses (typically pytest spinning up
-            # a fresh loop per test). Rebuild to bind to the new loop.
             self._lock = asyncio.Lock()
-            self._lock_loop = loop
         return self._lock
 
     @lock.setter
     def lock(self, value: asyncio.Lock) -> None:
-        # Tests occasionally swap in a custom lock (``TrackingLock`` /
-        # ``asyncio.Lock()``). Honor the swap; the property getter pins
-        # the loop on first use so the supplied lock is not silently
-        # replaced.
+        """Test-only override. Honors the swap; does NOT track loop."""
         self._lock = value
-        try:
-            self._lock_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            self._lock_loop = None
 
     def _register_page(self, page) -> str:
         """Assign a stable UUID to a Page if not already registered.
@@ -5427,20 +5403,6 @@ class BrowserManager:
                 action_result, captcha_envelope = await self._with_captcha_redetect(
                     inst, _click_body(),
                 )
-            except NotImplementedError as e:
-                # Defensive: when PR2 (shadow DOM) merges, refs carrying
-                # both ``shadow_path`` and ``frame_id`` will hit the
-                # ``Shadow + iframe combination not yet supported`` guard
-                # in ``_resolve_shadow_element``. Wrap as a structured
-                # ``not_supported`` envelope so the agent sees a typed
-                # error rather than a 500 from the generic catch-all.
-                inst.m_click_fail += 1
-                inst.click_window.append(False)
-                inst.recorder.record_click(method="auto", success=False)
-                return _err(
-                    "not_supported",
-                    str(e) or "Action not supported on this ref type",
-                )
             except Exception as e:
                 inst.m_click_fail += 1
                 inst.click_window.append(False)
@@ -5694,13 +5656,6 @@ class BrowserManager:
                     return {"success": False, "error": "Must provide ref or selector"}
                 await asyncio.sleep(action_delay())
                 return {"success": True, "data": {"hovered": ref or selector}}
-            except NotImplementedError as e:
-                # See click() for rationale — pre-emptive catch for PR2's
-                # shadow+iframe combination guard.
-                return _err(
-                    "not_supported",
-                    str(e) or "Action not supported on this ref type",
-                )
             except Exception as e:
                 return {"success": False, "error": str(e)}
 
@@ -5871,13 +5826,6 @@ class BrowserManager:
             try:
                 action_result, captcha_envelope = await self._with_captcha_redetect(
                     inst, _type_body(),
-                )
-            except NotImplementedError as e:
-                # See click() for rationale — pre-emptive catch for PR2's
-                # shadow+iframe combination guard.
-                return _err(
-                    "not_supported",
-                    str(e) or "Action not supported on this ref type",
                 )
             except Exception as e:
                 return {"success": False, "error": str(e)}
@@ -6157,15 +6105,6 @@ class BrowserManager:
                     "success": True,
                     "data": {"direction": direction, "pixels": scrolled},
                 }
-            except NotImplementedError as e:
-                # See click() for rationale — pre-emptive catch for PR2's
-                # shadow+iframe combination guard. ``scroll(ref=...)``
-                # routes through ``_locator_from_ref`` which is the path
-                # that will raise once shadow_path resolution lands.
-                return _err(
-                    "not_supported",
-                    str(e) or "Action not supported on this ref type",
-                )
             except Exception as e:
                 return {"success": False, "error": str(e)}
 
@@ -6276,9 +6215,10 @@ class BrowserManager:
         # 1. Install. Failures are non-fatal — we still run the action.
         # Do not run read-back unless install succeeded; a failed install
         # could otherwise read stale probe state left by a prior action.
+        probe_var = inst._captcha_probe_var
         probe_installed = False
         try:
-            await inst.page.evaluate(_JS_CAPTCHA_REDETECT_INSTALL)
+            await inst.page.evaluate(_JS_CAPTCHA_REDETECT_INSTALL, probe_var)
             probe_installed = True
         except Exception as e:
             logger.debug(
@@ -6288,16 +6228,43 @@ class BrowserManager:
 
         # 2. Run the action. Always propagate exceptions — the wrapper
         # exists to add detection, not to swallow action failures. When
-        # the action fails after a successful install, best-effort tear
-        # down the observer so a later flag-disabled path cannot inherit
-        # stale probe state.
+        # the action fails after a successful install, run the read-back
+        # with the REAL selector list so we can both tear down the
+        # observer AND surface "the action failed because a captcha
+        # appeared mid-flight" as actionable diagnostic context. The
+        # captured hits ride on the exception via ``captcha_redetect_hits``
+        # so callers / observability can distinguish a generic action
+        # failure from a captcha-induced one.
         try:
             result = await action_coro
-        except Exception:
+        except Exception as exc:
             if probe_installed:
-                with contextlib.suppress(Exception):
-                    await inst.page.evaluate(
-                        _JS_CAPTCHA_REDETECT_READBACK, [],
+                try:
+                    captcha_hits = await inst.page.evaluate(
+                        _JS_CAPTCHA_REDETECT_READBACK,
+                        [probe_var, list(_CAPTCHA_REDETECT_SELECTORS)],
+                    )
+                    if not isinstance(captcha_hits, list):
+                        captcha_hits = []
+                    if captcha_hits:
+                        logger.info(
+                            "captcha redetect: action failed AFTER captcha "
+                            "appeared for %s — selectors hit: %s. Likely "
+                            "cause of failure.",
+                            agent_id, captcha_hits,
+                        )
+                        try:
+                            exc.captcha_redetect_hits = captcha_hits  # type: ignore[attr-defined]
+                        except Exception:
+                            # Some exception types (raised by C extensions)
+                            # reject attribute assignment. Don't let that
+                            # mask the original failure.
+                            pass
+                except Exception as readback_err:
+                    logger.debug(
+                        "captcha redetect: read-back failed during "
+                        "action-failure tear-down for %s: %s",
+                        agent_id, readback_err,
                     )
             raise
 
@@ -6315,7 +6282,7 @@ class BrowserManager:
             try:
                 hits = await inst.page.evaluate(
                     _JS_CAPTCHA_REDETECT_READBACK,
-                    list(_CAPTCHA_REDETECT_SELECTORS),
+                    [probe_var, list(_CAPTCHA_REDETECT_SELECTORS)],
                 )
                 if not isinstance(hits, list):
                     hits = []
@@ -6596,10 +6563,31 @@ class BrowserManager:
             # less return, gate-trip return, raise, cancellation),
             # refund. ``adjust_cost`` is clamped at zero so a refund
             # that races with another adjustment can't drive negative.
+            #
+            # ``asyncio.CancelledError`` is a ``BaseException`` (Py 3.8+),
+            # so a plain ``contextlib.suppress(Exception)`` does NOT
+            # catch it — and ``await`` on the refund coro is itself a
+            # cancellation point that re-raises CancelledError, leaving
+            # the reservation permanently committed (silent over-charge).
+            # ``asyncio.shield`` wraps the coro in a Task that the outer
+            # cancellation cannot propagate INTO; the local ``await``
+            # still raises CancelledError but the shielded Task runs
+            # to completion in the background. We re-raise to honour
+            # cancellation semantics.
             if reserved_millicents and not reservation_settled:
-                with contextlib.suppress(Exception):
-                    await _cost.adjust_cost(
-                        agent_id, -reserved_millicents,
+                refund_coro = _cost.adjust_cost(
+                    agent_id, -reserved_millicents,
+                )
+                try:
+                    await asyncio.shield(refund_coro)
+                except asyncio.CancelledError:
+                    # Outer task was cancelled; the shielded refund
+                    # Task continues independently. Re-raise to honour
+                    # cancellation.
+                    raise
+                except Exception:
+                    logger.warning(
+                        "captcha cost refund failed", exc_info=True,
                     )
 
     async def _check_captcha(self, inst: CamoufoxInstance) -> dict:
@@ -7451,6 +7439,13 @@ class BrowserManager:
             recv_dir.mkdir(parents=True, exist_ok=True)
         except OSError:
             pass
+        # Resolve every input path canonically and remember the result.
+        # We pass the RESOLVED paths to ``chooser.set_files`` later —
+        # not the originals — so that an attacker controlling the
+        # filesystem under ``recv_dir`` cannot swap a symlink target
+        # between validation and upload (TOCTOU). When a path resolves
+        # to a target outside ``recv_dir`` we reject up front.
+        resolved_paths: list[str] = []
         for p in local_paths:
             try:
                 resolved = Path(p).resolve()
@@ -7466,6 +7461,7 @@ class BrowserManager:
                     "success": False,
                     "error": "Upload path outside receive dir",
                 }
+            resolved_paths.append(str(resolved))
 
         inst = await self.get_or_start(agent_id)
         inst.touch()
@@ -7476,7 +7472,7 @@ class BrowserManager:
                         "success": False,
                         "error": "User has browser control — action paused",
                     }
-                for p in local_paths:
+                for p in resolved_paths:
                     if not Path(p).is_file():
                         return {
                             "success": False,
@@ -7505,16 +7501,16 @@ class BrowserManager:
                             inst.page, locator, timeout=timeout_ms,
                         )
                 chooser = await info.value
-                await chooser.set_files(local_paths)
+                await chooser.set_files(resolved_paths)
                 await asyncio.sleep(action_delay())
                 return {
                     "success": True,
-                    "data": {"uploaded": list(local_paths)},
+                    "data": {"uploaded": list(resolved_paths)},
                 }
             except Exception as e:
                 return {"success": False, "error": str(e)}
             finally:
-                for p in local_paths:
+                for p in resolved_paths:
                     try:
                         Path(p).unlink(missing_ok=True)
                     except Exception:

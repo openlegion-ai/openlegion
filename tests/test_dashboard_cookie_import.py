@@ -423,6 +423,84 @@ class TestValidateCookies:
         assert accepted == []
         assert dropped == [{"reason": "invalid_httponly", "count": 1}]
 
+    # A5: real-browser exports (Chrome devtools "Copy as cURL", older
+    # Chromium JSON exports, Curl bridge tooling) emit ``secure``/
+    # ``httpOnly`` as the integers ``0`` / ``1`` rather than JSON
+    # booleans. Pre-A5 these were rejected as ``invalid_secure``/
+    # ``invalid_httponly`` — a real-world regression for operators
+    # importing exports from those sources. The validator now accepts
+    # ``0``/``1`` and coerces to bool.
+    def test_accepts_int_secure_one(self):
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "sid", "value": "x", "domain": ".example.com",
+              "secure": 1}],
+        )
+        assert dropped == []
+        assert accepted[0]["secure"] is True
+
+    def test_accepts_int_secure_zero(self):
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "sid", "value": "x", "domain": ".example.com",
+              "secure": 0}],
+        )
+        assert dropped == []
+        assert accepted[0]["secure"] is False
+
+    def test_accepts_int_httponly_one(self):
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "sid", "value": "x", "domain": ".example.com",
+              "httpOnly": 1}],
+        )
+        assert dropped == []
+        assert accepted[0]["httpOnly"] is True
+
+    def test_accepts_int_httponly_zero(self):
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "sid", "value": "x", "domain": ".example.com",
+              "httpOnly": 0}],
+        )
+        assert dropped == []
+        assert accepted[0]["httpOnly"] is False
+
+    def test_rejects_int_secure_two(self):
+        """Only ``0`` and ``1`` are accepted as int → bool. Anything else
+        (e.g. ``2``) is still treated as garbage so a buggy exporter
+        cannot smuggle a truthy value past the validator."""
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "sid", "value": "x", "domain": ".example.com",
+              "secure": 2}],
+        )
+        assert accepted == []
+        assert dropped == [{"reason": "invalid_secure", "count": 1}]
+
+    def test_rejects_int_httponly_two(self):
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "sid", "value": "x", "domain": ".example.com",
+              "httpOnly": 2}],
+        )
+        assert accepted == []
+        assert dropped == [{"reason": "invalid_httponly", "count": 1}]
+
+    def test_https_url_without_explicit_secure_defaults_secure(self):
+        """When the source omits ``secure`` (real-browser exports often
+        do) and the URL is HTTPS, default to secure=True. Pre-A5 we
+        silently downgraded to ``False``, which broke cross-site auth
+        imports for cookies whose source intended secure-only."""
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "sid", "value": "x", "url": "https://example.com/"}],
+        )
+        assert dropped == []
+        assert accepted[0]["secure"] is True
+
+    def test_http_url_without_explicit_secure_defaults_insecure(self):
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "sid", "value": "x", "url": "http://example.com/"}],
+        )
+        assert dropped == []
+        # ``secure`` not set on plain-http (the default-secure heuristic
+        # only fires for HTTPS).
+        assert accepted[0].get("secure") is False
+
     def test_rejects_nan_expires(self):
         accepted, dropped, _ = _validate_cookies(
             [{"name": "sid", "value": "x", "domain": ".example.com",

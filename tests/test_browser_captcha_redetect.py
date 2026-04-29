@@ -762,3 +762,153 @@ class TestRedetectRateLimitClockExpiry:
                     await mgr._with_captcha_redetect(inst, _do())
 
         assert check_spy.await_count == 2
+
+
+# ── 16. B1 STEALTH — probe-var randomisation + non-enumerable property ────
+
+
+class TestProbeVarStealth:
+    """The captcha re-detection MutationObserver state is stored on a
+    per-instance random window property name AND defined as
+    ``enumerable: false`` so anti-bot scripts walking
+    ``Object.keys(window)`` cannot fingerprint our automation. The JS
+    install template uses ``Object.defineProperty``; the probe-var name
+    matches ``__telemetry_<8-hex>`` and is generated independently per
+    :class:`CamoufoxInstance`.
+    """
+
+    def test_install_js_uses_define_property(self):
+        """Install JS uses ``Object.defineProperty`` (not ``window.X = …``)
+        so the probe state is non-enumerable and stays out of
+        ``Object.keys`` walks."""
+        from src.browser.service import _JS_CAPTCHA_REDETECT_INSTALL
+        assert "Object.defineProperty" in _JS_CAPTCHA_REDETECT_INSTALL
+        assert "enumerable: false" in _JS_CAPTCHA_REDETECT_INSTALL
+        # The hard-coded ``window.__ol_captcha_probe = …`` enumerable
+        # global must NOT appear — that was the pre-fix shape.
+        assert "window.__ol_captcha_probe" not in _JS_CAPTCHA_REDETECT_INSTALL
+
+    def test_probe_var_name_matches_telemetry_pattern(self):
+        """Per-instance probe-var name follows ``__telemetry_<8-hex>`` —
+        mimics ad-tech / RUM globals that real sites carry, so a passive
+        observer cannot trivially distinguish ours from a third-party
+        SDK."""
+        import re as _re
+        inst = _mk_inst()
+        assert _re.match(
+            r"^__telemetry_[0-9a-f]{8}$", inst._captcha_probe_var,
+        ), inst._captcha_probe_var
+
+    def test_two_instances_have_independent_probe_vars(self):
+        """Probe-var names are generated independently per
+        :class:`CamoufoxInstance` so two browsers can't be linked by a
+        shared global. ``secrets.token_hex(4)`` has 32 bits of entropy
+        — collision probability across two draws is ~2e-10."""
+        inst_a = _mk_inst(agent_id="agent-a")
+        inst_b = _mk_inst(agent_id="agent-b")
+        assert inst_a._captcha_probe_var != inst_b._captcha_probe_var
+
+    @pytest.mark.asyncio
+    async def test_install_call_passes_probe_var_to_evaluate(self, mgr):
+        """The install JS receives the per-instance probe-var name as
+        its first argument so the JS knows which window property to
+        attach the state under."""
+        page = _mk_page()
+        inst = _mk_inst(page=page)
+        async with inst.lock:
+            async def _do():
+                return {"success": True}
+
+            await mgr._with_captcha_redetect(inst, _do())
+
+        # Find the install evaluate call — install JS contains
+        # MutationObserver in body.
+        install_calls = [
+            c for c in page.evaluate.await_args_list
+            if "MutationObserver" in c.args[0]
+        ]
+        assert install_calls, "install JS was never evaluated"
+        # Second positional arg is the probe-var name.
+        probe_var_arg = install_calls[0].args[1]
+        assert probe_var_arg == inst._captcha_probe_var
+
+    @pytest.mark.asyncio
+    async def test_readback_call_passes_probe_var_in_args(self, mgr):
+        """The read-back JS now expects ``[probeVar, selectors]`` so
+        delete works against the same property that install set."""
+        sel = 'iframe[src*="recaptcha"]'
+        page = _mk_page(redetect_hits=[sel])
+        inst = _mk_inst(page=page)
+        async with inst.lock:
+            async def _do():
+                return {"success": True}
+
+            await mgr._with_captcha_redetect(inst, _do())
+
+        readback_calls = [
+            c for c in page.evaluate.await_args_list
+            if "p.adds" in c.args[0]
+        ]
+        assert readback_calls, "read-back JS was never evaluated"
+        # Second positional arg is ``[probe_var, selectors]``.
+        args_arg = readback_calls[0].args[1]
+        assert isinstance(args_arg, list) and len(args_arg) == 2
+        assert args_arg[0] == inst._captcha_probe_var
+        assert isinstance(args_arg[1], list)
+
+
+# ── 17. B3 — preserve readback hits on action failure ────────────────────
+
+
+class TestActionFailurePreservesCaptchaHits:
+    """When the wrapped action raises after a successful probe install,
+    the wrapper now runs READBACK with the real selector list (not an
+    empty list) so the captured DOM additions can be used to attach
+    diagnostic context to the propagated exception. This lets callers
+    distinguish "action failed because a captcha appeared mid-flight"
+    from a generic action failure.
+    """
+
+    @pytest.mark.asyncio
+    async def test_failure_after_captcha_attaches_hits_attribute(self, mgr):
+        """Action raises after probe install; read-back returned hits
+        → propagated exception carries ``captcha_redetect_hits``."""
+        sel = 'iframe[src*="recaptcha"]'
+        page = _mk_page(redetect_hits=[sel])
+        inst = _mk_inst(page=page)
+
+        class _BoomError(RuntimeError):
+            pass
+
+        async def _failing_action():
+            raise _BoomError("simulated action failure")
+
+        async with inst.lock:
+            with pytest.raises(_BoomError) as excinfo:
+                await mgr._with_captcha_redetect(inst, _failing_action())
+
+        # The exception carries the redetect hits so observability
+        # downstream can flag this failure as captcha-induced.
+        assert hasattr(excinfo.value, "captcha_redetect_hits")
+        assert excinfo.value.captcha_redetect_hits == [sel]
+
+    @pytest.mark.asyncio
+    async def test_failure_without_captcha_no_hits_attribute(self, mgr):
+        """Action raises after probe install but no captcha-shaped DOM
+        additions occurred → no ``captcha_redetect_hits`` attribute is
+        attached (we only attach when there's signal to attach)."""
+        # Empty redetect_hits so read-back returns []
+        page = _mk_page(redetect_hits=[])
+        inst = _mk_inst(page=page)
+
+        class _BoomError(RuntimeError):
+            pass
+
+        async def _failing_action():
+            raise _BoomError("simulated action failure")
+
+        async with inst.lock:
+            with pytest.raises(_BoomError) as excinfo:
+                await mgr._with_captcha_redetect(inst, _failing_action())
+
+        assert not hasattr(excinfo.value, "captcha_redetect_hits")

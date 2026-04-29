@@ -299,6 +299,100 @@ class TestUploadFile:
         assert not a.exists()
 
 
+# ── A8: TOCTOU on chooser.set_files (audit-fix) ────────────────────────────
+
+
+class TestUploadResolvedPathsPreventTOCTOU:
+    """Validation does ``Path(p).resolve()`` and confirms
+    ``relative_to(recv_dir)``. Pre-A8, ``chooser.set_files`` was called
+    with the ORIGINAL ``local_paths`` (un-resolved). An attacker
+    controlling ``recv_dir`` filesystem could swap a symlink target
+    between validation and ``set_files``. The fix passes RESOLVED
+    canonical paths to ``set_files`` so post-validation symlink swaps
+    can't redirect the upload.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _confine_upload_recv_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("OPENLEGION_UPLOAD_RECV_DIR", str(tmp_path))
+        import src.browser.flags as flags
+        flags._operator_settings = None
+        yield
+        flags._operator_settings = None
+
+    @pytest.mark.asyncio
+    async def test_set_files_called_with_resolved_paths(
+        self, tmp_path, monkeypatch,
+    ):
+        """``chooser.set_files`` must receive resolved canonical paths,
+        not the originals — this is the actual TOCTOU mitigation."""
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "p"))
+        inst = _make_instance()
+
+        chooser = MagicMock()
+        chooser.set_files = AsyncMock()
+
+        async def _chooser_value():
+            return chooser
+
+        inst.page.expect_file_chooser = MagicMock(
+            return_value=_async_ctx(_chooser_value()),
+        )
+
+        fake_locator = MagicMock()
+        fake_locator.click = AsyncMock()
+        monkeypatch.setattr(
+            mgr, "_locator_from_ref",
+            AsyncMock(return_value=fake_locator),
+        )
+        monkeypatch.setattr(mgr, "get_or_start", AsyncMock(return_value=inst))
+        monkeypatch.setattr(
+            "src.browser.service.action_delay", lambda: 0,
+        )
+
+        # Real file under recv_dir.
+        target = tmp_path / "real.bin"
+        target.write_bytes(b"payload")
+        # Symlink in recv_dir pointing INSIDE recv_dir at the real
+        # file. This is allowed (resolves to within recv_dir).
+        link = tmp_path / "via-link.bin"
+        link.symlink_to(target)
+
+        result = await mgr.upload_file("a1", "e1", [str(link)])
+        assert result["success"] is True
+        # set_files received the RESOLVED path (target), not the
+        # symlink path. Pre-A8, it would have received str(link).
+        chooser.set_files.assert_awaited_once()
+        called_with = chooser.set_files.await_args.args[0]
+        assert called_with == [str(target.resolve())]
+        # Response also reports resolved paths.
+        assert result["data"]["uploaded"] == [str(target.resolve())]
+
+    @pytest.mark.asyncio
+    async def test_symlink_to_outside_recv_dir_rejected(
+        self, tmp_path, monkeypatch,
+    ):
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "p"))
+        inst = _make_instance()
+        monkeypatch.setattr(mgr, "get_or_start", AsyncMock(return_value=inst))
+
+        # Outside recv_dir — symlink in recv_dir points to a file
+        # outside it.
+        outside_dir = tmp_path.parent / "evil-target-dir"
+        outside_dir.mkdir(exist_ok=True)
+        outside_target = outside_dir / "secrets.bin"
+        outside_target.write_bytes(b"sensitive")
+        link = tmp_path / "looks-innocent.bin"
+        link.symlink_to(outside_target)
+
+        result = await mgr.upload_file("a1", "e1", [str(link)])
+        assert result["success"] is False
+        assert "outside" in result["error"].lower()
+        # Outside file must NOT have been deleted by the cleanup
+        # finally — only paths under recv_dir get unlinked.
+        assert outside_target.exists()
+
+
 class TestBrowserSidePeriodicGc:
     @pytest.mark.asyncio
     async def test_gc_reaps_files_older_than_ttl(self, tmp_path, monkeypatch):
