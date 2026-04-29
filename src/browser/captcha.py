@@ -271,6 +271,90 @@ _ANTIBOT_SOLUTION_KEYS: frozenset[str] = frozenset({
 })
 
 
+# Playwright's ``BrowserContext.add_cookies`` accepts only this exact
+# enum for ``sameSite``. Providers and real-browser cookie exports use
+# every casing under the sun (``"Lax"``, ``"lax"``, ``"LAX"``,
+# ``"unspecified"``, ``"no_restriction"``...). Map all known shapes
+# down to the canonical case; anything unrecognized returns ``None``
+# so we drop the field rather than fail the whole add_cookies call.
+_SAMESITE_PLAYWRIGHT_MAP: dict[str, str] = {
+    "strict": "Strict",
+    "lax": "Lax",
+    "none": "None",
+    "no_restriction": "None",
+    "norestriction": "None",
+}
+
+
+def _normalize_cookie_same_site(value: object) -> str | None:
+    """Coerce a provider-supplied ``sameSite`` value to Playwright's enum.
+
+    Returns ``None`` for unset / unrecognized values so the caller drops
+    the field — Playwright treats absence as "Lax" by default, which
+    matches the common case for anti-bot session cookies.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return None
+    return _SAMESITE_PLAYWRIGHT_MAP.get(value.strip().lower())
+
+
+def _normalize_cookie_expires(value: object) -> float | None:
+    """Coerce a provider-supplied ``expires`` value to seconds-since-epoch.
+
+    Accepts:
+      * Numeric seconds-since-epoch (``1735689600``).
+      * Numeric milliseconds-since-epoch (``1735689600000``) — divided by
+        1000 when the value is implausibly large for seconds.
+      * ``-1`` — Playwright's "session cookie" sentinel; preserved.
+      * ISO-8601 strings (``"2025-12-31T23:59:59Z"``) — parsed via
+        :meth:`datetime.fromisoformat`. Some providers emit a trailing
+        ``Z`` that ``fromisoformat`` rejects on Python < 3.11; rewrite
+        to ``+00:00`` before parsing.
+
+    Returns ``None`` for anything unparseable so the caller drops the
+    field rather than fail the whole add_cookies call.
+    """
+    if value is None:
+        return None
+    # Sentinel pass-through.
+    if value == -1 or value == -1.0:
+        return -1.0
+    if isinstance(value, bool):
+        # ``isinstance(True, int)`` is True in Python, so guard explicitly.
+        return None
+    if isinstance(value, (int, float)):
+        as_float = float(value)
+        # Heuristic: anything past year 9999 in seconds (≥ 2.5e11) is
+        # almost certainly milliseconds. Year-2200 in seconds is ~7.3e9.
+        # Threshold of 1e12 (year 33658 in seconds) is safely past any
+        # plausible "real seconds" value while comfortably under the
+        # millis-for-real-dates range (2024 in millis ≈ 1.7e12).
+        if as_float > 1e12:
+            as_float /= 1000.0
+        return as_float
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        # Numeric string ⇒ recurse via float coercion.
+        try:
+            return _normalize_cookie_expires(float(s))
+        except ValueError:
+            pass
+        # ISO-8601. Python ≤ 3.10 doesn't accept trailing 'Z' in
+        # ``fromisoformat`` so rewrite it; ≥ 3.11 handles both.
+        from datetime import datetime
+        try:
+            iso = s[:-1] + "+00:00" if s.endswith("Z") else s
+            dt = datetime.fromisoformat(iso)
+            return dt.timestamp()
+        except ValueError:
+            return None
+    return None
+
+
 async def _apply_antibot_solution(page: object, token: str) -> bool:
     """Apply a CapSolver anti-bot solution payload to the BrowserContext.
 
@@ -316,7 +400,13 @@ async def _apply_antibot_solution(page: object, token: str) -> bool:
     # both ``domain`` and ``path``. Most providers return ``domain`` +
     # ``path`` already; we normalize to a small whitelist of known
     # Playwright fields and fall back to ``url=<page url>`` when the
-    # entry has no domain.
+    # entry has no domain. Field-shape normalization handles common
+    # provider drift:
+    #   * ``sameSite`` — Playwright requires the exact-case enum
+    #     {"Strict", "Lax", "None"}; providers commonly return
+    #     ``"strict"``/``"lax"``/``"unspecified"`` or omit it.
+    #   * ``expires`` — Playwright wants seconds-since-epoch as a
+    #     number; some providers return ISO-8601 strings or millis.
     page_url = ""
     try:
         page_url = page.url or ""
@@ -333,9 +423,23 @@ async def _apply_antibot_solution(page: object, token: str) -> bool:
             continue
         norm: dict = {"name": name, "value": str(value)}
         # Forward Playwright's canonical cookie fields when present.
-        for k in ("domain", "path", "expires", "httpOnly", "secure", "sameSite"):
+        for k in ("domain", "path", "httpOnly", "secure"):
             if k in c and c[k] is not None:
                 norm[k] = c[k]
+        # ``sameSite`` — coerce to Playwright's exact-case enum. An
+        # unrecognized / unspecified value is dropped (Playwright treats
+        # absence as "Lax" by default, which is the common-case shape
+        # for the cookies anti-bot solvers return).
+        ss = _normalize_cookie_same_site(c.get("sameSite"))
+        if ss is not None:
+            norm["sameSite"] = ss
+        # ``expires`` — coerce numeric / ISO-8601 / millis-since-epoch
+        # to seconds-since-epoch (float). Drop unparseable values
+        # rather than failing the whole cookie. ``-1`` is the
+        # session-cookie sentinel; preserve it verbatim.
+        exp = _normalize_cookie_expires(c.get("expires"))
+        if exp is not None:
+            norm["expires"] = exp
         # Fallback target — Playwright requires either ``url`` or
         # (``domain``+``path``). If neither is present, point at the
         # current page URL so the cookie still lands somewhere usable.
@@ -1968,7 +2072,17 @@ class CaptchaSolver:
         # Breaker tracks SOLVER reliability (provider returned a token), not
         # injection success. Provider was paid the moment the token came
         # back; injection failure is our problem, not theirs.
-        await self._record_solver_outcome(success=True)
+        #
+        # §22 — anti-bot kinds are NEUTRAL to the breaker: the failure
+        # paths above already skip the tick (anti-bot solves have
+        # inherently high failure rates that shouldn't trip a fleet-
+        # wide breaker), and the success path skips it too for
+        # symmetry. Without this skip, anti-bot successes silently
+        # CLEAR a breaker that real standard-path failures had ticked,
+        # masking genuine provider outages on the kinds the breaker
+        # is actually meant to guard.
+        if not antibot_path:
+            await self._record_solver_outcome(success=True)
         return SolveResult(
             token=token,
             injection_succeeded=bool(injected),

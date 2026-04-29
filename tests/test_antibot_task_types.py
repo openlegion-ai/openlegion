@@ -631,3 +631,211 @@ class TestApplyAntibotSolution:
         assert ok is True
         ctx.add_cookies.assert_awaited_once()
         page.reload.assert_awaited_once()
+
+
+# ── 11: cookie field normalization (sameSite, expires) ────────────────
+
+
+class TestCookieNormalization:
+    """Playwright's ``BrowserContext.add_cookies`` is strict about
+    enum casing and field types. Provider responses drift across
+    casings / formats; pre-fix every drift silently failed the whole
+    add_cookies call (operator pays for solves that don't apply)."""
+
+    def test_samesite_canonical_casing(self):
+        from src.browser.captcha import _normalize_cookie_same_site
+        assert _normalize_cookie_same_site("Lax") == "Lax"
+        assert _normalize_cookie_same_site("Strict") == "Strict"
+        assert _normalize_cookie_same_site("None") == "None"
+
+    def test_samesite_lowercase_coerced(self):
+        from src.browser.captcha import _normalize_cookie_same_site
+        assert _normalize_cookie_same_site("lax") == "Lax"
+        assert _normalize_cookie_same_site("strict") == "Strict"
+        assert _normalize_cookie_same_site("none") == "None"
+        assert _normalize_cookie_same_site("LAX") == "Lax"
+
+    def test_samesite_no_restriction_alias(self):
+        from src.browser.captcha import _normalize_cookie_same_site
+        # Some providers / Chrome devtools use this spelling.
+        assert _normalize_cookie_same_site("no_restriction") == "None"
+        assert _normalize_cookie_same_site("noRestriction") == "None"
+
+    def test_samesite_unrecognized_dropped(self):
+        from src.browser.captcha import _normalize_cookie_same_site
+        # Unrecognized value → None (drop the field; Playwright defaults
+        # absence to "Lax", which is the right shape for these cookies).
+        assert _normalize_cookie_same_site("unspecified") is None
+        assert _normalize_cookie_same_site("garbage") is None
+        assert _normalize_cookie_same_site(None) is None
+        assert _normalize_cookie_same_site("") is None
+        # Non-string input → None.
+        assert _normalize_cookie_same_site(42) is None
+
+    def test_expires_seconds_passthrough(self):
+        from src.browser.captcha import _normalize_cookie_expires
+        assert _normalize_cookie_expires(1735689600) == 1735689600.0
+        assert _normalize_cookie_expires(1735689600.5) == 1735689600.5
+
+    def test_expires_session_sentinel(self):
+        from src.browser.captcha import _normalize_cookie_expires
+        # -1 is Playwright's session-cookie sentinel; preserved.
+        assert _normalize_cookie_expires(-1) == -1.0
+        assert _normalize_cookie_expires(-1.0) == -1.0
+
+    def test_expires_milliseconds_coerced(self):
+        from src.browser.captcha import _normalize_cookie_expires
+        # Some providers return millis-since-epoch (JavaScript's
+        # ``Date.now()`` shape). 1735689600000 ms = 1735689600 s
+        # = 2025-01-01.
+        assert _normalize_cookie_expires(1735689600000) == 1735689600.0
+
+    def test_expires_iso8601_string(self):
+        from src.browser.captcha import _normalize_cookie_expires
+        # ISO with trailing 'Z' (Python ≤3.10's fromisoformat rejects
+        # this; the normalizer rewrites to '+00:00').
+        ts = _normalize_cookie_expires("2025-01-01T00:00:00Z")
+        assert ts is not None
+        assert abs(ts - 1735689600.0) < 1.0  # within 1s
+
+    def test_expires_numeric_string(self):
+        from src.browser.captcha import _normalize_cookie_expires
+        assert _normalize_cookie_expires("1735689600") == 1735689600.0
+
+    def test_expires_unparseable_dropped(self):
+        from src.browser.captcha import _normalize_cookie_expires
+        assert _normalize_cookie_expires("not-a-date") is None
+        assert _normalize_cookie_expires(None) is None
+        assert _normalize_cookie_expires("") is None
+        # Booleans are NOT treated as numbers (defensive — ``isinstance(
+        # True, int)`` is True in Python).
+        assert _normalize_cookie_expires(True) is None
+        assert _normalize_cookie_expires(False) is None
+
+    @pytest.mark.asyncio
+    async def test_apply_solution_normalizes_provider_drift(self):
+        """End-to-end: a CapSolver-shaped response with lowercase
+        ``sameSite`` and ISO-8601 ``expires`` lands in
+        ``add_cookies`` with the canonical Playwright shape."""
+        from src.browser.captcha import _apply_antibot_solution
+
+        page = MagicMock()
+        page.url = "https://protected.site/"
+        ctx = MagicMock()
+        captured: list = []
+
+        async def _add_cookies(cookies):
+            captured.append(list(cookies))
+        ctx.add_cookies = _add_cookies
+        page.context = ctx
+        page.reload = AsyncMock()
+
+        token = json.dumps({
+            "cookies": [
+                {
+                    "name": "_abck",
+                    "value": "v",
+                    "domain": ".target.com",
+                    "path": "/",
+                    "sameSite": "lax",                       # lowercase
+                    "expires": "2025-01-01T00:00:00Z",       # ISO
+                    "secure": True,
+                },
+            ],
+        })
+        ok = await _apply_antibot_solution(page, token)
+        assert ok is True
+        assert len(captured) == 1
+        applied = captured[0][0]
+        # sameSite normalized to canonical case.
+        assert applied["sameSite"] == "Lax"
+        # expires coerced to numeric seconds-since-epoch.
+        assert isinstance(applied["expires"], float)
+        assert abs(applied["expires"] - 1735689600.0) < 1.0
+        # Other fields passed through.
+        assert applied["domain"] == ".target.com"
+        assert applied["secure"] is True
+
+
+# ── 12: anti-bot kinds are NEUTRAL to the breaker (no clear on success) ─
+
+
+class TestAntibotBreakerNeutrality:
+    """Anti-bot kinds skip the breaker on FAILURE (commit 0b4b8c6) and
+    must also skip on SUCCESS — otherwise a successful anti-bot solve
+    silently CLEARS a breaker that genuine standard-path failures had
+    ticked, masking real provider outages."""
+
+    @pytest.mark.asyncio
+    async def test_antibot_success_does_not_clear_breaker(self):
+        from src.browser.captcha import CaptchaSolver
+
+        solver = CaptchaSolver("capsolver", "fake-key")
+        solver._solver_health_checked = True
+
+        # Pre-load the failure window with TWO failures — below the
+        # threshold, so the breaker isn't tripped (which would
+        # short-circuit the solve below). The point of the test is the
+        # FAILURE WINDOW state, not the breaker-open state.
+        await solver._record_solver_outcome(success=False)
+        await solver._record_solver_outcome(success=False)
+        assert len(solver._solver_failure_timestamps) == 2
+
+        # An anti-bot solve succeeds.
+        async def _success_submit(*a, **kw):
+            return (
+                json.dumps({
+                    "cookies": [{"name": "x", "value": "v",
+                                 "domain": ".x.com"}],
+                }),
+                True,   # used_proxy_aware
+                False,  # compat_rejected
+                True,   # provider_contacted
+            )
+
+        page = MagicMock()
+        page.url = "https://protected.site/"
+        ctx = MagicMock()
+        ctx.add_cookies = AsyncMock()
+        page.context = ctx
+        page.reload = AsyncMock()
+        page.evaluate = AsyncMock()
+
+        with patch.object(solver, "_submit_and_poll", _success_submit):
+            result = await solver.solve(
+                page, "any-selector", "https://protected.site/",
+                kind="js-challenge-akamai",
+            )
+
+        # The standard-path failure window MUST still be intact —
+        # pre-fix, the success path called
+        # ``_record_solver_outcome(success=True)`` which clears the
+        # window (and would set ``len == 0`` here). With the symmetry
+        # fix, anti-bot kinds skip the breaker tick on success too.
+        assert len(solver._solver_failure_timestamps) == 2, (
+            "anti-bot success must not clear the standard-path "
+            "failure window"
+        )
+        assert result.token is not None  # solve itself succeeded
+
+    @pytest.mark.asyncio
+    async def test_standard_kind_success_still_clears_breaker(self):
+        """Regression guard: the standard-kind success path must still
+        clear the breaker — that's the whole point of the failure
+        window. Three failures + one success → breaker reset."""
+        from src.browser.captcha import (
+            _BREAKER_FAILURE_THRESHOLD,
+            CaptchaSolver,
+        )
+
+        solver = CaptchaSolver("capsolver", "fake-key")
+        solver._solver_health_checked = True
+        # Tick the breaker.
+        from unittest.mock import patch as _patch
+        with _patch("src.browser.captcha.time.time", return_value=1_000_000.0):
+            for _ in range(_BREAKER_FAILURE_THRESHOLD):
+                await solver._record_solver_outcome(success=False)
+        # A standard-kind success clears it.
+        await solver._record_solver_outcome(success=True)
+        assert solver.is_breaker_open() is False
+        assert len(solver._solver_failure_timestamps) == 0
