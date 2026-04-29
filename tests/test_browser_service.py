@@ -912,6 +912,61 @@ class TestClick:
         assert result["data"]["clicked"] == "e0"
 
     @pytest.mark.asyncio
+    async def test_human_click_force_scrolls_into_view_first(self):
+        """Force-click must call ``scroll_into_view_if_needed`` BEFORE
+        the forced click. Pre-fix the force path skipped scroll-into-
+        view (Playwright's ``force=True`` skips ALL actionability
+        checks), so an off-fold force-click landed at the element's
+        geometric position outside the visible viewport — visibly
+        clicking nowhere on VNC. Bug bites SPA frameworks (X /
+        Twitter / Gmail) hard because they use ``aria-disabled`` on
+        visually-active buttons, which auto-triggers force=True
+        in the click loop."""
+        from src.browser.service import BrowserManager
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        page = MagicMock()
+        locator = AsyncMock()
+        locator.scroll_into_view_if_needed = AsyncMock()
+        locator.click = AsyncMock()
+
+        await mgr._human_click(page, locator, force=True, timeout=1000)
+        locator.scroll_into_view_if_needed.assert_awaited_once()
+        locator.click.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_human_click_force_tolerates_scroll_failure(self):
+        """If the element is detached / cross-origin / has no box,
+        ``scroll_into_view_if_needed`` raises. The forced click
+        should still proceed — we attempt the click at the last-known
+        position rather than fail-fast on the scroll."""
+        from src.browser.service import BrowserManager
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        page = MagicMock()
+        locator = AsyncMock()
+        locator.scroll_into_view_if_needed = AsyncMock(
+            side_effect=RuntimeError("element detached"),
+        )
+        locator.click = AsyncMock()
+
+        await mgr._human_click(page, locator, force=True, timeout=1000)
+        locator.click.assert_awaited_once()  # click still attempted
+
+    @pytest.mark.asyncio
+    async def test_human_click_selector_force_scrolls_into_view_first(self):
+        """Mirror of the locator-based force test for the selector path."""
+        from src.browser.service import BrowserManager
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        page = AsyncMock()
+        sub_locator = AsyncMock()
+        sub_locator.scroll_into_view_if_needed = AsyncMock()
+        page.locator = MagicMock(return_value=sub_locator)
+        page.click = AsyncMock()
+
+        await mgr._human_click_selector(page, "#submit", force=True, timeout=1000)
+        sub_locator.scroll_into_view_if_needed.assert_awaited_once()
+        page.click.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_click_by_selector(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
@@ -2787,11 +2842,30 @@ class TestHumanTiming:
         assert 0.04 <= mean <= 0.12
 
     def test_keystroke_delay_alpha(self):
+        """Halved from 54 WPM (μ=0.045) → 27 WPM (μ=0.090) so the
+        typing-vs-mouse-speed ratio looks human in VNC playback."""
         from src.browser.timing import keystroke_delay
         samples = [keystroke_delay("a") for _ in range(1000)]
-        assert all(0.020 <= s <= 0.090 for s in samples)
+        assert all(0.040 <= s <= 0.180 for s in samples)
         mean = sum(samples) / len(samples)
-        assert 0.035 <= mean <= 0.055
+        assert 0.075 <= mean <= 0.105
+
+    def test_keystroke_delay_alpha_below_realistic_typing_speed_floor(self):
+        """27 WPM = ~135 CPM = ~0.444 ms/char is the realistic-floor
+        target. Sub-30 WPM is the documented design point. Sample mean
+        across 5k draws must fall in the 0.07–0.11 s window — well
+        within the realistic-typing-speed range and clearly slower
+        than the original 0.045 s baseline."""
+        from src.browser.timing import keystroke_delay
+        samples = [keystroke_delay("a") for _ in range(5000)]
+        mean = sum(samples) / len(samples)
+        # Anti-regression: previous 54 WPM mean was ~0.045s. New
+        # baseline must be at least ~50% slower.
+        assert mean > 0.07, (
+            f"keystroke_delay regressed to {mean:.3f}s — should be ≥0.07s "
+            f"(27 WPM target)"
+        )
+        assert mean < 0.11
 
     def test_keystroke_delay_symbol_slower(self):
         from src.browser.timing import keystroke_delay
@@ -3397,7 +3471,9 @@ class TestTypeWithVariance:
         press_chars = [c[0][0] for c in mock_page.keyboard.press.call_args_list]
         assert press_chars == ["H", "i", "!"]
         assert len(delays) == 3
-        assert all(0.020 <= d <= 0.110 for d in delays)
+        # Bounds widened in 2026-04 keystroke-speed halving: alpha/symbol
+        # delays are now in [0.040, 0.220] s.
+        assert all(0.040 <= d <= 0.220 for d in delays)
 
     @pytest.mark.asyncio
     async def test_type_with_variance_falls_back_to_keyboard_type(self):
