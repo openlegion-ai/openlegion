@@ -52,6 +52,12 @@ KNOWN_FLAGS: dict[str, str] = {
     "BROWSER_ENABLE_ADBLOCK": "true | false (default true; gates uBO install)",
     # ── Resolution pool (§6.1) ────────────────────────────────────────────
     "BROWSER_RESOLUTION_POOL": "true | false (default true after phase 6.1)",
+    # ── Device profile (§19.3 / Phase 10 §21) ─────────────────────────────
+    "BROWSER_DEVICE_PROFILE":
+        "desktop-windows (default) | desktop-macos | mobile-ios | mobile-android"
+        " — selects the device emulation profile (UA, viewport, DPR, "
+        "is_mobile, has_touch). Per-agent overrides supported via the "
+        "operator settings layer.",
     # ── Canary (§5.4) ─────────────────────────────────────────────────────
     "BROWSER_CANARY_ENABLED": "true | false (default false)",
     # ── Operator kill switches for high-trust phases ──────────────────────

@@ -36,7 +36,14 @@ from src.browser.captcha import (
 from src.browser.profile_schema import migrate_profile
 from src.browser.redaction import CredentialRedactor
 from src.browser.ref_handle import RefHandle, RefStale, ShadowHop
-from src.browser.stealth import build_launch_options, pick_referer, validate_referer
+from src.browser.stealth import (
+    DEFAULT_DEVICE_PROFILE,
+    build_launch_options,
+    build_mobile_init_script,
+    get_device_profile,
+    pick_referer,
+    validate_referer,
+)
 from src.browser.timing import (
     action_delay,
     click_dwell,
@@ -2564,6 +2571,22 @@ class BrowserManager:
         # the browser from starting.
         sync_adblock_extension(Path(profile_dir))
 
+        # §19.3 / Phase 10 §21: device profile selection. Read with
+        # ``agent_id`` so per-agent overrides (operator-settings or
+        # dashboard flag panel) take precedence over operator-wide env.
+        from src.browser.flags import get_str as _flag_get_str_dp
+        device_profile = _flag_get_str_dp(
+            "BROWSER_DEVICE_PROFILE",
+            DEFAULT_DEVICE_PROFILE,
+            agent_id=agent_id,
+        ) or DEFAULT_DEVICE_PROFILE
+        # ``get_device_profile`` logs a warning + falls back when the value
+        # is unknown; we only need to capture the name we'll forward to
+        # ``build_launch_options`` (which performs the same fallback).
+        logger.info(
+            "Agent '%s' device profile: %s", agent_id, device_profile,
+        )
+
         proxy_config = self.get_proxy_config(agent_id)
         if proxy_config is not None:
             if proxy_config.get("url"):
@@ -2573,16 +2596,25 @@ class BrowserManager:
                     proxy_arg["username"] = proxy_config["username"]
                 if proxy_config.get("password"):
                     proxy_arg["password"] = proxy_config["password"]
-                options = build_launch_options(agent_id, profile_dir, proxy=proxy_arg)
+                options = build_launch_options(
+                    agent_id, profile_dir, proxy=proxy_arg,
+                    device_profile=device_profile,
+                )
             else:
                 # Explicitly no proxy (direct mode or inherit with no system proxy)
-                options = build_launch_options(agent_id, profile_dir, proxy=None)
+                options = build_launch_options(
+                    agent_id, profile_dir, proxy=None,
+                    device_profile=device_profile,
+                )
         else:
             # No per-agent config pushed yet — start without proxy.
             # The mesh will push the correct config shortly after startup
             # which triggers a reset, relaunching with the right proxy.
             logger.warning("No proxy config pushed for '%s' yet, starting without proxy", agent_id)
-            options = build_launch_options(agent_id, profile_dir, proxy=None)
+            options = build_launch_options(
+                agent_id, profile_dir, proxy=None,
+                device_profile=device_profile,
+            )
 
         # Log which proxy is being used for debuggability
         _proxy_opt = options.get("proxy")
@@ -2621,6 +2653,28 @@ class BrowserManager:
                 options.pop("geoip", None)
                 browser = await AsyncNewBrowser(pw, **options)
         context = browser
+
+        # §19.3 / Phase 10 §21: inject the navigator-override init script
+        # for mobile profiles BEFORE any page is created. ``add_init_script``
+        # is registered on the BrowserContext so every page (current + new
+        # tabs) receives it at ``document_start``, ahead of any site script.
+        # Returns ``None`` for desktop profiles — no-op in that case.
+        mobile_init = build_mobile_init_script(get_device_profile(device_profile))
+        if mobile_init is not None:
+            try:
+                await context.add_init_script(script=mobile_init)
+                logger.debug(
+                    "Agent '%s' mobile navigator init script injected (profile=%s)",
+                    agent_id, device_profile,
+                )
+            except Exception as e:
+                # Non-fatal: a missing init script weakens the spoof but
+                # doesn't break the browser. Log and continue.
+                logger.warning(
+                    "Agent '%s' add_init_script failed for profile %s: %s",
+                    agent_id, device_profile, e,
+                )
+
         pages = context.pages
         page = pages[0] if pages else await context.new_page()
 
