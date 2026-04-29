@@ -7594,20 +7594,31 @@ class TestGetSolver:
                 flags.reload_operator_settings()
 
     def test_get_solver_returns_solver_when_configured(self):
-        """Valid provider + key env flags → CaptchaSolver instance."""
+        """Valid provider + key env flags → MultiProviderSolver instance.
+
+        §11.8: ``get_solver`` now returns the failover wrapper. With only
+        the primary slot configured the wrapper holds ``secondary=None``
+        and behaves as a single-provider solver — the existing call
+        sites (``BrowserManager._captcha_solver`` and
+        ``_metered_solve``) read ``solver.provider`` through the
+        wrapper's property, so ``MultiProviderSolver`` is the correct
+        public surface.
+        """
         with patch.dict("os.environ", {
             "CAPTCHA_SOLVER_PROVIDER": "2captcha",
             "CAPTCHA_SOLVER_KEY": "test-key-123",
         }):
             from src.browser import flags
-            from src.browser.captcha import CaptchaSolver, get_solver
+            from src.browser.captcha import MultiProviderSolver, get_solver
 
             flags.reload_operator_settings()
             try:
                 solver = get_solver()
-                assert isinstance(solver, CaptchaSolver)
+                assert isinstance(solver, MultiProviderSolver)
                 assert solver.provider == "2captcha"
-                assert solver.api_key == "test-key-123"
+                assert solver.primary.api_key == "test-key-123"
+                # Single-provider config — secondary slot empty.
+                assert solver.secondary is None
             finally:
                 flags.reload_operator_settings()
 
@@ -7629,16 +7640,16 @@ class TestGetSolver:
             "CAPTCHA_SOLVER_KEY": "env-key-789",
         }, clear=True):
             from src.browser import flags
-            from src.browser.captcha import CaptchaSolver, get_solver
+            from src.browser.captcha import MultiProviderSolver, get_solver
 
             flags.reload_operator_settings()
             try:
                 solver = get_solver()
-                assert isinstance(solver, CaptchaSolver)
+                assert isinstance(solver, MultiProviderSolver)
                 assert solver.provider == "capsolver"
                 # The env-var key WINS — settings.json plaintext key was
                 # ignored at load time per the env-only flag policy.
-                assert solver.api_key == "env-key-789"
+                assert solver.primary.api_key == "env-key-789"
             finally:
                 flags.reload_operator_settings()
 

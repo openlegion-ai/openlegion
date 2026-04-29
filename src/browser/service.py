@@ -7526,6 +7526,20 @@ class BrowserManager:
                 )
                 raise
 
+            # §11.8 multi-provider: re-read the wrapper's ``provider``
+            # AFTER ``solve()`` so the cost-accounting tier matches the
+            # provider that actually served the solve, not the one we
+            # captured pre-call. On a mid-call failover (primary fatal
+            # at ``createTask`` → wrapper retries on secondary inside
+            # the same ``solve()`` call) the active solver flips, and
+            # using the stale pre-call snapshot would charge the agent
+            # at primary's pricing for a secondary-served solve. The
+            # post-solve read is single-coroutine-safe — there is no
+            # await between this read and the cost-counter update.
+            actual_provider = getattr(self._captcha_solver, "provider", "")
+            if not (isinstance(actual_provider, str) and actual_provider):
+                actual_provider = provider
+
             # Cost accounting fires on token retrieval, NOT on
             # injection success — the provider already charged for the
             # token. Skip accounting when no token came back (gates /
@@ -7538,9 +7552,9 @@ class BrowserManager:
                 # was warned above; here we just skip the increment
                 # silently and let the finally-refund clean up the
                 # reservation.
-                if isinstance(provider, str) and provider:
+                if isinstance(actual_provider, str) and actual_provider:
                     millicents = _cost.estimate_millicents(
-                        provider, kind,
+                        actual_provider, kind,
                         proxy_aware=result.used_proxy_aware,
                     )
                     if millicents is None:
@@ -7550,7 +7564,7 @@ class BrowserManager:
                             "keeping any reserved cost-cap charge; "
                             "otherwise skipping cost increment "
                             "(under-count > over-count)",
-                            provider, kind, result.used_proxy_aware,
+                            actual_provider, kind, result.used_proxy_aware,
                         )
                         # With a configured cap, we reserved the max
                         # published tier before the provider call. If
