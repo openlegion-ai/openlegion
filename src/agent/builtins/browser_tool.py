@@ -6,6 +6,7 @@ service container. Agent containers no longer bundle Chrome or VNC.
 
 from __future__ import annotations
 
+import asyncio
 import random
 import time
 from urllib.parse import urlparse
@@ -113,13 +114,61 @@ async def browser_navigate(
 # trail before the agent navigates to a behavior-fingerprinting target.
 # Mirrors ``stealth._SEARCH_REFERERS`` — kept in sync intentionally so the
 # warmup hits the same hosts the server-side referer picker expects to see
-# in a session's history. We pick one per call (rolling-5 anti-repeat is
-# the server's job once we hand off to ``navigate``).
-_WARMUP_SEARCH_ENGINES: tuple[str, ...] = (
-    "https://www.google.com/",
-    "https://www.bing.com/",
-    "https://duckduckgo.com/",
+# in a session's history. Weighted by realistic market share (StatCounter
+# global 2025 desktop) so the fleet doesn't cluster on the unusual non-
+# Google engines. ``random.choices(weights=...)`` does not normalize, so
+# the weights below sum to 1.0 by construction. Tuple of (url, weight)
+# pairs — ``random.choices`` consumes them via ``zip``.
+_WARMUP_SEARCH_ENGINES: tuple[tuple[str, float], ...] = (
+    ("https://www.google.com/",  0.85),
+    ("https://www.bing.com/",    0.10),
+    ("https://duckduckgo.com/",  0.05),
 )
+
+
+def _pick_warmup_search_engine(rng: random.Random | None = None) -> str:
+    """Sample a search-engine URL from the weighted distribution.
+
+    Exposed for testability — operators inspecting warmup behavior on
+    stealth canaries can replay the same RNG seed to get a deterministic
+    engine choice. Default ``rng`` uses the global ``random`` module
+    state, which is shared across all skills in the agent process.
+    """
+    rng = rng or random
+    urls = [u for u, _ in _WARMUP_SEARCH_ENGINES]
+    weights = [w for _, w in _WARMUP_SEARCH_ENGINES]
+    return rng.choices(urls, weights=weights, k=1)[0]
+
+
+# Gaussian SERP-dwell parameters. After landing on a search engine,
+# real users spend 3–12 seconds reading results before clicking
+# through. A zero-or-near-zero pause between SERP load and apex nav
+# is itself a behavioral signal — even with a clean fingerprint, the
+# arrival-timing distribution clusters at sub-second handoffs that
+# the in-house behavioral models on LinkedIn / X / Meta key on.
+# Truncated normal: μ=4s, σ=1.5s, clamped to [2.0s, 9.0s] so the
+# dwell stays in the "user glances at results" range and never blows
+# past the agent's reasonable patience budget.
+_SERP_DWELL_MU_S: float = 4.0
+_SERP_DWELL_SIGMA_S: float = 1.5
+_SERP_DWELL_MIN_S: float = 2.0
+_SERP_DWELL_MAX_S: float = 9.0
+
+
+def _sample_serp_dwell(rng: random.Random | None = None) -> float:
+    """Truncated-normal sample of the SERP-to-apex dwell time, in seconds.
+
+    Exposed for testability. Reuses the same ``random.Random`` injection
+    pattern as :func:`_pick_warmup_search_engine` so an operator can
+    replay an exact warmup from logs.
+    """
+    rng = rng or random
+    sample = rng.gauss(_SERP_DWELL_MU_S, _SERP_DWELL_SIGMA_S)
+    if sample < _SERP_DWELL_MIN_S:
+        sample = _SERP_DWELL_MIN_S
+    elif sample > _SERP_DWELL_MAX_S:
+        sample = _SERP_DWELL_MAX_S
+    return sample
 
 
 def _warmup_apex_url(target_url: str) -> str | None:
@@ -208,7 +257,7 @@ async def browser_warmup(
     steps: list[dict] = []
 
     # Step 1: search-engine landing. Recoverable.
-    search_url = random.choice(_WARMUP_SEARCH_ENGINES)
+    search_url = _pick_warmup_search_engine()
     search_step: dict = {
         "kind": "search_engine",
         "url": search_url,
@@ -262,6 +311,27 @@ async def browser_warmup(
         # nav since that's all we promised to do.
         success = bool(steps[0].get("ok"))
     else:
+        # SERP dwell — pause on the search-engine page before clicking
+        # through. Real users spend several seconds reading results;
+        # zero-or-near-zero handoff between SERP load and apex nav is
+        # itself a behavioral signal the in-house behavioral models on
+        # LinkedIn / X / Meta key on. Only fires when we actually got
+        # past the search-engine load (skip the dwell if the SERP nav
+        # failed; pausing on a failed page produces no fingerprint
+        # benefit and just wastes the agent's budget). Recorded as a
+        # step so operators can see the dwell in the warmup trace.
+        # ``asyncio.CancelledError`` is a BaseException — it propagates
+        # cleanly through the bare ``await`` and short-circuits the
+        # whole warmup, which is the right behavior on caller timeout.
+        if steps[0].get("ok"):
+            dwell_s = _sample_serp_dwell()
+            steps.append({
+                "kind": "serp_dwell",
+                "delay_s": round(dwell_s, 2),
+                "ok": True,
+            })
+            await asyncio.sleep(dwell_s)
+
         apex_step: dict = {
             "kind": "apex",
             "url": apex_url,

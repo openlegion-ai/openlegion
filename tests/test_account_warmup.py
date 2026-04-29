@@ -14,7 +14,7 @@ into a believable pre-task browsing trail. Tests pin:
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -157,17 +157,23 @@ class TestBrowserWarmupIntensities:
 
     @pytest.mark.asyncio
     async def test_deep_intensity_mixes_nav_and_scroll(self):
+        from src.agent.builtins import browser_tool as bt
         from src.agent.builtins.browser_tool import browser_warmup
 
         mc = _make_mesh(return_value={"url": "ok"})
-        result = await browser_warmup(
-            target_url="https://www.linkedin.com/in/x",
-            intensity="deep",
-            mesh_client=mc,
-        )
+        # Stub asyncio.sleep so the SERP dwell doesn't actually sleep.
+        async def _fake_sleep(s):
+            return None
+        with patch.object(bt.asyncio, "sleep", _fake_sleep):
+            result = await browser_warmup(
+                target_url="https://www.linkedin.com/in/x",
+                intensity="deep",
+                mesh_client=mc,
+            )
 
         action_kinds = [c.args[0] for c in mc.browser_command.await_args_list]
-        # deep = search-nav, scroll, apex-nav, scroll-on-apex
+        # deep = search-nav, scroll, apex-nav, scroll-on-apex (the SERP
+        # dwell is an asyncio.sleep, not a mesh action).
         assert action_kinds.count("navigate") == 2
         assert action_kinds.count("scroll") == 2
         assert len(action_kinds) == 4
@@ -175,9 +181,12 @@ class TestBrowserWarmupIntensities:
         # the apex nav, and another scroll comes after the apex nav.
         assert action_kinds == ["navigate", "scroll", "navigate", "scroll"]
         assert result["success"] is True
-        # Step kinds in the returned envelope mirror the action sequence.
+        # Step kinds in the returned envelope include the SERP dwell
+        # between the search-engine scroll and the apex nav.
         step_kinds = [s["kind"] for s in result["steps"]]
-        assert step_kinds == ["search_engine", "scroll", "apex", "scroll"]
+        assert step_kinds == [
+            "search_engine", "scroll", "serp_dwell", "apex", "scroll",
+        ]
 
     @pytest.mark.asyncio
     async def test_unknown_intensity_falls_back_to_normal(self):
@@ -374,6 +383,7 @@ class TestBrowserWarmupApexFailure:
     async def test_apex_skip_at_deep_when_apex_fails(self):
         """At deep intensity, if the apex nav fails, the apex-scroll
         step should NOT run (no point scrolling a non-loaded page)."""
+        from src.agent.builtins import browser_tool as bt
         from src.agent.builtins.browser_tool import browser_warmup
 
         side_effect = [
@@ -382,18 +392,23 @@ class TestBrowserWarmupApexFailure:
             RuntimeError("apex unreachable"),
         ]
         mc = _make_mesh(side_effect=side_effect)
-        result = await browser_warmup(
-            target_url="https://www.linkedin.com/in/x",
-            intensity="deep",
-            mesh_client=mc,
-        )
+        # Stub the SERP dwell sleep so the test runs quickly.
+        async def _fake_sleep(s):
+            return None
+        with patch.object(bt.asyncio, "sleep", _fake_sleep):
+            result = await browser_warmup(
+                target_url="https://www.linkedin.com/in/x",
+                intensity="deep",
+                mesh_client=mc,
+            )
 
         assert result["success"] is False
         # Only 3 underlying calls — the post-apex scroll was skipped.
         assert mc.browser_command.await_count == 3
         kinds = [s["kind"] for s in result["steps"]]
-        # search_engine + scroll + apex (apex-failed); no second scroll.
-        assert kinds == ["search_engine", "scroll", "apex"]
+        # search_engine + scroll + serp_dwell + apex (apex-failed);
+        # no second scroll.
+        assert kinds == ["search_engine", "scroll", "serp_dwell", "apex"]
 
 
 # ── returned envelope shape ────────────────────────────────────
@@ -449,3 +464,167 @@ class TestBrowserWarmupEnvelope:
         ]
         for call in nav_calls:
             assert call.args[1]["wait_until"] == "domcontentloaded"
+
+
+# ── 8: weighted search-engine selection ───────────────────────────────
+
+
+class TestWeightedSearchEngine:
+    def test_weighted_distribution_skews_to_google(self):
+        """Real distribution is ~85% Google / ~10% Bing / ~5% DDG.
+        Verify the picker honors the weights at fleet-scale by sampling
+        many times with a seeded rng — Google should dominate."""
+        import random as _random
+
+        from src.agent.builtins.browser_tool import _pick_warmup_search_engine
+
+        rng = _random.Random(42)
+        counts = {"google": 0, "bing": 0, "duckduckgo": 0}
+        for _ in range(2000):
+            url = _pick_warmup_search_engine(rng=rng)
+            for k in counts:
+                if k in url:
+                    counts[k] += 1
+                    break
+        # Google must be the dominant pick (85% target, ±5% slack).
+        assert counts["google"] / 2000 > 0.78
+        # Non-Google should be present but rare.
+        assert counts["bing"] > 0
+        assert counts["duckduckgo"] > 0
+        # No unweighted clustering — Bing should not approach Google.
+        assert counts["bing"] < counts["google"] / 2
+
+    def test_picker_reproducible_with_seeded_rng(self):
+        """Operator audit: same rng seed → same engine choice. Lets a
+        canary run replay an exact warmup from logs."""
+        import random as _random
+
+        from src.agent.builtins.browser_tool import _pick_warmup_search_engine
+
+        rng_a = _random.Random(123)
+        rng_b = _random.Random(123)
+        urls_a = [_pick_warmup_search_engine(rng=rng_a) for _ in range(20)]
+        urls_b = [_pick_warmup_search_engine(rng=rng_b) for _ in range(20)]
+        assert urls_a == urls_b
+
+
+# ── 9: SERP dwell ─────────────────────────────────────────────────────
+
+
+class TestSerpDwell:
+    def test_sample_within_clamp_window(self):
+        import random as _random
+
+        from src.agent.builtins.browser_tool import _sample_serp_dwell
+
+        rng = _random.Random(777)
+        for _ in range(500):
+            d = _sample_serp_dwell(rng=rng)
+            assert 2.0 <= d <= 9.0  # _SERP_DWELL_MIN_S / MAX_S
+
+    def test_sample_clamped_to_min(self):
+        from src.agent.builtins.browser_tool import _sample_serp_dwell
+
+        class _StubRng:
+            def gauss(self, mu, sigma):
+                return -10.0  # below min
+
+        d = _sample_serp_dwell(rng=_StubRng())
+        assert d == 2.0
+
+    def test_sample_clamped_to_max(self):
+        from src.agent.builtins.browser_tool import _sample_serp_dwell
+
+        class _StubRng:
+            def gauss(self, mu, sigma):
+                return 999.0  # above max
+
+        d = _sample_serp_dwell(rng=_StubRng())
+        assert d == 9.0
+
+    @pytest.mark.asyncio
+    async def test_warmup_normal_intensity_includes_serp_dwell_step(self):
+        """At ``normal`` intensity, after the search-engine nav
+        succeeds, a ``serp_dwell`` step must appear in the warmup trace
+        BEFORE the apex nav."""
+        from src.agent.builtins import browser_tool as bt
+        from src.agent.builtins.browser_tool import browser_warmup
+
+        mc = _make_mesh(return_value={"url": "ok"})
+
+        # Stub asyncio.sleep so the test doesn't actually wait 4s.
+        slept: list[float] = []
+
+        async def _fake_sleep(s):
+            slept.append(s)
+        with patch.object(bt.asyncio, "sleep", _fake_sleep):
+            result = await browser_warmup(
+                target_url="https://linkedin.com/in/x",
+                intensity="normal",
+                mesh_client=mc,
+            )
+
+        kinds = [s["kind"] for s in result["steps"]]
+        # Order: search_engine → serp_dwell → apex
+        assert "serp_dwell" in kinds
+        assert kinds.index("serp_dwell") < kinds.index("apex")
+        # Sleep was actually called with a positive duration in the
+        # SERP-dwell window.
+        assert len(slept) >= 1
+        assert 2.0 <= slept[0] <= 9.0
+
+    @pytest.mark.asyncio
+    async def test_warmup_skips_serp_dwell_when_search_failed(self):
+        """SERP-dwell should NOT fire when the search-engine nav failed
+        — pausing on a failed page produces no fingerprint benefit."""
+        from src.agent.builtins import browser_tool as bt
+        from src.agent.builtins.browser_tool import browser_warmup
+
+        # First call (search) returns error; second call (apex) succeeds.
+        mc = _make_mesh()
+        mc.browser_command = AsyncMock(side_effect=[
+            {"error": "search-engine timeout"},  # SERP nav fails
+            {"url": "ok"},                       # apex nav succeeds
+        ])
+
+        slept: list[float] = []
+
+        async def _fake_sleep(s):
+            slept.append(s)
+        with patch.object(bt.asyncio, "sleep", _fake_sleep):
+            result = await browser_warmup(
+                target_url="https://linkedin.com/in/x",
+                intensity="normal",
+                mesh_client=mc,
+            )
+
+        kinds = [s["kind"] for s in result["steps"]]
+        assert "serp_dwell" not in kinds, (
+            "SERP-dwell must skip when the search engine load failed"
+        )
+        # No asyncio.sleep should have been called for the SERP dwell.
+        assert slept == []
+
+    @pytest.mark.asyncio
+    async def test_warmup_light_intensity_no_serp_dwell(self):
+        """Light intensity = search-engine only, no apex hop, no SERP
+        dwell (the dwell only matters as a hand-off pause to the apex
+        nav)."""
+        from src.agent.builtins import browser_tool as bt
+        from src.agent.builtins.browser_tool import browser_warmup
+
+        mc = _make_mesh(return_value={"url": "ok"})
+        slept: list[float] = []
+
+        async def _fake_sleep(s):
+            slept.append(s)
+        with patch.object(bt.asyncio, "sleep", _fake_sleep):
+            result = await browser_warmup(
+                target_url="https://linkedin.com/in/x",
+                intensity="light",
+                mesh_client=mc,
+            )
+
+        kinds = [s["kind"] for s in result["steps"]]
+        assert "serp_dwell" not in kinds
+        assert slept == []
