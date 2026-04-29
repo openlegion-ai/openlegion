@@ -1967,14 +1967,17 @@ class CaptchaSolver:
             # Walk the frame tree if Playwright exposes one. ``frames``
             # may be missing (test mocks), non-iterable (AsyncMock
             # auto-attr), or include the main frame already covered
-            # above; iterating defensively skips all of those.
+            # above; iterating defensively skips all of those. Playwright
+            # includes ``page.main_frame`` in ``page.frames``; skip it so
+            # callbacks do not fire twice in the top-level document.
             frames = getattr(page, "frames", None)
             try:
                 frame_iter = list(frames) if frames is not None else []
             except TypeError:
                 frame_iter = []
+            main_frame = getattr(page, "main_frame", None)
             for frame in frame_iter:
-                if frame is page:
+                if frame is page or frame is main_frame:
                     continue
                 evaluator = getattr(frame, "evaluate", None)
                 if not callable(evaluator):

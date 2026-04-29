@@ -324,16 +324,20 @@ def pick_resolution(agent_id: str) -> tuple[int, int]:
     return _RESOLUTION_POOL[0][0]
 
 
-# ── §6.6 NetworkInformation per-agent fingerprint ─────────────────────────────
+# ── §6.6 NetworkInformation helper for non-Firefox future paths ───────────────
 
 
 def pick_network_info(agent_id: str) -> dict:
     """Stable per-agent ``navigator.connection`` values.
 
-    Real desktop users on broadband / 4G / 5G report
+    The current browser path is Firefox-shaped, and real Firefox does not
+    expose NetworkInformation, so ``build_launch_options`` does not apply
+    these values today. Keep the helper deterministic for a future
+    Chromium-shaped path where exposing the API would be coherent with the UA.
+
+    Real Chromium-family desktop users on broadband / 4G / 5G report
     ``effectiveType="4g"`` overwhelmingly; the variability is in
-    ``downlink`` (Mbps) and ``rtt`` (ms). Datacenter Firefox often
-    leaves all three undefined, which is itself a signal.
+    ``downlink`` (Mbps) and ``rtt`` (ms).
 
     Picks per-agent from plausible bands:
       - downlink: 5–20 Mbps (covers home broadband, mobile 4G good signal)
@@ -453,8 +457,9 @@ def build_launch_options(agent_id: str, profile_dir: str, proxy: dict | None = N
         "os": os_hint,
         "locale": locale,        # navigator.language / Accept-Language header
         "window": (width, height),
-        # block_webrtc: Camoufox native toggle — prevents Docker container IP
-        # from leaking via ICE candidates.  More reliable than manual prefs.
+        # block_webrtc: Camoufox native toggle — primary defense against
+        # Docker container IP leaks via ICE candidates. Firefox prefs below
+        # add defense in depth.
         "block_webrtc": True,
     }
 
@@ -484,23 +489,14 @@ def build_launch_options(agent_id: str, profile_dir: str, proxy: dict | None = N
 
     options["firefox_user_prefs"] = _stealth_prefs()
 
-    # ── §6.6 NetworkInformation spoof ────────────────────────────────────────
-    # Camoufox's ``config`` dict supports dotted keys for navigator.* override.
-    # Set per-agent stable values so ``navigator.connection.{effectiveType,
-    # downlink, rtt}`` look like a desktop on broadband. Without this Firefox
-    # leaves these undefined on Linux containers, which detection scripts use
-    # as a desktop-vs-bot tell.
-    netinfo = pick_network_info(agent_id)
-    options["config"] = {
-        "navigator.connection.effectiveType": netinfo["effectiveType"],
-        "navigator.connection.downlink": netinfo["downlink"],
-        "navigator.connection.rtt": netinfo["rtt"],
-        "navigator.connection.saveData": netinfo["saveData"],
-    }
-    # Camoufox requires this acknowledgement before applying ``config``
-    # overrides. We're past the early-return path so it's safe to set
-    # unconditionally now.
-    options["i_know_what_im_doing"] = True
+    # ── §6.6 NetworkInformation ──────────────────────────────────────────────
+    # Real Firefox does not expose ``navigator.connection``. Earlier phases
+    # injected per-agent NetworkInformation values through Camoufox config,
+    # but that made a Firefox-shaped UA expose a Chromium-only API — a stronger
+    # anti-bot signal than the API being absent. Keep ``pick_network_info`` as
+    # a deterministic helper for a future Chromium-shaped path, but do not
+    # pass any ``navigator.connection.*`` config while `_assert_firefox_ua`
+    # requires a Firefox UA.
 
     # ── User-Agent version override ──────────────────────────────────────────
     # Camoufox bundles a specific Firefox build (e.g. 135.0).  Some sites
@@ -521,7 +517,8 @@ def build_launch_options(agent_id: str, profile_dir: str, proxy: dict | None = N
             # If a future change introduces a Chromium UA, this raises so
             # the developer has to wire Sec-CH-UA-* overrides first.
             _assert_firefox_ua(ua)
-            options["config"]["navigator.userAgent"] = ua
+            options.setdefault("config", {})["navigator.userAgent"] = ua
+            options["i_know_what_im_doing"] = True
             options["firefox_user_prefs"]["general.useragent.override"] = ua
             logger.info("UA override: Firefox/%s", ua_version)
 

@@ -1519,9 +1519,9 @@ function dashboard() {
           },
         };
         if (!evt.data.ok && (evt.data.mismatches || []).length) {
-          // Toast dedup: a fleet-wide regression (e.g. Camoufox version
-          // bump that breaks navigator.connection injection) would
-          // otherwise stack one 8s toast per agent on a mass restart.
+          // Toast dedup: a fleet-wide fingerprint regression (e.g. a
+          // Camoufox version bump that changes navigator/platform shape)
+          // would otherwise stack one 8s toast per agent on a mass restart.
           // Fingerprint signature = the sorted mismatch list. Suppress
           // identical signatures fired within the same 30s window;
           // surface a "+N more" toast instead.

@@ -678,6 +678,30 @@ class TestCostCapReservation:
         assert await cost.get_millicents("agent-1") == 100
 
     @pytest.mark.asyncio
+    async def test_unpriced_actual_tier_keeps_reservation_under_cap(
+        self, mgr, monkeypatch,
+    ):
+        """If the solver returns a token on a tier without a published
+        actual rate, do not refund the cost-cap reservation. Refunding
+        would let an untracked provider charge bypass the cap."""
+        monkeypatch.setenv("CAPTCHA_COST_LIMIT_USD_PER_AGENT_MONTH", "1.00")
+        solver = _mk_solver(
+            return_value=_solved(used_proxy_aware=True),
+            provider="2captcha",
+        )
+        mgr._captcha_solver = solver
+        inst = _mk_inst()
+
+        result = await mgr._metered_solve(
+            inst, 'iframe[src*="recaptcha"]', "recaptcha-v3",
+        )
+
+        assert result.token == "tok"
+        # 2captcha recaptcha-v3 has a proxyless published reservation of
+        # 100 mc but no proxy-aware published row. Keep the reservation.
+        assert await cost.get_millicents("agent-1") == 100
+
+    @pytest.mark.asyncio
     async def test_unpriced_kind_with_cap_fails_closed(
         self, mgr, monkeypatch,
     ):

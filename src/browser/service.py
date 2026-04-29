@@ -19,6 +19,7 @@ import re
 import subprocess
 import time
 import uuid
+import warnings
 import weakref
 from collections import deque
 from pathlib import Path
@@ -1951,18 +1952,30 @@ class CamoufoxInstance:
         except RuntimeError:
             loop = None
         if self._lock is None:
-            # ``asyncio.Lock()`` on Python 3.10+ (project minimum) does
-            # NOT consult or bind a loop at construction; first acquire
-            # binds it. Constructing one in a thread with no loop is
-            # safe — leave ``_lock_loop = None`` and pin on first real
-            # async use below. (Earlier code did
-            # ``asyncio.new_event_loop() + set_event_loop()`` here as
-            # a Python-3.9 workaround; that mutated the calling
-            # thread's current event loop as a side effect of an
-            # attribute READ, which is surprising and breaks any code
-            # that later calls ``asyncio.run`` in that thread.)
-            self._lock = asyncio.Lock()
-            self._lock_loop = loop  # may be None; pinned below on first real use
+            if loop is None:
+                try:
+                    # Python 3.10+ creates an unbound lock here without
+                    # touching thread-local event-loop state.
+                    self._lock = asyncio.Lock()
+                    self._lock_loop = None
+                except RuntimeError:
+                    # Python 3.9 still calls get_event_loop() during
+                    # Lock construction. Use an explicit throwaway loop
+                    # without setting it as the thread default; first
+                    # real async use will rebuild for the running loop.
+                    tmp_loop = asyncio.new_event_loop()
+                    try:
+                        with warnings.catch_warnings():
+                            warnings.simplefilter(
+                                "ignore", DeprecationWarning,
+                            )
+                            self._lock = asyncio.Lock(loop=tmp_loop)
+                    finally:
+                        tmp_loop.close()
+                    self._lock_loop = tmp_loop
+            else:
+                self._lock = asyncio.Lock()
+                self._lock_loop = loop
         elif loop is None:
             # No active loop to bind against; return what we have.
             return self._lock
@@ -6555,10 +6568,19 @@ class BrowserManager:
                         logger.warning(
                             "captcha solve: no published rate for "
                             "provider=%s kind=%s proxy_aware=%s — "
-                            "skipping cost increment "
+                            "keeping any reserved cost-cap charge; "
+                            "otherwise skipping cost increment "
                             "(under-count > over-count)",
                             provider, kind, result.used_proxy_aware,
                         )
+                        # With a configured cap, we reserved the max
+                        # published tier before the provider call. If
+                        # the solver reports an unpriced actual tier
+                        # after returning a token, keep that reservation
+                        # instead of refunding it; refunding would let an
+                        # untracked provider charge bypass the cap.
+                        if reserved_millicents:
+                            reservation_settled = True
                     else:
                         if reserved_millicents:
                             await _cost.adjust_cost(

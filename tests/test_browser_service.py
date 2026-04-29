@@ -458,6 +458,7 @@ class TestCamoufoxInstanceLock:
     def test_lock_property_does_not_require_current_event_loop(self):
         errors: list[BaseException] = []
         locks: list[asyncio.Lock] = []
+        loop_state: list[str] = []
 
         def build_and_read_lock() -> None:
             try:
@@ -465,6 +466,12 @@ class TestCamoufoxInstanceLock:
                     "a1", MagicMock(), MagicMock(), MagicMock(),
                 )
                 locks.append(inst.lock)
+                try:
+                    asyncio.get_event_loop()
+                except RuntimeError:
+                    loop_state.append("unset")
+                else:
+                    loop_state.append("set")
             except BaseException as exc:
                 errors.append(exc)
 
@@ -475,6 +482,7 @@ class TestCamoufoxInstanceLock:
         assert errors == []
         assert len(locks) == 1
         assert isinstance(locks[0], asyncio.Lock)
+        assert loop_state == ["unset"]
 
     @pytest.mark.asyncio
     async def test_instance_has_lock(self):
@@ -635,16 +643,17 @@ class TestUAOverride:
     def test_no_override_by_default(self):
         """Without BROWSER_UA_VERSION, no UA-specific keys should be set.
 
-        Phase 3 §6.6 introduced unconditional ``navigator.connection.*``
-        keys plus ``i_know_what_im_doing`` so the assertions for those
-        no longer hold here — but ``navigator.userAgent`` and the
-        Firefox pref-level override must still be absent on the no-UA-
-        version path. That's the actual contract this test is guarding.
+        Firefox does not expose ``navigator.connection``; default launch
+        options should therefore avoid Camoufox ``config`` entirely. UA
+        config is only needed when an explicit Firefox version override is
+        requested.
         """
         from src.browser.stealth import build_launch_options
         with patch.dict("os.environ", {}, clear=True):
             opts = build_launch_options("agent1", "/tmp/profile")
         assert "navigator.userAgent" not in (opts.get("config") or {})
+        assert "config" not in opts
+        assert "i_know_what_im_doing" not in opts
         assert "general.useragent.override" not in opts["firefox_user_prefs"]
 
     def test_override_sets_camoufox_config(self):
@@ -706,9 +715,7 @@ class TestUAOverride:
         from src.browser.stealth import build_launch_options
         with patch.dict("os.environ", {"BROWSER_UA_VERSION": "abc"}, clear=True):
             opts = build_launch_options("agent1", "/tmp/profile")
-        # The §6.6 navigator.connection.* keys are still set; only the
-        # UA override path must not have run.
-        assert "navigator.userAgent" not in (opts.get("config") or {})
+        assert "config" not in opts
         assert "general.useragent.override" not in opts["firefox_user_prefs"]
 
     def test_override_rejects_single_number(self):
@@ -716,7 +723,7 @@ class TestUAOverride:
         from src.browser.stealth import build_launch_options
         with patch.dict("os.environ", {"BROWSER_UA_VERSION": "138"}, clear=True):
             opts = build_launch_options("agent1", "/tmp/profile")
-        assert "navigator.userAgent" not in (opts.get("config") or {})
+        assert "config" not in opts
 
     def test_override_rejects_empty_parts(self):
         """Malformed versions like '138.' or '.0' should be rejected."""
@@ -724,9 +731,7 @@ class TestUAOverride:
         for bad in ("138.", ".0", ".", ".."):
             with patch.dict("os.environ", {"BROWSER_UA_VERSION": bad}, clear=True):
                 opts = build_launch_options("agent1", "/tmp/profile")
-            assert "navigator.userAgent" not in (opts.get("config") or {}), (
-                f"Expected rejection for {bad!r}"
-            )
+            assert "config" not in opts, f"Expected rejection for {bad!r}"
 
     def test_override_strips_whitespace(self):
         """Leading/trailing whitespace should be stripped."""
@@ -739,9 +744,7 @@ class TestUAOverride:
         from src.browser.stealth import build_launch_options
         with patch.dict("os.environ", {"BROWSER_UA_VERSION": ""}, clear=True):
             opts = build_launch_options("agent1", "/tmp/profile")
-        # config exists for §6.6 NetworkInformation; the UA-specific
-        # key inside it is what must not be set.
-        assert "navigator.userAgent" not in (opts.get("config") or {})
+        assert "config" not in opts
 
     def test_build_ua_string_directly(self):
         """Unit test the helper function."""
@@ -3525,7 +3528,8 @@ class TestTypeFast:
         async def capture_sleep(t: float):
             delays.append(t)
 
-        with patch("src.browser.service.asyncio.sleep", side_effect=capture_sleep):
+        with patch("src.browser.service.asyncio.sleep", side_effect=capture_sleep), \
+             patch("src.browser.service.action_delay", return_value=0.2):
             result = await mgr.type_text("a1", ref="e0", text="test", fast=True)
 
         assert result["success"] is True
@@ -11086,4 +11090,3 @@ class TestSnapshotDiffSubsetShortCircuit:
         # ``scope`` is included to signal the caller that the diff was
         # not produced.
         assert result["data"].get("scope") == "navigation"
-
