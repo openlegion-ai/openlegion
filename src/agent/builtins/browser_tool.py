@@ -6,6 +6,8 @@ service container. Agent containers no longer bundle Chrome or VNC.
 
 from __future__ import annotations
 
+import random
+import time
 from urllib.parse import urlparse
 
 from src.agent.skills import skill
@@ -105,6 +107,220 @@ async def browser_navigate(
     if referer is not None:
         params["referer"] = referer
     return await _browser_command(mesh_client, "navigate", params)
+
+
+# Pre-task warmup: search-engine landings used to seed a believable arrival
+# trail before the agent navigates to a behavior-fingerprinting target.
+# Mirrors ``stealth._SEARCH_REFERERS`` — kept in sync intentionally so the
+# warmup hits the same hosts the server-side referer picker expects to see
+# in a session's history. We pick one per call (rolling-5 anti-repeat is
+# the server's job once we hand off to ``navigate``).
+_WARMUP_SEARCH_ENGINES: tuple[str, ...] = (
+    "https://www.google.com/",
+    "https://www.bing.com/",
+    "https://duckduckgo.com/",
+)
+
+
+def _warmup_apex_url(target_url: str) -> str | None:
+    """Return the target's apex-host URL, or None if ``target_url`` is invalid.
+
+    For ``https://www.linkedin.com/in/x?foo=1`` returns ``https://linkedin.com/``.
+    Strips a leading ``www.`` so the apex nav matches what real users type.
+    Only ``http``/``https`` URLs with a hostname are accepted.
+    """
+    try:
+        parsed = urlparse(target_url)
+    except Exception:
+        return None
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in ("http", "https"):
+        return None
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return None
+    if host.startswith("www."):
+        host = host[4:]
+    return f"{scheme}://{host}/"
+
+
+@skill(
+    name="browser_warmup",
+    description=(
+        "Pre-task warmup: navigate to a search engine and the target's home "
+        "page before starting the main task. Use this once at the start of "
+        "an automation session against LinkedIn / X / Twitter / Facebook / "
+        "Instagram (and other behavior-fingerprinting targets) so the "
+        "session has a realistic browsing trail. NOT needed for casual "
+        "sites without bot detection. Do NOT call this multiple times per "
+        "session — once at the start is enough; the session already has a "
+        "referer history after that. Returns a structured summary of the "
+        "steps that ran so the agent can log what happened."
+    ),
+    parameters={
+        "target_url": {
+            "type": "string",
+            "description": (
+                "The URL the agent will navigate to AFTER warmup completes. "
+                "Used to derive the apex host (e.g. linkedin.com) for the "
+                "same-origin warmup hop. Must be http:// or https://."
+            ),
+        },
+        "intensity": {
+            "type": "string",
+            "description": (
+                "Warmup depth. 'light' = search engine only (1 nav, fastest). "
+                "'normal' (default) = search engine + apex host (2 navs). "
+                "'deep' = search engine + scroll + apex host + scroll on apex "
+                "(4 actions, highest realism)."
+            ),
+            "default": "normal",
+        },
+    },
+    parallel_safe=False,
+)
+async def browser_warmup(
+    target_url: str,
+    intensity: str = "normal",
+    *,
+    mesh_client=None,
+) -> dict:
+    """Run a pre-task browsing warmup against a target's apex host.
+
+    Composes existing ``navigate`` and ``scroll`` browser commands. All
+    failures EXCEPT the apex nav are recoverable — a search-engine timeout
+    is logged into ``steps`` and the apex hop still runs. ``success`` is
+    False only when the apex navigation itself fails (or when input
+    validation rejects the request before any navs run).
+    """
+    apex_url = _warmup_apex_url(target_url)
+    if apex_url is None:
+        return {"error": "invalid target_url"}
+
+    intensity_norm = (intensity or "normal").strip().lower()
+    if intensity_norm not in ("light", "normal", "deep"):
+        intensity_norm = "normal"
+
+    if not mesh_client:
+        return {"error": "Browser requires mesh connectivity"}
+
+    started = time.monotonic()
+    steps: list[dict] = []
+
+    # Step 1: search-engine landing. Recoverable.
+    search_url = random.choice(_WARMUP_SEARCH_ENGINES)
+    search_step: dict = {
+        "kind": "search_engine",
+        "url": search_url,
+    }
+    try:
+        search_result = await _browser_command(
+            mesh_client,
+            "navigate",
+            {
+                "url": search_url,
+                "wait_ms": 500,
+                "wait_until": "domcontentloaded",
+                "snapshot_after": False,
+            },
+        )
+        if isinstance(search_result, dict) and "error" in search_result:
+            search_step["ok"] = False
+            search_step["error"] = search_result["error"]
+        else:
+            search_step["ok"] = True
+    except Exception as exc:  # noqa: BLE001 — log and continue
+        search_step["ok"] = False
+        search_step["error"] = str(exc)
+    steps.append(search_step)
+
+    # Step 2 (deep only): a single scroll-down on the search engine to
+    # mimic "looking at results" before clicking through. Recoverable.
+    if intensity_norm == "deep":
+        scroll_step: dict = {"kind": "scroll", "where": "search_engine"}
+        try:
+            scroll_result = await _browser_command(
+                mesh_client,
+                "scroll",
+                {"direction": "down", "amount": 0},
+            )
+            if isinstance(scroll_result, dict) and "error" in scroll_result:
+                scroll_step["ok"] = False
+                scroll_step["error"] = scroll_result["error"]
+            else:
+                scroll_step["ok"] = True
+        except Exception as exc:  # noqa: BLE001
+            scroll_step["ok"] = False
+            scroll_step["error"] = str(exc)
+        steps.append(scroll_step)
+
+    # Step 3: apex-host nav. THE critical step — failure means warmup
+    # failed. Skipped at "light" intensity (search-engine-only mode).
+    success = True
+    if intensity_norm == "light":
+        # No apex hop at light intensity. Success tracks the search-engine
+        # nav since that's all we promised to do.
+        success = bool(steps[0].get("ok"))
+    else:
+        apex_step: dict = {
+            "kind": "apex",
+            "url": apex_url,
+        }
+        try:
+            apex_result = await _browser_command(
+                mesh_client,
+                "navigate",
+                {
+                    "url": apex_url,
+                    "wait_ms": 1000,
+                    "wait_until": "domcontentloaded",
+                    "snapshot_after": False,
+                },
+            )
+            if isinstance(apex_result, dict) and "error" in apex_result:
+                apex_step["ok"] = False
+                apex_step["error"] = apex_result["error"]
+                success = False
+            else:
+                apex_step["ok"] = True
+        except Exception as exc:  # noqa: BLE001
+            apex_step["ok"] = False
+            apex_step["error"] = str(exc)
+            success = False
+        steps.append(apex_step)
+
+        # Step 4 (deep only): a small scroll on the apex page so the
+        # session also looks like a human "glanced at the home page"
+        # before the agent's targeted nav. Recoverable.
+        if intensity_norm == "deep" and success:
+            apex_scroll_step: dict = {"kind": "scroll", "where": "apex"}
+            try:
+                apex_scroll_result = await _browser_command(
+                    mesh_client,
+                    "scroll",
+                    {"direction": "down", "amount": 0},
+                )
+                if (
+                    isinstance(apex_scroll_result, dict)
+                    and "error" in apex_scroll_result
+                ):
+                    apex_scroll_step["ok"] = False
+                    apex_scroll_step["error"] = apex_scroll_result["error"]
+                else:
+                    apex_scroll_step["ok"] = True
+            except Exception as exc:  # noqa: BLE001
+                apex_scroll_step["ok"] = False
+                apex_scroll_step["error"] = str(exc)
+            steps.append(apex_scroll_step)
+
+    total_ms = int((time.monotonic() - started) * 1000)
+    return {
+        "success": success,
+        "intensity": intensity_norm,
+        "target_apex": apex_url,
+        "steps": steps,
+        "total_ms": total_ms,
+    }
 
 
 @skill(
