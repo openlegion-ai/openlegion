@@ -469,6 +469,89 @@ async def _drain_captcha_audit() -> list[dict]:
     return drained
 
 
+# ── §20 — session-persistence audit aggregator ────────────────────────────
+#
+# Snapshot/restore events surface to the operator dashboard via the same
+# per-minute aggregation pattern as the captcha audit log (§11.14 / §2.7
+# forbid per-call events). Aggregated by ``(agent_id, action, success)``
+# so a stuck periodic-snapshot loop on one agent doesn't drown out the
+# rest. Cookie values and origin domains are NEVER recorded — privacy
+# posture (§20). The bucket holds counts + first/last timestamps only.
+#
+# State is module-global because the BrowserManager is a singleton in
+# the browser-service container. Flush is driven from
+# :meth:`BrowserManager._emit_metrics` (already on the 60s tick); see
+# ``_drain_session_audit`` below.
+_session_audit_lock: asyncio.Lock | None = None
+_session_audit_lock_loop: asyncio.AbstractEventLoop | None = None
+# {(agent_id, action, success_bool): {"count": int, "first_ts": float}}
+_session_audit_buckets: dict[tuple[str, str, bool], dict] = {}
+
+
+def _get_session_audit_lock() -> asyncio.Lock:
+    """Return a session audit lock bound to the active event loop."""
+    global _session_audit_lock, _session_audit_lock_loop
+    loop = asyncio.get_running_loop()
+    if _session_audit_lock is None or _session_audit_lock_loop is not loop:
+        _session_audit_lock = asyncio.Lock()
+        _session_audit_lock_loop = loop
+    return _session_audit_lock
+
+
+async def _record_session_audit_event(
+    agent_id: str, action: str, success: bool,
+) -> None:
+    """Aggregate a session snapshot/restore event into the per-minute bucket.
+
+    ``action`` is ``"session_snapshot"`` or ``"session_restore"``. The
+    bucket aggregates by ``(agent_id, action, success)`` so a misconfigured
+    flag or broken disk surfaces clearly. URL and origin domains are
+    NEVER captured here — that would leak which sites the agent is
+    logged into through the dashboard event stream.
+    """
+    async with _get_session_audit_lock():
+        key = (agent_id, action, bool(success))
+        bucket = _session_audit_buckets.get(key)
+        now = time.time()
+        if bucket is None:
+            _session_audit_buckets[key] = {
+                "count": 1,
+                "first_ts": now,
+            }
+        else:
+            bucket["count"] += 1
+
+
+async def _drain_session_audit() -> list[dict]:
+    """Atomically swap the session audit buckets and return drained payloads.
+
+    Called once per metrics-emit tick. Each returned dict is one
+    EventBus payload. Mirrors :func:`_drain_captcha_audit` but with the
+    ``session_event`` type so the dashboard can route events into a
+    dedicated panel.
+    """
+    async with _get_session_audit_lock():
+        if not _session_audit_buckets:
+            return []
+        buckets = dict(_session_audit_buckets)
+        _session_audit_buckets.clear()
+    drained = []
+    for (agent_id, action, success), info in buckets.items():
+        # NOTE: ``agent_id`` (not ``agent``) — the dashboard metrics
+        # poller routes browser-service events into the per-agent
+        # EventBus by this exact field name, same as the captcha audit
+        # path.  No ``url`` or ``origin`` field — privacy posture (§20).
+        drained.append({
+            "type": "session_event",
+            "agent_id": agent_id,
+            "action": action,
+            "success": success,
+            "count": info["count"],
+            "first_ts": info["first_ts"],
+        })
+    return drained
+
+
 def _kind_confidence(kind: str) -> str:
     """Default ``solver_confidence`` for a no-solver path, derived from how
     confidently we classified the *kind*. Placeholder kinds (§11.1 / §11.3)
@@ -2190,6 +2273,12 @@ class BrowserManager:
                 "Playwright private artifact-stream API unavailable; "
                 "browser_download will return service_unavailable.",
             )
+        # §20 — per-agent elapsed-seconds counter for periodic session
+        # snapshots. Incremented by 60 on each metrics tick; resets to 0
+        # after a snapshot fires. Keyed by agent_id so an agent that just
+        # started doesn't immediately snapshot (would write an empty
+        # storage_state to disk for nothing). See ``_periodic_session_snapshots``.
+        self._session_snapshot_elapsed_s: dict[str, int] = {}
 
     def _manager_lock(self) -> asyncio.Lock:
         """Return the manager lock for the currently running event loop.
@@ -2390,6 +2479,123 @@ class BrowserManager:
                 logger.warning(
                     "captcha audit sink raised for '%s': %s",
                     ev.get("agent_id", ""), e,
+                )
+
+        # §20 — periodic session snapshots. Hooked into the same 60s tick
+        # so we don't add a second background task; per-agent elapsed
+        # counters fire when they cross the configured interval. Runs
+        # AFTER metrics drain so a long snapshot can't starve the metrics
+        # path; runs BEFORE the session-audit drain so this tick's
+        # snapshot events surface immediately.
+        try:
+            await self._periodic_session_snapshots()
+        except Exception as e:
+            logger.warning("periodic session snapshot pass failed: %s", e)
+
+        # §20 — drain the session audit-log buckets (snapshot/restore
+        # events). Same per-minute aggregation pattern as captcha — no
+        # cookie values, no origin domains.
+        try:
+            session_events = await _drain_session_audit()
+        except Exception as e:
+            logger.warning("session audit drain failed: %s", e)
+            session_events = []
+        for ev in session_events:
+            ev = dict(ev)
+            self._metrics_seq += 1
+            ev["seq"] = self._metrics_seq
+            ev["ts"] = now
+            self._metrics_history.append(ev)
+            if self._metrics_sink is None:
+                continue
+            try:
+                self._metrics_sink(ev)
+            except Exception as e:
+                logger.warning(
+                    "session audit sink raised for '%s': %s",
+                    ev.get("agent_id", ""), e,
+                )
+
+    async def _periodic_session_snapshots(self) -> None:
+        """§20 — opportunistically snapshot live session state mid-flight.
+
+        Process kills (OOM, kernel panic, ``docker kill``) bypass the
+        graceful-shutdown path entirely; without a periodic snapshot the
+        agent's freshest cookies + ``localStorage`` since the last
+        clean-stop would be lost. Instead of running a separate background
+        task, we hook into the existing 60s metrics tick: per-agent
+        elapsed-second counters accumulate, and a snapshot fires when a
+        counter crosses the configured interval (default 300s, range
+        [60, 3600]). RPO at the default = at most ~5 minutes of state.
+
+        Failures are logged + swallowed — same posture as the on-shutdown
+        snapshot. A bad disk on one agent must not abort the metrics
+        loop and starve the rest of the fleet.
+
+        No-op when ``BROWSER_SESSION_PERSISTENCE_ENABLED=false`` (default)
+        — the elapsed counters still tick for housekeeping but no I/O
+        happens. The flag is checked per-agent so an operator override
+        for one agent works without affecting the others.
+        """
+        from src.browser.flags import get_bool, get_int
+        from src.browser.session_persistence import snapshot_session
+
+        # Single global default-bound; per-agent flag overrides apply
+        # below as we iterate.
+        global_default = get_bool("BROWSER_SESSION_PERSISTENCE_ENABLED", False)
+
+        # Stale agent_ids in the elapsed-counter dict (instance closed
+        # between ticks) — drop them to keep the dict size bounded over
+        # long deployments with rotating agent ids.
+        live_ids = set(self._instances.keys())
+        stale = [
+            aid for aid in self._session_snapshot_elapsed_s
+            if aid not in live_ids
+        ]
+        for aid in stale:
+            self._session_snapshot_elapsed_s.pop(aid, None)
+
+        for agent_id, inst in list(self._instances.items()):
+            enabled = get_bool(
+                "BROWSER_SESSION_PERSISTENCE_ENABLED",
+                global_default,
+                agent_id=agent_id,
+            )
+            if not enabled:
+                # Reset the counter so a flag flip mid-deployment doesn't
+                # immediately fire a snapshot from accumulated stale time.
+                self._session_snapshot_elapsed_s.pop(agent_id, None)
+                continue
+            interval_s = get_int(
+                "BROWSER_SESSION_PERIODIC_SNAPSHOT_S",
+                300,
+                agent_id=agent_id,
+                min_value=60,
+                max_value=3600,
+            )
+            elapsed = self._session_snapshot_elapsed_s.get(agent_id, 0) + 60
+            if elapsed < interval_s:
+                self._session_snapshot_elapsed_s[agent_id] = elapsed
+                continue
+            # Cross the threshold — fire the snapshot and reset the
+            # counter. Reset BEFORE the await so a slow snapshot can't
+            # double-fire on the next tick.
+            self._session_snapshot_elapsed_s[agent_id] = 0
+            try:
+                ok = await snapshot_session(agent_id, inst.context)
+            except Exception as e:
+                logger.warning(
+                    "periodic session snapshot for '%s' raised: %s",
+                    agent_id, e,
+                )
+                ok = False
+            try:
+                await _record_session_audit_event(
+                    agent_id, "session_snapshot", ok,
+                )
+            except Exception as e:
+                logger.debug(
+                    "session audit record failed for '%s': %s", agent_id, e,
                 )
 
     def get_recent_metrics(self, since_seq: int = 0) -> dict:
@@ -2718,6 +2924,26 @@ class BrowserManager:
 
         inst = CamoufoxInstance(agent_id, browser, context, page)
 
+        # §20 — restore the previously-snapshotted session state.
+        #
+        # Camoufox's ``persistent_context=True`` already retains cookies +
+        # localStorage in the on-disk profile dir, so this is genuinely a
+        # SECOND-CHANNEL restore: the JSON sidecar is the operator-visible,
+        # operator-clearable copy of session state that survives even when
+        # the profile dir is wiped (operator support, profile rotation,
+        # template-based agent re-spawn). On a normal restart the sidecar
+        # and profile dir agree; if they disagree (sidecar fresher than the
+        # on-disk profile, e.g. after a profile-dir reset), the sidecar
+        # wins for cookies / localStorage so the agent stays logged in.
+        #
+        # We use Playwright's ``add_cookies`` + ``add_init_script`` here
+        # rather than launching with ``storage_state`` because Camoufox's
+        # ``persistent_context=True`` path does not pass ``storage_state``
+        # through to Firefox (it owns the profile dir directly). The end
+        # state is the same: cookies merged into the cookie jar; localStorage
+        # seeded on each origin's first navigation via the init script.
+        await self._maybe_restore_session(inst)
+
         # §9.1 wire request listeners at the BrowserContext level so new
         # tabs (in-page ``window.open()`` or ``browser_open_tab``) inherit
         # them automatically. Idempotent — also re-runs after browser RESET
@@ -2751,6 +2977,123 @@ class BrowserManager:
             )
 
         return inst
+
+    async def _maybe_restore_session(self, inst: CamoufoxInstance) -> None:
+        """§20 — restore cookies + localStorage from the per-agent sidecar.
+
+        No-op when:
+          * ``BROWSER_SESSION_PERSISTENCE_ENABLED=false`` (the default;
+            operators must opt in deliberately because storage_state
+            files contain live session tokens).
+          * No sidecar exists for this agent.
+          * The sidecar fails to parse (logged; sidecar is preserved).
+
+        Best-effort: a restore failure is logged and we record the audit
+        event with ``success=False``, but the browser starts anyway with
+        whatever the on-disk profile already had. Blocking startup on a
+        bad sidecar would be a worse failure mode than running with a
+        slightly-stale session.
+        """
+        from src.browser.flags import get_bool
+        from src.browser.session_persistence import (
+            restore_session,
+            session_path,
+        )
+
+        agent_id = inst.agent_id
+        enabled = get_bool(
+            "BROWSER_SESSION_PERSISTENCE_ENABLED", False, agent_id=agent_id,
+        )
+        if not enabled:
+            return
+        if not session_path(agent_id).exists():
+            # No sidecar — common case for the first launch on an agent
+            # that never had its session captured. Don't emit an audit
+            # event for this (would be noise; the dashboard should not
+            # show "restore failed" when there was nothing to restore).
+            return
+
+        # Build a context_factory that applies the loaded ``storage_state``
+        # to ``inst.context`` and returns it. Camoufox's persistent_context
+        # path doesn't accept ``storage_state`` at launch, so we apply
+        # cookies + localStorage post-launch here. If a future migration
+        # off persistent_context happens, swap this for a ``new_context``
+        # call that takes ``storage_state`` directly.
+        context = inst.context
+
+        async def _apply_state(*, storage_state: dict) -> object:
+            cookies = storage_state.get("cookies") or []
+            origins = storage_state.get("origins") or []
+            if cookies:
+                try:
+                    await context.add_cookies(cookies)
+                except Exception as e:
+                    logger.warning(
+                        "session restore for '%s': add_cookies failed: %s",
+                        agent_id, e,
+                    )
+                    raise
+            # Seed localStorage on first navigation per origin via an
+            # init script. Real Playwright ``new_context(storage_state=)``
+            # does the same dance under the hood (mass-injects per-origin
+            # storage on first navigation). We build one script that
+            # checks ``window.location.origin`` and applies the matching
+            # entries. Idempotent — re-running on a page already seeded
+            # just overwrites the same keys with the same values.
+            if origins:
+                import json as _json
+                origin_map = {}
+                for entry in origins:
+                    if not isinstance(entry, dict):
+                        continue
+                    origin = entry.get("origin")
+                    items = entry.get("localStorage") or []
+                    if not isinstance(origin, str) or not isinstance(items, list):
+                        continue
+                    origin_map[origin] = items
+                if origin_map:
+                    script = (
+                        "(() => { try {"
+                        f"  const map = {_json.dumps(origin_map)};"
+                        "  const entries = map[window.location.origin];"
+                        "  if (!entries) return;"
+                        "  for (const e of entries) {"
+                        "    if (e && typeof e.name === 'string') {"
+                        "      try { window.localStorage.setItem(e.name, e.value); } "
+                        "      catch (_) {}"
+                        "    }"
+                        "  }"
+                        "} catch (_) {} })();"
+                    )
+                    try:
+                        await context.add_init_script(script)
+                    except Exception as e:
+                        logger.warning(
+                            "session restore for '%s': add_init_script "
+                            "failed: %s", agent_id, e,
+                        )
+                        raise
+            return context
+
+        restored = None
+        try:
+            restored = await restore_session(agent_id, _apply_state)
+        except Exception as e:
+            # restore_session itself catches its inner errors; this
+            # branch only fires if something exotic blew up.
+            logger.warning(
+                "session restore for '%s' raised unexpectedly: %s",
+                agent_id, e,
+            )
+        success = restored is not None
+        try:
+            await _record_session_audit_event(
+                agent_id, "session_restore", success,
+            )
+        except Exception as e:
+            logger.debug(
+                "session audit record failed for '%s': %s", agent_id, e,
+            )
 
     async def _run_navigator_probe(self, inst: CamoufoxInstance) -> None:
         """Read key navigator/Intl signals from the live page and validate
@@ -2994,6 +3337,33 @@ class BrowserManager:
                 logger.debug(
                     "Recorder dump failed for '%s': %s", agent_id, e,
                 )
+        # §20 — snapshot session state BEFORE ``context.close()``. Order
+        # matters: ``storage_state()`` queries the live BrowserContext, so
+        # closing first would give us a closed-context error. Best-effort:
+        # never block shutdown on a failed snapshot. Drops the per-agent
+        # elapsed counter so a re-launch starts a fresh interval.
+        try:
+            from src.browser.flags import get_bool
+            from src.browser.session_persistence import snapshot_session
+            if get_bool(
+                "BROWSER_SESSION_PERSISTENCE_ENABLED", False, agent_id=agent_id,
+            ):
+                ok = await snapshot_session(agent_id, inst.context)
+                try:
+                    await _record_session_audit_event(
+                        agent_id, "session_snapshot", ok,
+                    )
+                except Exception as e:
+                    logger.debug(
+                        "session audit record failed for '%s': %s",
+                        agent_id, e,
+                    )
+        except Exception as e:
+            logger.warning(
+                "Stop-time session snapshot for '%s' failed: %s",
+                agent_id, e,
+            )
+        self._session_snapshot_elapsed_s.pop(agent_id, None)
         try:
             await inst.context.close()
         except Exception as e:

@@ -724,6 +724,46 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         await _apply_delay()
         return result
 
+    # ── Session persistence (Phase 10 §20) ────────────────────────────────
+    #
+    # Read-only summary + operator clear endpoint. Mounted on the browser
+    # service so the per-agent JSON sidecar lives next to the rest of the
+    # browser-state files (``data/sessions/<agent_id>.json``). The dashboard
+    # router calls these via ``runtime.browser_service_url`` and forwards
+    # the privacy-safe shape to the operator panel.
+    #
+    # Privacy: GET returns counts only — no cookie values, no origin
+    # domains. DELETE wipes the sidecar; the live BrowserContext is left
+    # untouched (cookies stay live in-process). To purge in-process state
+    # too, the operator follows up with ``/browser/{agent_id}/reset``.
+
+    @app.get("/browser/{agent_id}/session")
+    async def session_info(agent_id: str, request: Request):
+        """Return the privacy-safe session sidecar summary for an agent.
+
+        Shape: ``{has_persisted_session, saved_at, origin_count, cookie_count}``.
+        Origin domains and cookie values are NOT returned — the operator
+        sees counts only. Even an unauthenticated read of this would not
+        leak which sites the agent is logged into.
+        """
+        _verify_auth(request)
+        from src.browser.session_persistence import session_summary
+        return session_summary(agent_id)
+
+    @app.delete("/browser/{agent_id}/session")
+    async def session_clear(agent_id: str, request: Request):
+        """Delete the per-agent session sidecar.
+
+        The live BrowserContext is intentionally left running — calling
+        ``/browser/{agent_id}/reset`` is the way to wipe in-process state
+        as well. This endpoint targets the persisted copy on disk, e.g.
+        for the operator's "fresh start on next restart" workflow.
+        """
+        _verify_auth(request)
+        from src.browser.session_persistence import clear_session
+        deleted = await clear_session(agent_id)
+        return {"success": True, "data": {"deleted": deleted}}
+
     # ── Settings ───────────────────────────────────────────────────────────
 
     @app.get("/browser/settings")
