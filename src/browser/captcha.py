@@ -12,6 +12,7 @@ configured, the existing fallback (ask user via VNC) is preserved.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
 from collections import deque
@@ -126,6 +127,18 @@ _SOLVE_TIMEOUT_DEFAULTS_MS: dict[str, int] = {
     "turnstile":                 180_000,
     "cf-interstitial-turnstile": 180_000,
     # FunCaptcha / GeeTest / AWS WAF entries reserved for §11.5 deferred work
+    # Anti-bot platform task types (CapSolver-only, see ``_ANTIBOT_KINDS``).
+    # Provider-side solve takes 60-180s; we pick the high end as default
+    # because all four platforms (Akamai BMP, Imperva, Kasada, DataDome)
+    # are known-slow and a tight default would surface as a flood of
+    # ``solver_outcome="timeout"`` envelopes on legitimate solves.
+    # Operators can override per-kind via
+    # ``CAPTCHA_TIMEOUT_<KIND_UPPER_UNDERSCORE>_MS`` (see
+    # :meth:`_timeout_seconds_for_kind`).
+    "js-challenge-akamai":       180_000,
+    "js-challenge-imperva":      180_000,
+    "js-challenge-kasada":       180_000,
+    "datadome-behavioral":       180_000,
 }
 _SOLVE_TIMEOUT_FALLBACK_MS = 120_000  # for unknown / behavioral kinds
 _POLL_INTERVAL = 5    # seconds between result polls
@@ -244,6 +257,271 @@ def _redact_clientkey_text(text: str) -> str:
     return out
 
 
+# §22 — keys carrying a solution payload for CapSolver anti-bot tasks.
+# CapSolver's anti-bot product surface (AntiAkamaiBMPTask /
+# AntiImpervaTask / AntiKasadaTask / DataDomeSliderTask) returns
+# ``cookies`` / ``userAgent`` / ``sensorData`` instead of the
+# CAPTCHA-style ``gRecaptchaResponse`` / ``token`` field. Surface the
+# solution as a JSON-serialised string so the caller's accounting path
+# fires (provider was paid) and :func:`_apply_antibot_solution` can
+# re-parse it on the injection path to apply the cookies via
+# :class:`playwright.async_api.BrowserContext`.
+_ANTIBOT_SOLUTION_KEYS: frozenset[str] = frozenset({
+    "cookies", "userAgent", "sensorData", "headers",
+})
+
+
+# Playwright's ``BrowserContext.add_cookies`` accepts only this exact
+# enum for ``sameSite``. Providers and real-browser cookie exports use
+# every casing under the sun (``"Lax"``, ``"lax"``, ``"LAX"``,
+# ``"unspecified"``, ``"no_restriction"``...). Map all known shapes
+# down to the canonical case; anything unrecognized returns ``None``
+# so we drop the field rather than fail the whole add_cookies call.
+_SAMESITE_PLAYWRIGHT_MAP: dict[str, str] = {
+    "strict": "Strict",
+    "lax": "Lax",
+    "none": "None",
+    "no_restriction": "None",
+    "norestriction": "None",
+}
+
+
+def _normalize_cookie_same_site(value: object) -> str | None:
+    """Coerce a provider-supplied ``sameSite`` value to Playwright's enum.
+
+    Returns ``None`` for unset / unrecognized values so the caller drops
+    the field — Playwright treats absence as "Lax" by default, which
+    matches the common case for anti-bot session cookies.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return None
+    return _SAMESITE_PLAYWRIGHT_MAP.get(value.strip().lower())
+
+
+def _normalize_cookie_expires(value: object) -> float | None:
+    """Coerce a provider-supplied ``expires`` value to seconds-since-epoch.
+
+    Accepts:
+      * Numeric seconds-since-epoch (``1735689600``).
+      * Numeric milliseconds-since-epoch (``1735689600000``) — divided by
+        1000 when the value is implausibly large for seconds.
+      * ``-1`` — Playwright's "session cookie" sentinel; preserved.
+      * ISO-8601 strings (``"2025-12-31T23:59:59Z"``) — parsed via
+        :meth:`datetime.fromisoformat`. Some providers emit a trailing
+        ``Z`` that ``fromisoformat`` rejects on Python < 3.11; rewrite
+        to ``+00:00`` before parsing.
+
+    Returns ``None`` for anything unparseable so the caller drops the
+    field rather than fail the whole add_cookies call.
+    """
+    if value is None:
+        return None
+    # Sentinel pass-through.
+    if value == -1 or value == -1.0:
+        return -1.0
+    if isinstance(value, bool):
+        # ``isinstance(True, int)`` is True in Python, so guard explicitly.
+        return None
+    if isinstance(value, (int, float)):
+        as_float = float(value)
+        # Heuristic: anything past year 9999 in seconds (≥ 2.5e11) is
+        # almost certainly milliseconds. Year-2200 in seconds is ~7.3e9.
+        # Threshold of 1e12 (year 33658 in seconds) is safely past any
+        # plausible "real seconds" value while comfortably under the
+        # millis-for-real-dates range (2024 in millis ≈ 1.7e12).
+        if as_float > 1e12:
+            as_float /= 1000.0
+        return as_float
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        # Numeric string ⇒ recurse via float coercion.
+        try:
+            return _normalize_cookie_expires(float(s))
+        except ValueError:
+            pass
+        # ISO-8601. Python ≤ 3.10 doesn't accept trailing 'Z' in
+        # ``fromisoformat`` so rewrite it; ≥ 3.11 handles both.
+        from datetime import datetime
+        try:
+            iso = s[:-1] + "+00:00" if s.endswith("Z") else s
+            dt = datetime.fromisoformat(iso)
+            return dt.timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+async def _apply_antibot_solution(page: object, token: str) -> bool:
+    """Apply a CapSolver anti-bot solution payload to the BrowserContext.
+
+    ``token`` is the JSON string produced by :func:`_extract_solution_token`
+    on an anti-bot solve — typically ``{"cookies": [...], "userAgent":
+    "...", "sensorData": "..."}``. We:
+
+    1. Parse the JSON. Bail cleanly on malformed input (provider rotated
+       the response shape — surface as ``injection_failed`` so the
+       operator-handoff path picks up).
+    2. Apply each cookie via ``page.context.add_cookies``. Playwright's
+       cookie shape is well-documented; we forward the canonical fields
+       and use the page URL as a fallback target when the provider
+       didn't include a domain.
+    3. Reload the page so the next request carries the cleared cookies.
+       Anti-bot challenges are STATEFUL — without a reload, the current
+       page DOM still shows the challenge and the agent's next click
+       hits the pre-clear state.
+
+    Returns True iff at least one cookie was applied successfully.
+    Failure modes (malformed JSON, no cookies, ``add_cookies`` raised,
+    no ``page.context``) all return False so the caller correctly
+    records ``injection_failed``.
+    """
+    if not token:
+        return False
+    try:
+        sol = json.loads(token)
+    except (TypeError, ValueError):
+        logger.debug(
+            "anti-bot solution: malformed JSON token — provider may have "
+            "rotated the response shape; falling back to operator handoff"
+        )
+        return False
+    if not isinstance(sol, dict):
+        return False
+
+    raw_cookies = sol.get("cookies")
+    if not isinstance(raw_cookies, list) or not raw_cookies:
+        return False
+
+    # Playwright BrowserContext.add_cookies requires either ``url`` or
+    # both ``domain`` and ``path``. Most providers return ``domain`` +
+    # ``path`` already; we normalize to a small whitelist of known
+    # Playwright fields and fall back to ``url=<page url>`` when the
+    # entry has no domain. Field-shape normalization handles common
+    # provider drift:
+    #   * ``sameSite`` — Playwright requires the exact-case enum
+    #     {"Strict", "Lax", "None"}; providers commonly return
+    #     ``"strict"``/``"lax"``/``"unspecified"`` or omit it.
+    #   * ``expires`` — Playwright wants seconds-since-epoch as a
+    #     number; some providers return ISO-8601 strings or millis.
+    page_url = ""
+    try:
+        page_url = page.url or ""
+    except Exception:
+        pass
+
+    normalized: list[dict] = []
+    for c in raw_cookies:
+        if not isinstance(c, dict):
+            continue
+        name = c.get("name")
+        value = c.get("value")
+        if not isinstance(name, str) or not name or "value" not in c:
+            continue
+        norm: dict = {"name": name, "value": str(value)}
+        # Forward Playwright's canonical cookie fields when present.
+        for k in ("domain", "path", "httpOnly", "secure"):
+            if k in c and c[k] is not None:
+                norm[k] = c[k]
+        # ``sameSite`` — coerce to Playwright's exact-case enum. An
+        # unrecognized / unspecified value is dropped (Playwright treats
+        # absence as "Lax" by default, which is the common-case shape
+        # for the cookies anti-bot solvers return).
+        ss = _normalize_cookie_same_site(c.get("sameSite"))
+        if ss is not None:
+            norm["sameSite"] = ss
+        # ``expires`` — coerce numeric / ISO-8601 / millis-since-epoch
+        # to seconds-since-epoch (float). Drop unparseable values
+        # rather than failing the whole cookie. ``-1`` is the
+        # session-cookie sentinel; preserve it verbatim.
+        exp = _normalize_cookie_expires(c.get("expires"))
+        if exp is not None:
+            norm["expires"] = exp
+        # Fallback target — Playwright requires either ``url`` or
+        # (``domain``+``path``). If neither is present, point at the
+        # current page URL so the cookie still lands somewhere usable.
+        if "domain" not in norm and "url" not in norm:
+            if not page_url:
+                continue
+            norm["url"] = page_url
+        normalized.append(norm)
+
+    if not normalized:
+        return False
+
+    context = getattr(page, "context", None)
+    add_cookies = getattr(context, "add_cookies", None) if context is not None else None
+    if not callable(add_cookies):
+        logger.debug(
+            "anti-bot solution: page.context.add_cookies unavailable; "
+            "cookies cannot be applied",
+        )
+        return False
+    try:
+        await add_cookies(normalized)
+    except Exception as e:
+        logger.warning("anti-bot cookie injection failed: %s", e)
+        return False
+
+    # Reload so the cleared-challenge cookies take effect on the next
+    # request. Best-effort — some pages reject reload mid-challenge;
+    # the cookies are still applied to the context for subsequent navs
+    # the agent issues. Use ``domcontentloaded`` (not ``networkidle``)
+    # so we don't block on the cleared page's own background polling.
+    try:
+        reload = getattr(page, "reload", None)
+        if callable(reload):
+            await reload(wait_until="domcontentloaded")
+    except Exception as e:
+        logger.debug("anti-bot post-solve reload failed (non-fatal): %s", e)
+
+    logger.info(
+        "anti-bot solution applied: %d cookies via BrowserContext",
+        len(normalized),
+    )
+    return True
+
+
+def _extract_solution_token(solution: object, captcha_type: str) -> str | None:
+    """Extract a token-shaped string from a provider ``solution`` payload.
+
+    The default behavior (CAPTCHA-family tasks) reads the standard
+    ``gRecaptchaResponse`` / ``token`` fields. For anti-bot kinds the
+    solution carries cookies / userAgent / sensorData instead; we
+    JSON-serialise the dict so the caller's "token retrieved" path fires
+    even though there is no CAPTCHA-style token. Token injection still
+    fails downstream for these kinds (no anti-bot inject path yet) but
+    the cost-accounting + breaker semantics need a non-``None`` value to
+    distinguish "provider charged us" from "provider rejected".
+    """
+    if not isinstance(solution, dict):
+        return None
+    # Standard CAPTCHA fields take precedence regardless of kind — covers
+    # tests that mock anti-bot responses with ``gRecaptchaResponse`` and
+    # the rare case where CapSolver routes an anti-bot task back through
+    # the standard path.
+    token = solution.get("gRecaptchaResponse") or solution.get("token")
+    if token:
+        return token
+    if captcha_type in _ANTIBOT_KINDS:
+        # Any presence of an anti-bot solution key signals a real
+        # provider-side success. Serialise the whole dict so
+        # :func:`_apply_antibot_solution` can re-parse and apply the
+        # cookies/userAgent/sensorData via the BrowserContext.
+        if any(k in solution for k in _ANTIBOT_SOLUTION_KEYS):
+            try:
+                return json.dumps(solution, sort_keys=True, default=str)
+            except (TypeError, ValueError):
+                # Defensive — solution payloads are JSON over the wire
+                # so this shouldn't happen, but fall through cleanly
+                # rather than raising to the caller.
+                return None
+    return None
+
+
 # Map from detected selector pattern to a canonical CAPTCHA type.
 _CAPTCHA_TYPE_MAP: dict[str, str] = {
     "recaptcha": "recaptcha",
@@ -347,6 +625,55 @@ _2CAPTCHA_TASK_TYPES: dict[str, dict[str, object]] = {
     },
 }
 
+# §22 — anti-bot platform task types (CapSolver only).
+#
+# 2Captcha does NOT publish equivalents for these platforms — their
+# product surface is reCAPTCHA / hCaptcha / Turnstile / FunCAPTCHA /
+# GeeTest / image, NOT platform-sensor anti-bot. Adding these kinds to
+# :data:`_2CAPTCHA_TASK_TYPES` would emit ``ERROR_INVALID_TASK_TYPE`` on
+# every solve and trip the §11.16 breaker. The dispatch in
+# :class:`CaptchaSolver.supports_kind` short-circuits anti-bot kinds when
+# the active provider is 2Captcha so the §11.13 envelope routes to
+# operator escalation (matches today's behavior for these kinds).
+#
+# CapSolver task types verified against
+# https://docs.capsolver.com/en/guide/captcha/ as of April 2026:
+#   * AntiAkamaiBMPTask        — Akamai Bot Manager
+#   * AntiImpervaTask          — Imperva Advanced Bot Protection
+#   * AntiKasadaTask           — Kasada
+#   * DataDomeSliderTask       — DataDome behavioral / slider
+#
+# Anti-bot tasks REQUIRE a proxy — CapSolver does not publish any
+# ``Proxyless`` variant for these. ``proxyless`` is intentionally ``None``
+# so :meth:`_build_task_body` returns ``(None, ...)`` (i.e. unsupported)
+# when the operator hasn't configured ``CAPTCHA_SOLVER_PROXY_*`` env
+# vars; the agent then surfaces an operator-escalation envelope rather
+# than silently routing to the always-fail proxyless path.
+#
+# Drift here is silent (``ERROR_INVALID_TASK_TYPE``); re-verify against
+# CapSolver docs when bumping variants. The anti-bot product surface
+# rotates faster than the standard CAPTCHA task types — provider docs
+# drift quarterly. The §11.16 breaker + fatal-error gate keeps the
+# fleet's solver path safe even when our table goes stale (an unknown
+# task name surfaces as a per-call error and the operator sees the
+# audit-log signal long before three failures trip the breaker for
+# kinds the agent loop should never have routed to the solver).
+#
+# Anti-bot kinds are LOW-CONFIDENCE by design: failure rates can exceed
+# 50% even with the right task type because tokens are rejected at the
+# application layer for IP / fingerprint mismatches the solver has no
+# visibility into. The dispatch in :meth:`solve` skips the breaker tick
+# on anti-bot failures (see ``_record_solver_outcome`` call sites) so a
+# burst of legitimate-but-rejected anti-bot solves doesn't lock the
+# whole fleet's solver out of the standard CAPTCHA paths for 10 minutes.
+_ANTIBOT_KINDS: frozenset[str] = frozenset({
+    "js-challenge-akamai",
+    "js-challenge-imperva",
+    "js-challenge-kasada",
+    "datadome-behavioral",
+})
+
+
 # CapSolver
 _CAPSOLVER_TASK_TYPES: dict[str, dict[str, object]] = {
     "recaptcha": {
@@ -392,6 +719,32 @@ _CAPSOLVER_TASK_TYPES: dict[str, dict[str, object]] = {
         "proxy_aware": "ReCaptchaV3EnterpriseTask",
         "extra": {},
     },
+    # §22 — anti-bot platform task types. Proxy-required (no proxyless
+    # variant published). Best-effort: CapSolver's anti-bot product
+    # surface rotates faster than the standard CAPTCHA tasks — operators
+    # who hit ``ERROR_INVALID_TASK_TYPE`` should re-verify the task name
+    # against the live docs (see the comment block on ``_ANTIBOT_KINDS``
+    # for the rationale and the breaker-skip semantics).
+    "js-challenge-akamai": {
+        "proxyless": None,
+        "proxy_aware": "AntiAkamaiBMPTask",
+        "extra": {},
+    },
+    "js-challenge-imperva": {
+        "proxyless": None,
+        "proxy_aware": "AntiImpervaTask",
+        "extra": {},
+    },
+    "js-challenge-kasada": {
+        "proxyless": None,
+        "proxy_aware": "AntiKasadaTask",
+        "extra": {},
+    },
+    "datadome-behavioral": {
+        "proxyless": None,
+        "proxy_aware": "DataDomeSliderTask",
+        "extra": {},
+    },
 }
 
 
@@ -432,6 +785,14 @@ _SOLVER_PROXY_COMPAT: dict[tuple[str, str], set[str]] = {
     ("capsolver", "recaptcha-enterprise-v3"): {"http", "https", "socks4", "socks5"},
     ("capsolver", "hcaptcha"):                {"http", "https", "socks4", "socks5"},
     ("capsolver", "turnstile"):               {"http", "https", "socks4", "socks5"},
+    # §22 — anti-bot tasks accept the same proxy-type set as the
+    # standard CapSolver tasks. CapSolver's anti-bot docs do not
+    # individually enumerate accepted proxyType values; we mirror the
+    # standard set as the safe default.
+    ("capsolver", "js-challenge-akamai"):     {"http", "https", "socks4", "socks5"},
+    ("capsolver", "js-challenge-imperva"):    {"http", "https", "socks4", "socks5"},
+    ("capsolver", "js-challenge-kasada"):     {"http", "https", "socks4", "socks5"},
+    ("capsolver", "datadome-behavioral"):     {"http", "https", "socks4", "socks5"},
 }
 
 
@@ -1233,6 +1594,33 @@ class CaptchaSolver:
         self._solver_failure_timestamps.clear()
         return False
 
+    def supports_kind(self, kind: str | None) -> bool:
+        """True iff this solver's provider has a published task type for ``kind``.
+
+        Drives the §22 routing decision in :meth:`_check_captcha`: anti-bot
+        kinds (Akamai BMP / Imperva / Kasada / DataDome) are dispatched to
+        the solver path only when the active provider declares a task
+        type for them. 2Captcha does not publish anti-bot task types
+        (their product is reCAPTCHA / hCaptcha / Turnstile / FunCAPTCHA /
+        GeeTest / image), so :data:`_2CAPTCHA_TASK_TYPES` returns
+        ``False`` for every anti-bot kind and the caller routes those
+        cleanly to operator escalation instead of contacting an unsupported
+        provider.
+
+        Returns ``False`` for ``None`` and for kinds the provider table
+        doesn't list. Lookup is case-sensitive — the §11.13 envelope
+        kinds are canonical lowercase-hyphen.
+        """
+        if not isinstance(kind, str) or not kind:
+            return False
+        prov = (self.provider or "").lower()
+        if prov == "2captcha":
+            return kind in _2CAPTCHA_TASK_TYPES
+        if prov == "capsolver":
+            return kind in _CAPSOLVER_TASK_TYPES
+        # Unknown provider — fall through to "no" rather than guessing.
+        return False
+
     async def health_check(
         self, provider: str | None = None,
     ) -> Literal["healthy", "degraded", "unreachable"]:
@@ -1502,44 +1890,67 @@ class CaptchaSolver:
                 used_proxy_aware=False, compat_rejected=False,
             )
 
-        captcha_type = _classify_captcha(selector)
-        # §11.1 — when the coarse selector classifier says "recaptcha", run
-        # the precise variant classifier so v3 / v2-invisible / Enterprise
-        # widgets get the right provider task type. Falls back to
-        # ``captcha_type`` when the classifier returns ``unknown`` (e.g. the
-        # registry isn't accessible from this frame); legacy selector-based
-        # behavior is preserved.
+        # §22 — anti-bot platform kinds (Akamai BMP, Imperva, Kasada,
+        # DataDome) take precedence over selector-based classification.
+        # The caller already classified via ``js_challenge.classify_*`` /
+        # ``_classify_behavioral`` and passed the kind; we use it
+        # directly so the §11.13 envelope kind matches what the
+        # ``_check_captcha`` audit trail recorded. These kinds DO NOT use
+        # ``websiteKey``-style sitekey markers and skipping the DOM
+        # extraction below saves a no-op ``page.evaluate`` round-trip.
+        antibot_path = kind is not None and kind in _ANTIBOT_KINDS
+
         page_action: str | None = None
         sitekey: str | None = None
-        if captcha_type == "recaptcha":
-            classified = await _classify_recaptcha(page)
-            variant = classified.get("variant") or "unknown"
-            if variant != "unknown":
-                captcha_type = variant
-            sitekey = classified.get("sitekey")
-            page_action = classified.get("action")
+        if antibot_path:
+            captcha_type = kind  # type: ignore[assignment]
+        else:
+            captcha_type = _classify_captcha(selector)
+            # §11.1 — when the coarse selector classifier says "recaptcha",
+            # run the precise variant classifier so v3 / v2-invisible /
+            # Enterprise widgets get the right provider task type. Falls
+            # back to ``captcha_type`` when the classifier returns
+            # ``unknown`` (e.g. the registry isn't accessible from this
+            # frame); legacy selector-based behavior is preserved.
+            if captcha_type == "recaptcha":
+                classified = await _classify_recaptcha(page)
+                variant = classified.get("variant") or "unknown"
+                if variant != "unknown":
+                    captcha_type = variant
+                sitekey = classified.get("sitekey")
+                page_action = classified.get("action")
         logger.info(
             "Attempting to solve %s CAPTCHA on %s",
             captcha_type,
             redact_url(page_url),
         )
 
-        if not sitekey:
-            sitekey = await self._extract_sitekey(page, captcha_type)
-        if not sitekey:
-            logger.warning("Could not extract sitekey for %s CAPTCHA", captcha_type)
-            # LOCAL failure — sitekey couldn't be extracted from the
-            # page DOM. The provider was never contacted, so the §11.16
-            # breaker MUST NOT count this. Pre-fix, three sitekey-extraction
-            # failures from a single agent (e.g. an unsupported widget
-            # variant the DOM-extractor doesn't recognize) tripped the
-            # breaker for the entire BrowserManager and blocked real
-            # solves for every other agent. The breaker tracks PROVIDER
-            # reliability — local classifier gaps belong elsewhere.
-            return SolveResult(
-                token=None, injection_succeeded=False,
-                used_proxy_aware=False, compat_rejected=False,
-            )
+        if antibot_path:
+            # Anti-bot kinds don't use a sitekey — set to empty string and
+            # skip the DOM extractor. ``_build_task_body`` omits
+            # ``websiteKey`` for these kinds (see the body-builder branch
+            # gated on ``_ANTIBOT_KINDS``).
+            sitekey = ""
+        else:
+            if not sitekey:
+                sitekey = await self._extract_sitekey(page, captcha_type)
+            if not sitekey:
+                logger.warning(
+                    "Could not extract sitekey for %s CAPTCHA", captcha_type,
+                )
+                # LOCAL failure — sitekey couldn't be extracted from the
+                # page DOM. The provider was never contacted, so the
+                # §11.16 breaker MUST NOT count this. Pre-fix, three
+                # sitekey-extraction failures from a single agent (e.g.
+                # an unsupported widget variant the DOM-extractor doesn't
+                # recognize) tripped the breaker for the entire
+                # BrowserManager and blocked real solves for every other
+                # agent. The breaker tracks PROVIDER reliability — local
+                # classifier gaps belong elsewhere.
+                return SolveResult(
+                    token=None, injection_succeeded=False,
+                    used_proxy_aware=False, compat_rejected=False,
+                )
 
         # §11.2 — load the dedicated solver-proxy config (NOT the agent's
         # primary egress proxy; see ``get_solver_proxy_config`` docstring).
@@ -1579,7 +1990,15 @@ class CaptchaSolver:
             # already been issued (the task-body builder + provider HTTP
             # call complete in well under a second; the deadline only
             # bites during the poll loop). Treat as provider-contacted.
-            await self._record_solver_outcome(success=False)
+            #
+            # §22 — anti-bot kinds skip the breaker tick. Failure rates
+            # for Akamai BMP / Imperva / Kasada / DataDome are inherently
+            # high (token-IP / fingerprint binding rejections at the
+            # application layer); a burst of legitimate-but-rejected
+            # anti-bot solves shouldn't lock the whole fleet's solver
+            # out of the standard CAPTCHA path for 10 minutes.
+            if not antibot_path:
+                await self._record_solver_outcome(success=False)
             return SolveResult(
                 token=None, injection_succeeded=False,
                 used_proxy_aware=False, compat_rejected=False,
@@ -1596,8 +2015,10 @@ class CaptchaSolver:
             # both per-provider helpers catch and convert into ``None``
             # tokens. When it does happen, conservatively treat it as
             # provider-contacted so a programmer-error flood doesn't
-            # silently mask a real provider outage.
-            await self._record_solver_outcome(success=False)
+            # silently mask a real provider outage. Anti-bot kinds still
+            # skip the tick (§22 rationale above).
+            if not antibot_path:
+                await self._record_solver_outcome(success=False)
             return SolveResult(
                 token=None, injection_succeeded=False,
                 used_proxy_aware=False, compat_rejected=False,
@@ -1616,7 +2037,14 @@ class CaptchaSolver:
             # Those need operator intervention, not breaker backoff;
             # skipping the tick keeps a misconfigured key from locking
             # the whole BrowserManager out of solver duty for 10 minutes.
-            if provider_contacted and not self._solver_unreachable:
+            #
+            # §22 — anti-bot kinds skip the tick by design (see the
+            # exception-path comment block above for the rationale).
+            if (
+                provider_contacted
+                and not self._solver_unreachable
+                and not antibot_path
+            ):
                 await self._record_solver_outcome(success=False)
             return SolveResult(
                 token=None, injection_succeeded=False,
@@ -1644,7 +2072,17 @@ class CaptchaSolver:
         # Breaker tracks SOLVER reliability (provider returned a token), not
         # injection success. Provider was paid the moment the token came
         # back; injection failure is our problem, not theirs.
-        await self._record_solver_outcome(success=True)
+        #
+        # §22 — anti-bot kinds are NEUTRAL to the breaker: the failure
+        # paths above already skip the tick (anti-bot solves have
+        # inherently high failure rates that shouldn't trip a fleet-
+        # wide breaker), and the success path skips it too for
+        # symmetry. Without this skip, anti-bot successes silently
+        # CLEAR a breaker that real standard-path failures had ticked,
+        # masking genuine provider outages on the kinds the breaker
+        # is actually meant to guard.
+        if not antibot_path:
+            await self._record_solver_outcome(success=True)
         return SolveResult(
             token=token,
             injection_succeeded=bool(injected),
@@ -1814,10 +2252,20 @@ class CaptchaSolver:
             proxy_aware_name = None
             static_extras = {k: v for k, v in entry.items() if k != "type"}
 
+        # §22 — anti-bot platform task types don't use ``websiteKey``
+        # (no DOM sitekey marker on Akamai BMP / Imperva / Kasada /
+        # DataDome challenges; those tasks identify the site by URL +
+        # the proxy-bound IP fingerprint). Including an empty
+        # ``websiteKey`` field would cause CapSolver to reject the task
+        # with ``ERROR_KEY_MUST_NOT_BE_EMPTY``; omit the field entirely
+        # for anti-bot kinds. ``sitekey`` is always ``""`` for these
+        # variants because :meth:`solve` skips DOM extraction and passes
+        # an empty string in.
         body: dict[str, object] = {
             "websiteURL": page_url,
-            "websiteKey": sitekey,
         }
+        if captcha_type not in _ANTIBOT_KINDS:
+            body["websiteKey"] = sitekey
         # Merge static extras (``isInvisible``, ``isEnterprise``).
         for k, v in static_extras.items():
             body[k] = v
@@ -1980,7 +2428,7 @@ class CaptchaSolver:
                 return None, used_proxy_aware, compat_rejected, True
             if data.get("status") == "ready":
                 solution = data.get("solution", {})
-                token = solution.get("gRecaptchaResponse") or solution.get("token")
+                token = _extract_solution_token(solution, captcha_type)
                 return token, used_proxy_aware, compat_rejected, True
             # status == "processing" — keep polling
         return None, used_proxy_aware, compat_rejected, True
@@ -2052,7 +2500,7 @@ class CaptchaSolver:
                 return None, used_proxy_aware, compat_rejected, True
             if data.get("status") == "ready":
                 solution = data.get("solution", {})
-                token = solution.get("gRecaptchaResponse") or solution.get("token")
+                token = _extract_solution_token(solution, captcha_type)
                 return token, used_proxy_aware, compat_rejected, True
         return None, used_proxy_aware, compat_rejected, True
 
@@ -2073,7 +2521,23 @@ class CaptchaSolver:
         parent textarea, returning ``injection_failed`` even though
         the provider returned a valid token. Walk every frame and
         bubble up "any frame succeeded" as the success bit.
+
+        §22 anti-bot kinds (Akamai BMP / Imperva / Kasada / DataDome) take
+        a different path: the "token" is a JSON-encoded
+        ``{cookies, userAgent?, sensorData?, headers?}`` payload from
+        :func:`_extract_solution_token`. We apply the cookies to the
+        active ``BrowserContext`` and reload the page so the cleared
+        challenge state takes effect on the next request — without this
+        the operator pays for solves that produce no usable session.
         """
+        # §22 — anti-bot kinds carry a structured solution (cookies +
+        # optional userAgent / headers) instead of a CAPTCHA-style
+        # injectable token. Apply the cookies via the BrowserContext;
+        # the ``recaptcha`` / ``hcaptcha`` / ``turnstile`` token-injection
+        # branches below would all return False for these kinds.
+        if captcha_type in _ANTIBOT_KINDS:
+            return await _apply_antibot_solution(page, token)
+
         family = captcha_type
         if captcha_type.startswith("recaptcha"):
             family = "recaptcha"
@@ -2366,13 +2830,28 @@ class MultiProviderSolver:
 
     # ── routing ─────────────────────────────────────────────────────────
 
-    async def _pick_solver(self) -> CaptchaSolver | None:
+    async def _pick_solver(
+        self, kind: str | None = None,
+    ) -> CaptchaSolver | None:
         """Choose the solver for the next solve attempt.
 
         Returns the secondary when the primary is unreachable OR has an
         open breaker; otherwise returns the primary. Returns ``None``
         when both are unavailable — caller surfaces a no-token result
         without contacting either provider.
+
+        §22 — when ``kind`` names an anti-bot platform task type that the
+        primary doesn't support (e.g. primary is 2Captcha, kind is
+        ``js-challenge-akamai``) the wrapper PREFERS the secondary even
+        though the primary is healthy. This is the kind-aware routing
+        the BrowserManager relies on so a 2Captcha-primary deployment
+        with a CapSolver secondary still surfaces anti-bot solves
+        through the secondary instead of routing to operator escalation.
+        Without this branch, ``_pick_solver`` would always return the
+        healthy primary and the per-provider task-table lookup inside
+        ``_solve_2captcha`` would emit a no-token local-failure result.
+        For non-anti-bot kinds and for kinds the primary supports, the
+        existing primary-first routing is preserved.
 
         Side effect: updates ``self._active_solver`` so the
         :attr:`provider` property reads the right tier for cost
@@ -2381,6 +2860,30 @@ class MultiProviderSolver:
         primary_unreachable = await self.primary.is_solver_unreachable()
         primary_breaker_open = self.primary.is_breaker_open()
         primary_skip = primary_unreachable or primary_breaker_open
+
+        # §22 — kind-aware routing for anti-bot kinds. We only consult
+        # the support table when ``kind`` is provided AND the primary
+        # doesn't declare support; that keeps the existing primary-first
+        # bias for every other code path (the prior failover branch's
+        # tests assume an unconditional primary preference).
+        kind_aware_route = (
+            kind in _ANTIBOT_KINDS
+            and not self.primary.supports_kind(kind)
+            and self.secondary is not None
+            and self.secondary.supports_kind(kind)
+        )
+        if kind_aware_route:
+            secondary_unreachable = await self.secondary.is_solver_unreachable()
+            secondary_breaker_open = self.secondary.is_breaker_open()
+            if not (secondary_unreachable or secondary_breaker_open):
+                self._active_solver = self.secondary
+                return self.secondary
+            # Secondary is the only provider that supports the kind, but
+            # it's down. Surface the no-solver shape rather than letting
+            # a doomed primary call generate an ``ERROR_INVALID_TASK_TYPE``
+            # response that would tick its breaker.
+            self._active_solver = self.primary
+            return None
 
         if not primary_skip:
             self._active_solver = self.primary
@@ -2429,7 +2932,7 @@ class MultiProviderSolver:
              :class:`SolveResult` without contacting either provider,
              matching today's "no solver" envelope path.
         """
-        target = await self._pick_solver()
+        target = await self._pick_solver(kind=kind)
         if target is None:
             # Both primary and secondary are unavailable. Mirror the
             # short-circuit shape used by the underlying solver's own
@@ -2504,6 +3007,26 @@ class MultiProviderSolver:
         if self.secondary is None:
             return True
         return self.secondary.is_breaker_open()
+
+    def supports_kind(self, kind: str | None) -> bool:
+        """True iff at least one underlying solver supports ``kind``.
+
+        Mirrors :meth:`CaptchaSolver.supports_kind` but folds across both
+        primary + secondary so an operator with CapSolver as the secondary
+        can still route §22 anti-bot kinds (Akamai BMP / Imperva /
+        Kasada / DataDome) to the solver even when 2Captcha is primary.
+        Pre-solve gate semantics: when ``False`` the caller skips the
+        solver path entirely and emits the existing operator-escalation
+        envelope. Health gating (``is_solver_unreachable`` /
+        ``is_breaker_open``) is checked separately in
+        :meth:`_check_captcha`; this method only answers "does any
+        configured provider declare a task type for this kind".
+        """
+        if self.primary.supports_kind(kind):
+            return True
+        if self.secondary is not None and self.secondary.supports_kind(kind):
+            return True
+        return False
 
     async def health_check(
         self, provider: str | None = None,

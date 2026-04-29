@@ -26,6 +26,7 @@ from urllib.parse import urlparse
 
 from src.browser import captcha_policy
 from src.browser.captcha import (
+    _ANTIBOT_KINDS,
     SolveResult,
     _classify_behavioral,
     _classify_cf_state,
@@ -239,6 +240,32 @@ def _sanitize_download_filename(suggested: str) -> str:
     if len(name) < 2:
         name = name + "_"
     return name
+
+
+# ── §22 anti-bot solver opt-in helper ─────────────────────────────────────
+def _solver_supports_kind(solver: object, kind: str) -> bool:
+    """Return ``True`` iff ``solver.supports_kind(kind)`` is genuinely True.
+
+    Three-state defensive read: the bundled ``CaptchaSolver`` and the
+    ``MultiProviderSolver`` wrapper both expose
+    :meth:`supports_kind`; legacy / mocked solvers may not. We require
+    a strict ``is True`` comparison rather than truthiness so that
+    ``MagicMock`` auto-attribute children (which test suites attach to
+    ``BrowserManager._captcha_solver``) don't accidentally enable the
+    anti-bot solver path. Tests opt-in by configuring
+    ``solver.supports_kind = MagicMock(return_value=True)``.
+
+    Returns ``False`` on any exception so a buggy third-party subclass
+    can't crash the upstream :meth:`_check_captcha` flow.
+    """
+    method = getattr(solver, "supports_kind", None)
+    if not callable(method):
+        return False
+    try:
+        return method(kind) is True
+    except Exception:
+        logger.debug("supports_kind raised", exc_info=True)
+        return False
 
 
 # ── §11.14 per-agent solve rate limiter ───────────────────────────────────
@@ -8111,74 +8138,149 @@ class BrowserManager:
                                 "coarse kind=%s", kind, exc_info=True,
                             )
 
+                    # §22 — anti-bot kind solver path. When the active
+                    # solver provider declares a task type for the
+                    # detected anti-bot kind (CapSolver publishes
+                    # AntiAkamaiBMPTask / AntiImpervaTask / AntiKasadaTask /
+                    # DataDomeSliderTask; 2Captcha publishes none) we
+                    # OPT-IN to the solver path with forced low
+                    # confidence. Otherwise we keep the legacy
+                    # operator-escalation path. The two-step gate
+                    # (``supports_kind`` + low-confidence forcing) is
+                    # what keeps a 2Captcha-only deployment from spilling
+                    # ``ERROR_INVALID_TASK_TYPE`` errors that would trip
+                    # the §11.16 breaker.
+                    antibot_force_low_confidence = False
+
                     # §19 — tier-1 anti-bot JS-challenge classifier runs
                     # BEFORE the §11.3 behavioral classifier. JS challenges
                     # (Akamai Bot Manager, Kasada, FingerprintJS Pro,
                     # Imperva ABP, F5 Bot Defense) typically nest ABOVE
                     # CAPTCHA in the typical site stack — they fire first
                     # and gate access entirely, so detecting them takes
-                    # precedence over the §11.3 behavioral pass. None are
-                    # API-solvable (vendor design, no third-party solver);
-                    # the only correct response is to escalate via
-                    # ``request_captcha_help`` so the operator can
-                    # intervene through the VNC handoff (§19.1).
+                    # precedence over the §11.3 behavioral pass.
+                    #
+                    # §22 — kinds with a CapSolver task type (Akamai,
+                    # Imperva, Kasada) fall through to the solver path
+                    # IFF the active solver supports them. FingerprintJS
+                    # and F5 have no CapSolver task type and remain
+                    # operator-escalation-only.
                     js_vendor = await classify_js_challenge(inst.page)
                     if js_vendor:
                         js_kind = f"js-challenge-{js_vendor}"
-                        logger.info(
-                            "JS-challenge detected (%s); skipping solver, "
-                            "escalating to request_captcha_help",
-                            js_kind,
-                        )
                         try:
                             page_url = inst.page.url or ""
                         except Exception:
                             page_url = ""
-                        await _record_captcha_audit_event(
-                            inst.agent_id, "skipped_behavioral",
-                            js_kind, page_url,
-                        )
-                        return _captcha_envelope(
-                            kind=js_kind,
-                            solver_attempted=False,
-                            solver_outcome="skipped_behavioral",
-                            solver_confidence="behavioral-only",
-                            next_action="request_captcha_help",
-                        )
+                        # Anti-bot solver opt-in. Three-step gate:
+                        #   1. Kind must be in :data:`_ANTIBOT_KINDS`
+                        #      (excludes ``js-challenge-fingerprintjs``
+                        #      and ``js-challenge-f5`` — no published
+                        #      CapSolver task type).
+                        #   2. Solver must be configured.
+                        #   3. Active solver must declare a task type
+                        #      for the kind via ``supports_kind`` —
+                        #      keeps 2Captcha from spilling
+                        #      ``ERROR_INVALID_TASK_TYPE``.
+                        if (
+                            js_kind in _ANTIBOT_KINDS
+                            and self._captcha_solver is not None
+                            and _solver_supports_kind(
+                                self._captcha_solver, js_kind,
+                            )
+                        ):
+                            logger.info(
+                                "JS-challenge detected (%s); active solver "
+                                "supports the kind, attempting solver path "
+                                "with forced low confidence",
+                                js_kind,
+                            )
+                            kind = js_kind
+                            antibot_force_low_confidence = True
+                            # Fall through to the standard solver path
+                            # (cf_force_low_confidence is set below).
+                        else:
+                            logger.info(
+                                "JS-challenge detected (%s); skipping solver, "
+                                "escalating to request_captcha_help",
+                                js_kind,
+                            )
+                            await _record_captcha_audit_event(
+                                inst.agent_id, "skipped_behavioral",
+                                js_kind, page_url,
+                            )
+                            return _captcha_envelope(
+                                kind=js_kind,
+                                solver_attempted=False,
+                                solver_outcome="skipped_behavioral",
+                                solver_confidence="behavioral-only",
+                                next_action="request_captcha_help",
+                            )
 
                     # §11.3 — behavioral-only classifier runs BEFORE the
                     # solver health/breaker gates so behavioral-only flows
                     # (PerimeterX Press & Hold, DataDome blocker) don't
-                    # consume health-check or breaker quota. The solver
-                    # genuinely cannot help with these challenges; the
-                    # only correct response is to escalate via
-                    # ``request_captcha_help`` (§11.14).
-                    behavioral_kind = await _classify_behavioral(inst.page)
-                    if behavioral_kind:
-                        logger.info(
-                            "Behavioral-only challenge detected (%s); "
-                            "skipping solver, escalating to request_captcha_help",
-                            behavioral_kind,
-                        )
-                        # Audit-log so operators see the activity in the
-                        # dashboard (per §2.7 cadence — aggregated, not
-                        # per-call). URL flows through ``redact_url``
-                        # inside the recorder.
-                        try:
-                            page_url = inst.page.url or ""
-                        except Exception:
-                            page_url = ""
-                        await _record_captcha_audit_event(
-                            inst.agent_id, "skipped_behavioral",
-                            behavioral_kind, page_url,
-                        )
-                        return _captcha_envelope(
-                            kind=behavioral_kind,
-                            solver_attempted=False,
-                            solver_outcome="skipped_behavioral",
-                            solver_confidence="behavioral-only",
-                            next_action="request_captcha_help",
-                        )
+                    # consume health-check or breaker quota. PerimeterX
+                    # remains operator-escalation-only — no published
+                    # CapSolver task type as of April 2026.
+                    #
+                    # §22 — DataDome behavioral routes through the solver
+                    # path IFF the active solver supports
+                    # ``datadome-behavioral`` (CapSolver does;
+                    # ``DataDomeSliderTask``).
+                    if not antibot_force_low_confidence:
+                        behavioral_kind = await _classify_behavioral(inst.page)
+                        if behavioral_kind:
+                            try:
+                                page_url = inst.page.url or ""
+                            except Exception:
+                                page_url = ""
+                            # Same three-step opt-in gate as the JS-challenge
+                            # branch. ``px-press-hold`` is excluded by the
+                            # ``_ANTIBOT_KINDS`` check (no published CapSolver
+                            # task type) and stays on the operator-escalation
+                            # path; ``datadome-behavioral`` opts in when
+                            # CapSolver is the active provider.
+                            if (
+                                behavioral_kind in _ANTIBOT_KINDS
+                                and self._captcha_solver is not None
+                                and _solver_supports_kind(
+                                    self._captcha_solver, behavioral_kind,
+                                )
+                            ):
+                                logger.info(
+                                    "Behavioral-only challenge detected (%s); "
+                                    "active solver supports the kind, "
+                                    "attempting solver path with forced "
+                                    "low confidence",
+                                    behavioral_kind,
+                                )
+                                kind = behavioral_kind
+                                antibot_force_low_confidence = True
+                                # Fall through to standard solver path.
+                            else:
+                                logger.info(
+                                    "Behavioral-only challenge detected (%s); "
+                                    "skipping solver, escalating to "
+                                    "request_captcha_help",
+                                    behavioral_kind,
+                                )
+                                # Audit-log so operators see the activity
+                                # in the dashboard (per §2.7 cadence —
+                                # aggregated, not per-call). URL flows
+                                # through ``redact_url`` inside the
+                                # recorder.
+                                await _record_captcha_audit_event(
+                                    inst.agent_id, "skipped_behavioral",
+                                    behavioral_kind, page_url,
+                                )
+                                return _captcha_envelope(
+                                    kind=behavioral_kind,
+                                    solver_attempted=False,
+                                    solver_outcome="skipped_behavioral",
+                                    solver_confidence="behavioral-only",
+                                    next_action="request_captcha_help",
+                                )
 
                     # §11.3 — Cloudflare interstitial tri-state classifier.
                     # ``auto`` waits once and re-checks; ``behavioral``
@@ -8367,6 +8469,22 @@ class BrowserManager:
                         # lock).
                         if cf_force_low_confidence:
                             envelope["solver_confidence"] = "low"
+                        # §22 — anti-bot kinds (Akamai BMP / Imperva /
+                        # Kasada / DataDome behavioral) are inherently
+                        # low-confidence: the solver token can be
+                        # rejected at the application layer for IP /
+                        # fingerprint mismatches the solver has no
+                        # visibility into. Force ``low`` confidence and,
+                        # on a non-``solved`` outcome, upgrade
+                        # ``next_action`` to ``request_captcha_help`` so
+                        # the agent doesn't retry — anti-bot challenges
+                        # have low success rates by design and retries
+                        # rarely improve the result.
+                        if antibot_force_low_confidence:
+                            envelope["solver_confidence"] = "low"
+                            outcome = envelope.get("solver_outcome")
+                            if outcome and outcome != "solved":
+                                envelope["next_action"] = "request_captcha_help"
                         if low_success:
                             envelope["solver_confidence"] = "low"
                             outcome = envelope.get("solver_outcome")
