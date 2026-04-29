@@ -2801,6 +2801,7 @@ def create_mesh_app(
 
     async def _deferred_push_browser_proxies() -> None:
         """Push proxy config for all agents after a delay (non-blocking background task)."""
+        nonlocal _last_browser_boot_id, _last_boot_id_check_ts
         await asyncio.sleep(5)  # Wait for agents to register
         if not container_manager:
             return
@@ -2819,6 +2820,30 @@ def create_mesh_app(
             *(_push_browser_proxy(agent_id) for agent_id in agents),
             return_exceptions=True,
         )
+        # Seed ``_last_browser_boot_id`` so the first browser command's
+        # restart-detection probe doesn't fire a redundant re-push for
+        # all agents. If the deferred push above failed (e.g. browser
+        # container slow to start), boot_id stays None and the first-
+        # contact recovery path in ``_check_browser_boot_id_changed``
+        # still corrects the race. We bypass the throttle here — this
+        # is a one-time seed at startup, not the per-command hot path.
+        try:
+            svc_token = getattr(container_manager, "browser_auth_token", "")
+            headers: dict = {}
+            if svc_token:
+                headers["Authorization"] = f"Bearer {svc_token}"
+            resp = await _browser_proxy_client.get(
+                f"{svc_url}/browser/status", headers=headers, timeout=5,
+            )
+            boot_id = resp.json().get("boot_id")
+            if boot_id:
+                _last_browser_boot_id = boot_id
+                _last_boot_id_check_ts = time.monotonic()
+        except Exception:
+            # Browser container not ready yet — leave boot_id unset so
+            # the first-contact branch in `_check_browser_boot_id_changed`
+            # picks up the race correction.
+            pass
         logger.info("Pushed browser proxy config for %d agents", len(agents))
 
     @app.on_event("startup")

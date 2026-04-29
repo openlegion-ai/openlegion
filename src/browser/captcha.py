@@ -1335,7 +1335,13 @@ class CaptchaSolver:
         not operator-actionable config faults.
         """
         description = data.get("errorDescription")
-        safe_desc = _redact_clientkey_text(str(description))
+        # Render a clean placeholder when the provider returned no
+        # description — ``str(None)`` would log the literal "None"
+        # which is misleading in operator dashboards.
+        if description is None or description == "":
+            safe_desc = f"errorId={data.get('errorId')}"
+        else:
+            safe_desc = _redact_clientkey_text(str(description))
         if _is_fatal_provider_error(description):
             # Sticky for the rest of this process — the docstring on
             # ``_solver_unreachable`` (and the §11.16 breaker test

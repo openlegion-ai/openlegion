@@ -388,7 +388,14 @@ class DockerBackend(RuntimeBackend):
         else:
             max_browsers, browser_mem, browser_shm, browser_cpu = min(max_agents, 10), "8g", "2g", 200000
 
-        # Override browser idle timeout from dashboard config
+        # Override browser idle timeout from dashboard config; also bridge
+        # the dashboard-saved CAPTCHA solver provider/key into the host
+        # process env so the env-var translation at the bottom of this
+        # function (``OPENLEGION_CAPTCHA_SOLVER_* → CAPTCHA_SOLVER_*``)
+        # picks them up. Without this bridge, the dashboard's "Save key"
+        # flow only takes effect on the first apply-settings click of
+        # the session — a cold engine restart would silently drop the
+        # solver key until the operator clicked "Apply" again.
         idle_timeout_minutes = 30
         settings_path = self.project_root / "config" / "settings.json"
         if settings_path.exists():
@@ -396,6 +403,22 @@ class DockerBackend(RuntimeBackend):
                 bsettings = json.loads(settings_path.read_text())
                 if "browser_idle_timeout" in bsettings:
                     idle_timeout_minutes = int(bsettings["browser_idle_timeout"])
+                # Captcha solver settings live at the top-level (not under
+                # ``browser_flags``) — the dashboard writes them there.
+                # Only seed env if the operator hasn't already set the
+                # canonical env vars by hand; explicit env always wins.
+                _solver_provider = (bsettings.get("captcha_solver_provider") or "").strip()
+                _solver_key = (bsettings.get("captcha_solver_key") or "").strip()
+                if _solver_provider and not (
+                    os.environ.get("CAPTCHA_SOLVER_PROVIDER")
+                    or os.environ.get("OPENLEGION_CAPTCHA_SOLVER_PROVIDER")
+                ):
+                    os.environ["OPENLEGION_CAPTCHA_SOLVER_PROVIDER"] = _solver_provider
+                if _solver_key and not (
+                    os.environ.get("CAPTCHA_SOLVER_KEY")
+                    or os.environ.get("OPENLEGION_CAPTCHA_SOLVER_KEY")
+                ):
+                    os.environ["OPENLEGION_CAPTCHA_SOLVER_KEY"] = _solver_key
             except (json.JSONDecodeError, OSError, ValueError):
                 pass
 
@@ -591,20 +614,34 @@ class DockerBackend(RuntimeBackend):
 
         self.browser_vnc_url = f"http://127.0.0.1:{vnc_port}/index.html?autoconnect=true&path=&resize=scale"
 
-        # Push saved browser settings (speed) so they survive container restarts
+        # Push saved browser settings (speed + inter-action delay) so
+        # they survive container restarts. Pre-fix, only ``browser_speed``
+        # was pushed — the dashboard-saved ``browser_delay`` silently
+        # reverted to 0 after every browser-service restart, undoing the
+        # operator's stealth tuning. The browser settings endpoint accepts
+        # both keys in a single POST.
         try:
             _settings_path = Path("config/settings.json")
             if _settings_path.exists():
                 _saved = json.loads(_settings_path.read_text())
+                _payload: dict = {}
                 _speed = _saved.get("browser_speed")
                 if _speed is not None:
+                    _payload["speed"] = _speed
+                _delay = _saved.get("browser_delay")
+                if _delay is not None:
+                    _payload["delay"] = _delay
+                if _payload:
                     _httpx.post(
                         f"{self.browser_service_url}/browser/settings",
-                        json={"speed": _speed},
+                        json=_payload,
                         headers={"Authorization": f"Bearer {self.browser_auth_token}"},
                         timeout=5,
                     )
-                    logger.info("Pushed browser speed=%.2f from saved settings", _speed)
+                    logger.info(
+                        "Pushed browser settings from disk: speed=%s delay=%s",
+                        _payload.get("speed"), _payload.get("delay"),
+                    )
         except Exception as e:
             logger.debug("Browser settings push skipped: %s", e)
 
