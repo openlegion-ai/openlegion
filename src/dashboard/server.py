@@ -1252,6 +1252,117 @@ def create_dashboard_router(
             "metrics": agent_metrics,
         }
 
+    @api_router.get("/api/agents/{agent_id}/session")
+    async def api_agent_session_info(agent_id: str) -> dict:
+        """Phase 10 §20 — return the privacy-safe session-sidecar summary.
+
+        Proxies to the browser service's ``/browser/{agent_id}/session``
+        endpoint, which returns counts only — no cookie values, no origin
+        domains. Operators see whether a session is persisted and roughly
+        how many cookies / origins it holds, without learning which sites
+        the agent is logged into through the dashboard event stream.
+
+        Returns the §2.3 success/error envelope so the panel can render a
+        "service down" state without conflating it with "no session".
+        """
+        if agent_id not in agent_registry:
+            raise HTTPException(404, "Agent not found")
+        if (
+            not runtime
+            or not hasattr(runtime, "browser_service_url")
+            or not runtime.browser_service_url
+        ):
+            return {
+                "success": False,
+                "error": {
+                    "code": "service_unavailable",
+                    "message": "Browser service not available",
+                    "retry_after_ms": None,
+                },
+            }
+        try:
+            browser_auth = getattr(runtime, "browser_auth_token", "")
+            headers = {}
+            if browser_auth:
+                headers["Authorization"] = f"Bearer {browser_auth}"
+            resp = await _dashboard_browser_client.get(
+                f"{runtime.browser_service_url}/browser/{agent_id}/session",
+                headers=headers,
+            )
+            if resp.status_code != 200:
+                return {
+                    "success": False,
+                    "error": {
+                        "code": "upstream_error",
+                        "message": f"Browser service returned {resp.status_code}",
+                        "retry_after_ms": None,
+                    },
+                }
+            return {"success": True, "data": resp.json()}
+        except Exception as e:
+            return {
+                "success": False,
+                "error": {
+                    "code": "service_unavailable",
+                    "message": str(e),
+                    "retry_after_ms": None,
+                },
+            }
+
+    @api_router.delete("/api/agents/{agent_id}/session")
+    async def api_agent_session_clear(agent_id: str) -> dict:
+        """Phase 10 §20 — clear the persisted session sidecar.
+
+        The router-level CSRF guard (``_csrf_check`` requires
+        ``X-Requested-With``) gates this endpoint, so a cookie-only CSRF
+        attempt cannot trigger a session wipe. The live BrowserContext
+        is intentionally NOT closed here — call ``/browser/{agent_id}/reset``
+        as the next step if the operator wants a fully fresh state.
+        """
+        if agent_id not in agent_registry:
+            raise HTTPException(404, "Agent not found")
+        if (
+            not runtime
+            or not hasattr(runtime, "browser_service_url")
+            or not runtime.browser_service_url
+        ):
+            return {
+                "success": False,
+                "error": {
+                    "code": "service_unavailable",
+                    "message": "Browser service not available",
+                    "retry_after_ms": None,
+                },
+            }
+        try:
+            browser_auth = getattr(runtime, "browser_auth_token", "")
+            headers = {}
+            if browser_auth:
+                headers["Authorization"] = f"Bearer {browser_auth}"
+            resp = await _dashboard_browser_client.delete(
+                f"{runtime.browser_service_url}/browser/{agent_id}/session",
+                headers=headers,
+            )
+            if resp.status_code != 200:
+                return {
+                    "success": False,
+                    "error": {
+                        "code": "upstream_error",
+                        "message": f"Browser service returned {resp.status_code}",
+                        "retry_after_ms": None,
+                    },
+                }
+            return {"success": True, "data": resp.json().get("data", {})}
+        except Exception as e:
+            return {
+                "success": False,
+                "error": {
+                    "code": "service_unavailable",
+                    "message": str(e),
+                    "retry_after_ms": None,
+                },
+            }
+
     @api_router.get("/api/agent-templates")
     async def api_agent_templates() -> list:
         """Return available skill templates for creating new agents."""

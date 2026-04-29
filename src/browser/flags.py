@@ -103,6 +103,28 @@ KNOWN_FLAGS: dict[str, str] = {
         "comma-separated; force normal solver flow on hardcoded-unsolvable hosts (§11.18)",
     "OPENLEGION_CAPTCHA_SKIP_SOLVE_DOMAINS":
         "comma-separated; force escalation-only on hosts we'd otherwise solve (§11.18)",
+    # ── Session continuity (§20) ──────────────────────────────────────────
+    "BROWSER_SESSION_PERSISTENCE_ENABLED":
+        "true | false (DEFAULT FALSE) — opt-in persistence of "
+        "BrowserContext.storage_state() across container restarts. "
+        "Stores cookies + localStorage + sessionStorage + IndexedDB at "
+        "data/sessions/<agent_id>.json with chmod 0o600. Default-off "
+        "because the sidecar contains live session tokens; if leaked, "
+        "those tokens grant account takeover on whatever sites the "
+        "agent was logged into. Operators must opt in deliberately and "
+        "are responsible for rotating sidecars on a cadence appropriate "
+        "for their threat model (this module bakes in NO time-based "
+        "expiry).",
+    "BROWSER_SESSION_PERIODIC_SNAPSHOT_S":
+        "int seconds, range [60, 3600] (default 300) — interval for "
+        "the periodic mid-flight session snapshot. Hooked into the "
+        "60s metrics tick: counter accumulates and snapshots when "
+        "elapsed >= this value. Lower = better RPO at the cost of "
+        "more disk writes; higher = fewer writes but more state lost "
+        "on a hard kill.",
+    "BROWSER_SESSION_DIR":
+        "directory for per-agent session sidecars (default data/sessions). "
+        "Override for tests / custom volume layouts.",
     # ── Observability ─────────────────────────────────────────────────────
     "BROWSER_RECORD_BEHAVIOR": "1 to enable behavior recorder (§5.3)",
 }
