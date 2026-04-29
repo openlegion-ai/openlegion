@@ -33,6 +33,7 @@ from src.browser.captcha import (
     _redact_clientkey_text,
     get_solver,
 )
+from src.browser.js_challenge import classify_js_challenge
 from src.browser.profile_schema import migrate_profile
 from src.browser.redaction import CredentialRedactor
 from src.browser.ref_handle import RefHandle, RefStale, ShadowHop
@@ -152,6 +153,12 @@ _VALID_CAPTCHA_KINDS: frozenset[str] = frozenset({
     "cf-interstitial-auto", "cf-interstitial-behavioral",
     "cf-interstitial-turnstile",
     "px-press-hold", "datadome-behavioral",
+    # §19 — tier-1 anti-bot JS-challenge frameworks. Detection-only;
+    # never solver-attempted. Caller routes to ``request_captcha_help``
+    # for operator intervention via the VNC handoff.
+    "js-challenge-akamai", "js-challenge-kasada",
+    "js-challenge-fingerprintjs", "js-challenge-imperva",
+    "js-challenge-f5",
     "unknown",
 })
 
@@ -167,6 +174,14 @@ _BEHAVIORAL_KINDS: frozenset[str] = frozenset({
     "datadome-behavioral",
     "cf-interstitial-auto",
     "cf-interstitial-behavioral",
+    # §19 — tier-1 anti-bot JS-challenge kinds. No solver task entry;
+    # operator must intervene via VNC. Reject as ``hint`` value with a
+    # message pointing at ``request_captcha_help``.
+    "js-challenge-akamai",
+    "js-challenge-kasada",
+    "js-challenge-fingerprintjs",
+    "js-challenge-imperva",
+    "js-challenge-f5",
 })
 
 
@@ -6697,6 +6712,41 @@ class BrowserManager:
                                 "_classify_recaptcha raised; falling back to "
                                 "coarse kind=%s", kind, exc_info=True,
                             )
+
+                    # §19 — tier-1 anti-bot JS-challenge classifier runs
+                    # BEFORE the §11.3 behavioral classifier. JS challenges
+                    # (Akamai Bot Manager, Kasada, FingerprintJS Pro,
+                    # Imperva ABP, F5 Bot Defense) typically nest ABOVE
+                    # CAPTCHA in the typical site stack — they fire first
+                    # and gate access entirely, so detecting them takes
+                    # precedence over the §11.3 behavioral pass. None are
+                    # API-solvable (vendor design, no third-party solver);
+                    # the only correct response is to escalate via
+                    # ``request_captcha_help`` so the operator can
+                    # intervene through the VNC handoff (§19.1).
+                    js_vendor = await classify_js_challenge(inst.page)
+                    if js_vendor:
+                        js_kind = f"js-challenge-{js_vendor}"
+                        logger.info(
+                            "JS-challenge detected (%s); skipping solver, "
+                            "escalating to request_captcha_help",
+                            js_kind,
+                        )
+                        try:
+                            page_url = inst.page.url or ""
+                        except Exception:
+                            page_url = ""
+                        await _record_captcha_audit_event(
+                            inst.agent_id, "skipped_behavioral",
+                            js_kind, page_url,
+                        )
+                        return _captcha_envelope(
+                            kind=js_kind,
+                            solver_attempted=False,
+                            solver_outcome="skipped_behavioral",
+                            solver_confidence="behavioral-only",
+                            next_action="request_captcha_help",
+                        )
 
                     # §11.3 — behavioral-only classifier runs BEFORE the
                     # solver health/breaker gates so behavioral-only flows
