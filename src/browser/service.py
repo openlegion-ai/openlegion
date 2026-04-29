@@ -5660,9 +5660,28 @@ class BrowserManager:
            current mouse position (already on the element from the hover).
 
         When ``force=True``, falls back to ``locator.click(force=True)`` since
-        hover may fail on elements obscured by overlays.
+        hover may fail on elements obscured by overlays. We still call
+        ``scroll_into_view_if_needed`` first — Playwright's ``force=True``
+        skips ALL actionability checks INCLUDING the implicit scroll-
+        into-view, so a forced click on an off-fold element fires the
+        click event at the element's geometric position which can land
+        OUTSIDE the visible viewport. From the operator's VNC view, the
+        click visually "lands nowhere." This bites in particular on
+        SPA frameworks (X / Twitter / Gmail) that use ``aria-disabled``
+        on visually-active buttons — the click loop auto-applies
+        ``force=True`` for those (see ``_ARIA_FORCE_ROLES`` gate in
+        :meth:`click`), so the force path is hit MORE often than
+        operators expect. Scrolling explicitly is cheap and additive.
         """
         if force:
+            try:
+                await locator.scroll_into_view_if_needed(timeout=timeout)
+            except Exception:
+                # Element may be detached / cross-origin / have no box;
+                # the forced click below will still attempt at the last-
+                # known position. Better to log via the click error path
+                # than to fail-fast here.
+                pass
             await locator.click(timeout=timeout, force=True)
             return
         try:
@@ -5678,8 +5697,17 @@ class BrowserManager:
         """Like _human_click but takes a CSS selector instead of a locator.
 
         Hovers first to generate natural mouse movement, then clicks.
+        On the ``force=True`` path, scrolls the locator into view BEFORE
+        the forced click — Playwright's ``force=True`` skips
+        scroll-into-view; without this an off-fold force-click fires
+        outside the viewport and visibly lands nowhere on VNC. Mirror
+        of :meth:`_human_click`'s force path.
         """
         if force:
+            try:
+                await page.locator(selector).scroll_into_view_if_needed(timeout=timeout)
+            except Exception:
+                pass
             await page.click(selector, timeout=timeout, force=True)
             return
         try:
