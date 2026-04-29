@@ -641,6 +641,17 @@ def create_dashboard_router(
         dependencies=[Depends(_verify_dashboard_auth), Depends(_csrf_check)],
     )
 
+    # Per-platform success aggregator — subscribes to EventBus emits and
+    # maintains a 24h rolling window of captcha outcomes / fingerprint
+    # burns / pre-nav dwells per host.  Instantiated even when
+    # ``event_bus`` is None (some dashboards run without a bus) so the
+    # GET endpoint can still return an empty snapshot rather than
+    # 500'ing.
+    from src.dashboard.platform_success import PlatformSuccessAggregator
+    platform_success = PlatformSuccessAggregator()
+    if event_bus is not None:
+        event_bus.add_listener(platform_success.handle_event)
+
     jinja_env = Environment(
         loader=FileSystemLoader(str(_TEMPLATES_DIR)),
         autoescape=True,
@@ -4215,6 +4226,18 @@ def create_dashboard_router(
             "speed": settings.get("browser_speed", 1.0),
             "delay": settings.get("browser_delay", 0.0),
         }
+
+    @api_router.get("/api/dashboard/platform-success")
+    async def api_get_platform_success() -> dict:
+        """Per-platform fleet success rollup over the last 24h.
+
+        Read-only aggregation surfaced from the dashboard's in-memory
+        EventBus listener — no SQLite, no upstream call.  Operators use
+        this to spot "which sites is my fleet succeeding on, and which
+        ones are flagging or burning fingerprints" without scraping
+        logs.  Resets on mesh restart (process-local).
+        """
+        return platform_success.snapshot()
 
     @api_router.post("/api/browser-settings")
     async def api_set_browser_settings(request: Request) -> dict:
