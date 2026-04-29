@@ -87,7 +87,7 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 | **`src/browser/`** | |
 | `__main__.py` | Starts KasmVNC (Xvnc), Openbox WM, FastAPI command server |
 | `server.py` | Browser service FastAPI app. Raises `RuntimeError` on startup when auth token missing in production (MESH_AUTH_TOKEN set but BROWSER_AUTH_TOKEN absent); warns only in dev. |
-| `service.py` | BrowserManager with per-agent Camoufox instances. `_MAX_WALK_DEPTH=50` for DOM snapshot. Per-agent X11 WID tracking for targeted VNC focus. |
+| `service.py` | BrowserManager with per-agent Camoufox instances. `_MAX_WALK_DEPTH=50` for DOM snapshot. Per-agent X11 WID tracking for targeted VNC focus. §22 fingerprint health monitor: rolling per-agent rejection window (`_FINGERPRINT_WINDOW_SIZE=10`, burn threshold 50%); post-solve page-state monitor probes vendor-specific selectors (Cloudflare 1xxx, DataDome, PerimeterX, Imperva, Akamai BMP) + branded rejection text; burn surfaces `fingerprint_burn=True` + `next_action="retry_with_fresh_profile"` on subsequent captcha envelopes; operator clears manually after profile rotation. |
 | `redaction.py` | Credential redaction for browser output |
 | `stealth.py` | Anti-bot fingerprint building (Windows fingerprint, WebRTC kill, `BROWSER_UA_VERSION` override) |
 | `timing.py` | Timing jitter for human-like behavior |

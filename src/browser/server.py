@@ -750,6 +750,31 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         from src.browser.session_persistence import session_summary
         return session_summary(agent_id)
 
+    @app.get("/browser/{agent_id}/fingerprint-health")
+    async def fingerprint_health(agent_id: str, request: Request):
+        """§22 — return the per-agent fingerprint health summary.
+
+        Shape: ``{window_size, rejection_rate, burned, last_signal_ts}``.
+        Read-only.  No URL / origin leakage — ``last_signal_ts`` is an
+        ISO-8601 timestamp or null; nothing else identifies the sites
+        the agent is interacting with.
+        """
+        _verify_auth(request)
+        return await manager.get_fingerprint_health(agent_id)
+
+    @app.post("/browser/{agent_id}/fingerprint-health/reset")
+    async def fingerprint_health_reset(agent_id: str, request: Request):
+        """§22 — clear the rolling fingerprint rejection window.
+
+        Operator-only — used after a manual profile rotation. The live
+        BrowserContext is intentionally NOT touched here; the operator
+        is expected to have already rotated the profile before clearing
+        the metric.  Auth is the standard browser-service bearer token;
+        the dashboard layer additionally CSRF-gates this path.
+        """
+        _verify_auth(request)
+        return await manager.reset_fingerprint_health(agent_id)
+
     @app.delete("/browser/{agent_id}/session")
     async def session_clear(agent_id: str, request: Request):
         """Delete the per-agent session sidecar.
