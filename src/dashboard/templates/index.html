@@ -1444,7 +1444,7 @@
           :class="openChats.length > 0 && !chatPanelMinimized && !chatFullScreen
             ? 'grid-cols-1 lg:grid-cols-2'
             : 'grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4'">
-          <template x-for="agent in filteredAgents" :key="agent.id">
+          <template x-for="agent in displayAgents" :key="agent.id">
             <div
               role="article"
               :aria-label="'Agent ' + agent.id"
@@ -1459,7 +1459,9 @@
 
               <!-- Header: Avatar + Name + Health -->
               <div class="flex items-start gap-3 mb-3 relative">
-                <div class="agent-avatar cursor-pointer" :class="'agent-color-' + agentColorIndex(agent.id)" @click="drillDown(agent.id)" title="View agent details">
+                <div class="agent-avatar cursor-pointer" :class="'agent-color-' + agentColorIndex(agent.id)"
+                  @click="drillDown(agent.id)"
+                  :title="agent.id === 'operator' ? 'Open operator settings' : 'View agent details'">
                   <img :src="agentAvatarUrl(agent.id)" :alt="agent.id">
                   <!-- Activity indicator dot -->
                   <span class="activity-dot"
@@ -1474,8 +1476,13 @@
                 </div>
                 <div class="flex-1 min-w-0">
                   <div class="flex items-center gap-2">
-                    <span class="font-semibold text-white group-hover:text-indigo-300 transition-colors truncate cursor-pointer" @click="drillDown(agent.id)" :title="agent.id" x-text="agent.id"></span>
-                    <svg class="w-3 h-3 text-gray-600 group-hover:text-indigo-400 transition-colors shrink-0 cursor-pointer" @click="drillDown(agent.id)" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+                    <span class="font-semibold text-white group-hover:text-indigo-300 transition-colors truncate cursor-pointer"
+                      @click="drillDown(agent.id)"
+                      :title="agent.id" x-text="agent.id"></span>
+                    <span x-show="agent.id === 'operator'" class="text-[10px] px-1.5 py-0.5 rounded bg-indigo-900/30 text-indigo-400 border border-indigo-800/40 shrink-0">system</span>
+                    <svg class="w-3 h-3 text-gray-600 group-hover:text-indigo-400 transition-colors shrink-0 cursor-pointer"
+                      @click="drillDown(agent.id)"
+                      fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
                   </div>
                   <div class="text-xs text-gray-500 truncate mt-0.5" x-show="agent.model"
                     x-text="formatModelName(agent.model)"></div>
@@ -1575,7 +1582,7 @@
                     <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
                     <span x-text="openChats.includes(agent.id) ? 'Chatting' : 'Chat'"></span>
                   </button>
-                  <button x-show="agent.heartbeat_job_id" @click="toggleHeartbeat(agent)"
+                  <button x-show="agent.id !== 'operator' && agent.heartbeat_job_id" @click="toggleHeartbeat(agent)"
                     :disabled="cronPauseLoading[agent.heartbeat_job_id] === true"
                     class="action-btn action-btn-warn disabled:opacity-50">
                     <svg x-show="cronPauseLoading[agent.heartbeat_job_id] !== true && agent.heartbeat_enabled" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>

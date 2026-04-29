@@ -244,6 +244,22 @@ class TestCreateProject:
             with pytest.raises(ValueError, match="already exists"):
                 _create_project("existing")
 
+    def test_create_with_operator_member_rejected_no_partial_state(self, tmp_path):
+        """Operator in initial members must raise BEFORE the project dir is created (no partial state)."""
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir(parents=True)
+        perms_file = tmp_path / "permissions.json"
+        perms_file.write_text(json.dumps({"permissions": {}}))
+
+        with (
+            patch("src.cli.config.PROJECTS_DIR", projects_dir),
+            patch("src.cli.config.PERMISSIONS_FILE", perms_file),
+        ):
+            with pytest.raises(ValueError, match="system agent"):
+                _create_project("new-proj", members=["agent1", "operator"])
+        # Project directory must not exist — rejection happens before any filesystem writes
+        assert not (projects_dir / "new-proj").exists()
+
 
 class TestDeleteProject:
     def test_delete_project(self, tmp_path):
@@ -352,6 +368,25 @@ class TestAddRemoveAgentProject:
         ):
             with pytest.raises(ValueError, match="not found"):
                 _add_agent_to_project("ghost", "agent1")
+
+    def test_add_operator_rejected(self, tmp_path):
+        """Operator is a system agent and must never be assignable to a project."""
+        projects_dir = tmp_path / "projects"
+        proj_dir = projects_dir / "proj1"
+        proj_dir.mkdir(parents=True)
+        (proj_dir / "metadata.yaml").write_text(yaml.dump({"name": "proj1", "members": []}))
+        perms_file = tmp_path / "permissions.json"
+        perms_file.write_text(json.dumps({"permissions": {"operator": {}}}))
+
+        with (
+            patch("src.cli.config.PROJECTS_DIR", projects_dir),
+            patch("src.cli.config.PERMISSIONS_FILE", perms_file),
+        ):
+            with pytest.raises(ValueError, match="system agent"):
+                _add_agent_to_project("proj1", "operator")
+        # Members list must remain empty — no partial write before the rejection
+        meta = yaml.safe_load((proj_dir / "metadata.yaml").read_text())
+        assert meta["members"] == []
 
     def test_remove_agent(self, tmp_path):
         projects_dir = tmp_path / "projects"

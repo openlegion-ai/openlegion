@@ -728,13 +728,20 @@ function dashboard() {
     },
 
     get filteredAgents() {
-      // Hide the operator system agent from the fleet view — it's managed via the Chat tab
+      // User-fleet view: excludes the operator system agent. Drives all stats (cost, tokens, health),
+      // count-against-quota displays, and broadcast targeting. Operator is rendered separately via displayAgents.
       if (this.activeProject) {
         return this.agents.filter(a => a.id !== 'operator' && a.project === this.activeProject);
       }
-      // When projects exist, show only standalone (unassigned) agents
       const base = this.projects.length > 0 ? this.unassignedAgents : this.agents;
       return base.filter(a => a.id !== 'operator');
+    },
+
+    /** Agent grid render list. Standalone view prepends the operator card (system agent, links to operator settings). */
+    get displayAgents() {
+      if (this.activeProject) return this.filteredAgents;
+      const operator = this.agents.find(a => a.id === 'operator');
+      return operator ? [operator, ...this.filteredAgents] : this.filteredAgents;
     },
 
     get filteredFleetCost() {
@@ -2628,13 +2635,13 @@ function dashboard() {
       } catch (e) { this.showToast(`Remove failed: ${e.message}`); }
     },
 
-    /** Agents in the registry that are not in any project. */
+    /** Agents in the registry that are not in any project. Excludes operator (system agent, not project-assignable). */
     get unassignedAgents() {
       const assigned = new Set();
       for (const p of this.projects) {
         for (const m of (p.members || [])) assigned.add(m);
       }
-      return this.agents.filter(a => !assigned.has(a.id));
+      return this.agents.filter(a => a.id !== 'operator' && !assigned.has(a.id));
     },
 
     /** Get the active project object. */
@@ -4730,12 +4737,12 @@ function dashboard() {
     },
 
     get broadcastTargets() {
-      // Project selected → project members; no project → standalone agents only
-      // Exclude over-limit (locked) agents — they aren't running
+      // Project selected → project members; no project → standalone agents only.
+      // Exclude over-limit (locked) agents — they aren't running. Always exclude operator (system agent, has its own chat).
       if (this.activeProject) {
         return this.filteredAgents.filter(a => !a.over_limit);
       }
-      return this.agents.filter(a => !a.over_limit && !a.project);
+      return this.agents.filter(a => a.id !== 'operator' && !a.over_limit && !a.project);
     },
 
     sendBroadcast() {
@@ -5684,6 +5691,17 @@ function dashboard() {
     // ── Agent drill-down ──────────────────────────────────
 
     drillDown(agentId) {
+      // Operator is a system agent — route to its dedicated settings page instead of the generic agent detail panel.
+      // Centralizes operator routing for all callers (card clicks, URL routes, search results).
+      if (agentId === 'operator') {
+        // Suppress switchTab's URL push so the back button returns to the source page, not the intermediate /system/<previous-tab>.
+        // Save/restore _skipPush so we don't clobber the outer invariant (e.g. _applyRoute holds _skipPush=true).
+        const prevSkip = this._skipPush;
+        this._skipPush = true;
+        try { this.switchTab('system'); } finally { this._skipPush = prevSkip; }
+        this.switchSystemTab('operator');
+        return;
+      }
       this._detailReturnProject = this.activeProject;
       this.activeTab = 'fleet';
       this.selectedAgent = agentId;
