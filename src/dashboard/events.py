@@ -11,6 +11,7 @@ import asyncio
 import json
 import threading
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -52,6 +53,12 @@ class EventBus:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._seq: int = 0  # monotonic sequence counter
         self._lock = threading.Lock()
+        # In-process listeners — invoked synchronously from emit() so the
+        # dashboard's own aggregators (e.g. per-platform success rollup) can
+        # observe events without going through a WebSocket. Listeners must
+        # be cheap and non-blocking; exceptions are swallowed to keep emit
+        # robust against a buggy aggregator.
+        self._listeners: list[Callable[[dict], None]] = []
 
     def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Bind to the mesh server's event loop. Idempotent."""
@@ -72,6 +79,17 @@ class EventBus:
             self._seq += 1
             evt_dict["_seq"] = self._seq
             self._buffer.append(evt_dict)
+            listeners = list(self._listeners)
+
+        # In-process listeners run synchronously on the caller's stack —
+        # the dashboard aggregators are O(1) per event so this is cheap.
+        # Catch every exception so a single misbehaving listener cannot
+        # break the broadcast path or starve other listeners.
+        for cb in listeners:
+            try:
+                cb(evt_dict)
+            except Exception as e:
+                logger.debug("EventBus listener raised: %s", e)
 
         if not self._clients:
             return
@@ -108,6 +126,27 @@ class EventBus:
 
     def unsubscribe(self, ws: WebSocket) -> None:
         self._clients = [c for c in self._clients if c.ws is not ws]
+
+    def add_listener(self, cb: Callable[[dict], None]) -> None:
+        """Register an in-process callback invoked synchronously from emit().
+
+        Used by the dashboard's per-platform success aggregator (and any
+        future module-level rollup) so it can observe events without
+        masquerading as a WebSocket subscriber. Idempotent — adding the
+        same callback twice will only call it twice (no dedupe).
+        """
+        with self._lock:
+            self._listeners.append(cb)
+
+    def remove_listener(self, cb: Callable[[dict], None]) -> None:
+        """Remove a previously-registered listener.  No-op if absent.
+
+        Uses equality (``==``) rather than identity so a bound-method
+        round-trip (``agg.handle_event`` evaluates to a fresh
+        ``MethodType`` each access) still matches the registered entry.
+        """
+        with self._lock:
+            self._listeners = [c for c in self._listeners if c != cb]
 
     @property
     def current_seq(self) -> int:

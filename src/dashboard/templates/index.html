@@ -5110,6 +5110,88 @@
             </template>
           </div>
 
+          <!-- ── Per-Platform Success ── -->
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-5">
+            <div class="flex items-center justify-between mb-1">
+              <div class="flex items-center gap-2">
+                <svg class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3"/></svg>
+                <h3 class="text-sm font-medium text-gray-200">Per-Platform Success</h3>
+              </div>
+              <span class="text-[10px] text-gray-600">last 24h · refreshes 30s</span>
+            </div>
+            <p class="text-[10px] text-gray-500 mb-4 leading-relaxed">
+              Aggregated per host across the fleet. <span class="text-gray-400">Success</span> is the share of CAPTCHA gates that solved cleanly. <span class="text-amber-400">Burns</span> are fingerprints rejected after a solve — the cue to rotate the profile. Hosts without any CAPTCHA activity show "—" for success rate.
+            </p>
+            <template x-if="!platformSuccessLoading && (platformSuccessData.platforms || []).length === 0">
+              <div class="text-xs text-gray-600 italic py-2">
+                No browser activity yet. Platform stats appear here as agents navigate.
+              </div>
+            </template>
+            <template x-if="platformSuccessLoading && (platformSuccessData.platforms || []).length === 0">
+              <div class="text-xs text-gray-600 italic py-2">Loading&hellip;</div>
+            </template>
+            <template x-if="(platformSuccessData.platforms || []).length > 0">
+              <div class="overflow-x-auto">
+                <table class="w-full text-xs">
+                  <thead>
+                    <tr class="text-[10px] uppercase tracking-wide text-gray-500 border-b border-gray-800">
+                      <th class="text-left font-medium pb-2 pr-4">Platform</th>
+                      <th class="text-right font-medium pb-2 pr-4">Navs</th>
+                      <th class="text-right font-medium pb-2 pr-4">CAPTCHA</th>
+                      <th class="text-right font-medium pb-2 pr-4">Burns</th>
+                      <th class="text-right font-medium pb-2 pr-4">Avg dwell</th>
+                      <th class="text-left font-medium pb-2 w-40">Success rate</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <template x-for="row in (platformSuccessData.platforms || [])" :key="row.host">
+                      <tr class="border-b border-gray-800/40">
+                        <td class="py-2 pr-4">
+                          <div class="text-gray-200 font-medium" x-text="row.label"></div>
+                          <div class="text-[10px] text-gray-600 font-mono truncate max-w-[14rem]" x-text="row.host"></div>
+                        </td>
+                        <td class="py-2 pr-4 text-right font-mono text-gray-300" x-text="row.navigations"></td>
+                        <td class="py-2 pr-4 text-right font-mono text-gray-300">
+                          <span x-text="(row.captcha_solved || 0) + '/' + (row.captcha_attempted || 0)"></span>
+                          <template x-if="(row.captcha_failed || 0) > 0">
+                            <span class="text-red-400 ml-1" x-text="'(' + row.captcha_failed + ' failed)'"></span>
+                          </template>
+                          <template x-if="(row.captcha_other || 0) > 0">
+                            <span class="text-amber-400 ml-1 text-[10px]"
+                              :title="'Gate-skipped (cost cap / rate limit / behavioral): ' + row.captcha_other"
+                              x-text="'+' + row.captcha_other + ' skipped'"></span>
+                          </template>
+                        </td>
+                        <td class="py-2 pr-4 text-right font-mono"
+                          :class="(row.fingerprint_burns || 0) > 0 ? 'text-amber-400' : 'text-gray-600'"
+                          x-text="row.fingerprint_burns || 0"></td>
+                        <td class="py-2 pr-4 text-right font-mono text-gray-400"
+                          x-text="(row.pre_nav_delays_applied || 0) > 0 ? row.avg_pre_nav_delay_s.toFixed(2) + 's' : '—'"></td>
+                        <td class="py-2 pr-4">
+                          <template x-if="row.success_rate === null">
+                            <span class="text-gray-600">—</span>
+                          </template>
+                          <template x-if="row.success_rate !== null">
+                            <div class="flex items-center gap-2">
+                              <div class="flex-1 h-1.5 rounded-full bg-gray-800 overflow-hidden">
+                                <div class="h-full rounded-full"
+                                  :class="platformSuccessBarClass(row.success_rate)"
+                                  :style="'width: ' + Math.round((row.success_rate || 0) * 100) + '%'"></div>
+                              </div>
+                              <span class="text-[10px] font-mono w-10 text-right"
+                                :class="platformSuccessTextClass(row.success_rate)"
+                                x-text="Math.round((row.success_rate || 0) * 100) + '%'"></span>
+                            </div>
+                          </template>
+                        </td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </template>
+          </div>
+
           <!-- ── Interaction Speed ── -->
           <div class="bg-gray-900 border border-gray-800 rounded-lg p-5">
             <div class="flex items-center gap-2 mb-4">

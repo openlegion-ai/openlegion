@@ -39,6 +39,7 @@ from src.browser.redaction import CredentialRedactor
 from src.browser.ref_handle import RefHandle, RefStale, ShadowHop
 from src.browser.stealth import (
     DEFAULT_DEVICE_PROFILE,
+    _canonical_host,
     build_launch_options,
     build_mobile_init_script,
     get_device_profile,
@@ -548,6 +549,94 @@ async def _drain_session_audit() -> list[dict]:
             "action": action,
             "success": success,
             "count": info["count"],
+            "first_ts": info["first_ts"],
+        })
+    return drained
+
+
+# ── platform pre-nav delay audit aggregator ──────────────────────────────
+#
+# Companion to the per-platform pre-nav dwell (LinkedIn / X / Meta).  Per
+# §2.7 we cannot emit one event per applied dwell — that would flood the
+# WebSocket on a hot navigate loop.  Aggregate by ``(agent_id, host)`` so
+# the dashboard's per-platform success panel can compute count + average
+# dwell duration without scraping the INFO log.
+#
+# State is module-global because the BrowserManager is a singleton in
+# the browser service container.  Drain is driven from
+# :meth:`BrowserManager._emit_metrics` (already on the 60s tick); see
+# ``_drain_platform_timing_audit`` below.
+_platform_timing_audit_lock: asyncio.Lock | None = None
+_platform_timing_audit_lock_loop: asyncio.AbstractEventLoop | None = None
+# {(agent_id, host): {"count": int, "total_delay_s": float, "first_ts": float}}
+_platform_timing_audit_buckets: dict[tuple[str, str], dict] = {}
+
+
+def _get_platform_timing_audit_lock() -> asyncio.Lock:
+    """Return a platform-timing audit lock bound to the active event loop."""
+    global _platform_timing_audit_lock, _platform_timing_audit_lock_loop
+    loop = asyncio.get_running_loop()
+    if (
+        _platform_timing_audit_lock is None
+        or _platform_timing_audit_lock_loop is not loop
+    ):
+        _platform_timing_audit_lock = asyncio.Lock()
+        _platform_timing_audit_lock_loop = loop
+    return _platform_timing_audit_lock
+
+
+async def _record_platform_timing_audit_event(
+    agent_id: str, host: str, delay_s: float,
+) -> None:
+    """Aggregate one applied pre-nav dwell into the per-minute bucket.
+
+    ``host`` is the canonical host (lower-cased, ``www.`` stripped) —
+    callers route through :func:`src.browser.stealth._canonical_host`.
+    Bucket aggregates by ``(agent_id, host)`` so a single agent looping
+    on one platform doesn't drown out the others.  ``delay_s`` is
+    summed so the drain payload can carry a true running average.
+    """
+    if not host or delay_s < 0:
+        return
+    async with _get_platform_timing_audit_lock():
+        key = (agent_id, host)
+        bucket = _platform_timing_audit_buckets.get(key)
+        now = time.time()
+        if bucket is None:
+            _platform_timing_audit_buckets[key] = {
+                "count": 1,
+                "total_delay_s": float(delay_s),
+                "first_ts": now,
+            }
+        else:
+            bucket["count"] += 1
+            bucket["total_delay_s"] += float(delay_s)
+
+
+async def _drain_platform_timing_audit() -> list[dict]:
+    """Atomically swap the platform-timing audit buckets and return payloads.
+
+    Called once per metrics-emit tick. Mirrors
+    :func:`_drain_captcha_audit` — each returned dict is one EventBus
+    payload of type ``platform_pre_nav_delay`` so the dashboard's
+    per-platform success aggregator can route it into the right host
+    bucket.
+    """
+    async with _get_platform_timing_audit_lock():
+        if not _platform_timing_audit_buckets:
+            return []
+        buckets = dict(_platform_timing_audit_buckets)
+        _platform_timing_audit_buckets.clear()
+    drained = []
+    for (agent_id, host), info in buckets.items():
+        drained.append({
+            "type": "platform_pre_nav_delay",
+            # ``agent_id`` (not ``agent``) — same convention as the
+            # captcha / session / fingerprint audit paths.
+            "agent_id": agent_id,
+            "host": host,
+            "count": info["count"],
+            "total_delay_s": round(info["total_delay_s"], 4),
             "first_ts": info["first_ts"],
         })
     return drained
@@ -2894,6 +2983,30 @@ class BrowserManager:
                     ev.get("agent_id", ""), e,
                 )
 
+        # Drain the platform pre-nav-delay audit buckets — feeds the
+        # dashboard's per-platform success panel with count + average
+        # dwell per (agent, host).  Same per-minute aggregation pattern.
+        try:
+            pt_events = await _drain_platform_timing_audit()
+        except Exception as e:
+            logger.warning("platform-timing audit drain failed: %s", e)
+            pt_events = []
+        for ev in pt_events:
+            ev = dict(ev)
+            self._metrics_seq += 1
+            ev["seq"] = self._metrics_seq
+            ev["ts"] = now
+            self._metrics_history.append(ev)
+            if self._metrics_sink is None:
+                continue
+            try:
+                self._metrics_sink(ev)
+            except Exception as e:
+                logger.warning(
+                    "platform-timing audit sink raised for '%s': %s",
+                    ev.get("agent_id", ""), e,
+                )
+
         # Phase 10 §24 — per-tenant spend-threshold alerts. Walks every
         # tenant currently active in the cost counter, asks the threshold
         # tracker which percentages crossed THIS tick, and ships a
@@ -3927,6 +4040,17 @@ class BrowserManager:
             "platform_pre_nav_delay agent=%s platform=%s delay=%.2fs",
             agent_id, label, delay_s,
         )
+        # Record into the per-minute audit aggregator so the dashboard's
+        # per-platform success panel can show count + average dwell.  Use
+        # the canonical host (lower-cased, ``www.`` stripped) so binning
+        # matches the dashboard side and the captcha audit path.  The
+        # call is best-effort — a recording failure must not block the
+        # navigation it's instrumenting.
+        try:
+            host = _canonical_host(url) or label
+            await _record_platform_timing_audit_event(agent_id, host, delay_s)
+        except Exception as e:
+            logger.debug("platform-timing audit record failed: %s", e)
         await asyncio.sleep(delay_s)
 
     def set_proxy_config(self, agent_id: str, config: dict | None) -> None:
