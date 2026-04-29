@@ -256,13 +256,20 @@ class PlatformSuccessAggregator:
                     continue
 
                 events = solved + failed + other
-                # Success rate is a fleet-level health number — only
-                # meaningful where at least one captcha gate fired.
-                # Hosts that never tripped a gate are reported as
-                # ``None`` so the frontend can render "—" instead of a
-                # misleading 100%.
-                if events > 0:
-                    success_rate: float | None = solved / events
+                # Success rate must reflect ATTEMPTED solves only —
+                # ``other`` rolls up gate-skipped outcomes (cost_cap,
+                # rate_limited, skipped_behavioral, provider_missing,
+                # price_missing) that never reached the solver. Including
+                # them in the denominator made a fleet that hit cost cap
+                # 100 times and successfully solved 5 captchas show
+                # ``5/105 = 4.7%`` — operator-misleading. The honest
+                # success rate is solver attempts that returned a token
+                # ÷ total attempts (excluding gate skips). Hosts with
+                # zero attempts are reported as ``None`` so the frontend
+                # can render "—" instead of a misleading 100% / 0%.
+                attempted = solved + failed
+                if attempted > 0:
+                    success_rate: float | None = solved / attempted
                 else:
                     success_rate = None
 
@@ -271,6 +278,7 @@ class PlatformSuccessAggregator:
                     "label": _platform_label(host),
                     "navigations": navigations,
                     "captcha_events": events,
+                    "captcha_attempted": attempted,
                     "captcha_solved": solved,
                     "captcha_failed": failed,
                     "captcha_other": other,

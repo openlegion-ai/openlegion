@@ -5152,9 +5152,14 @@
                         </td>
                         <td class="py-2 pr-4 text-right font-mono text-gray-300" x-text="row.navigations"></td>
                         <td class="py-2 pr-4 text-right font-mono text-gray-300">
-                          <span x-text="(row.captcha_solved || 0) + '/' + (row.captcha_events || 0)"></span>
+                          <span x-text="(row.captcha_solved || 0) + '/' + (row.captcha_attempted || 0)"></span>
                           <template x-if="(row.captcha_failed || 0) > 0">
                             <span class="text-red-400 ml-1" x-text="'(' + row.captcha_failed + ' failed)'"></span>
+                          </template>
+                          <template x-if="(row.captcha_other || 0) > 0">
+                            <span class="text-amber-400 ml-1 text-[10px]"
+                              :title="'Gate-skipped (cost cap / rate limit / behavioral): ' + row.captcha_other"
+                              x-text="'+' + row.captcha_other + ' skipped'"></span>
                           </template>
                         </td>
                         <td class="py-2 pr-4 text-right font-mono"

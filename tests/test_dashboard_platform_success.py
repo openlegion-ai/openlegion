@@ -75,11 +75,15 @@ class TestRecordCaptcha:
         row = rows["linkedin.com"]
         assert row["captcha_solved"] == 1
         assert row["captcha_failed"] == 1
-        # cost_cap, rate_limited, etc. → "other"
+        # cost_cap, rate_limited, etc. → "other" (gate-skipped, not
+        # actually attempted at the solver).
         assert row["captcha_other"] == 1
         assert row["captcha_events"] == 3
-        # 1 solved out of 3 captcha events → 0.333
-        assert abs(row["success_rate"] - 1 / 3) < 1e-3
+        # ``captcha_attempted`` excludes gate skips; success_rate uses
+        # the attempted denominator so a fleet hitting cost cap 100x
+        # and solving 5 captchas doesn't show as "5/105 = 4.7%".
+        assert row["captcha_attempted"] == 2
+        assert abs(row["success_rate"] - 0.5) < 1e-3
 
     def test_no_host_is_dropped(self):
         agg = PlatformSuccessAggregator()
@@ -525,3 +529,64 @@ class TestWindowEvictionEndpoint:
         snap = agg.snapshot()
         # The host's only event aged out — empty rows are dropped
         assert snap["platforms"] == []
+
+
+# ── success_rate denominator excludes gate-skipped events ─────────────
+
+
+class TestSuccessRateExcludesGateSkips:
+    """Pre-fix the denominator was ``solved + failed + other``. A fleet
+    that hit cost cap 100 times and solved 5 captchas reported a 4.7%
+    success rate — operator-misleading. The honest rate uses only
+    ``solved + failed`` (the actual solver attempts)."""
+
+    def test_cost_cap_storm_does_not_drag_success_rate_to_zero(self):
+        """100 cost-cap skips + 5 successful solves → 100% (5/5),
+        not 4.7% (5/105). Operator sees the truth: every solve we
+        ATTEMPTED succeeded; we just didn't attempt many because of
+        the cap."""
+        agg = PlatformSuccessAggregator()
+        for _ in range(5):
+            agg.record_captcha("linkedin.com", "success")
+        for _ in range(100):
+            agg.record_captcha("linkedin.com", "cost_cap")
+        snap = agg.snapshot()
+        row = next(p for p in snap["platforms"] if p["host"] == "linkedin.com")
+        assert row["captcha_solved"] == 5
+        assert row["captcha_failed"] == 0
+        assert row["captcha_other"] == 100
+        assert row["captcha_attempted"] == 5
+        # captcha_events still reports the total (operator-visible
+        # volume) so a glance at the row shows "100 cost-cap skips".
+        assert row["captcha_events"] == 105
+        # Success rate excludes the skips → 5/5 = 100%.
+        assert row["success_rate"] == 1.0
+
+    def test_rate_limit_skips_excluded(self):
+        """``rate_limited`` is a gate-skip outcome same as ``cost_cap`` —
+        belongs in ``other``, not in the success-rate denominator."""
+        agg = PlatformSuccessAggregator()
+        agg.record_captcha("x.com", "success")
+        agg.record_captcha("x.com", "failed")
+        agg.record_captcha("x.com", "rate_limited")
+        agg.record_captcha("x.com", "skipped_behavioral")
+        snap = agg.snapshot()
+        row = next(p for p in snap["platforms"] if p["host"] == "x.com")
+        assert row["captcha_attempted"] == 2  # success + failed
+        assert row["captcha_other"] == 2      # rate_limited + skipped_behavioral
+        assert abs(row["success_rate"] - 0.5) < 1e-3
+
+    def test_only_gate_skips_yields_null_success_rate(self):
+        """A platform that only ever hits gate skips (every captcha
+        cost-cap'd, never reached the solver) reports
+        ``success_rate=None`` — there's nothing meaningful to compute,
+        and "0% / 0 attempts" is more honest than "0% / 0 attempts"
+        rendered as "0%"."""
+        agg = PlatformSuccessAggregator()
+        for _ in range(10):
+            agg.record_captcha("instagram.com", "cost_cap")
+        snap = agg.snapshot()
+        row = next(p for p in snap["platforms"] if p["host"] == "instagram.com")
+        assert row["captcha_attempted"] == 0
+        assert row["captcha_other"] == 10
+        assert row["success_rate"] is None
