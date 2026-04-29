@@ -552,6 +552,346 @@ async def _drain_session_audit() -> list[dict]:
     return drained
 
 
+# ── §22 / §11.17 — fingerprint health monitoring ─────────────────────────
+#
+# Anti-bot frameworks sometimes accept a solver-injected token mechanically
+# (the solve "succeeds" from our perspective) but reject the SESSION the
+# token was injected into — typically when the agent's BrowserForge
+# fingerprint has been observed solving captchas across many sites and is
+# now flagged. The solver is healthy; the FINGERPRINT is burned.
+#
+# Per-agent rolling window of post-solve outcomes:
+#   - True  → page rejected the solve (selector still present, "verification
+#             failed" / "try again" / "could not be verified" / "robot detected"
+#             text on page).
+#   - False → page accepted the solve (navigated away, no captcha selector).
+#
+# Burn detection: window full (>=10 entries) AND >=50% True. While burned,
+# subsequent ``_check_captcha`` envelopes carry ``fingerprint_burn: True``
+# and ``next_action="retry_with_fresh_profile"``, signalling the operator
+# to rotate the profile manually (auto-rotation is too destructive — it
+# wipes session cookies / login state and can cascade other agents' work).
+#
+# Operator clears the burn manually via ``POST .../fingerprint-health/reset``
+# after rotating the profile.  The window also clears naturally once 10
+# consecutive accepts roll the True entries out.
+#
+# Exclusions per §11.17 spec:
+#   - ``skipped_behavioral`` and ``request_captcha_help`` outcomes do NOT
+#     count toward the rejection rate.  They're correct escalations, not
+#     rejections — the solver never attempted-and-injected a token, so
+#     post-solve page state has nothing to tell us about the fingerprint.
+#   - Only outcomes where the solver actually attempted-and-injected a
+#     token (``solver_outcome="solved"``, page-state monitor verifies)
+#     contribute to the window.
+#
+# State is module-global because the BrowserManager is a singleton in the
+# browser-service container.  Per-agent ``deque(maxlen=10)`` is sufficient
+# (no new sliding-window primitive needed); reuses the same shape as
+# ``CaptchaSolver._solver_failure_timestamps``.
+_FINGERPRINT_WINDOW_SIZE = 10
+_FINGERPRINT_BURN_THRESHOLD = 0.5  # >= 50% rejected → burned
+# Page-state monitor: how long we wait after a ``solved`` envelope to
+# observe whether the page accepted or rejected the token.
+_FINGERPRINT_MONITOR_TIMEOUT_S = 10.0
+# Text fragments that indicate the post-solve page is still rejecting the
+# session.  Matched case-insensitively against the page's visible body
+# text inside the monitor's poll loop.  Multi-vendor coverage: the agent
+# may be solving captchas on sites protected by Cloudflare, DataDome,
+# PerimeterX/HUMAN, Akamai BMP, Imperva, F5 Distributed Cloud, Kasada, or
+# native vendor implementations.  False-positive cost is low (one entry
+# in a 10-deep window), and missing a rejection costs us much more (the
+# fingerprint stays in service after it has been flagged).
+_FINGERPRINT_REJECTION_TEXT: tuple[str, ...] = (
+    # Generic — vendor-agnostic phrasing reused across stacks.
+    "verification failed",
+    "try again",
+    "could not be verified",
+    "robot detected",
+    "are you a robot",
+    "please complete the verification",
+    "security check",
+    "checking if the site connection is secure",
+    "additional verification required",
+    "human verification",
+    # Cloudflare — interstitial / 1xxx error codes.  The interstitial
+    # body shows "Just a moment..." while running the JS challenge; if
+    # we still see it 10s after token injection the challenge re-armed.
+    "just a moment",
+    "ray id",
+    "cloudflare ray id",
+    "error 1020",  # Access denied — site rule blocked the IP.
+    "error 1015",  # Rate-limited.
+    "error 1010",  # Browser signature blocked.
+    # DataDome — branded block page.
+    "blocked by datadome",
+    "request unsuccessful",
+    "incident id",  # Imperva + DataDome both surface this.
+    # PerimeterX / HUMAN — branded block page text.
+    "please verify you are a human",
+    "press and hold",  # PerimeterX press-and-hold variant.
+    "this site uses an additional layer of security",
+    # Imperva — generic block.
+    "access denied",
+    "request blocked",
+    "you don't have permission to access",
+    # Akamai BMP — branded reference text.
+    "reference #",  # "Reference #18.deadbeef.1234567890" pattern.
+    # Generic anti-bot rejection language.
+    "you have been blocked",
+    "unusual activity",
+    "suspicious activity",
+    "session expired",
+    "challenge failed",
+    "captcha failed",
+    "captcha invalid",
+)
+# Vendor-specific element selectors — far more deterministic than text
+# scanning (language-independent, layout-stable).  Each selector here
+# matches a known anti-bot vendor's interstitial / block page.  If any
+# selector resolves with count>0 on the post-solve page, the session
+# was rejected.
+_FINGERPRINT_REJECTION_SELECTORS: tuple[str, ...] = (
+    # Cloudflare — challenge / error pages (#cf-error-details and the
+    # 1xxx error containers; #challenge-error-text on the JS challenge
+    # interstitial).
+    "[id^=cf-error]",
+    "#challenge-error-text",
+    ".cf-error-details",
+    ".cf-browser-verification",
+    # DataDome — geo / device block page.
+    "#ddm-blocked",
+    ".dd-r-blocked",
+    "[data-dd-block]",
+    # PerimeterX / HUMAN — block / press-and-hold page (#px-captcha
+    # appears on the press-and-hold variant; .px-block-spam on the
+    # outright block).
+    "#px-captcha",
+    ".px-block-spam",
+    # Imperva — incident page (the iframe wraps the actual block content).
+    "#main-iframe[src*=incident]",
+    # Akamai BMP — bm-error reference container.
+    "[id^=bm-error]",
+    # F5 Distributed Cloud / Shape Security — generic block iframe.
+    "iframe[src*=shape]",
+)
+_fingerprint_lock: asyncio.Lock | None = None
+_fingerprint_lock_loop: asyncio.AbstractEventLoop | None = None
+# {agent_id: deque[bool]} — entries True = rejected, False = accepted.
+_fingerprint_window: dict[str, deque[bool]] = {}
+# {agent_id: float} — unix timestamp of the most recent recorded signal.
+# Surfaced by the dashboard endpoint as ``last_signal_ts``.
+_fingerprint_last_signal: dict[str, float] = {}
+
+
+def _get_fingerprint_lock() -> asyncio.Lock:
+    """Return a fingerprint-state lock bound to the active event loop."""
+    global _fingerprint_lock, _fingerprint_lock_loop
+    loop = asyncio.get_running_loop()
+    if _fingerprint_lock is None or _fingerprint_lock_loop is not loop:
+        _fingerprint_lock = asyncio.Lock()
+        _fingerprint_lock_loop = loop
+    return _fingerprint_lock
+
+
+async def _record_fingerprint_outcome(
+    agent_id: str, rejected: bool,
+) -> bool:
+    """Append a post-solve outcome to the agent's rolling fingerprint window.
+
+    Returns the burn-state AFTER the append.  Caller can use the return
+    value to decide whether to emit a ``fingerprint_burn`` audit event.
+    The deque is bounded at :data:`_FINGERPRINT_WINDOW_SIZE` so the
+    natural rollover happens once 10 consecutive accepts arrive.
+    """
+    async with _get_fingerprint_lock():
+        bucket = _fingerprint_window.get(agent_id)
+        if bucket is None:
+            bucket = deque(maxlen=_FINGERPRINT_WINDOW_SIZE)
+            _fingerprint_window[agent_id] = bucket
+        bucket.append(bool(rejected))
+        _fingerprint_last_signal[agent_id] = time.time()
+        return _is_burned_locked(bucket)
+
+
+def _is_burned_locked(bucket: deque[bool]) -> bool:
+    """Compute burn state from a window snapshot.
+
+    Caller must hold :func:`_get_fingerprint_lock`.  Burn fires only
+    when the window is FULL — partial windows are not enough signal.
+    """
+    if len(bucket) < _FINGERPRINT_WINDOW_SIZE:
+        return False
+    rejected = sum(1 for v in bucket if v)
+    return (rejected / len(bucket)) >= _FINGERPRINT_BURN_THRESHOLD
+
+
+async def _is_fingerprint_burned(agent_id: str) -> bool:
+    """Read-only burn check for ``_check_captcha`` to decorate envelopes."""
+    async with _get_fingerprint_lock():
+        bucket = _fingerprint_window.get(agent_id)
+        if bucket is None:
+            return False
+        return _is_burned_locked(bucket)
+
+
+async def _get_fingerprint_health(agent_id: str) -> dict:
+    """Return the dashboard-shaped health payload for one agent.
+
+    Shape is contract-stable — see plan §22 dashboard panel and
+    ``test_fingerprint_health::test_health_endpoint_shape``::
+
+        {"window_size": int, "rejection_rate": float, "burned": bool,
+         "last_signal_ts": str | None}
+
+    ``rejection_rate`` is 0.0 when the window is empty (avoid divide-by-zero
+    surprises in the dashboard).  ``last_signal_ts`` is ISO-8601 UTC, or
+    ``None`` when no signal has ever been recorded for this agent.
+    """
+    async with _get_fingerprint_lock():
+        bucket = _fingerprint_window.get(agent_id)
+        last_ts = _fingerprint_last_signal.get(agent_id)
+        if bucket is None or len(bucket) == 0:
+            window_size = 0
+            rejection_rate = 0.0
+            burned = False
+        else:
+            window_size = len(bucket)
+            rejected = sum(1 for v in bucket if v)
+            rejection_rate = rejected / window_size
+            burned = _is_burned_locked(bucket)
+    return {
+        "window_size": window_size,
+        "rejection_rate": rejection_rate,
+        "burned": burned,
+        "last_signal_ts": _iso8601_utc(last_ts) if last_ts else None,
+    }
+
+
+async def _reset_fingerprint_window(agent_id: str) -> bool:
+    """Operator-triggered reset.  Returns True if state was cleared.
+
+    Called after the operator manually rotates the BrowserForge fingerprint
+    (no auto-rotation per §22 — see header note).  Drops both the rolling
+    window and the last-signal timestamp; the next post-solve outcome
+    starts a fresh window.
+    """
+    async with _get_fingerprint_lock():
+        had_state = (
+            agent_id in _fingerprint_window
+            or agent_id in _fingerprint_last_signal
+        )
+        _fingerprint_window.pop(agent_id, None)
+        _fingerprint_last_signal.pop(agent_id, None)
+    return had_state
+
+
+# ── §22 — fingerprint audit aggregator (per-minute, no URL leak) ──────────
+#
+# Mirrors ``_drain_captcha_audit`` / ``_drain_session_audit`` — aggregated
+# per minute keyed by ``(agent_id, signal, page_origin)`` so a stuck retry
+# loop on one site doesn't drown out the rest of the fleet.  ``page_origin``
+# is the redacted netloc only (no path, no query, no fragment) so the
+# dashboard event stream cannot be used to infer which sites the agent is
+# logged into.  Cookie values, full URLs, and query parameters are NEVER
+# included — same privacy posture as the §20 session audit.
+#
+# Signals: ``rejected`` / ``accepted`` (page-state monitor outcome) and
+# ``fingerprint_burn`` (one-shot when a fresh outcome trips the threshold).
+_fingerprint_audit_lock: asyncio.Lock | None = None
+_fingerprint_audit_lock_loop: asyncio.AbstractEventLoop | None = None
+# {(agent_id, signal, page_origin): {"count": int, "first_ts": float}}
+_fingerprint_audit_buckets: dict[tuple[str, str, str], dict] = {}
+
+
+def _get_fingerprint_audit_lock() -> asyncio.Lock:
+    """Return a fingerprint audit lock bound to the active event loop."""
+    global _fingerprint_audit_lock, _fingerprint_audit_lock_loop
+    loop = asyncio.get_running_loop()
+    if (
+        _fingerprint_audit_lock is None
+        or _fingerprint_audit_lock_loop is not loop
+    ):
+        _fingerprint_audit_lock = asyncio.Lock()
+        _fingerprint_audit_lock_loop = loop
+    return _fingerprint_audit_lock
+
+
+def _page_origin_for_audit(page_url: str) -> str:
+    """Reduce a URL to ``netloc`` only (no path / query / fragment).
+
+    Returns ``""`` on any parse failure so the audit event still records
+    the signal even when the source URL is malformed.  Mirrors the
+    "counts only, no values" privacy posture used by the §20 session
+    audit aggregator.  Userinfo (``user:pass@host``) is stripped.
+    """
+    if not page_url:
+        return ""
+    try:
+        parsed = urlparse(page_url)
+    except Exception:
+        return ""
+    host = parsed.hostname or ""
+    if not host:
+        return ""
+    if parsed.port:
+        return f"{host}:{parsed.port}"
+    return host
+
+
+async def _record_fingerprint_audit_event(
+    agent_id: str, signal: str, page_origin: str,
+) -> None:
+    """Aggregate a fingerprint signal into the per-minute bucket.
+
+    ``signal`` is one of ``"rejected"`` / ``"accepted"`` / ``"fingerprint_burn"``.
+    ``page_origin`` MUST already be reduced to a redacted netloc — callers
+    use :func:`_page_origin_for_audit` on the live page URL before this
+    call.  Specific URLs are NEVER stored.
+    """
+    async with _get_fingerprint_audit_lock():
+        key = (agent_id, signal, page_origin)
+        bucket = _fingerprint_audit_buckets.get(key)
+        now = time.time()
+        if bucket is None:
+            _fingerprint_audit_buckets[key] = {
+                "count": 1,
+                "first_ts": now,
+            }
+        else:
+            bucket["count"] += 1
+
+
+async def _drain_fingerprint_audit() -> list[dict]:
+    """Atomically swap fingerprint audit buckets and return drained payloads.
+
+    Called from :meth:`BrowserManager._emit_metrics` once per minute. Each
+    returned dict is one EventBus payload with ``type="fingerprint_event"``
+    so the dashboard can route it to a dedicated panel without clashing
+    with the captcha / session audit streams.
+    """
+    async with _get_fingerprint_audit_lock():
+        if not _fingerprint_audit_buckets:
+            return []
+        buckets = dict(_fingerprint_audit_buckets)
+        _fingerprint_audit_buckets.clear()
+    drained = []
+    for (agent_id, signal, page_origin), info in buckets.items():
+        # ``agent_id`` (not ``agent``) — the dashboard metrics poller
+        # routes browser-service events into the per-agent EventBus by
+        # this exact field name, same convention as the captcha and
+        # session audit paths.
+        drained.append({
+            "type": "fingerprint_event",
+            "agent_id": agent_id,
+            "signal": signal,
+            "page_origin": page_origin,
+            "count": info["count"],
+            "first_ts": info["first_ts"],
+        })
+    return drained
+
+
 def _kind_confidence(kind: str) -> str:
     """Default ``solver_confidence`` for a no-solver path, derived from how
     confidently we classified the *kind*. Placeholder kinds (§11.1 / §11.3)
@@ -2050,6 +2390,15 @@ class CamoufoxInstance:
         # envelope even when it didn't read the action's response.
         self._last_redetect_ts: float = 0.0
         self._pending_captcha_envelope: dict | None = None
+        # §22 — fingerprint health monitor tasks.  ``_check_captcha``
+        # spawns a fire-and-forget post-solve monitor (10s window
+        # observing whether the page accepted or rejected the injected
+        # token).  Tracked here so ``BrowserManager._stop_instance`` can
+        # cancel any in-flight monitors at agent stop — otherwise a
+        # task left behind would race against a deleted Page and emit
+        # spurious rejection signals.  Discarded on completion via the
+        # task's ``add_done_callback`` (see ``_spawn_fingerprint_monitor``).
+        self._fingerprint_monitor_tasks: set[asyncio.Task] = set()
         # Per-instance random property name for the captcha re-detection
         # MutationObserver state. Anti-bot scripts that walk
         # ``Object.keys(window)`` looking for unfamiliar ``__ol_*``
@@ -2513,6 +2862,34 @@ class BrowserManager:
             except Exception as e:
                 logger.warning(
                     "session audit sink raised for '%s': %s",
+                    ev.get("agent_id", ""), e,
+                )
+
+        # §22 — drain the fingerprint audit-log buckets (post-solve
+        # accept/reject signals + burn-state crossings).  Same per-minute
+        # aggregation pattern; ``page_origin`` is netloc-only, no full
+        # URLs / paths / queries.  Routed to the EventBus as
+        # ``type="fingerprint_event"`` so the dashboard can render a
+        # dedicated panel without colliding with captcha or session
+        # streams.
+        try:
+            fp_events = await _drain_fingerprint_audit()
+        except Exception as e:
+            logger.warning("fingerprint audit drain failed: %s", e)
+            fp_events = []
+        for ev in fp_events:
+            ev = dict(ev)
+            self._metrics_seq += 1
+            ev["seq"] = self._metrics_seq
+            ev["ts"] = now
+            self._metrics_history.append(ev)
+            if self._metrics_sink is None:
+                continue
+            try:
+                self._metrics_sink(ev)
+            except Exception as e:
+                logger.warning(
+                    "fingerprint audit sink raised for '%s': %s",
                     ev.get("agent_id", ""), e,
                 )
 
@@ -3313,6 +3690,24 @@ class BrowserManager:
             # Outside a running loop (shouldn't happen — _stop_instance
             # is only called from async paths), best-effort.
             _solve_rate_window.pop(agent_id, None)
+        # §22 — cancel any in-flight fingerprint health monitors so they
+        # cannot record spurious rejection signals against a torn-down
+        # Page.  We do NOT drop the rolling window itself: the operator
+        # may want to inspect the burn state via the dashboard endpoint
+        # AFTER stopping a flagged agent, and a future re-launch with the
+        # same agent id should surface the existing window so the burn
+        # alert isn't lost on a routine restart.  The window is cleared
+        # explicitly by the ``fingerprint-health/reset`` endpoint.
+        monitor_tasks = list(
+            getattr(inst, "_fingerprint_monitor_tasks", set()) or [],
+        )
+        for task in monitor_tasks:
+            task.cancel()
+        for task in monitor_tasks:
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
         jitter = getattr(inst, '_jitter_task', None)
         if jitter:
             jitter.cancel()
@@ -3455,6 +3850,47 @@ class BrowserManager:
                 "agents": list(self._instances.keys()),
                 "boot_id": self.boot_id,
             }
+
+    async def get_fingerprint_health(self, agent_id: str) -> dict:
+        """§22 — return the per-agent fingerprint health summary.
+
+        Returns the contract-stable shape from :func:`_get_fingerprint_health`
+        without requiring a live BrowserContext — the metric persists on
+        module-level state, so the operator can inspect a flagged agent
+        even after it has been stopped (useful when deciding whether to
+        rotate the profile before restart).
+
+        Defense-in-depth: ``agent_id`` is regex-validated even though
+        the dashboard-side proxy already enforces this — a future caller
+        that bypasses the proxy must not be able to harvest module-level
+        state for arbitrary keys.  An invalid id returns the empty shape
+        rather than raising, matching the read-mostly contract.
+        """
+        if not _AGENT_ID_RE.fullmatch(agent_id or ""):
+            return {
+                "window_size": 0,
+                "rejection_rate": 0.0,
+                "burned": False,
+                "last_signal_ts": None,
+            }
+        return await _get_fingerprint_health(agent_id)
+
+    async def reset_fingerprint_health(self, agent_id: str) -> dict:
+        """§22 — clear the rolling rejection window for ``agent_id``.
+
+        Returns ``{"reset": <bool>}`` indicating whether any state was
+        cleared.  Operator-only — gated upstream by the dashboard CSRF
+        check / browser-service bearer auth.  The expectation is that
+        the operator has rotated the profile manually first; the
+        endpoint does NOT touch the BrowserContext or storage state.
+
+        Defense-in-depth: ``agent_id`` is regex-validated.  An invalid
+        id returns ``{"reset": False}`` without touching state.
+        """
+        if not _AGENT_ID_RE.fullmatch(agent_id or ""):
+            return {"reset": False}
+        cleared = await _reset_fingerprint_window(agent_id)
+        return {"reset": cleared}
 
     async def focus(self, agent_id: str) -> bool:
         """Bring an agent's browser window to VNC foreground.
@@ -7029,6 +7465,241 @@ class BrowserManager:
                         "captcha cost refund failed", exc_info=True,
                     )
 
+    async def _monitor_post_solve_state(
+        self,
+        inst: CamoufoxInstance,
+        captcha_selectors: list[str],
+        kind: str,
+        page_origin: str,
+    ) -> None:
+        """§22 — observe post-solve page state and record outcome.
+
+        Runs as a fire-and-forget task spawned from :meth:`_check_captcha`
+        AFTER a ``solver_outcome="solved"`` envelope has been built.  We
+        do NOT block the action response on this — the operator-facing
+        burn metric is best-effort (an outcome we couldn't classify is
+        better dropped than blocking the agent loop on a 10s wait).
+
+        Signals:
+          * Same captcha selector still present after the timeout →
+            rejected. (Anti-bot framework re-rendered the challenge.)
+          * Page text contains one of :data:`_FINGERPRINT_REJECTION_TEXT`
+            within the timeout → rejected.
+          * Navigation away from the captcha page AND no captcha selector
+            on the new page → accepted.
+          * Stale signal (no clear outcome after the timeout) → DROP.
+            Polluting the metric with ambiguity would inflate the
+            rejection rate on slow sites and drive false-positive burns.
+
+        The monitor never raises — exceptions are caught and logged at
+        DEBUG so a torn-down Page during cancellation doesn't surface as
+        a noisy ERROR in the agent log.
+        """
+        agent_id = inst.agent_id
+        deadline = time.monotonic() + _FINGERPRINT_MONITOR_TIMEOUT_S
+        # Capture the URL at spawn-time so we can detect a navigation away.
+        try:
+            initial_url = inst.page.url or ""
+        except Exception:
+            initial_url = ""
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    # Stale — drop without recording.  See docstring.
+                    return
+                # Sleep in small slices so a redirect chain that finishes
+                # fast can be detected before the full 10s elapses; cheap
+                # because the rejection-text check is one ``inner_text()``
+                # call per slice.
+                await asyncio.sleep(min(0.5, remaining))
+
+                # Has the page navigated to a different URL?
+                try:
+                    current_url = inst.page.url or ""
+                except Exception:
+                    # Page closed mid-monitor (agent stopped, tab gone).
+                    # Treat as a stale signal — no record.
+                    return
+
+                # Probe captcha selectors on the live page.  Wrap each in
+                # its own try so a single bad selector doesn't kill the
+                # whole monitor pass.
+                still_present = False
+                for sel in captcha_selectors:
+                    try:
+                        if await inst.page.locator(sel).count() > 0:
+                            still_present = True
+                            break
+                    except Exception:
+                        # Locator raises during nav / detached frame.
+                        # Don't conclude rejection from a probe failure.
+                        continue
+
+                # Vendor-specific element probes — these are the most
+                # reliable signal because they're language-independent
+                # and survive layout changes.  Cloudflare 1xxx error
+                # containers, DataDome / PerimeterX / Imperva / Akamai /
+                # F5 block-page selectors all surface here.  A single
+                # match is enough — the monitor's job is to tell us
+                # the *fingerprint* is flagged, not which vendor flagged it.
+                vendor_block_found = False
+                for sel in _FINGERPRINT_REJECTION_SELECTORS:
+                    try:
+                        if await inst.page.locator(sel).count() > 0:
+                            vendor_block_found = True
+                            break
+                    except Exception:
+                        # Locator raises during nav / detached frame.
+                        # Try the next selector — a probe failure for
+                        # one vendor doesn't tell us anything about
+                        # whether another vendor flagged us.
+                        continue
+
+                if vendor_block_found:
+                    await self._handle_post_solve_outcome(
+                        agent_id, rejected=True, page_origin=page_origin,
+                    )
+                    return
+
+                # Look for explicit rejection text.  Bound the read so a
+                # huge body doesn't stall the monitor; ``inner_text`` on
+                # ``body`` is fine for any normal anti-bot interstitial.
+                rejection_text_found = False
+                try:
+                    body_text = await inst.page.locator("body").inner_text(
+                        timeout=2000,
+                    )
+                    if body_text:
+                        haystack = body_text.lower()
+                        for needle in _FINGERPRINT_REJECTION_TEXT:
+                            if needle in haystack:
+                                rejection_text_found = True
+                                break
+                except Exception:
+                    # Best-effort — body read failed (cross-origin frame
+                    # / page closed / read timeout).  Don't infer
+                    # rejection from a read failure.
+                    pass
+
+                if rejection_text_found:
+                    await self._handle_post_solve_outcome(
+                        agent_id, rejected=True, page_origin=page_origin,
+                    )
+                    return
+
+                # Navigation-away check: only counts as accepted when
+                # the new page also has no captcha selector. A redirect
+                # to a new captcha page (multi-step gate) keeps us in
+                # the loop until the deadline rather than recording a
+                # premature accept.
+                if current_url != initial_url and not still_present:
+                    await self._handle_post_solve_outcome(
+                        agent_id, rejected=False, page_origin=page_origin,
+                    )
+                    return
+
+                # Same URL + still present after we've had at least a
+                # small chunk of the budget — keep waiting until deadline
+                # to see if the page clears.  Only the FINAL still-present
+                # check (after the full timeout) records a rejection,
+                # which we do at the top-of-loop fall-through.
+                if remaining <= 0.5 and still_present:
+                    await self._handle_post_solve_outcome(
+                        agent_id, rejected=True, page_origin=page_origin,
+                    )
+                    return
+        except asyncio.CancelledError:
+            # Agent stopped — don't record anything.  Re-raise to honour
+            # cancellation.
+            raise
+        except Exception:
+            # Anything else — log + drop.  Monitors must NEVER crash an
+            # agent's hot path.
+            logger.debug(
+                "fingerprint monitor for %s raised unexpectedly",
+                agent_id, exc_info=True,
+            )
+            return
+        # Suppress unused-variable lint for ``kind`` — kept on the
+        # signature for future extension (per-kind monitor tuning).
+        _ = kind
+
+    async def _handle_post_solve_outcome(
+        self, agent_id: str, *, rejected: bool, page_origin: str,
+    ) -> None:
+        """Record an outcome to the rolling window + audit aggregator.
+
+        Centralised so the monitor task and any future explicit-record
+        callers (e.g. an action that observes a rejection synchronously)
+        emit consistent signals to the dashboard.  Burn-state crossing
+        emits the ``fingerprint_burn`` audit event exactly once per
+        crossing — repeated calls within the burn window do not re-emit.
+        """
+        try:
+            was_burned_before = await _is_fingerprint_burned(agent_id)
+            now_burned = await _record_fingerprint_outcome(
+                agent_id, rejected,
+            )
+            signal = "rejected" if rejected else "accepted"
+            await _record_fingerprint_audit_event(
+                agent_id, signal, page_origin,
+            )
+            if now_burned and not was_burned_before:
+                # Fresh crossing of the burn threshold — surface as a
+                # distinct signal so the dashboard panel can highlight
+                # the transition (rather than relying on aggregating
+                # rejection counts).  Per-burn emit, NOT per-rejection.
+                await _record_fingerprint_audit_event(
+                    agent_id, "fingerprint_burn", page_origin,
+                )
+                logger.warning(
+                    "fingerprint burn detected for %s (rejection rate "
+                    ">=%.0f%%); next captcha solves will surface "
+                    "next_action=retry_with_fresh_profile",
+                    agent_id, _FINGERPRINT_BURN_THRESHOLD * 100,
+                )
+        except Exception:
+            logger.debug(
+                "fingerprint outcome record failed for %s",
+                agent_id, exc_info=True,
+            )
+
+    def _spawn_fingerprint_monitor(
+        self,
+        inst: CamoufoxInstance,
+        captcha_selectors: list[str],
+        kind: str,
+    ) -> None:
+        """Schedule :meth:`_monitor_post_solve_state` as a tracked task.
+
+        Registers the task on ``inst._fingerprint_monitor_tasks`` so
+        :meth:`_stop_instance` can cancel it at agent stop.  Tasks
+        self-deregister on completion via ``add_done_callback`` so the
+        set doesn't grow unbounded for a long-running agent.
+        """
+        try:
+            page_url = inst.page.url or ""
+        except Exception:
+            page_url = ""
+        page_origin = _page_origin_for_audit(page_url)
+        try:
+            task = asyncio.create_task(
+                self._monitor_post_solve_state(
+                    inst, captcha_selectors, kind, page_origin,
+                ),
+                name=f"fp-monitor-{inst.agent_id}",
+            )
+        except RuntimeError:
+            # No running loop — extremely unusual (we got here via an
+            # ``async def``); play safe and skip the spawn rather than
+            # raise into the caller.
+            return
+        inst._fingerprint_monitor_tasks.add(task)
+        task.add_done_callback(
+            lambda t, _inst=inst: _inst._fingerprint_monitor_tasks.discard(t),
+        )
+
     async def _check_captcha(self, inst: CamoufoxInstance) -> dict:
         """Check for CAPTCHA elements and attempt auto-solve if configured.
 
@@ -7409,6 +8080,54 @@ class BrowserManager:
                                     page_url_for_policy,
                                     policy="low_success",
                                 )
+                        # §22 — fingerprint burn override.  Once the
+                        # rolling rejection rate crosses the burn
+                        # threshold every subsequent ``_check_captcha``
+                        # envelope carries ``fingerprint_burn=True`` and
+                        # routes the agent to ``retry_with_fresh_profile``.
+                        # Auto-rotation is intentionally NOT done here —
+                        # rotating a profile mid-flight would wipe
+                        # session cookies / login state and cascade into
+                        # other agents' work.  The operator clears the
+                        # burn manually via the dashboard reset endpoint
+                        # after rotating the profile.  Skips
+                        # ``solver_outcome=="solved"`` envelopes so a
+                        # genuine solve still surfaces ``next_action="solved"``
+                        # — the override applies to the FOLLOWING
+                        # captcha encounter, not the one we're currently
+                        # finalising (which we still let through to
+                        # produce a real signal for the monitor).  When
+                        # ``solver_attempted=False`` (no_solver / breaker /
+                        # cost_cap escalations) we still mark the
+                        # envelope so the agent loop sees the burn state
+                        # before it requests operator help.
+                        if await _is_fingerprint_burned(inst.agent_id):
+                            envelope["fingerprint_burn"] = True
+                            outcome = envelope.get("solver_outcome")
+                            if outcome != "solved":
+                                envelope["next_action"] = (
+                                    "retry_with_fresh_profile"
+                                )
+                        # §22 — schedule the post-solve monitor when the
+                        # solver actually injected a token.  Fire-and-forget
+                        # so the agent's action response is not blocked on
+                        # the 10s observation window.  Skipped escalations
+                        # (``skipped_behavioral`` / ``request_captcha_help``)
+                        # are NOT monitored — no token was injected, so
+                        # the page state has nothing to tell us about the
+                        # fingerprint.  Failed-solve outcomes (rejected /
+                        # injection_failed / timeout) are also not
+                        # monitored — the page never received a valid
+                        # token, so a still-present captcha is expected
+                        # rather than a fingerprint signal.
+                        if (
+                            envelope.get("solver_outcome") == "solved"
+                            and envelope.get("solver_attempted")
+                        ):
+                            self._spawn_fingerprint_monitor(
+                                inst, captcha_selectors,
+                                envelope.get("kind", "unknown"),
+                            )
                         return envelope
 
                     if self._captcha_solver:

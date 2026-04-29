@@ -1363,6 +1363,118 @@ def create_dashboard_router(
                 },
             }
 
+    @api_router.get("/api/agents/{agent_id}/fingerprint-health")
+    async def api_agent_fingerprint_health(agent_id: str) -> dict:
+        """Phase 10 §22 — return the per-agent fingerprint health summary.
+
+        Proxies to the browser service's
+        ``/browser/{agent_id}/fingerprint-health`` endpoint, which returns
+        only ``{window_size, rejection_rate, burned, last_signal_ts}`` —
+        no URL / origin / cookie data leaks here.
+
+        Returns the §2.3 success/error envelope so the panel can render a
+        "service down" state without conflating it with "no signal".
+        """
+        if agent_id not in agent_registry:
+            raise HTTPException(404, "Agent not found")
+        if (
+            not runtime
+            or not hasattr(runtime, "browser_service_url")
+            or not runtime.browser_service_url
+        ):
+            return {
+                "success": False,
+                "error": {
+                    "code": "service_unavailable",
+                    "message": "Browser service not available",
+                    "retry_after_ms": None,
+                },
+            }
+        try:
+            browser_auth = getattr(runtime, "browser_auth_token", "")
+            headers = {}
+            if browser_auth:
+                headers["Authorization"] = f"Bearer {browser_auth}"
+            resp = await _dashboard_browser_client.get(
+                f"{runtime.browser_service_url}/browser/{agent_id}/fingerprint-health",
+                headers=headers,
+            )
+            if resp.status_code != 200:
+                return {
+                    "success": False,
+                    "error": {
+                        "code": "upstream_error",
+                        "message": f"Browser service returned {resp.status_code}",
+                        "retry_after_ms": None,
+                    },
+                }
+            return {"success": True, "data": resp.json()}
+        except Exception as e:
+            return {
+                "success": False,
+                "error": {
+                    "code": "service_unavailable",
+                    "message": str(e),
+                    "retry_after_ms": None,
+                },
+            }
+
+    @api_router.post("/api/agents/{agent_id}/fingerprint-health/reset")
+    async def api_agent_fingerprint_health_reset(agent_id: str) -> dict:
+        """Phase 10 §22 — clear the per-agent fingerprint rejection window.
+
+        Operator-only endpoint, used AFTER manually rotating the
+        BrowserForge fingerprint.  The router-level CSRF guard
+        (``_csrf_check`` requires ``X-Requested-With``) gates this path,
+        so a cookie-only CSRF cannot reset a flagged agent's burn state.
+        The live BrowserContext is intentionally NOT touched —
+        ``/browser/{agent_id}/reset`` remains the operator action for
+        wiping in-process browser state.
+        """
+        if agent_id not in agent_registry:
+            raise HTTPException(404, "Agent not found")
+        if (
+            not runtime
+            or not hasattr(runtime, "browser_service_url")
+            or not runtime.browser_service_url
+        ):
+            return {
+                "success": False,
+                "error": {
+                    "code": "service_unavailable",
+                    "message": "Browser service not available",
+                    "retry_after_ms": None,
+                },
+            }
+        try:
+            browser_auth = getattr(runtime, "browser_auth_token", "")
+            headers = {}
+            if browser_auth:
+                headers["Authorization"] = f"Bearer {browser_auth}"
+            resp = await _dashboard_browser_client.post(
+                f"{runtime.browser_service_url}/browser/{agent_id}/fingerprint-health/reset",
+                headers=headers,
+            )
+            if resp.status_code != 200:
+                return {
+                    "success": False,
+                    "error": {
+                        "code": "upstream_error",
+                        "message": f"Browser service returned {resp.status_code}",
+                        "retry_after_ms": None,
+                    },
+                }
+            return {"success": True, "data": resp.json()}
+        except Exception as e:
+            return {
+                "success": False,
+                "error": {
+                    "code": "service_unavailable",
+                    "message": str(e),
+                    "retry_after_ms": None,
+                },
+            }
+
     @api_router.get("/api/agent-templates")
     async def api_agent_templates() -> list:
         """Return available skill templates for creating new agents."""
