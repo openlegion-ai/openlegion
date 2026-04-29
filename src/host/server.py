@@ -26,6 +26,7 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.responses import StreamingResponse
 
 from src.host.credentials import is_system_credential
+from src.shared.redaction import redact_url
 from src.shared.types import (
     AGENT_ID_RE_PATTERN,
     RESERVED_AGENT_IDS,
@@ -1192,11 +1193,16 @@ def create_mesh_app(
             raise HTTPException(400, "Service name is required")
 
         if event_bus:
+            # OAuth callback URLs (?code=...&state=...) and other
+            # query-string secrets must not leak to the dashboard event
+            # history. ``redact_url`` strips sensitive query params
+            # while preserving scheme/host/path so the operator still
+            # sees what target the agent meant to log into.
             event_bus.emit(
                 "browser_login_request",
                 agent=agent_id,
                 data={
-                    "url": url[:2048],
+                    "url": redact_url(url)[:2048],
                     "service": service[:128],
                     "description": description[:500],
                 },
@@ -3174,6 +3180,11 @@ def create_mesh_app(
         if _stage_locks_guard is None or _stage_locks_guard_loop is not loop:
             _stage_locks_guard = asyncio.Lock()
             _stage_locks_guard_loop = loop
+            # Per-handle locks were bound to the previous loop; using
+            # them on the new loop raises ``RuntimeError: ... attached
+            # to a different loop``. Clear the dict so subsequent
+            # ``_get_stage_lock`` calls construct fresh locks.
+            _stage_locks.clear()
         return _stage_locks_guard
 
     async def _get_stage_lock(handle: str) -> asyncio.Lock:

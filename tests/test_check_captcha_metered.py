@@ -798,3 +798,83 @@ class TestProviderMissingFailsClosedWhenCapOn:
         # Warning was logged so operators see the misconfig.
         joined = "\n".join(rec.getMessage() for rec in caplog.records)
         assert "provider" in joined.lower()
+
+
+# ── 13. A1: cancellation refund leak — asyncio.shield protects the refund ──
+
+
+class TestCancellationRefundsReservation:
+    """``_metered_solve`` reserves the published cost-cap price BEFORE the
+    provider HTTP call and refunds in ``finally`` if no token came back.
+    Pre-fix, the ``finally`` used ``contextlib.suppress(Exception)`` which
+    does NOT catch ``asyncio.CancelledError`` (a ``BaseException``). On
+    task cancellation the ``await _cost.adjust_cost(...)`` itself
+    re-raises CancelledError (cancellation point), the refund is skipped,
+    and the reserved spend stays committed forever — silent over-charge.
+
+    After the fix, ``asyncio.shield`` wraps the refund coro so the local
+    ``await`` raising CancelledError still lets the shielded Task
+    complete in the background. This test verifies that mid-solve task
+    cancellation eventually refunds to the pre-solve balance.
+    """
+
+    @pytest.mark.asyncio
+    async def test_cancellation_during_solve_refunds_reservation(
+        self, mgr, monkeypatch,
+    ):
+        # $5.00 cap so the reservation isn't itself capped. The reservation
+        # for ``recaptcha-v2-checkbox`` at 2captcha is the worst-case tier
+        # (proxy-aware = 300 mc).
+        monkeypatch.setenv("CAPTCHA_COST_LIMIT_USD_PER_AGENT_MONTH", "5.00")
+        from src.browser.service import _max_published_solve_cost_millicents
+        reservation_mc = _max_published_solve_cost_millicents(
+            "2captcha", "recaptcha-v2-checkbox",
+        )
+        assert reservation_mc and reservation_mc > 0
+
+        # Pre-charge a known baseline so we can assert the post-cancel
+        # balance returns to it (refund applied).
+        baseline_mc = 50
+        await cost.add_cost("agent-1", baseline_mc)
+
+        # Solver awaits an event we never set, blocking the Task in the
+        # post-reservation / pre-token-return window. The metered_solve
+        # task is cancelled while awaiting solver.solve.
+        gate = asyncio.Event()
+
+        async def _slow_solve(*args, **kwargs):
+            await gate.wait()
+            return _solved()
+
+        solver = _mk_solver(return_value=_solved(), provider="2captcha")
+        solver.solve = AsyncMock(side_effect=_slow_solve)
+        mgr._captcha_solver = solver
+        inst = _mk_inst()
+
+        task = asyncio.create_task(
+            mgr._metered_solve(
+                inst, 'iframe[src*="recaptcha"]',
+                "recaptcha-v2-checkbox",
+            ),
+        )
+        # Yield enough turns for the task to enter the gate (reserve
+        # the cost and start awaiting the slow solver).
+        for _ in range(10):
+            await asyncio.sleep(0)
+        # Reservation visible in the counter: baseline + reservation_mc.
+        assert await cost.get_millicents("agent-1") == baseline_mc + reservation_mc
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        # Yield turns so the shielded refund Task can run to completion.
+        for _ in range(20):
+            await asyncio.sleep(0)
+
+        # Refund applied — counter is back to baseline, NOT
+        # baseline+reservation. Pre-fix this assertion would be the
+        # over-charged total (silent leak). Post-fix the shield
+        # + ``CancelledError: raise`` protects the refund coro's
+        # completion.
+        assert await cost.get_millicents("agent-1") == baseline_mc

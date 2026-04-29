@@ -878,6 +878,54 @@ class TestBrowserLoginRequestEndpoint:
         event_bus.emit.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_emitted_url_is_redacted(self, tmp_path):
+        """A9: ``request_browser_login`` MUST redact the URL before
+        emitting to the event bus. OAuth callback URLs (``?code=...&
+        state=...``) and other query-string secrets must NOT leak to
+        the dashboard event history. ``redact_url`` strips query
+        params with sensitive names while preserving scheme/host/path.
+        """
+        from httpx import ASGITransport, AsyncClient
+
+        app, event_bus, _cm = _build_app(
+            tmp_path,
+            perms_map={"worker": {"can_use_browser": True}},
+        )
+
+        sensitive_url = (
+            "https://example.com/cb"
+            "?code=secret_xyz_must_not_leak"
+            "&state=abc"
+            "&access_token=tk_live_must_not_leak"
+        )
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            resp = await client.post(
+                "/mesh/browser-login-request",
+                json={
+                    "agent_id": "worker",
+                    "url": sensitive_url,
+                    "service": "X",
+                    "description": "Log in",
+                },
+                headers={"X-Agent-ID": "worker"},
+            )
+        assert resp.status_code == 200, resp.text
+
+        event_bus.emit.assert_called_once()
+        emitted_data = event_bus.emit.call_args[1]["data"]
+        emitted_url = emitted_data["url"]
+        # The sensitive query values MUST NOT appear in the emitted
+        # event payload — ``redact_url`` strips them before emit.
+        assert "secret_xyz_must_not_leak" not in emitted_url
+        assert "tk_live_must_not_leak" not in emitted_url
+        # Scheme + host + path are preserved so the operator still
+        # sees what target the agent meant to log into.
+        assert emitted_url.startswith("https://example.com/cb")
+
+    @pytest.mark.asyncio
     async def test_rate_limit_charged_to_caller_not_target(self, tmp_path):
         """The notify rate limit MUST be charged to the caller, never the
         target. Defense-in-depth: the original PR attributed the limit to

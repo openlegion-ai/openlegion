@@ -7604,15 +7604,22 @@ class TestGetSolver:
                 flags.reload_operator_settings()
 
     def test_get_solver_reads_operator_browser_flags(self, tmp_path):
-        """Operator settings browser_flags configure the solver without env."""
+        """Operator settings browser_flags configure the PROVIDER (non-secret)
+        from the JSON file. The KEY is env-only (see ``flags._ENV_ONLY_FLAGS``)
+        — providing it via settings.json is silently dropped with a warning,
+        and the env-var fallback wins."""
         settings = tmp_path / "settings.json"
+        # Settings file declares both — provider sticks, key is stripped.
         settings.write_text(json.dumps({
             "browser_flags": {
                 "CAPTCHA_SOLVER_PROVIDER": "capsolver",
                 "CAPTCHA_SOLVER_KEY": "settings-key-456",
             },
         }))
-        with patch.dict("os.environ", {"OPENLEGION_SETTINGS_PATH": str(settings)}, clear=True):
+        with patch.dict("os.environ", {
+            "OPENLEGION_SETTINGS_PATH": str(settings),
+            "CAPTCHA_SOLVER_KEY": "env-key-789",
+        }, clear=True):
             from src.browser import flags
             from src.browser.captcha import CaptchaSolver, get_solver
 
@@ -7621,7 +7628,9 @@ class TestGetSolver:
                 solver = get_solver()
                 assert isinstance(solver, CaptchaSolver)
                 assert solver.provider == "capsolver"
-                assert solver.api_key == "settings-key-456"
+                # The env-var key WINS — settings.json plaintext key was
+                # ignored at load time per the env-only flag policy.
+                assert solver.api_key == "env-key-789"
             finally:
                 flags.reload_operator_settings()
 

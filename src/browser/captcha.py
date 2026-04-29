@@ -587,7 +587,22 @@ _DEFAULT_V3_MIN_SCORE = 0.7
 
 
 def get_solver() -> CaptchaSolver | None:
-    """Create a CaptchaSolver from browser flags, or None if not configured."""
+    """Return the configured solver, or ``None`` if no provider is set.
+
+    Reads ``CAPTCHA_SOLVER_PROVIDER`` and ``CAPTCHA_SOLVER_KEY`` at
+    process startup. **Per-agent overrides are NOT supported for
+    provider/key** — the solver is constructed once in
+    ``BrowserManager.__init__`` and shared process-wide. The returned
+    instance carries stateful breaker / health-check / cost-counter
+    coupling that would not be safe to swap per-call.
+
+    Use ``CAPTCHA_DISABLED`` per-agent to disable solving for a specific
+    agent. Solver-proxy creds DO support per-agent override (see
+    :func:`get_solver_proxy_config`).
+
+    Live-reload requires browser-service restart; flag changes via
+    ``config/settings.json`` take effect on the next process start.
+    """
     provider = flags.get_str("CAPTCHA_SOLVER_PROVIDER", "").strip().lower()
     api_key = flags.get_str("CAPTCHA_SOLVER_KEY", "").strip()
     if not provider or not api_key:
@@ -2052,6 +2067,15 @@ class CaptchaSolver:
                 # Real-world flow: provider verifies the token
                 # server-side from the form post; the SDK callback is
                 # not strictly required.
+                # hCaptcha exposes the response token under
+                # ``[name="h-captcha-response"]`` only. The previous
+                # implementation also wrote into
+                # ``[name="g-recaptcha-response"]`` — that's a pure
+                # cross-family mistake (g-recaptcha-response is a
+                # reCAPTCHA field; touching it from the hCaptcha branch
+                # leaks tokens across families on pages embedding both
+                # widgets and silently flips ``updated=true`` whenever
+                # an unrelated reCAPTCHA field exists).
                 results = await _eval_in_all_frames("""(token) => {
                     let updated = false;
                     const fire = (el) => {
@@ -2060,13 +2084,7 @@ class CaptchaSolver:
                             el.dispatchEvent(new Event('change', { bubbles: true }));
                         } catch (e) {}
                     };
-                    const textarea = document.querySelector('[name="h-captcha-response"]');
-                    if (textarea) {
-                        textarea.value = token;
-                        fire(textarea);
-                        updated = true;
-                    }
-                    document.querySelectorAll('[name="g-recaptcha-response"]').forEach(el => {
+                    document.querySelectorAll('[name="h-captcha-response"]').forEach(el => {
                         el.value = token;
                         fire(el);
                         updated = true;
@@ -2081,6 +2099,17 @@ class CaptchaSolver:
                 # mirror ``[name="cf-turnstile-response"]`` at the top
                 # level too. Walk both so we hit whichever variant the
                 # site uses.
+                # Turnstile selector tightening: only fire on the
+                # canonical ``[name="cf-turnstile-response"]`` field
+                # AND only when the page actually carries Turnstile
+                # widget context (a ``.cf-turnstile``/``[class*=cf-turnstile]``
+                # ancestor or a Cloudflare-challenge iframe). The prior
+                # ``input[name*="turnstile"]`` substring fallback was a
+                # false-positive vector — A/B test flag inputs and
+                # marketing pixels containing ``turnstile`` substrings
+                # in unrelated pages would return ``updated=true`` and
+                # let us bill the user for a "successful" injection
+                # that landed nowhere.
                 per_frame = await _eval_in_all_frames("""(token) => {
                     let updated = false;
                     let widget_count = 0;
@@ -2090,13 +2119,26 @@ class CaptchaSolver:
                             el.dispatchEvent(new Event('change', { bubbles: true }));
                         } catch (e) {}
                     };
-                    // Find the Turnstile response input
-                    const input = document.querySelector('[name="cf-turnstile-response"]')
-                        || document.querySelector('input[name*="turnstile"]');
-                    if (input) {
-                        input.value = token;
-                        fire(input);
-                        updated = true;
+                    const turnstile_iframe = document.querySelector(
+                        'iframe[src*="challenges.cloudflare.com"]'
+                    );
+                    const inputs = document.querySelectorAll(
+                        '[name="cf-turnstile-response"]'
+                    );
+                    for (const input of inputs) {
+                        // Confirm Turnstile widget context: the input
+                        // is inside (or adjacent to) a ``.cf-turnstile``
+                        // wrapper, OR a Cloudflare challenge iframe is
+                        // on the page. Without context the field is
+                        // probably a coincidentally-named hidden input.
+                        const widget = input.closest(
+                            '.cf-turnstile, [class*="cf-turnstile"]'
+                        );
+                        if (widget || turnstile_iframe) {
+                            input.value = token;
+                            fire(input);
+                            updated = true;
+                        }
                     }
                     // Trigger callback if available. On pages with
                     // multiple Turnstile widgets we fire the callback
