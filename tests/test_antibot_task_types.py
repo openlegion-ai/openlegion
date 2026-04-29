@@ -34,6 +34,7 @@ from src.browser.captcha import (
     _SOLVE_TIMEOUT_DEFAULTS_MS,
     CaptchaSolver,
     MultiProviderSolver,
+    _apply_antibot_solution,
     _extract_solution_token,
 )
 from src.browser.captcha_cost_counter import (
@@ -452,3 +453,181 @@ class TestPricing:
         for kind in _ANTIBOT_KINDS:
             assert f"2captcha-{kind}" not in PRICING_MILLICENTS
             assert ("2captcha", kind) not in PRICING_MILLICENTS_PROXY_AWARE
+
+
+# ── 10: _apply_antibot_solution — cookies → BrowserContext ────────────
+
+
+class TestApplyAntibotSolution:
+    """Wires the JSON-encoded anti-bot token into a real
+    :class:`playwright.async_api.BrowserContext`. Pre-fix the token was
+    extracted but never applied, so every anti-bot solve cost money and
+    produced ``injection_failed``."""
+
+    def _make_page_with_context(self):
+        """Build a page mock with a working ``page.context.add_cookies``
+        and ``page.reload``. Returns ``(page, calls)`` where ``calls``
+        is a list capturing the args of each add_cookies invocation."""
+        page = MagicMock()
+        page.url = "https://protected.site/landing"
+        ctx = MagicMock()
+        calls: list[list[dict]] = []
+
+        async def _add_cookies(cookies):
+            # Playwright takes a list-of-dicts; capture for assertion.
+            calls.append(list(cookies))
+        ctx.add_cookies = _add_cookies
+
+        async def _reload(**kw):
+            return None
+        page.reload = _reload
+
+        page.context = ctx
+        return page, calls
+
+    @pytest.mark.asyncio
+    async def test_applies_canonical_cookie_shape(self):
+        page, calls = self._make_page_with_context()
+        token = json.dumps({
+            "cookies": [
+                {"name": "_abck", "value": "abc123", "domain": ".target.com",
+                 "path": "/", "secure": True, "httpOnly": True},
+                {"name": "bm_sz", "value": "xyz", "domain": ".target.com",
+                 "path": "/"},
+            ],
+        })
+        ok = await _apply_antibot_solution(page, token)
+        assert ok is True
+        assert len(calls) == 1
+        applied = calls[0]
+        assert len(applied) == 2
+        # Canonical fields forwarded.
+        assert applied[0]["name"] == "_abck"
+        assert applied[0]["value"] == "abc123"
+        assert applied[0]["domain"] == ".target.com"
+        assert applied[0]["secure"] is True
+
+    @pytest.mark.asyncio
+    async def test_uses_page_url_when_cookie_lacks_domain(self):
+        page, calls = self._make_page_with_context()
+        token = json.dumps({
+            "cookies": [
+                {"name": "session", "value": "v"},  # no domain/url
+            ],
+        })
+        ok = await _apply_antibot_solution(page, token)
+        assert ok is True
+        assert calls[0][0]["url"] == "https://protected.site/landing"
+
+    @pytest.mark.asyncio
+    async def test_skips_cookie_with_no_name(self):
+        page, calls = self._make_page_with_context()
+        token = json.dumps({
+            "cookies": [
+                {"value": "orphan"},  # no name → skipped
+                {"name": "good", "value": "v", "domain": ".x.com"},
+            ],
+        })
+        ok = await _apply_antibot_solution(page, token)
+        assert ok is True
+        # Only the well-formed cookie was applied.
+        assert len(calls[0]) == 1
+        assert calls[0][0]["name"] == "good"
+
+    @pytest.mark.asyncio
+    async def test_reload_called_after_apply(self):
+        page, calls = self._make_page_with_context()
+        reload_calls: list = []
+
+        async def _reload(**kw):
+            reload_calls.append(kw)
+        page.reload = _reload
+
+        token = json.dumps({
+            "cookies": [{"name": "x", "value": "v", "domain": ".x.com"}],
+        })
+        ok = await _apply_antibot_solution(page, token)
+        assert ok is True
+        assert len(reload_calls) == 1
+        # Use domcontentloaded so we don't block on the cleared page's
+        # background polling.
+        assert reload_calls[0].get("wait_until") == "domcontentloaded"
+
+    @pytest.mark.asyncio
+    async def test_malformed_json_returns_false(self):
+        page, _ = self._make_page_with_context()
+        ok = await _apply_antibot_solution(page, "{ not valid json")
+        assert ok is False
+
+    @pytest.mark.asyncio
+    async def test_empty_token_returns_false(self):
+        page, _ = self._make_page_with_context()
+        ok = await _apply_antibot_solution(page, "")
+        assert ok is False
+
+    @pytest.mark.asyncio
+    async def test_no_cookies_returns_false(self):
+        page, _ = self._make_page_with_context()
+        token = json.dumps({"userAgent": "Mozilla/5.0", "sensorData": "..."})
+        ok = await _apply_antibot_solution(page, token)
+        assert ok is False
+
+    @pytest.mark.asyncio
+    async def test_add_cookies_failure_returns_false(self):
+        page = MagicMock()
+        page.url = "https://x.com/"
+        ctx = MagicMock()
+
+        async def _failing_add(cookies):
+            raise RuntimeError("playwright rejected cookie shape")
+        ctx.add_cookies = _failing_add
+        page.context = ctx
+        page.reload = AsyncMock()
+
+        token = json.dumps({
+            "cookies": [{"name": "x", "value": "v", "domain": ".x.com"}],
+        })
+        ok = await _apply_antibot_solution(page, token)
+        assert ok is False
+        # Reload must NOT fire when the cookie apply failed — there's
+        # nothing for it to apply on the next request.
+        page.reload.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_context_returns_false(self):
+        page = MagicMock()
+        page.url = "https://x.com/"
+        page.context = None  # legacy / mock without context
+        page.reload = AsyncMock()
+
+        token = json.dumps({
+            "cookies": [{"name": "x", "value": "v", "domain": ".x.com"}],
+        })
+        ok = await _apply_antibot_solution(page, token)
+        assert ok is False
+
+    @pytest.mark.asyncio
+    async def test_inject_token_routes_antibot_kind_through_apply(self):
+        """End-to-end: ``CaptchaSolver._inject_token`` routes anti-bot
+        kinds through ``_apply_antibot_solution`` rather than the
+        recaptcha/hcaptcha/turnstile branches."""
+        solver = CaptchaSolver("capsolver", "fake-key")
+        page = MagicMock()
+        page.url = "https://protected.site/"
+        ctx = MagicMock()
+        ctx.add_cookies = AsyncMock()
+        page.context = ctx
+        page.reload = AsyncMock()
+        # Stop ``_eval_in_all_frames`` from being called — the anti-bot
+        # branch should short-circuit before any frame evaluation.
+        page.evaluate = AsyncMock(side_effect=AssertionError(
+            "anti-bot path must NOT call page.evaluate",
+        ))
+
+        token = json.dumps({
+            "cookies": [{"name": "_abck", "value": "v", "domain": ".x.com"}],
+        })
+        ok = await solver._inject_token(page, "js-challenge-akamai", token)
+        assert ok is True
+        ctx.add_cookies.assert_awaited_once()
+        page.reload.assert_awaited_once()

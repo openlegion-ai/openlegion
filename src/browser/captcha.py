@@ -12,6 +12,7 @@ configured, the existing fallback (ask user via VNC) is preserved.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
 from collections import deque
@@ -262,14 +263,122 @@ def _redact_clientkey_text(text: str) -> str:
 # ``cookies`` / ``userAgent`` / ``sensorData`` instead of the
 # CAPTCHA-style ``gRecaptchaResponse`` / ``token`` field. Surface the
 # solution as a JSON-serialised string so the caller's accounting path
-# fires (provider was paid) while making clear via the token shape that
-# it isn't a CAPTCHA-injectable token. The ``_inject_token`` path doesn't
-# match the anti-bot families and surfaces ``injection_failed``, which
-# is the honest signal until a future PR threads the cookies / userAgent
-# back into ``page.context`` directly.
+# fires (provider was paid) and :func:`_apply_antibot_solution` can
+# re-parse it on the injection path to apply the cookies via
+# :class:`playwright.async_api.BrowserContext`.
 _ANTIBOT_SOLUTION_KEYS: frozenset[str] = frozenset({
     "cookies", "userAgent", "sensorData", "headers",
 })
+
+
+async def _apply_antibot_solution(page: object, token: str) -> bool:
+    """Apply a CapSolver anti-bot solution payload to the BrowserContext.
+
+    ``token`` is the JSON string produced by :func:`_extract_solution_token`
+    on an anti-bot solve — typically ``{"cookies": [...], "userAgent":
+    "...", "sensorData": "..."}``. We:
+
+    1. Parse the JSON. Bail cleanly on malformed input (provider rotated
+       the response shape — surface as ``injection_failed`` so the
+       operator-handoff path picks up).
+    2. Apply each cookie via ``page.context.add_cookies``. Playwright's
+       cookie shape is well-documented; we forward the canonical fields
+       and use the page URL as a fallback target when the provider
+       didn't include a domain.
+    3. Reload the page so the next request carries the cleared cookies.
+       Anti-bot challenges are STATEFUL — without a reload, the current
+       page DOM still shows the challenge and the agent's next click
+       hits the pre-clear state.
+
+    Returns True iff at least one cookie was applied successfully.
+    Failure modes (malformed JSON, no cookies, ``add_cookies`` raised,
+    no ``page.context``) all return False so the caller correctly
+    records ``injection_failed``.
+    """
+    if not token:
+        return False
+    try:
+        sol = json.loads(token)
+    except (TypeError, ValueError):
+        logger.debug(
+            "anti-bot solution: malformed JSON token — provider may have "
+            "rotated the response shape; falling back to operator handoff"
+        )
+        return False
+    if not isinstance(sol, dict):
+        return False
+
+    raw_cookies = sol.get("cookies")
+    if not isinstance(raw_cookies, list) or not raw_cookies:
+        return False
+
+    # Playwright BrowserContext.add_cookies requires either ``url`` or
+    # both ``domain`` and ``path``. Most providers return ``domain`` +
+    # ``path`` already; we normalize to a small whitelist of known
+    # Playwright fields and fall back to ``url=<page url>`` when the
+    # entry has no domain.
+    page_url = ""
+    try:
+        page_url = page.url or ""
+    except Exception:
+        pass
+
+    normalized: list[dict] = []
+    for c in raw_cookies:
+        if not isinstance(c, dict):
+            continue
+        name = c.get("name")
+        value = c.get("value")
+        if not isinstance(name, str) or not name or "value" not in c:
+            continue
+        norm: dict = {"name": name, "value": str(value)}
+        # Forward Playwright's canonical cookie fields when present.
+        for k in ("domain", "path", "expires", "httpOnly", "secure", "sameSite"):
+            if k in c and c[k] is not None:
+                norm[k] = c[k]
+        # Fallback target — Playwright requires either ``url`` or
+        # (``domain``+``path``). If neither is present, point at the
+        # current page URL so the cookie still lands somewhere usable.
+        if "domain" not in norm and "url" not in norm:
+            if not page_url:
+                continue
+            norm["url"] = page_url
+        normalized.append(norm)
+
+    if not normalized:
+        return False
+
+    context = getattr(page, "context", None)
+    add_cookies = getattr(context, "add_cookies", None) if context is not None else None
+    if not callable(add_cookies):
+        logger.debug(
+            "anti-bot solution: page.context.add_cookies unavailable; "
+            "cookies cannot be applied",
+        )
+        return False
+    try:
+        await add_cookies(normalized)
+    except Exception as e:
+        logger.warning("anti-bot cookie injection failed: %s", e)
+        return False
+
+    # Reload so the cleared-challenge cookies take effect on the next
+    # request. Best-effort — some pages reject reload mid-challenge;
+    # the cookies are still applied to the context for subsequent navs
+    # the agent issues. Use ``domcontentloaded`` (not ``networkidle``)
+    # so we don't block on the cleared page's own background polling.
+    try:
+        reload = getattr(page, "reload", None)
+        if callable(reload):
+            await reload(wait_until="domcontentloaded")
+    except Exception as e:
+        logger.debug("anti-bot post-solve reload failed (non-fatal): %s", e)
+
+    logger.info(
+        "anti-bot solution applied: %d cookies via BrowserContext",
+        len(normalized),
+    )
+    return True
 
 
 def _extract_solution_token(solution: object, captcha_type: str) -> str | None:
@@ -295,12 +404,11 @@ def _extract_solution_token(solution: object, captcha_type: str) -> str | None:
         return token
     if captcha_type in _ANTIBOT_KINDS:
         # Any presence of an anti-bot solution key signals a real
-        # provider-side success. Serialise the whole dict so the agent /
-        # operator can see what was returned without us trying to
-        # inject a cookie set we don't know how to apply yet.
+        # provider-side success. Serialise the whole dict so
+        # :func:`_apply_antibot_solution` can re-parse and apply the
+        # cookies/userAgent/sensorData via the BrowserContext.
         if any(k in solution for k in _ANTIBOT_SOLUTION_KEYS):
             try:
-                import json
                 return json.dumps(solution, sort_keys=True, default=str)
             except (TypeError, ValueError):
                 # Defensive — solution payloads are JSON over the wire
@@ -2299,7 +2407,23 @@ class CaptchaSolver:
         parent textarea, returning ``injection_failed`` even though
         the provider returned a valid token. Walk every frame and
         bubble up "any frame succeeded" as the success bit.
+
+        §22 anti-bot kinds (Akamai BMP / Imperva / Kasada / DataDome) take
+        a different path: the "token" is a JSON-encoded
+        ``{cookies, userAgent?, sensorData?, headers?}`` payload from
+        :func:`_extract_solution_token`. We apply the cookies to the
+        active ``BrowserContext`` and reload the page so the cleared
+        challenge state takes effect on the next request — without this
+        the operator pays for solves that produce no usable session.
         """
+        # §22 — anti-bot kinds carry a structured solution (cookies +
+        # optional userAgent / headers) instead of a CAPTCHA-style
+        # injectable token. Apply the cookies via the BrowserContext;
+        # the ``recaptcha`` / ``hcaptcha`` / ``turnstile`` token-injection
+        # branches below would all return False for these kinds.
+        if captcha_type in _ANTIBOT_KINDS:
+            return await _apply_antibot_solution(page, token)
+
         family = captcha_type
         if captcha_type.startswith("recaptcha"):
             family = "recaptcha"
