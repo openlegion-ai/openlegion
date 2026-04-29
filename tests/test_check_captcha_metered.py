@@ -230,7 +230,7 @@ class TestInjectionFailedCountsCost:
         # Cost IS counted — provider was paid.
         # First selector match is recaptcha → kind=recaptcha-v2-checkbox →
         # 100 millicents at 2captcha proxyless.
-        assert await cost.get_cents("agent-1") == 100
+        assert await cost.get_millicents("agent-1") == 100
 
 
 # ── 4. CF-Turnstile pricing is in the table ───────────────────────────────
@@ -276,7 +276,7 @@ class TestCfTurnstilePricing:
         assert envelope["kind"] == "cf-interstitial-turnstile"
         assert envelope["solver_outcome"] == "solved"
         # 2captcha turnstile = 200 millicents. CF-bound alias picks up the same rate.
-        assert await cost.get_cents("agent-1") == 200
+        assert await cost.get_millicents("agent-1") == 200
 
 
 # ── 5. CF-auto cleared → no "no published rate" warning logged ────────────
@@ -798,3 +798,159 @@ class TestProviderMissingFailsClosedWhenCapOn:
         # Warning was logged so operators see the misconfig.
         joined = "\n".join(rec.getMessage() for rec in caplog.records)
         assert "provider" in joined.lower()
+
+
+# ── 11. Cancellation safely refunds reserved cost (audit fix to PR #781) ──
+
+
+class TestCancellationRefundsReservation:
+    """Pre-fix, ``_metered_solve``'s ``finally`` block used
+    ``contextlib.suppress(Exception)``. ``asyncio.CancelledError`` is a
+    ``BaseException`` (since Python 3.8), so a cancellation between the
+    cost-cap reservation and the provider call would skip the refund —
+    the reservation stayed committed against the agent's monthly bucket
+    even though no token was retrieved.
+
+    The fix: ``contextlib.suppress(BaseException)`` plus ``asyncio.shield``
+    so the lock acquire + adjust completes even when the parent task is
+    being cancelled.
+    """
+
+    @pytest.mark.asyncio
+    async def test_cancellation_refunds_reserved_millicents(
+        self, mgr, monkeypatch,
+    ):
+        # Configure a cost cap so ``_metered_solve`` reserves spend.
+        # 2captcha v2-checkbox: max published 300 millicents (proxy-aware
+        # tier); 100 mc proxyless. The reservation always picks max so
+        # an untracked-tier solve can't bypass the cap.
+        monkeypatch.setenv("CAPTCHA_COST_LIMIT_USD_PER_AGENT_MONTH", "1.00")
+
+        # Solver whose ``solve()`` blocks until cancelled — gives us a
+        # deterministic point where the reservation is committed and
+        # the body is mid-flight.
+        async def _blocking_solve(*args, **kwargs):
+            await asyncio.sleep(60)
+
+        solver = MagicMock()
+        solver.provider = "2captcha"
+        solver.solve = _blocking_solve
+        solver.is_solver_unreachable = AsyncMock(return_value=False)
+        solver.is_breaker_open = MagicMock(return_value=False)
+        mgr._captcha_solver = solver
+        inst = _mk_inst()
+
+        # Drive through ``_metered_solve`` directly to avoid the outer
+        # ``_check_captcha`` envelope-building. Pre-cancel state must
+        # be empty.
+        assert await cost.get_millicents("agent-1") == 0
+
+        task = asyncio.create_task(
+            mgr._metered_solve(
+                inst, "iframe[src*=recaptcha]", "recaptcha-v2-checkbox",
+            ),
+        )
+        # Yield enough times for the cost-cap reservation to commit
+        # and the body to enter the blocking solve call.
+        for _ in range(10):
+            await asyncio.sleep(0)
+        # Reservation is now committed against the agent's bucket.
+        assert await cost.get_millicents("agent-1") > 0
+
+        task.cancel()
+        # The task should raise CancelledError — wait for it to settle.
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        # The refund must have completed via the shielded
+        # ``adjust_cost`` call inside the ``finally`` — bucket back to 0.
+        assert await cost.get_millicents("agent-1") == 0
+
+    @pytest.mark.asyncio
+    async def test_cancellation_during_refund_still_completes(
+        self, mgr, monkeypatch,
+    ):
+        """Stronger regression: the refund itself can be cancelled
+        mid-flight (e.g. a second ``.cancel()`` on a task already
+        unwinding). Without ``asyncio.shield`` the second cancellation
+        propagates through the ``await _cost.adjust_cost`` call and
+        ``contextlib.suppress(BaseException)`` is what keeps the
+        ``finally`` block from leaking the CancelledError. With both
+        shield + BaseException, the refund completes regardless.
+        """
+        monkeypatch.setenv("CAPTCHA_COST_LIMIT_USD_PER_AGENT_MONTH", "1.00")
+
+        # Wrap ``_cost.adjust_cost`` so we can assert it was called
+        # AND inject a slow path that spans cancellation.
+        original_adjust = cost.adjust_cost
+        adjust_calls: list[int] = []
+
+        # Fire a second cancellation while the adjust is suspended; on
+        # the buggy code path (no shield, suppress(Exception)), this
+        # CancelledError raises out of ``await adjust_cost`` and is NOT
+        # caught by ``contextlib.suppress(Exception)``, so the refund
+        # never settles. With ``asyncio.shield`` the inner adjust is
+        # protected from the cancellation; with
+        # ``contextlib.suppress(BaseException)`` even an unprotected
+        # CancelledError is swallowed instead of leaking.
+        current_task_holder: list[asyncio.Task | None] = [None]
+
+        async def slow_adjust(agent_id: str, delta: int) -> int:
+            adjust_calls.append(delta)
+            # Schedule a re-cancel of the parent task so the refund's
+            # await is hit by a fresh CancelledError mid-flight. The
+            # bug regression: pre-fix, this CancelledError leaked out
+            # of the suppressed finally and the refund was lost.
+            t = current_task_holder[0]
+            if t is not None and delta < 0:
+                t.cancel()
+            await asyncio.sleep(0)
+            return await original_adjust(agent_id, delta)
+
+        monkeypatch.setattr(cost, "adjust_cost", slow_adjust)
+
+        async def _blocking_solve(*args, **kwargs):
+            await asyncio.sleep(60)
+
+        solver = MagicMock()
+        solver.provider = "2captcha"
+        solver.solve = _blocking_solve
+        solver.is_solver_unreachable = AsyncMock(return_value=False)
+        solver.is_breaker_open = MagicMock(return_value=False)
+        mgr._captcha_solver = solver
+        inst = _mk_inst()
+
+        task = asyncio.create_task(
+            mgr._metered_solve(
+                inst, "iframe[src*=recaptcha]", "recaptcha-v2-checkbox",
+            ),
+        )
+        current_task_holder[0] = task
+        for _ in range(10):
+            await asyncio.sleep(0)
+        # Reservation should be committed against the bucket.
+        assert await cost.get_millicents("agent-1") > 0
+
+        # Cancel while solve() is mid-flight; the finally's
+        # ``await asyncio.shield(adjust_cost(...))`` must complete
+        # even though the parent task is unwinding (and the slow_adjust
+        # above re-cancels the task while the refund is suspended,
+        # which is exactly the scenario PR #781's
+        # ``suppress(Exception)`` would have leaked).
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        # The refund SHOULD have been invoked with the negative delta —
+        # and the bucket SHOULD be back to zero. Pre-fix, the second
+        # cancel() inside slow_adjust would propagate
+        # ``CancelledError`` out of ``await adjust_cost``;
+        # ``contextlib.suppress(Exception)`` would NOT catch it, the
+        # refund would be lost, and the bucket would stay at the
+        # reserved value.
+        assert any(d < 0 for d in adjust_calls), \
+            f"refund never invoked; adjust_calls={adjust_calls}"
+        assert await cost.get_millicents("agent-1") == 0
+
+
+

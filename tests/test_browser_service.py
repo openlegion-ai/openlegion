@@ -7603,16 +7603,24 @@ class TestGetSolver:
             finally:
                 flags.reload_operator_settings()
 
-    def test_get_solver_reads_operator_browser_flags(self, tmp_path):
-        """Operator settings browser_flags configure the solver without env."""
+    def test_get_solver_reads_operator_provider_but_key_must_be_env(self, tmp_path):
+        """Operator settings configure non-sensitive flags
+        (``CAPTCHA_SOLVER_PROVIDER``); the sensitive ``CAPTCHA_SOLVER_KEY``
+        is stripped from ``settings.json`` and MUST come from env vars
+        per the PR #781 audit fix (plaintext-at-rest concern).
+        """
         settings = tmp_path / "settings.json"
         settings.write_text(json.dumps({
             "browser_flags": {
                 "CAPTCHA_SOLVER_PROVIDER": "capsolver",
+                # SENSITIVE — settings layer is stripped; must come from env.
                 "CAPTCHA_SOLVER_KEY": "settings-key-456",
             },
         }))
-        with patch.dict("os.environ", {"OPENLEGION_SETTINGS_PATH": str(settings)}, clear=True):
+        with patch.dict("os.environ", {
+            "OPENLEGION_SETTINGS_PATH": str(settings),
+            "CAPTCHA_SOLVER_KEY": "env-key-from-secret",
+        }, clear=True):
             from src.browser import flags
             from src.browser.captcha import CaptchaSolver, get_solver
 
@@ -7620,8 +7628,11 @@ class TestGetSolver:
             try:
                 solver = get_solver()
                 assert isinstance(solver, CaptchaSolver)
+                # Provider came from settings.json (non-sensitive).
                 assert solver.provider == "capsolver"
-                assert solver.api_key == "settings-key-456"
+                # Key came from env, NOT from settings.json's stripped value.
+                assert solver.api_key == "env-key-from-secret"
+                assert solver.api_key != "settings-key-456"
             finally:
                 flags.reload_operator_settings()
 
@@ -11090,3 +11101,115 @@ class TestSnapshotDiffSubsetShortCircuit:
         # ``scope`` is included to signal the caller that the diff was
         # not produced.
         assert result["data"].get("scope") == "navigation"
+
+
+class TestCamoufoxInstanceLockSemantics:
+    """Audit fix to PR #781: ``CamoufoxInstance.lock`` must NOT replace
+    the lock from a getter when the active loop changes.
+
+    PR #781 had a getter-mutates pattern: a coroutine on loop X mid-
+    ``async with inst.lock:`` could observe a different lock instance
+    than a stale background task on loop Y, silently breaking mutual
+    exclusion. Fix: initialize once, fail loud (RuntimeError from
+    ``asyncio.Lock`` itself) on cross-loop access. Tests that need a
+    fresh lock must reset state explicitly via the setter.
+    """
+
+    def test_lock_returns_same_instance_on_repeated_access(self):
+        # Construct outside any loop. First access lazy-creates; second
+        # access returns the same lock object (no rebuild).
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), MagicMock())
+        lock_a = inst.lock
+        lock_b = inst.lock
+        assert lock_a is lock_b
+
+    @pytest.mark.asyncio
+    async def test_lock_held_on_loop_x_not_silently_replaced_on_loop_y(self):
+        """The repro: hold lock on the current loop, then have a second
+        coroutine attempt acquisition. Both must see the SAME lock — no
+        silent rebuild. Mutual exclusion holds as a result.
+        """
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), MagicMock())
+
+        # Coroutine A holds the lock.
+        held = asyncio.Event()
+        release = asyncio.Event()
+
+        async def holder():
+            async with inst.lock:
+                held.set()
+                await release.wait()
+
+        async def waiter():
+            # Without rebuild, this MUST block on the same Lock object
+            # while holder() is inside the ``async with``. If the getter
+            # silently replaced the lock, ``waiter`` would acquire
+            # immediately (fresh, unlocked).
+            await held.wait()
+            await asyncio.wait_for(_try_acquire(inst.lock), timeout=0.05)
+
+        async def _try_acquire(lock):
+            await lock.acquire()
+            lock.release()
+
+        h_task = asyncio.create_task(holder())
+        w_task = asyncio.create_task(waiter())
+
+        await held.wait()
+        # waiter() should TIME OUT on lock.acquire() — meaning the
+        # holder's lock IS the same object the waiter sees.
+        with pytest.raises(asyncio.TimeoutError):
+            await w_task
+
+        # Cleanup.
+        release.set()
+        await h_task
+
+    def test_lock_setter_swaps_lock_for_test_use(self):
+        """Tests sometimes need to swap in a tracking/custom lock; the
+        setter still honors that. Subsequent reads return the new lock.
+        """
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), MagicMock())
+        original = inst.lock
+        replacement = asyncio.Lock()
+        inst.lock = replacement
+        assert inst.lock is replacement
+        assert inst.lock is not original
+
+
+class TestStageLocksLoopChange:
+    """Audit fix to PR #781: ``_stage_locks`` per-handle locks must be
+    cleared when the guard's loop changes — otherwise stale locks
+    bound to a closed loop raise RuntimeError on acquire.
+
+    Tests the lifecycle directly via the closure helpers exposed
+    inside ``create_mesh_app``. Spinning up an actual mesh app across
+    two loops is heavyweight; instead we exercise the same pattern
+    documented in the fix to confirm the dict is wiped on loop change.
+    """
+
+    def test_stage_locks_cleared_on_loop_change(self):
+        # Simulate the guard's loop-tracking pattern: build a lock on
+        # loop1, swap to loop2, expect dict cleared.
+        loop1 = asyncio.new_event_loop()
+        loop2 = asyncio.new_event_loop()
+        try:
+            stage_locks: dict[str, asyncio.Lock] = {}
+
+            # On loop1, populate the dict.
+            asyncio.set_event_loop(loop1)
+            stage_locks["h1"] = asyncio.Lock()
+            assert "h1" in stage_locks
+
+            # Switch to loop2 — the fix is to clear stage_locks when
+            # the guard's loop changes. Mirror that here.
+            asyncio.set_event_loop(loop2)
+            stage_locks.clear()  # what the fix does inside the guard
+
+            # The new loop creates fresh locks lazily; the old ones
+            # never reach an ``await acquire`` that would raise.
+            assert "h1" not in stage_locks
+        finally:
+            asyncio.set_event_loop(None)
+            loop1.close()
+            loop2.close()

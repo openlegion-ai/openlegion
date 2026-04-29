@@ -587,7 +587,33 @@ _DEFAULT_V3_MIN_SCORE = 0.7
 
 
 def get_solver() -> CaptchaSolver | None:
-    """Create a CaptchaSolver from browser flags, or None if not configured."""
+    """Create a CaptchaSolver from browser flags, or None if not configured.
+
+    **Process-singleton.** :class:`BrowserManager` calls this once at
+    ``__init__`` time and caches the result on ``self._captcha_solver``;
+    flag changes after that point require a browser-service restart to
+    take effect. This is intentional — solver instance lifecycle
+    (breaker state, health-check, cost accounting) is shared across
+    every agent on the service, so per-agent solver creds aren't
+    structurally supported here.
+
+    **Per-agent overrides for ``CAPTCHA_SOLVER_PROVIDER`` and
+    ``CAPTCHA_SOLVER_KEY`` are silently ignored.** The "per-agent >
+    operator > env > default" precedence claim documented in
+    :mod:`src.browser.flags` does not apply to these two names — there
+    is no ``agent_id`` parameter passed into the lookup. To disable
+    captcha solving for a specific agent without touching provider
+    creds, use the per-agent ``CAPTCHA_DISABLED`` flag (which IS
+    consulted on every solve through ``_metered_solve`` with the
+    agent's id).
+
+    A future architectural change could lift the singleton restriction
+    by reaching the solver per-call inside ``_metered_solve`` with the
+    agent_id, but that would require redesigning solver state sharing
+    (breaker, health, cost) to be per-agent or per-(agent, provider)
+    pair. Deferred — see ``_metered_solve`` for the call site that
+    would need to change.
+    """
     provider = flags.get_str("CAPTCHA_SOLVER_PROVIDER", "").strip().lower()
     api_key = flags.get_str("CAPTCHA_SOLVER_KEY", "").strip()
     if not provider or not api_key:

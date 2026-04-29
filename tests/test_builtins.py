@@ -1340,9 +1340,16 @@ class TestCredentialRedaction:
             "content": "key is sk-abcdefghijklmnopqrstuvwxyz"
         })
 
-        result = asyncio.get_event_loop().run_until_complete(
-            _browser_command(mc, "navigate", {"url": "https://x.com"})
-        )
+        # Use new_event_loop instead of get_event_loop — the latter raises
+        # RuntimeError on Python 3.10+ when no loop is running, and test-
+        # ordering shifts surface that intermittently in CI.
+        loop = asyncio.new_event_loop()
+        try:
+            result = loop.run_until_complete(
+                _browser_command(mc, "navigate", {"url": "https://x.com"})
+            )
+        finally:
+            loop.close()
 
         assert "sk-abcdefghijklmnopqrstuvwxyz" not in str(result)
         assert "[REDACTED]" in result["content"]
@@ -1358,9 +1365,13 @@ class TestCredentialRedaction:
             side_effect=Exception("fail: sk-abcdefghijklmnopqrstuvwxyz exposed")
         )
 
-        result = asyncio.get_event_loop().run_until_complete(
-            _browser_command(mc, "navigate", {})
-        )
+        loop = asyncio.new_event_loop()
+        try:
+            result = loop.run_until_complete(
+                _browser_command(mc, "navigate", {})
+            )
+        finally:
+            loop.close()
 
         assert "sk-abcdefghijklmnopqrstuvwxyz" not in str(result)
         assert "[REDACTED]" in result["error"]

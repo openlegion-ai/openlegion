@@ -22,6 +22,24 @@ logs a warning and falls through to the next layer rather than crashing.
 Flag names are canonical strings — no enum required. Known flags are
 collected in :data:`KNOWN_FLAGS` purely for documentation / tab-completion;
 unknown names work too (readers get a warning in debug mode).
+
+**Exceptions to the precedence rule.** A handful of flags are read
+from a process-singleton site that doesn't carry ``agent_id``:
+
+* ``CAPTCHA_SOLVER_PROVIDER`` and ``CAPTCHA_SOLVER_KEY`` — read once
+  at :func:`src.browser.captcha.get_solver` time (called from
+  ``BrowserManager.__init__``). Per-agent overrides are silently
+  ignored; flag changes need a browser-service restart. Use the
+  per-agent ``CAPTCHA_DISABLED`` flag if you need to disable solving
+  for a single agent.
+
+**Sensitive flags must NOT live in ``config/settings.json``.** That
+file is plaintext at rest and shipped without ``chmod 0600``; treating
+it as a credential store leaks secrets via host backups, accidental
+``cat``, or non-root container reads. ``_load_operator_settings``
+strips :data:`_ENV_ONLY_FLAGS` (solver API keys, solver-proxy
+credentials) from the file with a warning log. Set those names via
+environment variables only.
 """
 
 from __future__ import annotations
@@ -108,6 +126,25 @@ KNOWN_FLAGS: dict[str, str] = {
 }
 
 
+# ── Sensitive flags ────────────────────────────────────────────────────────
+
+
+# Flag names that MUST come from environment variables, never from
+# ``config/settings.json``. The settings file is plaintext at rest
+# without ``chmod 0600`` — operator credentials in there are
+# trivially exposed via host backups, accidental ``cat``, or any
+# non-root reader on the container filesystem. ``_load_operator_settings``
+# strips these names with a warning log so a misconfigured settings
+# file silently degrades to env-only behavior rather than leaking
+# the credential value into log scrapes that include the file.
+_ENV_ONLY_FLAGS: frozenset[str] = frozenset({
+    "CAPTCHA_SOLVER_KEY",
+    "CAPTCHA_SOLVER_KEY_SECONDARY",
+    "CAPTCHA_SOLVER_PROXY_PASSWORD",
+    "CAPTCHA_SOLVER_PROXY_LOGIN",
+})
+
+
 # ── Overrides state ────────────────────────────────────────────────────────
 
 
@@ -152,7 +189,23 @@ def _load_operator_settings() -> dict[str, str]:
             logger.warning("browser_flags in %s is not a dict; ignoring", path)
             flags = {}
         # Coerce keys/values to str for uniform lookup.
-        _operator_settings = {str(k): str(v) for k, v in flags.items()}
+        coerced = {str(k): str(v) for k, v in flags.items()}
+        # Strip sensitive flag names — see ``_ENV_ONLY_FLAGS`` above.
+        # We never log the value, only the name, so an operator who
+        # misconfigured the file gets a clear "you put X in the wrong
+        # place" message without the secret being captured by log
+        # scrapers / backup tooling.
+        for sensitive in _ENV_ONLY_FLAGS:
+            if sensitive in coerced:
+                logger.warning(
+                    "Operator settings at %s contained sensitive "
+                    "flag %r — ignored. Sensitive credentials must "
+                    "come from environment variables, not "
+                    "config/settings.json (plaintext at rest).",
+                    path, sensitive,
+                )
+                coerced.pop(sensitive, None)
+        _operator_settings = coerced
         return _operator_settings
 
 

@@ -26,6 +26,7 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.responses import StreamingResponse
 
 from src.host.credentials import is_system_credential
+from src.shared.redaction import redact_url
 from src.shared.types import (
     AGENT_ID_RE_PATTERN,
     RESERVED_AGENT_IDS,
@@ -1192,11 +1193,19 @@ def create_mesh_app(
             raise HTTPException(400, "Service name is required")
 
         if event_bus:
+            # Redact query-string credentials (auth tokens, OAuth ``code``
+            # / ``state`` params, signed-URL signatures) before pushing
+            # the URL through the dashboard event bus. The bus fans out
+            # to every connected websocket client and lands in browser
+            # devtools / log scrapes; raw URLs are exactly the wrong
+            # shape to broadcast. ``redact_url`` strips the query
+            # string when any param matches the credential allowlist
+            # rules in :mod:`src.shared.redaction`.
             event_bus.emit(
                 "browser_login_request",
                 agent=agent_id,
                 data={
-                    "url": url[:2048],
+                    "url": redact_url(url)[:2048],
                     "service": service[:128],
                     "description": description[:500],
                 },
@@ -3164,6 +3173,15 @@ def create_mesh_app(
     # requests with the same idempotency_key produce the same handle —
     # without this lock, both would write to the partial file concurrently
     # and corrupt the resulting bytes.
+    #
+    # PR #781 audit follow-up: PR #781 lazified the guard but left the
+    # per-handle locks inside ``_stage_locks`` bound to whatever loop
+    # was active when each was first created. After a loop change
+    # (typically test ordering) the cached per-handle locks were stale
+    # and ``async with old_lock:`` raised
+    # ``RuntimeError: ... attached to a different loop``. Fix: when the
+    # guard is recreated for a new loop, also clear ``_stage_locks`` so
+    # per-handle locks are re-created lazily on the new loop.
     _stage_locks: dict[str, asyncio.Lock] = {}
     _stage_locks_guard: asyncio.Lock | None = None
     _stage_locks_guard_loop: asyncio.AbstractEventLoop | None = None
@@ -3174,6 +3192,10 @@ def create_mesh_app(
         if _stage_locks_guard is None or _stage_locks_guard_loop is not loop:
             _stage_locks_guard = asyncio.Lock()
             _stage_locks_guard_loop = loop
+            # Per-handle locks bound to the previous loop are no
+            # longer reachable; drop them so ``_get_stage_lock``
+            # rebuilds against the active loop on next access.
+            _stage_locks.clear()
         return _stage_locks_guard
 
     async def _get_stage_lock(handle: str) -> asyncio.Lock:

@@ -111,8 +111,8 @@ class TestSolveCaptchaSuccess:
         assert result["data"]["captcha_found"] is True
         assert result["data"]["solver_outcome"] == "solved"
 
-        # Cost incremented (recaptcha-v2-checkbox @ 2captcha = 100¢)
-        assert await cost.get_cents("agent-1") == 100
+        # Cost incremented (recaptcha-v2-checkbox @ 2captcha = 100mc)
+        assert await cost.get_millicents("agent-1") == 100
 
 
 class TestSolveCaptchaCostCap:

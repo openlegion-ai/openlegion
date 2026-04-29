@@ -6,7 +6,7 @@ Covers:
     compatibility table.
   * :meth:`CaptchaSolver._build_task_body` — proxy-aware vs proxyless
     task-name selection and credential injection.
-  * :func:`src.browser.captcha_cost_counter.estimate_cents` —
+  * :func:`src.browser.captcha_cost_counter.estimate_millicents` —
     ``proxy_aware`` flag pricing tier.
   * **Credential-leak canary** — exercises a full solve with a mocked
     httpx client and asserts the agent's primary egress proxy creds
@@ -447,26 +447,26 @@ class TestTaskBody:
 class TestCostCounterProxyAware:
     def test_proxyless_baseline(self):
         # 2captcha v2-checkbox proxyless rate: 100¢
-        assert cost.estimate_cents(
+        assert cost.estimate_millicents(
             "2captcha", "recaptcha-v2-checkbox", proxy_aware=False,
         ) == 100
 
     def test_proxy_aware_three_x(self):
         # 2captcha v2-checkbox proxy-aware: ~3× → 300¢
-        assert cost.estimate_cents(
+        assert cost.estimate_millicents(
             "2captcha", "recaptcha-v2-checkbox", proxy_aware=True,
         ) == 300
 
     def test_capsolver_proxy_aware_three_x(self):
         # CapSolver v2-checkbox proxyless 80¢ → proxy-aware 240¢
-        assert cost.estimate_cents(
+        assert cost.estimate_millicents(
             "capsolver", "recaptcha-v2-checkbox", proxy_aware=True,
         ) == 240
 
     def test_proxy_aware_default_is_false(self):
         # Default ``proxy_aware`` arg → proxyless tier (existing callers
         # keep working).
-        assert cost.estimate_cents(
+        assert cost.estimate_millicents(
             "capsolver", "turnstile",
         ) == 60
 
@@ -474,16 +474,16 @@ class TestCostCounterProxyAware:
         # 2captcha v3 has no proxy-aware row (provider doesn't document
         # the task) — caller billed proxyless rate to match the request
         # body actually sent.
-        proxyless = cost.estimate_cents(
+        proxyless = cost.estimate_millicents(
             "2captcha", "recaptcha-v3", proxy_aware=False,
         )
-        proxy_aware = cost.estimate_cents(
+        proxy_aware = cost.estimate_millicents(
             "2captcha", "recaptcha-v3", proxy_aware=True,
         )
         assert proxyless == proxy_aware == 100
 
     def test_unknown_variant_still_returns_none(self):
-        assert cost.estimate_cents(
+        assert cost.estimate_millicents(
             "2captcha", "unknown-variant", proxy_aware=True,
         ) is None
 

@@ -194,14 +194,6 @@ def estimate_millicents(
     return PRICING_MILLICENTS.get(key)
 
 
-# Back-compat alias — third-party subclasses or older call sites using
-# ``estimate_cents`` get the millicents value transparently. The name is
-# off-by-1000 wrt its label but every internal caller has been migrated
-# to ``estimate_millicents`` in the same change-set; this exists so an
-# out-of-tree CaptchaSolver subclass keeps importing without a hard break.
-estimate_cents = estimate_millicents
-
-
 # ── State + lock ───────────────────────────────────────────────────────────
 
 
@@ -335,13 +327,6 @@ async def check_and_charge(
             bucket["millicents"] = current + int(millicents)
             return True, bucket["millicents"]
         return True, current
-
-
-# Back-compat alias for an external caller that used to read cents. The
-# name is preserved but the units are now MILLICENTS — the caller almost
-# certainly wants ``get_millicents`` directly, but this avoids a hard
-# break at import. Internal call sites have been migrated.
-get_cents = get_millicents
 
 
 async def reset(agent_id: str | None = None) -> None:

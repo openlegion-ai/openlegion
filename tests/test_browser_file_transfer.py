@@ -106,11 +106,15 @@ class TestUploadFile:
         # Use a real path that exists so the path-validation guard passes.
         real_file = tmp_path / "foo.pdf"
         real_file.write_bytes(b"fake pdf")
+        # ``upload_file`` now feeds the canonical (resolved) path to
+        # ``chooser.set_files`` to close the symlink-swap TOCTOU window
+        # — assert against the resolved string, not the raw input.
+        resolved = str(real_file.resolve())
 
         result = await mgr.upload_file("a1", "e1", [str(real_file)])
         assert result["success"] is True
-        assert result["data"]["uploaded"] == [str(real_file)]
-        chooser.set_files.assert_awaited_once_with([str(real_file)])
+        assert result["data"]["uploaded"] == [resolved]
+        chooser.set_files.assert_awaited_once_with([resolved])
         fake_locator.click.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -297,6 +301,61 @@ class TestUploadFile:
         result = await mgr.upload_file("a1", "e1", [str(a)])
         assert result["success"] is False
         assert not a.exists()
+
+    @pytest.mark.asyncio
+    async def test_symlink_swap_uses_resolved_path(self, tmp_path, monkeypatch):
+        """TOCTOU audit fix: ``set_files`` must receive the canonical
+        (post-symlink-resolution) path, not the original input that may
+        be a symlink. Pre-fix, the validator resolved the path but the
+        unresolved path was passed to ``chooser.set_files`` — leaving a
+        window where the symlink target could be swapped between
+        validation and the chooser call.
+        """
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "p"))
+        inst = _make_instance()
+
+        chooser = MagicMock()
+        chooser.set_files = AsyncMock()
+
+        async def _chooser_value():
+            return chooser
+
+        inst.page.expect_file_chooser = MagicMock(
+            return_value=_async_ctx(_chooser_value()),
+        )
+
+        fake_locator = MagicMock()
+        fake_locator.click = AsyncMock()
+        monkeypatch.setattr(
+            mgr, "_locator_from_ref",
+            AsyncMock(return_value=fake_locator),
+        )
+        monkeypatch.setattr(mgr, "get_or_start", AsyncMock(return_value=inst))
+        monkeypatch.setattr("src.browser.service.action_delay", lambda: 0)
+
+        # Real target inside recv_dir (the autouse fixture pinned recv_dir
+        # to ``tmp_path``).
+        target = tmp_path / "real-target.pdf"
+        target.write_bytes(b"real-pdf")
+        # Symlink also inside recv_dir, pointing at the real target.
+        symlink = tmp_path / "link.pdf"
+        symlink.symlink_to(target)
+
+        result = await mgr.upload_file("a1", "e1", [str(symlink)])
+        assert result["success"] is True
+
+        # The chooser must have received the RESOLVED canonical path
+        # (the real target), NOT the symlink path. A symlink-swap
+        # between validation and the chooser call would otherwise hit
+        # whatever the symlink later pointed at.
+        called_with = chooser.set_files.await_args.args[0]
+        # Symlink itself is inside ``tmp_path``, but its resolved form
+        # is the canonical real-target path. Verify the chooser saw
+        # the canonical form.
+        resolved_target = str(target.resolve())
+        assert called_with == [resolved_target]
+        # And NOT the symlink string — confirms we closed the gap.
+        assert called_with != [str(symlink)] or symlink.resolve() == symlink
 
 
 class TestBrowserSidePeriodicGc:

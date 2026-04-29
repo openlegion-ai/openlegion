@@ -34,10 +34,7 @@ async def _isolate_state(tmp_path, monkeypatch):
 
 
 class TestEstimateMillicents:
-    """Pricing table is now in MILLICENTS (1/1000 of a cent). The legacy
-    ``estimate_cents`` is a back-compat alias to ``estimate_millicents``;
-    both names return the same integer.
-    """
+    """Pricing table is in MILLICENTS (1/1000 of a cent)."""
 
     def test_known_2captcha_recaptcha_v2(self):
         # 2captcha v2-checkbox is published at $1/1000 = $0.001/solve
@@ -62,14 +59,6 @@ class TestEstimateMillicents:
     def test_empty_inputs_safe(self):
         assert cost.estimate_millicents("", "hcaptcha") is None
         assert cost.estimate_millicents("2captcha", "") is None
-
-    def test_legacy_estimate_cents_alias_returns_millicents(self):
-        # Back-compat alias for out-of-tree subclasses; the unit changed
-        # under the alias but the magnitude matches what those callers
-        # were already storing — the callers' arithmetic was already
-        # off-by-1000 when treating the value as cents. The alias keeps
-        # them importing without breaking the in-tree fix.
-        assert cost.estimate_cents("2captcha", "recaptcha-v2-checkbox") == 100
 
 
 class TestAddCostAndOverCap:
@@ -104,14 +93,6 @@ class TestAddCostAndOverCap:
     async def test_unrelated_agents_isolated(self):
         await cost.add_cost("agent-1", 200)
         assert await cost.get_millicents("agent-2") == 0
-
-    @pytest.mark.asyncio
-    async def test_legacy_get_cents_alias_returns_millicents(self):
-        await cost.add_cost("agent-1", 100)
-        # Back-compat alias — same integer the new ``get_millicents``
-        # returns. The label-vs-unit mismatch is documented; out-of-tree
-        # callers' arithmetic was already off-by-1000 before this fix.
-        assert await cost.get_cents("agent-1") == 100
 
 
 class TestMonthRollover:

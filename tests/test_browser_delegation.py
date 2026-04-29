@@ -752,6 +752,48 @@ class TestBrowserLoginRequestEndpoint:
         assert call_args[1]["data"]["service"] == "X"
 
     @pytest.mark.asyncio
+    async def test_url_query_credentials_redacted_before_emit(self, tmp_path):
+        """PR #781 audit fix: ``request_browser_login`` was emitting raw
+        URLs onto the dashboard event bus. Query-string credentials
+        (OAuth ``code`` / ``state``, signed-URL signatures, auth tokens)
+        must be stripped via ``redact_url`` before fan-out.
+        """
+        from httpx import ASGITransport, AsyncClient
+
+        app, event_bus, _cm = _build_app(
+            tmp_path,
+            perms_map={"worker": {"can_use_browser": True}},
+        )
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            resp = await client.post(
+                "/mesh/browser-login-request",
+                json={
+                    "agent_id": "worker",
+                    "url": (
+                        "https://example.com/oauth/callback"
+                        "?code=secret-auth-code&state=opaque-state-xyz"
+                    ),
+                    "service": "X",
+                    "description": "Log in",
+                },
+                headers={"X-Agent-ID": "worker"},
+            )
+        assert resp.status_code == 200, resp.text
+
+        event_bus.emit.assert_called_once()
+        emitted_url = event_bus.emit.call_args[1]["data"]["url"]
+        # The ``code`` / ``state`` values must NOT appear unredacted on
+        # the bus; ``redact_url`` strips the entire query string when
+        # any param matches the credential allowlist.
+        assert "secret-auth-code" not in emitted_url
+        assert "opaque-state-xyz" not in emitted_url
+        # Origin survives so the dashboard can still render the card.
+        assert emitted_url.startswith("https://example.com/")
+
+    @pytest.mark.asyncio
     async def test_delegation_blocked_by_can_message(self, tmp_path):
         from httpx import ASGITransport, AsyncClient
 

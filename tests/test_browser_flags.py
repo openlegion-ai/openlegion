@@ -247,3 +247,60 @@ class TestSnapshotAll:
         flags.set_agent_override("a", "BROWSER_DOWNLOADS_DISABLED", "true")
         snap = flags.snapshot_all(agent_id="a")
         assert snap["BROWSER_DOWNLOADS_DISABLED"] == "true"
+
+
+class TestSensitiveFlagsRefusedFromSettingsJson:
+    """Audit fix to PR #781: ``config/settings.json`` is plaintext at
+    rest with no chmod 0600. Sensitive flags (solver API keys, solver-
+    proxy credentials) must come from environment variables only;
+    when they appear in the settings file we strip them and log a
+    warning, falling through to env / default lookup.
+    """
+
+    def test_sensitive_flag_in_settings_is_stripped_with_warning(
+        self, settings_file, caplog,
+    ):
+        import logging as _logging
+        path = settings_file({
+            "browser_flags": {
+                "CAPTCHA_SOLVER_KEY": "leak-via-config",
+                "BROWSER_DOWNLOADS_DISABLED": "true",  # non-sensitive: kept
+            },
+        })
+        with mock.patch.dict(os.environ, {"OPENLEGION_SETTINGS_PATH": path}), \
+             caplog.at_level(_logging.WARNING, logger="browser.flags"):
+            flags.reload_operator_settings()
+            # Sensitive name was stripped; lookup falls through to env (unset) → default.
+            assert flags.get_str("CAPTCHA_SOLVER_KEY", "default-key") == "default-key"
+            # Non-sensitive name survives.
+            assert flags.get_bool("BROWSER_DOWNLOADS_DISABLED", False) is True
+
+        # The warning was emitted with the flag NAME but never the value.
+        joined = "\n".join(rec.getMessage() for rec in caplog.records)
+        assert "CAPTCHA_SOLVER_KEY" in joined
+        assert "leak-via-config" not in joined
+
+    def test_sensitive_flag_env_var_still_works(self, settings_file):
+        path = settings_file({
+            "browser_flags": {
+                "CAPTCHA_SOLVER_KEY": "leaked-via-config",
+            },
+        })
+        with mock.patch.dict(os.environ, {
+            "OPENLEGION_SETTINGS_PATH": path,
+            "CAPTCHA_SOLVER_KEY": "from-env",
+        }):
+            flags.reload_operator_settings()
+            # Settings layer was stripped; env wins.
+            assert flags.get_str("CAPTCHA_SOLVER_KEY", "") == "from-env"
+
+    def test_all_listed_sensitive_flags_are_stripped(self, settings_file):
+        body = {
+            "browser_flags": {name: f"secret-{name}" for name in flags._ENV_ONLY_FLAGS},
+        }
+        path = settings_file(body)
+        with mock.patch.dict(os.environ, {"OPENLEGION_SETTINGS_PATH": path}):
+            flags.reload_operator_settings()
+            for name in flags._ENV_ONLY_FLAGS:
+                # Each sensitive flag falls through to env (unset) → default.
+                assert flags.get_str(name, "fallback") == "fallback"

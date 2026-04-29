@@ -19,7 +19,6 @@ import re
 import subprocess
 import time
 import uuid
-import warnings
 import weakref
 from collections import deque
 from pathlib import Path
@@ -1938,70 +1937,36 @@ class CamoufoxInstance:
 
     @property
     def lock(self) -> asyncio.Lock:
-        """Per-instance lock, bound lazily to the active event loop.
+        """Per-instance async lock. Created lazily on first access.
 
-        Construction may happen outside any running loop (sync FastAPI
-        startup, pytest fixtures), so the lock is created on first access
-        and refreshed if the active loop has changed since. Mirrors the
-        ``_manager_lock`` / ``_get_*_lock`` helpers elsewhere in this module.
-        Synchronous inspection is supported; the first real async use pins
-        or refreshes the lock for that running loop.
+        **Loop binding is fixed once initialized** — accessing from a
+        different loop after the lock is created will surface as a
+        ``RuntimeError`` from ``asyncio.Lock`` itself (loud, not silent).
+        We deliberately do NOT replace the lock when the loop changes:
+        a getter-mutates pattern (PR #781) silently broke mutual
+        exclusion when a coroutine on loop X was mid-``async with
+        inst.lock:`` while a stale background task on loop Y accessed
+        ``inst.lock`` and received a fresh ``asyncio.Lock`` instance.
+        Both coroutines then thought they held "the" lock, but the
+        actual ``Lock`` objects were different — mutex broken.
+
+        Cross-loop access is a programmer / lifecycle bug; failing
+        loud is the correct behavior. Tests that previously relied on
+        the auto-rebuild behavior must reset state between event loops
+        explicitly (e.g., recreate the ``CamoufoxInstance`` or call
+        the lock setter to swap in a fresh lock).
         """
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
         if self._lock is None:
-            if loop is None:
-                try:
-                    # Python 3.10+ creates an unbound lock here without
-                    # touching thread-local event-loop state.
-                    self._lock = asyncio.Lock()
-                    self._lock_loop = None
-                except RuntimeError:
-                    # Python 3.9 still calls get_event_loop() during
-                    # Lock construction. Use an explicit throwaway loop
-                    # without setting it as the thread default; first
-                    # real async use will rebuild for the running loop.
-                    tmp_loop = asyncio.new_event_loop()
-                    try:
-                        with warnings.catch_warnings():
-                            warnings.simplefilter(
-                                "ignore", DeprecationWarning,
-                            )
-                            self._lock = asyncio.Lock(loop=tmp_loop)
-                    finally:
-                        tmp_loop.close()
-                    self._lock_loop = tmp_loop
-            else:
-                self._lock = asyncio.Lock()
-                self._lock_loop = loop
-        elif loop is None:
-            # No active loop to bind against; return what we have.
-            return self._lock
-        elif self._lock_loop is None:
-            # Lock was created (or set via the setter) outside a
-            # running loop; pin it to the loop that's actually using
-            # it now without discarding.
-            self._lock_loop = loop
-        elif self._lock_loop is not loop:
-            # Loop changed between uses (typically pytest spinning up
-            # a fresh loop per test). Rebuild to bind to the new loop.
             self._lock = asyncio.Lock()
-            self._lock_loop = loop
         return self._lock
 
     @lock.setter
     def lock(self, value: asyncio.Lock) -> None:
         # Tests occasionally swap in a custom lock (``TrackingLock`` /
-        # ``asyncio.Lock()``). Honor the swap; the property getter pins
-        # the loop on first use so the supplied lock is not silently
-        # replaced.
+        # ``asyncio.Lock()``). Honor the swap; subsequent reads return
+        # the new lock until it's swapped again or the instance is
+        # discarded.
         self._lock = value
-        try:
-            self._lock_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            self._lock_loop = None
 
     def _register_page(self, page) -> str:
         """Assign a stable UUID to a Page if not already registered.
@@ -5427,21 +5392,17 @@ class BrowserManager:
                 action_result, captcha_envelope = await self._with_captcha_redetect(
                     inst, _click_body(),
                 )
-            except NotImplementedError as e:
-                # Defensive: when PR2 (shadow DOM) merges, refs carrying
-                # both ``shadow_path`` and ``frame_id`` will hit the
-                # ``Shadow + iframe combination not yet supported`` guard
-                # in ``_resolve_shadow_element``. Wrap as a structured
-                # ``not_supported`` envelope so the agent sees a typed
-                # error rather than a 500 from the generic catch-all.
-                inst.m_click_fail += 1
-                inst.click_window.append(False)
-                inst.recorder.record_click(method="auto", success=False)
-                return _err(
-                    "not_supported",
-                    str(e) or "Action not supported on this ref type",
-                )
             except Exception as e:
+                # ``NotImplementedError`` is intentionally NOT caught
+                # specially here — PR #781 removed the
+                # ``raise NotImplementedError`` from
+                # ``_resolve_shadow_element`` (shadow-in-iframe is now
+                # supported), so a former defensive catch would only
+                # mask programmer errors (e.g. an unimplemented
+                # Playwright API) as a permanent ``not_supported``
+                # envelope. Let it surface through the generic handler
+                # so logs.exception fires and the operator sees the
+                # real problem.
                 inst.m_click_fail += 1
                 inst.click_window.append(False)
                 inst.recorder.record_click(method="auto", success=False)
@@ -5694,14 +5655,10 @@ class BrowserManager:
                     return {"success": False, "error": "Must provide ref or selector"}
                 await asyncio.sleep(action_delay())
                 return {"success": True, "data": {"hovered": ref or selector}}
-            except NotImplementedError as e:
-                # See click() for rationale — pre-emptive catch for PR2's
-                # shadow+iframe combination guard.
-                return _err(
-                    "not_supported",
-                    str(e) or "Action not supported on this ref type",
-                )
             except Exception as e:
+                # See ``click()`` — ``NotImplementedError`` is no longer
+                # a structurally expected outcome (shadow-in-iframe is
+                # supported). Let it surface through the generic handler.
                 return {"success": False, "error": str(e)}
 
     async def type_text(self, agent_id: str, ref: str | None = None, selector: str | None = None,
@@ -5872,14 +5829,10 @@ class BrowserManager:
                 action_result, captcha_envelope = await self._with_captcha_redetect(
                     inst, _type_body(),
                 )
-            except NotImplementedError as e:
-                # See click() for rationale — pre-emptive catch for PR2's
-                # shadow+iframe combination guard.
-                return _err(
-                    "not_supported",
-                    str(e) or "Action not supported on this ref type",
-                )
             except Exception as e:
+                # See ``click()`` — ``NotImplementedError`` is no longer
+                # a structurally expected outcome (shadow-in-iframe is
+                # supported). Let it surface through the generic handler.
                 return {"success": False, "error": str(e)}
 
             if (
@@ -6157,16 +6110,10 @@ class BrowserManager:
                     "success": True,
                     "data": {"direction": direction, "pixels": scrolled},
                 }
-            except NotImplementedError as e:
-                # See click() for rationale — pre-emptive catch for PR2's
-                # shadow+iframe combination guard. ``scroll(ref=...)``
-                # routes through ``_locator_from_ref`` which is the path
-                # that will raise once shadow_path resolution lands.
-                return _err(
-                    "not_supported",
-                    str(e) or "Action not supported on this ref type",
-                )
             except Exception as e:
+                # See ``click()`` — ``NotImplementedError`` is no longer
+                # a structurally expected outcome (shadow-in-iframe is
+                # supported). Let it surface through the generic handler.
                 return {"success": False, "error": str(e)}
 
     async def wait_for_element(
@@ -6596,10 +6543,24 @@ class BrowserManager:
             # less return, gate-trip return, raise, cancellation),
             # refund. ``adjust_cost`` is clamped at zero so a refund
             # that races with another adjustment can't drive negative.
+            #
+            # ``contextlib.suppress(BaseException)`` (not ``Exception``)
+            # is required because ``asyncio.CancelledError`` is a
+            # ``BaseException`` since Python 3.8 — task cancellation
+            # (timeout, browser shutdown, container stop) would
+            # otherwise skip the refund and the over-reservation would
+            # remain committed against the agent's monthly bucket.
+            #
+            # ``asyncio.shield`` ensures the lock acquire + adjust
+            # completes even when the parent task is being cancelled:
+            # without it, the ``await`` re-raises ``CancelledError``
+            # before the refund settles to disk.
             if reserved_millicents and not reservation_settled:
-                with contextlib.suppress(Exception):
-                    await _cost.adjust_cost(
-                        agent_id, -reserved_millicents,
+                with contextlib.suppress(BaseException):
+                    await asyncio.shield(
+                        _cost.adjust_cost(
+                            agent_id, -reserved_millicents,
+                        ),
                     )
 
     async def _check_captcha(self, inst: CamoufoxInstance) -> dict:
@@ -7451,6 +7412,15 @@ class BrowserManager:
             recv_dir.mkdir(parents=True, exist_ok=True)
         except OSError:
             pass
+        # Resolve every path canonically (post-symlink) and feed those
+        # resolved strings to ``chooser.set_files``. Earlier code passed
+        # the original ``local_paths`` which reopened a TOCTOU window:
+        # validate-then-use against ``Path(p).resolve()``, but the
+        # raw ``p`` could be a symlink whose target was swapped between
+        # validation and the chooser call. Pinning the canonical path
+        # closes that gap — Playwright sees the post-resolution file,
+        # not whatever the symlink points at moments later.
+        resolved_paths: list[str] = []
         for p in local_paths:
             try:
                 resolved = Path(p).resolve()
@@ -7466,6 +7436,7 @@ class BrowserManager:
                     "success": False,
                     "error": "Upload path outside receive dir",
                 }
+            resolved_paths.append(str(resolved))
 
         inst = await self.get_or_start(agent_id)
         inst.touch()
@@ -7476,7 +7447,7 @@ class BrowserManager:
                         "success": False,
                         "error": "User has browser control — action paused",
                     }
-                for p in local_paths:
+                for p in resolved_paths:
                     if not Path(p).is_file():
                         return {
                             "success": False,
@@ -7505,16 +7476,22 @@ class BrowserManager:
                             inst.page, locator, timeout=timeout_ms,
                         )
                 chooser = await info.value
-                await chooser.set_files(local_paths)
+                await chooser.set_files(resolved_paths)
                 await asyncio.sleep(action_delay())
                 return {
                     "success": True,
-                    "data": {"uploaded": list(local_paths)},
+                    "data": {"uploaded": list(resolved_paths)},
                 }
             except Exception as e:
                 return {"success": False, "error": str(e)}
             finally:
-                for p in local_paths:
+                # Unlink the canonical (resolved) path — we never want
+                # to follow a symlink swap into a victim file. If the
+                # original ``local_paths`` entry was a symlink, the
+                # symlink itself remains; that's harmless and the
+                # original raw path was supplied by the trusted mesh
+                # caller (validated above).
+                for p in resolved_paths:
                     try:
                         Path(p).unlink(missing_ok=True)
                     except Exception:

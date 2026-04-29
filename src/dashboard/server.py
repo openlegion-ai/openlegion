@@ -405,13 +405,45 @@ def _validate_cookies(
         if name.startswith("__Host-") and domain:
             _drop("host_prefix_with_domain")
             continue
+        # ``secure`` / ``httpOnly`` accept JSON booleans AND the
+        # integer 0/1 form that Chrome devtools' "Copy as cURL", older
+        # Chromium exports, and curl-style imports emit. Pre-PR-781,
+        # ``bool(1)`` coerced silently to ``True`` and the cookie was
+        # accepted; PR #781's strict ``isinstance(..., bool)`` check
+        # rejected ``1`` because ``isinstance(1, bool)`` is ``False``
+        # (despite ``bool`` being an ``int`` subclass). That was a
+        # regression for legitimate cookies. Anything other than a
+        # bool or 0/1 is still rejected with a clear reason.
         secure_raw = raw.get("secure")
-        if secure_raw is not None and not isinstance(secure_raw, bool):
+        if secure_raw is None:
+            secure_explicit = False
+            secure = False
+        elif isinstance(secure_raw, bool):
+            secure_explicit = True
+            secure = secure_raw
+        elif type(secure_raw) is int and secure_raw in (0, 1):
+            secure_explicit = True
+            secure = bool(secure_raw)
+        else:
             _drop("invalid_secure")
             continue
-        secure = secure_raw if secure_raw is not None else False
+        # When ``url=https://...`` and the cookie didn't carry an
+        # explicit ``secure`` attribute, default to Secure rather than
+        # silently downgrading. Real-browser exports often omit the
+        # attribute even when the original cookie was Secure; defaulting
+        # to ``False`` would push them onto the wire over plain HTTP if
+        # the operator later changed origins. Operator-explicit
+        # ``secure: false`` is honored (``secure_explicit`` flag).
+        if not secure_explicit and url and url.lower().startswith("https://"):
+            secure = True
         http_only_raw = raw.get("httpOnly")
-        if http_only_raw is not None and not isinstance(http_only_raw, bool):
+        if http_only_raw is None:
+            http_only_value: bool | None = None
+        elif isinstance(http_only_raw, bool):
+            http_only_value = http_only_raw
+        elif type(http_only_raw) is int and http_only_raw in (0, 1):
+            http_only_value = bool(http_only_raw)
+        else:
             _drop("invalid_httponly")
             continue
         if name.startswith("__Host-"):
@@ -489,10 +521,13 @@ def _validate_cookies(
                 _drop("invalid_expires")
                 continue
             normalized["expires"] = int(exp)
-        # httpOnly / secure — pass through only explicit JSON booleans.
-        if http_only_raw is not None:
-            normalized["httpOnly"] = http_only_raw
-        if secure_raw is not None:
+        # httpOnly / secure — pass the coerced bool downstream so
+        # Playwright sees a real boolean (``add_cookies`` rejects
+        # int 0/1) and the https-default Secure value (above) is
+        # respected for url-based imports without explicit attributes.
+        if http_only_value is not None:
+            normalized["httpOnly"] = http_only_value
+        if secure_explicit or secure:
             normalized["secure"] = secure
         accepted.append(normalized)
 

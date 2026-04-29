@@ -423,6 +423,72 @@ class TestValidateCookies:
         assert accepted == []
         assert dropped == [{"reason": "invalid_httponly", "count": 1}]
 
+    def test_accepts_int_one_secure_from_chrome_devtools(self):
+        # Chrome devtools' "Copy as cURL", older Chromium exports, and
+        # curl-style imports emit ``secure: 1`` (int, not bool).
+        # PR #781 audit fix: int 0/1 must be accepted via coercion.
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "sid", "value": "x", "domain": ".example.com",
+              "secure": 1}],
+        )
+        assert dropped == []
+        assert accepted[0]["secure"] is True
+
+    def test_accepts_int_zero_secure(self):
+        # Operator-explicit ``secure=0`` is honored (not silently
+        # promoted by an https-origin default).
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "sid", "value": "x", "domain": ".example.com",
+              "secure": 0}],
+        )
+        assert dropped == []
+        # ``secure=False`` is the legacy pass-through; the normalize
+        # block omits ``secure`` when explicitly False to match
+        # pre-PR-781 wire shape. Either way the cookie was accepted.
+        assert accepted[0].get("secure", False) is False
+
+    def test_rejects_int_two_secure(self):
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "sid", "value": "x", "domain": ".example.com",
+              "secure": 2}],
+        )
+        assert accepted == []
+        assert dropped == [{"reason": "invalid_secure", "count": 1}]
+
+    def test_accepts_int_one_httponly(self):
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "sid", "value": "x", "domain": ".example.com",
+              "httpOnly": 1}],
+        )
+        assert dropped == []
+        assert accepted[0]["httpOnly"] is True
+
+    def test_https_origin_defaults_secure_true(self):
+        # Real-browser exports often omit ``secure`` even when the
+        # original cookie was Secure. Default to ``True`` for
+        # https-origin url imports so we don't silently downgrade
+        # a Secure cookie to plain.
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "sid", "value": "x", "url": "https://example.com/"}],
+        )
+        assert dropped == []
+        assert accepted[0]["secure"] is True
+
+    def test_https_origin_explicit_secure_false_honored(self):
+        # Operator-explicit ``secure: false`` overrides the
+        # https-origin default. The cookie still gets dropped at the
+        # downstream RFC-6265 §5.4 check (``Secure`` requires HTTPS),
+        # but only because it was explicitly Secure-less, not because
+        # we silently flipped the operator's choice.
+        accepted, dropped, _ = _validate_cookies(
+            [{"name": "sid", "value": "x", "url": "https://example.com/",
+              "secure": False}],
+        )
+        # Plain http urls would drop on secure_non_https_url, but here
+        # the url IS https and ``secure=False`` is honored — accepted.
+        assert dropped == []
+        assert accepted[0].get("secure", False) is False
+
     def test_rejects_nan_expires(self):
         accepted, dropped, _ = _validate_cookies(
             [{"name": "sid", "value": "x", "domain": ".example.com",
