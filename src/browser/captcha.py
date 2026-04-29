@@ -628,15 +628,55 @@ _DEFAULT_V3_ACTION = "verify"
 _DEFAULT_V3_MIN_SCORE = 0.7
 
 
-def get_solver() -> CaptchaSolver | None:
-    """Return the configured solver, or ``None`` if no provider is set.
+def _build_single_solver(
+    provider_flag: str, key_flag: str, *, label: str,
+) -> CaptchaSolver | None:
+    """Resolve one ``(provider, key)`` flag pair into a :class:`CaptchaSolver`.
 
-    Reads ``CAPTCHA_SOLVER_PROVIDER`` and ``CAPTCHA_SOLVER_KEY`` at
+    Shared loader for the primary and secondary solver slots used by
+    :func:`get_solver`. Returns ``None`` when either flag is unset or the
+    provider name isn't in :data:`_SUPPORTED_PROVIDERS` — the latter logs
+    a warning so an operator typo (``CAPTCHA_SOLVER_PROVIDER_SECONDARY=foo``)
+    surfaces cleanly instead of silently degrading to single-provider.
+    """
+    provider = flags.get_str(provider_flag, "").strip().lower()
+    api_key = flags.get_str(key_flag, "").strip()
+    if not provider or not api_key:
+        return None
+    if provider not in _SUPPORTED_PROVIDERS:
+        logger.warning(
+            "Unknown %s %r (expected one of %s), %s solver disabled",
+            provider_flag, provider, ", ".join(_SUPPORTED_PROVIDERS), label,
+        )
+        return None
+    logger.info("CAPTCHA %s solver configured: provider=%s", label, provider)
+    return CaptchaSolver(provider, api_key)
+
+
+def get_solver() -> "MultiProviderSolver | None":
+    """Return the configured solver wrapper, or ``None`` if none configured.
+
+    Reads ``CAPTCHA_SOLVER_PROVIDER`` / ``CAPTCHA_SOLVER_KEY`` for the
+    primary slot and ``CAPTCHA_SOLVER_PROVIDER_SECONDARY`` /
+    ``CAPTCHA_SOLVER_KEY_SECONDARY`` for the §11.8 failover slot at
     process startup. **Per-agent overrides are NOT supported for
     provider/key** — the solver is constructed once in
     ``BrowserManager.__init__`` and shared process-wide. The returned
-    instance carries stateful breaker / health-check / cost-counter
-    coupling that would not be safe to swap per-call.
+    wrapper carries stateful breaker / health-check / cost-counter
+    coupling on each underlying :class:`CaptchaSolver` that would not
+    be safe to swap per-call.
+
+    Returns:
+      * ``None`` — neither slot configured (no solver).
+      * :class:`MultiProviderSolver` with ``secondary=None`` —
+        single-provider deployment; failover paths are no-ops.
+      * :class:`MultiProviderSolver` with both slots populated —
+        full §11.8 failover behavior.
+
+    The wrapper exposes the same public surface as :class:`CaptchaSolver`
+    (``solve``, ``is_solver_unreachable``, ``is_breaker_open``,
+    ``health_check``, ``close``, ``provider``) so the rest of
+    :mod:`src.browser.service` stays unchanged.
 
     Use ``CAPTCHA_DISABLED`` per-agent to disable solving for a specific
     agent. Solver-proxy creds DO support per-agent override (see
@@ -645,19 +685,22 @@ def get_solver() -> CaptchaSolver | None:
     Live-reload requires browser-service restart; flag changes via
     ``config/settings.json`` take effect on the next process start.
     """
-    provider = flags.get_str("CAPTCHA_SOLVER_PROVIDER", "").strip().lower()
-    api_key = flags.get_str("CAPTCHA_SOLVER_KEY", "").strip()
-    if not provider or not api_key:
+    primary = _build_single_solver(
+        "CAPTCHA_SOLVER_PROVIDER", "CAPTCHA_SOLVER_KEY", label="primary",
+    )
+    if primary is None:
         return None
-    if provider not in _SUPPORTED_PROVIDERS:
-        logger.warning(
-            "Unknown CAPTCHA_SOLVER_PROVIDER %r (expected one of %s), solver disabled",
-            provider,
-            ", ".join(_SUPPORTED_PROVIDERS),
+    secondary = _build_single_solver(
+        "CAPTCHA_SOLVER_PROVIDER_SECONDARY",
+        "CAPTCHA_SOLVER_KEY_SECONDARY",
+        label="secondary",
+    )
+    if secondary is not None:
+        logger.info(
+            "CAPTCHA failover armed: primary=%s secondary=%s",
+            primary.provider, secondary.provider,
         )
-        return None
-    logger.info("CAPTCHA solver configured: provider=%s", provider)
-    return CaptchaSolver(provider, api_key)
+    return MultiProviderSolver(primary, secondary)
 
 
 def _classify_captcha(selector: str) -> str:
@@ -2257,3 +2300,247 @@ class CaptchaSolver:
         except Exception:
             logger.debug("Token injection error", exc_info=True)
         return False
+
+
+# ── §11.8 multi-provider failover wrapper ──────────────────────────────────
+
+
+class MultiProviderSolver:
+    """Failover wrapper around two :class:`CaptchaSolver` instances.
+
+    Public surface intentionally mirrors :class:`CaptchaSolver` so the
+    BrowserManager's :meth:`_metered_solve` and the up-stream gates in
+    ``service.py`` keep working without changes:
+
+      * :attr:`provider` — *active* solver's provider name (the one used
+        for the most recent solve, or the one that WILL be used when read
+        before a solve). Drives cost-counter pricing tier lookups.
+      * :meth:`solve` — async; routes to primary unless primary is
+        unreachable / breaker-open, then secondary. Mid-call fatal
+        primary failures (``token=None`` + ``_solver_unreachable`` newly
+        flipped) trigger one transparent retry on the secondary.
+      * :meth:`is_solver_unreachable` — async; True iff BOTH solvers are
+        unreachable (single-provider config: True iff primary is).
+      * :meth:`is_breaker_open` — sync; True iff BOTH breakers are open.
+      * :meth:`health_check` — runs both, returns the worst outcome
+        (``unreachable`` > ``degraded`` > ``healthy``).
+      * :meth:`close` — closes both underlying clients.
+
+    State isolation: each underlying :class:`CaptchaSolver` keeps its own
+    breaker, health-check flag, and failure window. A fatal-config error
+    on the primary does not affect the secondary, and vice versa — that
+    independence is the entire point of the wrapper.
+
+    Single-provider deployments (``secondary=None``) get a transparent
+    pass-through: every method behaves exactly as if the primary were
+    being used directly. Failover paths short-circuit cheaply.
+    """
+
+    def __init__(
+        self,
+        primary: CaptchaSolver,
+        secondary: CaptchaSolver | None,
+    ) -> None:
+        self.primary: CaptchaSolver = primary
+        self.secondary: CaptchaSolver | None = secondary
+        # The provider name that will be used for the NEXT solve under
+        # current state. Mutated by :meth:`_pick_solver` before a solve
+        # and again on mid-call failover so ``self.provider`` returns
+        # the right tier for cost accounting reads in
+        # :meth:`BrowserManager._metered_solve`.
+        self._active_solver: CaptchaSolver = primary
+
+    # ── pricing-tier surface for ``_metered_solve`` ─────────────────────
+
+    @property
+    def provider(self) -> str:
+        """Active solver's provider name.
+
+        Read by ``_metered_solve`` BEFORE :meth:`solve` to pick the
+        cost-cap reservation tier and AFTER :meth:`solve` to pick the
+        accounting tier. The wrapper updates ``_active_solver`` based on
+        current health state in :meth:`_pick_solver` so a pre-solve read
+        sees the solver that will actually be used.
+        """
+        return self._active_solver.provider
+
+    # ── routing ─────────────────────────────────────────────────────────
+
+    async def _pick_solver(self) -> CaptchaSolver | None:
+        """Choose the solver for the next solve attempt.
+
+        Returns the secondary when the primary is unreachable OR has an
+        open breaker; otherwise returns the primary. Returns ``None``
+        when both are unavailable — caller surfaces a no-token result
+        without contacting either provider.
+
+        Side effect: updates ``self._active_solver`` so the
+        :attr:`provider` property reads the right tier for cost
+        accounting on the upcoming solve.
+        """
+        primary_unreachable = await self.primary.is_solver_unreachable()
+        primary_breaker_open = self.primary.is_breaker_open()
+        primary_skip = primary_unreachable or primary_breaker_open
+
+        if not primary_skip:
+            self._active_solver = self.primary
+            return self.primary
+
+        if self.secondary is None:
+            # Single-provider config — no failover available. Keep
+            # ``_active_solver`` pointing at primary so the provider
+            # property remains consistent with what the caller would
+            # have seen pre-failover-feature.
+            self._active_solver = self.primary
+            return None
+
+        secondary_unreachable = await self.secondary.is_solver_unreachable()
+        secondary_breaker_open = self.secondary.is_breaker_open()
+        if secondary_unreachable or secondary_breaker_open:
+            # Both out — surface the same "no solver path" semantics as
+            # today's unreachable / breaker-open envelopes.
+            self._active_solver = self.primary
+            return None
+
+        self._active_solver = self.secondary
+        return self.secondary
+
+    async def solve(
+        self,
+        page,
+        selector: str,
+        page_url: str,
+        *,
+        agent_id: str | None = None,
+        kind: str | None = None,
+    ) -> SolveResult:
+        """Solve a CAPTCHA using primary, falling over to secondary on failure.
+
+        Routing decisions:
+
+          1. Primary healthy → call ``primary.solve()``. On a clean
+             ``token is None`` AND ``_solver_unreachable`` newly flipped
+             (commit 2e889bd's fatal-config gate), retry once on the
+             secondary in the same call. The flag is sticky so all
+             subsequent solves bypass primary.
+          2. Primary unreachable / breaker-open → skip primary entirely,
+             call ``secondary.solve()``.
+          3. Both unreachable / breaker-open → return a no-token
+             :class:`SolveResult` without contacting either provider,
+             matching today's "no solver" envelope path.
+        """
+        target = await self._pick_solver()
+        if target is None:
+            # Both primary and secondary are unavailable. Mirror the
+            # short-circuit shape used by the underlying solver's own
+            # unreachable / breaker-open paths.
+            logger.info(
+                "Skipping solve: both solvers unavailable "
+                "(primary=%s secondary=%s)",
+                self.primary.provider,
+                self.secondary.provider if self.secondary else "<unset>",
+            )
+            return SolveResult(
+                token=None, injection_succeeded=False,
+                used_proxy_aware=False, compat_rejected=False,
+            )
+
+        result = await target.solve(
+            page, selector, page_url,
+            agent_id=agent_id, kind=kind,
+        )
+
+        # §11.8 mid-call failover: primary's fatal-config gate
+        # (``_handle_provider_error_response`` from commit 2e889bd) flips
+        # ``_solver_unreachable`` AFTER the provider HTTP call has already
+        # returned a no-token outcome. The pre-solve gate in
+        # :meth:`_pick_solver` couldn't see that yet. When it happens on
+        # the primary AND a secondary is configured, retry once.
+        if (
+            target is self.primary
+            and result.token is None
+            and self.primary._solver_unreachable
+            and self.secondary is not None
+        ):
+            secondary_unreachable = await self.secondary.is_solver_unreachable()
+            secondary_breaker_open = self.secondary.is_breaker_open()
+            if not (secondary_unreachable or secondary_breaker_open):
+                logger.warning(
+                    "Primary solver flipped unreachable mid-call; "
+                    "retrying on secondary (primary=%s secondary=%s)",
+                    self.primary.provider, self.secondary.provider,
+                )
+                self._active_solver = self.secondary
+                return await self.secondary.solve(
+                    page, selector, page_url,
+                    agent_id=agent_id, kind=kind,
+                )
+
+        return result
+
+    # ── health surface ──────────────────────────────────────────────────
+
+    async def is_solver_unreachable(self) -> bool:
+        """True iff BOTH solvers are unreachable.
+
+        Drives the pre-solve gate in :meth:`_check_captcha`. Returning
+        True yields the existing ``no_solver`` envelope path;
+        single-provider deployments collapse to "primary unreachable".
+        """
+        if not await self.primary.is_solver_unreachable():
+            return False
+        if self.secondary is None:
+            return True
+        return await self.secondary.is_solver_unreachable()
+
+    def is_breaker_open(self) -> bool:
+        """True iff BOTH breakers are open.
+
+        Drives the pre-solve breaker gate in :meth:`_check_captcha`.
+        Single-provider deployments collapse to "primary breaker open".
+        """
+        if not self.primary.is_breaker_open():
+            return False
+        if self.secondary is None:
+            return True
+        return self.secondary.is_breaker_open()
+
+    async def health_check(
+        self, provider: str | None = None,
+    ) -> Literal["healthy", "degraded", "unreachable"]:
+        """Probe both solvers and return the worst outcome.
+
+        Worst-case ranking: ``unreachable`` > ``degraded`` > ``healthy``.
+        Operators reading this signal want to know whether at least one
+        provider is reachable; ``healthy`` here means "both healthy",
+        ``degraded`` means "at least one degraded but neither
+        unreachable", ``unreachable`` means "both unreachable" — the
+        only state where solving is truly unavailable.
+
+        ``provider`` argument is accepted for parity with
+        :meth:`CaptchaSolver.health_check` but ignored (the wrapper
+        always probes both underlying solvers).
+        """
+        primary_outcome = await self.primary.health_check()
+        if self.secondary is None:
+            return primary_outcome
+        secondary_outcome = await self.secondary.health_check()
+        # Worst-case fold: any "unreachable" wins only when BOTH agree;
+        # otherwise downgrade to the worse of the two non-unreachable
+        # outcomes.
+        if primary_outcome == "unreachable" and secondary_outcome == "unreachable":
+            return "unreachable"
+        if primary_outcome == "degraded" or secondary_outcome == "degraded":
+            return "degraded"
+        if primary_outcome == "unreachable" or secondary_outcome == "unreachable":
+            # One side unreachable, the other healthy/degraded — surface
+            # ``degraded`` so operators see the partial fault without
+            # the wrapper claiming "totally unreachable".
+            return "degraded"
+        return "healthy"
+
+    async def close(self) -> None:
+        """Close both underlying solver clients."""
+        await self.primary.close()
+        if self.secondary is not None:
+            await self.secondary.close()
