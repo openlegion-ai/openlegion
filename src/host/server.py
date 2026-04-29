@@ -2700,6 +2700,14 @@ def create_mesh_app(
     _browser_proxy_client = _httpx.AsyncClient(timeout=60)
 
     _last_browser_boot_id: str | None = None
+    # Throttle for `_check_browser_boot_id_changed`. The probe was
+    # previously fired on every browser command (one extra HTTP round-trip
+    # per navigate / click / type), even though the browser service
+    # restarts at most once per deploy. 30s is a good balance: a real
+    # restart is detected within one tick, and the per-command overhead
+    # collapses from "always probe" to "almost never probe."
+    _last_boot_id_check_ts: float = 0.0
+    _BOOT_ID_CHECK_INTERVAL_S = 30.0
 
     async def _push_browser_proxy(agent_id: str) -> None:
         """Push proxy config for an agent to the browser service."""
@@ -2745,14 +2753,28 @@ def create_mesh_app(
             logger.warning("Failed to push proxy config for %s: %s", agent_id, e)
 
     async def _check_browser_boot_id_changed() -> bool:
-        """Check if browser service restarted by comparing boot_id."""
-        nonlocal _last_browser_boot_id
+        """Check if the browser service restarted by comparing boot_id.
+
+        Throttled to one probe per ``_BOOT_ID_CHECK_INTERVAL_S`` seconds
+        so the per-command overhead is bounded; a real restart is
+        detected on the next tick after it happens. Treats the first
+        successful contact (when ``_last_browser_boot_id`` is still
+        ``None``) as a restart so the cold-start race — where the
+        deferred startup push at ``+5s`` ran before the browser service
+        was reachable — self-heals on the first browser command instead
+        of leaving every agent permanently in "no proxy" mode.
+        """
+        nonlocal _last_browser_boot_id, _last_boot_id_check_ts
         if not container_manager:
             return False
         svc_url = getattr(container_manager, "browser_service_url", None)
         svc_token = getattr(container_manager, "browser_auth_token", "")
         if not svc_url:
             return False
+        now = time.monotonic()
+        if now - _last_boot_id_check_ts < _BOOT_ID_CHECK_INTERVAL_S:
+            return False
+        _last_boot_id_check_ts = now
         try:
             headers: dict = {}
             if svc_token:
@@ -2763,8 +2785,13 @@ def create_mesh_app(
             data = resp.json()
             boot_id = data.get("boot_id")
             if _last_browser_boot_id is None:
+                # First successful contact. The deferred startup push at
+                # +5s may have run when the browser service wasn't ready
+                # yet (silently failing per-agent); treating this as a
+                # restart triggers a re-push so agents that missed the
+                # initial window pick up their proxy config.
                 _last_browser_boot_id = boot_id
-                return False
+                return True
             if boot_id != _last_browser_boot_id:
                 _last_browser_boot_id = boot_id
                 return True
@@ -2774,6 +2801,7 @@ def create_mesh_app(
 
     async def _deferred_push_browser_proxies() -> None:
         """Push proxy config for all agents after a delay (non-blocking background task)."""
+        nonlocal _last_browser_boot_id, _last_boot_id_check_ts
         await asyncio.sleep(5)  # Wait for agents to register
         if not container_manager:
             return
@@ -2783,8 +2811,39 @@ def create_mesh_app(
         agents = list(router.agent_registry.keys())
         if not agents:
             return
-        for agent_id in agents:
-            await _push_browser_proxy(agent_id)
+        # Push in parallel — sequential awaits could add seconds of
+        # startup latency on a fleet with many agents. Each
+        # ``_push_browser_proxy`` already swallows its own exceptions
+        # (line ~2745); ``return_exceptions=True`` is belt-and-suspenders
+        # so one transient failure doesn't cancel the rest.
+        await asyncio.gather(
+            *(_push_browser_proxy(agent_id) for agent_id in agents),
+            return_exceptions=True,
+        )
+        # Seed ``_last_browser_boot_id`` so the first browser command's
+        # restart-detection probe doesn't fire a redundant re-push for
+        # all agents. If the deferred push above failed (e.g. browser
+        # container slow to start), boot_id stays None and the first-
+        # contact recovery path in ``_check_browser_boot_id_changed``
+        # still corrects the race. We bypass the throttle here — this
+        # is a one-time seed at startup, not the per-command hot path.
+        try:
+            svc_token = getattr(container_manager, "browser_auth_token", "")
+            headers: dict = {}
+            if svc_token:
+                headers["Authorization"] = f"Bearer {svc_token}"
+            resp = await _browser_proxy_client.get(
+                f"{svc_url}/browser/status", headers=headers, timeout=5,
+            )
+            boot_id = resp.json().get("boot_id")
+            if boot_id:
+                _last_browser_boot_id = boot_id
+                _last_boot_id_check_ts = time.monotonic()
+        except Exception:
+            # Browser container not ready yet — leave boot_id unset so
+            # the first-contact branch in `_check_browser_boot_id_changed`
+            # picks up the race correction.
+            pass
         logger.info("Pushed browser proxy config for %d agents", len(agents))
 
     @app.on_event("startup")
@@ -3054,9 +3113,17 @@ def create_mesh_app(
             restarted = await _check_browser_boot_id_changed()
             if restarted:
                 all_agents = list(router.agent_registry.keys())
-                logger.info("Browser service restarted, re-pushing proxy for %d agents", len(all_agents))
-                for _aid in all_agents:
-                    await _push_browser_proxy(_aid)
+                if all_agents:
+                    logger.info(
+                        "Browser service restarted, re-pushing proxy for %d agents",
+                        len(all_agents),
+                    )
+                    # Parallel — sequential awaits added cumulative latency
+                    # to the triggering agent's command on large fleets.
+                    await asyncio.gather(
+                        *(_push_browser_proxy(_aid) for _aid in all_agents),
+                        return_exceptions=True,
+                    )
         except Exception:
             pass  # Non-blocking — don't fail the browser command
 

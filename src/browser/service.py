@@ -42,6 +42,7 @@ from src.browser.stealth import (
     build_launch_options,
     build_mobile_init_script,
     get_device_profile,
+    pick_platform_pre_nav_delay,
     pick_referer,
     validate_referer,
 )
@@ -3897,6 +3898,37 @@ class BrowserManager:
         await self.stop(agent_id)
         # Next get_or_start will create a fresh instance with same profile
 
+    async def _apply_platform_pre_nav_delay(
+        self, agent_id: str, url: str,
+    ) -> None:
+        """Sleep a platform-specific Gaussian dwell before navigating.
+
+        No-op when ``url`` is not on the protected-platform list (LinkedIn
+        / X / Twitter / Meta) or when the operator has disabled the
+        feature via ``BROWSER_PLATFORM_TIMING_ENABLED=false``. The flag
+        check lives here (not in ``stealth.py``) so the operator-tuning
+        and per-agent-override paths flow through the standard
+        :mod:`src.browser.flags` precedence chain. See
+        :func:`src.browser.stealth.pick_platform_pre_nav_delay` for the
+        sampling logic and per-platform tuning rationale.
+        """
+        from src.browser.flags import get_bool
+        if not get_bool("BROWSER_PLATFORM_TIMING_ENABLED", True, agent_id=agent_id):
+            return
+        delay_s, label = pick_platform_pre_nav_delay(url)
+        if delay_s <= 0 or label is None:
+            return
+        # Single INFO log per applied delay so operators can correlate
+        # latency reports with the platform-timing posture without
+        # having to chase agent-side traces. URL is intentionally NOT
+        # logged at INFO — the host label is enough; full URLs flow
+        # through the recorder's redaction pipeline elsewhere.
+        logger.info(
+            "platform_pre_nav_delay agent=%s platform=%s delay=%.2fs",
+            agent_id, label, delay_s,
+        )
+        await asyncio.sleep(delay_s)
+
     def set_proxy_config(self, agent_id: str, config: dict | None) -> None:
         """Store proxy config for an agent. Pass None to clear."""
         if config is None:
@@ -4157,6 +4189,12 @@ class BrowserManager:
             # picker can see "we just used a direct/social/search
             # pattern" and rotate accordingly.
             inst.recent_referers.append(resolved_referer)
+
+            # Per-platform pre-nav dwell. Fires only on known high-
+            # protection platforms (LinkedIn / X / Meta) where in-house
+            # behavioral models score sub-second arrivals as bot signal.
+            # No-op for any other host.
+            await self._apply_platform_pre_nav_delay(agent_id, url)
 
             # Playwright accepts ``referer`` for goto and sets both the
             # network header and document.referrer consistently. Empty
@@ -9572,6 +9610,11 @@ class BrowserManager:
                 }
                 if resolved_referer:
                     goto_kwargs["referer"] = resolved_referer
+                # Per-platform pre-nav dwell — same posture as the main
+                # ``navigate`` path. New-tab arrivals on these platforms
+                # are also profiled by the in-house behavioral models, so
+                # the delay applies here too.
+                await self._apply_platform_pre_nav_delay(agent_id, url)
                 try:
                     await new_page.goto(url, **goto_kwargs)
                 except Exception as e:

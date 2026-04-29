@@ -29,6 +29,7 @@ from src.browser.captcha import (
     _BREAKER_OPEN_DURATION,
     _HEALTH_DEGRADED_LATENCY,
     CaptchaSolver,
+    _is_fatal_provider_error,
     _redact_clientkey,
     _redact_clientkey_text,
 )
@@ -497,6 +498,124 @@ async def test_three_failures_staggered_inside_window_does_trip():
         assert solver.is_breaker_open() is True
 
 
+# ── Fatal provider config errors: mark unreachable, skip breaker ─────
+
+
+def test_is_fatal_provider_error_helper():
+    """Substring + case-insensitive match against the marker set."""
+    assert _is_fatal_provider_error("ERROR_ZERO_BALANCE") is True
+    assert _is_fatal_provider_error("error_key_does_not_exist") is True
+    # Provider sometimes wraps the canonical token in extra prose.
+    assert _is_fatal_provider_error("ERROR_ACCOUNT_SUSPENDED for abuse") is True
+    assert _is_fatal_provider_error("ERROR_INSUFFICIENT_BALANCE: top up at...") is True
+    # Non-fatal errors must NOT match.
+    assert _is_fatal_provider_error("ERROR_INVALID_SITEKEY") is False
+    assert _is_fatal_provider_error("ERROR_NO_SLOT_AVAILABLE") is False
+    assert _is_fatal_provider_error("ERROR_CAPTCHA_UNSOLVABLE") is False
+    # Defensive: None / numeric / empty.
+    assert _is_fatal_provider_error(None) is False
+    assert _is_fatal_provider_error("") is False
+    assert _is_fatal_provider_error(42) is False
+
+
+@pytest.mark.asyncio
+async def test_fatal_provider_error_marks_solver_unreachable():
+    """A `createTask` response carrying a fatal-config errorDescription
+    (zero balance, revoked key, banned account) must mark the
+    process-wide solver UNREACHABLE so subsequent solves short-circuit
+    cleanly through the existing health gate. Without this, three of
+    these in 5 minutes would trip the §11.16 breaker for the whole
+    BrowserManager — the breaker is meant for transient PROVIDER
+    outages, not operator-actionable config faults like 'top up your
+    account'."""
+    solver = _make_solver()
+    solver._solver_health_checked = True  # skip the probe
+
+    fatal_resp = MagicMock()
+    fatal_resp.json = MagicMock(return_value={
+        "errorId": 10,
+        "errorDescription": "ERROR_ZERO_BALANCE",
+    })
+    fatal_resp.raise_for_status = MagicMock()
+
+    client = AsyncMock(spec=httpx.AsyncClient)
+    client.is_closed = False
+    client.post = AsyncMock(return_value=fatal_resp)
+    solver._client = client
+
+    page = _solve_page()
+    result = await solver.solve(page, 'iframe[src*="recaptcha"]', "https://example.com")
+
+    assert bool(result) is False
+    assert solver._solver_unreachable is True
+    # And the breaker MUST be untouched — no transient-failure ticks.
+    assert len(solver._solver_failure_timestamps) == 0
+    assert solver.is_breaker_open() is False
+
+
+@pytest.mark.asyncio
+async def test_three_fatal_errors_do_not_trip_breaker():
+    """Three consecutive fatal-config responses must NOT trip the
+    breaker. Each one marks the solver unreachable and the next
+    `solve()` short-circuits through `_solver_unreachable`. This is the
+    regression case: pre-fix, a user whose key just ran out of balance
+    would burn the fleet's solver capacity for the whole 10-min breaker
+    window."""
+    solver = _make_solver()
+    solver._solver_health_checked = True
+
+    fatal_resp = MagicMock()
+    fatal_resp.json = MagicMock(return_value={
+        "errorId": 10,
+        "errorDescription": "ERROR_ZERO_BALANCE",
+    })
+    fatal_resp.raise_for_status = MagicMock()
+
+    client = AsyncMock(spec=httpx.AsyncClient)
+    client.is_closed = False
+    client.post = AsyncMock(return_value=fatal_resp)
+    solver._client = client
+
+    page = _solve_page()
+    for _ in range(_BREAKER_FAILURE_THRESHOLD):
+        await solver.solve(page, 'iframe[src*="recaptcha"]', "https://example.com")
+
+    assert solver._solver_unreachable is True
+    assert solver.is_breaker_open() is False
+    # First call hit the wire; subsequent two short-circuited via the
+    # unreachable flag, so no extra `createTask` HTTP calls.
+    assert client.post.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_non_fatal_provider_error_still_ticks_breaker():
+    """Regression check: an `ERROR_INVALID_SITEKEY` (transient/page-
+    specific) must still count toward the §11.16 breaker. Three of
+    those in a row should still trip the breaker — the fatal-error
+    short-circuit must NOT swallow ordinary failure signals."""
+    solver = _make_solver()
+    solver._solver_health_checked = True
+
+    transient_resp = MagicMock()
+    transient_resp.json = MagicMock(return_value={
+        "errorId": 1,
+        "errorDescription": "ERROR_INVALID_SITEKEY",
+    })
+    transient_resp.raise_for_status = MagicMock()
+
+    client = AsyncMock(spec=httpx.AsyncClient)
+    client.is_closed = False
+    client.post = AsyncMock(return_value=transient_resp)
+    solver._client = client
+
+    page = _solve_page()
+    for _ in range(_BREAKER_FAILURE_THRESHOLD):
+        await solver.solve(page, 'iframe[src*="recaptcha"]', "https://example.com")
+
+    assert solver._solver_unreachable is False
+    assert solver.is_breaker_open() is True
+
+
 # ── 10: concurrent solves while breaker open all short-circuit ────────
 
 
@@ -930,18 +1049,23 @@ class TestBreakerLocalVsProviderFailures:
 
     @pytest.mark.asyncio
     async def test_three_provider_500_failures_DO_trip_breaker(self):
-        """Provider-contacted failures (createTask 5xx, errorId>0,
-        timeouts during polling) MUST still trip the breaker — that's
-        the signal it was designed for."""
+        """Provider-contacted TRANSIENT failures (createTask 5xx,
+        non-fatal errorId>0, timeouts during polling) MUST still trip
+        the breaker — that's the signal it was designed for. Fatal
+        config errors (zero balance, revoked key) take a different
+        path — see ``test_three_fatal_errors_do_not_trip_breaker``."""
         solver = _make_solver(provider="2captcha")
         solver._solver_health_checked = True
 
         page = _solve_page()
 
-        # createTask returns errorId>0 — provider WAS contacted.
+        # createTask returns errorId>0 with a NON-fatal description so
+        # the fatal-config short-circuit doesn't fire — provider WAS
+        # contacted and the breaker SHOULD count this as a transient
+        # outage signal.
         err_resp = MagicMock()
         err_resp.json = MagicMock(return_value={
-            "errorId": 1, "errorDescription": "ERROR_KEY_DOES_NOT_EXIST",
+            "errorId": 1, "errorDescription": "ERROR_NO_SLOT_AVAILABLE",
         })
         err_resp.raise_for_status = MagicMock()
 
@@ -959,5 +1083,8 @@ class TestBreakerLocalVsProviderFailures:
                 )
 
         # Breaker SHOULD have tripped — these were real provider
-        # failures, not local classification gaps.
+        # failures, not local classification gaps and not fatal config.
         assert solver.is_breaker_open() is True
+        # And the solver was NOT marked unreachable — the operator
+        # doesn't need to restart for a transient capacity issue.
+        assert solver._solver_unreachable is False

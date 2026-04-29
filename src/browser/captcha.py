@@ -145,6 +145,48 @@ _BREAKER_FAILURE_WINDOW = 300.0    # 5 min
 _BREAKER_FAILURE_THRESHOLD = 3
 _BREAKER_OPEN_DURATION = 600.0      # 10 min
 
+
+# Fatal provider error markers — substring (case-insensitive) matched
+# against the ``errorDescription`` returned by a solver provider. When a
+# response carries one of these, the issue is operator-actionable
+# (revoked / mistyped key, drained balance, banned account) and will not
+# recover until the operator intervenes. We mark the process-wide solver
+# UNREACHABLE so subsequent solves short-circuit cleanly via the existing
+# health-check gate, instead of letting the per-process circuit breaker
+# trip on three of these in a row. The breaker is meant to ride out
+# transient provider outages — three "zero balance" errors from one
+# agent should not lock the whole fleet's solver out for 10 minutes;
+# the operator needs to fix billing, not wait for a backoff window.
+#
+# Both 2Captcha and CapSolver use these or near-identical strings as of
+# 2026-04. Substring + case-insensitive match keeps us robust against
+# minor wording drift ("Invalid API key" vs "ERROR_INVALID_API_KEY").
+_FATAL_PROVIDER_ERROR_MARKERS: frozenset[str] = frozenset({
+    "ERROR_KEY_DOES_NOT_EXIST",
+    "ERROR_WRONG_USER_KEY",
+    "ERROR_ZERO_BALANCE",
+    "ERROR_KEY_DENIED_ACCESS",
+    "ERROR_INVALID_API_KEY",
+    "ERROR_INSUFFICIENT_BALANCE",
+    "ERROR_USER_NOT_FOUND",
+    "ERROR_KEY_BANNED",
+    "ERROR_ACCOUNT_SUSPENDED",
+})
+
+
+def _is_fatal_provider_error(error_description: object) -> bool:
+    """True iff ``error_description`` names an operator-actionable error.
+
+    See :data:`_FATAL_PROVIDER_ERROR_MARKERS` for the rationale and the
+    canonical marker list. ``error_description`` is whatever
+    ``data.get("errorDescription")`` returned — usually a string but
+    occasionally ``None`` or numeric on malformed responses.
+    """
+    if error_description is None:
+        return False
+    upper = str(error_description).upper()
+    return any(marker in upper for marker in _FATAL_PROVIDER_ERROR_MARKERS)
+
 # /getBalance endpoints — both providers expose these and accept the same
 # JSON body shape (``{"clientKey": "..."}``). Both return
 # ``{"errorId": 0, "balance": <float>}`` on success.
@@ -1280,6 +1322,45 @@ class CaptchaSolver:
             elif outcome == "degraded":
                 self._solver_health_degraded = True
 
+    def _handle_provider_error_response(self, data: dict) -> None:
+        """Log + classify an ``errorId>0`` response from a solver provider.
+
+        Always logs the (redacted) ``errorDescription`` so operators can
+        diagnose. When the description matches a known fatal-config
+        marker, additionally flips the per-process unreachable flag so
+        subsequent solves short-circuit through the existing health
+        gate. Without this, three "zero balance" errors from one agent
+        in 5 minutes would trip the §11.16 breaker for the whole
+        BrowserManager — the breaker tracks transient PROVIDER outages,
+        not operator-actionable config faults.
+        """
+        description = data.get("errorDescription")
+        # Render a clean placeholder when the provider returned no
+        # description — ``str(None)`` would log the literal "None"
+        # which is misleading in operator dashboards.
+        if description is None or description == "":
+            safe_desc = f"errorId={data.get('errorId')}"
+        else:
+            safe_desc = _redact_clientkey_text(str(description))
+        if _is_fatal_provider_error(description):
+            # Sticky for the rest of this process — the docstring on
+            # ``_solver_unreachable`` (and the §11.16 breaker test
+            # suite) treat the flag as one-way; an operator clears it
+            # by restarting the browser service after fixing the key /
+            # balance. This keeps semantics aligned with the existing
+            # health-check unreachable path.
+            self._solver_unreachable = True
+            logger.warning(
+                "%s reported a fatal config error (%s) — disabling solver "
+                "for this session. Operator must fix the API key / balance "
+                "and restart the browser service.",
+                self.provider, safe_desc,
+            )
+            return
+        logger.warning(
+            "%s solver error: %s", self.provider, safe_desc,
+        )
+
     async def _record_solver_outcome(self, success: bool) -> None:
         """Update the breaker state after a solve attempt.
 
@@ -1485,7 +1566,14 @@ class CaptchaSolver:
             # means ``_build_task_body`` rejected the variant locally
             # (no row in the per-provider task table) — the captcha is
             # unsupported, NOT a provider outage signal.
-            if provider_contacted:
+            #
+            # ``_solver_unreachable`` flipping mid-call means the provider
+            # returned a fatal-config error (revoked key, drained balance,
+            # banned account) — see :func:`_is_fatal_provider_error`.
+            # Those need operator intervention, not breaker backoff;
+            # skipping the tick keeps a misconfigured key from locking
+            # the whole BrowserManager out of solver duty for 10 minutes.
+            if provider_contacted and not self._solver_unreachable:
                 await self._record_solver_outcome(success=False)
             return SolveResult(
                 token=None, injection_succeeded=False,
@@ -1815,10 +1903,7 @@ class CaptchaSolver:
             )
             return None, used_proxy_aware, compat_rejected, True
         if data.get("errorId", 0) != 0:
-            logger.warning(
-                "2Captcha submit error: %s",
-                _redact_clientkey_text(str(data.get("errorDescription"))),
-            )
+            self._handle_provider_error_response(data)
             return None, used_proxy_aware, compat_rejected, True
         task_id = data.get("taskId")
         if not task_id:
@@ -1848,10 +1933,7 @@ class CaptchaSolver:
                 )
                 return None, used_proxy_aware, compat_rejected, True
             if data.get("errorId", 0) != 0:
-                logger.warning(
-                    "2Captcha poll error: %s",
-                    _redact_clientkey_text(str(data.get("errorDescription"))),
-                )
+                self._handle_provider_error_response(data)
                 return None, used_proxy_aware, compat_rejected, True
             if data.get("status") == "ready":
                 solution = data.get("solution", {})
@@ -1898,10 +1980,7 @@ class CaptchaSolver:
             )
             return None, used_proxy_aware, compat_rejected, True
         if data.get("errorId", 0) != 0:
-            logger.warning(
-                "CapSolver submit error: %s",
-                _redact_clientkey_text(str(data.get("errorDescription"))),
-            )
+            self._handle_provider_error_response(data)
             return None, used_proxy_aware, compat_rejected, True
         task_id = data.get("taskId")
         if not task_id:
@@ -1926,10 +2005,7 @@ class CaptchaSolver:
                 )
                 return None, used_proxy_aware, compat_rejected, True
             if data.get("errorId", 0) != 0:
-                logger.warning(
-                    "CapSolver poll error: %s",
-                    _redact_clientkey_text(str(data.get("errorDescription"))),
-                )
+                self._handle_provider_error_response(data)
                 return None, used_proxy_aware, compat_rejected, True
             if data.get("status") == "ready":
                 solution = data.get("solution", {})

@@ -447,7 +447,146 @@ def pick_referer(
     return rng.choice(candidates)
 
 
-# ── Per-agent resolution pool (§6.1) ──────────────────────────────────────────
+# ── Per-platform pre-navigate timing posture ─────────────────────────────────
+
+
+# Why this exists: LinkedIn, X/Twitter, and Meta all stack heavy in-house
+# behavioral risk-scoring on top of standard CAPTCHA/anti-bot. A signal
+# they all key on is "request fired ~0ms after the previous action" —
+# the agent typing a URL, hitting Enter, and pulling a page in 50ms is
+# itself a fingerprint, separate from JS / TLS / IP layers. Real humans
+# pause to focus the address bar, glance at the URL, and only then hit
+# Enter. The sub-second-arrival cluster is a reliable bot signal at
+# fleet scale.
+#
+# This module adds a Gaussian pre-nav dwell that fires ONLY when the
+# target host matches a known high-protection platform. The delay is
+# applied just before ``page.goto(...)`` so it shifts the request-time
+# distribution toward the human population without slowing down nav
+# to less-defended sites.
+#
+# Tuning rationale per platform:
+# * LinkedIn / X / Twitter — moderate (2-3s μ). PerimeterX/HUMAN on
+#   LinkedIn and X's in-house "Bird" risk model both score arrival
+#   timing; 2-3s of dwell falls inside the human bell curve without
+#   feeling noticeable to operators watching VNC.
+# * Meta (facebook.com / instagram.com) — heavier (4s μ). Meta's
+#   behavioral checkpoint logic is the most aggressive of the three;
+#   real users on Meta also page-dwell longer (feed-scroll culture),
+#   so a higher μ is plausible AND less risky.
+#
+# Operators override globally by unsetting ``BROWSER_PLATFORM_TIMING_ENABLED``
+# (default true) or per-agent via the same flag. Per-platform tuning is
+# operator-driven via env: ``BROWSER_PLATFORM_TIMING_<HOSTKEY>_MU_S`` etc.
+# (deferred work — current values are fine for the launch profile and
+# adjustable in code).
+_PLATFORM_TIMING_PROFILES: dict[str, dict[str, float | str]] = {
+    # Maps the bare-domain canonical hostname (matching the same
+    # subdomain semantics as ``captcha_policy._matches`` — bare entry
+    # matches apex AND any subdomain). Keep alphabetical for diff
+    # readability.
+    "facebook.com": {
+        "label": "facebook",
+        "mu_s": 4.0, "sigma_s": 1.2, "min_s": 1.5, "max_s": 8.0,
+    },
+    "instagram.com": {
+        "label": "instagram",
+        "mu_s": 4.0, "sigma_s": 1.2, "min_s": 1.5, "max_s": 8.0,
+    },
+    "linkedin.com": {
+        "label": "linkedin",
+        "mu_s": 3.0, "sigma_s": 1.0, "min_s": 1.0, "max_s": 6.0,
+    },
+    "twitter.com": {
+        "label": "twitter",
+        "mu_s": 2.5, "sigma_s": 0.8, "min_s": 0.8, "max_s": 5.0,
+    },
+    "x.com": {
+        "label": "x",
+        "mu_s": 2.5, "sigma_s": 0.8, "min_s": 0.8, "max_s": 5.0,
+    },
+}
+
+
+def _canonical_host(url: str) -> str | None:
+    """Lower-cased hostname with leading ``www.`` stripped, or None.
+
+    Mirrors ``captcha_policy._hostname`` so the bare-domain matching
+    rules below behave consistently across the two modules.
+    """
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return None
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return None
+    if host.startswith("www."):
+        host = host[4:]
+    return host
+
+
+def get_platform_timing_profile(url: str) -> dict | None:
+    """Return the timing profile dict for ``url``'s host, or ``None``.
+
+    Bare-domain match: an entry ``"linkedin.com"`` matches both
+    ``linkedin.com`` and any subdomain (``mobile.linkedin.com``,
+    ``api.linkedin.com``). Returns ``None`` when the host isn't on
+    the protected-platform list.
+
+    The returned dict is the live module-level entry — do not mutate.
+    """
+    host = _canonical_host(url)
+    if host is None:
+        return None
+    if host in _PLATFORM_TIMING_PROFILES:
+        return _PLATFORM_TIMING_PROFILES[host]
+    # Subdomain match: walk parents (``mobile.linkedin.com`` →
+    # ``linkedin.com``). Uses the same right-anchored suffix logic as
+    # captcha_policy so behavior is consistent across modules.
+    for entry, profile in _PLATFORM_TIMING_PROFILES.items():
+        if host.endswith("." + entry):
+            return profile
+    return None
+
+
+def pick_platform_pre_nav_delay(
+    url: str,
+    *,
+    rng: random.Random | None = None,
+) -> tuple[float, str | None]:
+    """Sample a pre-nav dwell for ``url`` based on its platform profile.
+
+    Returns ``(delay_seconds, label)``:
+      * ``(0.0, None)`` — host is not on the protected-platform list;
+        caller skips the delay entirely.
+      * ``(delay, label)`` — sample a clamped Gaussian per the
+        profile's μ/σ/min/max. ``label`` is the platform short-name
+        (``"linkedin"``, ``"x"``, ...) for logging.
+
+    Sampling: ``rng.gauss(mu, sigma)`` clamped into ``[min_s, max_s]``.
+    Real-user arrival timing on these platforms is well-modeled by a
+    truncated normal — power-law / log-normal alternatives don't match
+    the underlying behavior any better at this scale and are harder
+    to tune.
+    """
+    profile = get_platform_timing_profile(url)
+    if profile is None:
+        return 0.0, None
+    rng = rng or random
+    mu = float(profile["mu_s"])
+    sigma = float(profile["sigma_s"])
+    lo = float(profile["min_s"])
+    hi = float(profile["max_s"])
+    sample = rng.gauss(mu, sigma)
+    if sample < lo:
+        sample = lo
+    elif sample > hi:
+        sample = hi
+    return sample, str(profile["label"])
+
+
+
 
 
 # Distribution approximates Windows-desktop market share on the most common
