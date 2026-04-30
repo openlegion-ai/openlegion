@@ -86,6 +86,30 @@ _SCHEMA_VERSION = 1
 # writing junk. Cap the whole sidecar at 8 MiB so a hostile workflow
 # can't blow out the disk via persisted state.
 _MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024
+
+# Cookie names known to be bound by detection vendors to a specific
+# (UA, IP) tuple. Replaying these under a rotated UA or a different
+# proxy egress IP triggers an immediate 403 — and worse, the failed
+# replay itself is recorded by the vendor as "session token used from
+# wrong origin", lowering our trust score for the lifetime of the
+# session. Drop them before restore when the binding signature changed.
+#
+# Match prefixes (case-insensitive) — vendors append agent-specific
+# suffixes (cf_clearance is bare; ``datadome`` cookie is exactly
+# ``datadome``; ``_abck``/``ak_bmsc`` are Akamai BMP; ``incap_ses_``,
+# ``visid_incap_`` are Imperva; ``pxhd``/``_px3`` are PerimeterX).
+_BINDING_SENSITIVE_COOKIE_PREFIXES: tuple[str, ...] = (
+    "cf_clearance",   # Cloudflare
+    "datadome",        # DataDome
+    "_abck",           # Akamai BMP
+    "ak_bmsc",         # Akamai BMP secondary
+    "bm_sv",           # Akamai BMP supplementary
+    "bm_sz",           # Akamai BMP supplementary
+    "incap_ses_",      # Imperva session
+    "visid_incap_",    # Imperva visitor
+    "pxhd",            # PerimeterX device
+    "_px",             # PerimeterX (_px, _px2, _px3)
+)
 # Reuse the canonical agent-id regex — sidecars are written under
 # ``<dir>/<agent_id>.json`` and an unvalidated agent_id is a directory
 # traversal vector (``../../etc/passwd``).
@@ -141,7 +165,62 @@ def session_path(agent_id: str) -> Path:
 # ── Snapshot ───────────────────────────────────────────────────────────────
 
 
-async def snapshot_session(agent_id: str, context: Any) -> bool:
+def _hash_signature(parts: dict[str, str | None]) -> str:
+    """Stable SHA-256 of (key, value) pairs after dropping None values.
+
+    Used to detect "did the agent's UA or proxy change since the last
+    snapshot" without storing the raw UA/proxy on disk. We only need
+    equality, never recovery. Trimmed to 16 hex chars — collision risk
+    is irrelevant because we never authenticate based on the digest.
+    """
+    import hashlib
+    kept = sorted((k, v) for k, v in parts.items() if v)
+    serialized = json.dumps(kept, separators=(",", ":"), sort_keys=False)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:16]
+
+
+def _drop_binding_sensitive_cookies(state: dict, vendors_seen: list[str]) -> int:
+    """Strip cookies whose names match the binding-sensitive prefix list.
+
+    Mutates ``state`` in place. Returns the number of cookies removed.
+    Caller logs the count + vendor names. We do NOT log specific cookie
+    names or values to keep the audit trail privacy-safe.
+    """
+    cookies = state.get("cookies")
+    if not isinstance(cookies, list):
+        return 0
+    kept: list = []
+    dropped = 0
+    for cookie in cookies:
+        if not isinstance(cookie, dict):
+            kept.append(cookie)
+            continue
+        name = (cookie.get("name") or "").lower()
+        bound = False
+        for prefix in _BINDING_SENSITIVE_COOKIE_PREFIXES:
+            if name == prefix or name.startswith(prefix):
+                bound = True
+                # Track which vendor families we dropped (de-dupe by
+                # caller). Helps operators see "we dropped Cloudflare
+                # tokens" without leaking specific cookie names.
+                family = prefix.split("_", 1)[0] or prefix
+                if family not in vendors_seen:
+                    vendors_seen.append(family)
+                break
+        if bound:
+            dropped += 1
+        else:
+            kept.append(cookie)
+    state["cookies"] = kept
+    return dropped
+
+
+async def snapshot_session(
+    agent_id: str,
+    context: Any,
+    *,
+    binding_signature: dict[str, str | None] | None = None,
+) -> bool:
     """Capture ``context.storage_state()`` to the per-agent sidecar.
 
     ``context`` is duck-typed as a Playwright ``BrowserContext``; only
@@ -203,11 +282,19 @@ async def snapshot_session(agent_id: str, context: Any) -> bool:
         )
         return False
 
-    payload = {
+    payload: dict = {
         "version": _SCHEMA_VERSION,
         "saved_at": int(time.time()),
         "storage_state": state,
     }
+    if binding_signature:
+        # Persist a short hash of the (UA, proxy) used when this state
+        # was captured. On restore, the caller passes the current
+        # signature; if it differs we drop binding-sensitive cookies
+        # (cf_clearance et al.) before seeding the context. Stored as
+        # an opaque digest so the file does not leak the specific UA
+        # version or proxy URL beyond what the cookies themselves do.
+        payload["binding_signature"] = _hash_signature(binding_signature)
 
     # Cap serialized payload size before opening any file. A hostile
     # site can inflate one origin's localStorage near the per-origin
@@ -281,6 +368,8 @@ async def snapshot_session(agent_id: str, context: Any) -> bool:
 async def restore_session(
     agent_id: str,
     context_factory: Callable[..., Awaitable[Any]],
+    *,
+    current_signature: dict[str, str | None] | None = None,
 ) -> Any | None:
     """Build a BrowserContext seeded with the previously-snapshotted state.
 
@@ -288,6 +377,15 @@ async def restore_session(
     given a ``storage_state`` keyword argument — passed in so the
     caller's full context-creation parameters (proxy, viewport, init
     scripts) are preserved. We just inject the storage_state.
+
+    ``current_signature`` is an optional dict of binding-relevant fields
+    (typically ``{"ua": ..., "proxy": ...}``) that the caller knows about
+    NOW. When supplied alongside a snapshot that recorded a binding
+    signature, a mismatch causes binding-sensitive cookies (cf_clearance
+    et al.) to be dropped before the context is seeded. Cloudflare /
+    DataDome / PerimeterX bind these tokens to (UA, IP); replaying them
+    under a different fingerprint or proxy is a guaranteed 403 AND a
+    trust-score hit. Better to fall back to a fresh challenge.
 
     Returns the new context on success; ``None`` when:
 
@@ -346,6 +444,31 @@ async def restore_session(
             "type; starting fresh", agent_id,
         )
         return None
+
+    # Binding-cookie invalidation: when the caller knows the current
+    # signature (UA, proxy egress) AND the sidecar recorded one at
+    # snapshot time, compare. On mismatch, drop binding-sensitive
+    # cookies before seeding the context. Old-format snapshots (no
+    # binding_signature persisted) and callers that don't supply
+    # ``current_signature`` skip this step transparently.
+    persisted_sig = payload.get("binding_signature")
+    if (
+        current_signature
+        and isinstance(persisted_sig, str)
+        and persisted_sig
+    ):
+        live_sig = _hash_signature(current_signature)
+        if live_sig != persisted_sig:
+            vendors_seen: list[str] = []
+            dropped = _drop_binding_sensitive_cookies(state, vendors_seen)
+            if dropped:
+                logger.info(
+                    "session restore for '%s': binding signature changed "
+                    "(persisted=%s live=%s); dropped %d cookies bound to "
+                    "vendors: %s",
+                    agent_id, persisted_sig, live_sig, dropped,
+                    ",".join(vendors_seen) or "(none)",
+                )
 
     try:
         context = await context_factory(storage_state=state)
