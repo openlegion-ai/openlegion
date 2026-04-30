@@ -79,6 +79,16 @@ KNOWN_FLAGS: dict[str, str] = {
     "BROWSER_CAPTCHA_REDETECT_ENABLED":
         "true | false (default true) — gate MutationObserver-based "
         "post-action captcha re-detection on click/type/press_key/fill_form",
+    # ── Per-platform pre-nav timing posture ───────────────────────────────
+    "BROWSER_PLATFORM_TIMING_ENABLED":
+        "true | false (default true) — gate the per-platform pre-navigate "
+        "Gaussian dwell that fires on known high-protection platforms "
+        "(LinkedIn / X / Twitter / Facebook / Instagram). The dwell "
+        "shifts arrival-timing distribution toward the human population "
+        "for sites whose in-house behavioral models score sub-second "
+        "arrivals as bot signal. Operators who run high-volume tests "
+        "against these platforms (or have measured no benefit) can "
+        "disable globally or per-agent.",
     # ── CAPTCHA solver (§11) ──────────────────────────────────────────────
     "CAPTCHA_SOLVER_PROVIDER": "2captcha | capsolver | unset",
     "CAPTCHA_SOLVER_KEY": "API key for the primary provider",

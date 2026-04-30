@@ -26,6 +26,7 @@ from urllib.parse import urlparse
 
 from src.browser import captcha_policy
 from src.browser.captcha import (
+    _ANTIBOT_KINDS,
     SolveResult,
     _classify_behavioral,
     _classify_cf_state,
@@ -39,9 +40,11 @@ from src.browser.redaction import CredentialRedactor
 from src.browser.ref_handle import RefHandle, RefStale, ShadowHop
 from src.browser.stealth import (
     DEFAULT_DEVICE_PROFILE,
+    _canonical_host,
     build_launch_options,
     build_mobile_init_script,
     get_device_profile,
+    pick_platform_pre_nav_delay,
     pick_referer,
     validate_referer,
 )
@@ -237,6 +240,32 @@ def _sanitize_download_filename(suggested: str) -> str:
     if len(name) < 2:
         name = name + "_"
     return name
+
+
+# ── §22 anti-bot solver opt-in helper ─────────────────────────────────────
+def _solver_supports_kind(solver: object, kind: str) -> bool:
+    """Return ``True`` iff ``solver.supports_kind(kind)`` is genuinely True.
+
+    Three-state defensive read: the bundled ``CaptchaSolver`` and the
+    ``MultiProviderSolver`` wrapper both expose
+    :meth:`supports_kind`; legacy / mocked solvers may not. We require
+    a strict ``is True`` comparison rather than truthiness so that
+    ``MagicMock`` auto-attribute children (which test suites attach to
+    ``BrowserManager._captcha_solver``) don't accidentally enable the
+    anti-bot solver path. Tests opt-in by configuring
+    ``solver.supports_kind = MagicMock(return_value=True)``.
+
+    Returns ``False`` on any exception so a buggy third-party subclass
+    can't crash the upstream :meth:`_check_captcha` flow.
+    """
+    method = getattr(solver, "supports_kind", None)
+    if not callable(method):
+        return False
+    try:
+        return method(kind) is True
+    except Exception:
+        logger.debug("supports_kind raised", exc_info=True)
+        return False
 
 
 # ── §11.14 per-agent solve rate limiter ───────────────────────────────────
@@ -547,6 +576,94 @@ async def _drain_session_audit() -> list[dict]:
             "action": action,
             "success": success,
             "count": info["count"],
+            "first_ts": info["first_ts"],
+        })
+    return drained
+
+
+# ── platform pre-nav delay audit aggregator ──────────────────────────────
+#
+# Companion to the per-platform pre-nav dwell (LinkedIn / X / Meta).  Per
+# §2.7 we cannot emit one event per applied dwell — that would flood the
+# WebSocket on a hot navigate loop.  Aggregate by ``(agent_id, host)`` so
+# the dashboard's per-platform success panel can compute count + average
+# dwell duration without scraping the INFO log.
+#
+# State is module-global because the BrowserManager is a singleton in
+# the browser service container.  Drain is driven from
+# :meth:`BrowserManager._emit_metrics` (already on the 60s tick); see
+# ``_drain_platform_timing_audit`` below.
+_platform_timing_audit_lock: asyncio.Lock | None = None
+_platform_timing_audit_lock_loop: asyncio.AbstractEventLoop | None = None
+# {(agent_id, host): {"count": int, "total_delay_s": float, "first_ts": float}}
+_platform_timing_audit_buckets: dict[tuple[str, str], dict] = {}
+
+
+def _get_platform_timing_audit_lock() -> asyncio.Lock:
+    """Return a platform-timing audit lock bound to the active event loop."""
+    global _platform_timing_audit_lock, _platform_timing_audit_lock_loop
+    loop = asyncio.get_running_loop()
+    if (
+        _platform_timing_audit_lock is None
+        or _platform_timing_audit_lock_loop is not loop
+    ):
+        _platform_timing_audit_lock = asyncio.Lock()
+        _platform_timing_audit_lock_loop = loop
+    return _platform_timing_audit_lock
+
+
+async def _record_platform_timing_audit_event(
+    agent_id: str, host: str, delay_s: float,
+) -> None:
+    """Aggregate one applied pre-nav dwell into the per-minute bucket.
+
+    ``host`` is the canonical host (lower-cased, ``www.`` stripped) —
+    callers route through :func:`src.browser.stealth._canonical_host`.
+    Bucket aggregates by ``(agent_id, host)`` so a single agent looping
+    on one platform doesn't drown out the others.  ``delay_s`` is
+    summed so the drain payload can carry a true running average.
+    """
+    if not host or delay_s < 0:
+        return
+    async with _get_platform_timing_audit_lock():
+        key = (agent_id, host)
+        bucket = _platform_timing_audit_buckets.get(key)
+        now = time.time()
+        if bucket is None:
+            _platform_timing_audit_buckets[key] = {
+                "count": 1,
+                "total_delay_s": float(delay_s),
+                "first_ts": now,
+            }
+        else:
+            bucket["count"] += 1
+            bucket["total_delay_s"] += float(delay_s)
+
+
+async def _drain_platform_timing_audit() -> list[dict]:
+    """Atomically swap the platform-timing audit buckets and return payloads.
+
+    Called once per metrics-emit tick. Mirrors
+    :func:`_drain_captcha_audit` — each returned dict is one EventBus
+    payload of type ``platform_pre_nav_delay`` so the dashboard's
+    per-platform success aggregator can route it into the right host
+    bucket.
+    """
+    async with _get_platform_timing_audit_lock():
+        if not _platform_timing_audit_buckets:
+            return []
+        buckets = dict(_platform_timing_audit_buckets)
+        _platform_timing_audit_buckets.clear()
+    drained = []
+    for (agent_id, host), info in buckets.items():
+        drained.append({
+            "type": "platform_pre_nav_delay",
+            # ``agent_id`` (not ``agent``) — same convention as the
+            # captcha / session / fingerprint audit paths.
+            "agent_id": agent_id,
+            "host": host,
+            "count": info["count"],
+            "total_delay_s": round(info["total_delay_s"], 4),
             "first_ts": info["first_ts"],
         })
     return drained
@@ -2893,6 +3010,30 @@ class BrowserManager:
                     ev.get("agent_id", ""), e,
                 )
 
+        # Drain the platform pre-nav-delay audit buckets — feeds the
+        # dashboard's per-platform success panel with count + average
+        # dwell per (agent, host).  Same per-minute aggregation pattern.
+        try:
+            pt_events = await _drain_platform_timing_audit()
+        except Exception as e:
+            logger.warning("platform-timing audit drain failed: %s", e)
+            pt_events = []
+        for ev in pt_events:
+            ev = dict(ev)
+            self._metrics_seq += 1
+            ev["seq"] = self._metrics_seq
+            ev["ts"] = now
+            self._metrics_history.append(ev)
+            if self._metrics_sink is None:
+                continue
+            try:
+                self._metrics_sink(ev)
+            except Exception as e:
+                logger.warning(
+                    "platform-timing audit sink raised for '%s': %s",
+                    ev.get("agent_id", ""), e,
+                )
+
         # Phase 10 §24 — per-tenant spend-threshold alerts. Walks every
         # tenant currently active in the cost counter, asks the threshold
         # tracker which percentages crossed THIS tick, and ships a
@@ -3897,6 +4038,48 @@ class BrowserManager:
         await self.stop(agent_id)
         # Next get_or_start will create a fresh instance with same profile
 
+    async def _apply_platform_pre_nav_delay(
+        self, agent_id: str, url: str,
+    ) -> None:
+        """Sleep a platform-specific Gaussian dwell before navigating.
+
+        No-op when ``url`` is not on the protected-platform list (LinkedIn
+        / X / Twitter / Meta) or when the operator has disabled the
+        feature via ``BROWSER_PLATFORM_TIMING_ENABLED=false``. The flag
+        check lives here (not in ``stealth.py``) so the operator-tuning
+        and per-agent-override paths flow through the standard
+        :mod:`src.browser.flags` precedence chain. See
+        :func:`src.browser.stealth.pick_platform_pre_nav_delay` for the
+        sampling logic and per-platform tuning rationale.
+        """
+        from src.browser.flags import get_bool
+        if not get_bool("BROWSER_PLATFORM_TIMING_ENABLED", True, agent_id=agent_id):
+            return
+        delay_s, label = pick_platform_pre_nav_delay(url)
+        if delay_s <= 0 or label is None:
+            return
+        # Single INFO log per applied delay so operators can correlate
+        # latency reports with the platform-timing posture without
+        # having to chase agent-side traces. URL is intentionally NOT
+        # logged at INFO — the host label is enough; full URLs flow
+        # through the recorder's redaction pipeline elsewhere.
+        logger.info(
+            "platform_pre_nav_delay agent=%s platform=%s delay=%.2fs",
+            agent_id, label, delay_s,
+        )
+        # Record into the per-minute audit aggregator so the dashboard's
+        # per-platform success panel can show count + average dwell.  Use
+        # the canonical host (lower-cased, ``www.`` stripped) so binning
+        # matches the dashboard side and the captcha audit path.  The
+        # call is best-effort — a recording failure must not block the
+        # navigation it's instrumenting.
+        try:
+            host = _canonical_host(url) or label
+            await _record_platform_timing_audit_event(agent_id, host, delay_s)
+        except Exception as e:
+            logger.debug("platform-timing audit record failed: %s", e)
+        await asyncio.sleep(delay_s)
+
     def set_proxy_config(self, agent_id: str, config: dict | None) -> None:
         """Store proxy config for an agent. Pass None to clear."""
         if config is None:
@@ -4157,6 +4340,12 @@ class BrowserManager:
             # picker can see "we just used a direct/social/search
             # pattern" and rotate accordingly.
             inst.recent_referers.append(resolved_referer)
+
+            # Per-platform pre-nav dwell. Fires only on known high-
+            # protection platforms (LinkedIn / X / Meta) where in-house
+            # behavioral models score sub-second arrivals as bot signal.
+            # No-op for any other host.
+            await self._apply_platform_pre_nav_delay(agent_id, url)
 
             # Playwright accepts ``referer`` for goto and sets both the
             # network header and document.referrer consistently. Empty
@@ -5622,9 +5811,28 @@ class BrowserManager:
            current mouse position (already on the element from the hover).
 
         When ``force=True``, falls back to ``locator.click(force=True)`` since
-        hover may fail on elements obscured by overlays.
+        hover may fail on elements obscured by overlays. We still call
+        ``scroll_into_view_if_needed`` first — Playwright's ``force=True``
+        skips ALL actionability checks INCLUDING the implicit scroll-
+        into-view, so a forced click on an off-fold element fires the
+        click event at the element's geometric position which can land
+        OUTSIDE the visible viewport. From the operator's VNC view, the
+        click visually "lands nowhere." This bites in particular on
+        SPA frameworks (X / Twitter / Gmail) that use ``aria-disabled``
+        on visually-active buttons — the click loop auto-applies
+        ``force=True`` for those (see ``_ARIA_FORCE_ROLES`` gate in
+        :meth:`click`), so the force path is hit MORE often than
+        operators expect. Scrolling explicitly is cheap and additive.
         """
         if force:
+            try:
+                await locator.scroll_into_view_if_needed(timeout=timeout)
+            except Exception:
+                # Element may be detached / cross-origin / have no box;
+                # the forced click below will still attempt at the last-
+                # known position. Better to log via the click error path
+                # than to fail-fast here.
+                pass
             await locator.click(timeout=timeout, force=True)
             return
         try:
@@ -5640,8 +5848,17 @@ class BrowserManager:
         """Like _human_click but takes a CSS selector instead of a locator.
 
         Hovers first to generate natural mouse movement, then clicks.
+        On the ``force=True`` path, scrolls the locator into view BEFORE
+        the forced click — Playwright's ``force=True`` skips
+        scroll-into-view; without this an off-fold force-click fires
+        outside the viewport and visibly lands nowhere on VNC. Mirror
+        of :meth:`_human_click`'s force path.
         """
         if force:
+            try:
+                await page.locator(selector).scroll_into_view_if_needed(timeout=timeout)
+            except Exception:
+                pass
             await page.click(selector, timeout=timeout, force=True)
             return
         try:
@@ -7488,6 +7705,20 @@ class BrowserManager:
                 )
                 raise
 
+            # §11.8 multi-provider: re-read the wrapper's ``provider``
+            # AFTER ``solve()`` so the cost-accounting tier matches the
+            # provider that actually served the solve, not the one we
+            # captured pre-call. On a mid-call failover (primary fatal
+            # at ``createTask`` → wrapper retries on secondary inside
+            # the same ``solve()`` call) the active solver flips, and
+            # using the stale pre-call snapshot would charge the agent
+            # at primary's pricing for a secondary-served solve. The
+            # post-solve read is single-coroutine-safe — there is no
+            # await between this read and the cost-counter update.
+            actual_provider = getattr(self._captcha_solver, "provider", "")
+            if not (isinstance(actual_provider, str) and actual_provider):
+                actual_provider = provider
+
             # Cost accounting fires on token retrieval, NOT on
             # injection success — the provider already charged for the
             # token. Skip accounting when no token came back (gates /
@@ -7500,9 +7731,9 @@ class BrowserManager:
                 # was warned above; here we just skip the increment
                 # silently and let the finally-refund clean up the
                 # reservation.
-                if isinstance(provider, str) and provider:
+                if isinstance(actual_provider, str) and actual_provider:
                     millicents = _cost.estimate_millicents(
-                        provider, kind,
+                        actual_provider, kind,
                         proxy_aware=result.used_proxy_aware,
                     )
                     if millicents is None:
@@ -7512,7 +7743,7 @@ class BrowserManager:
                             "keeping any reserved cost-cap charge; "
                             "otherwise skipping cost increment "
                             "(under-count > over-count)",
-                            provider, kind, result.used_proxy_aware,
+                            actual_provider, kind, result.used_proxy_aware,
                         )
                         # With a configured cap, we reserved the max
                         # published tier before the provider call. If
@@ -7907,74 +8138,149 @@ class BrowserManager:
                                 "coarse kind=%s", kind, exc_info=True,
                             )
 
+                    # §22 — anti-bot kind solver path. When the active
+                    # solver provider declares a task type for the
+                    # detected anti-bot kind (CapSolver publishes
+                    # AntiAkamaiBMPTask / AntiImpervaTask / AntiKasadaTask /
+                    # DataDomeSliderTask; 2Captcha publishes none) we
+                    # OPT-IN to the solver path with forced low
+                    # confidence. Otherwise we keep the legacy
+                    # operator-escalation path. The two-step gate
+                    # (``supports_kind`` + low-confidence forcing) is
+                    # what keeps a 2Captcha-only deployment from spilling
+                    # ``ERROR_INVALID_TASK_TYPE`` errors that would trip
+                    # the §11.16 breaker.
+                    antibot_force_low_confidence = False
+
                     # §19 — tier-1 anti-bot JS-challenge classifier runs
                     # BEFORE the §11.3 behavioral classifier. JS challenges
                     # (Akamai Bot Manager, Kasada, FingerprintJS Pro,
                     # Imperva ABP, F5 Bot Defense) typically nest ABOVE
                     # CAPTCHA in the typical site stack — they fire first
                     # and gate access entirely, so detecting them takes
-                    # precedence over the §11.3 behavioral pass. None are
-                    # API-solvable (vendor design, no third-party solver);
-                    # the only correct response is to escalate via
-                    # ``request_captcha_help`` so the operator can
-                    # intervene through the VNC handoff (§19.1).
+                    # precedence over the §11.3 behavioral pass.
+                    #
+                    # §22 — kinds with a CapSolver task type (Akamai,
+                    # Imperva, Kasada) fall through to the solver path
+                    # IFF the active solver supports them. FingerprintJS
+                    # and F5 have no CapSolver task type and remain
+                    # operator-escalation-only.
                     js_vendor = await classify_js_challenge(inst.page)
                     if js_vendor:
                         js_kind = f"js-challenge-{js_vendor}"
-                        logger.info(
-                            "JS-challenge detected (%s); skipping solver, "
-                            "escalating to request_captcha_help",
-                            js_kind,
-                        )
                         try:
                             page_url = inst.page.url or ""
                         except Exception:
                             page_url = ""
-                        await _record_captcha_audit_event(
-                            inst.agent_id, "skipped_behavioral",
-                            js_kind, page_url,
-                        )
-                        return _captcha_envelope(
-                            kind=js_kind,
-                            solver_attempted=False,
-                            solver_outcome="skipped_behavioral",
-                            solver_confidence="behavioral-only",
-                            next_action="request_captcha_help",
-                        )
+                        # Anti-bot solver opt-in. Three-step gate:
+                        #   1. Kind must be in :data:`_ANTIBOT_KINDS`
+                        #      (excludes ``js-challenge-fingerprintjs``
+                        #      and ``js-challenge-f5`` — no published
+                        #      CapSolver task type).
+                        #   2. Solver must be configured.
+                        #   3. Active solver must declare a task type
+                        #      for the kind via ``supports_kind`` —
+                        #      keeps 2Captcha from spilling
+                        #      ``ERROR_INVALID_TASK_TYPE``.
+                        if (
+                            js_kind in _ANTIBOT_KINDS
+                            and self._captcha_solver is not None
+                            and _solver_supports_kind(
+                                self._captcha_solver, js_kind,
+                            )
+                        ):
+                            logger.info(
+                                "JS-challenge detected (%s); active solver "
+                                "supports the kind, attempting solver path "
+                                "with forced low confidence",
+                                js_kind,
+                            )
+                            kind = js_kind
+                            antibot_force_low_confidence = True
+                            # Fall through to the standard solver path
+                            # (cf_force_low_confidence is set below).
+                        else:
+                            logger.info(
+                                "JS-challenge detected (%s); skipping solver, "
+                                "escalating to request_captcha_help",
+                                js_kind,
+                            )
+                            await _record_captcha_audit_event(
+                                inst.agent_id, "skipped_behavioral",
+                                js_kind, page_url,
+                            )
+                            return _captcha_envelope(
+                                kind=js_kind,
+                                solver_attempted=False,
+                                solver_outcome="skipped_behavioral",
+                                solver_confidence="behavioral-only",
+                                next_action="request_captcha_help",
+                            )
 
                     # §11.3 — behavioral-only classifier runs BEFORE the
                     # solver health/breaker gates so behavioral-only flows
                     # (PerimeterX Press & Hold, DataDome blocker) don't
-                    # consume health-check or breaker quota. The solver
-                    # genuinely cannot help with these challenges; the
-                    # only correct response is to escalate via
-                    # ``request_captcha_help`` (§11.14).
-                    behavioral_kind = await _classify_behavioral(inst.page)
-                    if behavioral_kind:
-                        logger.info(
-                            "Behavioral-only challenge detected (%s); "
-                            "skipping solver, escalating to request_captcha_help",
-                            behavioral_kind,
-                        )
-                        # Audit-log so operators see the activity in the
-                        # dashboard (per §2.7 cadence — aggregated, not
-                        # per-call). URL flows through ``redact_url``
-                        # inside the recorder.
-                        try:
-                            page_url = inst.page.url or ""
-                        except Exception:
-                            page_url = ""
-                        await _record_captcha_audit_event(
-                            inst.agent_id, "skipped_behavioral",
-                            behavioral_kind, page_url,
-                        )
-                        return _captcha_envelope(
-                            kind=behavioral_kind,
-                            solver_attempted=False,
-                            solver_outcome="skipped_behavioral",
-                            solver_confidence="behavioral-only",
-                            next_action="request_captcha_help",
-                        )
+                    # consume health-check or breaker quota. PerimeterX
+                    # remains operator-escalation-only — no published
+                    # CapSolver task type as of April 2026.
+                    #
+                    # §22 — DataDome behavioral routes through the solver
+                    # path IFF the active solver supports
+                    # ``datadome-behavioral`` (CapSolver does;
+                    # ``DataDomeSliderTask``).
+                    if not antibot_force_low_confidence:
+                        behavioral_kind = await _classify_behavioral(inst.page)
+                        if behavioral_kind:
+                            try:
+                                page_url = inst.page.url or ""
+                            except Exception:
+                                page_url = ""
+                            # Same three-step opt-in gate as the JS-challenge
+                            # branch. ``px-press-hold`` is excluded by the
+                            # ``_ANTIBOT_KINDS`` check (no published CapSolver
+                            # task type) and stays on the operator-escalation
+                            # path; ``datadome-behavioral`` opts in when
+                            # CapSolver is the active provider.
+                            if (
+                                behavioral_kind in _ANTIBOT_KINDS
+                                and self._captcha_solver is not None
+                                and _solver_supports_kind(
+                                    self._captcha_solver, behavioral_kind,
+                                )
+                            ):
+                                logger.info(
+                                    "Behavioral-only challenge detected (%s); "
+                                    "active solver supports the kind, "
+                                    "attempting solver path with forced "
+                                    "low confidence",
+                                    behavioral_kind,
+                                )
+                                kind = behavioral_kind
+                                antibot_force_low_confidence = True
+                                # Fall through to standard solver path.
+                            else:
+                                logger.info(
+                                    "Behavioral-only challenge detected (%s); "
+                                    "skipping solver, escalating to "
+                                    "request_captcha_help",
+                                    behavioral_kind,
+                                )
+                                # Audit-log so operators see the activity
+                                # in the dashboard (per §2.7 cadence —
+                                # aggregated, not per-call). URL flows
+                                # through ``redact_url`` inside the
+                                # recorder.
+                                await _record_captcha_audit_event(
+                                    inst.agent_id, "skipped_behavioral",
+                                    behavioral_kind, page_url,
+                                )
+                                return _captcha_envelope(
+                                    kind=behavioral_kind,
+                                    solver_attempted=False,
+                                    solver_outcome="skipped_behavioral",
+                                    solver_confidence="behavioral-only",
+                                    next_action="request_captcha_help",
+                                )
 
                     # §11.3 — Cloudflare interstitial tri-state classifier.
                     # ``auto`` waits once and re-checks; ``behavioral``
@@ -8163,6 +8469,22 @@ class BrowserManager:
                         # lock).
                         if cf_force_low_confidence:
                             envelope["solver_confidence"] = "low"
+                        # §22 — anti-bot kinds (Akamai BMP / Imperva /
+                        # Kasada / DataDome behavioral) are inherently
+                        # low-confidence: the solver token can be
+                        # rejected at the application layer for IP /
+                        # fingerprint mismatches the solver has no
+                        # visibility into. Force ``low`` confidence and,
+                        # on a non-``solved`` outcome, upgrade
+                        # ``next_action`` to ``request_captcha_help`` so
+                        # the agent doesn't retry — anti-bot challenges
+                        # have low success rates by design and retries
+                        # rarely improve the result.
+                        if antibot_force_low_confidence:
+                            envelope["solver_confidence"] = "low"
+                            outcome = envelope.get("solver_outcome")
+                            if outcome and outcome != "solved":
+                                envelope["next_action"] = "request_captcha_help"
                         if low_success:
                             envelope["solver_confidence"] = "low"
                             outcome = envelope.get("solver_outcome")
@@ -9572,6 +9894,11 @@ class BrowserManager:
                 }
                 if resolved_referer:
                     goto_kwargs["referer"] = resolved_referer
+                # Per-platform pre-nav dwell — same posture as the main
+                # ``navigate`` path. New-tab arrivals on these platforms
+                # are also profiled by the in-house behavioral models, so
+                # the delay applies here too.
+                await self._apply_platform_pre_nav_delay(agent_id, url)
                 try:
                     await new_page.goto(url, **goto_kwargs)
                 except Exception as e:

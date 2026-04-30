@@ -229,6 +229,15 @@ function dashboard() {
     captchaSolverKeyMasked: '',
     captchaSolverSaving: false,
 
+    // Per-platform success rollup (24h rolling window; aggregated by
+    // the dashboard from browser_metrics EventBus payloads).  Refreshed
+    // on a sensible cadence — not the noisy 1s timer; 30s aligns with
+    // the operator's expected debugging cadence and also keeps the
+    // load on the dashboard process modest when the panel is left open.
+    platformSuccessData: { platforms: [], since: null },
+    platformSuccessLoading: false,
+    _platformSuccessTimer: null,
+
     // System settings
     systemSettings: null,
     systemSettingsLoading: false,
@@ -1281,6 +1290,7 @@ function dashboard() {
           this.fetchBrowserSettings();
           this.fetchSystemSettings();
           this.fetchCaptchaSolver();
+          this.startPlatformSuccessRefresh();
         }
         if (this.systemTab === 'activity') {
           if (this.activityView === 'traces') {
@@ -1303,7 +1313,8 @@ function dashboard() {
       if (tabId === 'storage') { this.fetchUploads(); this.fetchStorage(); this.fetchDatabaseDetails(); }
       if (tabId === 'network') { this.loadNetworkProxy(); }
       if (tabId === 'settings') { this.fetchBrowserSettings(); this.fetchSystemSettings(); }
-      if (tabId === 'browser') { this.fetchBrowserSettings(); this.fetchSystemSettings(); this.fetchCaptchaSolver(); }
+      if (tabId === 'browser') { this.fetchBrowserSettings(); this.fetchSystemSettings(); this.fetchCaptchaSolver(); this.startPlatformSuccessRefresh(); }
+      if (tabId !== 'browser') { this.stopPlatformSuccessRefresh(); }
       if (tabId === 'operator') {
         this.fetchAuditLog();
       }
@@ -3700,6 +3711,54 @@ function dashboard() {
     },
 
     // ── Browser settings ─────────────────────────────────
+
+    async fetchPlatformSuccess() {
+      // Pull the rollup; the dashboard aggregates events in-process,
+      // so this is a cheap dict-walk on the server side.  On error we
+      // keep the previous payload visible (operators see a stale row
+      // rather than an empty panel).
+      this.platformSuccessLoading = true;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/dashboard/platform-success`);
+        if (resp.ok) {
+          this.platformSuccessData = await resp.json();
+        }
+      } catch (e) { console.warn('fetchPlatformSuccess failed:', e); }
+      this.platformSuccessLoading = false;
+    },
+
+    startPlatformSuccessRefresh() {
+      // Idempotent — calling twice will not stack timers.  30s polling
+      // matches the panel's "operator-glance" use case; the live
+      // EventBus already streams the underlying signals to the
+      // browser metrics + fingerprint cards on faster cadences.
+      if (this._platformSuccessTimer) return;
+      this.fetchPlatformSuccess();
+      this._platformSuccessTimer = setInterval(() => {
+        this.fetchPlatformSuccess();
+      }, 30000);
+    },
+
+    stopPlatformSuccessRefresh() {
+      if (this._platformSuccessTimer) {
+        clearInterval(this._platformSuccessTimer);
+        this._platformSuccessTimer = null;
+      }
+    },
+
+    platformSuccessBarClass(rate) {
+      if (rate === null || rate === undefined) return 'bg-gray-700';
+      if (rate >= 0.8) return 'bg-emerald-500';
+      if (rate >= 0.5) return 'bg-yellow-500';
+      return 'bg-red-500';
+    },
+
+    platformSuccessTextClass(rate) {
+      if (rate === null || rate === undefined) return 'text-gray-500';
+      if (rate >= 0.8) return 'text-emerald-400';
+      if (rate >= 0.5) return 'text-yellow-400';
+      return 'text-red-400';
+    },
 
     async fetchBrowserSettings() {
       this.browserSettingsLoading = true;

@@ -91,17 +91,24 @@ def keystroke_delay(char: str) -> float:
     """Per-key delay (seconds). Symbols/digits are slower than letters.
 
     Base values (scaled by speed factor):
-    Letters: μ=0.045, σ=0.015, range 0.020–0.090.
-    Symbols/digits: μ=0.065, σ=0.020, range 0.025–0.110.
-    Spaces: μ=0.035, σ=0.010, range 0.018–0.070 (faster, word boundary rhythm).
+    Letters: μ=0.090, σ=0.030, range 0.040–0.180.
+    Symbols/digits: μ=0.130, σ=0.040, range 0.050–0.220.
+    Spaces: μ=0.070, σ=0.020, range 0.036–0.140 (faster, word boundary rhythm).
 
-    At speed=1.0, this is ≈270 CPM / 54 WPM — a moderate typist.
+    At speed=1.0, this is ≈135 CPM / 27 WPM — a moderate-to-slow typist
+    that better matches the real-user population (StatCounter / Typing.com
+    benchmarks put the modal user at 30–40 WPM). Pre-2026-04 values
+    were halved (μ=0.045 → 54 WPM); operators reported the typing-vs-
+    mouse speed mismatch was an obvious behavioral signal — keystrokes
+    fired in ~500ms while a click+settle takes ~300ms, so an "agent
+    types 11 chars in the time of one mouse click" pattern was visible
+    in VNC playback. Halving brings the ratio into a believable range.
     """
     if char == " ":
-        return _scaled(0.035, 0.010, 0.018, 0.070)
+        return _scaled(0.070, 0.020, 0.036, 0.140)
     if char.isalpha():
-        return _scaled(0.045, 0.015, 0.020, 0.090)
-    return _scaled(0.065, 0.020, 0.025, 0.110)
+        return _scaled(0.090, 0.030, 0.040, 0.180)
+    return _scaled(0.130, 0.040, 0.050, 0.220)
 
 
 def think_pause() -> float:

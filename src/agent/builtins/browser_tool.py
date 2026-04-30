@@ -6,6 +6,9 @@ service container. Agent containers no longer bundle Chrome or VNC.
 
 from __future__ import annotations
 
+import asyncio
+import random
+import time
 from urllib.parse import urlparse
 
 from src.agent.skills import skill
@@ -105,6 +108,289 @@ async def browser_navigate(
     if referer is not None:
         params["referer"] = referer
     return await _browser_command(mesh_client, "navigate", params)
+
+
+# Pre-task warmup: search-engine landings used to seed a believable arrival
+# trail before the agent navigates to a behavior-fingerprinting target.
+# Mirrors ``stealth._SEARCH_REFERERS`` — kept in sync intentionally so the
+# warmup hits the same hosts the server-side referer picker expects to see
+# in a session's history. Weighted by realistic market share (StatCounter
+# global 2025 desktop) so the fleet doesn't cluster on the unusual non-
+# Google engines. ``random.choices(weights=...)`` does not normalize, so
+# the weights below sum to 1.0 by construction. Tuple of (url, weight)
+# pairs — ``random.choices`` consumes them via ``zip``.
+_WARMUP_SEARCH_ENGINES: tuple[tuple[str, float], ...] = (
+    ("https://www.google.com/",  0.85),
+    ("https://www.bing.com/",    0.10),
+    ("https://duckduckgo.com/",  0.05),
+)
+
+
+def _pick_warmup_search_engine(rng: random.Random | None = None) -> str:
+    """Sample a search-engine URL from the weighted distribution.
+
+    Exposed for testability — operators inspecting warmup behavior on
+    stealth canaries can replay the same RNG seed to get a deterministic
+    engine choice. Default ``rng`` uses the global ``random`` module
+    state, which is shared across all skills in the agent process.
+    """
+    rng = rng or random
+    urls = [u for u, _ in _WARMUP_SEARCH_ENGINES]
+    weights = [w for _, w in _WARMUP_SEARCH_ENGINES]
+    return rng.choices(urls, weights=weights, k=1)[0]
+
+
+# Gaussian SERP-dwell parameters. After landing on a search engine,
+# real users spend 3–12 seconds reading results before clicking
+# through. A zero-or-near-zero pause between SERP load and apex nav
+# is itself a behavioral signal — even with a clean fingerprint, the
+# arrival-timing distribution clusters at sub-second handoffs that
+# the in-house behavioral models on LinkedIn / X / Meta key on.
+# Truncated normal: μ=4s, σ=1.5s, clamped to [2.0s, 9.0s] so the
+# dwell stays in the "user glances at results" range and never blows
+# past the agent's reasonable patience budget.
+_SERP_DWELL_MU_S: float = 4.0
+_SERP_DWELL_SIGMA_S: float = 1.5
+_SERP_DWELL_MIN_S: float = 2.0
+_SERP_DWELL_MAX_S: float = 9.0
+
+
+def _sample_serp_dwell(rng: random.Random | None = None) -> float:
+    """Truncated-normal sample of the SERP-to-apex dwell time, in seconds.
+
+    Exposed for testability. Reuses the same ``random.Random`` injection
+    pattern as :func:`_pick_warmup_search_engine` so an operator can
+    replay an exact warmup from logs.
+    """
+    rng = rng or random
+    sample = rng.gauss(_SERP_DWELL_MU_S, _SERP_DWELL_SIGMA_S)
+    if sample < _SERP_DWELL_MIN_S:
+        sample = _SERP_DWELL_MIN_S
+    elif sample > _SERP_DWELL_MAX_S:
+        sample = _SERP_DWELL_MAX_S
+    return sample
+
+
+def _warmup_apex_url(target_url: str) -> str | None:
+    """Return the target's apex-host URL, or None if ``target_url`` is invalid.
+
+    For ``https://www.linkedin.com/in/x?foo=1`` returns ``https://linkedin.com/``.
+    Strips a leading ``www.`` so the apex nav matches what real users type.
+    Only ``http``/``https`` URLs with a hostname are accepted.
+    """
+    try:
+        parsed = urlparse(target_url)
+    except Exception:
+        return None
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in ("http", "https"):
+        return None
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return None
+    if host.startswith("www."):
+        host = host[4:]
+    return f"{scheme}://{host}/"
+
+
+@skill(
+    name="browser_warmup",
+    description=(
+        "Pre-task warmup: navigate to a search engine and the target's home "
+        "page before starting the main task. Use this once at the start of "
+        "an automation session against LinkedIn / X / Twitter / Facebook / "
+        "Instagram (and other behavior-fingerprinting targets) so the "
+        "session has a realistic browsing trail. NOT needed for casual "
+        "sites without bot detection. Do NOT call this multiple times per "
+        "session — once at the start is enough; the session already has a "
+        "referer history after that. Returns a structured summary of the "
+        "steps that ran so the agent can log what happened."
+    ),
+    parameters={
+        "target_url": {
+            "type": "string",
+            "description": (
+                "The URL the agent will navigate to AFTER warmup completes. "
+                "Used to derive the apex host (e.g. linkedin.com) for the "
+                "same-origin warmup hop. Must be http:// or https://."
+            ),
+        },
+        "intensity": {
+            "type": "string",
+            "description": (
+                "Warmup depth. 'light' = search engine only (1 nav, fastest). "
+                "'normal' (default) = search engine + apex host (2 navs). "
+                "'deep' = search engine + scroll + apex host + scroll on apex "
+                "(4 actions, highest realism)."
+            ),
+            "default": "normal",
+        },
+    },
+    parallel_safe=False,
+)
+async def browser_warmup(
+    target_url: str,
+    intensity: str = "normal",
+    *,
+    mesh_client=None,
+) -> dict:
+    """Run a pre-task browsing warmup against a target's apex host.
+
+    Composes existing ``navigate`` and ``scroll`` browser commands. All
+    failures EXCEPT the apex nav are recoverable — a search-engine timeout
+    is logged into ``steps`` and the apex hop still runs. ``success`` is
+    False only when the apex navigation itself fails (or when input
+    validation rejects the request before any navs run).
+    """
+    apex_url = _warmup_apex_url(target_url)
+    if apex_url is None:
+        return {"error": "invalid target_url"}
+
+    intensity_norm = (intensity or "normal").strip().lower()
+    if intensity_norm not in ("light", "normal", "deep"):
+        intensity_norm = "normal"
+
+    if not mesh_client:
+        return {"error": "Browser requires mesh connectivity"}
+
+    started = time.monotonic()
+    steps: list[dict] = []
+
+    # Step 1: search-engine landing. Recoverable.
+    search_url = _pick_warmup_search_engine()
+    search_step: dict = {
+        "kind": "search_engine",
+        "url": search_url,
+    }
+    try:
+        search_result = await _browser_command(
+            mesh_client,
+            "navigate",
+            {
+                "url": search_url,
+                "wait_ms": 500,
+                "wait_until": "domcontentloaded",
+                "snapshot_after": False,
+            },
+        )
+        if isinstance(search_result, dict) and "error" in search_result:
+            search_step["ok"] = False
+            search_step["error"] = search_result["error"]
+        else:
+            search_step["ok"] = True
+    except Exception as exc:  # noqa: BLE001 — log and continue
+        search_step["ok"] = False
+        search_step["error"] = str(exc)
+    steps.append(search_step)
+
+    # Step 2 (deep only): a single scroll-down on the search engine to
+    # mimic "looking at results" before clicking through. Recoverable.
+    if intensity_norm == "deep":
+        scroll_step: dict = {"kind": "scroll", "where": "search_engine"}
+        try:
+            scroll_result = await _browser_command(
+                mesh_client,
+                "scroll",
+                {"direction": "down", "amount": 0},
+            )
+            if isinstance(scroll_result, dict) and "error" in scroll_result:
+                scroll_step["ok"] = False
+                scroll_step["error"] = scroll_result["error"]
+            else:
+                scroll_step["ok"] = True
+        except Exception as exc:  # noqa: BLE001
+            scroll_step["ok"] = False
+            scroll_step["error"] = str(exc)
+        steps.append(scroll_step)
+
+    # Step 3: apex-host nav. THE critical step — failure means warmup
+    # failed. Skipped at "light" intensity (search-engine-only mode).
+    success = True
+    if intensity_norm == "light":
+        # No apex hop at light intensity. Success tracks the search-engine
+        # nav since that's all we promised to do.
+        success = bool(steps[0].get("ok"))
+    else:
+        # SERP dwell — pause on the search-engine page before clicking
+        # through. Real users spend several seconds reading results;
+        # zero-or-near-zero handoff between SERP load and apex nav is
+        # itself a behavioral signal the in-house behavioral models on
+        # LinkedIn / X / Meta key on. Only fires when we actually got
+        # past the search-engine load (skip the dwell if the SERP nav
+        # failed; pausing on a failed page produces no fingerprint
+        # benefit and just wastes the agent's budget). Recorded as a
+        # step so operators can see the dwell in the warmup trace.
+        # ``asyncio.CancelledError`` is a BaseException — it propagates
+        # cleanly through the bare ``await`` and short-circuits the
+        # whole warmup, which is the right behavior on caller timeout.
+        if steps[0].get("ok"):
+            dwell_s = _sample_serp_dwell()
+            steps.append({
+                "kind": "serp_dwell",
+                "delay_s": round(dwell_s, 2),
+                "ok": True,
+            })
+            await asyncio.sleep(dwell_s)
+
+        apex_step: dict = {
+            "kind": "apex",
+            "url": apex_url,
+        }
+        try:
+            apex_result = await _browser_command(
+                mesh_client,
+                "navigate",
+                {
+                    "url": apex_url,
+                    "wait_ms": 1000,
+                    "wait_until": "domcontentloaded",
+                    "snapshot_after": False,
+                },
+            )
+            if isinstance(apex_result, dict) and "error" in apex_result:
+                apex_step["ok"] = False
+                apex_step["error"] = apex_result["error"]
+                success = False
+            else:
+                apex_step["ok"] = True
+        except Exception as exc:  # noqa: BLE001
+            apex_step["ok"] = False
+            apex_step["error"] = str(exc)
+            success = False
+        steps.append(apex_step)
+
+        # Step 4 (deep only): a small scroll on the apex page so the
+        # session also looks like a human "glanced at the home page"
+        # before the agent's targeted nav. Recoverable.
+        if intensity_norm == "deep" and success:
+            apex_scroll_step: dict = {"kind": "scroll", "where": "apex"}
+            try:
+                apex_scroll_result = await _browser_command(
+                    mesh_client,
+                    "scroll",
+                    {"direction": "down", "amount": 0},
+                )
+                if (
+                    isinstance(apex_scroll_result, dict)
+                    and "error" in apex_scroll_result
+                ):
+                    apex_scroll_step["ok"] = False
+                    apex_scroll_step["error"] = apex_scroll_result["error"]
+                else:
+                    apex_scroll_step["ok"] = True
+            except Exception as exc:  # noqa: BLE001
+                apex_scroll_step["ok"] = False
+                apex_scroll_step["error"] = str(exc)
+            steps.append(apex_scroll_step)
+
+    total_ms = int((time.monotonic() - started) * 1000)
+    return {
+        "success": success,
+        "intensity": intensity_norm,
+        "target_apex": apex_url,
+        "steps": steps,
+        "total_ms": total_ms,
+    }
 
 
 @skill(

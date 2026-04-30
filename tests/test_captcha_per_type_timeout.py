@@ -93,6 +93,10 @@ class TestDefaultLookup:
 
     def test_default_table_matches_spec(self):
         # Spec: §11.9 — sanity check the static defaults haven't drifted.
+        # §22 added the four anti-bot platform kinds at 180s each (the
+        # AntiBot family is known-slow; 180s matches the documented
+        # provider response window and the per-type rationale on
+        # ``_CAPSOLVER_TASK_TYPES``).
         assert _SOLVE_TIMEOUT_DEFAULTS_MS == {
             "recaptcha-v2-checkbox":     120_000,
             "recaptcha-v2-invisible":    120_000,
@@ -102,6 +106,10 @@ class TestDefaultLookup:
             "hcaptcha":                  120_000,
             "turnstile":                 180_000,
             "cf-interstitial-turnstile": 180_000,
+            "js-challenge-akamai":       180_000,
+            "js-challenge-imperva":      180_000,
+            "js-challenge-kasada":       180_000,
+            "datadome-behavioral":       180_000,
         }
 
     def test_fallback_constant(self):
@@ -162,9 +170,12 @@ class TestEnvOverride:
 class TestFallback:
     def test_unknown_kind_returns_fallback(self):
         solver = _make_solver()
-        # Behavioral kinds are not solver kinds; they hit the fallback.
+        # Behavioral kinds without a CapSolver task type still hit the
+        # fallback. ``px-press-hold`` is HUMAN Security's "Press & Hold"
+        # — operator escalation only, no solver path.
+        # ``datadome-behavioral`` got a 180s entry in §22 (CapSolver
+        # publishes ``DataDomeSliderTask``); it no longer falls back.
         assert solver._timeout_seconds_for_kind("px-press-hold") == 120.0
-        assert solver._timeout_seconds_for_kind("datadome-behavioral") == 120.0
 
     def test_completely_bogus_kind_returns_fallback(self):
         solver = _make_solver()
