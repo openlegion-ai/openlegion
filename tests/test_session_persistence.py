@@ -551,6 +551,148 @@ class TestSizeCap:
         assert not sp.session_path("agent-big").exists()
 
 
+class TestBindingCookieInvalidation:
+    """F9: cf_clearance / datadome / etc. cookies are bound to (UA, IP).
+    On UA or proxy rotation we must drop them before restore so a
+    guaranteed-403 replay doesn't blow our trust score."""
+
+    def test_drop_helper_strips_known_vendors(self):
+        state = {
+            "cookies": [
+                {"name": "cf_clearance", "value": "abc"},
+                {"name": "datadome", "value": "xyz"},
+                {"name": "_abck", "value": "ak"},
+                {"name": "incap_ses_42", "value": "imp"},
+                {"name": "visid_incap_42", "value": "imp2"},
+                {"name": "pxhd", "value": "px"},
+                {"name": "_px3", "value": "px3"},
+                {"name": "session", "value": "keep-this"},
+                {"name": "csrftoken", "value": "keep-this-too"},
+            ],
+            "origins": [],
+        }
+        vendors: list[str] = []
+        dropped = sp._drop_binding_sensitive_cookies(state, vendors)
+        assert dropped == 7
+        names = {c["name"] for c in state["cookies"]}
+        assert names == {"session", "csrftoken"}
+
+    def test_signature_hash_is_stable_and_diffs_meaningfully(self):
+        a = sp._hash_signature({"ua": "Firefox/138", "proxy": "socks5://h:1"})
+        b = sp._hash_signature({"ua": "Firefox/138", "proxy": "socks5://h:1"})
+        assert a == b
+        c = sp._hash_signature({"ua": "Firefox/139", "proxy": "socks5://h:1"})
+        assert a != c
+        d = sp._hash_signature({"ua": "Firefox/138", "proxy": "socks5://h:2"})
+        assert a != d
+
+    def test_signature_drops_none_values(self):
+        a = sp._hash_signature({"ua": None, "proxy": None})
+        b = sp._hash_signature({})
+        assert a == b
+
+    @pytest.mark.asyncio
+    async def test_snapshot_persists_signature_when_provided(self, tmp_path):
+        ctx = _FakeContext()
+        ok = await sp.snapshot_session(
+            "agent-bind", ctx,
+            binding_signature={"ua": "Firefox/138", "proxy": "socks5://a"},
+        )
+        assert ok
+        path = sp.session_path("agent-bind")
+        payload = json.loads(path.read_text())
+        assert "binding_signature" in payload
+        assert isinstance(payload["binding_signature"], str)
+
+    @pytest.mark.asyncio
+    async def test_snapshot_omits_signature_when_not_provided(self):
+        ctx = _FakeContext()
+        ok = await sp.snapshot_session("agent-no-sig", ctx)
+        assert ok
+        path = sp.session_path("agent-no-sig")
+        payload = json.loads(path.read_text())
+        assert "binding_signature" not in payload
+
+    @pytest.mark.asyncio
+    async def test_restore_drops_bound_cookies_on_signature_mismatch(self):
+        ctx = _FakeContext({
+            "cookies": [
+                {"name": "cf_clearance", "value": "old"},
+                {"name": "datadome", "value": "old"},
+                {"name": "session", "value": "keep"},
+            ],
+            "origins": [],
+        })
+        await sp.snapshot_session(
+            "agent-rotate", ctx,
+            binding_signature={"ua": "Firefox/138", "proxy": "socks5://a"},
+        )
+
+        applied_state: dict = {}
+
+        async def factory(*, storage_state):
+            applied_state["state"] = storage_state
+            return MagicMock()
+
+        out = await sp.restore_session(
+            "agent-rotate", factory,
+            current_signature={"ua": "Firefox/139", "proxy": "socks5://a"},
+        )
+        assert out is not None
+        names = {c["name"] for c in applied_state["state"]["cookies"]}
+        assert names == {"session"}  # bound cookies dropped
+
+    @pytest.mark.asyncio
+    async def test_restore_preserves_cookies_when_signature_matches(self):
+        ctx = _FakeContext({
+            "cookies": [
+                {"name": "cf_clearance", "value": "k"},
+                {"name": "session", "value": "k"},
+            ],
+            "origins": [],
+        })
+        await sp.snapshot_session(
+            "agent-same", ctx,
+            binding_signature={"ua": "Firefox/138", "proxy": "socks5://a"},
+        )
+        applied_state: dict = {}
+
+        async def factory(*, storage_state):
+            applied_state["state"] = storage_state
+            return MagicMock()
+
+        out = await sp.restore_session(
+            "agent-same", factory,
+            current_signature={"ua": "Firefox/138", "proxy": "socks5://a"},
+        )
+        assert out is not None
+        names = {c["name"] for c in applied_state["state"]["cookies"]}
+        assert names == {"cf_clearance", "session"}
+
+    @pytest.mark.asyncio
+    async def test_restore_no_invalidation_when_caller_omits_signature(self):
+        # Backward compat: callers not yet plumbed for current_signature
+        # see existing behavior (no cookie drops).
+        ctx = _FakeContext({
+            "cookies": [{"name": "cf_clearance", "value": "k"}],
+            "origins": [],
+        })
+        await sp.snapshot_session(
+            "agent-legacy", ctx,
+            binding_signature={"ua": "Firefox/138", "proxy": "socks5://a"},
+        )
+        applied_state: dict = {}
+
+        async def factory(*, storage_state):
+            applied_state["state"] = storage_state
+            return MagicMock()
+
+        out = await sp.restore_session("agent-legacy", factory)
+        assert out is not None
+        names = {c["name"] for c in applied_state["state"]["cookies"]}
+        assert names == {"cf_clearance"}
+
+
 class TestSessionsDirMode:
     @pytest.mark.asyncio
     async def test_parent_dir_chmod_0o700(self, tmp_path, monkeypatch):

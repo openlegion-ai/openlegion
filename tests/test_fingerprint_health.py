@@ -42,16 +42,22 @@ def _reset_fingerprint_state():
     """Each test starts with empty module-level fingerprint state."""
     from src.browser.service import (
         _fingerprint_audit_buckets,
+        _fingerprint_hard_burn_reason,
+        _fingerprint_hard_burned,
         _fingerprint_last_signal,
         _fingerprint_window,
     )
     _fingerprint_window.clear()
     _fingerprint_last_signal.clear()
     _fingerprint_audit_buckets.clear()
+    _fingerprint_hard_burned.clear()
+    _fingerprint_hard_burn_reason.clear()
     yield
     _fingerprint_window.clear()
     _fingerprint_last_signal.clear()
     _fingerprint_audit_buckets.clear()
+    _fingerprint_hard_burned.clear()
+    _fingerprint_hard_burn_reason.clear()
 
 
 class TestRollingWindow:
@@ -68,6 +74,8 @@ class TestRollingWindow:
             "rejection_rate": 0.0,
             "burned": False,
             "last_signal_ts": None,
+            "hard_burned": False,
+            "hard_burn_reason": None,
         }
 
     @pytest.mark.asyncio
@@ -145,6 +153,157 @@ class TestRollingWindow:
         from src.browser.service import _reset_fingerprint_window
         cleared = await _reset_fingerprint_window("agent-never")
         assert cleared is False
+
+
+# ── F8: HTTP-status-aware hard-burn from vendor block headers ────────────
+
+
+class TestHardBurnClassifier:
+    """The pure classifier identifies vendor block signals from response
+    headers + status. Stays decoupled from any Playwright shape so the
+    classifier itself can be regression-tested without spinning up a
+    browser instance."""
+
+    def test_no_block_on_2xx_even_with_vendor_header(self):
+        # Vendor headers can appear on accepted 200 responses for
+        # watch-but-allow flows; we must NOT burn there.
+        from src.browser.service import _classify_hard_block
+        out = _classify_hard_block(
+            {"cf-mitigated": "block", "cf-ray": "abc"}, status=200,
+        )
+        assert out is None
+
+    def test_cloudflare_block_on_403(self):
+        from src.browser.service import _classify_hard_block
+        out = _classify_hard_block(
+            {"CF-Mitigated": "block", "cf-ray": "abc"}, status=403,
+        )
+        assert out is not None
+        vendor, signal = out
+        assert vendor == "cloudflare"
+        assert "cf-mitigated" in signal
+
+    def test_cloudflare_challenge_is_not_hard_block(self):
+        # cf-mitigated: challenge is the soft-challenge case (we already
+        # have body-text scanning for that). Hard burn only on
+        # ``block`` / ``dcv``.
+        from src.browser.service import _classify_hard_block
+        out = _classify_hard_block(
+            {"cf-mitigated": "challenge"}, status=403,
+        )
+        assert out is None
+
+    def test_perimeterx_block_on_403(self):
+        from src.browser.service import _classify_hard_block
+        out = _classify_hard_block(
+            {"x-px-block-type": "1"}, status=403,
+        )
+        assert out is not None
+        assert out[0] == "perimeterx"
+
+    def test_perimeterx_empty_value_not_block(self):
+        from src.browser.service import _classify_hard_block
+        out = _classify_hard_block(
+            {"x-px-block-type": "  "}, status=403,
+        )
+        assert out is None
+
+    def test_datadome_protected(self):
+        from src.browser.service import _classify_hard_block
+        out = _classify_hard_block(
+            {"x-datadome": "protected"}, status=403,
+        )
+        assert out is not None
+        assert out[0] == "datadome"
+
+    def test_datadome_ok_not_block(self):
+        from src.browser.service import _classify_hard_block
+        out = _classify_hard_block(
+            {"x-datadome": "ok"}, status=200,
+        )
+        assert out is None
+
+    def test_akamai_bmp_deny(self):
+        from src.browser.service import _classify_hard_block
+        out = _classify_hard_block(
+            {"x-akamai-bmp-action": "deny"}, status=403,
+        )
+        assert out is not None
+        assert out[0] == "akamai"
+
+    def test_4xx_alone_is_not_hard_block(self):
+        # A bare 403 with no vendor header is NOT a hard burn — could
+        # be a regular site-level deny (auth, perms). Hard burn requires
+        # vendor confirmation.
+        from src.browser.service import _classify_hard_block
+        assert _classify_hard_block({}, status=403) is None
+        assert _classify_hard_block({"server": "nginx"}, status=403) is None
+
+
+class TestForceFingerprintBurn:
+    @pytest.mark.asyncio
+    async def test_force_burn_short_circuits_window(self):
+        """Hard-burn should fire immediately without waiting for the
+        10-event rolling window to fill."""
+        from src.browser.service import (
+            _force_fingerprint_burn,
+            _is_fingerprint_burned,
+        )
+
+        agent = "agent-hard-burn"
+        # Window is empty — _is_fingerprint_burned would normally be False.
+        assert await _is_fingerprint_burned(agent) is False
+
+        transitioned = await _force_fingerprint_burn(
+            agent, vendor="cloudflare", reason="cf-mitigated=block",
+        )
+        assert transitioned is True
+        # Now the agent reads as burned even though the rolling window
+        # never filled.
+        assert await _is_fingerprint_burned(agent) is True
+
+    @pytest.mark.asyncio
+    async def test_force_burn_idempotent(self):
+        from src.browser.service import _force_fingerprint_burn
+
+        agent = "agent-twice"
+        first = await _force_fingerprint_burn(agent, "perimeterx", "x-px-block-type=1")
+        second = await _force_fingerprint_burn(agent, "perimeterx", "x-px-block-type=1")
+        assert first is True
+        assert second is False  # state already transitioned
+
+    @pytest.mark.asyncio
+    async def test_health_payload_surfaces_hard_burn(self):
+        from src.browser.service import (
+            _force_fingerprint_burn,
+            _get_fingerprint_health,
+        )
+
+        agent = "agent-payload"
+        await _force_fingerprint_burn(agent, "datadome", "x-datadome=protected")
+        out = await _get_fingerprint_health(agent)
+        assert out["hard_burned"] is True
+        assert out["burned"] is True  # union with rolling-window
+        assert out["hard_burn_reason"] == {
+            "vendor": "datadome",
+            "signal": "x-datadome=protected",
+        }
+
+    @pytest.mark.asyncio
+    async def test_reset_clears_hard_burn(self):
+        from src.browser.service import (
+            _force_fingerprint_burn,
+            _is_fingerprint_burned,
+            _reset_fingerprint_window,
+        )
+
+        agent = "agent-reset"
+        await _force_fingerprint_burn(agent, "akamai", "x-akamai-bmp-action=deny")
+        assert await _is_fingerprint_burned(agent) is True
+
+        cleared = await _reset_fingerprint_window(agent)
+        assert cleared is True
+        assert await _is_fingerprint_burned(agent) is False
 
 
 # ── §11.17 exclusion rules ────────────────────────────────────────────────

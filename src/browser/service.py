@@ -876,6 +876,16 @@ _fingerprint_window: dict[str, deque[bool]] = {}
 # {agent_id: float} — unix timestamp of the most recent recorded signal.
 # Surfaced by the dashboard endpoint as ``last_signal_ts``.
 _fingerprint_last_signal: dict[str, float] = {}
+# Hard-burn agents — populated by the response-header listener when a
+# detection vendor returns an unambiguous block (cf-mitigated, X-PX-Block-Type,
+# etc.). One hard-block is a stronger signal than a 10-event rolling window
+# could ever provide: bypass the threshold and burn immediately so the
+# operator sees the signal on the very next ``_check_captcha`` envelope.
+# Cleared by the same operator-triggered reset path as the rolling window.
+_fingerprint_hard_burned: set[str] = set()
+# {agent_id: (vendor, header_or_status)} — last hard-block reason captured
+# for operator visibility on the dashboard. Operator-only; never logged.
+_fingerprint_hard_burn_reason: dict[str, tuple[str, str]] = {}
 
 
 def _get_fingerprint_lock() -> asyncio.Lock:
@@ -921,12 +931,101 @@ def _is_burned_locked(bucket: deque[bool]) -> bool:
 
 
 async def _is_fingerprint_burned(agent_id: str) -> bool:
-    """Read-only burn check for ``_check_captcha`` to decorate envelopes."""
+    """Read-only burn check for ``_check_captcha`` to decorate envelopes.
+
+    Returns True if EITHER the rolling window has filled past the threshold
+    OR a hard-burn signal (vendor block header) has fired. The hard-burn
+    short-circuits the 10-event window so a single PerimeterX 403 with
+    ``X-PX-Block-Type: 1`` — or a Cloudflare ``cf-mitigated: block`` —
+    surfaces on the very next envelope, not after another nine attempts.
+    """
     async with _get_fingerprint_lock():
+        if agent_id in _fingerprint_hard_burned:
+            return True
         bucket = _fingerprint_window.get(agent_id)
         if bucket is None:
             return False
         return _is_burned_locked(bucket)
+
+
+# Header-based hard-block signatures. Each entry maps a vendor name to a
+# tuple of (header_name_lower, predicate). Predicate inspects the header
+# value and returns True when the value indicates an unambiguous block.
+# Lower-case header names because Playwright normalises them; we still
+# compare predicates case-insensitively for safety.
+def _cf_mitigated_predicate(value: str) -> bool:
+    # ``cf-mitigated: challenge`` is the soft-challenge case (we already
+    # see the JS interstitial via body-text scan); ``cf-mitigated: block``
+    # is the hard block. ``cf-mitigated: dcv`` is a domain-control
+    # verification probe — rare, treat as hard signal.
+    v = value.strip().lower()
+    return v in {"block", "dcv"}
+
+
+def _px_block_type_predicate(value: str) -> bool:
+    # PerimeterX/HUMAN ships ``X-PX-Block-Type`` only on a hard block.
+    # Any non-empty value is a positive signal.
+    return bool(value.strip())
+
+
+def _datadome_block_predicate(value: str) -> bool:
+    # DataDome's ``X-Datadome`` shape on block: starts with ``protected``
+    # for blocked requests; ``ok`` / empty on accepted ones. Be liberal
+    # (any value containing ``protected`` or ``blocked``).
+    v = value.strip().lower()
+    return ("protected" in v) or ("blocked" in v)
+
+
+_HARD_BLOCK_HEADER_PROBES: tuple[tuple[str, str, "callable"], ...] = (
+    ("cloudflare", "cf-mitigated", _cf_mitigated_predicate),
+    ("perimeterx", "x-px-block-type", _px_block_type_predicate),
+    ("datadome", "x-datadome", _datadome_block_predicate),
+    # Akamai BMP often sets ``X-Akamai-Bmp-Action: deny`` on blocks.
+    (
+        "akamai",
+        "x-akamai-bmp-action",
+        lambda v: v.strip().lower() == "deny",
+    ),
+)
+_HARD_BLOCK_STATUS_THRESHOLD = 400
+
+
+def _classify_hard_block(headers: dict[str, str], status: int) -> tuple[str, str] | None:
+    """Return (vendor, header_or_status) when headers show an unambiguous block.
+
+    Pure-function classification — no side effects. The status floor is a
+    sanity gate: vendor headers can appear on 200 responses for
+    accepted-but-watched flows (e.g. DataDome riskiness), and we don't
+    want to burn on those. Hard-block ⇒ status >= 400 AND a vendor probe
+    fires. Caller flips state and emits audit; this function only
+    classifies.
+    """
+    if status < _HARD_BLOCK_STATUS_THRESHOLD:
+        return None
+    lower_headers = {k.lower(): v for k, v in headers.items()}
+    for vendor, header, predicate in _HARD_BLOCK_HEADER_PROBES:
+        value = lower_headers.get(header)
+        if value is None:
+            continue
+        try:
+            if predicate(value):
+                return (vendor, f"{header}={value[:64]}")
+        except Exception:
+            # A misshapen predicate must never block the response listener.
+            continue
+    return None
+
+
+async def _force_fingerprint_burn(
+    agent_id: str, vendor: str, reason: str,
+) -> bool:
+    """Mark agent as hard-burned. Returns True iff state transitioned."""
+    async with _get_fingerprint_lock():
+        already = agent_id in _fingerprint_hard_burned
+        _fingerprint_hard_burned.add(agent_id)
+        _fingerprint_hard_burn_reason[agent_id] = (vendor, reason)
+        _fingerprint_last_signal[agent_id] = time.time()
+    return not already
 
 
 async def _get_fingerprint_health(agent_id: str) -> dict:
@@ -936,15 +1035,26 @@ async def _get_fingerprint_health(agent_id: str) -> dict:
     ``test_fingerprint_health::test_health_endpoint_shape``::
 
         {"window_size": int, "rejection_rate": float, "burned": bool,
-         "last_signal_ts": str | None}
+         "last_signal_ts": str | None,
+         "hard_burned": bool, "hard_burn_reason": {vendor, signal} | None}
 
     ``rejection_rate`` is 0.0 when the window is empty (avoid divide-by-zero
     surprises in the dashboard).  ``last_signal_ts`` is ISO-8601 UTC, or
     ``None`` when no signal has ever been recorded for this agent.
+
+    ``hard_burned`` is True when an HTTP response from a known detection
+    vendor surfaced a hard-block header (cf-mitigated=block,
+    X-PX-Block-Type, X-Datadome=protected, X-Akamai-Bmp-Action=deny). The
+    rolling-window ``burned`` flag is also forced True under that
+    condition so existing operator UI keeps working unchanged; the
+    ``hard_burned`` field lets dashboards present a distinct
+    "vendor-confirmed block" state.
     """
     async with _get_fingerprint_lock():
         bucket = _fingerprint_window.get(agent_id)
         last_ts = _fingerprint_last_signal.get(agent_id)
+        hard_burned = agent_id in _fingerprint_hard_burned
+        reason_pair = _fingerprint_hard_burn_reason.get(agent_id)
         if bucket is None or len(bucket) == 0:
             window_size = 0
             rejection_rate = 0.0
@@ -954,11 +1064,19 @@ async def _get_fingerprint_health(agent_id: str) -> dict:
             rejected = sum(1 for v in bucket if v)
             rejection_rate = rejected / window_size
             burned = _is_burned_locked(bucket)
+    if hard_burned:
+        burned = True
+    reason_payload: dict | None = None
+    if reason_pair is not None:
+        vendor, signal = reason_pair
+        reason_payload = {"vendor": vendor, "signal": signal}
     return {
         "window_size": window_size,
         "rejection_rate": rejection_rate,
         "burned": burned,
         "last_signal_ts": _iso8601_utc(last_ts) if last_ts else None,
+        "hard_burned": hard_burned,
+        "hard_burn_reason": reason_payload,
     }
 
 
@@ -966,17 +1084,20 @@ async def _reset_fingerprint_window(agent_id: str) -> bool:
     """Operator-triggered reset.  Returns True if state was cleared.
 
     Called after the operator manually rotates the BrowserForge fingerprint
-    (no auto-rotation per §22 — see header note).  Drops both the rolling
-    window and the last-signal timestamp; the next post-solve outcome
-    starts a fresh window.
+    (no auto-rotation per §22 — see header note).  Drops the rolling
+    window, the last-signal timestamp, AND any hard-burn signal so the
+    next post-solve outcome starts from a fully clean slate.
     """
     async with _get_fingerprint_lock():
         had_state = (
             agent_id in _fingerprint_window
             or agent_id in _fingerprint_last_signal
+            or agent_id in _fingerprint_hard_burned
         )
         _fingerprint_window.pop(agent_id, None)
         _fingerprint_last_signal.pop(agent_id, None)
+        _fingerprint_hard_burned.discard(agent_id)
+        _fingerprint_hard_burn_reason.pop(agent_id, None)
     return had_state
 
 
@@ -3340,7 +3461,10 @@ class BrowserManager:
             # double-fire on the next tick.
             self._session_snapshot_elapsed_s[agent_id] = 0
             try:
-                ok = await snapshot_session(agent_id, inst.context)
+                signature = self._build_session_binding_signature(agent_id)
+                ok = await snapshot_session(
+                    agent_id, inst.context, binding_signature=signature,
+                )
             except Exception as e:
                 logger.warning(
                     "periodic session snapshot for '%s' raised: %s",
@@ -4182,7 +4306,10 @@ class BrowserManager:
 
         restored = None
         try:
-            restored = await restore_session(agent_id, _apply_state)
+            current_signature = self._build_session_binding_signature(agent_id)
+            restored = await restore_session(
+                agent_id, _apply_state, current_signature=current_signature,
+            )
         except Exception as e:
             # restore_session itself catches its inner errors; this
             # branch only fires if something exotic blew up.
@@ -4436,6 +4563,19 @@ class BrowserManager:
                 await task
             except (asyncio.CancelledError, Exception):
                 pass
+        # Drain any in-flight hard-burn flip tasks fired by the response
+        # listener before tearing down the context. They are short-lived
+        # (one ``_force_fingerprint_burn`` call + audit event) but we
+        # await them so the burn state is consistent for any downstream
+        # operator dashboard read.
+        burn_tasks = list(
+            getattr(inst, "_burn_pending_tasks", set()) or [],
+        )
+        for task in burn_tasks:
+            try:
+                await asyncio.wait_for(task, timeout=2.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+                pass
         jitter = getattr(inst, '_jitter_task', None)
         if jitter:
             jitter.cancel()
@@ -4480,7 +4620,10 @@ class BrowserManager:
             if get_bool(
                 "BROWSER_SESSION_PERSISTENCE_ENABLED", False, agent_id=agent_id,
             ):
-                ok = await snapshot_session(agent_id, inst.context)
+                signature = self._build_session_binding_signature(agent_id)
+                ok = await snapshot_session(
+                    agent_id, inst.context, binding_signature=signature,
+                )
                 try:
                     await _record_session_audit_event(
                         agent_id, "session_snapshot", ok,
@@ -4607,6 +4750,39 @@ class BrowserManager:
     def get_proxy_config(self, agent_id: str) -> dict | None:
         """Get stored proxy config for an agent, or None."""
         return self._proxy_configs.get(agent_id)
+
+    def _build_session_binding_signature(
+        self, agent_id: str,
+    ) -> dict[str, str | None]:
+        """Build a (UA, proxy) signature for cookie-binding invalidation.
+
+        Cloudflare / DataDome / PerimeterX bind tokens like ``cf_clearance``
+        to the original (UA, IP) tuple. Replaying them under a rotated
+        UA or different proxy egress is a guaranteed 403 AND a trust-score
+        hit. The signature lets ``session_persistence.restore_session``
+        detect the change and drop bound cookies before seeding the
+        context.
+
+        We hash UA + proxy server URL (not the egress IP itself, which is
+        often unknown to us). For most operators a proxy URL change is a
+        proxy provider change, which usually means a different egress IP
+        — close enough to gate cookie reuse on.
+
+        Returns ``{"ua": ..., "proxy": ...}`` with ``None`` for fields we
+        don't know. ``None`` keys are dropped before hashing so an
+        operator who never configures a proxy gets stable hashes across
+        snapshots.
+        """
+        ua = os.environ.get("BROWSER_UA_VERSION") or None
+        proxy_cfg = self._proxy_configs.get(agent_id)
+        proxy_url: str | None = None
+        if isinstance(proxy_cfg, dict):
+            proxy_url = (
+                proxy_cfg.get("server")
+                or proxy_cfg.get("url")
+                or None
+            )
+        return {"ua": ua, "proxy": proxy_url}
 
     async def get_status(self, agent_id: str) -> dict:
         """Get status for a specific agent's browser.
@@ -10535,6 +10711,15 @@ class BrowserManager:
                 "requestfailed",
                 lambda req: self._record_request_failed(inst, req),
             )
+            # §22 hard-burn: scan responses for known vendor block
+            # signals (cf-mitigated, X-PX-Block-Type, etc.). One hit
+            # short-circuits the 10-event rolling window — a vendor
+            # surfacing a confirmed block is a stronger signal than any
+            # heuristic body-text scan could ever provide.
+            inst.context.on(
+                "response",
+                lambda resp: self._record_response_for_burn(inst, resp),
+            )
         except Exception as e:
             # Listener wiring is best-effort: a Camoufox build that doesn't
             # surface these events shouldn't take the browser down. The
@@ -10583,6 +10768,71 @@ class BrowserManager:
             })
         except Exception as e:
             logger.debug("network listener record failed: %s", e)
+
+    def _record_response_for_burn(self, inst: CamoufoxInstance, resp) -> None:
+        """Listener — scan response for vendor hard-block signals.
+
+        Synchronous Playwright callback. If the response carries an
+        unambiguous vendor block header (``cf-mitigated: block``,
+        ``X-PX-Block-Type``, ``X-Datadome: protected``,
+        ``X-Akamai-Bmp-Action: deny``) on a 4xx/5xx status, schedule
+        a fingerprint hard-burn for the agent.
+
+        Best-effort: ANY exception here must not propagate (we're inside
+        a Playwright event callback; raising would tear down the listener).
+        """
+        try:
+            status = int(getattr(resp, "status", 0) or 0)
+            headers = getattr(resp, "headers", {}) or {}
+            classification = _classify_hard_block(headers, status)
+            if classification is None:
+                return
+            vendor, signal = classification
+        except Exception:
+            return
+        # Hop into the asyncio loop to flip state under the fingerprint
+        # lock. ``create_task`` is fire-and-forget by design — we don't
+        # await the burn from inside the listener.
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(
+            self._on_hard_block_detected(inst.agent_id, vendor, signal),
+        )
+        # Hold a strong ref so the task doesn't get GC'd mid-flight.
+        # Bounded set bounded by the listener firing rate — see
+        # ``_drain_burn_tasks`` (re-uses an existing per-instance set
+        # of pending tasks if one exists; otherwise we allocate).
+        pending = getattr(inst, "_burn_pending_tasks", None)
+        if pending is None:
+            pending = set()
+            inst._burn_pending_tasks = pending
+        pending.add(task)
+        task.add_done_callback(pending.discard)
+
+    async def _on_hard_block_detected(
+        self, agent_id: str, vendor: str, signal: str,
+    ) -> None:
+        """Flip hard-burn state and emit the audit event exactly once."""
+        transitioned = await _force_fingerprint_burn(
+            agent_id, vendor, signal,
+        )
+        if transitioned:
+            try:
+                # Re-use the existing audit channel — operator dashboards
+                # already render fingerprint_burn rows; the new vendor
+                # context is captured in ``hard_burn_reason``.
+                page_origin = ""  # vendor-block events span sub-resources;
+                #                   no single origin is canonical
+                await _record_fingerprint_audit_event(
+                    agent_id, "fingerprint_burn", page_origin,
+                )
+            except Exception as e:
+                logger.debug(
+                    "Hard-burn audit emission failed for '%s': %s",
+                    agent_id, e,
+                )
 
     def _record_request_failed(self, inst: CamoufoxInstance, req) -> None:
         """Mark the matching log entry as blocked / cancelled / failed.
