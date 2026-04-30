@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -313,6 +314,54 @@ class TestSnapshotRestore:
         # Use a real path so the open succeeds before replace is reached.
         ok = await cost.snapshot(Path("/tmp/test_captcha_cost_fail.json"))
         assert ok is False
+
+    @pytest.mark.asyncio
+    async def test_inner_write_failure_does_not_double_close_fd(
+        self, tmp_path, monkeypatch,
+    ):
+        """Once fdopen owns the descriptor, failure cleanup must not os.close it."""
+        await cost.add_cost("agent-1", 5)
+        close_calls: list[int] = []
+        original_close = os.close
+
+        def close_spy(fd: int) -> None:
+            close_calls.append(fd)
+            original_close(fd)
+
+        def fsync_boom(fd: int) -> None:
+            raise OSError("simulated fsync failure")
+
+        monkeypatch.setattr(os, "close", close_spy)
+        monkeypatch.setattr(os, "fsync", fsync_boom)
+
+        ok = await cost.snapshot(tmp_path / "costs.json")
+        assert ok is False
+        assert close_calls == []
+
+    @pytest.mark.asyncio
+    async def test_fdopen_failure_closes_raw_fd_exactly_once(
+        self, tmp_path, monkeypatch,
+    ):
+        """If fdopen raises, ownership never transferred — we must os.close fd."""
+        await cost.add_cost("agent-2", 7)
+        close_calls: list[int] = []
+        original_close = os.close
+
+        def close_spy(fd: int) -> None:
+            close_calls.append(fd)
+            original_close(fd)
+
+        def fdopen_boom(fd, *a, **kw):
+            raise OSError("simulated fdopen failure")
+
+        monkeypatch.setattr(os, "close", close_spy)
+        monkeypatch.setattr(os, "fdopen", fdopen_boom)
+
+        ok = await cost.snapshot(tmp_path / "costs.json")
+        assert ok is False
+        # Exactly one close — the pre-fdopen cleanup of the raw fd. No
+        # double-close (which would raise OSError(EBADF) on a reused fd).
+        assert len(close_calls) == 1
 
 
 class TestConcurrentWrites:

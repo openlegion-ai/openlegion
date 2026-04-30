@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import inspect
 import json
 import math
 import mimetypes
@@ -262,10 +263,47 @@ def _solver_supports_kind(solver: object, kind: str) -> bool:
     if not callable(method):
         return False
     try:
-        return method(kind) is True
+        result = method(kind)
+        if inspect.isawaitable(result):
+            # This helper is intentionally synchronous because the bundled
+            # solver APIs are synchronous. Close coroutine objects from mocks
+            # or third-party adapters so capability probing cannot leak
+            # RuntimeWarnings, then fail closed.
+            close = getattr(result, "close", None)
+            if callable(close):
+                close()
+            return False
+        return result is True
     except Exception:
         logger.debug("supports_kind raised", exc_info=True)
         return False
+
+
+async def _safe_locator_count(page: object, selector: str) -> int:
+    """Return Playwright locator count, failing closed for async/mocked locators."""
+    try:
+        locator = page.locator(selector)  # type: ignore[attr-defined]
+    except Exception:
+        return 0
+    if inspect.isawaitable(locator):
+        close = getattr(locator, "close", None)
+        if callable(close):
+            close()
+        return 0
+    count = getattr(locator, "count", None)
+    if not callable(count):
+        return 0
+    try:
+        result = count()
+        if inspect.isawaitable(result):
+            result = await result
+    except Exception:
+        return 0
+    if isinstance(result, bool):
+        return int(result)
+    if isinstance(result, (int, float)):
+        return int(result)
+    return 0
 
 
 # ── §11.14 per-agent solve rate limiter ───────────────────────────────────
@@ -1648,8 +1686,29 @@ __NAME_HELPERS__
             nd.checked = !!(el.checked) || el.getAttribute('aria-checked') === 'true';
         }
         if (el.getAttribute('aria-selected') === 'true') nd.selected = true;
+        // Snapshots ride into LLM context; password / hidden / sensitive
+        // input values must NEVER appear there. Emit a sentinel so refs
+        // still resolve, but the value is opaque to the model.
+        const _itype = (el.type || '').toLowerCase();
+        const _aac = (el.getAttribute && el.getAttribute('autocomplete') || '').toLowerCase();
+        const _SENSITIVE_INPUT_TYPES = new Set([
+            'password','hidden','tel','email',
+        ]);
+        const _SENSITIVE_AUTOCOMPLETE = (
+            _aac.includes('cc-') || _aac === 'one-time-code' ||
+            _aac === 'current-password' || _aac === 'new-password'
+        );
+        const _isSensitive = (
+            (el.tagName === 'INPUT' && _SENSITIVE_INPUT_TYPES.has(_itype)) ||
+            _SENSITIVE_AUTOCOMPLETE
+        );
         if ((el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && el.value !== '') {
-            nd.value = String(el.value).slice(0, 500);
+            if (_isSensitive) {
+                nd.value = '[REDACTED]';
+                nd.value_redacted = true;
+            } else {
+                nd.value = String(el.value).slice(0, 500);
+            }
         }
         if (el.getAttribute('contenteditable') === 'true' && el.textContent) {
             const cv = el.textContent.trim();
@@ -3951,6 +4010,15 @@ class BrowserManager:
         jitter = getattr(inst, '_jitter_task', None)
         if jitter:
             jitter.cancel()
+            # Await the cancellation so the jitter coroutine cannot
+            # continue moving the X11 cursor against a context we are
+            # about to close. ``CancelledError`` is the success path;
+            # any other exception is swallowed because shutdown must
+            # not raise.
+            try:
+                await asyncio.wait_for(asyncio.shield(jitter), timeout=2.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+                pass
         # §5.3 dump the behavior recorder buffer (no-op when disabled or
         # empty). Runs before ``context.close()`` so a hung browser close
         # doesn't eat the diagnostic data. Acquire ``inst.lock`` first so
@@ -3999,8 +4067,20 @@ class BrowserManager:
                 agent_id, e,
             )
         self._session_snapshot_elapsed_s.pop(agent_id, None)
+        # ``context.close()`` can wedge indefinitely when the underlying
+        # Camoufox child has hung (X11 stuck, deadlocked on its own
+        # mutex, or refusing SIGTERM). A 10s ceiling lets one bad
+        # instance fall away without blocking ``stop_all`` and the rest
+        # of shutdown. The ``stop_all`` path already drives Playwright
+        # cleanup, so a dropped close here is best-effort cleanup, not
+        # a correctness loss.
         try:
-            await inst.context.close()
+            await asyncio.wait_for(inst.context.close(), timeout=10.0)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "context.close() for '%s' timed out after 10s — leaving "
+                "subprocess for Playwright shutdown to reap", agent_id,
+            )
         except Exception as e:
             logger.debug("Error closing browser for '%s': %s", agent_id, e)
         logger.info("Stopped browser for '%s'", agent_id)
@@ -4282,13 +4362,28 @@ class BrowserManager:
         the picker entirely — useful when the agent is following a known
         link from a specific page.
         """
-        # Validate URL scheme
+        # Validate URL: allow-list (http/https only) — matches open_tab.
+        # Deny-lists invite footguns (urlparse normalizes some schemes
+        # differently than Firefox; protocol-relative URLs ``//host``
+        # have empty scheme and would slip through; trailing whitespace
+        # in ``javascript:alert(1) `` may parse as empty in Python but
+        # still execute in Firefox). An allow-list is unambiguous.
         try:
             parsed = urlparse(url)
         except Exception:
             return {"success": False, "error": "Invalid URL"}
-        if parsed.scheme.lower() in _BLOCKED_URL_SCHEMES:
-            return {"success": False, "error": f"URL scheme '{parsed.scheme}' is not allowed"}
+        scheme = parsed.scheme.lower()
+        if scheme not in _ALLOWED_URL_SCHEMES:
+            return {
+                "success": False,
+                "error": f"URL scheme '{parsed.scheme}' is not allowed (only http/https)",
+            }
+        if not parsed.netloc:
+            # Reject protocol-relative or otherwise host-less URLs.
+            return {
+                "success": False,
+                "error": "URL missing host component",
+            }
         if wait_until not in _VALID_WAIT_UNTIL:
             valid = sorted(_VALID_WAIT_UNTIL)
             return {"success": False, "error": f"Invalid wait_until: {wait_until!r}. Use one of: {valid}"}
@@ -5856,7 +5951,14 @@ class BrowserManager:
         """
         if force:
             try:
-                await page.locator(selector).scroll_into_view_if_needed(timeout=timeout)
+                locator = page.locator(selector)
+                if inspect.isawaitable(locator):
+                    close = getattr(locator, "close", None)
+                    if callable(close):
+                        close()
+                    locator = None
+                if locator is not None:
+                    await locator.scroll_into_view_if_needed(timeout=timeout)
             except Exception:
                 pass
             await page.click(selector, timeout=timeout, force=True)
@@ -7858,7 +7960,7 @@ class BrowserManager:
                 still_present = False
                 for sel in captcha_selectors:
                     try:
-                        if await inst.page.locator(sel).count() > 0:
+                        if await _safe_locator_count(inst.page, sel) > 0:
                             still_present = True
                             break
                     except Exception:
@@ -7876,7 +7978,7 @@ class BrowserManager:
                 vendor_block_found = False
                 for sel in _FINGERPRINT_REJECTION_SELECTORS:
                     try:
-                        if await inst.page.locator(sel).count() > 0:
+                        if await _safe_locator_count(inst.page, sel) > 0:
                             vendor_block_found = True
                             break
                     except Exception:
@@ -8114,7 +8216,7 @@ class BrowserManager:
         ]
         try:
             for sel in captcha_selectors:
-                if await inst.page.locator(sel).count() > 0:
+                if await _safe_locator_count(inst.page, sel) > 0:
                     kind = self._classify_kind(sel)
                     # §11.1 — when the matched selector is a reCAPTCHA, run
                     # the precise variant classifier on the live page to
@@ -8328,7 +8430,9 @@ class BrowserManager:
                         for recheck_sel in captcha_selectors:
                             try:
                                 if (
-                                    await inst.page.locator(recheck_sel).count()
+                                    await _safe_locator_count(
+                                        inst.page, recheck_sel,
+                                    )
                                     > 0
                                 ):
                                     still_present = True

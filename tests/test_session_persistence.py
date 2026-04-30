@@ -243,6 +243,50 @@ class TestAtomicWrite:
         # Prior snapshot intact.
         assert canonical.read_bytes() == prior_bytes
 
+    @pytest.mark.asyncio
+    async def test_inner_write_failure_does_not_double_close_fd(self, monkeypatch):
+        """Once fdopen owns the descriptor, failure cleanup must not os.close it."""
+        ctx = _FakeContext()
+        close_calls: list[int] = []
+        original_close = os.close
+
+        def close_spy(fd: int) -> None:
+            close_calls.append(fd)
+            original_close(fd)
+
+        def fsync_boom(fd: int) -> None:
+            raise OSError("simulated fsync failure")
+
+        monkeypatch.setattr(os, "close", close_spy)
+        monkeypatch.setattr(os, "fsync", fsync_boom)
+
+        ok = await sp.snapshot_session("agent-fsync", ctx)
+        assert ok is False
+        assert close_calls == []
+
+    @pytest.mark.asyncio
+    async def test_fdopen_failure_closes_raw_fd_exactly_once(self, monkeypatch):
+        """If fdopen raises, ownership never transferred — we must os.close fd."""
+        ctx = _FakeContext()
+        close_calls: list[int] = []
+        original_close = os.close
+
+        def close_spy(fd: int) -> None:
+            close_calls.append(fd)
+            original_close(fd)
+
+        def fdopen_boom(fd, *a, **kw):
+            raise OSError("simulated fdopen failure")
+
+        monkeypatch.setattr(os, "close", close_spy)
+        monkeypatch.setattr(os, "fdopen", fdopen_boom)
+
+        ok = await sp.snapshot_session("agent-fdopen", ctx)
+        assert ok is False
+        # Exactly one close — the pre-fdopen cleanup of the raw fd. No
+        # double-close (which would raise OSError(EBADF) on a reused fd).
+        assert len(close_calls) == 1
+
 
 # ── Flag-disabled no-op (lifecycle integration) ────────────────────────────
 
@@ -429,6 +473,97 @@ class TestConcurrent:
 
 
 # ── Clear ──────────────────────────────────────────────────────────────────
+
+
+class TestAgentIdValidation:
+    """An attacker-controlled agent_id must never escape the sessions dir.
+
+    Path-traversal regressions: the canonical agent_id regex is the
+    single chokepoint enforced inside ``session_path``; every public
+    function in the module funnels through it.
+    """
+
+    def test_session_path_rejects_traversal(self):
+        with pytest.raises(sp.InvalidAgentIdError):
+            sp.session_path("../../../etc/passwd")
+
+    def test_session_path_rejects_slash(self):
+        with pytest.raises(sp.InvalidAgentIdError):
+            sp.session_path("a/b")
+
+    def test_session_path_rejects_empty(self):
+        with pytest.raises(sp.InvalidAgentIdError):
+            sp.session_path("")
+
+    def test_session_path_rejects_null_byte(self):
+        with pytest.raises(sp.InvalidAgentIdError):
+            sp.session_path("agent\x00x")
+
+    def test_session_path_rejects_long(self):
+        # ``AGENT_ID_RE_PATTERN`` caps at 64 chars total.
+        with pytest.raises(sp.InvalidAgentIdError):
+            sp.session_path("a" * 65)
+
+    @pytest.mark.asyncio
+    async def test_snapshot_with_bad_agent_id_returns_false(self):
+        ctx = _FakeContext()
+        ok = await sp.snapshot_session("../escape", ctx)
+        assert ok is False
+
+    @pytest.mark.asyncio
+    async def test_clear_with_bad_agent_id_returns_false(self):
+        ok = await sp.clear_session("../etc/passwd")
+        assert ok is False
+
+    @pytest.mark.asyncio
+    async def test_restore_with_bad_agent_id_returns_none(self):
+        async def factory(**kwargs):
+            return MagicMock()
+
+        out = await sp.restore_session("../bad", factory)
+        assert out is None
+
+    def test_summary_with_bad_agent_id_returns_safe_default(self):
+        out = sp.session_summary("../etc/passwd")
+        assert out == {
+            "has_persisted_session": False,
+            "saved_at": None,
+            "origin_count": 0,
+            "cookie_count": 0,
+        }
+
+
+class TestSizeCap:
+    @pytest.mark.asyncio
+    async def test_oversized_payload_refused(self, monkeypatch):
+        ctx = _FakeContext()
+        # Inflate the storage_state past the 8 MiB cap.
+        big = "x" * (sp._MAX_SNAPSHOT_BYTES + 1024)
+        ctx._state = {
+            "cookies": [],
+            "origins": [{"origin": "https://h.example", "localStorage": [
+                {"name": "k", "value": big},
+            ]}],
+        }
+        ok = await sp.snapshot_session("agent-big", ctx)
+        assert ok is False
+        # Sidecar must NOT exist after refusal.
+        assert not sp.session_path("agent-big").exists()
+
+
+class TestSessionsDirMode:
+    @pytest.mark.asyncio
+    async def test_parent_dir_chmod_0o700(self, tmp_path, monkeypatch):
+        # Pre-create the sessions dir with a permissive mode to verify
+        # the snapshot path tightens it.
+        target_dir = tmp_path / "sessions-perm"
+        target_dir.mkdir(mode=0o755)
+        monkeypatch.setenv("BROWSER_SESSION_DIR", str(target_dir))
+        ctx = _FakeContext()
+        ok = await sp.snapshot_session("agent-perm", ctx)
+        assert ok is True
+        mode = target_dir.stat().st_mode & 0o777
+        assert mode == 0o700, f"sessions dir mode {oct(mode)} != 0o700"
 
 
 class TestClear:

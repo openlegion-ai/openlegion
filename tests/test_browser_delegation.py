@@ -416,7 +416,7 @@ class TestBrowserCommandEndpoint:
                 "/mesh/browser/command",
                 json={
                     "action": "navigate",
-                    "params": {"url": "https://x.com/login"},
+                    "params": {"url": "https://93.184.216.34/login"},
                     "target_agent_id": "social-manager",
                 },
                 headers={"X-Agent-ID": "operator"},

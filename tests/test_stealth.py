@@ -130,3 +130,65 @@ class TestQuietStartupPrefs:
         assert prefs["browser.startup.homepage_override.mstone"] == "ignore"
         assert prefs["startup.homepage_welcome_url"] == ""
         assert prefs["browser.disableResetPrompt"] is True
+
+
+class TestAcceptLanguageCoherence:
+    """``intl.accept_languages`` must follow the chosen BROWSER_LOCALE so
+    the Accept-Language HTTP header, navigator.language, and
+    navigator.languages cohere — the easiest mismatch detection vector."""
+
+    def test_accept_languages_follows_locale(self):
+        from src.browser.stealth import _build_accept_languages, _stealth_prefs
+
+        prefs = _stealth_prefs(locale="en-US")
+        # en-US default: ``en-US,en;q=0.5`` — matches a real Firefox.
+        assert prefs["intl.accept_languages"] == "en-US,en;q=0.5"
+
+        prefs = _stealth_prefs(locale="de-DE")
+        # Non-English locale: leading entry, base, en fallback.
+        assert prefs["intl.accept_languages"] == "de-DE,de;q=0.9,en;q=0.5"
+
+        # Helper directly.
+        assert _build_accept_languages("fr-FR") == "fr-FR,fr;q=0.9,en;q=0.5"
+        assert _build_accept_languages("ja") == "ja,ja;q=0.9,en;q=0.5"
+        assert _build_accept_languages("en-GB") == "en-GB,en;q=0.5"
+
+    def test_accept_languages_default_when_blank(self):
+        from src.browser.stealth import _build_accept_languages
+
+        assert _build_accept_languages("") == "en-US,en;q=0.5"
+        assert _build_accept_languages(None) == "en-US,en;q=0.5"
+
+
+class TestEngineMismatchOptIn:
+    """``mobile-android`` ships Chrome UA on Firefox engine — strong bot
+    signal on FP-aware sites. Must be opt-in via env flag, not silent."""
+
+    def test_mobile_android_requires_opt_in(self, monkeypatch):
+        from src.browser.stealth import (
+            _DEVICE_PROFILES,
+            DEFAULT_DEVICE_PROFILE,
+            get_device_profile,
+        )
+
+        monkeypatch.delenv("OPENLEGION_BROWSER_ALLOW_ENGINE_MISMATCH", raising=False)
+        # Without flag, request for mobile-android falls back to default.
+        out = get_device_profile("mobile-android")
+        assert out is _DEVICE_PROFILES[DEFAULT_DEVICE_PROFILE]
+
+    def test_mobile_android_returns_profile_when_flag_set(self, monkeypatch):
+        from src.browser.stealth import _DEVICE_PROFILES, get_device_profile
+
+        monkeypatch.setenv("OPENLEGION_BROWSER_ALLOW_ENGINE_MISMATCH", "1")
+        out = get_device_profile("mobile-android")
+        assert out is _DEVICE_PROFILES["mobile-android"]
+
+    def test_mobile_ios_does_not_require_opt_in(self):
+        # iOS profile (Mobile Safari UA on Gecko) is also engine-mismatched
+        # but the docstring's stated trade-off was already accepted; not
+        # gating to avoid breaking existing iOS-mode operators. Documented
+        # via the explicit allow-list — only ``mobile-android`` is gated.
+        from src.browser.stealth import _DEVICE_PROFILES, get_device_profile
+
+        out = get_device_profile("mobile-ios")
+        assert out is _DEVICE_PROFILES["mobile-ios"]
