@@ -39,6 +39,10 @@ SOUL.md
 ROADMAP.md
 benchmark_report.md
 *.log
+.openlegion_history
+
+# Local-only demo recorder output (record.js + output snapshots)
+demo/
 skills/_marketplace/
 uv.lock
 .claude/
