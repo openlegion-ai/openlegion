@@ -98,6 +98,12 @@ function dashboard() {
     editForm: {},
     availableModels: [],
 
+    // Cookie / session import (operator-only, modal-triggered from
+    // the agent ⋯ actions menu). Field state lives on the modal's own
+    // `x-data` (template x-if) so cookie text never persists in DOM
+    // after close.
+    cookieImportOpen: false,
+
     // Add agent
     addAgentMode: false,
     addAgentForm: { name: '', role: '', model: '', avatar: 1, color: null, project: '', template: '', _showPicker: false, _showColorPicker: false, _templateSearch: '', _templateDropdownOpen: false, _modelSearch: '', _modelDropdownOpen: false },
@@ -210,6 +216,14 @@ function dashboard() {
     _browserMetricsLoading: {},
     _browserMetricsError: {},
     _BROWSER_METRICS_HISTORY_MAX: 60,  // ~1 hour at 60s emit cadence
+
+    // Per-agent privacy-safe session sidecar summary (Phase 10 §20).
+    // Keyed by agent_id; value is the `data` object returned by
+    // /api/agents/{id}/session: {has_persisted_session, saved_at,
+    // origin_count, cookie_count}. Drives the "Saved sessions" line
+    // in the agent settings Browser detail row. Counts only — no
+    // origin domains.
+    agentBrowserSession: {},
 
     captchaSolverProvider: '',
     captchaSolverKeyMasked: '',
@@ -3224,6 +3238,23 @@ function dashboard() {
       this.addAgentForm = { name: '', role: '', model: '', avatar: 1, color: null, project: '', template: '', _showPicker: false, _showColorPicker: false, _templateSearch: '', _templateDropdownOpen: false, _modelSearch: '', _modelDropdownOpen: false };
     },
 
+    openCookieImport() {
+      if (!this.selectedAgent || this.selectedAgent === 'operator') return;
+      if (!this.agentDetail || !this.agentDetail.vnc_url) {
+        this.showToast('Browser is not available for this agent');
+        return;
+      }
+      this.cookieImportOpen = true;
+    },
+
+    closeCookieImport() {
+      // The modal body is wrapped in <template x-if> so this unmounts
+      // the inner x-data scope — cookie text in DOM is dropped along
+      // with it. Don't gate on a "submitting" flag; the in-flight
+      // fetch will resolve harmlessly into a torn-down scope.
+      this.cookieImportOpen = false;
+    },
+
     async fetchAgentTemplates() {
       try {
         const resp = await fetch(`${window.__config.apiBase}/agent-templates`);
@@ -5728,9 +5759,14 @@ function dashboard() {
       this.fetchAgentConfig(agentId);
       this.fetchCronJobs();
       // Phase 7 §10.1 — seed per-agent browser metrics history so the
-      // detail panel renders sparklines immediately on open. Subsequent
-      // updates flow through the existing browser_metrics WS handler.
+      // detail panel renders the click-rate signal immediately on open.
+      // Subsequent updates flow through the existing browser_metrics
+      // WS handler.
       this.fetchBrowserMetricsHistory(agentId);
+      // Phase 10 §20 — privacy-safe session sidecar summary, used by
+      // the Browser detail row to surface "N origins saved" so the
+      // operator knows whether Reset Browser will blow away auth state.
+      this.fetchAgentBrowserSession(agentId);
       this.activeTab = 'fleet';
       if (!this._skipPush) this._pushUrl(false);
     },
@@ -6053,6 +6089,44 @@ function dashboard() {
       if (rate >= 0.7) return 'text-yellow-400';
       return 'text-red-400';
     },
+    clickRateBarColor(rate) {
+      // Bar-chart variant of clickRateColor — returns a Tailwind bg
+      // utility for the 9-segment mini bar in the Browser Health table.
+      if (rate == null) return 'bg-gray-700';
+      if (rate >= 0.9) return 'bg-green-500/70';
+      if (rate >= 0.7) return 'bg-yellow-500/70';
+      return 'bg-red-500/70';
+    },
+    browserHealthRows() {
+      // Sort failing agents to the top so a regressing site is the
+      // first thing the operator sees. Stale agents (no recent
+      // metrics) drop to the bottom — they're informational, not
+      // actionable. Idle (no clicks recorded yet) sort by name.
+      return this.browserMetricsList().slice().sort((a, b) => {
+        const aStale = this.browserMetricsStale(a.receivedAt) ? 1 : 0;
+        const bStale = this.browserMetricsStale(b.receivedAt) ? 1 : 0;
+        if (aStale !== bStale) return aStale - bStale;
+        const ar = a.click_success_rate_100;
+        const br = b.click_success_rate_100;
+        // Both null → name; one null → null last; otherwise ascending rate
+        if (ar == null && br == null) return a.agent.localeCompare(b.agent);
+        if (ar == null) return 1;
+        if (br == null) return -1;
+        return ar - br;
+      });
+    },
+    browserHealthSummary() {
+      // One-line summary shown in the card header — agent count plus
+      // the worst current click rate, so the page tells the operator
+      // "everything's fine" or "something's red" without expanding.
+      const list = this.browserMetricsList();
+      const live = list.filter(m => !this.browserMetricsStale(m.receivedAt));
+      if (live.length === 0) return list.length ? 'all idle' : '';
+      const rated = live.filter(m => m.click_success_rate_100 != null);
+      if (rated.length === 0) return live.length + ' active · no clicks yet';
+      const worst = Math.min(...rated.map(m => m.click_success_rate_100));
+      return live.length + ' active · low ' + this.fmtClickRate(worst);
+    },
     fmtBytes(n) {
       if (n == null || !Number.isFinite(n)) return '—';
       if (n < 1024) return n + 'B';
@@ -6195,6 +6269,30 @@ function dashboard() {
           ...this._browserMetricsLoading,
           [agentId]: false,
         };
+      }
+    },
+
+    async fetchAgentBrowserSession(agentId) {
+      // Privacy-safe sidecar summary — counts only, no origin domains.
+      // The dashboard endpoint returns the §2.3 envelope so we can
+      // distinguish "service down" from "no session"; the caller only
+      // cares about the data shape, so we skip surface-level errors
+      // (the row segment hides itself when has_persisted_session is
+      // falsy).
+      if (!agentId || agentId === 'operator') return;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/session`);
+        if (!resp.ok) return;
+        const body = await resp.json().catch(() => ({}));
+        if (body && body.success && body.data) {
+          this.agentBrowserSession = {
+            ...this.agentBrowserSession,
+            [agentId]: body.data,
+          };
+        }
+      } catch (e) {
+        // Service unavailable / offline — leave the entry absent so the
+        // row segment stays hidden rather than rendering a stale count.
       }
     },
 
