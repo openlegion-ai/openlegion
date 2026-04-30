@@ -32,6 +32,105 @@ _VNC_PORT = int(os.environ.get("VNC_PORT", "6080"))
 _API_PORT = int(os.environ.get("API_PORT", "8500"))
 
 
+# Memory budget per Camoufox + per-agent X stack, in MiB.  ~400 MB is
+# the high-water mark of a typical Camoufox instance under sustained
+# use; ~50 MB covers the per-agent Xvnc + Openbox + unclutter when
+# OPENLEGION_BROWSER_PER_AGENT_DISPLAY is on.  Sized for the safer of
+# the two paths so the autodetected default is correct in both modes.
+_MEM_PER_BROWSER_MB = 450
+# Reserved for OS + mesh + agent containers + Docker overhead.  The
+# CLAUDE.md resource budget for the engine quotes ~2.5 GB overhead;
+# add a 512 MB buffer so a fresh-install on a small box has slack
+# instead of teetering on the edge of OOM.
+_HEADROOM_MB = 3072
+# Hard ceiling — matches the display-allocator pool size.  Going above
+# this requires raising both knobs together; the comment in
+# src/browser/display_allocator.py:DISPLAY_RANGE_END is the source.
+_MAX_CAP = 64
+# Last-resort floor when memory autodetect fails.  4 GB box × the
+# budget above gives ~2 browsers; 5 was the legacy default and has
+# shipped for a year so we preserve it as the conservative fallback.
+_FALLBACK_DEFAULT = 5
+
+
+def _detect_total_memory_mb() -> int | None:
+    """Return total memory available to this process in MiB, or None.
+
+    Probes cgroups v2 first (the modern container path), falls back to
+    ``/proc/meminfo`` for bare-metal / VM, and gives up silently on
+    anything else.  Catches every exception so a hostile / missing
+    /proc /sys never crashes startup — the caller falls through to
+    :data:`_FALLBACK_DEFAULT`.
+
+    On cgroups v1 (the EOL Hetzner path is already on cgroups v2 since
+    Ubuntu 22.04, and CLAUDE.md pins Ubuntu 24.04) we'd skip the v2
+    file and read /proc/meminfo, which reports the host's memory not
+    the cgroup limit.  That's still useful as a coarse upper bound;
+    misconfigurations report a too-large value but the cap clamp keeps
+    us safe.
+    """
+    try:
+        v2 = Path("/sys/fs/cgroup/memory.max")
+        if v2.exists():
+            raw = v2.read_text().strip()
+            if raw and raw != "max":
+                return int(raw) // (1024 * 1024)
+    except Exception:
+        pass
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemTotal:"):
+                # Format: ``MemTotal:       16389184 kB``
+                return int(line.split()[1]) // 1024
+    except Exception:
+        pass
+    return None
+
+
+def _max_from_memory(total_mb: int | None) -> int:
+    """Pure helper — derive a safe cap from a known memory size.
+
+    Split out from :func:`_autodetect_default_max_browsers` so the
+    resolver can share a single ``_detect_total_memory_mb`` reading
+    with its log line, and so tests can exercise the math without
+    mocking ``Path``.
+
+    Math: ``(total_mem_mb - headroom_mb) // mem_per_browser_mb``,
+    clamped to ``[1, _MAX_CAP]``.
+
+    * ``None`` total → :data:`_FALLBACK_DEFAULT` (probes failed,
+      typically a non-Linux dev environment)
+    * available < one browser's budget → 1 (don't fail closed at 0)
+    """
+    if total_mb is None:
+        return _FALLBACK_DEFAULT
+    available = total_mb - _HEADROOM_MB
+    if available < _MEM_PER_BROWSER_MB:
+        # Tiny box — give one browser slot so the service can still
+        # serve a single agent rather than failing closed at zero.
+        return 1
+    return max(1, min(_MAX_CAP, available // _MEM_PER_BROWSER_MB))
+
+
+def _autodetect_default_max_browsers() -> int:
+    """Estimate a safe default cap from observable memory.
+
+    Used only when neither ``OPENLEGION_BROWSER_MAX_CONCURRENT`` nor
+    ``MAX_BROWSERS`` is set — i.e. self-host installs that haven't
+    tuned anything.  Hetzner-provisioned VPSes get the cap from the
+    provisioner, which always wins over the autodetect (the env-var
+    layer is checked first in :func:`_resolve_max_browsers`).
+
+    Reference table:
+
+    * 4 GB box   → (4096 − 3072) / 450 = 2 browsers
+    * 8 GB box   → (8192 − 3072) / 450 = 11 browsers
+    * 16 GB box  → (16384 − 3072) / 450 = 29 browsers
+    * 32 GB box  → (32768 − 3072) / 450 = 64 (clamped)
+    """
+    return _max_from_memory(_detect_total_memory_mb())
+
+
 def _resolve_max_browsers() -> int:
     """Return the per-service browser concurrency cap.
 
@@ -42,24 +141,48 @@ def _resolve_max_browsers() -> int:
     review flagged the runtime path's complexity.
 
     Precedence (highest → lowest):
-      1. ``OPENLEGION_BROWSER_MAX_CONCURRENT`` — canonical name, listed in
-         :data:`src.browser.flags.KNOWN_FLAGS`.
+      1. ``OPENLEGION_BROWSER_MAX_CONCURRENT`` — canonical name, set by
+         the provisioner per VPS plan and overridable by self-hosters.
+         Listed in :data:`src.browser.flags.KNOWN_FLAGS`.
       2. ``MAX_BROWSERS`` — legacy name kept for back-compat with existing
          deployments / Docker compose files. Removable after one release.
-      3. Default of 5.
+      3. Memory-derived autodetect (:func:`_autodetect_default_max_browsers`).
+         Replaces the previous hardcoded ``5`` floor — a 4 GB laptop and
+         a 32 GB VPS deserve different defaults.
     """
     from src.browser.flags import get_int
 
+    # Read memory once and forward the result so the autodetect helper
+    # and the log line stay consistent — calling _detect_total_memory_mb
+    # twice was harmless but cosmetically inconsistent (a thread or
+    # cgroup change between calls could disagree).
+    total_mb = _detect_total_memory_mb()
+    autodetected = _max_from_memory(total_mb)
+
     # ``min_value=1`` rejects nonsense like ``MAX=0`` (would deadlock the
-    # acquire loop). ``max_value=64`` is a soft ceiling — a single VPS won't
-    # have RAM for that many Camoufox instances anyway.
-    legacy_default = get_int("MAX_BROWSERS", 5, min_value=1, max_value=64)
-    return get_int(
+    # acquire loop). ``max_value=64`` matches the display-allocator pool
+    # ceiling — raising one without the other would cause allocator
+    # exhaustion under per-agent display mode.
+    legacy_default = get_int(
+        "MAX_BROWSERS", autodetected, min_value=1, max_value=_MAX_CAP,
+    )
+    final = get_int(
         "OPENLEGION_BROWSER_MAX_CONCURRENT",
         legacy_default,
         min_value=1,
-        max_value=64,
+        max_value=_MAX_CAP,
     )
+    # Single log line carrying both the resolved cap and the autodetect
+    # baseline, so an operator can tell at a glance whether the env
+    # override is doing what they expect.  ``memory_mb=None`` means the
+    # autodetect probes failed (typically a non-Linux dev environment),
+    # in which case ``autodetected`` is the conservative fallback.
+    suffix = " (env override)" if final != autodetected else ""
+    logger.info(
+        "Browser cap: %d%s — autodetect=%d, memory=%s MB",
+        final, suffix, autodetected, total_mb,
+    )
+    return final
 
 
 _MAX_BROWSERS = _resolve_max_browsers()
