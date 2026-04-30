@@ -1272,42 +1272,210 @@ class TestEvaluate:
         assert "failed" in result["error"].lower()
 
 
-class TestLRUEviction:
-    """Tests for max_concurrent browser eviction."""
+class TestPoolExhaustion:
+    """Tests for max_concurrent enforcement.
+
+    Behaviour change (was silent LRU eviction): when the cap is reached,
+    ``get_or_start`` now raises :class:`BrowserPoolExhausted` rather than
+    killing the oldest agent's session to make room.  Silent eviction
+    destroyed cookies/captcha/login state with only an INFO log; the
+    typed exception lets callers see the cap and decide what to do.
+    """
 
     @pytest.mark.asyncio
-    async def test_lru_eviction(self):
-        """When max concurrent is reached, least recently used should be stopped."""
+    async def test_refuses_when_cap_reached(self):
+        """At cap, a new agent's request raises BrowserPoolExhausted."""
         import time
 
-        from src.browser.service import BrowserManager, CamoufoxInstance
+        from src.browser.service import (
+            BrowserManager,
+            BrowserPoolExhausted,
+            CamoufoxInstance,
+        )
 
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles", max_concurrent=2)
 
-        # Add two instances — a1 is older
+        # Two existing instances → at cap.
         ctx_a1 = AsyncMock()
         inst_a1 = CamoufoxInstance("a1", MagicMock(), ctx_a1, MagicMock())
-        inst_a1.last_activity = time.time() - 100  # older
+        inst_a1.last_activity = time.time() - 100
         mgr._instances["a1"] = inst_a1
 
         ctx_a2 = AsyncMock()
         inst_a2 = CamoufoxInstance("a2", MagicMock(), ctx_a2, MagicMock())
-        inst_a2.last_activity = time.time()  # newer
+        inst_a2.last_activity = time.time()
         mgr._instances["a2"] = inst_a2
 
-        # Mock _start_browser so get_or_start can create a3
-        mock_page = AsyncMock()
-        mock_page.bring_to_front = AsyncMock()
-        new_inst = CamoufoxInstance("a3", MagicMock(), AsyncMock(), mock_page)
-        mgr._start_browser = AsyncMock(return_value=new_inst)
+        # Stub _start_browser; if the refusal path is wrong this test
+        # would silently pass with eviction, so we assert it was NEVER
+        # called below.
+        mgr._start_browser = AsyncMock()
 
-        await mgr.get_or_start("a3")
+        with pytest.raises(BrowserPoolExhausted) as excinfo:
+            await mgr.get_or_start("a3")
 
-        # a1 (oldest) should have been evicted
-        assert "a1" not in mgr._instances
+        # Cap and retry hint surfaced on the exception so the FastAPI
+        # handler can build a structured 503 envelope without parsing
+        # the message string.
+        assert excinfo.value.cap == 2
+        assert excinfo.value.retry_after_s > 0
+        # Critical: the existing agents' sessions were preserved.
+        assert "a1" in mgr._instances
         assert "a2" in mgr._instances
-        assert "a3" in mgr._instances
-        ctx_a1.close.assert_called_once()
+        ctx_a1.close.assert_not_called()
+        ctx_a2.close.assert_not_called()
+        # And the new browser was never started — no half-up state.
+        mgr._start_browser.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_existing_agent_request_still_succeeds_at_cap(self):
+        """Asking for an already-running agent at cap returns the existing one."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles", max_concurrent=2)
+        inst = CamoufoxInstance("a1", MagicMock(), AsyncMock(), MagicMock())
+        mgr._instances["a1"] = inst
+        # Pad to cap.
+        mgr._instances["a2"] = CamoufoxInstance(
+            "a2", MagicMock(), AsyncMock(), MagicMock(),
+        )
+
+        result = await mgr.get_or_start("a1")
+        assert result is inst
+
+    def test_pool_exhausted_returns_503_with_envelope(self):
+        """FastAPI handler converts the exception to a structured 503."""
+        from starlette.testclient import TestClient
+
+        from src.browser.server import create_browser_app
+        from src.browser.service import BrowserManager, BrowserPoolExhausted
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        app = create_browser_app(mgr)
+
+        # Inject a route that raises so we exercise the handler — keeps
+        # the test isolated from any real navigate/click endpoint plumbing.
+        @app.get("/_test_pool_exhausted")
+        async def _raise():
+            raise BrowserPoolExhausted(cap=5, retry_after_s=42)
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/_test_pool_exhausted")
+        assert resp.status_code == 503
+        assert resp.headers["Retry-After"] == "42"
+        body = resp.json()
+        assert body["error"] == "browser_pool_full"
+        assert body["cap"] == 5
+        assert body["retry_after_s"] == 42
+        assert "Browser pool full" in body["message"]
+
+    @pytest.mark.asyncio
+    async def test_idle_cleanup_releases_slot_under_cap(self):
+        """The natural pressure-release: an idle browser cleaned up
+        frees a slot, so the next get_or_start succeeds.
+
+        This is the recovery mechanism that replaces silent LRU
+        eviction.  Operators don't have to do anything — agents that
+        haven't been used in :data:`idle_timeout_minutes` get reaped
+        and their slots return to the pool.
+        """
+        import time
+
+        from src.browser.service import (
+            BrowserManager,
+            BrowserPoolExhausted,
+            CamoufoxInstance,
+        )
+
+        mgr = BrowserManager(
+            profiles_dir="/tmp/test_profiles",
+            max_concurrent=2,
+            idle_timeout_minutes=1,
+        )
+        # Pre-populate at cap with one stale, one fresh.
+        ctx_stale = AsyncMock()
+        stale = CamoufoxInstance("stale", MagicMock(), ctx_stale, MagicMock())
+        stale.last_activity = time.time() - 600  # well past 1-min timeout
+        mgr._instances["stale"] = stale
+
+        ctx_fresh = AsyncMock()
+        fresh = CamoufoxInstance("fresh", MagicMock(), ctx_fresh, MagicMock())
+        fresh.last_activity = time.time()
+        mgr._instances["fresh"] = fresh
+
+        # At cap → new agent refused.
+        with pytest.raises(BrowserPoolExhausted):
+            await mgr.get_or_start("newcomer")
+
+        # Idle cleanup runs (the background loop calls this periodically).
+        await mgr._cleanup_idle()
+        assert "stale" not in mgr._instances
+        assert "fresh" in mgr._instances
+
+        # Now there's room.  Stub _start_browser so the success path
+        # doesn't actually try to launch Camoufox.
+        new_inst = CamoufoxInstance(
+            "newcomer", MagicMock(), AsyncMock(), AsyncMock(),
+        )
+        mgr._start_browser = AsyncMock(return_value=new_inst)
+        result = await mgr.get_or_start("newcomer")
+        assert result is new_inst
+        assert "newcomer" in mgr._instances
+
+    @pytest.mark.asyncio
+    async def test_stop_then_start_at_cap_succeeds(self):
+        """``stop(X)`` followed by ``get_or_start(Y)`` at cap should
+        succeed.  Validates that explicit operator-driven slot freeing
+        works the same as idle cleanup.
+        """
+        from src.browser.service import BrowserManager, CamoufoxInstance
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles", max_concurrent=2)
+        for aid in ("a", "b"):
+            mgr._instances[aid] = CamoufoxInstance(
+                aid, MagicMock(), AsyncMock(), MagicMock(),
+            )
+
+        # Free a slot the explicit way.
+        await mgr.stop("a")
+        assert "a" not in mgr._instances
+
+        # New agent now fits.
+        new_inst = CamoufoxInstance(
+            "c", MagicMock(), AsyncMock(), AsyncMock(),
+        )
+        mgr._start_browser = AsyncMock(return_value=new_inst)
+        result = await mgr.get_or_start("c")
+        assert result is new_inst
+
+    @pytest.mark.asyncio
+    async def test_pool_exhaustion_logs_at_warning(self, caplog):
+        """The cap-hit log message is at WARNING so operators monitoring
+        log streams notice it without trawling INFO.  Silent pool
+        exhaustion was a real operational pain point pre-fix; downgrading
+        the log level here would resurrect it.
+        """
+        import logging
+
+        from src.browser.service import (
+            BrowserManager,
+            BrowserPoolExhausted,
+            CamoufoxInstance,
+        )
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles", max_concurrent=1)
+        mgr._instances["a"] = CamoufoxInstance(
+            "a", MagicMock(), AsyncMock(), MagicMock(),
+        )
+
+        with caplog.at_level(logging.WARNING, logger="browser.service"):
+            with pytest.raises(BrowserPoolExhausted):
+                await mgr.get_or_start("b")
+
+        assert any(
+            "Browser pool full" in r.message and r.levelno == logging.WARNING
+            for r in caplog.records
+        )
 
 
 class TestIdleCleanup:

@@ -68,6 +68,38 @@ from src.shared.utils import sanitize_for_prompt, setup_logging
 logger = setup_logging("browser.service")
 
 
+class BrowserPoolExhausted(RuntimeError):
+    """Raised when the per-service concurrent-browser cap is reached.
+
+    Replaced the previous silent-LRU-eviction behaviour: hitting the cap
+    used to kill the least-recently-used agent's browser to make room
+    for the new one — destroying its session, cookies, captcha state,
+    and login without surfacing anything beyond an INFO log.  That
+    fails closed for the operator (silent data loss) and silently
+    degrades the user experience under load.
+
+    Refusal lets the caller decide what to do: wait, retry, stop a
+    different agent, or raise visibility to the operator.  The browser
+    service FastAPI app installs an exception handler that converts
+    this to HTTP 503 with ``Retry-After`` and a structured envelope —
+    the agent's model sees ``error="browser_pool_full"`` instead of an
+    opaque 500 and can react.
+
+    The cap itself comes from ``OPENLEGION_BROWSER_MAX_CONCURRENT``;
+    the provisioner sets it per VPS plan, self-hosters can override
+    via env, and the engine auto-detects a sane floor from container
+    memory (see :func:`src.browser.__main__._resolve_max_browsers`).
+    """
+
+    def __init__(self, *, cap: int, retry_after_s: int = 60):
+        self.cap = cap
+        self.retry_after_s = retry_after_s
+        super().__init__(
+            f"Browser pool full (cap={cap}); stop an agent or wait "
+            f"~{retry_after_s}s for an idle slot",
+        )
+
+
 # ── §11.13 structured CAPTCHA detection envelope ──────────────────────────
 # Both helpers below produce literal-string enums (see plan §11.13). We do
 # NOT use Python ``enum.Enum``: the wire format is JSON strings, and a real
@@ -3306,12 +3338,19 @@ class BrowserManager:
                 inst.touch()
                 return inst
 
-            # Enforce max concurrent
+            # Enforce max concurrent — refuse rather than silently evict.
+            # Silent LRU eviction (the previous behaviour) destroyed the
+            # oldest agent's session/cookies/captcha state with only an
+            # INFO log to show for it; refusing surfaces the cap so the
+            # caller can stop a different agent or wait for the idle
+            # cleanup to free a slot.
             if len(self._instances) >= self.max_concurrent:
-                # Stop least recently used
-                oldest_id = min(self._instances, key=lambda a: self._instances[a].last_activity)
-                logger.info("Max browsers reached, stopping LRU '%s'", oldest_id)
-                await self._stop_instance(oldest_id)
+                logger.warning(
+                    "Browser pool full (cap=%d, %d running); refusing "
+                    "to start '%s'",
+                    self.max_concurrent, len(self._instances), agent_id,
+                )
+                raise BrowserPoolExhausted(cap=self.max_concurrent)
 
             # Start while holding lock to prevent duplicate instances for same agent
             instance = await self._start_browser(agent_id)

@@ -16,9 +16,9 @@ import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
-from src.browser.service import BrowserManager
+from src.browser.service import BrowserManager, BrowserPoolExhausted
 from src.shared.trace import TRACE_HEADER, current_trace_id
 from src.shared.utils import setup_logging
 
@@ -46,6 +46,29 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         finally:
             if token is not None:
                 current_trace_id.reset(token)
+
+    # Cap-exhausted handler — converts the typed exception raised by
+    # ``BrowserManager.get_or_start`` into a structured 503 with
+    # ``Retry-After``.  Installed once per app so every endpoint that
+    # transitively calls ``get_or_start`` gets uniform treatment instead
+    # of needing its own try/except.  The agent-side mesh client and the
+    # LLM downstream see ``error="browser_pool_full"`` plus a numeric
+    # cap and retry hint — enough signal to decide whether to wait,
+    # stop a different agent, or escalate.
+    @app.exception_handler(BrowserPoolExhausted)
+    async def _browser_pool_exhausted_handler(
+        request: Request, exc: BrowserPoolExhausted,
+    ):
+        return JSONResponse(
+            status_code=503,
+            headers={"Retry-After": str(exc.retry_after_s)},
+            content={
+                "error": "browser_pool_full",
+                "message": str(exc),
+                "cap": exc.cap,
+                "retry_after_s": exc.retry_after_s,
+            },
+        )
 
     auth_token = os.environ.get("BROWSER_AUTH_TOKEN", "")
     if not auth_token:

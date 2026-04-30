@@ -603,12 +603,28 @@ class TestBrowserMetricsEventBusContract:
 
 
 class TestMaxConcurrentEnvVar:
-    """Phase 7 §10.2 — startup-only ``OPENLEGION_BROWSER_MAX_CONCURRENT``."""
+    """Phase 7 §10.2 — startup-only ``OPENLEGION_BROWSER_MAX_CONCURRENT``.
+
+    These tests exercise the env-var precedence chain.  We mock
+    ``_detect_total_memory_mb`` to ``None`` so the autodetect fallback
+    deterministically returns :data:`_FALLBACK_DEFAULT` (5) regardless
+    of the host the test runs on — CI runners report large memory
+    sizes via /proc/meminfo and would otherwise produce machine-
+    dependent autodetect results.
+    """
+
+    @staticmethod
+    def _patch_no_memory():
+        """Force the autodetect probes to report None (CI-stable)."""
+        return mock.patch(
+            "src.browser.__main__._detect_total_memory_mb",
+            return_value=None,
+        )
 
     def test_default_when_unset(self):
         # Importing inside the test so each invocation gets a fresh read
         # against the patched environment.
-        with mock.patch.dict(os.environ, {}, clear=False):
+        with mock.patch.dict(os.environ, {}, clear=False), self._patch_no_memory():
             os.environ.pop("OPENLEGION_BROWSER_MAX_CONCURRENT", None)
             os.environ.pop("MAX_BROWSERS", None)
             from src.browser.__main__ import _resolve_max_browsers
@@ -618,12 +634,12 @@ class TestMaxConcurrentEnvVar:
         with mock.patch.dict(os.environ, {
             "OPENLEGION_BROWSER_MAX_CONCURRENT": "12",
             "MAX_BROWSERS": "3",
-        }):
+        }), self._patch_no_memory():
             from src.browser.__main__ import _resolve_max_browsers
             assert _resolve_max_browsers() == 12
 
     def test_legacy_var_used_when_canonical_unset(self):
-        with mock.patch.dict(os.environ, {"MAX_BROWSERS": "9"}, clear=False):
+        with mock.patch.dict(os.environ, {"MAX_BROWSERS": "9"}, clear=False), self._patch_no_memory():
             os.environ.pop("OPENLEGION_BROWSER_MAX_CONCURRENT", None)
             from src.browser.__main__ import _resolve_max_browsers
             assert _resolve_max_browsers() == 9
@@ -631,29 +647,29 @@ class TestMaxConcurrentEnvVar:
     def test_clamped_to_min(self):
         with mock.patch.dict(os.environ, {
             "OPENLEGION_BROWSER_MAX_CONCURRENT": "0",
-        }):
+        }), self._patch_no_memory():
             from src.browser.__main__ import _resolve_max_browsers
             assert _resolve_max_browsers() == 1  # clamped up
 
     def test_clamped_to_max(self):
         with mock.patch.dict(os.environ, {
             "OPENLEGION_BROWSER_MAX_CONCURRENT": "9999",
-        }):
+        }), self._patch_no_memory():
             from src.browser.__main__ import _resolve_max_browsers
             assert _resolve_max_browsers() == 64  # clamped down
 
     def test_garbage_falls_back_to_default(self):
         with mock.patch.dict(os.environ, {
             "OPENLEGION_BROWSER_MAX_CONCURRENT": "not-a-number",
-        }):
+        }), self._patch_no_memory():
             os.environ.pop("MAX_BROWSERS", None)
             from src.browser.__main__ import _resolve_max_browsers
             # flags.get_int falls back to its default (legacy) which is 5
-            # when MAX_BROWSERS is also absent.
+            # via the autodetect fallback when MAX_BROWSERS is also absent.
             assert _resolve_max_browsers() == 5
 
     def test_garbage_legacy_var_does_not_crash_import(self):
-        with mock.patch.dict(os.environ, {"MAX_BROWSERS": "not-a-number"}):
+        with mock.patch.dict(os.environ, {"MAX_BROWSERS": "not-a-number"}), self._patch_no_memory():
             os.environ.pop("OPENLEGION_BROWSER_MAX_CONCURRENT", None)
             from src.browser.__main__ import _resolve_max_browsers
 
