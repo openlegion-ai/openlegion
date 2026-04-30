@@ -68,6 +68,15 @@ KNOWN_FLAGS: dict[str, str] = {
     "OPENLEGION_REDACTION_URL_QUERY_ALLOW": "comma-separated param names",
     # ── Concurrency (§8.2) ────────────────────────────────────────────────
     "OPENLEGION_BROWSER_MAX_CONCURRENT": "int, startup-only (default 5)",
+    # ── Per-agent VNC isolation (PR 1 of per-agent display work) ──────────
+    "OPENLEGION_BROWSER_PER_AGENT_DISPLAY":
+        "true | false (DEFAULT FALSE) — when on, each agent gets its own "
+        "Xvnc display + Openbox + unclutter + paired KasmVNC port instead "
+        "of sharing :99/:6080.  Closes the cross-agent rendering leak on "
+        "VNC viewers and removes the screenX/window-gap fingerprint signal "
+        "by sizing the X server to match the picked window resolution.  "
+        "PR 1 ships dark; PR 2 wires the mesh+dashboard URL routing and "
+        "flips the default; PR 3 deletes the legacy shared-display path.",
     # ── File transfer (§4.5 / §8.1) ───────────────────────────────────────
     "OPENLEGION_UPLOAD_STAGE_MAX_MB": "int, per-file upload byte cap (default 50)",
     "OPENLEGION_UPLOAD_STAGE_DIR": "mesh staging dir (default /tmp/openlegion-upload-stage)",
