@@ -7008,6 +7008,71 @@ class TestStealthDeadCodeRemoved:
 # ── X11 input bypass tests ────────────────────────────────────────────────
 
 
+class TestPickClickTarget:
+    """Fitts'-Law-aware click coordinate sampler.
+
+    Replaces a uniform ±15%/±10% sampler that was a detectable cluster
+    (constant density + hard rectangular cutoff at ±15%). The new
+    sampler is a 2D Gaussian peaked at bbox center with σ scaling to
+    element size, clamped to inner 95%."""
+
+    def test_target_lands_inside_inner_95_percent(self):
+        from src.browser.service import BrowserManager
+        box = {"x": 100, "y": 200, "width": 80, "height": 30}
+        # Sample many times — every result must land within inner 95%
+        for _ in range(1000):
+            tx, ty = BrowserManager._pick_click_target(box)
+            assert 100 + 80 * 0.025 - 1 <= tx <= 100 + 80 * 0.975 + 1
+            assert 200 + 30 * 0.025 - 1 <= ty <= 200 + 30 * 0.975 + 1
+
+    def test_distribution_peaks_at_center(self):
+        """A 2D Gaussian must show density concentration near the
+        center — sample 5000 points and verify the empirical mean is
+        within 1px of the geometric center."""
+        import statistics
+
+        from src.browser.service import BrowserManager
+        box = {"x": 0, "y": 0, "width": 200, "height": 100}
+        xs, ys = [], []
+        for _ in range(5000):
+            tx, ty = BrowserManager._pick_click_target(box)
+            xs.append(tx)
+            ys.append(ty)
+        mx, my = statistics.mean(xs), statistics.mean(ys)
+        # Center is (100, 50); empirical mean within 2px on each axis.
+        assert abs(mx - 100) <= 2
+        assert abs(my - 50) <= 2
+
+    def test_sigma_scales_with_size(self):
+        """σ should scale with element size — small icons get tight
+        clicks, wide buttons get spread. Empirical std should be ~width/8."""
+        import statistics
+
+        from src.browser.service import BrowserManager
+        wide = {"x": 0, "y": 0, "width": 400, "height": 40}
+        small = {"x": 0, "y": 0, "width": 24, "height": 24}
+        wide_xs = [BrowserManager._pick_click_target(wide)[0] for _ in range(2000)]
+        small_xs = [BrowserManager._pick_click_target(small)[0] for _ in range(2000)]
+        wide_std = statistics.stdev(wide_xs)
+        small_std = statistics.stdev(small_xs)
+        # Wide element produces a much wider distribution.
+        assert wide_std > small_std * 5
+
+    def test_zero_size_box_doesnt_explode(self):
+        # Defensive: a malformed bbox shouldn't crash the sampler.
+        from src.browser.service import BrowserManager
+        out = BrowserManager._pick_click_target(
+            {"x": 50, "y": 50, "width": 0, "height": 0},
+        )
+        assert isinstance(out, tuple)
+        assert len(out) == 2
+
+    def test_missing_keys_returns_origin(self):
+        from src.browser.service import BrowserManager
+        assert BrowserManager._pick_click_target({}) == (0, 0)
+        assert BrowserManager._pick_click_target(None) == (0, 0)
+
+
 class TestX11Input:
     """Tests for X11 click/type bypass (isTrusted=true events)."""
 
@@ -7105,7 +7170,10 @@ class TestX11Input:
             with patch("src.browser.service.asyncio.sleep", new_callable=AsyncMock):
                 with patch("src.browser.service.random.randint", return_value=4):
                     with patch("src.browser.service.random.uniform", return_value=0.0):
-                        await mgr._x11_click(inst, mock_locator)
+                        # Click target uses Fitts'-Law Gaussian; pin
+                        # gauss=0 so the resolved point is bbox center.
+                        with patch("src.browser.service.random.gauss", return_value=0.0):
+                            await mgr._x11_click(inst, mock_locator)
 
         # With offsets=0 and start=(0,0), last mousemove should be at target (140, 215)
         # Find the last mousemove call (before mousedown)

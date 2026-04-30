@@ -6772,6 +6772,45 @@ class BrowserManager:
         # Fallback for edge cases
         await locator.scroll_into_view_if_needed(timeout=timeout)
 
+    @staticmethod
+    def _pick_click_target(box: dict) -> tuple[int, int]:
+        """Fitts'-Law-aware click coordinate sampler within a bbox.
+
+        Real users don't click bbox centers. Cursor distribution around
+        the visual centroid follows a 2D Gaussian whose σ scales with
+        target size — Fitts' Law in its empirical form (Card & MacKinlay
+        1980; later refined by MacKenzie 1992). The previous uniform
+        ±15% / ±10% sampler had three tells:
+
+          1. Constant density across the inner box — real distributions
+             are peaked at center.
+          2. Hard rectangular cutoff at ±15% — real cursors occasionally
+             land in the outer band.
+          3. No correlation between σ and element shape — for a long
+             button real σ_x is much larger than σ_y, but the prior
+             model didn't reflect that.
+
+        Implementation:
+          * Use σ = width/8, height/8 (so 99.7% within ±3σ ≈ width·0.375).
+          * Clamp to inner 95% of the bbox to avoid 0-width-band rounding
+            errors and never click outside the element.
+        """
+        if not box or "x" not in box or "width" not in box:
+            return (0, 0)
+        w = float(box.get("width", 0)) or 1.0
+        h = float(box.get("height", 0)) or 1.0
+        cx = float(box["x"]) + w / 2.0
+        cy = float(box["y"]) + h / 2.0
+        sigma_x = w / 8.0
+        sigma_y = h / 8.0
+        # Clamp to inner 95% of bbox so we never pick a point outside.
+        max_dx = w * 0.475
+        max_dy = h * 0.475
+        # Bounded 2D Gaussian — sample, clamp magnitude.
+        dx = max(-max_dx, min(max_dx, random.gauss(0.0, sigma_x)))
+        dy = max(-max_dy, min(max_dy, random.gauss(0.0, sigma_y)))
+        return (int(cx + dx), int(cy + dy))
+
     async def _x11_click(self, inst: CamoufoxInstance, locator, *,
                          timeout: int = _CLICK_TIMEOUT_MS) -> None:
         """Click via xdotool for isTrusted=true events.
@@ -6794,15 +6833,15 @@ class BrowserManager:
         await self._x11_ensure_in_viewport(inst, locator, timeout=timeout)
         await asyncio.sleep(x11_settle_delay())
 
-        # 2. Get element position — jitter within inner area, not dead center
+        # 2. Get element position — Fitts'-Law-aware Gaussian sampler
+        # peaked at bbox center; σ scales with element size so a wide
+        # button gets a wider distribution than a small icon. Replaces
+        # a uniform ±15% / ±10% sampler that was a detectable cluster
+        # (constant density + hard rectangular cutoff at ±15%).
         box = await locator.bounding_box()
         if not box:
             raise RuntimeError("Element has no bounding box — not visible")
-        # Real humans don't click dead center — offset within inner 60%
-        jitter_x = random.uniform(-0.15, 0.15) * box["width"]
-        jitter_y = random.uniform(-0.10, 0.10) * box["height"]
-        target_x = int(box["x"] + box["width"] / 2 + jitter_x)
-        target_y = int(box["y"] + box["height"] / 2 + jitter_y)
+        target_x, target_y = self._pick_click_target(box)
 
         wid = inst.x11_wid
         if not wid:
@@ -6877,11 +6916,9 @@ class BrowserManager:
         box = await locator.bounding_box()
         if not box:
             raise RuntimeError("Element has no bounding box — not visible")
-        # Jitter within inner area — same as _x11_click for consistency
-        jitter_x = random.uniform(-0.15, 0.15) * box["width"]
-        jitter_y = random.uniform(-0.10, 0.10) * box["height"]
-        target_x = int(box["x"] + box["width"] / 2 + jitter_x)
-        target_y = int(box["y"] + box["height"] / 2 + jitter_y)
+        # Fitts'-Law-aware Gaussian — same sampler as _x11_click so the
+        # mouse-event distribution out of hover-then-click is coherent.
+        target_x, target_y = self._pick_click_target(box)
 
         await self._x11_move_to(inst, target_x, target_y)
 
