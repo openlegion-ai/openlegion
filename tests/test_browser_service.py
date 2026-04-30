@@ -508,6 +508,75 @@ class TestBrowserServer:
         resp = client.post("/browser/test_agent/navigate", json={})
         assert resp.status_code == 400
 
+    @pytest.mark.asyncio
+    async def test_snapshot_parses_string_false_booleans(self):
+        from src.browser.server import create_browser_app
+        from src.browser.service import BrowserManager
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr.snapshot = AsyncMock(return_value={"ok": True})
+        app = create_browser_app(mgr)
+
+        from starlette.testclient import TestClient
+        client = TestClient(app)
+        resp = client.post(
+            "/browser/test_agent/snapshot",
+            json={"include_frames": "false", "diff_from_last": "false"},
+        )
+        assert resp.status_code == 200
+        mgr.snapshot.assert_awaited_once()
+        kwargs = mgr.snapshot.await_args.kwargs
+        assert kwargs["include_frames"] is False
+        assert kwargs["diff_from_last"] is False
+
+    @pytest.mark.asyncio
+    async def test_click_type_screenshot_parse_string_false_booleans(self):
+        """Regression: click(force/snapshot_after), type(clear/fast/snapshot_after),
+        screenshot(full_page) — all formerly used raw bool() so "false" → True."""
+        from src.browser.server import create_browser_app
+        from src.browser.service import BrowserManager
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr.click = AsyncMock(return_value={"ok": True})
+        mgr.type_text = AsyncMock(return_value={"ok": True})
+        mgr.screenshot = AsyncMock(return_value={"ok": True})
+        app = create_browser_app(mgr)
+
+        from starlette.testclient import TestClient
+        client = TestClient(app)
+
+        resp = client.post(
+            "/browser/test_agent/click",
+            json={
+                "ref": "x", "force": "false", "snapshot_after": "false",
+            },
+        )
+        assert resp.status_code == 200
+        ck = mgr.click.await_args.kwargs
+        assert ck["force"] is False
+        assert ck["snapshot_after"] is False
+
+        resp = client.post(
+            "/browser/test_agent/type",
+            json={
+                "ref": "x", "text": "hi",
+                "clear": "false", "fast": "false", "snapshot_after": "false",
+            },
+        )
+        assert resp.status_code == 200
+        tk = mgr.type_text.await_args.kwargs
+        assert tk["clear"] is False
+        assert tk["fast"] is False
+        assert tk["snapshot_after"] is False
+
+        resp = client.post(
+            "/browser/test_agent/screenshot",
+            json={"full_page": "false"},
+        )
+        assert resp.status_code == 200
+        sk = mgr.screenshot.await_args.kwargs
+        assert sk["full_page"] is False
+
 
 class TestBrowserManagerRefResolution:
     """Tests for ref-based element resolution using role+name."""
@@ -1045,6 +1114,35 @@ class TestNavigate:
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
 
         result = await mgr.navigate("a1", "data:text/html,<h1>hi</h1>")
+        assert result["success"] is False
+        assert "not allowed" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_navigate_rejects_protocol_relative_url(self):
+        """Protocol-relative URLs (``//evil.com/path``) parse as empty
+        scheme; the deny-list missed them. Allow-list rejects."""
+        from src.browser.service import BrowserManager
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        result = await mgr.navigate("a1", "//evil.com/path")
+        assert result["success"] is False
+        assert "not allowed" in result["error"] or "missing host" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_navigate_rejects_about_scheme(self):
+        from src.browser.service import BrowserManager
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        result = await mgr.navigate("a1", "about:config")
+        assert result["success"] is False
+        assert "not allowed" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_navigate_rejects_chrome_scheme(self):
+        from src.browser.service import BrowserManager
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        result = await mgr.navigate("a1", "chrome://settings/")
         assert result["success"] is False
         assert "not allowed" in result["error"]
 
@@ -7814,10 +7912,12 @@ class TestX11Input:
         inst = self._make_instance()
         # Simulate what _start_browser does after discovering WID
         assert inst.x11_wid is not None
+        coro = mgr._idle_mouse_jitter(inst)
         with patch("asyncio.create_task") as mock_create_task:
             mock_create_task.return_value = MagicMock()
             # Replicate the jitter task start logic
-            inst._jitter_task = asyncio.create_task(mgr._idle_mouse_jitter(inst))
+            inst._jitter_task = asyncio.create_task(coro)
+        coro.close()
 
         assert inst._jitter_task is not None
         mock_create_task.assert_called_once()

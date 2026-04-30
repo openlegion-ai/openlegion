@@ -64,11 +64,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
+from src.shared.types import AGENT_ID_RE_PATTERN
 from src.shared.utils import setup_logging
 
 logger = setup_logging("browser.session_persistence")
@@ -79,6 +81,35 @@ logger = setup_logging("browser.session_persistence")
 # missing dir on restore is a non-fatal no-op (returns None).
 _DEFAULT_DIR = "data/sessions"
 _SCHEMA_VERSION = 1
+# Hard cap on serialized snapshot size. localStorage can be ~5 MiB per
+# origin under spec; a malicious site can inflate one origin's quota by
+# writing junk. Cap the whole sidecar at 8 MiB so a hostile workflow
+# can't blow out the disk via persisted state.
+_MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024
+# Reuse the canonical agent-id regex — sidecars are written under
+# ``<dir>/<agent_id>.json`` and an unvalidated agent_id is a directory
+# traversal vector (``../../etc/passwd``).
+_AGENT_ID_RE = re.compile(AGENT_ID_RE_PATTERN)
+
+
+class InvalidAgentIdError(ValueError):
+    """Raised when ``agent_id`` does not match ``AGENT_ID_RE_PATTERN``.
+
+    Distinct from generic ``ValueError`` so the caller can map this
+    to HTTP 400 (caller error) instead of 500 (server bug).
+    """
+
+
+def _validate_agent_id(agent_id: str) -> None:
+    """Reject any agent_id that does not match the canonical regex.
+
+    The regex (``shared.types.AGENT_ID_RE_PATTERN``) restricts agent
+    ids to alnum + ``_-`` so they are safe filename components. This
+    closes the path-traversal vector at every persistence entry point
+    rather than depending on each caller to validate.
+    """
+    if not isinstance(agent_id, str) or not _AGENT_ID_RE.fullmatch(agent_id):
+        raise InvalidAgentIdError(f"invalid agent_id: {agent_id!r}")
 
 
 def _sessions_dir() -> Path:
@@ -97,7 +128,13 @@ def session_path(agent_id: str) -> Path:
     Pure path construction — does NOT touch the filesystem. Callers
     that want to know whether a session exists should call
     :func:`session_path(agent_id).exists()`.
+
+    Raises ``InvalidAgentIdError`` if ``agent_id`` would result in a
+    path-traversal-vulnerable filename (anything not matching
+    ``AGENT_ID_RE_PATTERN``). This is the single chokepoint — every
+    snapshot/restore/clear path goes through this function.
     """
+    _validate_agent_id(agent_id)
     return _sessions_dir() / f"{agent_id}.json"
 
 
@@ -131,9 +168,25 @@ async def snapshot_session(agent_id: str, context: Any) -> bool:
          operators can rely on the mode regardless of whether the
          target pre-existed.
     """
-    target = session_path(agent_id)
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
+        target = session_path(agent_id)
+    except InvalidAgentIdError as e:
+        logger.warning("session snapshot rejected: %s", e)
+        return False
+    try:
+        # 0o700 on the sessions dir so session sidecars (containing live
+        # session tokens) are not readable by other UIDs in the
+        # container. ``mkdir(mode=...)`` only takes effect on dirs
+        # actually created — so chmod after handles the pre-existing
+        # case (e.g. the dir was created by a prior version with the
+        # default umask).
+        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            os.chmod(target.parent, 0o700)
+        except OSError:
+            # Best-effort — non-fatal if filesystem rejects chmod
+            # (e.g. tmpfs with restrictive options).
+            pass
     except OSError as e:
         logger.warning(
             "session snapshot for '%s': cannot create parent dir: %s",
@@ -156,6 +209,22 @@ async def snapshot_session(agent_id: str, context: Any) -> bool:
         "storage_state": state,
     }
 
+    # Cap serialized payload size before opening any file. A hostile
+    # site can inflate one origin's localStorage near the per-origin
+    # quota; with N origins this can balloon to many MiB. Refuse to
+    # write rather than fill the disk.
+    try:
+        serialized = json.dumps(payload)
+    except (TypeError, ValueError) as e:
+        logger.warning("session snapshot for '%s': payload not JSON-serializable: %s", agent_id, e)
+        return False
+    if len(serialized) > _MAX_SNAPSHOT_BYTES:
+        logger.warning(
+            "session snapshot for '%s' exceeds %d bytes (got %d) — refusing to write",
+            agent_id, _MAX_SNAPSHOT_BYTES, len(serialized),
+        )
+        return False
+
     tmp = target.with_suffix(target.suffix + ".tmp")
     try:
         # Open with 0o600 from the start (umask-aware) so there is no
@@ -163,20 +232,28 @@ async def snapshot_session(agent_id: str, context: Any) -> bool:
         # Storage state contains session tokens — same posture as
         # ``.agent.env`` (CLAUDE.md §Security Boundaries).
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        # We own ``fd`` until ``os.fdopen`` returns. Both ``fchmod`` and
+        # ``fdopen`` can raise (MemoryError on buffer alloc, OSError on
+        # fchmod), which would leak the descriptor unless we close it
+        # in the narrow pre-fdopen window. After fdopen returns the
+        # returned file object owns ``fd`` and the ``with`` block
+        # handles cleanup on writer errors.
         try:
             os.fchmod(fd, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                json.dump(payload, fh)
-                fh.flush()
-                os.fsync(fh.fileno())
+            fh = os.fdopen(fd, "w", encoding="utf-8")
         except Exception:
-            # ``fdopen`` already owns ``fd`` after a successful call;
-            # only close when fdopen never ran (e.g. fchmod blew up).
             try:
                 os.close(fd)
             except OSError:
                 pass
             raise
+        with fh:
+            # Re-use the pre-serialized payload from the size-cap
+            # check — avoids an unnecessary second JSON encode pass on
+            # the hot path.
+            fh.write(serialized)
+            fh.flush()
+            os.fsync(fh.fileno())
         os.replace(tmp, target)
         # ``os.replace`` preserves the destination's mode on most
         # filesystems but Python's docs are not load-bearing on this;
@@ -227,7 +304,11 @@ async def restore_session(
     context — that's the design intent of returning ``None`` rather
     than raising. A bad sidecar must not block browser startup.
     """
-    target = session_path(agent_id)
+    try:
+        target = session_path(agent_id)
+    except InvalidAgentIdError as e:
+        logger.warning("session restore rejected: %s", e)
+        return None
     if not target.exists():
         return None
 
@@ -292,7 +373,11 @@ async def clear_session(agent_id: str) -> bool:
     negligible cost; the consistent shape lets callers ``await`` all
     three public functions uniformly.
     """
-    target = session_path(agent_id)
+    try:
+        target = session_path(agent_id)
+    except InvalidAgentIdError as e:
+        logger.warning("session clear rejected: %s", e)
+        return False
     if not target.exists():
         return False
     try:
@@ -329,7 +414,17 @@ def session_summary(agent_id: str) -> dict[str, Any]:
     Sync (no I/O blocking) because it's called from a hot dashboard
     poll path — async would buy nothing here (json.load is CPU-only).
     """
-    target = session_path(agent_id)
+    try:
+        target = session_path(agent_id)
+    except InvalidAgentIdError:
+        # Operators reading dashboard summary for a malformed agent_id
+        # see the empty shape rather than a stack trace.
+        return {
+            "has_persisted_session": False,
+            "saved_at": None,
+            "origin_count": 0,
+            "cookie_count": 0,
+        }
     if not target.exists():
         return {
             "has_persisted_session": False,

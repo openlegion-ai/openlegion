@@ -70,7 +70,11 @@ class TestGetDeviceProfile:
         assert prof["platform_navigator"] == "iPhone"
         assert prof["user_agent_data_mobile"] is True
 
-    def test_mobile_android_documented_shape(self):
+    def test_mobile_android_documented_shape(self, monkeypatch):
+        # ``mobile-android`` is opt-in (engine-mismatch warning); the
+        # shape it returns when enabled is the documented Pixel 8 / Chrome
+        # 124 fingerprint. Test the gated branch.
+        monkeypatch.setenv("OPENLEGION_BROWSER_ALLOW_ENGINE_MISMATCH", "1")
         prof = get_device_profile("mobile-android")
         # Chrome 124 / Android 14 / Pixel 8 UA.
         assert prof["user_agent"] == (
@@ -153,7 +157,11 @@ class TestBuildLaunchOptionsProfile:
         assert opts.get("i_know_what_im_doing") is True
 
     def test_mobile_android_sets_ua_viewport_os(self):
-        with mock.patch.dict(os.environ, {}, clear=True):
+        with mock.patch.dict(
+            os.environ,
+            {"OPENLEGION_BROWSER_ALLOW_ENGINE_MISMATCH": "1"},
+            clear=True,
+        ):
             opts = build_launch_options(
                 "agent-pixel", "/tmp/p",
                 device_profile="mobile-android",
@@ -225,7 +233,8 @@ class TestMobileInitScript:
         # userAgentData branch (templated value collapsed to "false").
         assert "if (false)" in script
 
-    def test_mobile_android_emits_script_with_user_agent_data(self):
+    def test_mobile_android_emits_script_with_user_agent_data(self, monkeypatch):
+        monkeypatch.setenv("OPENLEGION_BROWSER_ALLOW_ENGINE_MISMATCH", "1")
         prof = get_device_profile("mobile-android")
         script = build_mobile_init_script(prof)
         assert script is not None
@@ -313,8 +322,13 @@ class TestEndToEndProfileWiring:
     def test_flag_value_drives_build_launch_options_shape(self):
         # Simulate: operator sets BROWSER_DEVICE_PROFILE=mobile-android,
         # build_launch_options is called with that name → mobile shape.
+        # ``mobile-android`` ships a Chrome UA on a Firefox engine, so it
+        # is opt-in via OPENLEGION_BROWSER_ALLOW_ENGINE_MISMATCH=1; the
+        # operator-flag wiring path under test is independent of that
+        # gate.
         with mock.patch.dict(os.environ, {
             "BROWSER_DEVICE_PROFILE": "mobile-android",
+            "OPENLEGION_BROWSER_ALLOW_ENGINE_MISMATCH": "1",
         }):
             chosen = flags.get_str(
                 "BROWSER_DEVICE_PROFILE", DEFAULT_DEVICE_PROFILE,

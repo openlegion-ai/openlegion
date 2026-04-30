@@ -20,9 +20,18 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from src.browser.service import BrowserManager, BrowserPoolExhausted
 from src.shared.trace import TRACE_HEADER, current_trace_id
+from src.shared.types import AGENT_ID_RE_PATTERN
 from src.shared.utils import setup_logging
 
 logger = setup_logging("browser.server")
+
+# Hard cap on JSON request bodies. Form fields, snapshots, etc. are
+# all small; anything larger is either operator error or a memory-DoS
+# attempt against the parser. Keep an order of magnitude above the
+# host-side webhook 1 MiB precedent so legitimate base64-encoded
+# uploads via /browser/.../upload still fit.
+_MAX_BODY_BYTES = 8 * 1024 * 1024
+_AGENT_ID_RE = re.compile(AGENT_ID_RE_PATTERN)
 
 
 def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
@@ -31,6 +40,68 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
     if lifespan:
         kwargs["lifespan"] = lifespan
     app = FastAPI(**kwargs)
+
+    @app.middleware("http")
+    async def _validate_agent_id_in_path(request: Request, call_next):
+        """Reject any /browser/<agent_id>/... where agent_id is malformed.
+
+        The downstream manager validates per-call, but several paths
+        (set_proxy_config, get_status, session_path) use the agent_id
+        before validation — anything not matching the regex is a
+        path-traversal vector (filesystem sidecars) or a log-injection
+        vector. Reject early at the HTTP boundary so validation is
+        uniform and unforgettable.
+
+        The ``/browser/{prefix}`` health/metrics endpoints do not have
+        an agent_id slot — those are skipped via the allow-list of
+        non-agent prefixes.
+        """
+        path = request.url.path
+        if path.startswith("/browser/"):
+            parts = path.split("/", 3)
+            # Service-level prefixes that don't carry an agent_id
+            # (health/metrics/canary/keepalive/settings — verified
+            # against ``@app.{get,post,put,delete}`` declarations).
+            # Anything outside this allow-list is treated as the
+            # ``/browser/{agent_id}/...`` shape.
+            if len(parts) >= 3 and parts[2] not in (
+                "", "status", "metrics", "_canary", "keepalive", "settings",
+            ):
+                if not _AGENT_ID_RE.fullmatch(parts[2]):
+                    return JSONResponse(
+                        {"detail": "invalid agent_id"}, status_code=400,
+                    )
+        return await call_next(request)
+
+    @app.middleware("http")
+    async def _enforce_body_size(request: Request, call_next):
+        """Reject oversized JSON bodies before they reach ``request.json()``."""
+        cl = request.headers.get("content-length")
+        if cl is not None:
+            try:
+                size = int(cl)
+            except ValueError:
+                return JSONResponse(
+                    {"detail": "invalid Content-Length"}, status_code=400,
+                )
+            if size > _MAX_BODY_BYTES:
+                return JSONResponse(
+                    {"detail": "request body too large"}, status_code=413,
+                )
+        return await call_next(request)
+
+    def _body_bool(body: dict, name: str, default: bool) -> bool:
+        """Parse permissive JSON booleans without treating "false" as true."""
+        value = body.get(name, default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "off", ""}:
+                return False
+        return bool(value)
 
     # §2.5 trace propagation: read X-Trace-Id on every request and bind it
     # to the ContextVar so log records under this request carry the trace id.
@@ -147,7 +218,9 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         with contextlib.suppress(Exception):
             body = await request.json()
         try:
-            return await run_canary(manager, force=bool(body.get("force")))
+            return await run_canary(
+                manager, force=_body_bool(body, "force", False),
+            )
         except CanaryDisabledError as e:
             raise HTTPException(403, str(e))
         except CanaryRateLimitedError as e:
@@ -182,7 +255,7 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
             raise HTTPException(400, "url required")
         wait_ms = body.get("wait_ms", 1000)
         wait_until = body.get("wait_until", "domcontentloaded")
-        snapshot_after = body.get("snapshot_after", False)
+        snapshot_after = _body_bool(body, "snapshot_after", False)
         # §6.5 referer: forward the param ONLY when the caller included
         # it. ``"referer" not in body`` ⇒ leave the kwarg default (None)
         # so the service-side picker runs. Explicit empty-string ⇒
@@ -208,9 +281,9 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
             agent_id,
             filter=body.get("filter"),
             from_ref=body.get("from_ref"),
-            diff_from_last=bool(body.get("diff_from_last", False)),
+            diff_from_last=_body_bool(body, "diff_from_last", False),
             frame=body.get("frame"),
-            include_frames=bool(body.get("include_frames", True)),
+            include_frames=_body_bool(body, "include_frames", True),
         )
 
     @app.post("/browser/{agent_id}/click")
@@ -221,8 +294,8 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
             agent_id,
             ref=body.get("ref"),
             selector=body.get("selector"),
-            force=body.get("force", False),
-            snapshot_after=body.get("snapshot_after", False),
+            force=_body_bool(body, "force", False),
+            snapshot_after=_body_bool(body, "snapshot_after", False),
             timeout_ms=body.get("timeout_ms"),
             frame=body.get("frame"),
         )
@@ -287,9 +360,9 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
             ref=body.get("ref"),
             selector=body.get("selector"),
             text=body.get("text", ""),
-            clear=body.get("clear", True),
-            fast=body.get("fast", False),
-            snapshot_after=body.get("snapshot_after", False),
+            clear=_body_bool(body, "clear", True),
+            fast=_body_bool(body, "fast", False),
+            snapshot_after=_body_bool(body, "snapshot_after", False),
             frame=body.get("frame"),
         )
         await _apply_delay()
@@ -305,7 +378,7 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         body = await request.json()
         return await manager.screenshot(
             agent_id,
-            full_page=body.get("full_page", False),
+            full_page=_body_bool(body, "full_page", False),
             format=body.get("format", "webp"),
             quality=body.get("quality", 75),
             scale=body.get("scale", 1.0),
@@ -357,7 +430,7 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         """Toggle user browser control — pauses agent X11 input."""
         _verify_auth(request)
         body = await request.json()
-        enabled = bool(body.get("user_control", False))
+        enabled = _body_bool(body, "user_control", False)
         return await manager.set_user_control(agent_id, enabled)
 
     @app.post("/browser/{agent_id}/scroll")
@@ -389,7 +462,7 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         _verify_auth(request)
         body = await request.json()
         hint = body.get("hint")
-        retry_previous = bool(body.get("retry_previous", False))
+        retry_previous = _body_bool(body, "retry_previous", False)
         target_ref = body.get("target_ref")
         result = await manager.solve_captcha(
             agent_id,
@@ -677,7 +750,7 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         query = body.get("query", "")
         if not query:
             raise HTTPException(400, "query required")
-        scroll = bool(body.get("scroll", True))
+        scroll = _body_bool(body, "scroll", True)
         result = await manager.find_text(agent_id, query, scroll=scroll)
         await _apply_delay()
         return result
@@ -693,7 +766,7 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         _verify_auth(request)
         body = await request.json()
         fields = body.get("fields") or []
-        submit_after = bool(body.get("submit_after", False))
+        submit_after = _body_bool(body, "submit_after", False)
         result = await manager.fill_form(
             agent_id, fields, submit_after=submit_after,
         )
@@ -707,7 +780,7 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         url = body.get("url", "")
         if not url:
             raise HTTPException(400, "url required")
-        snapshot_after = bool(body.get("snapshot_after", False))
+        snapshot_after = _body_bool(body, "snapshot_after", False)
         result = await manager.open_tab(
             agent_id, url, snapshot_after=snapshot_after,
         )
@@ -736,7 +809,7 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         """Phase 6 §9.1 — list recent (redacted) network requests for an agent."""
         _verify_auth(request)
         body = await request.json()
-        include_blocked = bool(body.get("include_blocked", False))
+        include_blocked = _body_bool(body, "include_blocked", False)
         try:
             limit = int(body.get("limit", 50))
         except (TypeError, ValueError):

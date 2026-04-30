@@ -196,6 +196,15 @@ def get_device_profile(name: str | None = None) -> dict:
       * ``None`` or empty string → default (``desktop-windows``).
       * Known name → that profile.
       * Unknown name → log a warning and fall back to default.
+      * Engine-mismatch profiles (``mobile-android``) → require explicit
+        ``OPENLEGION_BROWSER_ALLOW_ENGINE_MISMATCH=1`` opt-in. The Android
+        profile ships a Chrome UA + ``platform_navigator: "Linux armv8l"``
+        on top of a Gecko/Firefox engine (Camoufox). Detection products
+        catch this via ``WebGL2RenderingContext.prototype.getParameter``,
+        ``RTCRtpSender.getCapabilities`` codec ordering, and
+        ``navigator.userActivation`` shape (Chromium-only). Without the
+        flag this profile is more harmful than helpful — fall back to
+        the default and surface a loud warning.
 
     The returned dict is the live module-level constant — do not mutate.
     Callers that want to layer per-agent overrides on top should
@@ -211,7 +220,27 @@ def get_device_profile(name: str | None = None) -> dict:
             name, sorted(_DEVICE_PROFILES.keys()), DEFAULT_DEVICE_PROFILE,
         )
         return _DEVICE_PROFILES[DEFAULT_DEVICE_PROFILE]
+    if name in _ENGINE_MISMATCH_PROFILES and not _engine_mismatch_allowed():
+        logger.warning(
+            "BROWSER_DEVICE_PROFILE=%r ships a Chrome UA on a Firefox "
+            "engine — strong bot signal on any FP-aware site. Set "
+            "OPENLEGION_BROWSER_ALLOW_ENGINE_MISMATCH=1 to opt in. "
+            "Falling back to %r.",
+            name, DEFAULT_DEVICE_PROFILE,
+        )
+        return _DEVICE_PROFILES[DEFAULT_DEVICE_PROFILE]
     return profile
+
+
+# Profiles whose UA + JS surface declare a different engine than the
+# underlying Camoufox (Gecko/Firefox). Each one is a strong tell on any
+# FP-aware site and is opt-in only.
+_ENGINE_MISMATCH_PROFILES = frozenset({"mobile-android"})
+
+
+def _engine_mismatch_allowed() -> bool:
+    val = os.environ.get("OPENLEGION_BROWSER_ALLOW_ENGINE_MISMATCH", "")
+    return val.strip().lower() in {"1", "true", "yes", "on"}
 
 
 # ── §6.5 Referrer realism on navigate ─────────────────────────────────────────
@@ -846,7 +875,7 @@ def build_launch_options(
     options["persistent_context"] = True
     options["user_data_dir"] = profile_dir
 
-    options["firefox_user_prefs"] = _stealth_prefs()
+    options["firefox_user_prefs"] = _stealth_prefs(locale=locale)
 
     # ── §6.6 NetworkInformation ──────────────────────────────────────────────
     # Real Firefox does not expose ``navigator.connection``. Earlier phases
@@ -953,13 +982,50 @@ def _build_ua_string(os_hint: str, version: str) -> str | None:
     return template.format(v=version)
 
 
-def _stealth_prefs() -> dict:
+def _build_accept_languages(locale: str) -> str:
+    """Build a coherent ``intl.accept_languages`` string from a BCP-47 tag.
+
+    Detection products (Cloudflare, FingerprintJS Pro, DataDome) compare
+    ``navigator.languages[0]`` and the ``Accept-Language`` header to the
+    primary script-determined locale. Real browsers ship a multi-entry
+    quality list — single-entry lists are themselves a soft cluster
+    signal. Build:
+
+        ``<locale>,<base>;q=0.9,en;q=0.5``
+
+    where ``<base>`` is the language part (``en-US`` → ``en``). When
+    the language already is ``en``, suppress the duplicate fallback.
+    """
+    locale = (locale or "en-US").strip()
+    if "-" in locale:
+        base = locale.split("-", 1)[0].lower()
+    else:
+        base = locale.lower()
+    if base == "en":
+        # ``en-US,en;q=0.5`` — what a real Firefox ships by default.
+        return f"{locale},en;q=0.5"
+    return f"{locale},{base};q=0.9,en;q=0.5"
+
+
+def _stealth_prefs(locale: str = "en-US") -> dict:
     """Return Firefox user preferences that minimise bot-detection surface.
 
     Design rationale for each group is inline.  Correctness over completeness:
     only prefs with a clear detection impact are included.
+
+    ``locale`` is the BCP-47 tag from ``BROWSER_LOCALE``; it drives the
+    ``intl.accept_languages`` pref so the ``Accept-Language`` header,
+    ``navigator.language`` and ``navigator.languages`` cohere.
     """
     return {
+        # ── Accept-Language coherence (§ antibot-audit F1) ────────────────────
+        # Without an explicit ``intl.accept_languages`` Firefox falls back
+        # to the build-locale default (en-US,en;q=0.5) — which can mismatch
+        # the BROWSER_LOCALE chosen for navigator.language. Detection
+        # products free-harvest ``navigator.languages[0] !== Accept-Language[0]``
+        # as a bot signal. Pin the pref to a coherent quality list derived
+        # from the same locale string Camoufox uses for navigator.language.
+        "intl.accept_languages": _build_accept_languages(locale),
         # ── UI cosmetics ──────────────────────────────────────────────────────
         "extensions.activeThemeID": "firefox-compact-dark@mozilla.org",
         "browser.uidensity": 1,

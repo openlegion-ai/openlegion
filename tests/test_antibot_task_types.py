@@ -22,6 +22,7 @@ Covers:
 from __future__ import annotations
 
 import json
+import warnings
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -132,6 +133,15 @@ class TestSupportsKind:
         for kind in ("recaptcha", "hcaptcha", "turnstile"):
             assert cap.supports_kind(kind) is True
             assert two.supports_kind(kind) is True
+
+    def test_service_probe_closes_awaitable_supports_kind(self):
+        from src.browser.service import _solver_supports_kind
+
+        solver = MagicMock()
+        solver.supports_kind = AsyncMock(return_value=True)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            assert _solver_supports_kind(solver, "js-challenge-akamai") is False
 
 
 # ── 4: MultiProviderSolver fold ───────────────────────────────────────

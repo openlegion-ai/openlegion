@@ -436,15 +436,22 @@ async def snapshot(path: Path | str | None = None) -> bool:
         # cost ledger is operator-grade billing data — same posture as
         # ``.env`` files (CLAUDE.md §Security Boundaries).
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        # Ownership of ``fd`` is held by us until ``os.fdopen`` returns,
+        # at which point the returned file object becomes responsible
+        # for closing it. ``fchmod`` and ``fdopen`` can both raise
+        # (e.g. MemoryError on fdopen's buffer alloc); close the raw fd
+        # in that window or it leaks. After fdopen returns, the ``with``
+        # block handles cleanup on writer errors.
         try:
             os.fchmod(fd, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                json.dump(payload, fh)
-                fh.flush()
-                os.fsync(fh.fileno())
+            fh = os.fdopen(fd, "w", encoding="utf-8")
         except Exception:
             os.close(fd)
             raise
+        with fh:
+            json.dump(payload, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
         os.replace(tmp, target)
         # ``os.replace`` preserves the destination's mode on most
         # filesystems but the Python docs are not load-bearing on this;
