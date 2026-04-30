@@ -6638,29 +6638,46 @@ class BrowserManager:
         cp2_x = start_x + dx * 0.75 + perp_x * off2
         cp2_y = start_y + dy * 0.75 + perp_y * off2
 
-        # Scale step count with distance — short moves stay snappy,
-        # long moves stay smooth.  Range: 3 steps (tiny) to 14 (across screen).
-        steps = max(3, min(14, int(dist / 80) + random.randint(2, 4)))
+        # Step density: real mousemove streams fire at ~125 Hz on Linux.
+        # The prior heuristic capped at 14 waypoints — for a 600 px move
+        # that's only ~9 events at ~67 px each, much coarser than a
+        # real cursor and a detectable cluster signal. Scale to roughly
+        # one waypoint per 15 px instead, with a hard cap so we don't
+        # generate hundreds of xdotool calls on full-screen sweeps.
+        steps = max(8, min(60, int(dist / 15) + random.randint(2, 4)))
 
         for i in range(1, steps + 1):
             # Raw parameter
             raw_t = i / steps
             # Cubic ease-in-out: slow start, fast middle, slow landing
-            # Models Fitts' Law deceleration as cursor approaches target
+            # Models Fitts' Law deceleration as cursor approaches target.
             if raw_t < 0.5:
                 t = 4 * raw_t * raw_t * raw_t
             else:
                 t = 1 - ((-2 * raw_t + 2) ** 3) / 2
 
             u = 1 - t
-            wp_x = int(
+            wp_x_f = (
                 u**3 * start_x + 3 * u**2 * t * cp1_x
                 + 3 * u * t**2 * cp2_x + t**3 * target_x
             )
-            wp_y = int(
+            wp_y_f = (
                 u**3 * start_y + 3 * u**2 * t * cp1_y
                 + 3 * u * t**2 * cp2_y + t**3 * target_y
             )
+            # Per-step jerk noise: real human cursors carry wrist micro-
+            # tremor (3rd-derivative noise). The C∞-smooth cubic is
+            # detectable as a clean signal-vs-noise cluster. Add small
+            # Gaussian perturbation perpendicular to the path, scaled
+            # by velocity (curve speed): cursors are more jittery while
+            # accelerating mid-cruise than at the slow end-points.
+            # Velocity proxy: ds/dt at this step ≈ |dt'/dt|.
+            vel_factor = math.sin(math.pi * raw_t)  # 0 at endpoints, 1 mid-path
+            tremor_sigma = 0.6 + 1.2 * vel_factor   # px
+            jx = random.gauss(0.0, tremor_sigma) * perp_x
+            jy = random.gauss(0.0, tremor_sigma) * perp_y
+            wp_x = int(wp_x_f + jx)
+            wp_y = int(wp_y_f + jy)
             wp_x = max(0, wp_x)
             wp_y = max(0, wp_y)
             mv_result = await loop.run_in_executor(
@@ -6922,6 +6939,41 @@ class BrowserManager:
 
         await self._x11_move_to(inst, target_x, target_y)
 
+    @staticmethod
+    def _next_jitter_event() -> tuple[float, int]:
+        """Return (sleep_seconds, burst_count) for the next idle-jitter cycle.
+
+        Replaces the prior uniform ``random.uniform(2.0, 7.0)`` schedule
+        with an on-off (Hawkes-like) process closer to real cursor
+        traces. Real users sit still for long stretches (reading) then
+        produce 2–4 corrective micro-movements in a quick burst before
+        going still again. The flat 2–7s schedule produced a constant
+        autocorrelation in the mousemove stream — a free cluster signal
+        for ArkoseLabs / DataDome / PerimeterX behavioral models.
+
+        Distribution:
+          * 80% of cycles → "quiet" period: lognormal mean ~22s, σ that
+            yields a heavy right tail (so occasional 60s+ stretches
+            occur naturally), single movement.
+          * 20% of cycles → "burst" period: short pause (0.4–1.2s)
+            then 2–4 movements back-to-back.
+
+        Returns ``(sleep_before_next_event, burst_count)``. The caller
+        treats burst_count > 1 as "fire that many movements with short
+        intra-burst gaps" — the gaps are sampled separately.
+        """
+        if random.random() < 0.20:
+            # Burst arrival: short hand-off gap.
+            sleep_s = random.uniform(0.4, 1.2)
+            burst_count = random.randint(2, 4)
+        else:
+            # Quiet period: lognormal so the mean is ~22s but the tail
+            # reaches >60s. random.lognormvariate(mu=ln(20), sigma=0.5)
+            # produces a median ≈ 20s, mean ≈ 23s, p99 ≈ 70s.
+            sleep_s = min(120.0, random.lognormvariate(math.log(20.0), 0.5))
+            burst_count = 1
+        return (sleep_s, burst_count)
+
     async def _idle_mouse_jitter(self, inst: CamoufoxInstance) -> None:
         """Periodic mouse micro-movement to simulate human fidgeting.
 
@@ -6929,30 +6981,54 @@ class BrowserManager:
         drifts, twitches, and repositioning. A mouse that is perfectly
         still for seconds between actions is a textbook bot pattern
         detected by ArkoseLabs and DataDome.
+
+        Schedule shape: long quiet periods interleaved with bursts of
+        2–4 corrective movements (see ``_next_jitter_event``). Within
+        a burst the displacement vectors are auto-correlated (next
+        ``(dx, dy)`` is a small perturbation of the prior one) — real
+        cursor twitches don't randomly switch direction frame to frame.
         """
+        last_dx = 0
+        last_dy = 0
         while True:
-            await asyncio.sleep(random.uniform(2.0, 7.0))
+            sleep_s, burst_count = self._next_jitter_event()
+            await asyncio.sleep(sleep_s)
             if not inst.x11_wid or inst.lock.locked() or inst._user_control:
                 continue
-            try:
-                dx = random.randint(-3, 3)
-                dy = random.randint(-2, 2)
+            for i in range(burst_count):
+                if i > 0:
+                    # Intra-burst gap: short, lognormal.
+                    await asyncio.sleep(
+                        random.uniform(0.08, 0.35),
+                    )
+                # Auto-correlated displacement — next movement carries
+                # ~50% of the prior direction plus a small random delta,
+                # so a burst looks like a continuous corrective drift
+                # rather than independent twitches.
+                dx = int(round(0.5 * last_dx + random.gauss(0, 1.6)))
+                dy = int(round(0.5 * last_dy + random.gauss(0, 1.2)))
+                # Clamp to ±5 px so we don't drift far from the cursor's
+                # actual reading position.
+                dx = max(-5, min(5, dx))
+                dy = max(-5, min(5, dy))
                 if dx == 0 and dy == 0:
                     continue
-                loop = asyncio.get_running_loop()
-                await loop.run_in_executor(
-                    None,
-                    lambda _dx=dx, _dy=dy: subprocess.run(
-                        ["xdotool", "mousemove_relative", "--sync",
-                         "--", str(_dx), str(_dy)],
-                        capture_output=True, timeout=2,
-                        env=inst.subprocess_env(),
-                    ),
-                )
-            except asyncio.CancelledError:
-                return
-            except Exception:
-                pass
+                last_dx, last_dy = dx, dy
+                try:
+                    loop = asyncio.get_running_loop()
+                    await loop.run_in_executor(
+                        None,
+                        lambda _dx=dx, _dy=dy: subprocess.run(
+                            ["xdotool", "mousemove_relative", "--sync",
+                             "--", str(_dx), str(_dy)],
+                            capture_output=True, timeout=2,
+                            env=inst.subprocess_env(),
+                        ),
+                    )
+                except asyncio.CancelledError:
+                    return
+                except Exception:
+                    pass
 
     async def _x11_type(self, inst: CamoufoxInstance, text: str,
                         *, typos: bool = True) -> None:

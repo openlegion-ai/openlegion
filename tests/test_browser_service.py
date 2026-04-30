@@ -7008,6 +7008,57 @@ class TestStealthDeadCodeRemoved:
 # ── X11 input bypass tests ────────────────────────────────────────────────
 
 
+class TestIdleJitterScheduler:
+    """Hawkes-like on-off schedule. The prior uniform 2–7s cycle was
+    a constant-autocorrelation signal in the mousemove stream — easy
+    cluster signal for ArkoseLabs / DataDome / PerimeterX. Real cursors
+    show long quiet periods + bursts of corrective movements."""
+
+    def test_quiet_periods_dominate_at_80_percent(self):
+        from src.browser.service import BrowserManager
+        single = 0
+        burst = 0
+        for _ in range(2000):
+            _sleep, count = BrowserManager._next_jitter_event()
+            if count == 1:
+                single += 1
+            else:
+                burst += 1
+        ratio = single / (single + burst)
+        # Allow ±5pp of empirical drift around the 0.80 target.
+        assert 0.75 <= ratio <= 0.85
+
+    def test_burst_count_is_2_to_4(self):
+        from src.browser.service import BrowserManager
+        for _ in range(500):
+            _sleep, count = BrowserManager._next_jitter_event()
+            assert count == 1 or 2 <= count <= 4
+
+    def test_quiet_period_has_heavy_tail(self):
+        """Lognormal tail: should produce some sleeps >40s out of 2000."""
+        from src.browser.service import BrowserManager
+        long_sleeps = 0
+        max_sleep = 0.0
+        for _ in range(2000):
+            sleep_s, count = BrowserManager._next_jitter_event()
+            if count == 1:
+                if sleep_s > 40:
+                    long_sleeps += 1
+                max_sleep = max(max_sleep, sleep_s)
+        # Heavy right tail: at least 1% of quiet periods exceed 40s.
+        assert long_sleeps > 5
+        # Capped at 120s to avoid runaway sleeps.
+        assert max_sleep <= 120.0
+
+    def test_burst_sleep_is_short(self):
+        """Burst arrivals fire after a short hand-off pause (0.4–1.2s)."""
+        from src.browser.service import BrowserManager
+        for _ in range(500):
+            sleep_s, count = BrowserManager._next_jitter_event()
+            if count > 1:
+                assert 0.4 <= sleep_s <= 1.2
+
+
 class TestPickClickTarget:
     """Fitts'-Law-aware click coordinate sampler.
 
