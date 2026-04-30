@@ -11,13 +11,16 @@ OpenLegion uses YAML and JSON files in the `config/` directory. Config files are
 | `config/permissions.json` | JSON | Per-agent ACL matrix |
 | `config/cron.json` | JSON | Scheduled job state (auto-managed) |
 | `config/projects/` | Directory | Per-project data (project.md, members) |
-| `config/settings.json` | JSON | Dashboard-managed runtime settings: browser speed/delay/timeout, execution limits (`max_iterations`, `chat_max_tool_rounds`, etc.), and default budgets. Written by the dashboard and injected as env vars into agent containers at startup. |
+| `config/settings.json` | JSON | Dashboard-managed runtime settings: browser speed/delay/timeout, execution limits (`max_iterations`, `chat_max_tool_rounds`, etc.), default budgets, and a `browser_flags` dict that overrides any flag in [`src/browser/flags.py:KNOWN_FLAGS`](../src/browser/flags.py) (precedence sits between per-agent overrides and env vars). Written by the dashboard and injected as env vars into agent containers at startup. **The four `_ENV_ONLY_FLAGS` (`CAPTCHA_SOLVER_KEY`, `CAPTCHA_SOLVER_KEY_SECONDARY`, `CAPTCHA_SOLVER_PROXY_LOGIN`, `CAPTCHA_SOLVER_PROXY_PASSWORD`) are stripped from this file at load with a warning** — settings.json is plaintext on disk with no chmod / encryption, so solver secrets must come from env vars only. See [Browser Flag Precedence](#browser-flag-precedence). |
+| `data/captcha_costs.json` | JSON | Runtime CAPTCHA spend ledger (chmod `0o600`). Per-agent monthly buckets in millicents (1/100,000 USD); persisted as a periodic snapshot from in-memory state on the 60s metrics tick. Override path with `CAPTCHA_COST_COUNTER_PATH`. State is current-month only — older windows defer to the planned SQLite snapshots. Restart loses at most one tick of spend. |
 | `config/network.yaml` | YAML | Network settings (`no_proxy` exclusion list for proxy mode). |
 | `.env` | dotenv | API keys and credentials |
 
 ## `config/agents.yaml`
 
 Defines every agent in the fleet.
+
+**Reserved agent IDs.** `mesh`, `operator`, and `canary-probe` are reserved (`src/shared/types.py:RESERVED_AGENT_IDS`). `mesh` and `operator` are internal trust-zone identifiers; `canary-probe` is the dedicated profile used by the stealth canary scanner (`src/browser/canary.py`). Attempts to create an agent with any of these IDs are rejected. The CLI also rejects `operator` from project membership (`src/cli/config.py`).
 
 ```yaml
 agents:
@@ -185,6 +188,7 @@ Blackboard patterns use the `projects/{name}/*` namespace. When an agent joins a
 | `allowed_apis` | list[string] | External APIs accessible through the vault proxy |
 | `allowed_credentials` | list[string] | Glob patterns for accessible credential names. `["*"]` grants access to all agent-tier credentials; `[]` denies all. System credentials (LLM provider keys) are always blocked regardless of patterns. |
 | `can_use_browser` | boolean | Whether this agent can use the shared browser service. Default: `false`. |
+| `browser_actions` | list[string] \| null | Per-action gate inside the browser surface, applied only when `can_use_browser=true`. Three forms with non-obvious semantics: `null` (default — field omitted) **and** `["*"]` both grant **all** known browser actions including any added in future phases. `[]` denies every action (equivalent to `can_use_browser=false`). Any specific list (e.g. `["navigate", "snapshot", "screenshot"]`) is an **allowlist** — only listed actions are permitted; everything else is denied. The action validator is `KNOWN_BROWSER_ACTIONS` in `src/host/permissions.py` (currently 26 entries: `navigate`, `snapshot`, `click`, `type`, `hover`, `screenshot`, `reset`, `focus`, `status`, `detect_captcha`, `scroll`, `wait_for`, `press_key`, `go_back`, `go_forward`, `switch_tab`, `upload_file`, `download`, `find_text`, `open_tab`, `fill_form`, `click_xy`, `inspect_requests`, `solve_captcha`, `request_captcha_help`, `request_browser_login`); typo'd names get HTTP 400 at the mesh gate. |
 | `can_spawn` | boolean | Whether this agent can spawn ephemeral fleet agents via `spawn_fleet_agent`. Default: `false`. |
 | `can_manage_cron` | boolean | Whether this agent can create, update, and delete cron jobs. Default: `false`. |
 | `can_use_wallet` | boolean | Whether this agent can access the wallet signing service. Default: `false`. |
@@ -229,7 +233,9 @@ OPENLEGION_CRED_WHATSAPP_ACCESS_TOKEN=EAAx...
 OPENLEGION_CRED_WHATSAPP_PHONE_NUMBER_ID=1234...
 ```
 
-All credentials are loaded by the credential vault (`src/host/credentials.py`). Agents never see values directly -- they make API calls through the mesh proxy, which injects credentials server-side.
+All credentials in the `OPENLEGION_SYSTEM_*` and `OPENLEGION_CRED_*` tiers are loaded by the credential vault (`src/host/credentials.py`). Agents never see values directly -- they make API calls through the mesh proxy, which injects credentials server-side.
+
+**CAPTCHA solver credentials bypass the vault.** The four secrets used by the browser CAPTCHA pipeline — `CAPTCHA_SOLVER_KEY`, `CAPTCHA_SOLVER_KEY_SECONDARY`, `CAPTCHA_SOLVER_PROXY_LOGIN`, `CAPTCHA_SOLVER_PROXY_PASSWORD` — are listed in `flags._ENV_ONLY_FLAGS` and read directly from the process environment by the browser service. They are NOT routed through the agent-tier `OPENLEGION_CRED_*` vault, do NOT appear in the credentials UI, and are explicitly stripped from `config/settings.json:browser_flags` at load with a one-time warning (settings.json is plaintext on disk). The dashboard's `POST /api/captcha-solver` endpoint writes them via `os.environ[…]` directly. Provide them as plain environment variables (e.g. via `.env`).
 
 **Channel credential fallback:** Channel bot tokens (Telegram, Discord, Slack, WhatsApp) are resolved with a four-tier fallback chain: `mesh.yaml` channel config field (e.g. `channels.telegram.bot_token`) → `OPENLEGION_SYSTEM_<NAME>` → `OPENLEGION_CRED_<NAME>` → legacy unprefixed `<NAME>` (e.g., `TELEGRAM_BOT_TOKEN`). The `OPENLEGION_CRED_` prefix is recommended for channel tokens.
 
@@ -276,9 +282,10 @@ Beyond credentials, these environment variables affect runtime behavior:
 | `THINKING` | `off` | Extended thinking/reasoning mode (set automatically from `thinking` in agents.yaml) |
 | `PROJECT_NAME` | -- | Project this agent belongs to (set automatically for project members) |
 | `EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model for memory vector search (set automatically from `llm.embedding_model` in mesh.yaml). Set to `"none"` to disable vector search |
-| `OPENLEGION_MAX_AGENTS` | `0` | Plan limit: maximum agents to start. `0` means unlimited. If set to N > 0, only the first N agents are started. |
+| `OPENLEGION_MAX_AGENTS` | `0` | Plan limit: maximum agents to start. `0` means unlimited. If set to N > 0, only the first N agents are started. **Also drives plan-aware browser-service sizing** (`src/host/runtime.py:start_browser_service`) — the browser container's memory, SHM, CPU quota, and `MAX_BROWSERS` cap are scaled by this value: ≤1 → Basic (2GB / 512m / 1.0 CPU / 1 browser), ≤5 → Growth (4GB / 1g / 1.5 CPU / N browsers), >5 → Pro (8GB / 2g / 2.0 CPU / `min(N, 10)` browsers). |
 | `OPENLEGION_MAX_PROJECTS` | -- | Plan limit: maximum projects allowed. If unset, projects are unlimited. If set to `0`, projects are disabled entirely. If set to N > 0, only N projects are allowed. |
-| `OPENLEGION_HOST_NETWORK` | `0` | Use Docker host networking for agent containers instead of bridge network. Set to `1`, `true`, or `yes` (case-insensitive) to enable. Not recommended — disables network isolation. |
+| `OPENLEGION_HOST_NETWORK` | `0` | Use Docker host networking for agent containers instead of bridge network. Set to `1`, `true`, or `yes` (case-insensitive) to enable. Not recommended — disables network isolation. Also propagates to the browser service, which **additionally requires** `OPENLEGION_BROWSER_ALLOW_HOST_NETWORK=1` (see below). |
+| `OPENLEGION_BROWSER_ALLOW_HOST_NETWORK` | `0` | **Hard gate** for running the browser container in host-network mode. When `OPENLEGION_HOST_NETWORK=1` and this flag is unset (or anything other than `1`/`true`/`yes`), `start_browser_service` raises `RuntimeError` at boot. The egress iptables filter cannot install in the host network namespace, so host mode strips the authoritative SSRF control. Set this to acknowledge the regression and run anyway (INSECURE — the browser will reach the host's private networks). |
 | `OPENLEGION_SYSTEM_WALLET_MASTER_SEED` | -- | BIP-39 mnemonic (24 words) for HD wallet key derivation. Required to enable wallet features. Generate with `openlegion wallet init`. |
 | `BROWSER_OS` | `windows` | OS fingerprint for Camoufox browser: `windows`, `macos`, or `linux`. Windows is recommended (≈70% desktop market share; Linux is a datacenter signal). |
 | `BROWSER_LOCALE` | `en-US` | BCP-47 locale tag for browser fingerprint (e.g. `en-US`, `de-DE`). |
@@ -287,15 +294,169 @@ Beyond credentials, these environment variables affect runtime behavior:
 | `BROWSER_PROXY_URL` | -- | Proxy URL for browser traffic (HTTP/HTTPS only, e.g. `http://proxy:8080`). SOCKS5 is not supported. Residential proxies recommended. |
 | `BROWSER_PROXY_USER` | -- | Proxy authentication username. |
 | `BROWSER_PROXY_PASS` | -- | Proxy authentication password. |
-| `OPENLEGION_BROWSER_MAX_CONCURRENT` | `5` | Per-service cap on simultaneous Camoufox browser instances (clamped to `[1, 64]`). **Startup-only** — runtime reconfig is unsupported (would need to bound the acquire semaphore mid-flight). Restart the browser service to change this. The legacy name `MAX_BROWSERS` is still honored as a fallback for older deployments. |
+| `OPENLEGION_BROWSER_MAX_CONCURRENT` | `5` | Per-service cap on simultaneous Camoufox browser instances (clamped to `[1, 64]`). **Startup-only** — runtime reconfig is unsupported (would need to bound the acquire semaphore mid-flight). The operator settings layer (`config/settings.json:browser_flags`) cannot override it either — `_resolve_max_browsers` is read once at process launch in `src/browser/__main__.py`. Restart the browser service to change this. The legacy name `MAX_BROWSERS` is still honored as a fallback for older deployments. |
+| `BROWSER_EGRESS_ALLOWLIST` | -- | Comma-separated CIDR allowlist for the browser container's iptables egress filter. By default the entrypoint REJECTs all RFC1918 / loopback / link-local / CGNAT / IANA-reserved ranges (the authoritative SSRF control for browser-initiated traffic); use this to punch through specific destinations (e.g. `BROWSER_EGRESS_ALLOWLIST=10.0.0.5/32` for a private proxy). When `BROWSER_PROXY_URL` is a literal RFC1918 / loopback / link-local / reserved IP, the runtime errors at startup unless this flag covers it. |
+| `BROWSER_EGRESS_DISABLE` | -- | Disable the browser egress filter entirely (no iptables rules installed). Removes the SSRF guarantee; intended for operator debugging only. |
 | `OPENLEGION_SYSTEM_PROXY` | -- | System-wide outbound HTTP proxy URL for all agent traffic. Managed via the dashboard proxy settings page. |
 | `HTTP_PROXY` / `HTTPS_PROXY` | -- | Per-agent proxy URLs. Auto-injected into agent containers by the runtime when a per-agent proxy is configured. Read by the agent-side `http_request` tool. |
 | `OPENLEGION_TOOL_TIMEOUT` | `300` | Per-tool execution timeout in seconds (hard ceiling). |
 | `OPENLEGION_MAX_ITERATIONS` | `20` | Maximum agent loop iterations per task (clamped 1–100). Overrides the default at the agent level. |
 | `OPENLEGION_CHAT_MAX_TOOL_ROUNDS` | `30` | Maximum tool rounds per chat turn (clamped 1–200). |
 | `OPENLEGION_CHAT_MAX_TOTAL_ROUNDS` | `200` | Maximum total chat rounds before session auto-continuation (clamped 1–1000). |
+| `OPENLEGION_SETTINGS_PATH` | `config/settings.json` | Path to the operator settings file consulted by `src/browser/flags.py`. Override for tests / containerized deployments. |
+| `OPENLEGION_UBLOCK_XPI` | `/opt/openlegion/extensions/uBlock0.xpi` | Path to the uBlock Origin XPI installed into agent browser profiles by the schema-v3 migration. Override for tests. |
+| `OPENLEGION_REDACTION_URL_QUERY_ALLOW` | -- | Comma-separated list of URL query parameter names that the unified redactor (`src/shared/redaction.py`) should NOT redact. Use to keep specific identifiers visible in browser logs / artifacts when an integration intentionally puts non-secret context in the query string. |
 
 The mesh port is configured in `config/mesh.yaml` (`mesh.port`), not via environment variable.
+
+## Browser Service Flags
+
+The browser service centralizes its environment-variable surface in [`src/browser/flags.py:KNOWN_FLAGS`](../src/browser/flags.py). Every read goes through a typed accessor (`get_str`, `get_bool`, `get_int`, `get_float`) which coerces and validates the value.
+
+### Browser Flag Precedence
+
+Highest to lowest:
+
+1. **Per-agent override** — registered at runtime via `flags.set_agent_override(agent_id, name, value)`. Surfaced through the dashboard flags panel (per-template tuning).
+2. **Operator settings** — `config/settings.json` under the `browser_flags` key. Plaintext on disk; the four `_ENV_ONLY_FLAGS` (CAPTCHA solver creds) are stripped at load with a warning.
+3. **Environment variable** — the canonical name listed in the tables below (case-sensitive).
+4. **Hardcoded default** at the call site.
+
+A malformed value at any layer logs a warning and falls through to the next, so a broken per-agent override cannot mask a valid env-var fallback.
+
+```json
+// config/settings.json — operator-wide overrides for any flag in KNOWN_FLAGS
+{
+  "browser_flags": {
+    "BROWSER_DEVICE_PROFILE": "desktop-windows",
+    "BROWSER_DOWNLOADS_DISABLED": "false",
+    "CAPTCHA_RATE_LIMIT_PER_HOUR": "20"
+  }
+}
+```
+
+### CAPTCHA Solver
+
+CAPTCHA solver flags drive the metered, breaker-protected solver pipeline in `src/browser/captcha.py` + `src/browser/service.py`. **The four secret-bearing flags marked _env-only_ are stripped from `config/settings.json` at load time** (`flags._ENV_ONLY_FLAGS`) — provide them as plain environment variables only.
+
+| Variable | Default | Description |
+|---|---|---|
+| `CAPTCHA_SOLVER_PROVIDER` | -- | Primary provider: `2captcha` or `capsolver`. Unset = solver disabled. |
+| `CAPTCHA_SOLVER_KEY` | -- | **Env-only.** API key for the primary provider. |
+| `CAPTCHA_SOLVER_PROVIDER_SECONDARY` | -- | Failover provider (§11.8). Same value set as primary. |
+| `CAPTCHA_SOLVER_KEY_SECONDARY` | -- | **Env-only.** API key for the failover provider. |
+| `CAPTCHA_DISABLED` | `false` | Fleet-wide kill switch. Short-circuits BEFORE health/breaker/rate-limit/cost-cap; returns `solver_outcome="no_solver"` envelope and `next_action="request_captcha_help"`. Per-agent override supported. Re-evaluated on every solve attempt — no restart needed. |
+| `CAPTCHA_RATE_LIMIT_PER_HOUR` | `20` | Per-agent solve rate limit (range 0–10000). Set `0` to disable. |
+| `CAPTCHA_RECAPTCHA_V3_MIN_SCORE` | `0.7` | Minimum reCAPTCHA v3 score to accept (range 0.1–0.9). |
+
+### CAPTCHA Per-Type Timeouts
+
+All values in milliseconds. Defaults reflect provider documentation guidance; override per type for slow networks.
+
+| Variable | Default |
+|---|---|
+| `CAPTCHA_TIMEOUT_RECAPTCHA_V2_CHECKBOX_MS` | `120000` |
+| `CAPTCHA_TIMEOUT_RECAPTCHA_V2_INVISIBLE_MS` | `120000` |
+| `CAPTCHA_TIMEOUT_RECAPTCHA_V3_MS` | `60000` |
+| `CAPTCHA_TIMEOUT_RECAPTCHA_ENTERPRISE_V2_MS` | `120000` |
+| `CAPTCHA_TIMEOUT_RECAPTCHA_ENTERPRISE_V3_MS` | `60000` |
+| `CAPTCHA_TIMEOUT_HCAPTCHA_MS` | `120000` |
+| `CAPTCHA_TIMEOUT_TURNSTILE_MS` | `180000` |
+| `CAPTCHA_TIMEOUT_CF_INTERSTITIAL_TURNSTILE_MS` | `180000` |
+
+### CAPTCHA Solver Proxy
+
+Optional dedicated proxy used for solver tasks (independent of `BROWSER_PROXY_URL`). `2captcha` accepts `{http, socks4, socks5}`; `capsolver` accepts the full `{http, https, socks4, socks5}`. The `_proxyless` task variant is used when these are unset.
+
+| Variable | Default | Description |
+|---|---|---|
+| `CAPTCHA_SOLVER_PROXY_TYPE` | -- | `http`, `https`, `socks4`, or `socks5`. |
+| `CAPTCHA_SOLVER_PROXY_ADDRESS` | -- | Proxy host. |
+| `CAPTCHA_SOLVER_PROXY_PORT` | -- | Proxy port. |
+| `CAPTCHA_SOLVER_PROXY_LOGIN` | -- | **Env-only.** Proxy username. |
+| `CAPTCHA_SOLVER_PROXY_PASSWORD` | -- | **Env-only.** Proxy password. |
+
+### CAPTCHA Pacing
+
+Gaussian-jittered delays between solves to avoid burst traffic patterns. All milliseconds.
+
+| Variable | Default | Description |
+|---|---|---|
+| `CAPTCHA_PACING_MS_MIN` | `3000` | Lower clamp on the pacing distribution. |
+| `CAPTCHA_PACING_MS_MAX` | `12000` | Upper clamp. |
+| `CAPTCHA_SOLVE_PACING_MU_MS` | `6000` | Gaussian mean. |
+| `CAPTCHA_SOLVE_PACING_SIGMA_MS` | `2500` | Gaussian standard deviation. |
+
+### CAPTCHA Cost Caps & Site Policy
+
+Cost caps are **opt-in** — unset = no cap. All amounts are USD; the runtime ledger stores millicents internally (1 millicent = 1/100,000 USD). Per-tenant cap thresholds (50 / 80 / 100% of cap) emit `tenant_spend_threshold` events through the dashboard EventBus, fired once per crossing per month.
+
+| Variable | Default | Description |
+|---|---|---|
+| `CAPTCHA_COST_LIMIT_USD_PER_AGENT_MONTH` | -- | Per-agent monthly USD cap. When exceeded, solver short-circuits with `skipped="cost_cap"`. |
+| `CAPTCHA_COST_LIMIT_USD_PER_TENANT_MONTH` | -- | Per-tenant monthly USD cap (tenant = project membership from `config/projects/`). Drives 50/80/100% threshold alerts. |
+| `CAPTCHA_COST_COUNTER_PATH` | `data/captcha_costs.json` | Path to the persisted cost counter snapshot. chmod `0o600`. |
+| `OPENLEGION_CAPTCHA_FORCE_SOLVE_DOMAINS` | -- | Comma-separated; force normal solver flow on hosts otherwise classified `unsolvable` by `src/browser/captcha_policy.py` (e.g. `challenges.cloudflare.com`, `humansecurity.com`, `captcha-delivery.com`). |
+| `OPENLEGION_CAPTCHA_SKIP_SOLVE_DOMAINS` | -- | Comma-separated; force escalation-only on hosts the solver would otherwise attempt. Read once at module import — restart browser service to apply changes. |
+| `BROWSER_CAPTCHA_REDETECT_ENABLED` | `true` | Gate the MutationObserver-based post-action captcha re-detection on `click` / `type` / `press_key` / `fill_form`. |
+
+### Browser Operator Kill Switches
+
+Default-off feature gates for high-trust browser surfaces. When tripped, the corresponding endpoint returns a `403 forbidden` envelope with `next_action="request_browser_login"` (or equivalent escalation).
+
+| Variable | Default | Effect |
+|---|---|---|
+| `BROWSER_DOWNLOADS_DISABLED` | `false` | `/mesh/browser/download` returns forbidden envelope; agent download tool fails closed. |
+| `BROWSER_NETWORK_INSPECT_DISABLED` | `false` | `inspect_requests` action returns forbidden envelope. |
+| `BROWSER_COOKIE_IMPORT_DISABLED` | `false` | Operator cookie/session-import endpoint disabled. |
+| `BROWSER_CANARY_ENABLED` | `false` | Opt-in; enables the stealth canary scanner (`src/browser/canary.py`). Uses the reserved `canary-probe` agent ID. |
+
+### Browser Snapshot, Screenshot & Ad-blocker
+
+| Variable | Default | Description |
+|---|---|---|
+| `BROWSER_SNAPSHOT_FORMAT` | `v2` | a11y snapshot rendering: `v1` (legacy verbose) or `v2` (compact, current default after release gate). |
+| `BROWSER_SCREENSHOT_FORMAT` | `webp` | `webp` or `png`. WebP encoding falls back to PNG on failure. |
+| `BROWSER_SCREENSHOT_QUALITY` | `75` | WebP quality 1–100. |
+| `BROWSER_RESOLUTION_POOL` | `true` | Per-agent deterministic viewport pool (1280×720 → 1920×1080) keyed by SHA-256 of the agent ID. Disable for fixed 1920×1080. |
+| `BROWSER_ENABLE_ADBLOCK` | `true` | Gates the uBlock Origin install during the schema-v3 profile migration. |
+
+### Browser Behavior Recorder
+
+| Variable | Default | Description |
+|---|---|---|
+| `BROWSER_RECORD_BEHAVIOR` | `0` | Set `1` to enable the §5.3 behavior recorder. Records hosts only — never full URLs. |
+
+### File Upload / Download Staging
+
+The two-stage upload protocol (mesh-side `upload-stage` → `upload_apply`) keeps large bodies out of agent address space. The mesh stages bytes into a tmpfs-backed dir and the browser service receives them via an internal endpoint.
+
+| Variable | Default | Description |
+|---|---|---|
+| `OPENLEGION_UPLOAD_STAGE_DIR` | `/tmp/openlegion-upload-stage` | Mesh-side staging directory. |
+| `OPENLEGION_UPLOAD_STAGE_TTL_S` | `60` | Orphan staging-file TTL in seconds (clamped ≥ 5). `.partial` files use 5×TTL. |
+| `OPENLEGION_UPLOAD_STAGE_MAX_MB` | `50` | Per-file upload byte cap (clamped ≥ 1). |
+| `OPENLEGION_UPLOAD_RECV_DIR` | `/tmp/upload-recv` | Browser-side receive directory. |
+| `BROWSER_DOWNLOAD_DIR` | `/tmp/downloads` | Browser-side download directory. |
+| `BROWSER_DOWNLOAD_TTL_S` | `60` | Stale download GC TTL in seconds. |
+
+### Session Continuity (§20)
+
+Opt-in persistence of `BrowserContext.storage_state()` across container restarts. **The sidecar contains live session tokens** — if leaked, those tokens grant account takeover on whatever sites the agent is logged into. The module bakes in NO time-based expiry; operators are responsible for rotating sidecars on a cadence appropriate for their threat model.
+
+| Variable | Default | Description |
+|---|---|---|
+| `BROWSER_SESSION_PERSISTENCE_ENABLED` | `false` | **Opt-in.** Enable per-agent storage_state snapshots. |
+| `BROWSER_SESSION_PERIODIC_SNAPSHOT_S` | `300` | Periodic snapshot interval in seconds (range 60–3600). Snapshots run on the 60s metrics tick when this elapsed. Lower = better RPO at the cost of disk writes. |
+| `BROWSER_SESSION_DIR` | `data/sessions` | Directory for per-agent sidecars (`<agent_id>.json`, chmod `0o600`). |
+
+### Mobile / Device Profile
+
+See [Browser Device Profiles](#browser-device-profiles) below for behavioral details.
+
+| Variable | Default | Description |
+|---|---|---|
+| `BROWSER_DEVICE_PROFILE` | `desktop-windows` | One of `desktop-windows`, `desktop-macos`, `mobile-ios`, `mobile-android`. Controls UA, viewport, DPR, `is_mobile`, `has_touch`, navigator-override init script. |
 
 ## Browser Device Profiles
 
@@ -323,14 +484,7 @@ The shared Camoufox browser ships four device-emulation profiles, selected via `
 
 ### Per-agent override
 
-`BROWSER_DEVICE_PROFILE` is a [unified flag](../src/browser/flags.py) — every read goes through the standard precedence chain:
-
-1. Per-agent override (registered via `flags.set_agent_override(agent_id, "BROWSER_DEVICE_PROFILE", "mobile-ios")`)
-2. Operator settings (`config/settings.json` → `browser_flags.BROWSER_DEVICE_PROFILE`)
-3. Environment variable (`BROWSER_DEVICE_PROFILE=mobile-ios`)
-4. Hardcoded default (`desktop-windows`)
-
-This means an operator can default the fleet to `desktop-windows` while pinning specific agents to `mobile-ios` for sites where mobile works better. Unknown values log a warning and fall back to `desktop-windows`.
+`BROWSER_DEVICE_PROFILE` follows the standard [Browser Flag Precedence](#browser-flag-precedence). An operator can default the fleet to `desktop-windows` while pinning specific agents to `mobile-ios` for sites where mobile works better. Unknown values log a warning and fall back to `desktop-windows`.
 
 ```json
 // config/settings.json — operator-wide default
