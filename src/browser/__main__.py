@@ -184,10 +184,30 @@ def _start_openbox() -> subprocess.Popen:
 
 
 def main() -> None:
-    """Start all services and run the FastAPI server."""
-    kasmvnc_proc = _start_kasmvnc()
-    unclutter_proc = _start_unclutter()
-    openbox_proc = _start_openbox()
+    """Start all services and run the FastAPI server.
+
+    When ``OPENLEGION_BROWSER_PER_AGENT_DISPLAY`` is on, the global
+    ``Xvnc :99`` / Openbox / unclutter are NOT started — each agent
+    gets its own X stack inside :class:`BrowserManager._start_browser`
+    instead.  The legacy path remains the default during the flag-
+    gated rollout (PR 1); PR 2 flips the default and PR 3 deletes the
+    legacy code path entirely.
+    """
+    from src.browser.display_allocator import is_per_agent_display_enabled
+
+    per_agent_default = is_per_agent_display_enabled()
+    if per_agent_default:
+        logger.info(
+            "Per-agent display mode active — skipping global Xvnc/Openbox/"
+            "unclutter; each agent's browser will get its own X stack",
+        )
+        kasmvnc_proc = None
+        unclutter_proc = None
+        openbox_proc = None
+    else:
+        kasmvnc_proc = _start_kasmvnc()
+        unclutter_proc = _start_unclutter()
+        openbox_proc = _start_openbox()
 
     manager = BrowserManager(
         profiles_dir="/data/profiles",
@@ -214,9 +234,11 @@ def main() -> None:
         except Exception as exc:
             logger.warning("captcha_cost_counter.snapshot failed: %s", exc)
         await manager.stop_all()
-        procs = [openbox_proc, kasmvnc_proc]
-        if unclutter_proc:
-            procs.insert(0, unclutter_proc)
+        # Tear down the global X stack only when it was started in
+        # legacy mode.  Per-agent mode has no global processes to reap;
+        # individual agents' X stacks were already torn down by
+        # ``manager.stop_all()`` via ``_teardown_per_agent_x_stack``.
+        procs = [p for p in (openbox_proc, kasmvnc_proc, unclutter_proc) if p]
         for proc in procs:
             try:
                 proc.terminate()

@@ -272,6 +272,201 @@ class TestX11WindowTracking:
         assert "agent1" not in mgr._instances
 
 
+class TestPerAgentXStack:
+    """Tests for the per-agent X stack lifecycle (PR 1).
+
+    Covers behavior visible without Docker / Camoufox / a real X server:
+      * ``subprocess_env`` returns the right shape per mode
+      * teardown is a no-op when the instance was never given a slot
+      * teardown cancels processes and releases the allocator slot
+      * the lifecycle helper writes ``DISPLAY`` into env on every call
+      * legacy callers (no ``inst``) still work — ``_get_firefox_wids``
+        with ``inst=None`` inherits process env
+    """
+
+    @pytest.mark.asyncio
+    async def test_subprocess_env_legacy_mode(self):
+        """No display_slot → subprocess_env() returns None (inherit env)."""
+        from src.browser.service import CamoufoxInstance
+        inst = CamoufoxInstance("a", MagicMock(), AsyncMock(), AsyncMock())
+        assert inst.display_slot is None
+        # None means "inherit os.environ" — same shape as omitting env=
+        # to subprocess.run.  Critical for the legacy code path where
+        # __main__.py sets DISPLAY=:99 process-globally.
+        assert inst.subprocess_env() is None
+
+    @pytest.mark.asyncio
+    async def test_subprocess_env_per_agent_mode(self):
+        """display_slot set → subprocess_env() scopes DISPLAY to the slot."""
+        from src.browser.display_allocator import Slot, port_for_display
+        from src.browser.service import CamoufoxInstance
+
+        inst = CamoufoxInstance("a", MagicMock(), AsyncMock(), AsyncMock())
+        inst.display_slot = Slot(display=137, vnc_port=port_for_display(137))
+        env = inst.subprocess_env()
+        assert env is not None
+        assert env["DISPLAY"] == ":137"
+        # Other env keys preserved from os.environ — needed so the
+        # spawned process still has PATH, HOME, etc.
+        assert "PATH" in env
+
+    @pytest.mark.asyncio
+    async def test_teardown_is_noop_without_slot(self):
+        """_teardown_per_agent_x_stack is safe to call on a legacy-mode inst."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        inst = CamoufoxInstance("a", MagicMock(), AsyncMock(), AsyncMock())
+        # display_slot is None and _x_procs is empty — nothing to do.
+        await mgr._teardown_per_agent_x_stack(inst)
+        # Allocator should never have been constructed (lazy).
+        assert mgr._display_allocator is None
+
+    @pytest.mark.asyncio
+    async def test_teardown_releases_slot_and_kills_processes(self, monkeypatch):
+        """Real teardown SIGTERMs the process group, waits, releases slot."""
+        from src.browser.display_allocator import (
+            DisplayAllocator,
+            Slot,
+            port_for_display,
+        )
+        from src.browser.service import BrowserManager, CamoufoxInstance
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        # Use a contained allocator so we don't fight the real /tmp/.X*-lock files.
+        alloc = DisplayAllocator(
+            display_start=200, display_end=205, run_boot_sweep=False,
+        )
+        slot = alloc.allocate()
+        mgr._display_allocator = alloc
+
+        inst = CamoufoxInstance("a", MagicMock(), AsyncMock(), AsyncMock())
+        inst.display_slot = slot
+
+        # Build mock Popens that report "already terminated" so the wait
+        # loop exits immediately.  poll() returns 0 = exited cleanly.
+        class _MockProc:
+            def __init__(self, pid: int):
+                self.pid = pid
+                self._exited = False
+
+            def poll(self):
+                # First poll: not exited yet (forces SIGTERM).  Second
+                # poll: exited (loop bails out).  Then wait() returns 0.
+                if self._exited:
+                    return 0
+                self._exited = True
+                return None
+
+            def wait(self, timeout=None):
+                self._exited = True
+                return 0
+
+        inst._x_procs = [_MockProc(11111), _MockProc(22222), _MockProc(33333)]
+
+        killed: list[tuple[int, int]] = []
+
+        def fake_killpg(pgid, sig):
+            killed.append((pgid, sig))
+
+        monkeypatch.setattr("src.browser.service.os.killpg", fake_killpg)
+
+        await mgr._teardown_per_agent_x_stack(inst)
+        # All three should have received SIGTERM (any later SIGKILL is
+        # harmless in this test since the mocks accept any signal).
+        sigterm_pids = sorted(pgid for pgid, sig in killed if sig == 15)
+        assert sigterm_pids == [11111, 22222, 33333]
+        # Slot returned to pool.
+        assert not alloc.is_allocated(slot.display)
+        # Instance state cleared.
+        assert inst.display_slot is None
+        assert inst._x_procs == []
+
+    @pytest.mark.asyncio
+    async def test_get_firefox_wids_uses_inst_display(self, monkeypatch):
+        """When _get_firefox_wids gets an inst with a slot, it scopes DISPLAY."""
+        from src.browser.display_allocator import Slot, port_for_display
+        from src.browser.service import BrowserManager, CamoufoxInstance
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        inst = CamoufoxInstance("a", MagicMock(), AsyncMock(), AsyncMock())
+        inst.display_slot = Slot(display=200, vnc_port=port_for_display(200))
+
+        observed: dict[str, str | None] = {}
+
+        def fake_run(cmd, **kwargs):
+            env = kwargs.get("env")
+            observed["display"] = (env or {}).get("DISPLAY")
+            mock = MagicMock()
+            mock.returncode = 0
+            mock.stdout = "999\n"
+            return mock
+
+        monkeypatch.setattr("src.browser.service.subprocess.run", fake_run)
+        wids = await mgr._get_firefox_wids(inst)
+        assert wids == {999}
+        assert observed["display"] == ":200"
+
+    @pytest.mark.asyncio
+    async def test_get_firefox_wids_legacy_mode_inherits_env(self, monkeypatch):
+        """No inst → env is None (subprocess.run inherits os.environ)."""
+        from src.browser.service import BrowserManager
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        observed: dict[str, str | None] = {}
+
+        def fake_run(cmd, **kwargs):
+            observed["env"] = kwargs.get("env", "MISSING")
+            mock = MagicMock()
+            mock.returncode = 0
+            mock.stdout = ""
+            return mock
+
+        monkeypatch.setattr("src.browser.service.subprocess.run", fake_run)
+        await mgr._get_firefox_wids()  # no inst
+        # env=None means inherit; the legacy __main__.py path sets
+        # DISPLAY=:99 in os.environ, so xdotool still finds the right
+        # X server.  Verifying the kwarg is None (not the literal
+        # string ``"MISSING"``) is what matters.
+        assert observed["env"] is None
+
+    @pytest.mark.asyncio
+    async def test_lazy_allocator_construction(self):
+        """Allocator is constructed once on first _ensure_allocator call."""
+        from src.browser.service import BrowserManager
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        assert mgr._display_allocator is None
+        a1 = mgr._ensure_allocator()
+        a2 = mgr._ensure_allocator()
+        assert a1 is a2
+
+    @pytest.mark.asyncio
+    async def test_focus_passes_per_agent_env(self, monkeypatch):
+        """focus() must scope DISPLAY to the focused agent's slot."""
+        from src.browser.display_allocator import Slot, port_for_display
+        from src.browser.service import BrowserManager, CamoufoxInstance
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mock_page = AsyncMock()
+        mock_page.bring_to_front = AsyncMock()
+        inst = CamoufoxInstance("a", MagicMock(), AsyncMock(), mock_page)
+        inst.x11_wid = 12345
+        inst.display_slot = Slot(display=200, vnc_port=port_for_display(200))
+        mgr.get_or_start = AsyncMock(return_value=inst)
+
+        observed: dict = {}
+
+        def fake_run(cmd, **kwargs):
+            observed["env"] = kwargs.get("env")
+            mock = MagicMock()
+            mock.returncode = 0
+            return mock
+
+        monkeypatch.setattr("src.browser.service.subprocess.run", fake_run)
+        ok = await mgr.focus("a")
+        assert ok is True
+        assert observed["env"]["DISPLAY"] == ":200"
+
+
 class TestBrowserServer:
     """Tests for the browser service FastAPI endpoints."""
 
@@ -7022,7 +7217,7 @@ class TestX11Input:
         mgr = self._make_manager()
         call_count = 0
 
-        async def mock_get_wids():
+        async def mock_get_wids(inst=None):
             nonlocal call_count
             call_count += 1
             if call_count == 30:
