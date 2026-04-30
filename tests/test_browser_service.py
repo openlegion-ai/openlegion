@@ -324,11 +324,7 @@ class TestPerAgentXStack:
     @pytest.mark.asyncio
     async def test_teardown_releases_slot_and_kills_processes(self, monkeypatch):
         """Real teardown SIGTERMs the process group, waits, releases slot."""
-        from src.browser.display_allocator import (
-            DisplayAllocator,
-            Slot,
-            port_for_display,
-        )
+        from src.browser.display_allocator import DisplayAllocator
         from src.browser.service import BrowserManager, CamoufoxInstance
 
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")

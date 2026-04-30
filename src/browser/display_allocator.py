@@ -42,7 +42,6 @@ in :class:`BrowserManager` so we don't need a second lock here.
 
 from __future__ import annotations
 
-import os
 import socket
 from dataclasses import dataclass
 from pathlib import Path

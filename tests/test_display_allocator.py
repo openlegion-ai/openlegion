@@ -13,17 +13,16 @@ Covers:
 from __future__ import annotations
 
 import socket
-from pathlib import Path
 
 import pytest
 
 from src.browser.display_allocator import (
     DISPLAY_RANGE_END,
     DISPLAY_RANGE_START,
+    VNC_PORT_BASE,
     DisplayAllocator,
     PoolExhausted,
     Slot,
-    VNC_PORT_BASE,
     _force_clear_residue_for_tests,
     _read_lock_pid,
     _write_fake_lock_for_tests,

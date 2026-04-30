@@ -26,12 +26,6 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from src.browser import captcha_policy
-from src.browser.display_allocator import (
-    DisplayAllocator,
-    PoolExhausted,
-    Slot,
-    is_per_agent_display_enabled,
-)
 from src.browser.captcha import (
     SolveResult,
     _classify_behavioral,
@@ -39,6 +33,12 @@ from src.browser.captcha import (
     _classify_recaptcha,
     _redact_clientkey_text,
     get_solver,
+)
+from src.browser.display_allocator import (
+    DisplayAllocator,
+    PoolExhausted,
+    Slot,
+    is_per_agent_display_enabled,
 )
 from src.browser.js_challenge import classify_js_challenge
 from src.browser.profile_schema import migrate_profile
@@ -883,15 +883,17 @@ async def _drain_fingerprint_audit() -> list[dict]:
         buckets = dict(_fingerprint_audit_buckets)
         _fingerprint_audit_buckets.clear()
     drained = []
-    for (agent_id, signal, page_origin), info in buckets.items():
+    for (agent_id, signal_name, page_origin), info in buckets.items():
         # ``agent_id`` (not ``agent``) — the dashboard metrics poller
         # routes browser-service events into the per-agent EventBus by
         # this exact field name, same convention as the captcha and
-        # session audit paths.
+        # session audit paths.  ``signal_name`` (not ``signal``) avoids
+        # shadowing the top-level ``import signal`` introduced for the
+        # per-agent X-stack lifecycle's killpg path.
         drained.append({
             "type": "fingerprint_event",
             "agent_id": agent_id,
-            "signal": signal,
+            "signal": signal_name,
             "page_origin": page_origin,
             "count": info["count"],
             "first_ts": info["first_ts"],
