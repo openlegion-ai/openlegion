@@ -8,7 +8,7 @@
    
 [![License: BSL 1.1](https://img.shields.io/badge/license-BSL%201.1-orange.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
-[![Tests: 2240](https://img.shields.io/badge/tests-2240%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
+[![Tests: 4600+](https://img.shields.io/badge/tests-4600%2B%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/mXNkjpDvvr)
 [![Twitter](https://img.shields.io/badge/Twitter-@openlegion-1DA1F2?logo=x&logoColor=white)](https://x.com/openlegion)
 [![LiteLLM](https://img.shields.io/badge/LLM-100%2B%20providers-orange.svg)](https://litellm.ai)
@@ -79,7 +79,7 @@ openlegion start
 
 > First install downloads ~70 packages and takes 2-3 minutes. Subsequent installs are fast.
 >
-> **First run:** On the very first `openlegion start`, Docker builds the `openlegion-agent:latest` and `openlegion-browser:latest` images from the `Dockerfile.agent` and `Dockerfile.browser` in the repo root. This can take several minutes with no progress output — this is normal. Subsequent starts are fast.
+> **First run:** On the very first `openlegion start`, Docker builds the `openlegion-agent:latest` and `openlegion-browser:latest` images from the `Dockerfile.agent` and `Dockerfile.browser` in the repo root. The browser image is significantly larger (Camoufox + KasmVNC + Openbox + Xvnc) and can take several minutes with no progress output — this is normal. Subsequent starts are fast.
 >
 > **Background mode:** `openlegion start -d` polls for startup for up to 90 seconds. If a Docker image build is needed on first run, this timeout may be exceeded — wait for the build to finish and re-run `openlegion start -d`.
 >
@@ -119,8 +119,8 @@ OpenLegion was designed from day one assuming agents will be compromised.
 | **Cost controls** | None | Per-agent daily + monthly budget caps |
 | **Multi-agent routing** | LLM CEO agent | Fleet model — blackboard + pub/sub coordination |
 | **LLM providers** | Broad | 100+ via LiteLLM with health-tracked failover |
-| **Test coverage** | Minimal | 2240 tests including full Docker E2E |
-| **Codebase size** | 430,000+ lines | ~32,000 lines — auditable in a day |
+| **Test coverage** | Minimal | 4600+ tests including full Docker E2E |
+| **Codebase size** | 430,000+ lines | ~62,000 lines — still auditable in a day |
 
 ---
 
@@ -134,7 +134,7 @@ Chat with your agent fleet via **Telegram**, **Discord**, **Slack**, **WhatsApp*
 via cron schedules, webhooks, heartbeat monitoring, and file watchers — without being
 prompted.
 
-**2240 tests passing** across **~32,000 lines** of application code.
+**4600+ tests passing** across the application code.
 **Fully auditable in a day.**
 No LangChain. No Redis. No Kubernetes. No CEO agent. BSL License.
 
@@ -225,7 +225,7 @@ connections.
 | Level | Zone | Description |
 |-------|------|-------------|
 | 0 | Untrusted | External input (webhooks, user prompts). Sanitized before reaching agents. |
-| 1 | Sandboxed | Agent containers. Isolated filesystem, no credentials. External network access gated through SSRF-protected mesh proxy — restricted Docker bridge with NAT egress; private/CGNAT/IPv4-mapped/6to4/Teredo ranges blocked by `http_tool.py`. |
+| 1 | Sandboxed | Agent containers. Isolated filesystem, no credentials. External network access gated through SSRF-protected mesh proxy — restricted Docker bridge with NAT egress; private/CGNAT/IPv4-mapped/6to4/Teredo ranges blocked by `http_tool.py`. The shared browser container has its own iptables egress filter (set up by entrypoint with `NET_ADMIN`, then dropped) — that is the authoritative SSRF control for browser-initiated traffic. |
 | 2 | Trusted | Mesh host. Holds credentials, manages containers, routes messages. |
 
 ---
@@ -278,10 +278,13 @@ Every inter-agent operation is checked against per-agent ACLs:
     "blackboard_read": ["projects/myproject/*"],
     "blackboard_write": ["projects/myproject/*"],
     "allowed_apis": ["llm", "brave_search"],
-    "allowed_credentials": ["brightdata_*"]
+    "allowed_credentials": ["brightdata_*"],
+    "browser_actions": null
   }
 }
 ```
+
+`browser_actions: null` means all known browser actions are allowed (default). Set to a list (e.g. `["navigate", "screenshot", "get_elements"]`) to narrow capability for sensitive agents; set to `[]` to deny all browser use even when `can_use_browser` is true.
 
 Blackboard patterns use the `projects/{name}/*` namespace. When an agent joins a
 project, it receives read/write access to that namespace. Standalone agents get
@@ -304,6 +307,18 @@ Agent containers are slim — no browser. Browsing is handled by a shared browse
 - **Resources**: 2–8GB RAM (scaled by fleet size), 1–2 CPU (scaled by fleet size), 512MB–2GB shared memory (scaled by fleet size)
 - **Ports**: 8500 (browser API), 6080 (KasmVNC web client)
 - **Capacity**: 1–10 concurrent browser sessions (scaled by fleet size)
+
+### Browser Capabilities
+
+Beyond the basic navigation/screenshot/click tools, the browser service ships with:
+
+- **CAPTCHA solving.** Optional 2captcha or capsolver provider configured per-fleet via `CAPTCHA_SOLVER_KEY` + `CAPTCHA_SOLVER_PROVIDER`. (Solver creds are env-only by design and bypass the `OPENLEGION_CRED_*` vault — see `_ENV_ONLY_FLAGS` in `src/browser/flags.py`.) Auto-solve runs after `browser_navigate`; behavioral / persistent challenges escalate to `request_captcha_help` which posts a card to the dashboard for the user to clear via the live VNC viewer. Disabled fleet-wide with `CAPTCHA_DISABLED=1`.
+- **Per-agent + per-tenant solver cost caps.** `CAPTCHA_COST_LIMIT_USD_PER_AGENT_MONTH` and `CAPTCHA_COST_LIMIT_USD_PER_TENANT_MONTH` enforce monthly spend with 50/80/100% threshold alerts. Per-tenant rollups exportable as CSV via `/dashboard/api/billing/captcha-rollup` (curl-only).
+- **Fingerprint health monitoring.** A rolling per-agent rejection window detects when a fingerprint is "burned" (>50% rejection over the last 10 events across Cloudflare / DataDome / PerimeterX / Imperva / Akamai BMP signals); subsequent CAPTCHA envelopes carry `fingerprint_burn=True` and a `retry_with_fresh_profile` hint. Operator clears state manually after profile rotation.
+- **JS-challenge detection.** Vendor-specific selectors detect Cloudflare 1xxx / Under Attack / Press & Hold and similar interstitials before the agent attempts to extract content.
+- **Mobile emulation profiles.** `BROWSER_DEVICE_PROFILE` env var (per-agent or fleet-wide) selects a mobile UA + viewport + touch profile when sites gate on desktop fingerprints. Configured via env, not the dashboard.
+- **Session continuity (opt-in).** `BROWSER_SESSION_PERSISTENCE_ENABLED=1` enables a per-agent storage-state sidecar so cookies and localStorage survive container restarts. Default-off; operator/curl-only management via `/dashboard/api/agents/{id}/session`.
+- **Two-stage workspace upload.** `browser_upload_file` reads from the agent's `/data` and uploads via a stage-then-apply protocol with idempotency keys and a tmpfs partial reaper, so a half-completed upload can never end up attached to a form.
 
 ---
 
@@ -379,20 +394,28 @@ canonicalized parameters and results over a 15-call sliding window.
 | `write_file` | Write/append file in `/data` |
 | `list_files` | List/glob files in `/data` |
 | `http_request` | HTTP GET/POST/PUT/DELETE/PATCH |
-| `browser_navigate` | Open URL, extract page text via shared browser service |
+| `browser_navigate` | Open URL, extract page text via shared browser service. Auto-detects CAPTCHAs and may auto-solve or surface a help envelope. |
 | `browser_get_elements` | Accessibility tree snapshot with element refs (e1, e2, ...) |
+| `browser_find_text` | Locate elements by visible/accessible name (Unicode case-fold match) |
 | `browser_screenshot` | Capture page screenshot |
 | `browser_click` | Click element by ref or CSS selector |
+| `browser_click_xy` | Click at viewport-relative pixel coordinates (canvas / non-accessible widgets) |
 | `browser_type` | Fill input by ref or CSS selector |
+| `browser_fill_form` | Fill multiple labeled form fields in one call |
 | `browser_hover` | Hover over element to trigger dropdowns/tooltips |
 | `browser_scroll` | Scroll page up/down or scroll element into view |
 | `browser_wait_for` | Wait for CSS selector to appear/disappear |
 | `browser_press_key` | Press keyboard key or shortcut (Escape, Enter, Control+a) |
-| `browser_go_back` | Navigate back in browser history |
-| `browser_go_forward` | Navigate forward in browser history |
+| `browser_go_back` / `browser_go_forward` | Navigate browser history |
+| `browser_open_tab` | Open a URL in a new tab (becomes the active page) |
 | `browser_switch_tab` | List open tabs or switch to a specific tab |
+| `browser_upload_file` | Upload workspace files to a file-input element (1-5 files) |
+| `browser_download` | Click a ref to trigger a download and save it as an artifact (≤50MB) |
+| `browser_inspect_requests` | List recent network request URLs (redacted; no bodies or headers) |
 | `browser_reset` | Reset browser session (profile preserved) |
 | `browser_detect_captcha` | CAPTCHA detection (usually not needed — `browser_navigate` auto-detects) |
+| `browser_solve_captcha` | Explicitly request a CAPTCHA solve on the current page |
+| `request_captcha_help` | Hand a behavioral / persistent CAPTCHA to the user via the dashboard viewer |
 | `request_browser_login` | Navigate browser to a URL and send a VNC login card to the user for manual credential entry |
 | `generate_image` | Generate an image via Gemini or DALL-E 3 and save as an artifact |
 | `memory_search` | Hybrid search across workspace files and structured DB |
@@ -518,6 +541,7 @@ can schedule their own jobs using the `set_cron` tool.
 
 Supports 5-field cron expressions (`minute hour dom month dow`), interval
 shorthand (`every 30m`, `every 2h`), and state persisted to `config/cron.json`.
+Cron jobs can also dispatch in **tool-mode** (`tool_name` + `tool_params`), invoking a built-in tool directly without an LLM round — useful for cheap deterministic monitoring.
 
 ### Heartbeat System
 
@@ -572,6 +596,8 @@ agents:
 When an agent exceeds its budget, the vault rejects LLM calls with an error
 instead of forwarding them to the provider.
 
+CAPTCHA solver spend is tracked **separately** from LLM spend (per-agent and per-tenant USD caps with 50/80/100% threshold alerts) — see [Browser Capabilities](#browser-capabilities). The two budgets do not share a pool.
+
 ---
 
 ## Security Model
@@ -585,7 +611,7 @@ Defense-in-depth with six layers:
 | Credential separation | Vault holds keys, agents call via proxy | Key leakage, unauthorized API use |
 | Permission enforcement | Per-agent ACLs for messaging, blackboard, pub/sub, APIs | Unauthorized data access |
 | Input validation | Path traversal prevention, SSRF blocking, safe condition eval (no `eval()`), token budgets, iteration limits, rate limiting | Injection, runaway loops, network abuse |
-| Unicode sanitization | Invisible character stripping at ~90 call sites across 16 source files, covering all external input boundaries | Prompt injection via hidden Unicode |
+| Unicode sanitization | Invisible character stripping at ~70 call sites across 17 source files, covering all external input boundaries | Prompt injection via hidden Unicode |
 
 ### Dual Runtime Backend
 
@@ -764,6 +790,7 @@ OPENLEGION_CRED_SLACK_BOT_TOKEN=xoxb-...
 OPENLEGION_CRED_SLACK_APP_TOKEN=xapp-...
 OPENLEGION_CRED_WHATSAPP_ACCESS_TOKEN=EAAx...
 OPENLEGION_CRED_WHATSAPP_PHONE_NUMBER_ID=1234...
+OPENLEGION_CRED_WHATSAPP_APP_SECRET=...        # X-Hub-Signature-256 verification (production)
 
 # Log format: "json" (default) or "text" (human-readable)
 OPENLEGION_LOG_FORMAT=text
@@ -785,9 +812,10 @@ OPENLEGION_CRED_DISCORD_BOT_TOKEN=MTIz...
 OPENLEGION_CRED_SLACK_BOT_TOKEN=xoxb-...
 OPENLEGION_CRED_SLACK_APP_TOKEN=xapp-...
 
-# WhatsApp (both required)
+# WhatsApp (both required; APP_SECRET required for production webhook signature verification)
 OPENLEGION_CRED_WHATSAPP_ACCESS_TOKEN=EAAx...
 OPENLEGION_CRED_WHATSAPP_PHONE_NUMBER_ID=1234...
+OPENLEGION_CRED_WHATSAPP_APP_SECRET=...      # X-Hub-Signature-256 verification
 ```
 
 On next `openlegion start`, a pairing code appears — send it to your bot to link.
@@ -919,7 +947,7 @@ pytest tests/
 | Memory Integration | 6 | Vector search, cross-task recall, salience |
 | E2E | 17 | Container health, workflow, chat, memory, triggering |
 | Web Search | 2 | DuckDuckGo search tool |
-| **Total** | **2240** | |
+| **Total** | **4600+** | (Phase 6-10 added captcha/session/profile/health/cost tests not broken out above) |
 
 ---
 
@@ -1001,15 +1029,29 @@ src/
 │   ├── health.py                       # Health monitor + auto-restart
 │   ├── lanes.py                        # Per-agent FIFO task queues
 │   ├── traces.py                       # Request tracing + grouped summaries
-│   └── transcript.py                   # Provider-specific transcript sanitization
+│   ├── transcript.py                   # Provider-specific transcript sanitization
+│   ├── wallet.py                       # WalletService — Ethereum + Solana operations
+│   └── api_keys.py                     # Named API key management (salted SHA-256 hashes)
 ├── shared/
 │   ├── types.py                        # All Pydantic models (the contract)
 │   ├── utils.py                        # ID generation, logging, sanitization
 │   └── trace.py                        # Trace ID generation + correlation
 ├── browser/
+│   ├── __main__.py                     # Container entry (KasmVNC + Openbox + FastAPI)
 │   ├── server.py                       # Browser service FastAPI server
-│   ├── service.py                      # Camoufox session management
+│   ├── service.py                      # Camoufox session management (per-agent profiles)
+│   ├── captcha.py                      # CAPTCHA solver core (2captcha, capsolver)
+│   ├── captcha_policy.py               # Per-site classifier (auto-solve vs hand-off)
+│   ├── captcha_cost_counter.py         # Per-agent + per-tenant solver cost rollups
+│   ├── js_challenge.py                 # JS-challenge / vendor-fingerprint detection
+│   ├── session_persistence.py          # Storage-state sidecar (opt-in continuity)
+│   ├── profile_schema.py               # Profile schema versioning + uBO migration
+│   ├── flags.py                        # Centralized browser flag registry
+│   ├── ref_handle.py                   # RefHandle / ShadowHop element resolver
+│   ├── canary.py                       # Stealth canary probe
+│   ├── recorder.py                     # Behavior recorder
 │   ├── stealth.py                      # Anti-detection configuration
+│   ├── timing.py                       # Human-like timing jitter
 │   └── redaction.py                    # Credential redaction for browser content
 ├── channels/
 │   ├── base.py                         # Abstract channel with unified UX
@@ -1056,7 +1098,7 @@ config/
 | The mesh is the only door | No agent has network access except through the mesh. No agent holds credentials. |
 | Private by default, shared by promotion | Agents keep knowledge private. Facts are explicitly promoted to the blackboard. |
 | Explicit failure handling | Domain-specific exceptions propagated with context. No silent error swallowing. |
-| Small enough to audit | ~32,000 total lines. The entire codebase is auditable in a day. |
+| Small enough to audit | ~62,000 total lines. The entire codebase is still auditable in a day. |
 | Skills over features | New capabilities are agent skills, not mesh code. |
 | SQLite for all state | Single-file databases. No external services. WAL mode for concurrent reads. |
 | Zero vendor lock-in | LiteLLM supports 100+ providers. Markdown workspace files. No proprietary formats. |
@@ -1089,7 +1131,7 @@ Looking for alternatives? OpenLegion is often compared to:
 
 OpenLegion differs from all of these in combining **fleet orchestration,
 Docker isolation, credential vaulting, and cost enforcement** in a single
-~32,000 line auditable codebase.
+~62,000 line auditable codebase.
 
 **Keywords:** autonomous AI agents, multi-agent framework, LLM agent orchestration,
 self-hosted AI agents, Docker AI agents, OpenClaw alternative, AI agent security,

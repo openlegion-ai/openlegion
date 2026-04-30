@@ -32,10 +32,11 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 | Path | Responsibility |
 |---|---|
 | **`src/shared/`** | |
-| `types.py` | Pydantic models — THE cross-component contract (335 lines, 24 models). `_generate_id()` helper. `AGENT_ID_RE_PATTERN` unified regex. |
+| `types.py` | Pydantic models — THE cross-component contract (369 lines, 24 models). `_generate_id()` helper. `AGENT_ID_RE_PATTERN` unified regex. `RESERVED_AGENT_IDS = {"mesh", "operator", "canary-probe"}`. `DashboardEvent.type` Literal enumerates 26 WebSocket event names. |
 | `utils.py` | `sanitize_for_prompt()`, `setup_logging()`, misc helpers |
 | `trace.py` | Distributed trace-ID generation and propagation |
 | `models.py` | Model cost/context window registry backed by LiteLLM, `estimate_cost()` |
+| `redaction.py` | Central credential/URL redactor (336 lines). `SECRET_PATTERNS` (9 regexes), `SENSITIVE_QUERY_PARAMS`, `redact_url()`, `deep_redact()`. Single source of truth replacing duplicated logic in `browser/redaction.py` + agent builtins. |
 | **`src/agent/`** | |
 | `loop.py` | Agent execution loop (task + chat mode). `MAX_ITERATIONS=20`, `CHAT_MAX_TOOL_ROUNDS=30`, `CHAT_MAX_TOTAL_ROUNDS=200`, `_MAX_SESSION_CONTINUES=5`, `HEARTBEAT_MAX_ITERATIONS=10`. Env-var bounds clamped via `_clamp_env()`. |
 | `server.py` | Agent FastAPI server (27 endpoints). `_FILE_CAPS` (7 entries) enforced on workspace writes (HTTP 413). `_WORKSPACE_ALLOWLIST` frozenset gates reads/writes. |
@@ -49,13 +50,13 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 | `mcp_client.py` | MCP tool server client and lifecycle |
 | `attachments.py` | Multimodal attachment enrichment (images → base64 vision blocks, PDFs → text extraction) |
 | **`src/agent/builtins/`** | |
-| `browser_tool.py` | Browser automation via shared Camoufox service. CAPTCHA detection/solving, screenshot capture with multimodal image blocks. |
+| `browser_tool.py` | Browser automation via shared Camoufox service (24 `@skill` tools). Navigation/DOM (`browser_navigate`, `browser_get_elements`, `browser_wait_for`, `browser_screenshot`, `browser_find_text`, `browser_open_tab`, `browser_switch_tab`, `browser_go_back`, `browser_go_forward`, `browser_reset`), interaction (`browser_click`, `browser_click_xy`, `browser_type`, `browser_hover`, `browser_scroll`, `browser_press_key`, `browser_fill_form`), inspection (`browser_inspect_requests`, `browser_detect_captcha`), file transfer (`browser_upload_file`, `browser_download`), CAPTCHA + handoff (`browser_solve_captcha`, `request_captcha_help`, `request_browser_login`). Screenshot capture emits multimodal image blocks. |
 | `exec_tool.py` | Shell execution scoped to `/data` (`_MAX_TIMEOUT=300`) |
 | `file_tool.py` | File I/O with two-stage path traversal protection (`lstat()` for symlink safety) |
 | `http_tool.py` | HTTP requests with CRED handles, SSRF protection (DNS pinning, IP blocking incl. CGNAT, 6to4, Teredo), cross-origin auth header stripping |
 | `memory_tool.py` | Memory search with hierarchical fallback, memory save |
 | `mesh_tool.py` | Blackboard (with `sanitize_for_prompt()`), pub/sub, notify_user, list_agents, artifacts, cron, spawn |
-| `coordination_tool.py` | Structured multi-agent coordination protocol — hand_off, check_inbox, update_status. Higher-level wrappers over blackboard for inter-agent work handoffs. |
+| `coordination_tool.py` | Structured multi-agent coordination protocol — `hand_off`, `check_inbox`, `update_status`, `complete_task`. Higher-level wrappers over blackboard for inter-agent work handoffs. |
 | `vault_tool.py` | Credential generation without returning actual values |
 | `web_search_tool.py` | DuckDuckGo search (no API key needed) |
 | `image_gen_tool.py` | Image generation via Gemini or OpenAI DALL-E 3, saves output as artifacts |
@@ -66,12 +67,12 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 | `fleet_tool.py` | Operator-only fleet management tools (`list_templates`, `apply_template`) |
 | `operator_tools.py` | Operator-only tools for fleet/project orchestration (`propose_edit`, `confirm_edit`, `save_observations`, `read_agent_history`, `create_agent`, `list_projects`, `get_project`, `create_project`, `add_agents_to_project`, `remove_agents_from_project`, `update_project_context`) |
 | **`src/host/`** | |
-| `server.py` | Mesh FastAPI app factory — ~60 endpoints, all permission-checked. `_RATE_LIMITS` dict (16 entries: 14 static + `ext_credentials`/`ext_status` added at external-API init). VNC reverse proxy with agent token rejection. Localhost validation for `x-mesh-internal`. |
+| `server.py` | Mesh FastAPI app factory — 66 endpoints (`@app.*` decorators), all permission-checked. `_RATE_LIMITS` dict (18 entries: 16 static + `ext_credentials`/`ext_status` added at external-API init; `upload_stage`/`upload_apply` added in Phase 5 §8.1 for the two-stage upload protocol). VNC reverse proxy with agent token rejection. Localhost validation for `x-mesh-internal`. `_require_operator_or_internal` permission tier between "any authenticated agent" and loopback-only. |
 | `mesh.py` | Blackboard (SQLite WAL), PubSub, MessageRouter |
 | `runtime.py` | RuntimeBackend ABC → DockerBackend / SandboxBackend. Container security: non-root UID 1000, `cap_drop=[ALL]`, `no-new-privileges`, `read_only=True`, `tmpfs=/tmp` (100m, noexec, nosuid), `mem_limit=384m`, `cpu_quota=15000` (0.15 CPU), `pids_limit=256`. |
 | `transport.py` | Transport ABC → HttpTransport / SandboxTransport |
 | `credentials.py` | Two-tier credential vault (SYSTEM_*/CRED_*) + LLM API proxy. OpenAI OAuth support. |
-| `permissions.py` | Per-agent ACL enforcement (glob patterns, deny-all default). `can_spawn`, `can_manage_cron`. |
+| `permissions.py` | Per-agent ACL enforcement (glob patterns, deny-all default). `can_spawn`, `can_manage_cron`, `can_browser_action`. `KNOWN_BROWSER_ACTIONS` frozenset (mesh-side input validator for `browser_command` action strings; rejects typos with HTTP 400). `browser_actions` permission key on `AgentPermissions`: `None` = all known actions allowed (default-allow back-compat), `["*"]` = explicit allow-all, `[]` = deny-all, specific list = opt-out narrowing. |
 | `lanes.py` | Per-agent FIFO task queues (followup/steer/collect modes) |
 | `health.py` | Health monitor with auto-restart and rate limiting |
 | `costs.py` | Per-agent cost tracking + budget enforcement (SQLite) |
@@ -87,11 +88,20 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 | **`src/browser/`** | |
 | `__main__.py` | Starts KasmVNC (Xvnc), Openbox WM, FastAPI command server |
 | `server.py` | Browser service FastAPI app. Raises `RuntimeError` on startup when auth token missing in production (MESH_AUTH_TOKEN set but BROWSER_AUTH_TOKEN absent); warns only in dev. |
-| `service.py` | BrowserManager with per-agent Camoufox instances. `_MAX_WALK_DEPTH=50` for DOM snapshot. Per-agent X11 WID tracking for targeted VNC focus. §22 fingerprint health monitor: rolling per-agent rejection window (`_FINGERPRINT_WINDOW_SIZE=10`, burn threshold 50%); post-solve page-state monitor probes vendor-specific selectors (Cloudflare 1xxx, DataDome, PerimeterX, Imperva, Akamai BMP) + branded rejection text; burn surfaces `fingerprint_burn=True` + `next_action="retry_with_fresh_profile"` on subsequent captcha envelopes; operator clears manually after profile rotation. §24 per-tenant cost telemetry: per-minute threshold-alert pass on the metrics tick (50/80/100% caps via `CAPTCHA_COST_LIMIT_USD_PER_TENANT_MONTH`), once per crossing per month, emits `tenant_spend_threshold` events through the EventBus. |
-| `captcha_cost_counter.py` | §24 tenant rollup helpers — `_tenant_for(agent_id)` (LRU(256), reverse map from `config/projects/`), `get_tenant_total`, `get_tenant_breakdown`, `record_tenant_threshold_alerts` (single-fire-per-crossing-per-month), `reset_tenant_cache` / `reset_threshold_state` invalidation hooks. In-memory state is current-month only — older windows defer to §11.10's persisted snapshots. |
-| `redaction.py` | Credential redaction for browser output |
-| `stealth.py` | Anti-bot fingerprint building (Windows fingerprint, WebRTC kill, `BROWSER_UA_VERSION` override) |
-| `timing.py` | Timing jitter for human-like behavior |
+| `service.py` | BrowserManager with per-agent Camoufox instances. `_MAX_WALK_DEPTH=50` for DOM snapshot. Per-agent X11 WID tracking for targeted VNC focus. §22 fingerprint health monitor: rolling per-agent rejection window (`_FINGERPRINT_WINDOW_SIZE=10`, burn threshold 50%); post-solve page-state monitor probes vendor-specific selectors (Cloudflare 1xxx, DataDome, PerimeterX, Imperva, Akamai BMP) + branded rejection text; burn surfaces `fingerprint_burn=True` + `next_action="retry_with_fresh_profile"` on subsequent captcha envelopes; operator clears manually after profile rotation (no auto-rotate). §24 per-tenant cost telemetry: per-minute threshold-alert pass on the metrics tick (50/80/100% caps via `CAPTCHA_COST_LIMIT_USD_PER_TENANT_MONTH`), once per crossing per month, builds a `tenant_spend_threshold` payload that the mesh poller dispatches as a `browser_metrics` WebSocket event with `data.type == "tenant_spend_threshold"` (there is no top-level `tenant_spend_threshold` `DashboardEvent.type` literal). |
+| `captcha.py` | CAPTCHA solver core (2183 lines). 2captcha + capsolver providers, vendor classifier, `_VALID_CAPTCHA_KINDS` allowlist (behavioral kinds rejected via `request_captcha_help` handoff), millicent (1/100,000 USD) cost accounting, fleet-wide kill switch via `CAPTCHA_DISABLED`, per-agent + per-tenant cost caps, circuit breaker. |
+| `captcha_cost_counter.py` | §24 tenant rollup helpers — `_tenant_for(agent_id)` (LRU(256), reverse map from `config/projects/`), `get_tenant_total`, `get_tenant_breakdown`, `record_tenant_threshold_alerts` (single-fire-per-crossing-per-month), `reset_tenant_cache` / `reset_threshold_state` invalidation hooks. Builds `tenant_spend_threshold` payloads consumed by the mesh poller and surfaced on the wire as `browser_metrics` events with `data.type == "tenant_spend_threshold"`. In-memory state is current-month only — older windows defer to §11.10's persisted snapshots. |
+| `captcha_policy.py` | Per-site CAPTCHA policy classifier (374 lines). Maps domain → behavior recommendations (auto-solve / handoff / skip). |
+| `js_challenge.py` | §19 JS-challenge vendor detection (188 lines). Identifies Cloudflare Under Attack, DataDome, PerimeterX, Imperva, Akamai BMP behavioral challenges that must route to `request_captcha_help`. |
+| `session_persistence.py` | §20 session continuity sidecar (379 lines). Per-agent storage_state JSON sidecar; **opt-in** via `BROWSER_SESSION_PERSISTENCE_ENABLED` (default false). |
+| `flags.py` | Centralized flag loader (393 lines). `KNOWN_FLAGS` (53 entries) with override precedence per-agent → settings.json → env → default. `_ENV_ONLY_FLAGS` blacklist for sensitive solver creds (`CAPTCHA_SOLVER_KEY`, `CAPTCHA_SOLVER_KEY_SECONDARY`, `CAPTCHA_SOLVER_PROXY_LOGIN`, `CAPTCHA_SOLVER_PROXY_PASSWORD`) — STRIPPED from `config/settings.json` at load with a warning, env-only by design (bypasses the `OPENLEGION_CRED_*` vault). |
+| `profile_schema.py` | Browser profile schema versioning + uBO migration (572 lines). |
+| `ref_handle.py` | RefHandle / ShadowHop reference resolution (378 lines) — stable element handles across snapshots. |
+| `canary.py` | Stealth canary (357 lines). Background `canary-probe` agent that sweeps test surfaces for fingerprint detectability. |
+| `recorder.py` | Behavior recorder for replay/debugging (252 lines). |
+| `redaction.py` | Credential redaction for browser output (delegates to `src/shared/redaction.py`). |
+| `stealth.py` | Anti-bot fingerprint building (Windows fingerprint, WebRTC kill, `BROWSER_UA_VERSION` override). Mobile emulation via `BROWSER_DEVICE_PROFILE` — caveat: profile sets UA strings but does not change underlying Camoufox Firefox engine, so server-side TLS/JA3 fingerprint may still be desktop. |
+| `timing.py` | Timing jitter for human-like behavior. |
 | **`src/channels/`** | |
 | `__init__.py` | `AT_MENTION_RE` regex for mention parsing |
 | `base.py` | Abstract Channel with PairingManager. All messages sanitized. |
@@ -100,7 +110,7 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 | `slack.py` | Slack adapter (Socket Mode, sanitized streaming) |
 | `whatsapp.py` | WhatsApp Cloud API adapter (`X-Hub-Signature-256` verification, warns when signature verification disabled) |
 | **`src/dashboard/`** | |
-| `server.py` | Dashboard FastAPI router + 106 API endpoints + VNC URL injection. Alpine.js SPA with `autoescape=True`, CSP headers, CSRF via `X-Requested-With` requirement on state-changing endpoints. |
+| `server.py` | Dashboard FastAPI router + 120 API endpoints (119 `@api_router.*` + 1 catchall) + VNC URL injection. Alpine.js SPA with `autoescape=True`, CSP headers, CSRF via `X-Requested-With` requirement on state-changing endpoints. SPA system tab has 11 sub-tabs (`activity`, `costs`, `automation`, `integrations`, `apikeys`, `wallet`, `network`, `storage`, `operator`, `browser`, `settings`); operator agent is rendered as the first card in the standalone fleet view (excluded from quota/cost/broadcast math) and is rejected by `_create_project` / `_add_agent_to_project` with `ValueError → HTTP 400`. |
 | `events.py` | EventBus for real-time WebSocket streaming. `threading.Lock` on `emit()`. |
 | `auth.py` | Session cookie verification for dashboard access |
 | `static/` | JS (app.js, websocket.js), CSS, avatars (50 SVGs), favicons |
@@ -158,7 +168,7 @@ Provisioner manages engine instances via Docker/systemd on Hetzner VPS:
 ### Error Handling
 - Domain-specific exceptions propagated with context
 - Overly broad catches avoided — transient vs permanent distinguished
-- `sanitize_for_prompt()` strips invisible Unicode across all input boundaries (88 call sites across 16 source files)
+- `sanitize_for_prompt()` strips invisible Unicode across all input boundaries (72 call sites across 17 source files; some duplicated logic was consolidated into `src/shared/redaction.py`)
 - Security errors return generic messages (no leaking internals)
 
 ### Async Patterns
@@ -186,7 +196,7 @@ Provisioner manages engine instances via Docker/systemd on Hetzner VPS:
 - **Agents never hold API keys.** All LLM/API calls go through mesh credential vault.
 - **No `eval()`/`exec()` on untrusted input.** Skill self-authoring uses AST validation.
 - **Permission checks on all mesh endpoints.** Default deny.
-- **Rate limits on state-mutating mesh endpoints.** 16 rate-limited categories defined in `server.py:_RATE_LIMITS` (14 static + 2 added at external-API init).
+- **Rate limits on state-mutating mesh endpoints.** 18 rate-limited categories defined in `server.py:_RATE_LIMITS` (16 static + `ext_credentials`/`ext_status` added at external-API init). Static set includes `upload_stage`/`upload_apply` for the Phase 5 §8.1 two-stage upload protocol.
 - **File path traversal protection.** Two-stage validation in `file_tool.py` (reject `..` before resolution, then walk with symlink resolution via `lstat()`). Workspace `_read_file()` uses `resolve` + `is_relative_to`.
 - **Agent container hardening.** Non-root (UID 1000), `no-new-privileges`, `cap_drop=[ALL]`, `read_only=True`, `tmpfs=/tmp` (100m, noexec, nosuid), 384MB memory, 0.15 CPU, `pids_limit=256`. Browser service container has a different posture (writable /home/browser for Firefox state) — see **Browser container network egress filter** below for its privilege model.
 - **All untrusted text sanitized** via `sanitize_for_prompt()` before reaching LLM context.
@@ -202,6 +212,11 @@ Provisioner manages engine instances via Docker/systemd on Hetzner VPS:
 - **Webhook body size limit.** 1MB with Content-Length pre-check.
 - **Wallet seed protection.** Seed reveal endpoint returns HTTP 410 (seed shown once at init). Init response has `Cache-Control: no-store`.
 - **Env file permissions.** `.agent.env` written with `chmod(0o600)`.
+- **Per-action browser permission gate.** `AgentPermissions.browser_actions: list[str] | None` narrows the per-action surface beyond the coarse `can_use_browser`. Semantics: `None` (default) = all known actions allowed (back-compat), `["*"]` = explicit allow-all, `[]` = deny all browser actions, specific list = opt-out narrowing. Mesh-side `KNOWN_BROWSER_ACTIONS` frozenset rejects unknown action names with HTTP 400 (input validator, not a permission gate).
+- **Operator-or-internal permission tier.** `_require_operator_or_internal` on `host/server.py` is a third tier between "any authenticated agent" and loopback-only `x-mesh-internal`. Demotes endpoints like `/mesh/system/metrics` and `/mesh/agents/{id}/metrics` to operator-only.
+- **Reserved agent IDs.** `RESERVED_AGENT_IDS = {"mesh", "operator", "canary-probe"}` — `canary-probe` is the stable agent ID owned by the §22/§23 stealth canary sweeper.
+- **Two-stage upload protocol.** `/mesh/browser/upload-stage` stages bytes to a tmpfs scratch dir with idempotency-key support; `/mesh/browser/upload_file` resolves staged handles → bytes and forwards to the browser service. A 5×TTL `.partial` reaper sweeps abandoned stages. Per-file cap 50 MB (`OPENLEGION_UPLOAD_STAGE_MAX_MB`), max 5 files (`_UPLOAD_MAX_FILES=5`).
+- **CAPTCHA solver credentials bypass the vault.** `CAPTCHA_SOLVER_KEY`, `CAPTCHA_SOLVER_KEY_SECONDARY`, `CAPTCHA_SOLVER_PROXY_LOGIN`, `CAPTCHA_SOLVER_PROXY_PASSWORD` are listed in `flags._ENV_ONLY_FLAGS` and STRIPPED from `config/settings.json` at load. They are env-only by design (separate from the `OPENLEGION_SYSTEM_*` / `OPENLEGION_CRED_*` vault) and pushed to the browser service container via `/restart-agents`.
 
 ## Dependencies & Infrastructure
 
@@ -238,11 +253,12 @@ Provisioner manages engine instances via Docker/systemd on Hetzner VPS:
 3. **Module-level globals.** `_skill_staging` in skills.py (threading lock protected), `_client` in http_tool.py (connection pooling). Avoid adding more.
 4. **Subagent browser concurrency.** Module-level state means subagents shouldn't use browser concurrently.
 5. **VNC proxy creates httpx client per request** — acceptable at current usage levels.
-6. **`src/shared/types.py` is the contract.** Every cross-component message is a Pydantic model here (335 lines, 24 models).
+6. **`src/shared/types.py` is the contract.** Every cross-component message is a Pydantic model here (369 lines, 24 models). Distinct from `DashboardEvent.type` (26 WebSocket event-name literals) — the two are easy to conflate.
 7. **LLM tool-calling message roles must alternate.** `user → assistant(tool_calls) → tool(result) → assistant`. `_trim_context` merges summary into first user message to preserve this invariant.
 8. **busy_timeout variance.** Traces uses 5000ms while other SQLite connections use 30000ms.
-9. **Monolithic server files.** `dashboard/server.py` (~3045 lines, 106 endpoints) and `host/server.py` (~1566 lines, ~60 endpoints) are single function-scoped definitions.
+9. **Monolithic server files.** `dashboard/server.py` (~5319 lines, 120 endpoints) and `host/server.py` (~4032 lines, 66 endpoints) are single function-scoped definitions.
 10. **`containers.py` backward-compat alias.** Only consumed by E2E tests.
+11. **Phase 6-10 browser surface.** CAPTCHA cost is tracked in **millicents** (1/100,000 USD) — separate ledger from LLM cost, persisted to `data/captcha_costs.json`. Per-agent + per-tenant monthly caps with 50/80/100% threshold alerts. Fleet-wide `CAPTCHA_DISABLED` kill switch + per-provider circuit breaker. **Session continuity is opt-in** via `BROWSER_SESSION_PERSISTENCE_ENABLED` (default false). **Mobile profile UA caveat:** `BROWSER_DEVICE_PROFILE` rewrites UA strings but does not change the underlying Camoufox Firefox engine, so server-side TLS/JA3 fingerprint may still be desktop. **Fingerprint burn does not auto-rotate** — operators must clear the burn flag manually after rotating the profile.
 
 ## Git Workflow
 
@@ -272,7 +288,7 @@ pytest tests/test_loop.py -x -v
 - Mock LLM responses, not the loop. See `tests/test_loop.py:_make_loop()`.
 - `AsyncMock` for async methods, SQLite in-memory or `tmp_path` for DB paths.
 - E2E tests skip gracefully without Docker + API key.
-- 62 test files covering all modules.
+- 123 test files covering all modules (Phase 6-10 added captcha/session/fingerprint test suites).
 
 ### Test File Mapping
 
@@ -416,3 +432,48 @@ pytest tests/test_loop.py -x -v
 - `discrepancy-report.md` — consolidated findings
 
 **Worktree state.** `docs/alignment-audit` branch off `main`, 13 tracked files modified + 1 collateral (`skills/README.md`). Ready for commit and PR.
+
+### Documentation Alignment Audit — Scoped Delta — 2026-04-30 (✅ complete)
+
+**Worktree:** `docs/phase6-10-alignment` (off `main`). **Scope:** 6 files — `README.md`, `CLAUDE.md`, `docs/agent-tools.md`, `docs/configuration.md`, `docs/security.md`, `docs/dashboard.md`. Other doc files explicitly excluded as already-aligned 2026-04-13 (low churn since).
+
+**Trigger.** ~30 commits since 2026-04-13 (Phases 6-10 of the browser/CAPTCHA work) added ~12K lines across 26 files: `src/browser/captcha.py` (+2085), `captcha_cost_counter.py` (+788), `captcha_policy.py`, `js_challenge.py`, `session_persistence.py`, `flags.py`, plus +5456 in `service.py`, +1369 in `dashboard/server.py`, +408 in `app.js`, +450 in `index.html`, and +167 in `host/server.py`. Only 2 doc commits landed in the same window — the surface had drifted hard.
+
+**Method.** 3 Phase-1 subagents extracted code truth (browser/CAPTCHA, dashboard, config/security delta) → outputs at `/tmp/engine-docs-audit-2026-04-30/phase1/`. 3 Phase-2 subagents audited the in-scope docs against that truth → discrepancy reports at `/tmp/engine-docs-audit-2026-04-30/phase2/`. 6 Phase-3 subagents applied fixes in parallel (one per file) inside this worktree.
+
+**Totals.** 14 🔴 lies · 22 🟡 stale · 92 🟢 missing · 16 🔵 vague · 2 ❌ broken examples (≈146 findings).
+
+**Highest-impact corrections (🔴):**
+- **`docs/security.md` SSRF misattribution.** Doc said `http_tool.py` was the universal SSRF control. Reality: browser-initiated traffic is gated by the **iptables egress filter** installed by `docker/browser-entrypoint.sh` (`cap_drop=ALL` + `cap_add=NET_ADMIN/SETUID/SETGID`); `_resolve_and_pin()` is a friendly early-reject. Two-traffic split now documented.
+- **9 of 24 browser tools entirely undocumented in `docs/agent-tools.md`** — `browser_click_xy`, `browser_find_text`, `browser_fill_form`, `browser_open_tab`, `browser_inspect_requests`, `browser_upload_file`, `browser_solve_captcha`, `browser_download`, `request_captcha_help`. All added with full param/return schemas.
+- **`browser_get_elements` row showed `--` for parameters** — actually takes 5 (`filter`, `from_ref`, `diff_from_last`, `frame`, `include_frames`).
+- **`browser_screenshot` claimed PNG output** — default is WebP; PNG is fallback. Three params (`format`, `quality`, `scale`) were undocumented. Token-cost surprise for agents that pattern off the doc.
+- **CAPTCHA cost unit was unstated** — internal accounting is in **millicents** (1/100,000 USD). Any "cents" language was wrong.
+- **`tenant_spend_threshold` is NOT a top-level `DashboardEvent.type` literal.** It rides as a `browser_metrics` payload with `data.type === "tenant_spend_threshold"` discriminator. Both CLAUDE.md (§24 paragraph) and `docs/dashboard.md` corrected; old "emits ... events through the EventBus" language was misleading.
+- **`browser_actions` permission key was invisible** — added to `docs/security.md` and `docs/configuration.md` with full semantics: `None` = all known actions allowed (back-compat default), `["*"]` = explicit allow-all, `[]` = deny-all, specific list = opt-out narrowing. Asymmetric vs. `allowed_credentials` deny-all default.
+- **CAPTCHA solver creds bypass the `OPENLEGION_CRED_*` vault.** Four flags (`CAPTCHA_SOLVER_KEY`, `CAPTCHA_SOLVER_KEY_SECONDARY`, `CAPTCHA_SOLVER_PROXY_LOGIN`, `CAPTCHA_SOLVER_PROXY_PASSWORD`) are in `flags._ENV_ONLY_FLAGS` and **stripped from `config/settings.json` at load with a warning**. Documented across all 4 doc files.
+- **`OPENLEGION_BROWSER_ALLOW_HOST_NETWORK` is hard-required for host-network mode** (RuntimeError at boot otherwise). Was previously implied as optional.
+- **`/mesh/system/metrics` and `/mesh/agents/{id}/metrics` were silently demoted to operator-only** by `_require_operator_or_internal`. Documented in `docs/security.md` Auth Tiers.
+- **`target_ref` parameter on `browser_solve_captcha` is silently ignored** (RESERVED for §11.6 deferred multi-captcha work). Now stated explicitly.
+- **CSRF curl example in `docs/dashboard.md` used wrong field** (`agent_id` vs. actual handler param `agent`).
+
+**Bulk additions (🟢):**
+- `docs/configuration.md` (+153 lines): 50+ env vars from `flags.KNOWN_FLAGS` grouped (CAPTCHA solver core / per-type timeouts / proxy / pacing / cost caps & site policy / kill switches / snapshot/screenshot / behavior recorder / upload-download staging / session continuity / mobile profile), `_ENV_ONLY_FLAGS` set, `data/captcha_costs.json` runtime file, `OPENLEGION_BROWSER_ALLOW_HOST_NETWORK` / `BROWSER_EGRESS_ALLOWLIST` / `BROWSER_EGRESS_DISABLE`, `OPENLEGION_REDACTION_URL_QUERY_ALLOW`, `OPENLEGION_SETTINGS_PATH`, `OPENLEGION_UBLOCK_XPI`, plan-aware browser sizing, `canary-probe` reserved ID, `browser_actions` permission with all three semantic forms.
+- `docs/security.md` (+142 lines): six-layer model expanded to nine layers; new sections — Browser Service Container (iptables egress + capability set), Auth Tiers, Operator-only Browser Surfaces, CAPTCHA Solver Controls (kill switch / circuit breaker / cost caps / fingerprint burn), File-transfer Endpoints (two-stage upload), Per-action Browser Gating, Reserved Agent IDs (incl. `canary-probe`); credential-redaction table now lists all 9 patterns from `src/shared/redaction.py` with URL-component-aware rules.
+- `docs/dashboard.md` (+173 lines): ~20 missing endpoints across new tables (Control & Handoffs, Settings & Metrics, Operator-Only no-UI), full 11-sub-tab System section (Activity / Costs / Automation / Integrations / API Keys / Wallet / Network / Storage / Operator / Browser / Settings), CAPTCHA help handoff card, Cookie/Session Import card, operator-agent fleet rendering rules, 26 `DashboardEvent.type` literals enumerated, **CSV column schema** (`period_start, agent_id, millicents, dollars, data_scope`) with `monthly_actual` vs. `current_month_aggregate` semantics and final synthetic `__tenant_total__` row.
+- `docs/agent-tools.md`: 9 tools added, 8 revised, new explanatory blocks for CAPTCHA solving (millicents / solver creds bypass vault / `target_ref` ignored / behavioral kinds rejected / outcome enumeration), fingerprint burn (manual reset only), permission gating, operator kill switches.
+- `README.md`: 9 browser tools added to capabilities table, new `Browser Capabilities` subsection covering CAPTCHA solving + kill switch + cost caps + fingerprint health + JS-challenge detection + mobile profiles + session continuity (flagged opt-in / default-off) + two-stage upload, `src/browser/` listing 4 → 16 modules, `WHATSAPP_APP_SECRET` added, test count 2240 → 4600+, codebase ~32K → ~62K lines.
+- `CLAUDE.md`: module table refreshed (`captcha.py`, `captcha_cost_counter.py`, `captcha_policy.py`, `js_challenge.py`, `session_persistence.py`, `flags.py`, `profile_schema.py`, `ref_handle.py`, `canary.py`, `recorder.py` added under `src/browser/`; `redaction.py` added under `src/shared/`); counts corrected (`_RATE_LIMITS` 16 → 18, mesh endpoints ~60 → 66, dashboard endpoints 106 → 120, types.py 335 → 369 lines (model count holds at 24; the 26 is the distinct `DashboardEvent.type` Literal arity), dashboard.py 3045 → 5319 lines, host.py 1566 → 4032 lines, sanitize call sites 88/16 files → 72/17 files, test files 62 → 123); new Security Boundaries entries (per-action browser gating, operator-or-internal tier, reserved agent IDs, two-stage upload, CAPTCHA solver creds bypass vault); Constraint #11 (Phase 6-10 browser surface — millicents / monthly caps / kill switch / circuit breaker / session continuity opt-in / mobile profile UA caveat / fingerprint burn manual-reset).
+
+**Notes flagged for human review:**
+- Phase 1 truth docs disagreed on `KNOWN_BROWSER_ACTIONS` size (1A: 26, 1C: 23). Phase-3C reconciled by direct grep → went with **26**. Verifier should confirm.
+- README claims `OPENLEGION_CRED_CAPTCHA_SOLVER_KEY` env name in one passing reference, but solver creds are `_ENV_ONLY_FLAGS` (no `OPENLEGION_CRED_*` prefix). Verifier should re-check.
+- Phase 1B claimed per-agent browser-metrics fetch is dead state; Phase 3D's reading of `app.js:5733` + `index.html:2986-3036` suggests sparkline path is live. Doc kept generic. Verifier should re-check whether docs should claim per-agent sparkline rendering.
+
+**Artifacts (retained at `/tmp/engine-docs-audit-2026-04-30/` for reference):**
+- `phase1/1A-browser-captcha-truth.md` — 695 lines, browser/CAPTCHA inventory
+- `phase1/1B-dashboard-truth.md` — dashboard endpoints/UI inventory
+- `phase1/1C-config-security-truth.md` — 518 lines, config/security delta inventory
+- `phase2/2A-agent-tools-findings.md`, `phase2/2B-config-security-findings.md`, `phase2/2C-dashboard-readme-claudemd-findings.md` — discrepancy reports
+
+**Worktree state.** `docs/phase6-10-alignment` branch off `main`, 6 files modified (606 insertions, 100 deletions). Verification pending; commit + PR to follow.

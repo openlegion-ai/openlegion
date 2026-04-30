@@ -14,9 +14,9 @@ The dashboard uses a consolidated three-tab layout:
 
 | Tab | What It Shows |
 |-----|--------------|
-| **Fleet** | Agent cards, agent detail views, configuration editing |
+| **Fleet** | Agent cards (operator card prepended in standalone view), agent detail views, configuration editing |
 | **Activity** | Traces, live events, blackboard, costs, and automation |
-| **System** | Credentials, pub/sub, model pricing, network/proxy settings |
+| **System** | 11 sub-tabs: Activity / Costs / Automation / Integrations / API Keys / Wallet / Network / Storage / Operator / Browser / Settings — see [System Tab](#system-tab) |
 
 A command palette (**Cmd+K** / **Ctrl+K**) provides quick access to agents, actions, and navigation. The search button in the nav bar also opens it.
 
@@ -53,6 +53,16 @@ Overview of all registered agents showing health status, activity state (idle/th
 
 When the shared browser service is running, an embedded KasmVNC viewer appears in each agent's detail view, providing a live view of the browser session. If the browser service has not started or is unavailable, the VNC viewer is not shown.
 
+### Operator Agent Rendering
+
+The operator is a system agent that builds and manages your workforce. It is rendered differently from regular agents:
+
+- In the **standalone fleet view** (no project selected), the operator card is prepended to the grid as the first card with a `system` badge.
+- Inside a project view, the operator card is **not** rendered — operator is never a project member. The backend rejects `POST /api/projects` and `POST /api/projects/{name}/members` requests that include the operator (`HTTP 400`).
+- Clicking the operator card routes to **System → Operator** (not the standard agent detail panel).
+- The operator is **excluded from quota math, fleet cost/token totals, and broadcasts** — only "real" agents count against `OPENLEGION_MAX_AGENTS` and receive broadcast messages.
+- The standard agent detail panel for operator (if reached via deep link) shows a banner directing the user to the Operator system sub-tab; **Heartbeat Pause** is hidden.
+
 ## Activity Tab
 
 Sub-views toggled via a tab bar at the top of the panel:
@@ -69,9 +79,37 @@ Sub-views toggled via a tab bar at the top of the panel:
 
 ## System Tab
 
-Environment overview showing configured credentials with tier labels (system or agent, names only, never values), pub/sub subscriptions, and model pricing tables. Add new credentials from a dropdown of LLM providers, known agent tools (Brave Search, Apollo, Hunter), or custom service names.
+The System tab is split into 11 sub-tabs along the top:
 
-The System tab also hosts a **Network** subsection for fleet-wide and per-agent proxy configuration (`GET/PUT /api/network/proxy`, `PUT /api/agents/{id}/proxy`). See [Proxy Configuration](#proxy-configuration) for details.
+| Sub-tab | What It Shows |
+|---------|--------------|
+| **Activity** | Trace stream + live event log (same backing as Activity tab, scoped here for system-level audit) |
+| **Costs** | Per-agent LLM spend with period selector and budget bars |
+| **Automation** | Cron jobs and webhook endpoints |
+| **Integrations** | Configured credentials with tier labels (system or agent, names only, never values), pub/sub subscriptions, and model pricing. Add credentials from a dropdown of LLM providers, known agent tools (Brave Search, Apollo, Hunter), or custom service names |
+| **API Keys** | Named external API keys (`/api/external-api-keys`) for inbound integrations |
+| **Wallet** | Wallet seed init, addresses (Ethereum + Solana), RPC endpoints, per-agent wallet enablement |
+| **Network** | Fleet-wide and per-agent proxy configuration (`GET/PUT /api/network/proxy`, `PUT /api/agents/{id}/proxy`). See [Proxy Configuration](#proxy-configuration) |
+| **Storage** | Agent SQLite databases with purge buttons. Each row shows DB id, size, oldest timestamp, and a `purgeable` flag |
+| **Operator** | Operator agent settings (model picker, heartbeat editor) and the operator audit log ("Change Log"), backed by `/api/operator-audit`. See [Operator Sub-tab](#operator-sub-tab) |
+| **Browser** | Live browser metrics fleet table, interaction speed and delay sliders, idle-timeout, and CAPTCHA solver provider/key. See [Browser Sub-tab](#browser-sub-tab) |
+| **Settings** | Default model, runtime logs viewer, and miscellaneous toggles |
+
+### Operator Sub-tab
+
+Operator-only system-agent control panel. Shows a status card with health indicator, a model picker (searchable dropdown over the same `availableModels` list used in the agent edit form), and a heartbeat-schedule editor (number + unit, e.g. `15m`, `1h`). Heartbeat **Pause** is intentionally hidden — the operator is not subject to operator-level pause controls.
+
+Below the status card, a **Change Log** table renders the operator audit feed (`GET /api/operator-audit?per_page=20&page=N`). Each entry shows actor, action, target, and timestamp. The list paginates client-side via `auditPage`.
+
+### Browser Sub-tab
+
+| Section | Backing endpoint(s) | Notes |
+|---------|--------------------|-------|
+| Live Browser Health (fleet table) | WS `browser_metrics` events | Per-agent rows: click rate (last 100), clicks/min, snapshot p50/p95, nav timeouts, last-update age. Stale rows fade after the 30-min eviction window |
+| Interaction Speed slider | `/api/browser-settings` | Speed multiplier with presets (Off / Light / Moderate / Heavy / Maximum) |
+| Delay Between Actions slider | `/api/browser-settings` | Random pause after each browser action (0–10s) |
+| Idle Timeout | `/api/system-settings` | Container idle timeout in minutes (5–120, default 30); restart required |
+| CAPTCHA Solver | `/api/captcha-solver` | Provider dropdown (none / 2captcha / capsolver) + API key field. Stored masked; restart required |
 
 ## Agent Management
 
@@ -101,18 +139,20 @@ The agent detail view features a tabbed **Agent Settings** panel for viewing and
 
 | Tab | Contents | Description |
 |-----|----------|-------------|
+| **Config** | Model, role, budget, credential access | Agent configuration (model changes trigger restart). Includes a **Remove Agent** action at the bottom |
 | **Identity** | `SOUL.md` (4K cap), `INSTRUCTIONS.md` (12K cap) | Personality, tone, operating procedures, domain knowledge |
 | **Memory** | `MEMORY.md` (16K cap), `USER.md` (4K cap), `HEARTBEAT.md` (no cap) | Long-term facts, user preferences, autonomous heartbeat rules |
-| **Config** | Model, role, budget, credential access | Agent configuration (model changes trigger restart) |
-| **Logs** | Activity + Learnings (read-only) | Daily session logs and recorded errors/corrections |
-| **Tools** | Capabilities list (read-only) | Available tools and skill definitions |
+| **Activity** | Per-agent activity stream from `/api/agents/{id}/activity` | Recent agent events scoped to this agent |
+| **Logs** | Daily logs + Learnings (read-only) | Daily session logs and recorded errors/corrections |
+| **Capabilities** | Tools list (read-only) | Available tools and skill definitions from `/api/agents/{id}/capabilities` |
+| **Files** | `/data` listing for the agent | Browse files written by the agent into its persistent volume; proxied via `/api/agents/{id}/files` |
 
 Each file card shows an access badge: **Shared** (teal) for files both you and the agent can edit (`SOUL.md`, `INSTRUCTIONS.md`, `USER.md`, `HEARTBEAT.md`), **Auto** (gray) for system-managed files (`MEMORY.md`). Customized files show a description subtitle; default files show a CTA prompt.
 
 ### Usage
 
 1. Click an agent card to open the detail view
-2. The **Agent Settings** panel shows 5 tabs — Identity is selected by default
+2. The **Agent Settings** panel shows 7 tabs — Config is selected by default
 3. File cards with default/scaffold content show a "default" pill and a "Customize" button with a friendly prompt
 4. Once customized, a description subtitle and character budget bar appear (indigo → amber at 80% → red at 95%)
 5. Click **Edit** (or **Customize** for default files) to open the inline editor
@@ -122,6 +162,16 @@ Each file card shows an access badge: **Shared** (teal) for files both you and t
 9. The **Config** tab shows model, role, budget, credential access, and a **Remove Agent** action at the bottom
 
 The dashboard proxies workspace operations through the mesh transport layer to the agent's container — files are read from and written to the agent's `/data/workspace` volume.
+
+## Cookie / Session Import (Operator-Only)
+
+An inline collapsible card on the agent detail panel lets operators paste cookie or storage-state payloads into an agent's Firefox profile, useful for transferring an authenticated session captured manually. The card is **operator-only** and **hidden on the operator agent itself** (operator does not run a browser session).
+
+- Two input modes: **Playwright** (storage-state JSON) or **Netscape** (TSV cookie jar)
+- POSTs to `/api/agents/{id}/browser/import_cookies` with rate limit 10/hour per (operator, agent)
+- A fleet kill switch (`OPENLEGION_DISABLE_COOKIE_IMPORT=1`) disables the endpoint
+- Card state lives in Alpine `x-data` only — it is **never persisted to localStorage** (cookie text is high-trust). Inputs are cleared on success
+- Imported cookies are stored UNENCRYPTED in `cookies.sqlite` inside the agent profile; the card surfaces an inline warning banner
 
 ## Chat
 
@@ -138,6 +188,14 @@ When an agent calls tools during a response, each tool appears as an inline pill
 - **Done** — green checkmark with truncated output preview (200 chars max)
 
 Tool calls appear above the text response, in the order they were executed.
+
+### Browser Login Handoff Card
+
+When an agent calls `request_browser_login`, a violet-accented handoff card appears in chat with the service name, login URL, and **Open Browser** / **Mark complete** / **Cancel** buttons. The card is rendered both in the requesting agent's chat and in the operator chat; state (completed/cancelled) syncs across both surfaces via the `browser_login_completed` / `browser_login_cancelled` WS events.
+
+### CAPTCHA Help Handoff Card
+
+When an agent calls `request_captcha_help`, an **amber-accented** handoff card mirrors the browser-login card structure with **Open Browser** / **Mark complete** / **Cancel** buttons. The card is rendered in both the requesting agent's chat and the operator chat. State syncs across both surfaces via the `browser_captcha_help_completed` / `browser_captcha_help_cancelled` WS events — clicking "Mark complete" in either chat marks the corresponding card complete in the other.
 
 ### Chat History
 
@@ -200,7 +258,27 @@ Click **Del** on any entry row. History namespace entries are protected and cann
 
 ## Real-Time Updates
 
-The dashboard connects to the mesh via WebSocket at `/ws/events`. Events are streamed in real-time with optional agent and type filters. The connection indicator in the top-right shows live/disconnected status. On disconnect, the WebSocket client automatically reconnects with exponential backoff.
+The dashboard connects to the mesh via WebSocket at `/ws/events`. Events are streamed in real-time. The connection indicator in the top-right shows live/disconnected status, and a countdown timer (`wsReconnectIn`) is shown during reconnect. On disconnect, the WebSocket client automatically reconnects with exponential backoff.
+
+### Event Types
+
+`DashboardEvent.type` is a `Literal[...]` of 26 values (`src/shared/types.py`):
+
+```
+agent_state, message_sent, message_received, tool_start, tool_result, text_delta,
+llm_call, blackboard_write, health_change, notification, workspace_updated,
+heartbeat_complete, cron_change, chat_user_message, chat_done, chat_reset,
+credit_exhausted, credential_request, credential_stored,
+browser_login_request, browser_login_completed, browser_login_cancelled,
+browser_captcha_help_request, browser_captcha_help_completed, browser_captcha_help_cancelled,
+browser_metrics, browser_nav_probe
+```
+
+The **WebSocket subscription is unfiltered on the wire** — the SPA receives every event and applies type/agent filters in JavaScript. The Live Events filter chips operate over a subset (`agent_state`, `message_*`, `tool_*`, `text_delta`, `llm_call`, `blackboard_write`, `health_change`, `notification`, `workspace_updated`, `heartbeat_complete`, `cron_change`, `credit_exhausted`, `credential_request`, `browser_login_*`, `browser_captcha_help_*`); `browser_metrics` and `browser_nav_probe` are not filter-chip-exposed but still arrive on the same socket.
+
+### `tenant_spend_threshold` Discriminator
+
+Per-tenant CAPTCHA-spend threshold alerts (50/80/100% of monthly cap) are **not** a separate WS event type. They ride as `browser_metrics` events with `data.type === "tenant_spend_threshold"` as the discriminator. Subscribers expecting a `tenant_spend_threshold` literal will silently miss every alert — match on `evt.type === "browser_metrics" && evt.data?.type === "tenant_spend_threshold"`.
 
 ## Authentication
 
@@ -209,7 +287,7 @@ The dashboard connects to the mesh via WebSocket at `/ws/events`. Events are str
 The dashboard operates in two modes:
 
 - **Dev / self-hosted mode** — when `/opt/openlegion/.access_token` does not exist (the default for local installs), all requests are allowed. No cookie or SSO is required.
-- **Hosted mode** — when `/opt/openlegion/.subdomain` exists (subdomain deployments via the OpenLegion cloud), the `ol_session` cookie is required on every request. Access without a valid cookie is rejected with HTTP 401/403.
+- **Hosted mode** — when `/opt/openlegion/.subdomain` exists (subdomain deployments via the OpenLegion cloud), the `ol_session` cookie is required on every request. Missing cookie returns **HTTP 401** ("Authentication required"); expired or invalid-signature cookie returns **HTTP 403** ("session expired" / "invalid signature").
 
 ### Session Cookie (`ol_session`)
 
@@ -227,20 +305,48 @@ The cookie is valid for up to 24 hours (enforced by the engine, independent of t
 All state-changing endpoints (POST, PUT, DELETE, PATCH) require the `X-Requested-With` header. Browsers block this custom header on cross-origin requests (CORS preflight), preventing CSRF attacks on cookie-authenticated sessions. GET, HEAD, and OPTIONS are exempt.
 
 ```bash
-# Example: include X-Requested-With on state-changing dashboard API calls
+# Example: include X-Requested-With on state-changing dashboard API calls.
+# Cron POST takes `agent` (not `agent_id`).
 curl -X POST http://localhost:8420/dashboard/api/cron \
   -H "X-Requested-With: XMLHttpRequest" \
   -H "Content-Type: application/json" \
-  -d '{"agent_id": "researcher", "schedule": "every 1h", "message": "Check leads"}'
+  -d '{"agent": "researcher", "schedule": "every 1h", "message": "Check leads"}'
 ```
 
 ### VNC Proxy
 
 The VNC reverse proxy at `/vnc/` rejects agent Bearer tokens. Only `ol_session` cookie authentication (dashboard auth) is accepted for VNC access, preventing agents from directly reading the shared browser screen.
 
+## CAPTCHA Rollup CSV
+
+The `/api/billing/captcha-rollup` endpoint exports per-tenant CAPTCHA-solver spend as CSV. It has **no UI** — operators reach it directly via curl. Required query params: `tenant` (project slug) and `period` (`daily` | `weekly` | `monthly`, default `monthly`).
+
+Column schema (one header row, then per-agent rows sorted by agent_id, then a synthetic tenant-total row):
+
+| Column | Description |
+|--------|-------------|
+| `period_start` | ISO-8601 UTC timestamp marking the start of the requested period |
+| `agent_id` | Agent that incurred the cost (or `__tenant_total__` for the synthetic last row) |
+| `millicents` | Spend in millicents (1 millicent = 1/100,000 USD) |
+| `dollars` | Spend in dollars (5 decimal places) |
+| `data_scope` | `monthly_actual` for `period=monthly`; `current_month_aggregate` for `period=daily` or `period=weekly` |
+
+Why two `data_scope` values: in-memory CAPTCHA-cost state is **current-month-only**. For `daily` and `weekly` requests, the export still surfaces month-to-date per-agent buckets (with `data_scope=current_month_aggregate` flagging that the data is not period-correct) rather than returning an empty CSV. Older periods would require persisted snapshots, deferred per the §11.10 SQLite trim plan.
+
+The final synthetic `__tenant_total__` row sums every agent in the tenant for the requested period — same `period_start` and `data_scope` as the per-agent rows.
+
+Example:
+
+```bash
+curl -X GET "http://localhost:8420/dashboard/api/billing/captcha-rollup?tenant=acme&period=monthly" \
+  -H "X-Requested-With: XMLHttpRequest"
+```
+
 ## API Endpoints
 
-All dashboard API endpoints are prefixed with `/dashboard/api/`. The SPA root is served at `GET /dashboard/` (HTML, not an API endpoint). State-changing endpoints (POST/PUT/DELETE/PATCH) require the `X-Requested-With` header; see [Authentication](#authentication).
+All dashboard API endpoints are prefixed with `/dashboard/api/`. The SPA root is served at `GET /dashboard/` (HTML, not an API endpoint). The dashboard exposes ~120 endpoints; tables below cover the ones grouped by feature. State-changing endpoints (POST/PUT/DELETE/PATCH) require the `X-Requested-With` header; see [Authentication](#authentication).
+
+A few endpoints have **no UI surface** and are reachable by curl only. They are flagged inline as `(operator-curl only — no UI)`.
 
 **Agents**
 
@@ -259,7 +365,7 @@ All dashboard API endpoints are prefixed with `/dashboard/api/`. The SPA root is
 | `GET` | `/dashboard/api/agents/{id}/permissions` | Agent credential and API permissions |
 | `PUT` | `/dashboard/api/agents/{id}/permissions` | Update credential access patterns |
 | `GET` | `/dashboard/api/agents/{id}/activity` | Agent activity events |
-| `POST` | `/dashboard/api/restart-agents` | Restart all agent containers and the browser service |
+| `POST` | `/dashboard/api/restart-agents` | Restart all agent containers and the browser service. Pushes `OPENLEGION_CAPTCHA_SOLVER_PROVIDER`/`_KEY` from settings into the browser container env, and re-pushes per-agent proxy config |
 
 **Chat**
 
@@ -270,8 +376,8 @@ All dashboard API endpoints are prefixed with `/dashboard/api/`. The SPA root is
 | `GET` | `/dashboard/api/agents/{id}/chat/history` | Retrieve conversation history for agent |
 | `POST` | `/dashboard/api/agents/{id}/steer` | Update agent system prompt live |
 | `POST` | `/dashboard/api/agents/{id}/reset` | Reset agent conversation history |
-| `POST` | `/dashboard/api/broadcast` | Send message to all agents |
-| `POST` | `/dashboard/api/broadcast/stream` | SSE streaming broadcast to all agents |
+| `POST` | `/dashboard/api/broadcast` | Send message to all agents (request body filters by `project` name or `standalone: true`; operator excluded) |
+| `POST` | `/dashboard/api/broadcast/stream` | SSE streaming broadcast (same filters as above) |
 
 **Workspace**
 
@@ -416,7 +522,7 @@ All dashboard API endpoints are prefixed with `/dashboard/api/`. The SPA root is
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/dashboard/api/settings` | Environment settings (includes default_model) |
+| `GET` | `/dashboard/api/settings` | Bundled environment payload — `credentials`, `has_llm_credentials`, `available_provider_models` (Ollama + OpenLegion gateway discovery), `model_costs`, `plan_limits`, `app_url`, `pubsub_subscriptions`, `has_byok_keys`, `credit_proxy_configured`, `default_model` |
 | `GET` | `/dashboard/api/system-settings` | System-level settings |
 | `POST` | `/dashboard/api/system-settings` | Update system-level settings |
 | `GET` | `/dashboard/api/browser-settings` | Browser service settings |
@@ -427,14 +533,41 @@ All dashboard API endpoints are prefixed with `/dashboard/api/`. The SPA root is
 | `GET` | `/dashboard/api/fleet/templates` | Fleet template list (alternate endpoint) |
 | `GET` | `/dashboard/api/logs` | Runtime logs (query: lines, level) |
 
-**Browser**
+**Browser — Control & Handoffs**
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/dashboard/api/browser/{agent_id}/focus` | Focus browser window for agent |
-| `POST` | `/dashboard/api/browser/{agent_id}/reset` | Reset browser session for agent |
+| `POST` | `/dashboard/api/browser/{agent_id}/focus` | Focus browser window for agent (raises X11 WID) |
+| `POST` | `/dashboard/api/browser/{agent_id}/control` | Toggle operator control of the browser window — pauses agent X11 input |
+| `POST` | `/dashboard/api/browser/{agent_id}/reset` | Reset browser session for agent (close and relaunch with current config) |
 | `POST` | `/dashboard/api/browser-login/complete` | Complete a browser login flow |
 | `POST` | `/dashboard/api/browser-login/cancel` | Cancel a browser login flow |
+| `POST` | `/dashboard/api/browser-captcha-help/complete` | Complete a CAPTCHA help handoff |
+| `POST` | `/dashboard/api/browser-captcha-help/cancel` | Cancel a CAPTCHA help handoff |
+| `POST` | `/dashboard/api/agents/{agent_id}/browser/import_cookies` | Operator-only cookie/session import (Playwright JSON or Netscape TSV); 10/hr rate limit per (operator, agent) |
+
+**Browser — Settings & Metrics**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/dashboard/api/browser-settings` | Browser service settings (speed multiplier, delay) |
+| `POST` | `/dashboard/api/browser-settings` | Update browser service settings |
+| `GET` | `/dashboard/api/agents/{agent_id}/browser/metrics` | Per-agent browser-metrics history snapshot |
+| `GET` | `/dashboard/api/captcha-solver` | Get configured CAPTCHA solver provider + masked key |
+| `POST` | `/dashboard/api/captcha-solver` | Set CAPTCHA solver provider + key (restart required) |
+| `DELETE` | `/dashboard/api/captcha-solver` | Remove CAPTCHA solver configuration |
+
+**Browser — Operator-Only (no UI)**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/dashboard/api/agents/{agent_id}/session` | Inspect persisted storage state for agent (operator-curl only — no UI) |
+| `DELETE` | `/dashboard/api/agents/{agent_id}/session` | Clear persisted storage state for agent (operator-curl only — no UI) |
+| `GET` | `/dashboard/api/agents/{agent_id}/fingerprint-health` | Per-agent fingerprint rejection-window summary + burn flag (operator-curl only — no UI) |
+| `POST` | `/dashboard/api/agents/{agent_id}/fingerprint-health/reset` | Clear fingerprint burn flag after profile rotation (operator-curl only — no UI) |
+| `GET` | `/dashboard/api/billing/captcha-rollup?tenant=…&period=daily\|weekly\|monthly` | CSV export of per-tenant CAPTCHA-solver spend (operator-curl only — no UI). See [CAPTCHA Rollup CSV](#captcha-rollup-csv) for column schema |
+
+> Mobile emulation profiles are env-only — set `BROWSER_DEVICE_PROFILE` to a profile name (e.g. `iphone_15`, `pixel_8`); there is no dashboard surface and no per-agent override endpoint.
 
 **WebSocket**
 
