@@ -433,6 +433,7 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
             direction=body.get("direction", "down"),
             amount=body.get("amount", 0),
             ref=body.get("ref"),
+            inside_ref=body.get("inside_ref"),
         )
         await _apply_delay()
         return result
