@@ -56,6 +56,23 @@ _MAX_HISTORY_LOGS_CHARS = 16000
 _MAX_HISTORY_LEARNINGS_CHARS = 8000
 
 
+def _origin_from_mesh_request(request: Request):
+    """Parse origin from a host-to-agent request.
+
+    ``X-Origin`` is authorization-bearing only after the mesh/dashboard/CLI
+    stamped it. The host transport adds ``x-mesh-internal`` on those hops, so
+    preserve the typed kind only for that trusted internal path. Direct callers
+    still get the strict parser, which downgrades caller-supplied kinds.
+    """
+    from src.shared.trace import parse_origin_header
+    from src.shared.types import MessageOrigin
+
+    raw = request.headers.get("x-origin")
+    if request.headers.get("x-mesh-internal"):
+        return MessageOrigin.from_header_value(raw, trust_kind=True)
+    return parse_origin_header(raw)
+
+
 def create_agent_app(loop: AgentLoop) -> FastAPI:
     """Create the FastAPI application for an agent container."""
     app = FastAPI(title=f"OpenLegion Agent: {loop.agent_id}")
@@ -184,8 +201,8 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         contextvar with ``kind="heartbeat"`` for any tool / coordination
         call made during the heartbeat run.
         """
-        from src.shared.trace import current_origin, parse_origin_header
-        origin = parse_origin_header(request.headers.get("x-origin"))
+        from src.shared.trace import current_origin
+        origin = _origin_from_mesh_request(request)
         token = current_origin.set(origin)
         try:
             result = await loop.execute_heartbeat(sanitize_for_prompt(msg.message))
@@ -205,8 +222,7 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
     @app.post("/chat", response_model=ChatResponse)
     async def chat(msg: ChatMessage, request: Request) -> ChatResponse:
         """Interactive chat with the agent. Supports tool use."""
-        from src.shared.trace import parse_origin_header
-        origin = parse_origin_header(request.headers.get("x-origin"))
+        origin = _origin_from_mesh_request(request)
         result = await loop.chat(
             sanitize_for_prompt(msg.message),
             trace_id=request.headers.get("x-trace-id"),
@@ -223,9 +239,8 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
     @app.post("/chat/stream")
     async def chat_stream(msg: ChatMessage, request: Request) -> StreamingResponse:
         """Streaming chat. Returns SSE events for tool use and text deltas."""
-        from src.shared.trace import parse_origin_header
         _trace_id = request.headers.get("x-trace-id")
-        _origin = parse_origin_header(request.headers.get("x-origin"))
+        _origin = _origin_from_mesh_request(request)
         async def event_generator():
             stream = loop.chat_stream(
                 sanitize_for_prompt(msg.message), trace_id=_trace_id,

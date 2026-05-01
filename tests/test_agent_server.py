@@ -792,12 +792,39 @@ class TestChatOriginHeader:
             resp = await client.post(
                 "/chat",
                 json={"message": "hello"},
-                headers={"x-origin": wire},
+                headers={"x-origin": wire, "x-mesh-internal": "1"},
             )
         assert resp.status_code == 200
         passed = mock_loop.chat.call_args.kwargs.get("origin")
         assert isinstance(passed, MessageOrigin)
         assert passed.kind == "human"
+        assert passed.channel == "dashboard"
+        assert passed.user == "op-1"
+
+    @pytest.mark.asyncio
+    async def test_chat_typed_human_origin_direct_call_downgrades(self):
+        """Direct non-mesh callers cannot self-assert human origin."""
+        from src.shared.types import MessageOrigin
+
+        app, mock_loop = _make_app()
+        mock_loop.chat = AsyncMock(return_value={
+            "response": "hi", "tool_outputs": [], "tokens_used": 0,
+        })
+        mock_loop.current_task = None
+
+        wire = MessageOrigin(
+            kind="human", channel="dashboard", user="op-1",
+        ).to_header_value()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/chat",
+                json={"message": "hello"},
+                headers={"x-origin": wire},
+            )
+        assert resp.status_code == 200
+        passed = mock_loop.chat.call_args.kwargs.get("origin")
+        assert isinstance(passed, MessageOrigin)
+        assert passed.kind == "agent"
         assert passed.channel == "dashboard"
         assert passed.user == "op-1"
 
@@ -833,7 +860,7 @@ class TestHeartbeatOriginContextVar:
             resp = await client.post(
                 "/heartbeat",
                 json={"message": "tick"},
-                headers={"x-origin": wire},
+                headers={"x-origin": wire, "x-mesh-internal": "1"},
             )
         assert resp.status_code == 200
         assert len(captured) == 1
