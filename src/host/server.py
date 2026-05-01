@@ -1054,8 +1054,8 @@ def create_mesh_app(
         agent_id = _validate_agent_id(data.get("agent_id", ""))
         agent_id = _resolve_agent_id(agent_id, request)
         capabilities = data.get("capabilities", [])
-        if not isinstance(capabilities, list) or len(capabilities) > 50:
-            raise HTTPException(400, "capabilities must be a list of at most 50 items")
+        if not isinstance(capabilities, list) or len(capabilities) > 200:
+            raise HTTPException(400, "capabilities must be a list of at most 200 items")
         port = _validate_port(data.get("port", 8400))
 
         existing = router.agent_registry.get(agent_id)
@@ -1273,6 +1273,10 @@ def create_mesh_app(
             _require_any_auth(request)
         def _agent_entry(aid: str, url: str) -> dict:
             entry: dict = {"url": url, "role": router.agent_roles.get(aid, "")}
+            # list_agents (mesh_tool) reads info["capabilities"] — emit it
+            # unconditionally (empty list is fine when the cache has no
+            # entry for that agent).
+            entry["capabilities"] = router._capabilities_cache.get(aid, [])
             proj = _agent_projects.get(aid)
             if proj:
                 entry["project"] = proj
@@ -1793,7 +1797,21 @@ def create_mesh_app(
             initial_instructions=instructions, initial_soul=soul,
         )
         _update_agent_field(name, "avatar", random.randint(1, 50))
-        _add_agent_permissions(name)
+        # Operator-created agents need the same coordination defaults as
+        # template-created agents — empty blackboard_read/write would lock
+        # them out of the coordination protocol entirely (and skip the
+        # auto-watch setup at /mesh/register, which is gated on
+        # blackboard_read being truthy). Mirrors the operator-permission
+        # ceiling in operator_tools.py and the starter.yaml template.
+        default_perms = {
+            "blackboard_read":  ["*"],
+            "blackboard_write": ["tasks/*", "context/*", "status/*", "output/*", "artifacts/*"],
+            "can_publish":      ["*"],
+            "can_subscribe":    ["*"],
+            "can_use_browser":  True,
+            "can_manage_cron":  True,
+        }
+        _add_agent_permissions(name, permissions=default_perms)
         skills_dir = PROJECT_ROOT / "skills" / name
         skills_dir.mkdir(parents=True, exist_ok=True)
 
