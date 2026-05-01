@@ -976,24 +976,14 @@ class TestControlPlanePermissions:
         assert m.can_request_user_credentials("mesh") is True
 
 
-# ── Task 1 (characterization): wildcard blackboard ACL survives project moves ─
+# ── Task 5: wildcard blackboard ACLs replaced on project membership churn ─
 
 
-@pytest.mark.characterization
-def test_wildcard_blackboard_acl_survives_project_add(tmp_path, monkeypatch):
-    # CAPTURE-TO-TIGHTEN — this test asserts today's over-broad behavior.
-    # After Task 5 (project scope warn → enforce), an agent with a wildcard
-    # ACL who is added to a project should have the wildcard narrowed (or
-    # at least denied at the read/write gate when the key is outside the
-    # project namespace). When Task 5 lands: flip the assertion to verify
-    # the wildcard is removed / superseded, or delete this test and replace
-    # it with a positive test asserting "added agent can NOT read other
-    # projects' keys".
-    """``_add_project_blackboard_permissions`` is purely additive: it
-    appends ``projects/{name}/*`` to the agent's existing patterns and
-    never touches a pre-existing ``*``. The wildcard therefore survives
-    the move and the agent retains fleet-wide blackboard access — Task 5
-    will make this scope warn-then-enforce.
+def test_wildcard_blackboard_acl_replaced_on_project_add(tmp_path, monkeypatch):
+    """Pin: ``_add_project_blackboard_permissions`` strips any
+    pre-existing ``*`` wildcard and replaces it with the project-scoped
+    grant. An agent with broad fleet-wide reach can no longer carry it
+    forward through a project join.
     """
     from src.cli.config import _add_project_blackboard_permissions
 
@@ -1013,67 +1003,24 @@ def test_wildcard_blackboard_acl_survives_project_add(tmp_path, monkeypatch):
     perms = json.loads(perms_file.read_text())
     read = perms["permissions"]["rover"]["blackboard_read"]
     write = perms["permissions"]["rover"]["blackboard_write"]
-    # Wildcard survives — Task 5 should narrow.
-    assert "*" in read
-    assert "*" in write
-    # Project pattern was appended next to the wildcard.
+    # Wildcard is gone — replaced by the project pattern.
+    assert "*" not in read
+    assert "*" not in write
     assert "projects/alpha/*" in read
     assert "projects/alpha/*" in write
 
 
-@pytest.mark.characterization
-def test_wildcard_blackboard_acl_survives_project_remove(tmp_path, monkeypatch):
-    # CAPTURE-TO-TIGHTEN — this test asserts today's over-broad behavior.
-    # After Task 5 (project scope warn → enforce), removing an agent from
-    # a project should leave it standalone, not still wildcarded. When
-    # Task 5 lands: flip the assertion to verify the wildcard was removed
-    # at project-leave time, or delete this test and add a negative test
-    # in this file asserting the agent can no longer read arbitrary keys.
-    """``_remove_project_blackboard_permissions`` only strips the project
-    pattern — a pre-existing ``*`` survives. Combined with the add-side
-    behavior above, this means an agent that ever had ``*`` retains
-    fleet-wide access through any number of project moves.
+def test_wildcard_blackboard_acl_replaced_then_stripped_on_remove(tmp_path, monkeypatch):
+    """Pin: add-then-remove leaves the agent without ``*`` and without
+    the project pattern. Task 5 narrows on add, and the remove path
+    strips both the project pattern and any surviving wildcard so an
+    agent cannot reacquire fleet-wide reach by leaving a project.
     """
-    from src.cli.config import _remove_project_blackboard_permissions
+    from src.cli.config import (
+        _add_project_blackboard_permissions,
+        _remove_project_blackboard_permissions,
+    )
 
-    perms_file = tmp_path / "permissions.json"
-    perms_file.write_text(json.dumps({
-        "permissions": {
-            "rover": {
-                # Both wildcard and project pattern present (the add-side
-                # state from the previous test).
-                "blackboard_read": ["*", "projects/alpha/*"],
-                "blackboard_write": ["*", "projects/alpha/*"],
-            },
-        },
-    }))
-    monkeypatch.setattr("src.cli.config.PERMISSIONS_FILE", perms_file)
-
-    _remove_project_blackboard_permissions("rover", "alpha")
-
-    perms = json.loads(perms_file.read_text())
-    read = perms["permissions"]["rover"]["blackboard_read"]
-    write = perms["permissions"]["rover"]["blackboard_write"]
-    # Project pattern was removed.
-    assert "projects/alpha/*" not in read
-    assert "projects/alpha/*" not in write
-    # But the wildcard survives — Task 5 should narrow.
-    assert "*" in read
-    assert "*" in write
-
-
-@pytest.mark.characterization
-def test_wildcard_blackboard_acl_grants_arbitrary_keys_after_project_remove(tmp_path):
-    # CAPTURE-TO-TIGHTEN — this test asserts today's over-broad behavior.
-    # After Task 5 (project scope warn → enforce), an agent that has been
-    # removed from project alpha should NOT be able to read keys from
-    # project beta. When Task 5 lands: flip these assertions to ``False``
-    # for cross-project keys, or delete this test in favour of a
-    # cross-project-isolation test in this file.
-    """End-to-end check that the surviving wildcard from the two tests
-    above actually grants live access via ``PermissionMatrix``: a
-    standalone-by-membership agent can still read another project's keys.
-    """
     perms_file = tmp_path / "permissions.json"
     perms_file.write_text(json.dumps({
         "permissions": {
@@ -1083,8 +1030,48 @@ def test_wildcard_blackboard_acl_grants_arbitrary_keys_after_project_remove(tmp_
             },
         },
     }))
+    monkeypatch.setattr("src.cli.config.PERMISSIONS_FILE", perms_file)
+
+    _add_project_blackboard_permissions("rover", "alpha")
+    _remove_project_blackboard_permissions("rover", "alpha")
+
+    perms = json.loads(perms_file.read_text())
+    read = perms["permissions"]["rover"]["blackboard_read"]
+    write = perms["permissions"]["rover"]["blackboard_write"]
+    # No wildcard, no project pattern — agent is back to standalone.
+    assert "*" not in read
+    assert "*" not in write
+    assert "projects/alpha/*" not in read
+    assert "projects/alpha/*" not in write
+
+
+def test_arbitrary_keys_blocked_after_project_remove_strips_wildcard(tmp_path, monkeypatch):
+    """Pin: live ``PermissionMatrix`` checks reject cross-project reads
+    after the membership system has touched the agent. The wildcard
+    strip on add+remove leaves no pattern that matches another
+    project's keys.
+    """
+    from src.cli.config import (
+        _add_project_blackboard_permissions,
+        _remove_project_blackboard_permissions,
+    )
+
+    perms_file = tmp_path / "permissions.json"
+    perms_file.write_text(json.dumps({
+        "permissions": {
+            "rover": {
+                "blackboard_read": ["*"],
+                "blackboard_write": ["*"],
+            },
+        },
+    }))
+    monkeypatch.setattr("src.cli.config.PERMISSIONS_FILE", perms_file)
+
+    _add_project_blackboard_permissions("rover", "alpha")
+    _remove_project_blackboard_permissions("rover", "alpha")
+
     pm = PermissionMatrix(config_path=str(perms_file))
-    # Wildcard reach across namespaces is what Task 5 will enforce away.
-    assert pm.can_read_blackboard("rover", "projects/alpha/secret")
-    assert pm.can_read_blackboard("rover", "projects/beta/secret")
-    assert pm.can_write_blackboard("rover", "projects/beta/note")
+    # No more wildcard reach across namespaces — Task 5 enforced.
+    assert not pm.can_read_blackboard("rover", "projects/alpha/secret")
+    assert not pm.can_read_blackboard("rover", "projects/beta/secret")
+    assert not pm.can_write_blackboard("rover", "projects/beta/note")
