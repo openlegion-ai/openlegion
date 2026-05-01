@@ -643,11 +643,17 @@ class REPLSession:
         if self.ctx.lane_manager is None or self.ctx.dispatch_loop is None:
             click.echo("Steer not available in this mode.")
             return
+        # Task 2b: stamp human/cli origin on REPL-driven steer commands.
         from src.shared.trace import new_trace_id
+        from src.shared.types import MessageOrigin
+        cli_origin = MessageOrigin(
+            kind="human", channel="cli", user=os.getenv("USER", "cli"),
+        )
         steer_msg = arg.strip()
         future = asyncio.run_coroutine_threadsafe(
             self.ctx.lane_manager.enqueue(
                 self.current, steer_msg, mode="steer", trace_id=new_trace_id(),
+                origin=cli_origin,
             ),
             self.ctx.dispatch_loop,
         )
@@ -1517,6 +1523,12 @@ class REPLSession:
             click.echo(f"Agent '{target}' not found.")
             return
 
+        # Task 2b: every CLI REPL message is human-driven.
+        from src.shared.types import MessageOrigin
+        cli_origin = MessageOrigin(
+            kind="human", channel="cli", user=os.getenv("USER", "cli"),
+        )
+
         # Auto-steer if the agent is currently busy
         if self.ctx.lane_manager:
             status = self.ctx.lane_manager.get_status().get(target, {})
@@ -1527,6 +1539,7 @@ class REPLSession:
                 future = asyncio.run_coroutine_threadsafe(
                     self.ctx.lane_manager.enqueue(
                         target, message, mode="steer", trace_id=steer_trace,
+                        origin=cli_origin,
                     ),
                     self.ctx.dispatch_loop,
                 )
@@ -1554,6 +1567,7 @@ class REPLSession:
                             self.ctx.lane_manager.enqueue(
                                 target, steer_msg, mode="steer",
                                 trace_id=new_trace_id(),
+                                origin=cli_origin,
                             ),
                             self.ctx.dispatch_loop,
                         )
@@ -1601,12 +1615,22 @@ def _send_message_streaming(
     stdin for ``/steer`` commands.
     """
     from src.host.transport import HttpTransport
-    from src.shared.trace import current_trace_id, trace_headers
+    from src.shared.trace import current_trace_id, origin_header, trace_headers
+    from src.shared.types import MessageOrigin
+
+    # Task 2b: every CLI REPL message is human-driven; stamp origin so
+    # downstream gates can distinguish it from agent-initiated work.
+    cli_origin = MessageOrigin(
+        kind="human",
+        channel="cli",
+        user=os.getenv("USER", "cli"),
+    )
 
     if isinstance(transport, HttpTransport):
         async def _stream():
             current_trace_id.set(trace_id)
             hdrs = trace_headers()
+            hdrs.update(origin_header(cli_origin))
             response_text = ""
             tool_count = 0
             if event_bus:
@@ -1698,6 +1722,7 @@ def _send_message_streaming(
         # Non-streaming fallback for SandboxTransport
         from src.shared.trace import TRACE_HEADER
         sync_hdrs = {TRACE_HEADER: trace_id} if trace_id else {}
+        sync_hdrs.update(origin_header(cli_origin))
         data = transport.request_sync(
             target, "POST", "/chat",
             json={"message": message}, timeout=120,

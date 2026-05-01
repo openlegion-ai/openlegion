@@ -150,6 +150,10 @@ async def hand_off(
     if output_key:
         task_record["output_key"] = output_key
     if origin:
+        # ``origin`` may be a typed ``MessageOrigin`` (post-Task-2a stamp
+        # sites) or a legacy raw dict. Persist as plain dict so the
+        # blackboard JSON write doesn't choke on a Pydantic instance and
+        # downstream readers continue to see the same shape.
         if hasattr(origin, "model_dump"):
             task_record["origin"] = origin.model_dump()
         elif isinstance(origin, dict):

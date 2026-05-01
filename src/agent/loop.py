@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from src.agent.mesh_client import MeshClient
     from src.agent.skills import SkillRegistry
     from src.agent.workspace import WorkspaceManager
+    from src.shared.types import MessageOrigin
 
 logger = setup_logging("agent.loop")
 
@@ -1647,7 +1648,7 @@ class AgentLoop:
 
     async def chat(
         self, user_message: str, *, trace_id: str | None = None,
-        origin: dict[str, str] | None = None,
+        origin: "MessageOrigin | dict[str, str] | None" = None,
     ) -> dict:
         """Handle a single chat turn with persistent conversation history.
 
@@ -2470,7 +2471,7 @@ class AgentLoop:
 
     async def chat_stream(
         self, user_message: str, *, trace_id: str | None = None,
-        origin: dict[str, str] | None = None,
+        origin: "MessageOrigin | dict[str, str] | None" = None,
     ):
         """Streaming chat that yields SSE events as they happen.
 

@@ -8,11 +8,15 @@ from __future__ import annotations
 
 import asyncio
 import os
+from typing import TYPE_CHECKING
 
 import httpx
 
 from src.shared.types import MeshEvent
 from src.shared.utils import setup_logging
+
+if TYPE_CHECKING:
+    from src.shared.types import MessageOrigin
 
 logger = setup_logging("agent.mesh_client")
 
@@ -256,7 +260,7 @@ class MeshClient:
 
     async def wake_agent(
         self, target: str, message: str = "",
-        origin: dict | None = None,
+        origin: "MessageOrigin | dict | None" = None,
     ) -> dict:
         """Wake a target agent so it processes work immediately."""
         from src.shared.trace import origin_header

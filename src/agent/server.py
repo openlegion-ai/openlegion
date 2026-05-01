@@ -177,9 +177,20 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
             return {"error": str(e)}
 
     @app.post("/heartbeat")
-    async def heartbeat(msg: ChatMessage) -> dict:
-        """Execute an autonomous heartbeat — separate from chat."""
-        result = await loop.execute_heartbeat(sanitize_for_prompt(msg.message))
+    async def heartbeat(msg: ChatMessage, request: Request) -> dict:
+        """Execute an autonomous heartbeat — separate from chat.
+
+        Task 2b: parse ``X-Origin`` so the heartbeat path stamps the
+        contextvar with ``kind="heartbeat"`` for any tool / coordination
+        call made during the heartbeat run.
+        """
+        from src.shared.trace import current_origin, parse_origin_header
+        origin = parse_origin_header(request.headers.get("x-origin"))
+        token = current_origin.set(origin)
+        try:
+            result = await loop.execute_heartbeat(sanitize_for_prompt(msg.message))
+        finally:
+            current_origin.reset(token)
         return result
 
     @app.get("/activity")
