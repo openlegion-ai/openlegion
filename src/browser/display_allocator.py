@@ -299,8 +299,12 @@ def is_per_agent_display_enabled(*, agent_id: str | None = None) -> bool:
 
     Reads ``OPENLEGION_BROWSER_PER_AGENT_DISPLAY`` via the centralised
     flag layer so operators can flip it via ``config/settings.json`` or
-    the agent-override path without redeploying.  Defaults to ``False``
-    so PR 1 ships dark — PR 2's mesh+dashboard work flips the default.
+    the agent-override path without redeploying.  Default flipped from
+    ``False`` to ``True`` once PR 1 (per-agent X stack lifecycle) and
+    PR 2 (per-agent mesh + dashboard routing) were both on main and
+    fully tested. The legacy shared-display path remains in the tree
+    as an env-var rollback (set ``OPENLEGION_BROWSER_PER_AGENT_DISPLAY=0``)
+    until the planned cleanup PR drops it entirely.
     """
     # Local import to avoid a hard dependency on the flag module from
     # tests that exercise the allocator standalone.
@@ -314,7 +318,7 @@ def is_per_agent_display_enabled(*, agent_id: str | None = None) -> bool:
 
 
 # Indirection so tests can patch the default without touching env state.
-_DEFAULT_PER_AGENT_DISPLAY = False
+_DEFAULT_PER_AGENT_DISPLAY = True
 
 
 # Convenience for tests / debugging — clear the env so a fresh allocator
