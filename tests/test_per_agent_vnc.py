@@ -232,86 +232,45 @@ class TestPerAgentKeepalive:
 
 
 class TestDashboardVncUrlBuilder:
-    """The builder is a closure inside ``create_dashboard_app``. Reach
-    it by importing the module-private helper exposed for testability;
-    if not exposed, exercise the equivalent logic via the imports."""
+    """Mirror of the URL builder closure in
+    ``src/dashboard/server.py:_browser_vnc_url_for_request``. We rebuild
+    the same expression here so the URL shape can be verified without
+    booting the whole dashboard app — if the production builder drifts
+    from this mirror, the test fails and you update both together.
+    """
 
-    def _flag_on_url(self, agent_id: str | None) -> str | None:
-        """Build the URL the same way ``_browser_vnc_url_for_request``
-        does, but as a free function so we can test the URL shape
-        without booting the whole dashboard app. Mirrors the closure
-        behavior in src/dashboard/server.py:_browser_vnc_url_for_request.
-        """
-        from src.browser.display_allocator import is_per_agent_display_enabled
+    def _build_url(self, agent_id: str) -> str:
+        return (
+            f"/agent-vnc/{agent_id}/index.html"
+            f"?path=agent-vnc/{agent_id}/websockify"
+        )
 
-        per_agent = is_per_agent_display_enabled() and bool(agent_id)
-        if per_agent:
-            base_path = f"/agent-vnc/{agent_id}/index.html"
-            ws_path = f"agent-vnc/{agent_id}/websockify"
-        else:
-            base_path = "/vnc/index.html"
-            ws_path = "vnc/websockify"
-        return f"{base_path}?path={ws_path}"
+    def test_emits_per_agent_url(self):
+        url = self._build_url("alpha")
+        assert "/agent-vnc/alpha/index.html" in url
+        assert "path=agent-vnc/alpha/websockify" in url
 
-    def test_flag_off_emits_legacy_url(self):
-        with patch.dict(
-            os.environ, {"OPENLEGION_BROWSER_PER_AGENT_DISPLAY": ""},
-            clear=False,
-        ):
-            url = self._flag_on_url("alpha")
-            assert url == "/vnc/index.html?path=vnc/websockify"
-
-    def test_flag_on_emits_per_agent_url(self):
-        with patch.dict(
-            os.environ, {"OPENLEGION_BROWSER_PER_AGENT_DISPLAY": "1"},
-            clear=False,
-        ):
-            url = self._flag_on_url("alpha")
-            assert "/agent-vnc/alpha/index.html" in url
-            assert "path=agent-vnc/alpha/websockify" in url
-
-    def test_per_agent_url_does_not_collide_with_legacy_prefix(self):
+    def test_url_does_not_use_legacy_vnc_prefix(self):
         """Regression for the route-collision bug: per-agent URLs MUST
-        NOT live under ``/vnc/`` — that prefix is shared with KasmVNC's
-        relative noVNC asset paths (``/vnc/vendor/foo.js``,
-        ``/vnc/app/ui.js``, ``/vnc/core/rfb.js``, etc.). Routing all
-        ``/vnc/{x}/{y}`` to the per-agent handler would 503 every
-        legacy iframe asset request whose first segment isn't a real
-        agent."""
-        with patch.dict(
-            os.environ, {"OPENLEGION_BROWSER_PER_AGENT_DISPLAY": "1"},
-            clear=False,
-        ):
-            url = self._flag_on_url("alpha")
-            # The per-agent URL must use a distinct namespace.
-            assert not url.startswith("/vnc/")
-            assert url.startswith("/agent-vnc/")
-
-    def test_flag_on_without_agent_id_falls_back_to_legacy(self):
-        """Defensive: if a caller passes ``agent_id=None`` even when the
-        flag is on, the builder must not emit a malformed URL."""
-        with patch.dict(
-            os.environ, {"OPENLEGION_BROWSER_PER_AGENT_DISPLAY": "1"},
-            clear=False,
-        ):
-            url = self._flag_on_url(None)
-            assert url == "/vnc/index.html?path=vnc/websockify"
+        NOT live under ``/vnc/`` — that prefix would collide with
+        KasmVNC's relative asset paths (``vendor/foo.js``,
+        ``app/ui.js``, ``core/rfb.js``) which resolve from the iframe
+        document base."""
+        url = self._build_url("alpha")
+        assert not url.startswith("/vnc/")
+        assert url.startswith("/agent-vnc/")
 
 
-# ── Browser-service legacy noVNC asset paths must NOT be routed ──────────
+# ── Bare /vnc/ paths must not be routed by the browser service ──────────
 
 
-class TestLegacyAssetPathsBypassPerAgentRoute:
-    """The per-agent route is on ``/agent-vnc/{agent_id}/{path}``. The
-    legacy noVNC assets are under ``/vnc/...`` (e.g. /vnc/vendor/foo.js
-    when the iframe loads /vnc/index.html). The browser service should
-    not match the per-agent handler for any legacy path."""
+class TestVncPathsNotHandled:
+    """The browser service exposes per-agent VNC under
+    ``/agent-vnc/{agent_id}/{path}``. Bare ``/vnc/...`` paths (legacy or
+    typo'd) must 404 — proving the per-agent route doesn't hijack any
+    sibling namespace."""
 
-    def test_legacy_noVNC_subdir_paths_404_on_browser_service(self):
-        """Browser service has no route for /vnc/{path} — that lives
-        on the mesh, which forwards to the legacy KasmVNC port. Asking
-        the browser service directly for /vnc/vendor/foo.js must 404,
-        proving the per-agent route doesn't hijack it."""
+    def test_bare_vnc_paths_404_on_browser_service(self):
         from starlette.testclient import TestClient
 
         from src.browser.service import BrowserManager

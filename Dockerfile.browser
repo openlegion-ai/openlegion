@@ -213,6 +213,8 @@ USER root
 COPY docker/browser-entrypoint.sh /usr/local/bin/browser-entrypoint.sh
 RUN chmod +x /usr/local/bin/browser-entrypoint.sh
 
-# 8500: browser command API, 6080: KasmVNC web client
-EXPOSE 8500 6080
+# Browser command API. Per-agent KasmVNCs on 6100..6163 are reached
+# from the mesh container (same Docker network) without needing host-
+# level publishing — the mesh proxies through ``:8500/agent-vnc/...``.
+EXPOSE 8500
 ENTRYPOINT ["/usr/local/bin/browser-entrypoint.sh"]

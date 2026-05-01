@@ -294,33 +294,6 @@ def _remove_residue(slot: Slot) -> bool:
     return removed
 
 
-def is_per_agent_display_enabled(*, agent_id: str | None = None) -> bool:
-    """Return True when the per-agent X stack should be used.
-
-    Reads ``OPENLEGION_BROWSER_PER_AGENT_DISPLAY`` via the centralised
-    flag layer so operators can flip it via ``config/settings.json`` or
-    the agent-override path without redeploying.  Default flipped from
-    ``False`` to ``True`` once PR 1 (per-agent X stack lifecycle) and
-    PR 2 (per-agent mesh + dashboard routing) were both on main and
-    fully tested. The legacy shared-display path remains in the tree
-    as an env-var rollback (set ``OPENLEGION_BROWSER_PER_AGENT_DISPLAY=0``)
-    until the planned cleanup PR drops it entirely.
-    """
-    # Local import to avoid a hard dependency on the flag module from
-    # tests that exercise the allocator standalone.
-    from src.browser.flags import get_bool
-
-    return get_bool(
-        "OPENLEGION_BROWSER_PER_AGENT_DISPLAY",
-        _DEFAULT_PER_AGENT_DISPLAY,
-        agent_id=agent_id,
-    )
-
-
-# Indirection so tests can patch the default without touching env state.
-_DEFAULT_PER_AGENT_DISPLAY = True
-
-
 # Convenience for tests / debugging — clear the env so a fresh allocator
 # pass observes a pristine /tmp.  NOT used in production.
 def _force_clear_residue_for_tests(display_start: int, display_end: int) -> None:
@@ -358,7 +331,6 @@ __all__ = [
     "DISPLAY_RANGE_END",
     "display_for_port",
     "port_for_display",
-    "is_per_agent_display_enabled",
 ]
 
 

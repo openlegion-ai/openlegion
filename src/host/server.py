@@ -3920,43 +3920,17 @@ def create_mesh_app(
         finally:
             event_bus.unsubscribe(websocket)
 
-    # ── VNC reverse proxy ────────────────────────────────────────────────
-    # Two routes on DIFFERENT prefixes coexist during the per-agent VNC
-    # rollout — separate namespaces avoid any collision:
+    # ── Per-agent VNC reverse proxy ──────────────────────────────────────
+    # ``/agent-vnc/{agent_id}/{path:path}`` forwards both HTTP (noVNC
+    # static client) and WebSocket (the actual /websockify VNC stream)
+    # through the browser service, which looks up the agent's allocated
+    # KasmVNC port via the display allocator and proxies onward.
     #
-    #   /agent-vnc/{agent_id}/{path:path}  — per-agent (PR 2). Forwards
-    #     through the browser service, which looks up the agent's
-    #     allocated VNC port (display_allocator) and proxies to that
-    #     KasmVNC. Used when OPENLEGION_BROWSER_PER_AGENT_DISPLAY=1.
-    #
-    #   /vnc/{path:path}                   — legacy shared-display.
-    #     Forwards directly to ``container_manager.browser_vnc_url``'s
-    #     port (the global KasmVNC :6080 attached to display :99). Used
-    #     when the flag is off. Reaches end-of-life in PR 3.
-    #
-    # We tried sharing the ``/vnc/`` prefix originally (per-agent at
-    # ``/vnc/{agent_id}/{path}``, legacy at ``/vnc/{path}``), but
-    # KasmVNC's noVNC client fetches relative assets like
-    # ``vendor/foo.js``, ``app/ui.js``, ``core/rfb.js`` from a
-    # ``/vnc/index.html`` document base — those resolve to two-segment
-    # URLs (``/vnc/vendor/foo.js``) where the first segment passes the
-    # agent_id regex but isn't an agent. The per-agent route would
-    # 503 every legacy iframe asset. Distinct prefixes side-step this
-    # entirely and survive any future noVNC subdirs without code
-    # changes.
-
-    def _get_vnc_port() -> int | None:
-        """Extract legacy KasmVNC port from browser_vnc_url, or None."""
-        if container_manager is None:
-            return None
-        url = getattr(container_manager, "browser_vnc_url", None)
-        if not url:
-            return None
-        try:
-            from urllib.parse import urlparse
-            return urlparse(url).port
-        except Exception:
-            return None
+    # Distinct prefix from any other ``/vnc/`` path so KasmVNC's
+    # relative asset URLs (``vendor/foo.js``, ``app/ui.js``,
+    # ``core/rfb.js``) — which resolve from the iframe's document base
+    # to ``/agent-vnc/{agent_id}/vendor/foo.js`` — match the same
+    # route and forward correctly.
 
     def _reject_agent_tokens(request: Request) -> None:
         """Block agent Bearer tokens from VNC routes.
@@ -4149,145 +4123,6 @@ def create_mesh_app(
                 "Per-agent VNC WebSocket proxy error %s -> %s: %s",
                 agent_id, target, exc,
             )
-        finally:
-            with contextlib.suppress(Exception):
-                await websocket.close()
-
-    @app.get("/vnc/{path:path}")
-    async def vnc_http_proxy(path: str, request: Request):
-        """Reverse-proxy HTTP requests to KasmVNC (static files)."""
-        _reject_agent_tokens(request)
-        from src.dashboard.auth import verify_session_cookie
-        cookie_value = request.cookies.get("ol_session", "")
-        auth_error = verify_session_cookie(cookie_value)
-        if auth_error is not None:
-            raise HTTPException(401, auth_error)
-        import httpx
-
-        port = _get_vnc_port()
-        if port is None:
-            raise HTTPException(502, "Browser service not available")
-        query = str(request.url.query)
-        target = f"http://127.0.0.1:{port}/{path}"
-        if query:
-            target += f"?{query}"
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.get(target)
-        except (httpx.ConnectError, httpx.TimeoutException) as exc:
-            logger.warning("VNC HTTP proxy failed to reach %s: %s", target, exc)
-            raise HTTPException(502, "Browser VNC not reachable")
-        headers = {}
-        ct = resp.headers.get("content-type")
-        if ct:
-            headers["content-type"] = ct
-        return StreamingResponse(
-            iter([resp.content]),
-            status_code=resp.status_code,
-            headers=headers,
-        )
-
-    @app.websocket("/vnc/{path:path}")
-    async def vnc_ws_proxy(websocket: WebSocket, path: str):
-        """Reverse-proxy WebSocket connections to KasmVNC."""
-        # Verify session cookie
-        from src.dashboard.auth import verify_session_cookie
-        cookie_value = websocket.cookies.get("ol_session", "")
-        auth_error = verify_session_cookie(cookie_value)
-        if auth_error is not None:
-            await websocket.close(code=1008, reason=auth_error)
-            return
-        # Block agent tokens — could arrive as header or query param.
-        if _auth_tokens:
-            token = websocket.query_params.get("token", "")
-            auth_header = websocket.headers.get("authorization", "")
-            if auth_header.startswith("Bearer "):
-                token = token or auth_header[7:]
-            if token:
-                for expected in _auth_tokens.values():
-                    if hmac.compare_digest(token, expected):
-                        await websocket.close(code=1008, reason="Agent access denied")
-                        return
-        port = _get_vnc_port()
-        if port is None:
-            await websocket.close(code=1011, reason="Browser service not available")
-            return
-
-        # KasmVNC requires Origin header for /websockify (even with -disableBasicAuth).
-        target = f"ws://127.0.0.1:{port}/websockify"
-        extra_headers = {
-            "Origin": f"http://127.0.0.1:{port}",
-        }
-
-        await websocket.accept(subprotocol="binary")
-        try:
-            import websockets
-
-            async with websockets.connect(
-                target,
-                subprotocols=["binary"],
-                additional_headers=extra_headers,
-                compression=None,
-                ping_interval=None,  # noVNC handles keepalive; websockets' auto-ping
-                                     # drops the connection when KasmVNC doesn't pong
-            ) as upstream:
-
-                async def client_to_upstream():
-                    try:
-                        while True:
-                            msg = await websocket.receive()
-                            if "bytes" in msg and msg["bytes"]:
-                                await upstream.send(msg["bytes"])
-                            elif "text" in msg and msg["text"]:
-                                await upstream.send(msg["text"])
-                    except Exception as e:
-                        logger.warning("VNC client→upstream error: %s", e)
-
-                async def upstream_to_client():
-                    try:
-                        async for msg in upstream:
-                            if isinstance(msg, bytes):
-                                await websocket.send_bytes(msg)
-                            else:
-                                await websocket.send_text(msg)
-                    except Exception as e:
-                        logger.warning("VNC upstream→client error: %s", e)
-
-                async def browser_keepalive():
-                    """Touch all browser instances every 5 min while VNC is open.
-
-                    Prevents idle cleanup from killing a browser that a user
-                    is actively viewing without any agent operations running.
-                    """
-                    svc_url = getattr(container_manager, "browser_service_url", None)
-                    svc_token = getattr(container_manager, "browser_auth_token", "")
-                    if not svc_url:
-                        return
-                    try:
-                        import httpx as _httpx
-                        async with _httpx.AsyncClient(timeout=5) as _client:
-                            while True:
-                                await asyncio.sleep(30)
-                                with contextlib.suppress(Exception):
-                                    await _client.post(
-                                        f"{svc_url}/browser/keepalive",
-                                        headers={"Authorization": f"Bearer {svc_token}"},
-                                    )
-                    except asyncio.CancelledError:
-                        pass
-
-                tasks = [
-                    asyncio.create_task(client_to_upstream()),
-                    asyncio.create_task(upstream_to_client()),
-                    asyncio.create_task(browser_keepalive()),
-                ]
-                _done, pending = await asyncio.wait(
-                    tasks, return_when=asyncio.FIRST_COMPLETED,
-                )
-                for task in pending:
-                    task.cancel()
-        except Exception as exc:
-            logger.warning("VNC WebSocket proxy error: %s", exc)
         finally:
             with contextlib.suppress(Exception):
                 await websocket.close()

@@ -892,8 +892,8 @@ class RuntimeContext:
         # ── Services ──
         echo_header("OpenLegion")
         echo_ok(f"Dashboard: http://localhost:{mesh_port}")
-        if hasattr(self.runtime, 'browser_vnc_url') and self.runtime.browser_vnc_url:
-            echo_ok(f"Browser VNC: {self.runtime.browser_vnc_url}")
+        if hasattr(self.runtime, 'browser_service_url') and self.runtime.browser_service_url:
+            echo_ok(f"Browser service: {self.runtime.browser_service_url}")
         if self._cron_job_count:
             echo_ok(f"Cron: {self._cron_job_count} job{'s' if self._cron_job_count != 1 else ''}")
         if self.channel_manager and self.channel_manager.active:

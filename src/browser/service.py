@@ -40,7 +40,6 @@ from src.browser.display_allocator import (
     DisplayAllocator,
     PoolExhausted,
     Slot,
-    is_per_agent_display_enabled,
 )
 from src.browser.js_challenge import classify_js_challenge
 from src.browser.profile_schema import migrate_profile
@@ -2608,13 +2607,13 @@ class CamoufoxInstance:
         self.dialog_detected: bool = False  # True when a modal was found (even if scoping failed)
         self._lock: asyncio.Lock | None = None
         self.x11_wid: int | None = None  # X11 window ID for targeted focus
-        # Per-agent X stack (PR 1 of per-agent VNC isolation).  Populated
-        # by ``BrowserManager._start_browser`` when
-        # ``OPENLEGION_BROWSER_PER_AGENT_DISPLAY`` is on; ``None`` on the
-        # legacy shared-display path.  When set, ``subprocess_env()``
-        # scopes ``DISPLAY`` to this slot for every xdotool / X11 call,
-        # and ``_x_procs`` carries the Xvnc + Openbox + unclutter Popen
-        # handles so ``_stop_instance`` can tear them down.
+        # Per-agent X stack. Populated by ``BrowserManager._start_browser``
+        # before the Camoufox launch and cleared in ``_stop_instance``.
+        # ``subprocess_env()`` scopes ``DISPLAY`` to this slot for every
+        # xdotool / X11 call; ``_x_procs`` carries the
+        # Xvnc + Openbox + unclutter Popen handles so ``_stop_instance``
+        # can tear them down. Nullable only during the brief start/stop
+        # transition window before allocation / after release.
         self.display_slot: Slot | None = None
         self._x_procs: list[subprocess.Popen] = []
         # P0.3: vestigial — the snapshot tree builder always uses the JS
@@ -2783,21 +2782,18 @@ class CamoufoxInstance:
     def subprocess_env(self) -> dict[str, str] | None:
         """Build the env dict for an xdotool / X11 subprocess call.
 
-        Returns ``None`` (i.e. inherit ``os.environ``) on the legacy
-        shared-display path so the global ``DISPLAY=:99`` set by
-        :mod:`src.browser.__main__` reaches the child unchanged.  In
-        per-agent mode, returns ``os.environ`` overlaid with this
-        instance's allocated ``DISPLAY``.  Subprocess callers should
-        always pass ``env=inst.subprocess_env()`` — the ``None`` case is
-        equivalent to omitting the kwarg, so the same call site works
-        in both modes.
+        Returns ``os.environ`` overlaid with this instance's allocated
+        ``DISPLAY``.  Multiple Xvnc instances run concurrently, each on
+        a different display — inheriting process-global ``DISPLAY``
+        would silently funnel every agent's xdotool call to whichever
+        display the launcher last set, breaking targeted focus, click
+        injection, type injection, and cursor jitter for every agent
+        except one.
 
-        Why this matters: on the per-agent path multiple Xvnc instances
-        run concurrently, each on a different display.  Inheriting
-        process-global ``DISPLAY`` would silently funnel every agent's
-        xdotool call to whichever display the launcher last set —
-        breaking targeted focus, click injection, type injection, and
-        cursor jitter for every agent except one.
+        ``None`` only during the brief start/stop transition window
+        before allocation / after release; subprocess callers in those
+        windows should be exceptional and the inherited env is the
+        safe fallback.
         """
         if self.display_slot is None:
             return None
@@ -2963,7 +2959,6 @@ class BrowserManager:
         self._lock_loop: asyncio.AbstractEventLoop | None = None
         self._cleanup_task: asyncio.Task | None = None
         self._playwright = None
-        self._user_focused_agent: str | None = None  # set by explicit focus() call
         self.redactor = CredentialRedactor()
         self._proxy_configs: dict[str, dict | None] = {}
         self.boot_id: str = str(uuid.uuid4())
@@ -3507,18 +3502,6 @@ class BrowserManager:
                 logger.info("Stopping idle browser for '%s'", agent_id)
                 await self._stop_instance(agent_id)
 
-    async def touch_all(self) -> int:
-        """Reset the idle timer for every running browser instance.
-
-        Called by the VNC keepalive while a user is actively viewing the
-        display, so a watched browser is never killed by the idle cleanup.
-        Returns the number of instances touched.
-        """
-        async with self._manager_lock():
-            for inst in self._instances.values():
-                inst.touch()
-            return len(self._instances)
-
     def touch_agent(self, agent_id: str) -> bool:
         """Reset the idle timer for one agent's browser. Sync, no lock —
         ``last_activity`` is a single attribute write and the keepalive
@@ -3533,63 +3516,18 @@ class BrowserManager:
         return True
 
     def get_agent_vnc_port(self, agent_id: str) -> int | None:
-        """Return the per-agent KasmVNC port for ``agent_id``, or None.
+        """Return the KasmVNC port for ``agent_id``'s browser, or None.
 
-        ``None`` means either (a) no browser instance for this agent
-        (never started, or already stopped), or (b) the per-agent
-        display flag is off and the instance is on the legacy shared
-        display. Both surface as 503 to the proxy — viewers see a
-        clean "browser not running" state instead of a stale frame.
+        ``None`` means no running instance (never started, already
+        stopped, or partway through start/stop transition before the
+        slot was allocated). Surfaces as 503 to the proxy — viewers
+        see a clean "browser not running" state instead of a stale
+        frame.
         """
         inst = self._instances.get(agent_id)
         if inst is None or inst.display_slot is None:
             return None
         return inst.display_slot.vnc_port
-
-    async def refocus_active(self) -> None:
-        """Re-assert X11 focus on the user's viewed browser window.
-
-        Called periodically by the VNC keepalive.  When a modal, popup, or
-        internal Firefox dialog steals X11 focus, subsequent VNC mouse clicks
-        go to the wrong window and appear to do nothing.
-
-        Prefers the agent the user explicitly focused (via the dashboard
-        Browser button) over the most recently active instance.  This
-        prevents background agent browser operations from stealing the
-        VNC display away from what the user is watching.
-        """
-        async with self._manager_lock():
-            if not self._instances:
-                return
-            # Prefer user's explicit focus over MRU
-            if (
-                self._user_focused_agent
-                and self._user_focused_agent in self._instances
-            ):
-                target = self._instances[self._user_focused_agent]
-            else:
-                target = max(self._instances.values(), key=lambda i: i.last_activity)
-            wid = target.x11_wid
-        if not wid:
-            # No WID known — skip xdotool entirely.  The fallback
-            # `search --class firefox` matches ALL Firefox windows and
-            # raises whichever it finds first, breaking multi-agent
-            # browser switching.
-            return
-        try:
-            wid_s = str(wid)
-            cmd = ["xdotool", "windowmap", "--sync", wid_s,
-                   "windowraise", wid_s, "windowfocus", wid_s]
-            loop = asyncio.get_running_loop()
-            env = target.subprocess_env()
-            await loop.run_in_executor(
-                None,
-                lambda: subprocess.run(
-                    cmd, capture_output=True, timeout=3, env=env,
-                ),
-            )
-        except Exception:
-            pass
 
     async def get_or_start(self, agent_id: str) -> CamoufoxInstance:
         """Get existing browser or start a new one for the agent."""
@@ -3636,8 +3574,7 @@ class BrowserManager:
         """Lazily construct the display/port allocator on first use.
 
         Construction runs the boot sweep, so we only pay that cost when
-        the per-agent path is actually exercised — installations still on
-        the legacy shared display never touch the allocator.
+        the per-agent path is actually exercised.
         """
         if self._display_allocator is None:
             self._display_allocator = DisplayAllocator()
@@ -3690,9 +3627,7 @@ class BrowserManager:
             # reload don't kick the previous viewer off.  No basic auth
             # because the mesh proxy gates on ``ol_session`` upstream;
             # KasmVNC only needs to accept the websocket from the proxy
-            # over the container's bridge network.  Background colour
-            # matches the legacy launcher so an iframe reload doesn't
-            # flash white before the browser paints.
+            # over the container's bridge network.
             xvnc_cmd = [
                 "Xvnc", slot.display_str,
                 "-geometry", f"{width}x{height}",
@@ -3712,12 +3647,10 @@ class BrowserManager:
             )
 
             # Wait for the lock file to appear — proxy for "X server is
-            # accepting connections".  The legacy launcher used a fixed
-            # ``time.sleep(0.5)`` which is racy on slow boxes; polling
-            # the lock file is both faster on fast boxes and safer on
-            # slow ones.  5s ceiling matches `_discover_new_wid`'s
-            # 6s patience window — Xvnc itself binds in well under 1s
-            # in practice.
+            # accepting connections".  Polls instead of a fixed sleep so
+            # we're fast on fast boxes and safe on slow ones.  5s
+            # ceiling matches `_discover_new_wid`'s 6s patience window;
+            # Xvnc itself binds in well under 1s in practice.
             for _ in range(50):
                 if xvnc.poll() is not None:
                     raise RuntimeError(
@@ -3754,8 +3687,7 @@ class BrowserManager:
             )
             # Brief settle so Openbox claims the WM role before Firefox
             # spawns its window — racing produces a window without
-            # decorations / wrong placement.  Matches the legacy 0.3s
-            # sleep in __main__.py.
+            # decorations / wrong placement.
             await asyncio.sleep(0.3)
 
             # ── unclutter (hard-required when humanize is on) ─────
@@ -3841,13 +3773,13 @@ class BrowserManager:
     ) -> set[int]:
         """Return the set of current X11 window IDs for Firefox windows.
 
-        Optional ``inst`` scopes the query to that agent's display.  When
-        ``None`` (legacy shared-display path), inherits process-global
-        ``DISPLAY`` — which is correct for the shared :99 setup.  In
-        per-agent mode, callers MUST pass ``inst`` so the search runs
-        against the right X server; otherwise xdotool would query
-        whatever ``os.environ['DISPLAY']`` happens to be (the legacy
-        :99 if __main__.py started it, else unset).
+        Callers MUST pass ``inst`` so the search runs against that
+        agent's display — X11 WIDs are NOT unique across displays, so
+        querying any other display would risk a numeric collision and
+        end up tracking the wrong window. The optional default is kept
+        only for the rare case where the agent has no slot yet (early
+        startup); the inherited env produces an empty set, which the
+        caller treats as "no windows yet, retry".
         """
         loop = asyncio.get_running_loop()
         env = inst.subprocess_env() if inst is not None else None
@@ -3876,14 +3808,11 @@ class BrowserManager:
         assigns incrementing IDs — the highest is the most recently created
         (the main browser window, not a transient popup from startup).
 
-        ``inst`` scopes the underlying ``xdotool search`` to that agent's
-        display in per-agent mode.  In legacy mode the parameter is
-        unused and queries fall back to the global ``DISPLAY``.
-
-        In per-agent mode there should only ever be one Firefox per
-        display, so the highest-WID heuristic becomes trivially correct
-        (one WID, that's the new one).  We keep the heuristic intact so
-        the legacy path still works during the flag-gated rollout.
+        ``inst`` scopes the underlying ``xdotool search`` to that
+        agent's display. With one Firefox per display the highest-WID
+        heuristic is trivially correct (one WID — that's the new one);
+        we keep the heuristic shape so any future multi-Firefox-per-
+        display use case still picks the most-recently-created window.
         """
         for _ in range(30):  # up to ~6s
             current = await self._get_firefox_wids(inst)
@@ -3995,74 +3924,55 @@ class BrowserManager:
         else:
             logger.info("Starting Camoufox for '%s' (profile=%s, no proxy)", agent_id, profile_dir)
 
-        # ── PR 1: per-agent X stack ───────────────────────────────────────
-        # When the flag is on, allocate a (display, port) slot and bring
-        # up Xvnc + Openbox + unclutter sized to the picked window
-        # resolution.  Camoufox is then launched with ``DISPLAY=:N`` in
-        # its env so its Firefox child lands on the agent-private display.
-        # On the legacy path this block is a no-op; ``_get_firefox_wids``
-        # below queries the shared :99 display via inherited env.
-        per_agent = is_per_agent_display_enabled(agent_id=agent_id)
-        slot: Slot | None = None
-        x_procs: list[subprocess.Popen] = []
-        if per_agent:
-            try:
-                slot = self._ensure_allocator().allocate()
-            except PoolExhausted:
-                logger.error(
-                    "Display pool exhausted; cannot start browser for '%s'",
-                    agent_id,
-                )
-                raise
-            # Window resolution comes from build_launch_options; we read
-            # it back so the X server's geometry matches exactly (closes
-            # the screenX / screen.width gap that's a known bot-cluster
-            # signal — see _spawn_per_agent_x_stack docstring).
-            win = options.get("window") or (1920, 1080)
-            try:
-                x_procs = await self._spawn_per_agent_x_stack(
-                    agent_id, slot, int(win[0]), int(win[1]),
-                )
-            except Exception:
-                # Roll back the allocator slot — _spawn_per_agent_x_stack
-                # already terminated whatever children it managed to start.
-                self._display_allocator.release(slot)
-                raise
-            # Scope DISPLAY for the Camoufox launch.  Belt-and-braces:
-            # passing ``env=`` to Playwright is the canonical path, but
-            # Camoufox's wrapper internals are out-of-our-control, so we
-            # also set process-global ``DISPLAY`` for the duration of the
-            # launch (safe because ``_start_browser`` runs under
-            # ``_manager_lock`` — at most one launch at a time).  Restored
-            # in the finally block below.
-            launch_env = {
-                **os.environ,
-                "DISPLAY": slot.display_str,
-                # MOZ_NO_REMOTE prevents Firefox from attaching to a peer
-                # X-remote channel.  With per-profile launches it's
-                # mostly belt-and-braces, but cross-profile X-remote
-                # attach has historically had quirks; pin the safe
-                # behaviour explicitly.
-                "MOZ_NO_REMOTE": "1",
-            }
-            options["env"] = launch_env
+        # ── Per-agent X stack ─────────────────────────────────────────────
+        # Allocate a (display, port) slot and bring up Xvnc + Openbox +
+        # unclutter sized to the picked window resolution.  Camoufox is
+        # then launched with ``DISPLAY=:N`` in its env so its Firefox
+        # child lands on the agent-private display.
+        try:
+            slot = self._ensure_allocator().allocate()
+        except PoolExhausted:
+            logger.error(
+                "Display pool exhausted; cannot start browser for '%s'",
+                agent_id,
+            )
+            raise
+        # Window resolution comes from build_launch_options; we read
+        # it back so the X server's geometry matches exactly (closes
+        # the screenX / screen.width gap that's a known bot-cluster
+        # signal — see _spawn_per_agent_x_stack docstring).
+        win = options.get("window") or (1920, 1080)
+        try:
+            x_procs = await self._spawn_per_agent_x_stack(
+                agent_id, slot, int(win[0]), int(win[1]),
+            )
+        except Exception:
+            # Roll back the allocator slot — _spawn_per_agent_x_stack
+            # already terminated whatever children it managed to start.
+            self._display_allocator.release(slot)
+            raise
+        # Scope DISPLAY for the Camoufox launch.  Belt-and-braces:
+        # passing ``env=`` to Playwright is the canonical path, but
+        # Camoufox's wrapper internals are out-of-our-control, so we
+        # also set process-global ``DISPLAY`` for the duration of the
+        # launch (safe because ``_start_browser`` runs under
+        # ``_manager_lock`` — at most one launch at a time).  Restored
+        # in the finally block below.
+        launch_env = {
+            **os.environ,
+            "DISPLAY": slot.display_str,
+            # MOZ_NO_REMOTE prevents Firefox from attaching to a peer
+            # X-remote channel.  With per-profile launches it's
+            # mostly belt-and-braces, but cross-profile X-remote
+            # attach has historically had quirks; pin the safe
+            # behaviour explicitly.
+            "MOZ_NO_REMOTE": "1",
+        }
+        options["env"] = launch_env
 
-        # Snapshot existing Firefox windows so we can identify the new one.
-        # In per-agent mode the just-spawned display is empty by
-        # construction, so we skip the probe entirely — querying the
-        # LEGACY :99 display here would read WIDs from a different X
-        # server, and X11 WIDs are NOT unique across displays.  A
-        # collision (the same numeric WID present on both :99 and the
-        # new display) would defeat the post-launch diff and end up
-        # tracking the wrong window forever.
-        if per_agent:
-            wids_before: set[int] = set()
-        else:
-            wids_before = await self._get_firefox_wids()
         # Hold the saved DISPLAY so we can restore it after the launch.
         _saved_display = os.environ.get("DISPLAY")
-        if per_agent and slot is not None:
-            os.environ["DISPLAY"] = slot.display_str
+        os.environ["DISPLAY"] = slot.display_str
 
         # persistent_context=True → returns a BrowserContext directly.
         # geoip=True makes Camoufox connect through the proxy to resolve
@@ -4092,35 +4002,31 @@ class BrowserManager:
                     browser = await AsyncNewBrowser(pw, **options)
         except Exception:
             # Camoufox refused to launch — tear down the per-agent X
-            # stack so the slot is reusable.  Restore the saved DISPLAY
-            # so subsequent legacy-mode operations on this manager still
-            # find :99 (or whatever was set).
-            if per_agent:
-                if _saved_display is None:
-                    os.environ.pop("DISPLAY", None)
-                else:
-                    os.environ["DISPLAY"] = _saved_display
-                if x_procs:
-                    # Build a transient instance just to reuse the
-                    # teardown helper's signal/wait logic.  Cheaper
-                    # than duplicating the kill loop here.
-                    _scratch = type("_Scratch", (), {})()
-                    _scratch.display_slot = slot
-                    _scratch._x_procs = x_procs
-                    with contextlib.suppress(Exception):
-                        await self._teardown_per_agent_x_stack(_scratch)
-                elif slot is not None and self._display_allocator is not None:
-                    self._display_allocator.release(slot)
+            # stack so the slot is reusable.  Restore the saved DISPLAY.
+            if _saved_display is None:
+                os.environ.pop("DISPLAY", None)
+            else:
+                os.environ["DISPLAY"] = _saved_display
+            if x_procs:
+                # Build a transient instance just to reuse the
+                # teardown helper's signal/wait logic.  Cheaper
+                # than duplicating the kill loop here.
+                _scratch = type("_Scratch", (), {})()
+                _scratch.display_slot = slot
+                _scratch._x_procs = x_procs
+                with contextlib.suppress(Exception):
+                    await self._teardown_per_agent_x_stack(_scratch)
+            elif self._display_allocator is not None:
+                self._display_allocator.release(slot)
             raise
         context = browser
         # Restore process-global DISPLAY now that the launch is done.
         # Subsequent xdotool calls go through ``inst.subprocess_env()``
         # which scopes DISPLAY explicitly per call.
-        if per_agent:
-            if _saved_display is None:
-                os.environ.pop("DISPLAY", None)
-            else:
-                os.environ["DISPLAY"] = _saved_display
+        if _saved_display is None:
+            os.environ.pop("DISPLAY", None)
+        else:
+            os.environ["DISPLAY"] = _saved_display
 
         # §19.3 / Phase 10 §21: inject the navigator-override init script
         # for mobile profiles BEFORE any page is created. ``add_init_script``
@@ -4172,11 +4078,9 @@ class BrowserManager:
         inst = CamoufoxInstance(agent_id, browser, context, page)
         # Attach the per-agent X stack to the instance so subsequent
         # subprocess_env() calls scope DISPLAY correctly and
-        # _stop_instance can tear the stack down.  Both fields are
-        # ``None`` / empty in legacy mode.
-        if per_agent:
-            inst.display_slot = slot
-            inst._x_procs = x_procs
+        # _stop_instance can tear the stack down.
+        inst.display_slot = slot
+        inst._x_procs = x_procs
 
         # §20 — restore the previously-snapshotted session state.
         #
@@ -4205,9 +4109,12 @@ class BrowserManager:
         # creates a fresh one with ``_network_attached=False``.
         self._attach_network_listeners(inst)
 
-        # Discover the new X11 window for targeted focus.  Pass ``inst``
-        # so the search runs against this agent's display in per-agent
-        # mode; legacy mode passes through to the global :99.
+        # Discover the new X11 window for targeted focus.  ``wids_before``
+        # is empty by construction — the agent's display was just spawned,
+        # so any Firefox window discovered there is ours. (X11 WIDs are
+        # NOT unique across displays; querying any other display would
+        # risk a numeric collision.)
+        wids_before: set[int] = set()
         wid = await self._discover_new_wid(wids_before, inst)
         if wid:
             inst.x11_wid = wid
@@ -4559,8 +4466,6 @@ class BrowserManager:
             logger.warning(
                 "Final metrics drain failed for '%s': %s", agent_id, e,
             )
-        if self._user_focused_agent == agent_id:
-            self._user_focused_agent = None
         # Drop the agent's solve-rate bucket so a long-running deployment
         # with rotating agent ids doesn't accumulate dead entries forever.
         # Acquired separately because the rate-limit lock and manager
@@ -4682,12 +4587,11 @@ class BrowserManager:
             )
         except Exception as e:
             logger.debug("Error closing browser for '%s': %s", agent_id, e)
-        # PR 1: tear down the per-agent X stack and release the slot.
-        # No-op when ``inst.display_slot`` is None (legacy shared-display
-        # mode).  Order matters: ``context.close()`` above asks Firefox
-        # to disconnect from its X server BEFORE we kill that X server,
-        # so Firefox can run its own teardown without the X connection
-        # vanishing under it.
+        # Tear down the per-agent X stack and release the slot. Order
+        # matters: ``context.close()`` above asks Firefox to disconnect
+        # from its X server BEFORE we kill that X server, so Firefox
+        # can run its own teardown without the X connection vanishing
+        # under it.
         with contextlib.suppress(Exception):
             await self._teardown_per_agent_x_stack(inst)
         logger.info("Stopped browser for '%s'", agent_id)
@@ -4909,12 +4813,10 @@ class BrowserManager:
         2. xdotool windowmap + windowraise — X11 level (unmaps if iconic,
            then raises in the stacking order so VNC actually sees it)
         """
-        self._user_focused_agent = agent_id
         try:
             inst = await self.get_or_start(agent_id)
         except Exception as e:
             logger.warning("Focus: browser failed to start for '%s': %s", agent_id, e)
-            self._user_focused_agent = None
             return False
         async with inst.lock:
             try:

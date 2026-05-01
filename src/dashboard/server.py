@@ -707,63 +707,41 @@ def create_dashboard_router(
         })
 
     def _browser_vnc_url_for_request(
-        request: Request, agent_id: str | None = None,
+        request: Request, agent_id: str,
     ) -> str | None:
-        """Build the browser VNC URL for ``agent_id``.
+        """Build the agent-scoped browser VNC URL.
 
-        Two URL shapes, gated on ``OPENLEGION_BROWSER_PER_AGENT_DISPLAY``:
-
-        - **Per-agent** (flag on, ``agent_id`` provided):
-          ``/agent-vnc/{agent_id}/index.html?path=agent-vnc/{agent_id}/websockify&...``
-          The mesh routes this to the browser service which looks up the
-          agent's allocated KasmVNC port. Each agent's iframe streams
-          *only that agent's framebuffer* — opening agent 2's settings
-          shows agent 2's browser, not whatever Openbox foregrounded
-          last on the shared :99 display.
-
-        - **Legacy shared** (flag off, or ``agent_id`` omitted):
-          ``/vnc/index.html?path=vnc/websockify&...`` — the original
-          shared-display URL. Same for every agent. Kept until PR 3
-          deletes the legacy path.
-
-        Distinct URL prefixes (``/agent-vnc/`` vs ``/vnc/``) are used
-        so the mesh proxy can keep both routes without the per-agent
-        route accidentally catching legacy noVNC asset paths like
-        ``/vnc/vendor/promise.js``.
+        Returns ``/agent-vnc/{agent_id}/index.html?path=agent-vnc/{agent_id}/websockify&...``
+        — same-origin so it works through HTTPS via the reverse proxy
+        without exposing extra ports. The mesh forwards this to the
+        browser service which looks up the agent's allocated KasmVNC
+        port (display_allocator) and proxies onward, so each agent's
+        iframe streams only that agent's framebuffer.
 
         Returns ``None`` if the browser service hasn't been initialized.
         """
-        # Readiness gate: the browser SERVICE is what matters here, not
-        # the legacy ``browser_vnc_url`` (which indicated the global
-        # ``KasmVNC :6080`` and is unset under the per-agent default).
-        # ``browser_service_url`` is set as soon as the FastAPI ``/status``
-        # health probe passes — the right "is the service up" signal.
+        # Readiness gate: ``browser_service_url`` is set as soon as the
+        # FastAPI ``/browser/status`` health probe passes — the right
+        # "is the service up" signal. The legacy ``browser_vnc_url``
+        # was an alias for ``KasmVNC :6080`` which no longer exists.
         if not runtime or not getattr(runtime, "browser_service_url", None):
             return None
-
-        from src.browser.display_allocator import is_per_agent_display_enabled
-        per_agent = is_per_agent_display_enabled() and bool(agent_id)
-        if per_agent:
-            base_path = f"/agent-vnc/{agent_id}/index.html"
-            ws_path = f"agent-vnc/{agent_id}/websockify"
-        else:
-            base_path = "/vnc/index.html"
-            ws_path = "vnc/websockify"
-
-        query = (
-            "autoconnect=true"
-            "&reconnect=true"
-            "&reconnect_delay=2000"
-            f"&path={ws_path}"
-            "&resize=scale"
-            "&quality=7"
-            "&enable_perf_stats=0"
-        )
 
         forwarded_proto = request.headers.get("x-forwarded-proto")
         host = request.headers.get("host", "127.0.0.1:8420")
         scheme = forwarded_proto or "http"
-        return f"{scheme}://{host}{base_path}?{query}"
+        query = (
+            "autoconnect=true"
+            "&reconnect=true"
+            "&reconnect_delay=2000"
+            f"&path=agent-vnc/{agent_id}/websockify"
+            "&resize=scale"
+            "&quality=7"
+            "&enable_perf_stats=0"
+        )
+        return (
+            f"{scheme}://{host}/agent-vnc/{agent_id}/index.html?{query}"
+        )
 
     # ── Fleet overview ───────────────────────────────────────
 
