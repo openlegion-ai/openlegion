@@ -26,6 +26,7 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.responses import StreamingResponse
 
 from src.host.credentials import is_system_credential
+from src.host.pending_actions import PendingActions
 from src.shared.redaction import redact_url
 from src.shared.types import (
     AGENT_ID_RE_PATTERN,
@@ -78,42 +79,178 @@ if TYPE_CHECKING:
     from src.shared.types import MessageOrigin
 
 
-# ── Pending Config Change Store (in-memory) ──────────────────────
-
-_pending_changes: dict[str, dict] = {}
+# ── Pending Config Change Store (SQLite-backed) ──────────────────
+#
+# Task 2d migrated this from an in-memory dict to a SQLite-backed
+# ``PendingActions`` store (``data/pending_actions.db``) so pending
+# operator-config edits survive mesh restarts. Schema carries the
+# payload digest (replay protection) and origin kind (so confirm-side
+# gates can require ``origin_kind="human"``). The mesh app picks the
+# canonical instance up via ``_get_pending_actions_store()`` below;
+# the module-level helpers (kept for backward compatibility with
+# external test imports) delegate to that singleton.
 _MAX_PENDING = 10
 _CHANGE_TTL_SECONDS = 300
 
+# Module-level singleton used by the ``_store_pending_change`` /
+# ``_get_pending_change`` / ``_consume_pending_change`` shims below.
+# ``create_mesh_app`` sets this to its own instance so the helpers and
+# the app share one store; tests that import the helpers directly get
+# an in-memory store the first time they touch one of the shims.
+_pending_actions_singleton: PendingActions | None = None
+
+
+def _get_pending_actions_store() -> PendingActions:
+    """Lazy-init the module-level pending-action store.
+
+    Tests that import ``_store_pending_change`` directly without going
+    through ``create_mesh_app`` will land here; we use ``:memory:`` so
+    they don't pollute the cwd. Production callers run through
+    ``create_mesh_app``, which constructs a disk-backed instance and
+    assigns it to ``_pending_actions_singleton`` before the helpers
+    are ever called.
+    """
+    global _pending_actions_singleton
+    if _pending_actions_singleton is None:
+        _pending_actions_singleton = PendingActions(db_path=":memory:")
+    return _pending_actions_singleton
+
+
+# ── Backward-compat dict view ───────────────────────────────────────
+# Existing tests (``tests/test_operator_audit.py``) imported the legacy
+# ``_pending_changes`` dict directly. They want to ``.clear()`` it,
+# index into it, and mutate ``expires_at`` on a row to force expiry.
+# We expose a thin proxy that forwards each operation to the SQLite
+# store so those existing tests keep passing without leaking the old
+# in-memory dict semantics back into production code.
+
+class _PendingChangesProxy:
+    """Dict-like view over the SQLite pending_actions store.
+
+    Keeps the legacy ``_pending_changes`` import working: ``.clear()``,
+    ``__contains__``, ``__getitem__`` for tests; production code uses
+    :class:`PendingActions` directly.
+    """
+
+    def _store(self) -> PendingActions:
+        return _get_pending_actions_store()
+
+    def clear(self) -> None:
+        with self._store()._conn() as conn:
+            conn.execute("DELETE FROM pending_actions")
+
+    def __contains__(self, change_id: object) -> bool:
+        if not isinstance(change_id, str):
+            return False
+        return self._store().peek(change_id) is not None
+
+    def __len__(self) -> int:
+        return len(self._store().list_pending())
+
+    def __getitem__(self, change_id: str) -> dict:
+        rec = self._store().peek(change_id)
+        if rec is None:
+            raise KeyError(change_id)
+        # Translate from the new schema back to the legacy fields the
+        # old tests asserted on. ``payload`` carries the (old, new)
+        # value pair as a dict, plus ``field`` lives on the row itself.
+        payload = rec.get("payload") or {}
+        return {
+            "agent_id": rec["target_id"],
+            "field": rec["action_kind"],
+            "old_value": payload.get("old_value", ""),
+            "new_value": payload.get("new_value", ""),
+            "expires_at": datetime.fromtimestamp(rec["expires_at"], tz=timezone.utc),
+        }
+
+    def __setitem__(self, change_id: str, value: dict) -> None:
+        # Only the ``expires_at`` mutation is supported -- it's the
+        # only mutation legacy tests perform on this dict (to force
+        # expiry). Other writes go through ``_store_pending_change``.
+        if not isinstance(value, dict) or "expires_at" not in value:
+            raise NotImplementedError(
+                "Use _store_pending_change to insert; only expires_at "
+                "mutations are supported on this proxy.",
+            )
+        new_expiry = value["expires_at"]
+        if isinstance(new_expiry, datetime):
+            new_expiry = new_expiry.timestamp()
+        with self._store()._conn() as conn:
+            conn.execute(
+                "UPDATE pending_actions SET expires_at=? WHERE nonce=?",
+                (new_expiry, change_id),
+            )
+
+
+_pending_changes = _PendingChangesProxy()
+
 
 def _cleanup_expired_changes() -> None:
-    now = datetime.now(timezone.utc)
-    expired = [k for k, v in _pending_changes.items() if v["expires_at"] < now]
-    for k in expired:
-        del _pending_changes[k]
+    """Reap expired pending actions. Kept for backward compatibility."""
+    _get_pending_actions_store().reap_expired()
 
 
 def _store_pending_change(agent_id: str, field: str, old_value: object, new_value: object) -> str:
-    _cleanup_expired_changes()
-    if len(_pending_changes) >= _MAX_PENDING:
-        oldest = min(_pending_changes, key=lambda k: _pending_changes[k]["expires_at"])
-        del _pending_changes[oldest]
+    """Persist a pending config change. Returns a change_id (nonce).
+
+    Backed by ``PendingActions`` (SQLite). Capped at ``_MAX_PENDING``
+    rows per process; oldest expires-first row is evicted to make room.
+    """
+    store = _get_pending_actions_store()
+    store.reap_expired()
+    pending = store.list_pending()
+    if len(pending) >= _MAX_PENDING:
+        # Evict the row whose ``expires_at`` is soonest -- matches the
+        # legacy behavior (``min(...)`` over ``expires_at``).
+        oldest = min(pending, key=lambda r: r["expires_at"])
+        with store._conn() as conn:
+            conn.execute(
+                "DELETE FROM pending_actions WHERE nonce=?", (oldest["nonce"],),
+            )
     change_id = str(_uuid.uuid4())
-    _pending_changes[change_id] = {
-        "agent_id": agent_id, "field": field,
-        "old_value": old_value, "new_value": new_value,
-        "expires_at": datetime.now(timezone.utc) + timedelta(seconds=_CHANGE_TTL_SECONDS),
-    }
+    payload = {"old_value": old_value, "new_value": new_value}
+    store.store(
+        nonce=change_id,
+        actor="operator",
+        target_kind="agent",
+        target_id=agent_id,
+        action_kind=field,
+        payload=payload,
+        ttl=_CHANGE_TTL_SECONDS,
+    )
     return change_id
 
 
 def _get_pending_change(change_id: str) -> dict | None:
-    _cleanup_expired_changes()
-    return _pending_changes.get(change_id)
+    """Read a pending change. Returns the legacy dict shape or None."""
+    store = _get_pending_actions_store()
+    rec = store.peek(change_id)
+    if rec is None:
+        return None
+    payload = rec.get("payload") or {}
+    return {
+        "agent_id": rec["target_id"],
+        "field": rec["action_kind"],
+        "old_value": payload.get("old_value", ""),
+        "new_value": payload.get("new_value", ""),
+        "expires_at": datetime.fromtimestamp(rec["expires_at"], tz=timezone.utc),
+    }
 
 
 def _consume_pending_change(change_id: str) -> dict | None:
-    _cleanup_expired_changes()
-    return _pending_changes.pop(change_id, None)
+    """Atomically consume a pending change. Returns legacy dict shape or None."""
+    store = _get_pending_actions_store()
+    rec = store.consume(change_id)
+    if rec is None:
+        return None
+    payload = rec.get("payload") or {}
+    return {
+        "agent_id": rec["target_id"],
+        "field": rec["action_kind"],
+        "old_value": payload.get("old_value", ""),
+        "new_value": payload.get("new_value", ""),
+        "expires_at": datetime.fromtimestamp(rec["expires_at"], tz=timezone.utc),
+    }
 
 
 # ── Task 2c: Server-side channel origin validation ────────────────
@@ -294,6 +431,17 @@ def create_mesh_app(
     # Exposed for external callers (dashboard, health monitor) to clean up
     # agent state when agents are removed.
     app.cleanup_agent = lambda agent_id: None  # replaced below
+
+    # Task 2d: persistent pending-action store (replaces the in-memory
+    # ``_pending_changes`` dict). Mirrors the path convention of
+    # ``data/costs.db`` / ``data/traces.db``. The disk-backed instance
+    # is also assigned to the module-level singleton so the legacy
+    # ``_store_pending_change`` / ``_consume_pending_change`` helpers
+    # share state with the endpoints below.
+    pending_actions = PendingActions(db_path="data/pending_actions.db")
+    app.pending_actions = pending_actions  # exposed for tests/dashboard
+    global _pending_actions_singleton
+    _pending_actions_singleton = pending_actions
 
     _auth_tokens = auth_tokens if auth_tokens is not None else {}
     _agent_projects = agent_projects if agent_projects is not None else {}
@@ -2699,7 +2847,37 @@ def create_mesh_app(
             yaml_key = _CONFIG_FIELD_MAP.get(field, field)
             old_value = agents[agent_id].get(yaml_key, "")
 
-        change_id = _store_pending_change(agent_id, field, old_value, new_value)
+        # Capture the proposer's origin kind so the confirm side can
+        # gate on ``origin_kind="human"`` (Task 2d). When the X-Origin
+        # header is missing or unverifiable the row stores ``None`` and
+        # the confirm endpoint will refuse to apply.
+        origin = _validated_origin(request)
+        origin_kind = origin.kind if origin is not None else None
+
+        # Cap to ``_MAX_PENDING`` rows to bound storage growth -- mirrors
+        # the legacy in-memory eviction behavior.
+        pending_actions.reap_expired()
+        existing = pending_actions.list_pending()
+        if len(existing) >= _MAX_PENDING:
+            oldest = min(existing, key=lambda r: r["expires_at"])
+            with pending_actions._conn() as _conn:
+                _conn.execute(
+                    "DELETE FROM pending_actions WHERE nonce=?",
+                    (oldest["nonce"],),
+                )
+
+        change_id = str(_uuid.uuid4())
+        payload = {"old_value": old_value, "new_value": new_value}
+        record = pending_actions.store(
+            nonce=change_id,
+            actor="operator",
+            target_kind="agent",
+            target_id=agent_id,
+            action_kind=field,
+            payload=payload,
+            origin_kind=origin_kind,
+            ttl=_CHANGE_TTL_SECONDS,
+        )
 
         # Generate preview diff
         old_str = json.dumps(old_value, indent=2) if not isinstance(old_value, str) else old_value
@@ -2719,7 +2897,29 @@ def create_mesh_app(
         return {
             "change_id": change_id,
             "preview_diff": preview,
-            "expires_at": _pending_changes[change_id]["expires_at"].isoformat(),
+            "expires_at": datetime.fromtimestamp(
+                record["expires_at"], tz=timezone.utc,
+            ).isoformat(),
+            "payload_digest": record["payload_digest"],
+        }
+
+    def _record_to_legacy_change(record: dict) -> dict:
+        """Map a ``PendingActions`` record to the legacy change dict.
+
+        ``_apply_pending_change`` was written against the old in-memory
+        shape (``agent_id`` / ``field`` / ``old_value`` / ``new_value``).
+        Rather than rewrite it, the SQLite-backed endpoints translate
+        records on the way in.
+        """
+        payload = record.get("payload") or {}
+        return {
+            "agent_id": record["target_id"],
+            "field": record["action_kind"],
+            "old_value": payload.get("old_value", ""),
+            "new_value": payload.get("new_value", ""),
+            "expires_at": datetime.fromtimestamp(
+                record["expires_at"], tz=timezone.utc,
+            ),
         }
 
     async def _apply_pending_change(change_id: str, change: dict) -> dict:
@@ -2848,24 +3048,53 @@ def create_mesh_app(
 
         return {"success": True, "agent_id": agent_id, "field": field}
 
+    def _confirm_origin_check(request: Request) -> None:
+        """Task 2d: confirm-side gate — refuse non-human origins.
+
+        Pending operator-config edits are durable, so an agent that
+        spoofed an X-Origin header (or a buggy adapter that promoted a
+        non-human origin) must not be able to flip the lever. The
+        propose endpoint records the proposer's origin kind on the row;
+        ``pending_actions.consume(require_origin_kind="human")`` then
+        rejects rows whose stored origin is not ``human``. We *also*
+        re-check the *current* request's origin here so a confirm
+        attempt that arrives without a human X-Origin is refused
+        immediately, before we ever consume the row.
+        """
+        confirm_origin = _validated_origin(request)
+        if confirm_origin is None or confirm_origin.kind != "human":
+            raise HTTPException(403, "Confirmation requires human origin")
+
     @app.post("/mesh/agents/{agent_id}/config")
     async def update_agent_config(agent_id: str, request: Request) -> dict:
         """Apply a pending config change. Used by confirm_edit tool."""
         _require_any_auth(request)
         if _resolve_agent_id("", request) != "operator":
             raise HTTPException(403, "Only the operator can apply config changes")
+        _confirm_origin_check(request)
         data = await request.json()
         change_id = data.get("change_id", "")
+        client_digest = data.get("payload_digest")
 
-        change = _get_pending_change(change_id)
-        if not change:
-            raise HTTPException(404, "Change not found or expired")
-        if change["agent_id"] != agent_id:
+        # Pre-flight: peek so we can preserve the legacy "agent ID
+        # mismatch" 400 (different from the generic invalid/expired
+        # response). Only ``consume`` actually deletes the row.
+        peek = pending_actions.peek(change_id)
+        if peek is not None and peek.get("target_id") != agent_id:
             raise HTTPException(400, "Agent ID mismatch")
-        # Consume only after validation passes
-        _consume_pending_change(change_id)
 
-        return await _apply_pending_change(change_id, change)
+        record = pending_actions.consume(
+            change_id,
+            confirmer="operator",
+            require_origin_kind="human",
+            expected_payload_digest=client_digest,
+        )
+        if not record:
+            raise HTTPException(400, "Pending action invalid or expired")
+
+        return await _apply_pending_change(
+            change_id, _record_to_legacy_change(record),
+        )
 
     @app.post("/mesh/config/confirm")
     async def confirm_config_change(request: Request) -> dict:
@@ -2879,18 +3108,26 @@ def create_mesh_app(
         _require_any_auth(request)
         if _resolve_agent_id("", request) != "operator":
             raise HTTPException(403, "Only the operator can confirm config changes")
+        _confirm_origin_check(request)
         data = await request.json()
         change_id = data.get("change_id", "")
+        client_digest = data.get("payload_digest")
 
-        change = _get_pending_change(change_id)
-        if not change:
-            raise HTTPException(404, "Change not found or expired")
-        # Consume before apply to prevent double-apply on retry. If
-        # _apply_pending_change raises, the change is already gone — the
-        # caller must propose a new change rather than retry this one.
-        _consume_pending_change(change_id)
+        # Consume + apply. ``consume`` is atomic: same nonce can only
+        # be applied once. If ``_apply_pending_change`` raises, the
+        # row is already gone -- the caller must propose a new change.
+        record = pending_actions.consume(
+            change_id,
+            confirmer="operator",
+            require_origin_kind="human",
+            expected_payload_digest=client_digest,
+        )
+        if not record:
+            raise HTTPException(400, "Pending action invalid or expired")
 
-        return await _apply_pending_change(change_id, change)
+        return await _apply_pending_change(
+            change_id, _record_to_legacy_change(record),
+        )
 
     # === Browser Service Proxy ===
 

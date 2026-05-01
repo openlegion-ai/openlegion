@@ -1,0 +1,363 @@
+"""Tests for the SQLite-backed PendingActions store (Task 2d).
+
+The legacy in-memory ``_pending_changes`` dict in ``src/host/server.py``
+was replaced with a persistent SQLite-backed store. These tests cover:
+
+* basic store / peek / consume semantics
+* atomic single-shot consume (replay protection)
+* expiry cleanup
+* origin / actor / payload-digest gates on consume
+* list_pending excludes expired
+* schema migration is idempotent
+* persistence across reopen
+* concurrent consumes serialize via ``BEGIN IMMEDIATE``
+"""
+
+from __future__ import annotations
+
+import threading
+import time
+
+from src.host.pending_actions import PendingActions, _payload_digest
+
+
+def _make_store(tmp_path) -> PendingActions:
+    return PendingActions(db_path=str(tmp_path / "pending.db"))
+
+
+# ── Basic API ─────────────────────────────────────────────────────
+
+
+def test_store_and_peek_returns_record_without_consuming(tmp_path):
+    pa = _make_store(tmp_path)
+    rec = pa.store(
+        nonce="n1",
+        actor="operator",
+        target_kind="agent",
+        target_id="alpha",
+        action_kind="model",
+        payload={"old_value": "gpt-4o", "new_value": "claude"},
+        origin_kind="human",
+    )
+    assert rec["nonce"] == "n1"
+    assert rec["payload_digest"]
+    assert rec["origin_kind"] == "human"
+
+    # Peek twice -- both should return the record (no consumption).
+    p1 = pa.peek("n1")
+    p2 = pa.peek("n1")
+    assert p1 is not None and p2 is not None
+    assert p1["target_id"] == "alpha"
+    assert p1["action_kind"] == "model"
+    assert p1["payload"] == {"old_value": "gpt-4o", "new_value": "claude"}
+
+
+def test_store_then_consume_returns_record_then_none(tmp_path):
+    pa = _make_store(tmp_path)
+    pa.store(
+        nonce="n1", actor="operator", target_kind="agent",
+        target_id="alpha", action_kind="model", payload={"x": 1},
+    )
+    first = pa.consume("n1")
+    second = pa.consume("n1")
+    assert first is not None
+    assert first["target_id"] == "alpha"
+    assert second is None  # already consumed
+
+
+def test_consume_unknown_nonce_returns_none(tmp_path):
+    pa = _make_store(tmp_path)
+    assert pa.consume("does-not-exist") is None
+
+
+def test_peek_unknown_nonce_returns_none(tmp_path):
+    pa = _make_store(tmp_path)
+    assert pa.peek("does-not-exist") is None
+
+
+# ── Expiry ────────────────────────────────────────────────────────
+
+
+def test_expired_peek_returns_none(tmp_path):
+    pa = _make_store(tmp_path)
+    pa.store(
+        nonce="n1", actor="operator", target_kind="agent",
+        target_id="alpha", action_kind="model", payload={"x": 1},
+        ttl=0,  # already expired
+    )
+    # Force the boundary by sleeping a hair to ensure now > expires_at.
+    time.sleep(0.01)
+    assert pa.peek("n1") is None
+
+
+def test_expired_consume_returns_none_and_deletes_row(tmp_path):
+    pa = _make_store(tmp_path)
+    pa.store(
+        nonce="n1", actor="operator", target_kind="agent",
+        target_id="alpha", action_kind="model", payload={"x": 1},
+        ttl=0,
+    )
+    time.sleep(0.01)
+    assert pa.consume("n1") is None
+    # Row should be gone -- a fresh store with the same nonce works.
+    pa.store(
+        nonce="n1", actor="operator", target_kind="agent",
+        target_id="beta", action_kind="model", payload={"y": 2},
+    )
+    assert pa.peek("n1")["target_id"] == "beta"
+
+
+def test_reap_expired_only_drops_expired(tmp_path):
+    pa = _make_store(tmp_path)
+    pa.store(
+        nonce="alive", actor="operator", target_kind="agent",
+        target_id="alpha", action_kind="model", payload={"x": 1},
+        ttl=300,
+    )
+    pa.store(
+        nonce="dead", actor="operator", target_kind="agent",
+        target_id="beta", action_kind="model", payload={"y": 2},
+        ttl=0,
+    )
+    time.sleep(0.01)
+    deleted = pa.reap_expired()
+    assert deleted == 1
+    assert pa.peek("alive") is not None
+    assert pa.peek("dead") is None
+
+
+def test_list_pending_excludes_expired(tmp_path):
+    pa = _make_store(tmp_path)
+    pa.store(
+        nonce="a", actor="operator", target_kind="agent",
+        target_id="alpha", action_kind="model", payload={}, ttl=300,
+    )
+    pa.store(
+        nonce="b", actor="operator", target_kind="agent",
+        target_id="beta", action_kind="model", payload={}, ttl=0,
+    )
+    time.sleep(0.01)
+    rows = pa.list_pending()
+    assert [r["nonce"] for r in rows] == ["a"]
+
+
+# ── Confirm-side gates ────────────────────────────────────────────
+
+
+def test_consume_wrong_confirmer_preserves_row(tmp_path):
+    pa = _make_store(tmp_path)
+    pa.store(
+        nonce="n1", actor="operator", target_kind="agent",
+        target_id="alpha", action_kind="model", payload={"x": 1},
+    )
+    # Wrong confirmer -- returns None and does NOT delete.
+    assert pa.consume("n1", confirmer="someone-else") is None
+    assert pa.peek("n1") is not None
+    # Right confirmer -- succeeds.
+    assert pa.consume("n1", confirmer="operator") is not None
+
+
+def test_consume_wrong_payload_digest_preserves_row(tmp_path):
+    pa = _make_store(tmp_path)
+    rec = pa.store(
+        nonce="n1", actor="operator", target_kind="agent",
+        target_id="alpha", action_kind="model", payload={"x": 1},
+    )
+    bogus_digest = "0" * 64
+    assert pa.consume("n1", expected_payload_digest=bogus_digest) is None
+    assert pa.peek("n1") is not None
+    # Real digest -- succeeds.
+    assert pa.consume("n1", expected_payload_digest=rec["payload_digest"]) is not None
+
+
+def test_consume_origin_kind_mismatch_preserves_row(tmp_path):
+    pa = _make_store(tmp_path)
+    pa.store(
+        nonce="n1", actor="operator", target_kind="agent",
+        target_id="alpha", action_kind="model", payload={"x": 1},
+        origin_kind="agent",
+    )
+    # Require human, row says agent -- refuse.
+    assert pa.consume("n1", require_origin_kind="human") is None
+    # Row preserved.
+    assert pa.peek("n1") is not None
+
+
+def test_consume_origin_kind_match_succeeds(tmp_path):
+    pa = _make_store(tmp_path)
+    pa.store(
+        nonce="n1", actor="operator", target_kind="agent",
+        target_id="alpha", action_kind="model", payload={"x": 1},
+        origin_kind="human",
+    )
+    assert pa.consume("n1", require_origin_kind="human") is not None
+
+
+def test_consume_origin_kind_required_but_missing(tmp_path):
+    """A row without origin_kind cannot satisfy require_origin_kind="human"."""
+    pa = _make_store(tmp_path)
+    pa.store(
+        nonce="n1", actor="operator", target_kind="agent",
+        target_id="alpha", action_kind="model", payload={"x": 1},
+        origin_kind=None,
+    )
+    assert pa.consume("n1", require_origin_kind="human") is None
+    assert pa.peek("n1") is not None  # still there
+
+
+def test_payload_digest_is_stable_across_dict_orderings():
+    """Equivalent payloads with reordered keys must hash identically."""
+    a = _payload_digest({"a": 1, "b": 2})
+    b = _payload_digest({"b": 2, "a": 1})
+    c = _payload_digest({"a": 1, "b": 3})
+    assert a == b
+    assert a != c
+
+
+# ── Schema / migration ────────────────────────────────────────────
+
+
+def test_init_schema_is_idempotent(tmp_path):
+    pa = _make_store(tmp_path)
+    # Calling twice must not blow up.
+    pa._init_schema()
+    pa._init_schema()
+    # Sanity: store still works after re-init.
+    pa.store(
+        nonce="n1", actor="operator", target_kind="agent",
+        target_id="alpha", action_kind="model", payload={"x": 1},
+    )
+    assert pa.peek("n1") is not None
+
+
+def test_persistence_across_reopen(tmp_path):
+    """Records survive reopening the database (mesh-restart scenario)."""
+    db_path = str(tmp_path / "pending.db")
+    pa1 = PendingActions(db_path=db_path)
+    pa1.store(
+        nonce="n1", actor="operator", target_kind="agent",
+        target_id="alpha", action_kind="model",
+        payload={"old_value": "gpt-4o", "new_value": "claude"},
+        origin_kind="human", ttl=300,
+    )
+    # Drop the first instance entirely.
+    del pa1
+    # Reopen.
+    pa2 = PendingActions(db_path=db_path)
+    rec = pa2.peek("n1")
+    assert rec is not None
+    assert rec["target_id"] == "alpha"
+    assert rec["origin_kind"] == "human"
+    assert rec["payload"] == {"old_value": "gpt-4o", "new_value": "claude"}
+
+
+# ── Concurrency ──────────────────────────────────────────────────
+
+
+def test_concurrent_consume_serializes(tmp_path):
+    """BEGIN IMMEDIATE in consume serializes two threads on the same nonce.
+
+    Two threads race to consume the same nonce. Exactly one wins; the
+    other returns None. (The losing thread's BEGIN IMMEDIATE waits on
+    SQLite's busy_timeout for the winner to commit; once that happens,
+    the loser sees an empty row and returns None.)
+    """
+    pa = _make_store(tmp_path)
+    pa.store(
+        nonce="n1", actor="operator", target_kind="agent",
+        target_id="alpha", action_kind="model", payload={"x": 1},
+    )
+    results: list = []
+    barrier = threading.Barrier(2)
+
+    def worker():
+        barrier.wait()
+        results.append(pa.consume("n1"))
+
+    t1 = threading.Thread(target=worker)
+    t2 = threading.Thread(target=worker)
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    successes = [r for r in results if r is not None]
+    assert len(successes) == 1, f"expected exactly one success, got {results}"
+
+
+# ── Replace-on-duplicate behavior ─────────────────────────────────
+
+
+def test_duplicate_nonce_replaces_row(tmp_path):
+    """INSERT OR REPLACE: storing the same nonce twice replaces the row.
+
+    Rationale (documented in PendingActions docstring): the propose
+    endpoint generates fresh UUIDs, so a collision in production
+    indicates a deliberate re-propose. Replacing the prior payload is
+    the correct semantic.
+    """
+    pa = _make_store(tmp_path)
+    pa.store(
+        nonce="n1", actor="operator", target_kind="agent",
+        target_id="alpha", action_kind="model",
+        payload={"old_value": "x", "new_value": "y"},
+    )
+    pa.store(
+        nonce="n1", actor="operator", target_kind="agent",
+        target_id="alpha", action_kind="model",
+        payload={"old_value": "x", "new_value": "z"},
+    )
+    rec = pa.peek("n1")
+    # New payload won.
+    assert rec["payload"]["new_value"] == "z"
+    # And only one row exists.
+    assert len(pa.list_pending()) == 1
+
+
+# ── Reap on consume / store ──────────────────────────────────────
+
+
+def test_opportunistic_reap_runs_on_store(tmp_path):
+    pa = _make_store(tmp_path)
+    pa.store(
+        nonce="dead", actor="operator", target_kind="agent",
+        target_id="alpha", action_kind="model", payload={}, ttl=0,
+    )
+    time.sleep(0.01)
+    # Storing a fresh row triggers opportunistic reap.
+    pa.store(
+        nonce="alive", actor="operator", target_kind="agent",
+        target_id="beta", action_kind="model", payload={}, ttl=300,
+    )
+    assert pa.peek("dead") is None
+    assert pa.peek("alive") is not None
+
+
+def test_safe_reap_swallows_errors(tmp_path, monkeypatch):
+    """_safe_reap must never raise even when reap_expired raises."""
+    pa = _make_store(tmp_path)
+
+    def boom():
+        raise RuntimeError("simulated database failure")
+
+    monkeypatch.setattr(pa, "reap_expired", boom)
+    # Must not raise.
+    pa._safe_reap()
+
+
+# ── Optional edge: list_pending returns ordered ──────────────────
+
+
+def test_list_pending_ordered_by_created_at(tmp_path):
+    pa = _make_store(tmp_path)
+    pa.store(
+        nonce="first", actor="operator", target_kind="agent",
+        target_id="alpha", action_kind="model", payload={}, ttl=300,
+    )
+    time.sleep(0.005)
+    pa.store(
+        nonce="second", actor="operator", target_kind="agent",
+        target_id="beta", action_kind="model", payload={}, ttl=300,
+    )
+    rows = pa.list_pending()
+    assert [r["nonce"] for r in rows] == ["first", "second"]
