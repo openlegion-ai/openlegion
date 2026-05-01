@@ -594,25 +594,15 @@ class DockerBackend(RuntimeBackend):
             logger.warning("Browser service API failed to become ready after 15 attempts")
             return
 
-        # Verify KasmVNC is also reachable — it starts independently of the
-        # FastAPI service and can fail even when the API is healthy.
-        vnc_url = f"http://127.0.0.1:{vnc_port}"
-        vnc_ready = False
-        for attempt in range(10):
-            try:
-                resp = _httpx.get(f"{vnc_url}/index.html", timeout=2)
-                if resp.status_code == 200:
-                    vnc_ready = True
-                    break
-            except Exception as e:
-                logger.debug("KasmVNC not ready (attempt %d): %s", attempt + 1, e)
-            time.sleep(1)
-
-        if not vnc_ready:
-            logger.warning("KasmVNC failed to become reachable on port %d", vnc_port)
-            return
-
-        self.browser_vnc_url = f"http://127.0.0.1:{vnc_port}/index.html?autoconnect=true&path=&resize=scale"
+        # Per-agent KasmVNCs spawn lazily inside
+        # ``BrowserManager._spawn_per_agent_x_stack`` when an agent
+        # starts a browser — there is no global KasmVNC to health-check
+        # at boot. The legacy ``self.browser_vnc_url`` setter (which
+        # pointed at ``:6080``) is preserved here as a non-empty marker
+        # so any stale dashboard code that still reads it sees a
+        # truthy value; the actual per-agent URLs are constructed from
+        # ``browser_service_url`` by the dashboard's URL builder.
+        self.browser_vnc_url = self.browser_service_url
 
         # Push saved browser settings (speed + inter-action delay) so
         # they survive container restarts. Pre-fix, only ``browser_speed``
