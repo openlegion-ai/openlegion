@@ -3921,13 +3921,32 @@ def create_mesh_app(
             event_bus.unsubscribe(websocket)
 
     # ── VNC reverse proxy ────────────────────────────────────────────────
-    # Proxies HTTP (static files) and WebSocket (VNC stream) requests from
-    # /vnc/{path} to the browser container's KasmVNC port.  This lets VNC
-    # work out-of-the-box behind a reverse proxy without exposing extra
-    # ports or dealing with mixed-content issues.
+    # Two routes on DIFFERENT prefixes coexist during the per-agent VNC
+    # rollout — separate namespaces avoid any collision:
+    #
+    #   /agent-vnc/{agent_id}/{path:path}  — per-agent (PR 2). Forwards
+    #     through the browser service, which looks up the agent's
+    #     allocated VNC port (display_allocator) and proxies to that
+    #     KasmVNC. Used when OPENLEGION_BROWSER_PER_AGENT_DISPLAY=1.
+    #
+    #   /vnc/{path:path}                   — legacy shared-display.
+    #     Forwards directly to ``container_manager.browser_vnc_url``'s
+    #     port (the global KasmVNC :6080 attached to display :99). Used
+    #     when the flag is off. Reaches end-of-life in PR 3.
+    #
+    # We tried sharing the ``/vnc/`` prefix originally (per-agent at
+    # ``/vnc/{agent_id}/{path}``, legacy at ``/vnc/{path}``), but
+    # KasmVNC's noVNC client fetches relative assets like
+    # ``vendor/foo.js``, ``app/ui.js``, ``core/rfb.js`` from a
+    # ``/vnc/index.html`` document base — those resolve to two-segment
+    # URLs (``/vnc/vendor/foo.js``) where the first segment passes the
+    # agent_id regex but isn't an agent. The per-agent route would
+    # 503 every legacy iframe asset. Distinct prefixes side-step this
+    # entirely and survive any future noVNC subdirs without code
+    # changes.
 
     def _get_vnc_port() -> int | None:
-        """Extract KasmVNC port from browser_vnc_url, or None."""
+        """Extract legacy KasmVNC port from browser_vnc_url, or None."""
         if container_manager is None:
             return None
         url = getattr(container_manager, "browser_vnc_url", None)
@@ -3956,6 +3975,183 @@ def create_mesh_app(
             for expected in _auth_tokens.values():
                 if hmac.compare_digest(token, expected):
                     raise HTTPException(403, "Agent access denied")
+
+    async def _verify_vnc_dashboard_session(request_or_ws) -> str | None:
+        """Run the same dashboard session-cookie check both VNC routes need.
+        Returns an error string or None on success.
+        """
+        from src.dashboard.auth import verify_session_cookie
+        cookies = getattr(request_or_ws, "cookies", {}) or {}
+        cookie_value = cookies.get("ol_session", "")
+        return verify_session_cookie(cookie_value)
+
+    @app.get("/agent-vnc/{agent_id}/{path:path}")
+    async def vnc_http_proxy_per_agent(
+        agent_id: str, path: str, request: Request,
+    ):
+        """Per-agent VNC HTTP proxy → browser service /agent-vnc/{agent_id}/...."""
+        _reject_agent_tokens(request)
+        auth_error = await _verify_vnc_dashboard_session(request)
+        if auth_error is not None:
+            raise HTTPException(401, auth_error)
+        if not _AGENT_ID_RE.fullmatch(agent_id):
+            raise HTTPException(404)
+        svc_url = getattr(container_manager, "browser_service_url", None)
+        svc_token = getattr(container_manager, "browser_auth_token", "")
+        if not svc_url:
+            raise HTTPException(502, "Browser service not available")
+        target = f"{svc_url}/agent-vnc/{agent_id}/{path}"
+        if request.url.query:
+            target += f"?{request.url.query}"
+        import httpx
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    target,
+                    headers={"Authorization": f"Bearer {svc_token}"},
+                )
+        except (httpx.ConnectError, httpx.TimeoutException) as exc:
+            logger.warning(
+                "Per-agent VNC HTTP proxy failed %s -> %s: %s",
+                agent_id, target, exc,
+            )
+            raise HTTPException(502, "Browser VNC not reachable")
+        headers = {}
+        ct = resp.headers.get("content-type")
+        if ct:
+            headers["content-type"] = ct
+        return StreamingResponse(
+            iter([resp.content]),
+            status_code=resp.status_code,
+            headers=headers,
+        )
+
+    @app.websocket("/agent-vnc/{agent_id}/{path:path}")
+    async def vnc_ws_proxy_per_agent(
+        websocket: WebSocket, agent_id: str, path: str,
+    ):
+        """Per-agent VNC WebSocket proxy → browser service /agent-vnc/{agent_id}/...."""
+        auth_error = await _verify_vnc_dashboard_session(websocket)
+        if auth_error is not None:
+            await websocket.close(code=1008, reason=auth_error)
+            return
+        # Block agent tokens — could arrive as header or query param.
+        if _auth_tokens:
+            token = websocket.query_params.get("token", "")
+            auth_header = websocket.headers.get("authorization", "")
+            if auth_header.startswith("Bearer "):
+                token = token or auth_header[7:]
+            if token:
+                for expected in _auth_tokens.values():
+                    if hmac.compare_digest(token, expected):
+                        await websocket.close(
+                            code=1008, reason="Agent access denied",
+                        )
+                        return
+        if not _AGENT_ID_RE.fullmatch(agent_id):
+            await websocket.close(code=1008, reason="invalid agent_id")
+            return
+        svc_url = getattr(container_manager, "browser_service_url", None)
+        svc_token = getattr(container_manager, "browser_auth_token", "")
+        if not svc_url:
+            await websocket.close(
+                code=1011, reason="Browser service not available",
+            )
+            return
+
+        # browser_service_url is http://...; convert to ws:// for the
+        # upstream connection. Preserve any query string the iframe sent
+        # — urlencode keeps it safe if any future param value contains
+        # ``&`` or ``=``. (KasmVNC's /websockify is typically called
+        # without query params, but encoding is one line of insurance.)
+        target = svc_url.replace("http://", "ws://").replace("https://", "wss://")
+        target = f"{target}/agent-vnc/{agent_id}/{path}"
+        if websocket.query_params:
+            from urllib.parse import urlencode
+            qs = urlencode(list(websocket.query_params.multi_items()))
+            if qs:
+                target += f"?{qs}"
+
+        await websocket.accept(subprotocol="binary")
+        try:
+            import websockets
+
+            async with websockets.connect(
+                target,
+                subprotocols=["binary"],
+                additional_headers={
+                    "Authorization": f"Bearer {svc_token}",
+                },
+                compression=None,
+                ping_interval=None,
+            ) as upstream:
+
+                async def client_to_upstream():
+                    try:
+                        while True:
+                            msg = await websocket.receive()
+                            if "bytes" in msg and msg["bytes"]:
+                                await upstream.send(msg["bytes"])
+                            elif "text" in msg and msg["text"]:
+                                await upstream.send(msg["text"])
+                    except Exception as e:
+                        logger.warning(
+                            "Per-agent VNC client→upstream error: %s", e,
+                        )
+
+                async def upstream_to_client():
+                    try:
+                        async for msg in upstream:
+                            if isinstance(msg, bytes):
+                                await websocket.send_bytes(msg)
+                            else:
+                                await websocket.send_text(msg)
+                    except Exception as e:
+                        logger.warning(
+                            "Per-agent VNC upstream→client error: %s", e,
+                        )
+
+                async def browser_keepalive():
+                    """Touch the viewed agent's browser every 30s while VNC
+                    is open. Per-agent endpoint — does NOT touch other
+                    agents' browsers, so opening one operator's VNC tab
+                    doesn't extend everyone's idle window.
+                    """
+                    if not svc_url:
+                        return
+                    try:
+                        import httpx as _httpx
+                        async with _httpx.AsyncClient(timeout=5) as _client:
+                            while True:
+                                await asyncio.sleep(30)
+                                with contextlib.suppress(Exception):
+                                    await _client.post(
+                                        f"{svc_url}/browser/{agent_id}/keepalive",
+                                        headers={
+                                            "Authorization": f"Bearer {svc_token}",
+                                        },
+                                    )
+                    except asyncio.CancelledError:
+                        pass
+
+                tasks = [
+                    asyncio.create_task(client_to_upstream()),
+                    asyncio.create_task(upstream_to_client()),
+                    asyncio.create_task(browser_keepalive()),
+                ]
+                _done, pending = await asyncio.wait(
+                    tasks, return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in pending:
+                    task.cancel()
+        except Exception as exc:
+            logger.warning(
+                "Per-agent VNC WebSocket proxy error %s -> %s: %s",
+                agent_id, target, exc,
+            )
+        finally:
+            with contextlib.suppress(Exception):
+                await websocket.close()
 
     @app.get("/vnc/{path:path}")
     async def vnc_http_proxy(path: str, request: Request):

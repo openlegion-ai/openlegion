@@ -706,29 +706,59 @@ def create_dashboard_router(
             ),
         })
 
-    def _browser_vnc_url_for_request(request: Request) -> str | None:
-        """Build shared browser VNC URL using the request host.
+    def _browser_vnc_url_for_request(
+        request: Request, agent_id: str | None = None,
+    ) -> str | None:
+        """Build the browser VNC URL for ``agent_id``.
 
-        Supports two modes:
-        - **Behind reverse proxy** (Caddy/nginx): detected via x-forwarded-proto
-          header. Routes VNC through /vnc/ path on the same origin so it works
-          through HTTPS without exposing extra ports.
-        - **Direct access** (local dev): uses the VNC port directly.
+        Two URL shapes, gated on ``OPENLEGION_BROWSER_PER_AGENT_DISPLAY``:
+
+        - **Per-agent** (flag on, ``agent_id`` provided):
+          ``/agent-vnc/{agent_id}/index.html?path=agent-vnc/{agent_id}/websockify&...``
+          The mesh routes this to the browser service which looks up the
+          agent's allocated KasmVNC port. Each agent's iframe streams
+          *only that agent's framebuffer* — opening agent 2's settings
+          shows agent 2's browser, not whatever Openbox foregrounded
+          last on the shared :99 display.
+
+        - **Legacy shared** (flag off, or ``agent_id`` omitted):
+          ``/vnc/index.html?path=vnc/websockify&...`` — the original
+          shared-display URL. Same for every agent. Kept until PR 3
+          deletes the legacy path.
+
+        Distinct URL prefixes (``/agent-vnc/`` vs ``/vnc/``) are used
+        so the mesh proxy can keep both routes without the per-agent
+        route accidentally catching legacy noVNC asset paths like
+        ``/vnc/vendor/promise.js``.
+
+        Returns ``None`` if the browser service hasn't been initialized.
         """
         if not runtime or not hasattr(runtime, 'browser_vnc_url') or not runtime.browser_vnc_url:
             return None
 
-        forwarded_proto = request.headers.get("x-forwarded-proto")
-        if forwarded_proto:
-            # Behind a reverse proxy (Caddy, nginx, etc.)
-            # Route through /vnc/ path — proxy must forward to the VNC port
-            scheme = forwarded_proto
-            host = request.headers.get("host", "127.0.0.1:8420")
-            return f"{scheme}://{host}/vnc/index.html?autoconnect=true&reconnect=true&reconnect_delay=2000&path=vnc/websockify&resize=scale&quality=7&enable_perf_stats=0"
+        from src.browser.display_allocator import is_per_agent_display_enabled
+        per_agent = is_per_agent_display_enabled() and bool(agent_id)
+        if per_agent:
+            base_path = f"/agent-vnc/{agent_id}/index.html"
+            ws_path = f"agent-vnc/{agent_id}/websockify"
+        else:
+            base_path = "/vnc/index.html"
+            ws_path = "vnc/websockify"
 
-        # Direct access (local dev) — route through mesh proxy
+        query = (
+            "autoconnect=true"
+            "&reconnect=true"
+            "&reconnect_delay=2000"
+            f"&path={ws_path}"
+            "&resize=scale"
+            "&quality=7"
+            "&enable_perf_stats=0"
+        )
+
+        forwarded_proto = request.headers.get("x-forwarded-proto")
         host = request.headers.get("host", "127.0.0.1:8420")
-        return f"http://{host}/vnc/index.html?autoconnect=true&reconnect=true&reconnect_delay=2000&path=vnc/websockify&resize=scale&quality=7&enable_perf_stats=0"
+        scheme = forwarded_proto or "http"
+        return f"{scheme}://{host}{base_path}?{query}"
 
     # ── Fleet overview ───────────────────────────────────────
 
@@ -776,7 +806,7 @@ def create_dashboard_router(
                     entry["heartbeat_schedule"] = hb.schedule
                     entry["heartbeat_enabled"] = hb.enabled
                     entry["heartbeat_next_run"] = hb.next_run
-            vnc_url = _browser_vnc_url_for_request(request)
+            vnc_url = _browser_vnc_url_for_request(request, agent_id)
             if vnc_url:
                 entry["vnc_url"] = vnc_url
             agents.append(entry)
@@ -1798,8 +1828,8 @@ def create_dashboard_router(
             "spend_week": spend_week,
             "budget": budget,
         }
-        # Include shared browser VNC info
-        vnc_url = _browser_vnc_url_for_request(request)
+        # Include this agent's browser VNC info (per-agent under flag, legacy otherwise)
+        vnc_url = _browser_vnc_url_for_request(request, agent_id)
         if vnc_url:
             result["vnc_url"] = vnc_url
         return result
@@ -1894,7 +1924,7 @@ def create_dashboard_router(
                 proxy_info["has_credential"] = False
         cfg_result["proxy"] = proxy_info
 
-        vnc_url = _browser_vnc_url_for_request(request)
+        vnc_url = _browser_vnc_url_for_request(request, agent_id)
         if vnc_url:
             cfg_result["vnc_url"] = vnc_url
         return cfg_result
