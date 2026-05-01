@@ -124,10 +124,12 @@ install_egress_filter() {
 :OUTPUT ACCEPT [0:0]
 
 # Loopback is allowed: Firefox can reach in-container services on 127.0.0.1
-# (KasmVNC on 6080, FastAPI on 8500). /browser/* requires bearer auth; the
-# /uploads/* endpoint is intentionally unauthenticated so the browser can
-# navigate to user-uploaded files. Narrowing this rule would require per-port
-# allowlists that must be kept in sync with service.py.
+# (per-agent KasmVNCs on 6100..6163, reached only by the FastAPI service
+# for the /agent-vnc/... proxy hop, and the FastAPI service itself on 8500).
+# /browser/* requires bearer auth; the /uploads/* endpoint is intentionally
+# unauthenticated so the browser can navigate to user-uploaded files.
+# Narrowing this rule would require per-port allowlists that must be kept
+# in sync with service.py.
 -A OUTPUT -o lo -j ACCEPT
 -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 ${dns_rules}${allow_rules}

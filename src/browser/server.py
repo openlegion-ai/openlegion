@@ -60,12 +60,14 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         if path.startswith("/browser/"):
             parts = path.split("/", 3)
             # Service-level prefixes that don't carry an agent_id
-            # (health/metrics/canary/keepalive/settings — verified
-            # against ``@app.{get,post,put,delete}`` declarations).
-            # Anything outside this allow-list is treated as the
-            # ``/browser/{agent_id}/...`` shape.
+            # (health/metrics/canary/settings — verified against
+            # ``@app.{get,post,put,delete}`` declarations). Anything
+            # outside this allow-list is treated as the
+            # ``/browser/{agent_id}/...`` shape. ``keepalive`` is now
+            # always agent-scoped (``/browser/{agent_id}/keepalive``)
+            # since the legacy bare endpoint was removed in #813.
             if len(parts) >= 3 and parts[2] not in (
-                "", "status", "metrics", "_canary", "keepalive", "settings",
+                "", "status", "metrics", "_canary", "settings",
             ):
                 if not _AGENT_ID_RE.fullmatch(parts[2]):
                     return JSONResponse(

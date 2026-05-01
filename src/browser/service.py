@@ -2,7 +2,8 @@
 
 Manages lazy-started Camoufox browser instances, one per agent.
 Each agent gets its own persistent profile, BrowserForge fingerprint,
-and browser context on a shared Xvnc display.
+and a private Xvnc + Openbox + unclutter stack on its own X11 display
+(spawned in :meth:`BrowserManager._spawn_per_agent_x_stack`).
 """
 
 from __future__ import annotations
@@ -2995,12 +2996,11 @@ class BrowserManager:
         # started doesn't immediately snapshot (would write an empty
         # storage_state to disk for nothing). See ``_periodic_session_snapshots``.
         self._session_snapshot_elapsed_s: dict[str, int] = {}
-        # PR 1 of per-agent VNC isolation: lazy-allocated when the first
-        # browser launches under ``OPENLEGION_BROWSER_PER_AGENT_DISPLAY``.
-        # Constructed once per BrowserManager (not per launch) because the
-        # allocator owns the free-slot pool and a boot sweep at construction
-        # time — making one per launch would re-sweep on every launch and
-        # lose track of which slots are in flight.
+        # Lazy-allocated when the first browser launches.  Constructed
+        # once per BrowserManager (not per launch) because the allocator
+        # owns the free-slot pool and a boot sweep at construction time —
+        # making one per launch would re-sweep on every launch and lose
+        # track of which slots are in flight.
         self._display_allocator: DisplayAllocator | None = None
 
     def _manager_lock(self) -> asyncio.Lock:
@@ -3587,10 +3587,9 @@ class BrowserManager:
 
         Sized to the agent's picked window resolution exactly.  Real users
         run their browser maximised: ``screen.width == window.outerWidth``
-        and ``screenX == 0``.  The legacy shared 1920×1080 display with a
-        smaller centered window broke that invariant — ``screenX`` ended
-        up at ~320 on a "1280-wide screen", a known bot-cluster signal.
-        Sizing the X server to match the window closes the gap.
+        and ``screenX == 0``.  Sizing the X server to match the picked
+        window closes a known bot-cluster signal where a smaller window
+        on a larger display reports ``screenX > 0``.
 
         Each child is launched with ``start_new_session=True`` so a stop
         path can ``os.killpg(proc.pid, ...)`` without leaving descendants
@@ -4804,14 +4803,15 @@ class BrowserManager:
         Auto-starts the browser if it isn't running yet, so the user
         always sees a window when they click "Browser" in the dashboard.
 
-        Also records this as the user's explicitly focused agent so
-        ``refocus_active()`` keeps this window visible even when other
-        agents are using their browsers in the background.
-
         Two-layer raise:
         1. bring_to_front() — browser-protocol level (activates the tab)
         2. xdotool windowmap + windowraise — X11 level (unmaps if iconic,
            then raises in the stacking order so VNC actually sees it)
+
+        Per-agent X servers mean only one Firefox per display, so the
+        X11 raise is largely vestigial for cross-agent contention; it
+        still matters when an agent has multiple Camoufox windows
+        (popups, ``browser_open_tab``).
         """
         try:
             inst = await self.get_or_start(agent_id)

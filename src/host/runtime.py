@@ -567,7 +567,12 @@ class DockerBackend(RuntimeBackend):
             pass
 
         self._browser_container = self.client.containers.run(self.BROWSER_IMAGE, **run_kwargs)
-        self.browser_service_url = f"http://127.0.0.1:{api_port}"
+        # Hold the API URL in a local — only publish to ``self`` once the
+        # health probe confirms the service is reachable. The dashboard
+        # URL builder gates on ``runtime.browser_service_url`` truthiness;
+        # publishing eagerly would let a request slip through during the
+        # boot window and produce a 502 at the iframe.
+        api_url = f"http://127.0.0.1:{api_port}"
 
         # Wait for browser service API to be ready
         import httpx as _httpx
@@ -575,7 +580,7 @@ class DockerBackend(RuntimeBackend):
         for attempt in range(15):
             try:
                 resp = _httpx.get(
-                    f"{self.browser_service_url}/browser/status",
+                    f"{api_url}/browser/status",
                     headers={"Authorization": f"Bearer {self.browser_auth_token}"},
                     timeout=2,
                 )
@@ -589,6 +594,8 @@ class DockerBackend(RuntimeBackend):
         if not browser_ready:
             logger.warning("Browser service API failed to become ready after 15 attempts")
             return
+
+        self.browser_service_url = api_url
 
         # Push saved browser settings (speed + inter-action delay) so
         # they survive container restarts. Pre-fix, only ``browser_speed``

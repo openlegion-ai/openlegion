@@ -1912,8 +1912,24 @@
                   </svg>
                   <span class="text-sm text-gray-400">Connecting to browser...</span>
                 </div>
+                <!-- Browser stopped overlay — surfaces when a browser
+                     tears down mid-view (idle timeout, agent reset).
+                     Hidden until the user actually engaged with the
+                     iframe (_browserFocusDone) so it doesn't flicker
+                     during the initial start-up window. Lets the user
+                     restart the browser with a click instead of letting
+                     the iframe sit blank or noVNC retry forever. -->
+                <div x-show="_browserFocusDone && agentDetail?.browser_running === false"
+                  x-cloak
+                  class="absolute inset-0 flex flex-col items-center justify-center bg-gray-900/95 z-20 gap-3">
+                  <span class="text-sm text-gray-400">Browser stopped</span>
+                  <button @click="_browserFocusDone = false; focusBrowser(selectedAgent).then(ok => { if (ok) { if (agentDetail && agentDetail.id === selectedAgent) { agentDetail.browser_running = true; } _browserFocusDone = true; } })"
+                    class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">
+                    Restart browser
+                  </button>
+                </div>
                 <iframe
-                  :src="(showBrowserViewer && _browserFocusDone) ? agentDetail?.vnc_url : ''"
+                  :src="(showBrowserViewer && _browserFocusDone && agentDetail?.browser_running) ? agentDetail?.vnc_url : ''"
                   class="w-full h-full border-0"
                   :tabindex="_browserViewOnly ? -1 : 0"
                   allow="clipboard-read; clipboard-write"
