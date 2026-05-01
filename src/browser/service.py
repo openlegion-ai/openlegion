@@ -8015,12 +8015,25 @@ class BrowserManager:
                 # Hover over the inside_ref element so wheel events route to its
                 # scroll target rather than the document. Critical for modals with
                 # overflow:auto containers (X thread composer, slide-out panels).
+                #
+                # ``inside_locator`` is hoisted so the X11→CDP wheel fallback path
+                # below can re-sync Playwright's internal mouse position. The X11
+                # cursor follows ``_x11_hover`` but Playwright's ``page.mouse``
+                # tracks state separately — without re-syncing, ``mouse.wheel()``
+                # would dispatch at Playwright's last-known position (default 0,0)
+                # rather than the modal we just placed the X11 cursor over.
+                inside_locator = None
                 if inside_ref:
                     if inside_ref not in inst.refs:
                         return {"success": False, "error": f"Ref '{inside_ref}' not found in snapshot"}
                     inside_locator = await self._locator_from_ref(inst, inside_ref)
                     if not inside_locator:
                         return {"success": False, "error": f"Ref '{inside_ref}' not found"}
+                    # Stealth-critical: X11 path produces real isTrusted=true
+                    # mousemove events. Playwright's ``locator.hover`` is the
+                    # CDP fallback only when X11 is unavailable or fails — that
+                    # one CDP mousemove is a known small leak we accept rather
+                    # than blocking the agent entirely.
                     if inst.x11_wid:
                         try:
                             await self._x11_hover(inst, inside_locator)
@@ -8066,6 +8079,18 @@ class BrowserManager:
                                 "X11 scroll failed for '%s', falling back to CDP: %s",
                                 agent_id, e,
                             )
+                            # Re-sync Playwright's mouse to inside_ref before
+                            # the CDP wheel — the X11 cursor we placed earlier
+                            # is invisible to Playwright's mouse state, so
+                            # ``mouse.wheel()`` would otherwise dispatch at
+                            # (0,0) and scroll the wrong element. Best-effort:
+                            # if the resync hover fails we still fire the
+                            # wheel rather than block the agent entirely.
+                            if inside_locator is not None:
+                                try:
+                                    await inside_locator.hover(timeout=2000)
+                                except Exception:
+                                    pass
                             # Fall back to CDP for actual remaining distance
                             remaining_px = max(0, amount - scrolled)
                             await inst.page.mouse.wheel(0, remaining_px * sign)
