@@ -731,7 +731,14 @@ class TestChatOriginHeader:
         assert resp.status_code == 200
         mock_loop.chat.assert_awaited_once()
         call_kwargs = mock_loop.chat.call_args.kwargs
-        assert call_kwargs.get("origin") == origin
+        # Task 2a: ``parse_origin_header`` returns a typed ``MessageOrigin``;
+        # legacy headers (no ``kind``) default to least-trusted ``kind="agent"``.
+        from src.shared.types import MessageOrigin
+        passed = call_kwargs.get("origin")
+        assert isinstance(passed, MessageOrigin)
+        assert passed.kind == "agent"
+        assert passed.channel == "whatsapp"
+        assert passed.user == "+1234"
 
     @pytest.mark.asyncio
     async def test_chat_no_origin_header_passes_none(self):

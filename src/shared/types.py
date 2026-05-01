@@ -37,6 +37,138 @@ AGENT_ID_RE_PATTERN = r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
 # === Inter-Component Messages ===
 
 
+class MessageOrigin(BaseModel):
+    """Typed origin for a message flowing through the mesh.
+
+    The ``kind`` field is the authorization-relevant piece: future tasks
+    gate durable actions on ``kind == "human"`` (Task 2d's pending-action
+    confirm), block worker → operator wakes when ``kind == "agent"``
+    (Task 2e), and downgrade unverifiable channel claims (Task 2c).
+
+    ``channel`` and ``user`` are free-form for now; they identify which
+    surface the message came from (cli, dashboard, telegram, …) and the
+    end-user id when one is available.
+
+    The model is ``frozen=True`` — origins are stamped once at the entry
+    point (CLI REPL, dashboard chat, channel adapter, cron tick, …) and
+    must not be mutated mid-flight.
+
+    Backward-compat: this PR (Task 2a) introduces the model but does not
+    flip stamp sites yet (Task 2b). Existing call sites that construct
+    raw ``{"channel": ..., "user": ...}`` dicts continue to work; the
+    helpers in ``src.shared.trace`` accept both shapes. Dict-style
+    accessors (``__getitem__`` / ``get``) are provided so readers do not
+    need to branch on type during the migration.
+    """
+
+    kind: Literal["human", "operator", "agent", "system", "heartbeat", "cron"]
+    channel: str = ""
+    user: str = ""
+
+    model_config = {"frozen": True}
+
+    # Dict-style accessors — let readers that still treat origin as a
+    # ``dict[str, str]`` keep working through the Task 2b migration.
+    def __getitem__(self, key: str) -> str:
+        if key in {"kind", "channel", "user"}:
+            return getattr(self, key)
+        raise KeyError(key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        # Match ``dict.get`` semantics: present-but-empty returns the
+        # empty string, only an unknown key falls back to ``default``.
+        if key in {"kind", "channel", "user"}:
+            return getattr(self, key)
+        return default
+
+    def to_header_value(self) -> str:
+        """Serialize to a JSON ``X-Origin`` header value.
+
+        Format keeps the existing JSON shape (``{"channel": ..., "user": ...}``)
+        and adds a ``kind`` key. Old mesh nodes parsing this with the
+        legacy parser whitelist only ``channel`` and ``user`` and silently
+        drop ``kind`` — so the rolling-deploy invariant holds.
+        """
+        import json as _json
+        return _json.dumps(
+            {"kind": self.kind, "channel": self.channel, "user": self.user},
+            separators=(",", ":"),
+        )
+
+    @classmethod
+    def from_header_value(
+        cls, value: str | None, *, trust_kind: bool = False,
+    ) -> "MessageOrigin | None":
+        """Parse an ``X-Origin`` header value back into a model.
+
+        Returns ``None`` on missing or malformed input (never a partial
+        model). Treats a missing ``kind`` segment as ``kind="agent"``
+        (the least-trusted origin). Unless ``trust_kind`` is true, an
+        explicit privileged kind from the header is also downgraded to
+        ``kind="agent"`` so request headers cannot self-assert human,
+        operator, system, heartbeat, or cron authority.
+
+        Field length bounds match the legacy parser
+        (``channel`` ≤ 32, ``user`` ≤ 128, raw blob ≤ 512).
+        """
+        if not value or len(value) > 512:
+            return None
+        import json as _json
+        try:
+            parsed = _json.loads(value)
+        except _json.JSONDecodeError:
+            return None
+        if not isinstance(parsed, dict):
+            return None
+
+        ch = parsed.get("channel", "")
+        us = parsed.get("user", "")
+        kind = parsed.get("kind")
+
+        # Channel/user are required for legacy compatibility unless this
+        # is a typed origin without an addressable surface (cron, system,
+        # heartbeat). The legacy parser rejected empty channel/user, so
+        # legacy headers without ``kind`` must still meet that bar.
+        if not isinstance(ch, str) or not isinstance(us, str):
+            return None
+
+        if kind is None:
+            # Legacy header — least-trusted default.
+            kind = "agent"
+            if not ch or not us:
+                # Legacy parser rejected empty channel/user for headers
+                # without a ``kind`` segment. Preserve that behavior so
+                # downstream auto-notify paths do not see a half-shaped
+                # legacy origin.
+                return None
+
+        if not isinstance(kind, str):
+            return None
+
+        if not trust_kind:
+            # Inbound request headers are not authority. Preserve addressable
+            # channel/user metadata, but downgrade all caller-supplied kinds.
+            kind = "agent"
+            if not ch or not us:
+                return None
+
+        if len(ch) > _MAX_ORIGIN_CHANNEL_LEN or len(us) > _MAX_ORIGIN_USER_LEN:
+            return None
+
+        try:
+            return cls(kind=kind, channel=ch, user=us)
+        except Exception:
+            # Pydantic validation error — bad ``kind`` value.
+            return None
+
+
+# Field-length caps used by ``MessageOrigin.from_header_value`` and
+# ``src.shared.trace.parse_origin_header``. Kept here so the type module
+# is self-contained.
+_MAX_ORIGIN_CHANNEL_LEN = 32
+_MAX_ORIGIN_USER_LEN = 128
+
+
 class AgentMessage(BaseModel):
     """Every message between agents passes through the mesh in this format."""
 
