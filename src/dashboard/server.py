@@ -714,7 +714,7 @@ def create_dashboard_router(
         Two URL shapes, gated on ``OPENLEGION_BROWSER_PER_AGENT_DISPLAY``:
 
         - **Per-agent** (flag on, ``agent_id`` provided):
-          ``/vnc/{agent_id}/index.html?path=vnc/{agent_id}/websockify&...``
+          ``/agent-vnc/{agent_id}/index.html?path=agent-vnc/{agent_id}/websockify&...``
           The mesh routes this to the browser service which looks up the
           agent's allocated KasmVNC port. Each agent's iframe streams
           *only that agent's framebuffer* — opening agent 2's settings
@@ -726,6 +726,11 @@ def create_dashboard_router(
           shared-display URL. Same for every agent. Kept until PR 3
           deletes the legacy path.
 
+        Distinct URL prefixes (``/agent-vnc/`` vs ``/vnc/``) are used
+        so the mesh proxy can keep both routes without the per-agent
+        route accidentally catching legacy noVNC asset paths like
+        ``/vnc/vendor/promise.js``.
+
         Returns ``None`` if the browser service hasn't been initialized.
         """
         if not runtime or not hasattr(runtime, 'browser_vnc_url') or not runtime.browser_vnc_url:
@@ -734,8 +739,8 @@ def create_dashboard_router(
         from src.browser.display_allocator import is_per_agent_display_enabled
         per_agent = is_per_agent_display_enabled() and bool(agent_id)
         if per_agent:
-            base_path = f"/vnc/{agent_id}/index.html"
-            ws_path = f"vnc/{agent_id}/websockify"
+            base_path = f"/agent-vnc/{agent_id}/index.html"
+            ws_path = f"agent-vnc/{agent_id}/websockify"
         else:
             base_path = "/vnc/index.html"
             ws_path = "vnc/websockify"

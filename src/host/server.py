@@ -3921,24 +3921,29 @@ def create_mesh_app(
             event_bus.unsubscribe(websocket)
 
     # ── VNC reverse proxy ────────────────────────────────────────────────
-    # Two routes coexist during the per-agent VNC rollout:
+    # Two routes on DIFFERENT prefixes coexist during the per-agent VNC
+    # rollout — separate namespaces avoid any collision:
     #
-    #   /vnc/{agent_id}/{path:path}  — per-agent (PR 2). Forwards through
-    #     the browser service, which looks up the agent's allocated VNC
-    #     port (display_allocator) and proxies to that KasmVNC. Used when
-    #     OPENLEGION_BROWSER_PER_AGENT_DISPLAY=1.
+    #   /agent-vnc/{agent_id}/{path:path}  — per-agent (PR 2). Forwards
+    #     through the browser service, which looks up the agent's
+    #     allocated VNC port (display_allocator) and proxies to that
+    #     KasmVNC. Used when OPENLEGION_BROWSER_PER_AGENT_DISPLAY=1.
     #
-    #   /vnc/{path:path}             — legacy shared-display fallback.
+    #   /vnc/{path:path}                   — legacy shared-display.
     #     Forwards directly to ``container_manager.browser_vnc_url``'s
     #     port (the global KasmVNC :6080 attached to display :99). Used
     #     when the flag is off. Reaches end-of-life in PR 3.
     #
-    # FastAPI matches in declaration order, and the per-agent route
-    # requires two path components after /vnc/ (agent_id + path), so
-    # /vnc/index.html naturally falls through to legacy. Path components
-    # containing characters outside [a-zA-Z0-9_-] (e.g. dots in
-    # `index.html`) also wouldn't pass the agent_id regex, but the
-    # segment-count split is what does the work in practice.
+    # We tried sharing the ``/vnc/`` prefix originally (per-agent at
+    # ``/vnc/{agent_id}/{path}``, legacy at ``/vnc/{path}``), but
+    # KasmVNC's noVNC client fetches relative assets like
+    # ``vendor/foo.js``, ``app/ui.js``, ``core/rfb.js`` from a
+    # ``/vnc/index.html`` document base — those resolve to two-segment
+    # URLs (``/vnc/vendor/foo.js``) where the first segment passes the
+    # agent_id regex but isn't an agent. The per-agent route would
+    # 503 every legacy iframe asset. Distinct prefixes side-step this
+    # entirely and survive any future noVNC subdirs without code
+    # changes.
 
     def _get_vnc_port() -> int | None:
         """Extract legacy KasmVNC port from browser_vnc_url, or None."""
@@ -3980,11 +3985,11 @@ def create_mesh_app(
         cookie_value = cookies.get("ol_session", "")
         return verify_session_cookie(cookie_value)
 
-    @app.get("/vnc/{agent_id}/{path:path}")
+    @app.get("/agent-vnc/{agent_id}/{path:path}")
     async def vnc_http_proxy_per_agent(
         agent_id: str, path: str, request: Request,
     ):
-        """Per-agent VNC HTTP proxy → browser service /vnc/{agent_id}/...."""
+        """Per-agent VNC HTTP proxy → browser service /agent-vnc/{agent_id}/...."""
         _reject_agent_tokens(request)
         auth_error = await _verify_vnc_dashboard_session(request)
         if auth_error is not None:
@@ -3995,7 +4000,7 @@ def create_mesh_app(
         svc_token = getattr(container_manager, "browser_auth_token", "")
         if not svc_url:
             raise HTTPException(502, "Browser service not available")
-        target = f"{svc_url}/vnc/{agent_id}/{path}"
+        target = f"{svc_url}/agent-vnc/{agent_id}/{path}"
         if request.url.query:
             target += f"?{request.url.query}"
         import httpx
@@ -4021,11 +4026,11 @@ def create_mesh_app(
             headers=headers,
         )
 
-    @app.websocket("/vnc/{agent_id}/{path:path}")
+    @app.websocket("/agent-vnc/{agent_id}/{path:path}")
     async def vnc_ws_proxy_per_agent(
         websocket: WebSocket, agent_id: str, path: str,
     ):
-        """Per-agent VNC WebSocket proxy → browser service /vnc/{agent_id}/...."""
+        """Per-agent VNC WebSocket proxy → browser service /agent-vnc/{agent_id}/...."""
         auth_error = await _verify_vnc_dashboard_session(websocket)
         if auth_error is not None:
             await websocket.close(code=1008, reason=auth_error)
@@ -4055,11 +4060,15 @@ def create_mesh_app(
             return
 
         # browser_service_url is http://...; convert to ws:// for the
-        # upstream connection. Preserve any query string the iframe sent.
+        # upstream connection. Preserve any query string the iframe sent
+        # — urlencode keeps it safe if any future param value contains
+        # ``&`` or ``=``. (KasmVNC's /websockify is typically called
+        # without query params, but encoding is one line of insurance.)
         target = svc_url.replace("http://", "ws://").replace("https://", "wss://")
-        target = f"{target}/vnc/{agent_id}/{path}"
+        target = f"{target}/agent-vnc/{agent_id}/{path}"
         if websocket.query_params:
-            qs = "&".join(f"{k}={v}" for k, v in websocket.query_params.multi_items())
+            from urllib.parse import urlencode
+            qs = urlencode(list(websocket.query_params.multi_items()))
             if qs:
                 target += f"?{qs}"
 

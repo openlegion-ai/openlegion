@@ -926,13 +926,18 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
     # ── Per-agent VNC reverse proxy ───────────────────────────────────────
     # Each running browser has its own Xvnc on a paired ``vnc_port`` from
     # the display allocator (see src/browser/display_allocator.py). The
-    # mesh's /vnc/{agent_id}/... route forwards here; we look up the
-    # agent's port and proxy onward to ``127.0.0.1:{port}``. Doing the
-    # per-agent dispatch on the browser-service side keeps the mesh free
-    # of port-allocator state and avoids publishing 64 extra container
-    # ports — only :8500 needs to be reachable from the mesh.
+    # mesh's /agent-vnc/{agent_id}/... route forwards here; we look up
+    # the agent's port and proxy onward to ``127.0.0.1:{port}``. Doing
+    # the per-agent dispatch on the browser-service side keeps the mesh
+    # free of port-allocator state and avoids publishing 64 extra
+    # container ports — only :8500 needs to be reachable from the mesh.
+    #
+    # Distinct prefix from the legacy ``/vnc/{path}`` namespace so the
+    # mesh can route both modes without colliding on noVNC's relative
+    # asset paths (``/vnc/vendor/foo.js``, etc.) — see the comment in
+    # src/host/server.py for the full reasoning.
 
-    @app.get("/vnc/{agent_id}/{path:path}")
+    @app.get("/agent-vnc/{agent_id}/{path:path}")
     async def vnc_http(agent_id: str, path: str, request: Request):
         """Proxy KasmVNC HTTP traffic (noVNC client + static assets)."""
         _verify_auth(request)
@@ -965,7 +970,7 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
             headers=headers,
         )
 
-    @app.websocket("/vnc/{agent_id}/{path:path}")
+    @app.websocket("/agent-vnc/{agent_id}/{path:path}")
     async def vnc_ws(websocket: WebSocket, agent_id: str, path: str):
         """Proxy KasmVNC WebSocket (the actual /websockify VNC stream)."""
         # WebSocket path: auth header arrives via Sec-WebSocket-Protocol

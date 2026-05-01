@@ -112,7 +112,7 @@ class TestBrowserManagerVncAccessors:
         assert b.last_activity == b_before
 
 
-# ── Browser-service /vnc/{agent_id}/{path} HTTP route ────────────────────
+# ── Browser-service /agent-vnc/{agent_id}/{path} HTTP route ────────────────────
 
 
 def _make_browser_app(mgr):
@@ -137,8 +137,8 @@ class TestPerAgentVncHttpRoute:
         client = TestClient(app)
         # Dot in agent_id fails the AGENT_ID_RE_PATTERN regex.
         # The middleware-level validator catches /browser/{x}/... but
-        # the /vnc/{x}/... handler does its own check.
-        resp = client.get("/vnc/bad.id/index.html")
+        # the /agent-vnc/{x}/... handler does its own check.
+        resp = client.get("/agent-vnc/bad.id/index.html")
         assert resp.status_code == 400
 
     def test_missing_instance_returns_503(self):
@@ -149,7 +149,7 @@ class TestPerAgentVncHttpRoute:
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
         app = _make_browser_app(mgr)
         client = TestClient(app)
-        resp = client.get("/vnc/ghost/index.html")
+        resp = client.get("/agent-vnc/ghost/index.html")
         assert resp.status_code == 503
         assert "not running" in resp.json()["detail"].lower()
 
@@ -166,7 +166,7 @@ class TestPerAgentVncHttpRoute:
         mgr._instances["legacy"] = inst
         app = _make_browser_app(mgr)
         client = TestClient(app)
-        resp = client.get("/vnc/legacy/index.html")
+        resp = client.get("/agent-vnc/legacy/index.html")
         assert resp.status_code == 503
 
     def test_with_slot_attempts_upstream_forward(self):
@@ -187,7 +187,7 @@ class TestPerAgentVncHttpRoute:
         mgr._instances["real"] = inst
         app = _make_browser_app(mgr)
         client = TestClient(app)
-        resp = client.get("/vnc/real/index.html")
+        resp = client.get("/agent-vnc/real/index.html")
         assert resp.status_code == 502
 
 
@@ -246,8 +246,8 @@ class TestDashboardVncUrlBuilder:
 
         per_agent = is_per_agent_display_enabled() and bool(agent_id)
         if per_agent:
-            base_path = f"/vnc/{agent_id}/index.html"
-            ws_path = f"vnc/{agent_id}/websockify"
+            base_path = f"/agent-vnc/{agent_id}/index.html"
+            ws_path = f"agent-vnc/{agent_id}/websockify"
         else:
             base_path = "/vnc/index.html"
             ws_path = "vnc/websockify"
@@ -267,8 +267,25 @@ class TestDashboardVncUrlBuilder:
             clear=False,
         ):
             url = self._flag_on_url("alpha")
-            assert "/vnc/alpha/index.html" in url
-            assert "path=vnc/alpha/websockify" in url
+            assert "/agent-vnc/alpha/index.html" in url
+            assert "path=agent-vnc/alpha/websockify" in url
+
+    def test_per_agent_url_does_not_collide_with_legacy_prefix(self):
+        """Regression for the route-collision bug: per-agent URLs MUST
+        NOT live under ``/vnc/`` — that prefix is shared with KasmVNC's
+        relative noVNC asset paths (``/vnc/vendor/foo.js``,
+        ``/vnc/app/ui.js``, ``/vnc/core/rfb.js``, etc.). Routing all
+        ``/vnc/{x}/{y}`` to the per-agent handler would 503 every
+        legacy iframe asset request whose first segment isn't a real
+        agent."""
+        with patch.dict(
+            os.environ, {"OPENLEGION_BROWSER_PER_AGENT_DISPLAY": "1"},
+            clear=False,
+        ):
+            url = self._flag_on_url("alpha")
+            # The per-agent URL must use a distinct namespace.
+            assert not url.startswith("/vnc/")
+            assert url.startswith("/agent-vnc/")
 
     def test_flag_on_without_agent_id_falls_back_to_legacy(self):
         """Defensive: if a caller passes ``agent_id=None`` even when the
@@ -279,5 +296,41 @@ class TestDashboardVncUrlBuilder:
         ):
             url = self._flag_on_url(None)
             assert url == "/vnc/index.html?path=vnc/websockify"
+
+
+# ── Browser-service legacy noVNC asset paths must NOT be routed ──────────
+
+
+class TestLegacyAssetPathsBypassPerAgentRoute:
+    """The per-agent route is on ``/agent-vnc/{agent_id}/{path}``. The
+    legacy noVNC assets are under ``/vnc/...`` (e.g. /vnc/vendor/foo.js
+    when the iframe loads /vnc/index.html). The browser service should
+    not match the per-agent handler for any legacy path."""
+
+    def test_legacy_noVNC_subdir_paths_404_on_browser_service(self):
+        """Browser service has no route for /vnc/{path} — that lives
+        on the mesh, which forwards to the legacy KasmVNC port. Asking
+        the browser service directly for /vnc/vendor/foo.js must 404,
+        proving the per-agent route doesn't hijack it."""
+        from starlette.testclient import TestClient
+
+        from src.browser.service import BrowserManager
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        app = _make_browser_app(mgr)
+        client = TestClient(app)
+        for legacy_path in (
+            "/vnc/index.html",
+            "/vnc/vendor/promise.js",
+            "/vnc/app/ui.js",
+            "/vnc/core/rfb.js",
+            "/vnc/styles/base.css",
+            "/vnc/websockify",
+        ):
+            resp = client.get(legacy_path)
+            assert resp.status_code == 404, (
+                f"{legacy_path} should 404 on browser service "
+                f"(per-agent prefix is /agent-vnc/), got {resp.status_code}"
+            )
 
 
