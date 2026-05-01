@@ -86,4 +86,9 @@ markers = [
     # playwright && playwright install firefox``). CI honours the same
     # skipif and does NOT install playwright.
     "browser: real-browser test requiring playwright (CI does not run)",
+    # Tests pinning behavior that a later task will deliberately change.
+    # Each marked test asserts today's accidental or over-broad behavior so
+    # future tasks can locate them by filter (``pytest -m characterization``)
+    # and flip or delete them in lockstep with the production change.
+    "characterization: tests pinning behavior to be changed in a later task",
 ]
