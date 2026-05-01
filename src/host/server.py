@@ -20,7 +20,6 @@ import uuid as _uuid
 from collections import defaultdict
 from collections.abc import Callable, Coroutine
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket
@@ -119,20 +118,13 @@ def _consume_pending_change(change_id: str) -> dict | None:
 
 # ── Task 2c: Server-side channel origin validation ────────────────
 #
-# When an inbound HTTP request carries ``X-Origin`` with ``kind="human"``
-# and a channel name from the messaging-channel set, the mesh re-checks
-# the claim against the on-disk pairing record (``config/<channel>_paired.json``).
-# A buggy or hostile adapter could otherwise elevate origin to ``human``
-# for any user id; this defense-in-depth gate downgrades unverifiable
-# claims to ``kind="agent"`` (least-trusted) before they reach
-# authorization-sensitive code paths (``/mesh/wake``, durable confirms,
-# etc.). Failure is silent (warning log only, never raises) so a forged
-# header cannot crash a request.
-#
-# CLI and dashboard origins are intentionally NOT in the paired set —
-# their authentication happens at a different layer (process identity
-# for CLI, ``ol_session`` cookie for dashboard).
+# ``X-Origin`` is authorization-bearing only after the mesh has a reason
+# to trust the stamping layer. Paired messaging channels are re-checked
+# against their on-disk pairing record; non-paired human channels and
+# privileged non-human kinds are preserved only for trusted callers such
+# as the operator or loopback-internal mesh calls.
 _PAIRED_CHANNELS = frozenset({"telegram", "discord", "slack", "whatsapp", "webhook"})
+_TRUSTED_ORIGIN_CALLERS = frozenset({"mesh", "operator"})
 
 # Tiny TTL cache for pairing-record reads. The on-disk file changes only
 # on ``/pair`` operations, which are rare. 5s staleness is acceptable for
@@ -151,7 +143,8 @@ def _read_pairing_record(channel: str) -> dict | None:
     cached = _pairing_cache.get(channel)
     if cached and time.monotonic() - cached[0] < _PAIRING_CACHE_TTL:
         return cached[1]
-    path = Path("config") / f"{channel}_paired.json"
+    from src.cli.config import PROJECT_ROOT
+    path = PROJECT_ROOT / "config" / f"{channel}_paired.json"
     record: dict | None
     if not path.exists():
         record = None
@@ -199,7 +192,32 @@ def _is_paired_user(channel: str, user: str) -> bool:
     return str(user) in (str(u) for u in allowed)
 
 
-def _validated_origin(request: Request) -> "MessageOrigin | None":
+def _is_loopback_internal_request(request: Request) -> bool:
+    """Return true only for the existing localhost mesh-internal trust path."""
+    if not request.headers.get("x-mesh-internal"):
+        return False
+    client_host = request.client.host if request.client else ""
+    try:
+        import ipaddress
+        return ipaddress.ip_address(client_host).is_loopback
+    except (ValueError, AttributeError):
+        return False
+
+
+def _downgrade_origin(origin: "MessageOrigin", reason: str) -> "MessageOrigin":
+    logger.warning(
+        "origin validation failed: %s kind=%s channel=%s user=%s — downgrading to kind=agent",
+        reason,
+        origin.kind,
+        origin.channel,
+        origin.user,
+    )
+    return origin.model_copy(update={"kind": "agent"})
+
+
+def _validated_origin(
+    request: Request, caller: str = "",
+) -> "MessageOrigin | None":
     """Parse ``X-Origin`` and downgrade unverifiable channel claims.
 
     This is the authorization-grade origin getter — endpoints that care
@@ -210,12 +228,10 @@ def _validated_origin(request: Request) -> "MessageOrigin | None":
 
     * Missing/malformed header → ``None`` (caller decides what default
       to use; ``/mesh/wake`` falls back to ``MessageOrigin(kind="agent")``).
-    * ``kind != "human"`` → returned unchanged (only human claims need
-      pairing recheck; agent/heartbeat/cron/system/operator either come
-      from internal stamping or have their own auth path).
-    * ``kind == "human"`` with a non-paired channel (cli, dashboard,
-      anything not in ``_PAIRED_CHANNELS``) → returned unchanged. Their
-      auth happens at a different layer.
+    * Trusted caller (operator/mesh or loopback internal) → returned unchanged.
+    * ``kind == "agent"`` → returned unchanged.
+    * Privileged non-human kinds from other callers → downgraded.
+    * ``kind == "human"`` with a non-paired channel → downgraded.
     * ``kind == "human"`` with a paired channel and a paired user →
       returned unchanged.
     * ``kind == "human"`` with a paired channel and an unpaired/empty
@@ -236,24 +252,19 @@ def _validated_origin(request: Request) -> "MessageOrigin | None":
     origin = MessageOrigin.from_header_value(raw, trust_kind=True)
     if origin is None:
         return None
+    if caller in _TRUSTED_ORIGIN_CALLERS or _is_loopback_internal_request(request):
+        return origin
+    if origin.kind == "agent":
+        return origin
     if origin.kind != "human":
-        return origin
+        return _downgrade_origin(origin, "untrusted non-human origin kind")
     if origin.channel not in _PAIRED_CHANNELS:
-        return origin
+        return _downgrade_origin(origin, "unverifiable human origin channel")
     if not origin.user:
-        logger.warning(
-            "channel origin recheck failed: channel=%s empty user — downgrading to kind=agent",
-            origin.channel,
-        )
-        return origin.model_copy(update={"kind": "agent"})
+        return _downgrade_origin(origin, "empty paired-channel user")
     if _is_paired_user(origin.channel, origin.user):
         return origin
-    logger.warning(
-        "channel origin recheck failed: channel=%s user=%s — downgrading to kind=agent",
-        origin.channel,
-        origin.user,
-    )
-    return origin.model_copy(update={"kind": "agent"})
+    return _downgrade_origin(origin, "unpaired channel user")
 
 
 def create_mesh_app(
@@ -567,7 +578,7 @@ def create_mesh_app(
         # unverifiable claims are downgraded to ``kind="agent"`` so the
         # lane payload (and any downstream auth gate that will be added
         # in Task 2d/2e) cannot be tricked by a hostile/buggy adapter.
-        origin = _validated_origin(request)
+        origin = _validated_origin(request, caller)
         # Task 2b: missing/invalid origin downgrades to ``kind="agent"``
         # (least-trusted) instead of ``None`` so downstream gates always
         # see an explicit kind. Auto-notify still gated on the original
