@@ -106,6 +106,28 @@ async def test_propose_edit_permission_ceiling_allows_permitted():
 
 
 @pytest.mark.asyncio
+async def test_propose_edit_permission_ceiling_allows_artifacts_write():
+    """artifacts/* must be inside the ceiling because save_artifact relies on
+    that namespace; without it the operator could observe an agent that has
+    artifacts/* write but couldn't reproduce that pattern via propose_edit."""
+    from src.agent.builtins.operator_tools import propose_edit
+
+    mc = MagicMock()
+    mc.propose_config_change = AsyncMock(
+        return_value={"change_id": "art1", "preview_diff": "..."},
+    )
+    result = await propose_edit(
+        "writer", "permissions", {"blackboard_write": ["artifacts/*"]},
+        mesh_client=mc,
+    )
+    assert "error" not in result
+    assert result["change_id"] == "art1"
+    mc.propose_config_change.assert_awaited_once_with(
+        "writer", "permissions", {"blackboard_write": ["artifacts/*"]},
+    )
+
+
+@pytest.mark.asyncio
 async def test_propose_edit_budget_validation_daily_too_low():
     from src.agent.builtins.operator_tools import propose_edit
 

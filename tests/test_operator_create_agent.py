@@ -40,6 +40,26 @@ def container_mgr():
 def mesh_app(tmp_path, _mesh_env, container_mgr):
     bb = Blackboard(db_path=str(tmp_path / "bb.db"))
     pubsub = PubSub()
+    # Seed the on-disk permissions file with operator + other so that
+    # permissions.reload() (called by the create route after writing the
+    # new agent's perms) preserves them across the reload.
+    import json as _json
+    perms_file = tmp_path / "config" / "permissions.json"
+    perms_file.parent.mkdir(parents=True, exist_ok=True)
+    perms_file.write_text(_json.dumps({
+        "permissions": {
+            "operator": {
+                "can_message": ["*"],
+                "can_spawn": True,
+                "blackboard_read": ["*"],
+                "blackboard_write": ["*"],
+            },
+            "other": {
+                "can_message": ["mesh"],
+                "can_spawn": False,
+            },
+        },
+    }))
     perms = PermissionMatrix.__new__(PermissionMatrix)
     perms.permissions = {
         "operator": AgentPermissions(
@@ -55,6 +75,10 @@ def mesh_app(tmp_path, _mesh_env, container_mgr):
             can_spawn=False,
         ),
     }
+    # _config_path points at the seeded permissions file so reload()
+    # in the create route picks up the on-disk write without losing the
+    # operator/other entries the fixture set in memory.
+    perms._config_path = str(perms_file)
     router = MessageRouter(permissions=perms, agent_registry={})
     app = create_mesh_app(
         bb, pubsub, router, perms,
@@ -279,6 +303,23 @@ class TestCreateCustomAgent:
         assert resp.status_code == 200
         router = mesh_app["router"]
         assert "routed" in router.agent_registry
+
+    def test_permissions_reload_after_disk_write(self, mesh_app):
+        """Regression: _add_agent_permissions writes to disk; the live
+        PermissionMatrix has to reload, otherwise the agent's imminent
+        /mesh/register call falls through to default/deny-all and the
+        coordination defaults applied here are silently negated until
+        process restart (cf. PR #656)."""
+        perms = mesh_app["perms"]
+        perms.reload = MagicMock()
+
+        client = mesh_app["client"]
+        resp = client.post(
+            "/mesh/agents/create",
+            json={"agent_id": "operator", "name": "reloadtest", "role": "test"},
+        )
+        assert resp.status_code == 200
+        perms.reload.assert_called()
 
 
 class TestCreateCustomAgentMeshClient:

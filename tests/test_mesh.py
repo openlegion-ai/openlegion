@@ -1090,3 +1090,60 @@ def test_inbox_watch_fires_on_handoff_write(tmp_path):
     assert agent_id in watchers
     assert writer_id not in watchers
     bb.close()
+
+
+# === /mesh/agents endpoint shape ===
+
+
+@pytest.mark.asyncio
+async def test_list_agents_endpoint_includes_capabilities(tmp_path):
+    """`/mesh/agents` must include a `capabilities` key per agent.
+
+    The list_agents builtin (src/agent/builtins/mesh_tool.py) reads
+    info.get("capabilities", []) — without this the dashboard and
+    coordination tools see every agent as having zero capabilities.
+    """
+    from httpx import ASGITransport, AsyncClient
+
+    from src.host.costs import CostTracker
+    from src.host.server import create_mesh_app
+    from src.host.traces import TraceStore
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix()
+    router = MessageRouter(perms, {})
+    costs = CostTracker(str(tmp_path / "costs.db"))
+    traces = TraceStore(str(tmp_path / "traces.db"))
+
+    # Register two agents — one with capabilities, one without (the cache
+    # only gets populated when capabilities is non-empty, so this exercises
+    # the empty-list fallback too).
+    router.register_agent("alice", "http://alice:8400", ["search", "summarize"])
+    router.register_agent("bob",   "http://bob:8400",   [])
+
+    app = create_mesh_app(
+        blackboard=bb, pubsub=pubsub, router=router, permissions=perms,
+        cost_tracker=costs, trace_store=traces,
+    )
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            resp = await client.get("/mesh/agents")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert set(data.keys()) == {"alice", "bob"}
+        # Both entries must carry the key (even if empty list).
+        assert "capabilities" in data["alice"]
+        assert "capabilities" in data["bob"]
+        assert sorted(data["alice"]["capabilities"]) == ["search", "summarize"]
+        assert data["bob"]["capabilities"] == []
+        # Existing fields preserved.
+        assert data["alice"]["url"] == "http://alice:8400"
+        assert "role" in data["alice"]
+    finally:
+        bb.close()
+        costs.close()
+        traces.close()

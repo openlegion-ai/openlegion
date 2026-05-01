@@ -1054,8 +1054,8 @@ def create_mesh_app(
         agent_id = _validate_agent_id(data.get("agent_id", ""))
         agent_id = _resolve_agent_id(agent_id, request)
         capabilities = data.get("capabilities", [])
-        if not isinstance(capabilities, list) or len(capabilities) > 50:
-            raise HTTPException(400, "capabilities must be a list of at most 50 items")
+        if not isinstance(capabilities, list) or len(capabilities) > 200:
+            raise HTTPException(400, "capabilities must be a list of at most 200 items")
         port = _validate_port(data.get("port", 8400))
 
         existing = router.agent_registry.get(agent_id)
@@ -1273,6 +1273,7 @@ def create_mesh_app(
             _require_any_auth(request)
         def _agent_entry(aid: str, url: str) -> dict:
             entry: dict = {"url": url, "role": router.agent_roles.get(aid, "")}
+            entry["capabilities"] = router.get_capabilities(aid)
             proj = _agent_projects.get(aid)
             if proj:
                 entry["project"] = proj
@@ -1634,6 +1635,11 @@ def create_mesh_app(
 
         # Apply template to create config entries
         created_names = _apply_template(template_name, tpl)
+        # _apply_template calls _add_agent_permissions for each new agent;
+        # reload the live matrix so /mesh/register sees the on-disk perms
+        # instead of falling through to default/deny-all. Cheap no-op when
+        # created_names is empty.
+        permissions.reload()
         if not created_names:
             return {
                 "template": template_name,
@@ -1793,7 +1799,26 @@ def create_mesh_app(
             initial_instructions=instructions, initial_soul=soul,
         )
         _update_agent_field(name, "avatar", random.randint(1, 50))
-        _add_agent_permissions(name)
+        # Operator-created agents need the same coordination defaults as
+        # template-created agents — empty blackboard_read/write would lock
+        # them out of the coordination protocol entirely (and skip the
+        # auto-watch setup at /mesh/register, which is gated on
+        # blackboard_read being truthy). Mirrors the operator-permission
+        # ceiling in operator_tools.py and the starter.yaml template.
+        default_perms = {
+            "blackboard_read":  ["*"],
+            "blackboard_write": ["tasks/*", "context/*", "status/*", "output/*", "artifacts/*"],
+            "can_publish":      ["*"],
+            "can_subscribe":    ["*"],
+            "can_use_browser":  True,
+            "can_manage_cron":  True,
+        }
+        _add_agent_permissions(name, permissions=default_perms)
+        # _add_agent_permissions writes to config/permissions.json on disk;
+        # the live PermissionMatrix has to reload or the agent's imminent
+        # /mesh/register call will fall through to default/deny-all (cf. PR
+        # #656 which added the same reload for the no-defaults case).
+        permissions.reload()
         skills_dir = PROJECT_ROOT / "skills" / name
         skills_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1924,7 +1949,7 @@ def create_mesh_app(
 
         # -- Mesh-derived metadata (verifiable, always fresh) --
         role = router.agent_roles.get(agent_id, "")
-        capabilities = router._capabilities_cache.get(agent_id, [])
+        capabilities = router.get_capabilities(agent_id)
 
         # Health status
         status = "unknown"

@@ -261,6 +261,45 @@ class TestAddAgentPermissions(_TempConfigMixin):
         # Invalid types are ignored, defaults preserved
         assert isinstance(gus["blackboard_read"], list)
 
+    def test_operator_created_agent_defaults_grant_coordination(self):
+        """Operator-created agents (POST /mesh/agents/create) must receive
+        the coordination defaults so they can participate in the
+        hand_off / check_inbox / blackboard r/w protocol.
+
+        Mirrors the defaults block in src/host/server.py:create_custom_agent
+        (operator-permission ceiling). Without these, blackboard_read is
+        empty and the auto-watch setup at /mesh/register skips the agent's
+        task inbox entirely.
+        """
+        _add_agent_to_config("hank", "helper", "openai/gpt-4o")
+        # Same dict the create_custom_agent route now passes.
+        default_perms = {
+            "blackboard_read":  ["*"],
+            "blackboard_write": ["tasks/*", "context/*", "status/*", "output/*", "artifacts/*"],
+            "can_publish":      ["*"],
+            "can_subscribe":    ["*"],
+            "can_use_browser":  True,
+            "can_manage_cron":  True,
+        }
+        _add_agent_permissions("hank", permissions=default_perms)
+        with open(self._perms_path) as f:
+            perms = json.load(f)
+        hank = perms["permissions"]["hank"]
+        # Coordination read access — wildcard so the auto-watch setup at
+        # mesh/register installs the tasks/{agent}/* watcher.
+        assert hank["blackboard_read"] == ["*"]
+        # Coordination write namespaces — must include tasks/* (hand_off)
+        # and the other standard prefixes.
+        for pattern in ("tasks/*", "context/*", "status/*", "output/*", "artifacts/*"):
+            assert pattern in hank["blackboard_write"], (
+                f"missing required write pattern {pattern!r} in {hank['blackboard_write']!r}"
+            )
+        # Boolean capability flags carried through.
+        assert hank["can_use_browser"] is True
+        assert hank["can_manage_cron"] is True
+        # Defaults still present.
+        assert "llm" in hank["allowed_apis"]
+
 
 class TestApplyTemplate(_TempConfigMixin):
     def test_creates_agents_with_new_fields(self):
