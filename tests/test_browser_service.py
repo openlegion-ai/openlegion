@@ -4067,6 +4067,7 @@ class TestTypoInjection:
         assert len(backspace_calls) == 2, f"Expected 2 typo corrections, got {len(backspace_calls)}"
 
 
+@pytest.mark.real_timing
 class TestClickRandomDelay:
     """Verify click delay is not a fixed 0.3s."""
 
@@ -4095,6 +4096,7 @@ class TestClickRandomDelay:
         assert len(set(f"{d:.4f}" for d in delays)) > 1
 
 
+@pytest.mark.real_timing
 class TestTypeWithVariance:
     """Verify per-char execCommand calls with keyboard.type fallback and varying delays."""
 
@@ -5010,6 +5012,7 @@ class TestScrollParameterized:
             assert delta < 0
 
 
+@pytest.mark.real_timing
 class TestWordBoundaryPause:
     """Verify think_pause fires at word boundaries with higher probability."""
 
