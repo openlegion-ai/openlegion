@@ -122,10 +122,19 @@ RUN mkdir -p /opt/openlegion/extensions \
 # Pillow ships with bundled libwebp on manylinux wheels, so no apt-level WebP
 # library is required. The encode path in src/browser/service.py uses
 # Image.save(..., format="WEBP") which is Pillow's built-in encoder.
+#
+# ``uvicorn[standard]`` is required (not plain ``uvicorn``): the
+# ``[standard]`` extra pulls in the ``websockets`` package, which
+# uvicorn needs to handle WebSocket upgrades. Without it, every WS
+# request to ``/agent-vnc/{agent_id}/{path}`` returns HTTP 404 at the
+# protocol layer before our route handler ever runs — which is what
+# the per-agent VNC iframe was hitting in production. The package is
+# also used by ``vnc_ws`` to connect upstream to the per-agent
+# KasmVNC.
 COPY pyproject.toml .
 RUN pip install --no-cache-dir --root-user-action=ignore --upgrade pip \
     && pip install --no-cache-dir --root-user-action=ignore \
-    "camoufox[geoip]" fastapi uvicorn pydantic httpx \
+    "camoufox[geoip]" fastapi "uvicorn[standard]" pydantic httpx \
     "Pillow>=10.0"
 
 # Application code
