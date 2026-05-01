@@ -20,6 +20,7 @@ import uuid as _uuid
 from collections import defaultdict
 from collections.abc import Callable, Coroutine
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket
@@ -75,6 +76,7 @@ if TYPE_CHECKING:
     from src.host.runtime import RuntimeBackend
     from src.host.traces import TraceStore
     from src.host.transport import Transport
+    from src.shared.types import MessageOrigin
 
 
 # ── Pending Config Change Store (in-memory) ──────────────────────
@@ -113,6 +115,145 @@ def _get_pending_change(change_id: str) -> dict | None:
 def _consume_pending_change(change_id: str) -> dict | None:
     _cleanup_expired_changes()
     return _pending_changes.pop(change_id, None)
+
+
+# ── Task 2c: Server-side channel origin validation ────────────────
+#
+# When an inbound HTTP request carries ``X-Origin`` with ``kind="human"``
+# and a channel name from the messaging-channel set, the mesh re-checks
+# the claim against the on-disk pairing record (``config/<channel>_paired.json``).
+# A buggy or hostile adapter could otherwise elevate origin to ``human``
+# for any user id; this defense-in-depth gate downgrades unverifiable
+# claims to ``kind="agent"`` (least-trusted) before they reach
+# authorization-sensitive code paths (``/mesh/wake``, durable confirms,
+# etc.). Failure is silent (warning log only, never raises) so a forged
+# header cannot crash a request.
+#
+# CLI and dashboard origins are intentionally NOT in the paired set —
+# their authentication happens at a different layer (process identity
+# for CLI, ``ol_session`` cookie for dashboard).
+_PAIRED_CHANNELS = frozenset({"telegram", "discord", "slack", "whatsapp", "webhook"})
+
+# Tiny TTL cache for pairing-record reads. The on-disk file changes only
+# on ``/pair`` operations, which are rare. 5s staleness is acceptable for
+# a defense-in-depth gate; ``_invalidate_pairing_cache`` lets the pair/
+# unpair flow drop a stale entry on demand.
+_pairing_cache: dict[str, tuple[float, dict | None]] = {}
+_PAIRING_CACHE_TTL = 5.0
+
+
+def _read_pairing_record(channel: str) -> dict | None:
+    """Read the pairing JSON for a channel.
+
+    Returns ``None`` if missing, malformed, or unreadable. Cached for
+    ``_PAIRING_CACHE_TTL`` seconds keyed on channel name.
+    """
+    cached = _pairing_cache.get(channel)
+    if cached and time.monotonic() - cached[0] < _PAIRING_CACHE_TTL:
+        return cached[1]
+    path = Path("config") / f"{channel}_paired.json"
+    record: dict | None
+    if not path.exists():
+        record = None
+    else:
+        try:
+            raw = path.read_text()
+            parsed = json.loads(raw)
+            record = parsed if isinstance(parsed, dict) else None
+        except (json.JSONDecodeError, OSError):
+            record = None
+    _pairing_cache[channel] = (time.monotonic(), record)
+    return record
+
+
+def _invalidate_pairing_cache(channel: str | None = None) -> None:
+    """Drop the cached pairing record for ``channel`` (or all channels).
+
+    Pair/unpair endpoints can call this to force a fresh read on the
+    next ``/mesh/wake`` (or other validated-origin) request. When called
+    with no argument, clears the entire cache — useful in tests.
+    """
+    if channel is None:
+        _pairing_cache.clear()
+        return
+    _pairing_cache.pop(channel, None)
+
+
+def _is_paired_user(channel: str, user: str) -> bool:
+    """Check if ``user`` is paired for ``channel``.
+
+    Mirrors :meth:`PairingManager.is_allowed` semantics: owner match OR
+    membership in the allowed list. Comparisons are stringified so
+    Telegram numeric ids and Slack/Discord string ids round-trip the
+    same way.
+    """
+    record = _read_pairing_record(channel)
+    if not record:
+        return False
+    owner = record.get("owner")
+    allowed = record.get("allowed", [])
+    if not isinstance(allowed, list):
+        allowed = []
+    if owner is not None and str(owner) == str(user):
+        return True
+    return str(user) in (str(u) for u in allowed)
+
+
+def _validated_origin(request: Request) -> "MessageOrigin | None":
+    """Parse ``X-Origin`` and downgrade unverifiable channel claims.
+
+    This is the authorization-grade origin getter — endpoints that care
+    about an origin's trust level (durable confirms, wakes, pending
+    actions) must use this instead of :func:`parse_origin_header`.
+
+    Behaviour:
+
+    * Missing/malformed header → ``None`` (caller decides what default
+      to use; ``/mesh/wake`` falls back to ``MessageOrigin(kind="agent")``).
+    * ``kind != "human"`` → returned unchanged (only human claims need
+      pairing recheck; agent/heartbeat/cron/system/operator either come
+      from internal stamping or have their own auth path).
+    * ``kind == "human"`` with a non-paired channel (cli, dashboard,
+      anything not in ``_PAIRED_CHANNELS``) → returned unchanged. Their
+      auth happens at a different layer.
+    * ``kind == "human"`` with a paired channel and a paired user →
+      returned unchanged.
+    * ``kind == "human"`` with a paired channel and an unpaired/empty
+      user → downgraded to ``kind="agent"`` (warning logged).
+
+    The helper never raises: a forged X-Origin header must not crash a
+    request. ``MessageOrigin`` is ``frozen=True`` (Task 2a), so the
+    downgrade is via :meth:`pydantic.BaseModel.model_copy`, not mutation.
+    """
+    from src.shared.types import MessageOrigin
+
+    raw = request.headers.get("x-origin")
+    # Use ``trust_kind=True`` here because we deliberately want to see
+    # the caller-supplied kind so we can validate it. The validation
+    # below either preserves it (for verified channel claims) or
+    # downgrades it. ``parse_origin_header`` (trust_kind=False) is
+    # still the right call for trace-only / non-authorization paths.
+    origin = MessageOrigin.from_header_value(raw, trust_kind=True)
+    if origin is None:
+        return None
+    if origin.kind != "human":
+        return origin
+    if origin.channel not in _PAIRED_CHANNELS:
+        return origin
+    if not origin.user:
+        logger.warning(
+            "channel origin recheck failed: channel=%s empty user — downgrading to kind=agent",
+            origin.channel,
+        )
+        return origin.model_copy(update={"kind": "agent"})
+    if _is_paired_user(origin.channel, origin.user):
+        return origin
+    logger.warning(
+        "channel origin recheck failed: channel=%s user=%s — downgrading to kind=agent",
+        origin.channel,
+        origin.user,
+    )
+    return origin.model_copy(update={"kind": "agent"})
 
 
 def create_mesh_app(
@@ -420,9 +561,13 @@ def create_mesh_app(
         else:
             wake_msg = f"You have a new task from {caller}. Call check_inbox() to see it."
 
-        from src.shared.trace import parse_origin_header
         from src.shared.types import MessageOrigin
-        origin = parse_origin_header(request.headers.get("x-origin"))
+        # Task 2c: ``_validated_origin`` re-checks ``kind="human"``
+        # channel claims against the on-disk pairing record. Forged or
+        # unverifiable claims are downgraded to ``kind="agent"`` so the
+        # lane payload (and any downstream auth gate that will be added
+        # in Task 2d/2e) cannot be tricked by a hostile/buggy adapter.
+        origin = _validated_origin(request)
         # Task 2b: missing/invalid origin downgrades to ``kind="agent"``
         # (least-trusted) instead of ``None`` so downstream gates always
         # see an explicit kind. Auto-notify still gated on the original

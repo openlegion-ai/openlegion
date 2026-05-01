@@ -2372,3 +2372,352 @@ class TestHandleNotifyOrigin:
             "hi",
             "chef",
         )
+
+
+# ── Task 2c: server-side channel origin pairing recheck ──────────
+
+
+class _ReqHeaders:
+    """Minimal stand-in for ``Request.headers`` (case-insensitive get)."""
+
+    def __init__(self, mapping: dict[str, str]) -> None:
+        self._lower = {k.lower(): v for k, v in mapping.items()}
+
+    def get(self, key: str, default: str | None = None) -> str | None:
+        return self._lower.get(key.lower(), default)
+
+
+class _FakeRequest:
+    def __init__(self, headers: dict[str, str]) -> None:
+        self.headers = _ReqHeaders(headers)
+
+
+def _write_pairing(tmp_path, channel: str, payload: dict | str) -> None:
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    path = cfg_dir / f"{channel}_paired.json"
+    if isinstance(payload, str):
+        path.write_text(payload)
+    else:
+        import json as _json
+        path.write_text(_json.dumps(payload))
+
+
+def _origin_header(kind: str, channel: str, user: str) -> str:
+    import json as _json
+    return _json.dumps({"kind": kind, "channel": channel, "user": user})
+
+
+class TestValidatedOrigin:
+    """Server-side recheck of inbound ``X-Origin`` channel claims (Task 2c)."""
+
+    def setup_method(self):
+        from src.host.server import _invalidate_pairing_cache
+        _invalidate_pairing_cache()
+
+    def teardown_method(self):
+        from src.host.server import _invalidate_pairing_cache
+        _invalidate_pairing_cache()
+
+    def test_paired_user_keeps_kind_human(self, tmp_path, monkeypatch):
+        from src.host.server import _validated_origin
+        from src.shared.types import MessageOrigin
+
+        monkeypatch.chdir(tmp_path)
+        _write_pairing(tmp_path, "telegram", {"owner": 42, "allowed": [42]})
+        req = _FakeRequest({"x-origin": _origin_header("human", "telegram", "42")})
+        result = _validated_origin(req)
+        assert isinstance(result, MessageOrigin)
+        assert result.kind == "human"
+        assert result.channel == "telegram"
+        assert result.user == "42"
+
+    def test_paired_user_in_allowed_list_keeps_human(self, tmp_path, monkeypatch):
+        from src.host.server import _validated_origin
+
+        monkeypatch.chdir(tmp_path)
+        _write_pairing(tmp_path, "discord", {"owner": "owner-id", "allowed": ["alice", "bob"]})
+        req = _FakeRequest({"x-origin": _origin_header("human", "discord", "alice")})
+        result = _validated_origin(req)
+        assert result.kind == "human"
+        assert result.user == "alice"
+
+    def test_unpaired_user_downgraded_to_agent(self, tmp_path, monkeypatch):
+        from src.host.server import _validated_origin
+
+        monkeypatch.chdir(tmp_path)
+        _write_pairing(tmp_path, "telegram", {"owner": 42, "allowed": [42]})
+        req = _FakeRequest({"x-origin": _origin_header("human", "telegram", "9999")})
+        result = _validated_origin(req)
+        assert result.kind == "agent"
+        # Channel/user metadata preserved for downstream addressing.
+        assert result.channel == "telegram"
+        assert result.user == "9999"
+
+    def test_empty_user_downgraded(self, tmp_path, monkeypatch):
+        """A typed ``kind="human"`` header with empty user passes the
+        parser (``trust_kind=True`` skips the empty-user reject), so the
+        validator's own empty-user branch must catch it and downgrade
+        — an empty user id cannot be verified against any pairing list.
+        """
+        from src.host.server import _validated_origin
+
+        monkeypatch.chdir(tmp_path)
+        _write_pairing(tmp_path, "telegram", {"owner": 42, "allowed": [42]})
+        req = _FakeRequest(
+            {"x-origin": _origin_header("human", "telegram", "")},
+        )
+        result = _validated_origin(req)
+        assert result is not None
+        assert result.kind == "agent"
+        assert result.channel == "telegram"
+        assert result.user == ""
+
+    def test_missing_pairing_file_downgrades(self, tmp_path, monkeypatch):
+        from src.host.server import _validated_origin
+
+        monkeypatch.chdir(tmp_path)
+        # No config/telegram_paired.json at all.
+        req = _FakeRequest({"x-origin": _origin_header("human", "telegram", "42")})
+        result = _validated_origin(req)
+        assert result.kind == "agent"
+
+    def test_malformed_pairing_file_downgrades(self, tmp_path, monkeypatch):
+        from src.host.server import _validated_origin
+
+        monkeypatch.chdir(tmp_path)
+        _write_pairing(tmp_path, "telegram", "not-json-at-all{")
+        req = _FakeRequest({"x-origin": _origin_header("human", "telegram", "42")})
+        result = _validated_origin(req)
+        assert result.kind == "agent"
+
+    def test_pairing_file_non_dict_downgrades(self, tmp_path, monkeypatch):
+        from src.host.server import _validated_origin
+
+        monkeypatch.chdir(tmp_path)
+        _write_pairing(tmp_path, "telegram", "[1, 2, 3]")
+        req = _FakeRequest({"x-origin": _origin_header("human", "telegram", "42")})
+        result = _validated_origin(req)
+        assert result.kind == "agent"
+
+    def test_non_paired_channel_passes_through(self, tmp_path, monkeypatch):
+        """CLI / dashboard origins pass through unchanged — they have
+        their own auth (process identity, ol_session cookie)."""
+        from src.host.server import _validated_origin
+
+        monkeypatch.chdir(tmp_path)
+        # No pairing file for cli — and shouldn't matter, cli isn't
+        # in _PAIRED_CHANNELS.
+        req = _FakeRequest({"x-origin": _origin_header("human", "cli", "jeff")})
+        result = _validated_origin(req)
+        assert result.kind == "human"
+        assert result.channel == "cli"
+
+        req2 = _FakeRequest({"x-origin": _origin_header("human", "dashboard", "op-1")})
+        result2 = _validated_origin(req2)
+        assert result2.kind == "human"
+        assert result2.channel == "dashboard"
+
+    def test_unknown_channel_passes_through(self, tmp_path, monkeypatch):
+        """Channels not in the paired set pass through. Unknown channels
+        either have their own auth path or are caller-controlled metadata
+        (e.g., trace propagation)."""
+        from src.host.server import _validated_origin
+
+        monkeypatch.chdir(tmp_path)
+        req = _FakeRequest({"x-origin": _origin_header("human", "rss", "feed-1")})
+        result = _validated_origin(req)
+        assert result.kind == "human"
+        assert result.channel == "rss"
+
+    def test_non_human_kinds_pass_through(self, tmp_path, monkeypatch):
+        """cron / heartbeat / agent / system / operator never trigger
+        the pairing recheck — only human claims need verification."""
+        from src.host.server import _validated_origin
+
+        monkeypatch.chdir(tmp_path)
+        # No pairing file for any of these — should pass through anyway.
+        for kind in ("agent", "system", "heartbeat", "cron", "operator"):
+            req = _FakeRequest({"x-origin": _origin_header(kind, "telegram", "42")})
+            result = _validated_origin(req)
+            assert result is not None, f"kind={kind} should parse"
+            assert result.kind == kind, f"kind={kind} should pass through"
+
+    def test_no_origin_header_returns_none(self, tmp_path, monkeypatch):
+        from src.host.server import _validated_origin
+
+        monkeypatch.chdir(tmp_path)
+        req = _FakeRequest({})
+        assert _validated_origin(req) is None
+
+    def test_malformed_origin_header_returns_none(self, tmp_path, monkeypatch):
+        from src.host.server import _validated_origin
+
+        monkeypatch.chdir(tmp_path)
+        req = _FakeRequest({"x-origin": "not-json"})
+        assert _validated_origin(req) is None
+
+    def test_cache_ttl_serves_stale_within_window(self, tmp_path, monkeypatch):
+        """Reads inside the TTL window hit the cache. After TTL expires
+        the helper re-reads the file."""
+        from src.host import server as _server
+
+        monkeypatch.chdir(tmp_path)
+        _write_pairing(tmp_path, "telegram", {"owner": 42, "allowed": [42]})
+        req_paired = _FakeRequest(
+            {"x-origin": _origin_header("human", "telegram", "42")},
+        )
+        # Prime cache (records the current monotonic timestamp).
+        assert _server._validated_origin(req_paired).kind == "human"
+
+        # Revoke owner on disk → ``42`` is no longer paired.
+        _write_pairing(tmp_path, "telegram", {"owner": 99, "allowed": []})
+        # Within TTL → cached record still says owner=42 → still kind=human.
+        assert _server._validated_origin(req_paired).kind == "human"
+
+        # Force expiry by rewriting the cache entry with a stale timestamp
+        # (cleaner than monkeypatching the global ``time`` module).
+        cached = _server._pairing_cache.get("telegram")
+        assert cached is not None
+        _server._pairing_cache["telegram"] = (
+            cached[0] - _server._PAIRING_CACHE_TTL - 1.0,
+            cached[1],
+        )
+        # Next call re-reads → owner is now 99 → user 42 unpaired → downgrade.
+        assert _server._validated_origin(req_paired).kind == "agent"
+
+    def test_invalidate_cache_forces_reread(self, tmp_path, monkeypatch):
+        from src.host import server as _server
+
+        monkeypatch.chdir(tmp_path)
+        _write_pairing(tmp_path, "telegram", {"owner": 42, "allowed": [42]})
+        req = _FakeRequest({"x-origin": _origin_header("human", "telegram", "42")})
+        assert _server._validated_origin(req).kind == "human"
+
+        # Revoke on disk and invalidate.
+        _write_pairing(tmp_path, "telegram", {"owner": 42, "allowed": []})
+        _server._invalidate_pairing_cache("telegram")
+        # User 42 still owner → still paired.
+        assert _server._validated_origin(req).kind == "human"
+
+        # Now flip the owner.
+        _write_pairing(tmp_path, "telegram", {"owner": 99, "allowed": []})
+        _server._invalidate_pairing_cache("telegram")
+        assert _server._validated_origin(req).kind == "agent"
+
+    def test_invalidate_cache_global(self, tmp_path, monkeypatch):
+        """Invalidate with no argument clears all entries."""
+        from src.host import server as _server
+
+        monkeypatch.chdir(tmp_path)
+        _write_pairing(tmp_path, "telegram", {"owner": 42, "allowed": []})
+        _write_pairing(tmp_path, "discord", {"owner": "alice", "allowed": []})
+
+        req_t = _FakeRequest({"x-origin": _origin_header("human", "telegram", "42")})
+        req_d = _FakeRequest({"x-origin": _origin_header("human", "discord", "alice")})
+        assert _server._validated_origin(req_t).kind == "human"
+        assert _server._validated_origin(req_d).kind == "human"
+
+        _server._invalidate_pairing_cache()
+        assert _server._pairing_cache == {}
+
+    def test_pairing_record_with_non_list_allowed(self, tmp_path, monkeypatch):
+        """A malformed pairing record with non-list ``allowed`` falls back
+        gracefully — the helper must not raise on bad shapes."""
+        from src.host.server import _validated_origin
+
+        monkeypatch.chdir(tmp_path)
+        _write_pairing(tmp_path, "telegram", {"owner": 42, "allowed": "not-a-list"})
+        # User 42 is the owner → still paired (owner check doesn't touch allowed).
+        req_owner = _FakeRequest({"x-origin": _origin_header("human", "telegram", "42")})
+        assert _validated_origin(req_owner).kind == "human"
+        # User 9999 is neither owner nor in (treated-as-empty) allowed → downgrade.
+        req_other = _FakeRequest({"x-origin": _origin_header("human", "telegram", "9999")})
+        assert _validated_origin(req_other).kind == "agent"
+
+
+def test_mesh_wake_downgrades_unpaired_human_origin(tmp_path, monkeypatch):
+    """``/mesh/wake`` with ``kind="human"`` from an unpaired channel user
+    enqueues a lane payload with origin downgraded to ``kind="agent"``.
+
+    Wake itself still succeeds (current capture behaviour — Task 2e
+    will tighten worker→operator wakes). The lane payload's origin is
+    the authoritative trust signal that downstream gates will read.
+    """
+    import time
+
+    from src.host import server as _server
+    from src.shared.types import MessageOrigin
+
+    monkeypatch.chdir(tmp_path)
+    _server._invalidate_pairing_cache()
+    # Pair owner=42; the wake claim uses user=not-paired so the recheck
+    # downgrades.
+    _write_pairing(tmp_path, "telegram", {"owner": 42, "allowed": [42]})
+
+    client, captured, loop, bb = _wake_test_app(tmp_path)
+    try:
+        resp = client.post(
+            "/mesh/wake",
+            params={"target": "chef", "message": "check inbox"},
+            headers={
+                "x-origin": _origin_header("human", "telegram", "not-paired"),
+                "X-Agent-ID": "operator",
+            },
+        )
+        assert resp.status_code == 200
+        deadline = time.monotonic() + 2.0
+        while not captured and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert captured, "lane_manager.enqueue was never called"
+        call = captured[0]
+        assert isinstance(call["origin"], MessageOrigin)
+        assert call["origin"].kind == "agent"
+        # Channel/user metadata is preserved so the auto-notify path can
+        # still address the originating surface (Task 2b semantics).
+        assert call["origin"].channel == "telegram"
+        assert call["origin"].user == "not-paired"
+        assert call["auto_notify"] is True
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        bb.close()
+        _server._invalidate_pairing_cache()
+
+
+def test_mesh_wake_paired_human_origin_keeps_kind(tmp_path, monkeypatch):
+    """``/mesh/wake`` with a verified channel claim keeps ``kind="human"``
+    on the lane payload — downstream gates can trust it."""
+    import time
+
+    from src.host import server as _server
+    from src.shared.types import MessageOrigin
+
+    monkeypatch.chdir(tmp_path)
+    _server._invalidate_pairing_cache()
+    _write_pairing(tmp_path, "telegram", {"owner": 42, "allowed": [42]})
+
+    client, captured, loop, bb = _wake_test_app(tmp_path)
+    try:
+        resp = client.post(
+            "/mesh/wake",
+            params={"target": "chef", "message": "check inbox"},
+            headers={
+                "x-origin": _origin_header("human", "telegram", "42"),
+                "X-Agent-ID": "operator",
+            },
+        )
+        assert resp.status_code == 200
+        deadline = time.monotonic() + 2.0
+        while not captured and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert captured
+        call = captured[0]
+        assert isinstance(call["origin"], MessageOrigin)
+        assert call["origin"].kind == "human"
+        assert call["origin"].channel == "telegram"
+        assert call["origin"].user == "42"
+        assert call["auto_notify"] is True
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        bb.close()
+        _server._invalidate_pairing_cache()
