@@ -932,6 +932,154 @@ class MeshClient:
             )
         return data
 
+    # ── Orchestration tasks v2 (Task 6) ─────────────────────────
+
+    # Cached probe result. Set on first call so the agent doesn't
+    # round-trip to /mesh/orchestration/status on every coordination
+    # call. ``None`` = not yet probed; ``True``/``False`` once known.
+    _orchestration_v2_cache: bool | None = None
+
+    async def orchestration_v2_enabled(self) -> bool:
+        """Return True when the mesh has v2 enabled. Fail-closed.
+
+        Cached for the process lifetime — the env var only changes on
+        mesh restart, and a restart drops this whole client. Any error
+        (network, 503, malformed JSON) is treated as "v2 off" so the
+        coordination tool falls back to the legacy blackboard path.
+        """
+        if self._orchestration_v2_cache is not None:
+            return self._orchestration_v2_cache
+        try:
+            response = await self._get_with_retry(
+                f"{self.mesh_url}/mesh/orchestration/status",
+                timeout=5,
+            )
+            if response.status_code == 200:
+                data = response.json()
+                self._orchestration_v2_cache = bool(data.get("enabled"))
+            else:
+                self._orchestration_v2_cache = False
+        except Exception as e:
+            logger.debug("orchestration_v2 probe failed (fail-closed): %s", e)
+            self._orchestration_v2_cache = False
+        return self._orchestration_v2_cache
+
+    async def create_task(
+        self,
+        *,
+        assignee: str,
+        title: str,
+        description: str | None = None,
+        project: str | None = None,
+        parent_task_id: str | None = None,
+        priority: int = 0,
+        dependencies: list[str] | None = None,
+        artifact_refs: list[str] | None = None,
+    ) -> dict:
+        """Create a durable task. Returns the new task record."""
+        client = await self._get_client()
+        body: dict = {
+            "assignee": assignee,
+            "title": title,
+            "priority": priority,
+        }
+        if description is not None:
+            body["description"] = description
+        if project is not None:
+            body["project"] = project
+        if parent_task_id is not None:
+            body["parent_task_id"] = parent_task_id
+        if dependencies is not None:
+            body["dependencies"] = dependencies
+        if artifact_refs is not None:
+            body["artifact_refs"] = artifact_refs
+        response = await client.post(
+            f"{self.mesh_url}/mesh/tasks",
+            json=body,
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def get_task(self, task_id: str) -> dict | None:
+        """Read a task by id. Returns None on 404."""
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/tasks/{task_id}",
+        )
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return response.json()
+
+    async def list_task_inbox(self, assignee: str | None = None) -> list[dict]:
+        """List tasks assigned to ``assignee`` (defaults to self)."""
+        target = assignee or self.agent_id
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/tasks/inbox/{target}",
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data.get("tasks", []) if isinstance(data, dict) else []
+
+    async def list_project_tasks(self, project_id: str) -> list[dict]:
+        """List tasks scoped to ``project_id``."""
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/tasks/project/{project_id}",
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data.get("tasks", []) if isinstance(data, dict) else []
+
+    async def set_task_status(
+        self, task_id: str, status: str,
+        blocker_note: str | None = None,
+    ) -> dict:
+        """Transition a task to ``status``."""
+        client = await self._get_client()
+        body: dict = {"status": status}
+        if blocker_note is not None:
+            body["blocker_note"] = blocker_note
+        response = await client.post(
+            f"{self.mesh_url}/mesh/tasks/{task_id}/status",
+            json=body,
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def reroute_task(
+        self, task_id: str, new_assignee: str, reason: str = "",
+    ) -> dict:
+        """Reassign a task to ``new_assignee``."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/tasks/{task_id}/reroute",
+            json={"new_assignee": new_assignee, "reason": reason},
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def cancel_task(self, task_id: str, reason: str = "") -> dict:
+        """Cancel a task."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/tasks/{task_id}/cancel",
+            json={"reason": reason},
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def list_task_events(self, task_id: str) -> list[dict]:
+        """Audit history for a task."""
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/tasks/{task_id}/events",
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data.get("events", []) if isinstance(data, dict) else []
+
     # ── Operator metrics ─────────────────────────────────────────
 
     async def get_system_metrics(self) -> dict:
