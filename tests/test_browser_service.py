@@ -3523,6 +3523,134 @@ class TestScroll:
         assert result["success"] is False
         assert "page closed" in result["error"]
 
+    @pytest.mark.asyncio
+    async def test_scroll_inside_ref_hovers_then_scrolls_cdp(self):
+        """inside_ref must hover the cursor over the container BEFORE wheel
+        events fire, so the wheel routes to that container's scroll target.
+        CDP path: locator.hover() then page.mouse.wheel()."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = MagicMock()
+        mock_page.viewport_size = {"width": 1280, "height": 720}
+        mock_page.mouse = AsyncMock()
+        mock_page.mouse.wheel = AsyncMock()
+
+        mock_locator = AsyncMock()
+        mock_locator.hover = AsyncMock()
+        mock_page.get_by_role.return_value = mock_locator
+        mock_locator.nth = MagicMock(return_value=mock_locator)
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst.seed_refs_legacy({"e7": {"role": "dialog", "name": "Compose"}})
+        # x11_wid stays None → CDP path
+        mgr._instances["a1"] = inst
+
+        result = await mgr.scroll("a1", direction="down", amount=300, inside_ref="e7")
+        assert result["success"] is True
+        assert result["data"]["inside_ref"] == "e7"
+        # Hover happens before any wheel call
+        mock_locator.hover.assert_awaited()
+        assert mock_page.mouse.wheel.await_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_scroll_inside_ref_uses_x11_hover_when_wid_set(self):
+        """When x11_wid is set, inside_ref must use _x11_hover (real X11
+        mousemove events) NOT Playwright's locator.hover (CDP synthetic).
+        Stealth requirement: do not leak isTrusted=false on bot-detection sites."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mock_page = MagicMock()
+        mock_page.viewport_size = {"width": 1280, "height": 720}
+        mock_page.mouse = AsyncMock()
+        mock_page.mouse.wheel = AsyncMock()
+
+        mock_locator = AsyncMock()
+        mock_locator.hover = AsyncMock()
+        mock_page.get_by_role.return_value = mock_locator
+        mock_locator.nth = MagicMock(return_value=mock_locator)
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst.x11_wid = 12345  # X11 path enabled
+        inst.seed_refs_legacy({"e7": {"role": "dialog", "name": "Compose"}})
+        mgr._instances["a1"] = inst
+
+        with patch.object(mgr, "_x11_hover", new=AsyncMock()) as mock_x11_hover, \
+             patch.object(mgr, "_x11_scroll_notch", new=AsyncMock()) as mock_notch:
+            result = await mgr.scroll("a1", direction="down", amount=200, inside_ref="e7")
+
+        assert result["success"] is True
+        mock_x11_hover.assert_awaited_once()
+        # Playwright hover MUST NOT be used on the X11 path (would leak isTrusted=false)
+        mock_locator.hover.assert_not_awaited()
+        assert mock_notch.await_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_scroll_inside_ref_missing(self):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mock_page = AsyncMock()
+        mock_page.viewport_size = {"width": 1280, "height": 720}
+        mock_page.mouse = AsyncMock()
+        mock_page.mouse.wheel = AsyncMock()
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst.seed_refs_legacy({"e0": {"role": "button", "name": "OK"}})
+        mgr._instances["a1"] = inst
+
+        result = await mgr.scroll("a1", inside_ref="e99")
+        assert result["success"] is False
+        assert "not found" in result["error"]
+        # Must not fall through to pixel scrolling
+        mock_page.mouse.wheel.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_scroll_ref_and_inside_ref_mutually_exclusive(self):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mock_page = AsyncMock()
+        mock_page.viewport_size = {"width": 1280, "height": 720}
+        mock_page.mouse = AsyncMock()
+        mock_page.mouse.wheel = AsyncMock()
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst.seed_refs_legacy({"e1": {"role": "button"}, "e2": {"role": "dialog"}})
+        mgr._instances["a1"] = inst
+
+        result = await mgr.scroll("a1", ref="e1", inside_ref="e2")
+        assert result["success"] is False
+        assert "mutually exclusive" in result["error"]
+        mock_page.mouse.wheel.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_scroll_inside_ref_x11_hover_failure_falls_back_to_cdp(self):
+        """If _x11_hover raises, fall back to locator.hover (CDP) so the agent
+        isn't blocked. Stealth on the wheel itself is preserved by whatever path
+        the notch loop selects (X11 if available, CDP otherwise)."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mock_page = MagicMock()
+        mock_page.viewport_size = {"width": 1280, "height": 720}
+        mock_page.mouse = AsyncMock()
+        mock_page.mouse.wheel = AsyncMock()
+
+        mock_locator = AsyncMock()
+        mock_locator.hover = AsyncMock()
+        mock_page.get_by_role.return_value = mock_locator
+        mock_locator.nth = MagicMock(return_value=mock_locator)
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst.x11_wid = 12345
+        inst.seed_refs_legacy({"e7": {"role": "dialog", "name": "Compose"}})
+        mgr._instances["a1"] = inst
+
+        with patch.object(mgr, "_x11_hover", new=AsyncMock(side_effect=RuntimeError("xdotool failed"))), \
+             patch.object(mgr, "_x11_scroll_notch", new=AsyncMock()):
+            result = await mgr.scroll("a1", direction="down", amount=100, inside_ref="e7")
+
+        assert result["success"] is True
+        mock_locator.hover.assert_awaited_once()  # CDP fallback hover used
+
 
 class TestX11Scroll:
     """Tests for X11-based scroll via xdotool button 4/5."""

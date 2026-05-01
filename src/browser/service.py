@@ -7967,14 +7967,29 @@ class BrowserManager:
             await asyncio.sleep(max(0.001, random.gauss(0.008, 0.003)))
 
     async def scroll(self, agent_id: str, direction: str = "down",
-                     amount: int = 0, ref: str | None = None) -> dict:
+                     amount: int = 0, ref: str | None = None,
+                     inside_ref: str | None = None) -> dict:
         """Smooth-scroll the page in randomized increments.
 
         Args:
             direction: "up" or "down"
             amount: total pixels to scroll (0 = one viewport height)
             ref: element ref to scroll into view instead of pixel scrolling
+            inside_ref: element ref of an inner scroll container (e.g. a
+                modal dialog with overflow:auto). Cursor is hovered over
+                the container's bbox center BEFORE wheel events fire so
+                the wheel routes to that container's scroll target rather
+                than the document. Mutually exclusive with ``ref``.
         """
+        if ref and inside_ref:
+            return {
+                "success": False,
+                "error": (
+                    "ref and inside_ref are mutually exclusive — use ref to "
+                    "bring an element into the viewport, inside_ref to scroll "
+                    "content within a container"
+                ),
+            }
         if direction not in ("up", "down"):
             return {"success": False, "error": f"Invalid direction: {direction!r} (use 'up' or 'down')"}
 
@@ -7996,6 +8011,33 @@ class BrowserManager:
                         await locator.scroll_into_view_if_needed(timeout=5000)
                         return {"success": True, "data": {"scrolled_to_ref": ref}}
                     return {"success": False, "error": f"Ref '{ref}' not found"}
+
+                # Hover over the inside_ref element so wheel events route to its
+                # scroll target rather than the document. Critical for modals with
+                # overflow:auto containers (X thread composer, slide-out panels).
+                if inside_ref:
+                    if inside_ref not in inst.refs:
+                        return {"success": False, "error": f"Ref '{inside_ref}' not found in snapshot"}
+                    inside_locator = await self._locator_from_ref(inst, inside_ref)
+                    if not inside_locator:
+                        return {"success": False, "error": f"Ref '{inside_ref}' not found"}
+                    if inst.x11_wid:
+                        try:
+                            await self._x11_hover(inst, inside_locator)
+                        except Exception as e:
+                            logger.warning(
+                                "X11 hover for inside_ref '%s' failed, falling back to CDP hover: %s",
+                                inside_ref, e,
+                            )
+                            try:
+                                await inside_locator.hover(timeout=5000)
+                            except Exception as he:
+                                return {"success": False, "error": f"Could not hover over inside_ref: {he}"}
+                    else:
+                        try:
+                            await inside_locator.hover(timeout=5000)
+                        except Exception as he:
+                            return {"success": False, "error": f"Could not hover over inside_ref: {he}"}
 
                 # Pixel-based scrolling
                 if amount <= 0:
@@ -8053,10 +8095,10 @@ class BrowserManager:
                     delta=scrolled,
                     method="x11" if _use_x11 else "cdp",
                 )
-                return {
-                    "success": True,
-                    "data": {"direction": direction, "pixels": scrolled},
-                }
+                data = {"direction": direction, "pixels": scrolled}
+                if inside_ref:
+                    data["inside_ref"] = inside_ref
+                return {"success": True, "data": data}
             except Exception as e:
                 return {"success": False, "error": str(e)}
 

@@ -900,8 +900,10 @@ async def browser_hover(
     name="browser_scroll",
     description=(
         "Scroll the browser page. Supports scrolling by direction (up/down) "
-        "with an optional pixel amount, or scrolling a specific element into view "
-        "using a ref from browser_get_elements. Default scrolls down by one viewport height. "
+        "with an optional pixel amount, scrolling a specific element into view "
+        "using a ref from browser_get_elements (ref param), or scrolling content "
+        "INSIDE an inner scroll container like a modal dialog (inside_ref param). "
+        "Default scrolls down by one viewport height. "
         "Call browser_get_elements after scrolling to see the updated page content."
     ),
     parameters={
@@ -920,16 +922,30 @@ async def browser_hover(
             "description": "Element ref from browser_get_elements to scroll into view (e.g. 'e5')",
             "default": "",
         },
+        "inside_ref": {
+            "type": "string",
+            "description": (
+                "Element ref of an inner scroll container (e.g. a modal dialog's "
+                "content area). Cursor is hovered over the container before "
+                "scrolling so the wheel events route to that container instead "
+                "of the page. Use this when a modal/panel has its own scroll "
+                "and the page itself shouldn't move. Mutually exclusive with ref."
+            ),
+            "default": "",
+        },
     },
     parallel_safe=False,
 )
 async def browser_scroll(
-    direction: str = "down", amount: int = 0, ref: str = "", *, mesh_client=None,
+    direction: str = "down", amount: int = 0, ref: str = "",
+    inside_ref: str = "", *, mesh_client=None,
 ) -> dict:
     """Scroll the page or scroll an element into view."""
     params = {"direction": direction, "amount": amount}
     if ref:
         params["ref"] = ref
+    if inside_ref:
+        params["inside_ref"] = inside_ref
     return await _browser_command(mesh_client, "scroll", params)
 
 
