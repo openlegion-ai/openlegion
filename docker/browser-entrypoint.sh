@@ -65,15 +65,17 @@ install_egress_filter() {
   fi
 
   if ! command -v iptables-restore >/dev/null 2>&1; then
-    log "iptables-restore not installed — skipping firewall setup"
-    return 0
+    log "ERROR: iptables-restore not installed; refusing to start without the egress filter."
+    log "  Set BROWSER_EGRESS_DISABLE=1 to start without the filter (insecure)."
+    exit 1
   fi
 
   # Sanity check: can we actually read the OUTPUT chain? If NET_ADMIN is absent
-  # (dev setups, restricted runtimes) bail out loudly instead of failing boot.
+  # (dev setups, restricted runtimes) fail closed instead of running unfiltered.
   if ! iptables -L OUTPUT -n >/dev/null 2>&1; then
-    log "WARNING: cannot access iptables (missing NET_ADMIN?). Egress filter NOT installed."
-    return 0
+    log "ERROR: cannot access iptables (missing NET_ADMIN?). Egress filter NOT installed."
+    log "  Set BROWSER_EGRESS_DISABLE=1 to start without the filter (insecure)."
+    exit 1
   fi
 
   # Build ACCEPT rules for configured nameservers so DNS keeps working. Docker's

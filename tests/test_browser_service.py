@@ -112,6 +112,26 @@ class TestBrowserManagerLifecycle:
         assert len(mgr._instances) == 0
 
     @pytest.mark.asyncio
+    async def test_cleanup_loop_start_stop_is_idempotent(self, tmp_path):
+        from src.browser.service import BrowserManager
+
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "profiles"))
+        await mgr.start_cleanup_loop()
+        cleanup_task = mgr._cleanup_task
+        upload_task = mgr._upload_recv_gc_task
+        download_task = mgr._download_gc_task
+        try:
+            await mgr.start_cleanup_loop()
+            assert mgr._cleanup_task is cleanup_task
+            assert mgr._upload_recv_gc_task is upload_task
+            assert mgr._download_gc_task is download_task
+        finally:
+            await mgr.stop_all()
+        assert mgr._cleanup_task is None
+        assert mgr._upload_recv_gc_task is None
+        assert mgr._download_gc_task is None
+
+    @pytest.mark.asyncio
     async def test_focus_auto_starts_browser(self):
         """Focus auto-starts a browser if one isn't running."""
         from src.browser.service import BrowserManager, CamoufoxInstance
@@ -294,13 +314,27 @@ class TestPerAgentXStack:
     @pytest.mark.asyncio
     async def test_teardown_releases_slot_and_kills_processes(self, monkeypatch):
         """Real teardown SIGTERMs the process group, waits, releases slot."""
-        from src.browser.display_allocator import DisplayAllocator
+        from src.browser.display_allocator import (
+            DisplayAllocator,
+            _port_is_bindable,
+            port_for_display,
+        )
         from src.browser.service import BrowserManager, CamoufoxInstance
 
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
-        # Use a contained allocator so we don't fight the real /tmp/.X*-lock files.
+        # Use a contained allocator whose VNC ports are free on this host.
+        for display_start in range(200, 500):
+            if all(
+                _port_is_bindable(port_for_display(d))
+                for d in range(display_start, display_start + 5)
+            ):
+                break
+        else:
+            pytest.skip("no free display/VNC test range available")
         alloc = DisplayAllocator(
-            display_start=200, display_end=205, run_boot_sweep=False,
+            display_start=display_start,
+            display_end=display_start + 5,
+            run_boot_sweep=False,
         )
         slot = alloc.allocate()
         mgr._display_allocator = alloc

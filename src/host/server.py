@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hmac
+import inspect
 import json
 import re
 import time
@@ -45,6 +46,17 @@ logger = setup_logging("host.server")
 _MAX_SYSTEM_PROMPT = 10_000  # chars — caps agent-supplied system prompt to limit context cost
 _MAX_BB_KEY_LEN = 512  # chars — prevents abusive key lengths in blackboard
 _MAX_BB_VALUE_BYTES = 262_144  # 256 KB — bounds per-key storage to keep SQLite WAL manageable
+
+
+def _websockets_headers_kw(connect, headers: dict[str, str]) -> dict:
+    """Return the header kwarg name supported by the installed websockets."""
+    try:
+        params = inspect.signature(connect).parameters
+    except (TypeError, ValueError):
+        return {"additional_headers": headers}
+    if "additional_headers" in params:
+        return {"additional_headers": headers}
+    return {"extra_headers": headers}
 
 
 def _extract_prompt_preview(params: dict, max_len: int = 500) -> str:
@@ -4078,9 +4090,10 @@ def create_mesh_app(
             async with websockets.connect(
                 target,
                 subprotocols=["binary"],
-                additional_headers={
-                    "Authorization": f"Bearer {svc_token}",
-                },
+                **_websockets_headers_kw(
+                    websockets.connect,
+                    {"Authorization": f"Bearer {svc_token}"},
+                ),
                 compression=None,
                 ping_interval=None,
             ) as upstream:

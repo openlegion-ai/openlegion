@@ -53,7 +53,8 @@ class TestGetDeviceProfile:
         assert prof["platform_navigator"] == "MacIntel"
         assert prof["camoufox_os"] == "macos"
 
-    def test_mobile_ios_documented_shape(self):
+    def test_mobile_ios_documented_shape(self, monkeypatch):
+        monkeypatch.setenv("OPENLEGION_BROWSER_ALLOW_ENGINE_MISMATCH", "1")
         prof = get_device_profile("mobile-ios")
         # UA matches the published Mobile Safari 17.5 / iOS 17.5 string.
         assert prof["user_agent"] == (
@@ -89,6 +90,16 @@ class TestGetDeviceProfile:
         assert prof["has_touch"] is True
         assert prof["platform_navigator"] == "Linux armv8l"
         assert prof["user_agent_data_mobile"] is True
+
+    def test_mobile_ios_requires_engine_mismatch_opt_in(self, monkeypatch, caplog):
+        monkeypatch.delenv("OPENLEGION_BROWSER_ALLOW_ENGINE_MISMATCH", raising=False)
+        with caplog.at_level(logging.WARNING, logger="browser.stealth"):
+            prof = get_device_profile("mobile-ios")
+        assert prof is _DESKTOP_WINDOWS_PROFILE
+        assert any(
+            "mobile-ios" in rec.message and "non-Firefox UA" in rec.message
+            for rec in caplog.records
+        )
 
     def test_unknown_falls_back_to_default_with_warning(self, caplog):
         with caplog.at_level(logging.WARNING, logger="browser.stealth"):
@@ -139,7 +150,11 @@ class TestBuildLaunchOptionsProfile:
         assert opts_default["os"] == opts_explicit["os"]
 
     def test_mobile_ios_sets_ua_viewport_os(self):
-        with mock.patch.dict(os.environ, {}, clear=True):
+        with mock.patch.dict(
+            os.environ,
+            {"OPENLEGION_BROWSER_ALLOW_ENGINE_MISMATCH": "1"},
+            clear=True,
+        ):
             opts = build_launch_options(
                 "agent-iphone", "/tmp/p",
                 device_profile="mobile-ios",
@@ -177,7 +192,10 @@ class TestBuildLaunchOptionsProfile:
     def test_mobile_profile_overrides_browser_os_env(self):
         # Operator set BROWSER_OS=windows; mobile profile must win and use
         # its own ``camoufox_os`` instead.
-        with mock.patch.dict(os.environ, {"BROWSER_OS": "windows"}):
+        with mock.patch.dict(os.environ, {
+            "BROWSER_OS": "windows",
+            "OPENLEGION_BROWSER_ALLOW_ENGINE_MISMATCH": "1",
+        }):
             opts = build_launch_options(
                 "agent-x", "/tmp/p", device_profile="mobile-ios",
             )
@@ -197,7 +215,10 @@ class TestBuildLaunchOptionsProfile:
         # On the default profile, BROWSER_UA_VERSION normally rewrites
         # the UA. With a mobile profile that pins its own UA, the env
         # var must NOT override the profile's UA.
-        with mock.patch.dict(os.environ, {"BROWSER_UA_VERSION": "200.0"}):
+        with mock.patch.dict(os.environ, {
+            "BROWSER_UA_VERSION": "200.0",
+            "OPENLEGION_BROWSER_ALLOW_ENGINE_MISMATCH": "1",
+        }):
             opts = build_launch_options(
                 "agent-x", "/tmp/p", device_profile="mobile-ios",
             )
@@ -218,7 +239,12 @@ class TestMobileInitScript:
     def test_mobile_ios_emits_script_without_user_agent_data(self):
         # iOS Safari does NOT expose userAgentData — script must not
         # define it.
-        prof = get_device_profile("mobile-ios")
+        with mock.patch.dict(
+            os.environ,
+            {"OPENLEGION_BROWSER_ALLOW_ENGINE_MISMATCH": "1"},
+            clear=True,
+        ):
+            prof = get_device_profile("mobile-ios")
         script = build_mobile_init_script(prof)
         assert script is not None
         assert "maxTouchPoints" in script
@@ -344,6 +370,7 @@ class TestEndToEndProfileWiring:
         # Operator runs desktop-windows; one agent overridden to mobile-ios.
         with mock.patch.dict(os.environ, {
             "BROWSER_DEVICE_PROFILE": "desktop-windows",
+            "OPENLEGION_BROWSER_ALLOW_ENGINE_MISMATCH": "1",
         }):
             flags.set_agent_override(
                 "agent-mobile", "BROWSER_DEVICE_PROFILE", "mobile-ios",
@@ -359,12 +386,15 @@ class TestEndToEndProfileWiring:
         assert chosen_mobile == "mobile-ios"
         assert chosen_other == "desktop-windows"
 
-        opts_mobile = build_launch_options(
-            "agent-mobile", "/tmp/p", device_profile=chosen_mobile,
-        )
-        opts_other = build_launch_options(
-            "agent-other", "/tmp/p", device_profile=chosen_other,
-        )
+        with mock.patch.dict(os.environ, {
+            "OPENLEGION_BROWSER_ALLOW_ENGINE_MISMATCH": "1",
+        }):
+            opts_mobile = build_launch_options(
+                "agent-mobile", "/tmp/p", device_profile=chosen_mobile,
+            )
+            opts_other = build_launch_options(
+                "agent-other", "/tmp/p", device_profile=chosen_other,
+            )
         # Targeted agent gets iOS UA + viewport
         assert opts_mobile["window"] == (393, 852)
         assert "iPhone" in opts_mobile["config"]["navigator.userAgent"]

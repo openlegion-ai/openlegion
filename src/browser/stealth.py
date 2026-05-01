@@ -35,10 +35,11 @@ mobile profiles + a desktop-macOS variant are available via the
   * ``mobile-ios``      — Mobile Safari on iPhone 14 Pro
   * ``mobile-android``  — Chrome on Pixel 8
 
-Mobile profiles are useful when the target site serves a mobile-friendly
-version (or when geographies dominated by mobile traffic make a mobile
-fingerprint less suspicious). Tradeoff: some desktop-only forms reject
-mobile UAs; some sites serve different content / fewer features to mobile.
+Mobile profiles are opt-in via ``OPENLEGION_BROWSER_ALLOW_ENGINE_MISMATCH=1``.
+They can be useful when the target site serves a mobile-friendly version
+(or when geographies dominated by mobile traffic make a mobile fingerprint
+less suspicious). Tradeoff: some desktop-only forms reject mobile UAs; some
+sites serve different content / fewer features to mobile.
 
 Camoufox compatibility caveats: Camoufox is built on Firefox, so the iOS
 profile (Mobile Safari UA) and Android profile (Chrome UA) ship a UA-engine
@@ -196,14 +197,14 @@ def get_device_profile(name: str | None = None) -> dict:
       * ``None`` or empty string → default (``desktop-windows``).
       * Known name → that profile.
       * Unknown name → log a warning and fall back to default.
-      * Engine-mismatch profiles (``mobile-android``) → require explicit
-        ``OPENLEGION_BROWSER_ALLOW_ENGINE_MISMATCH=1`` opt-in. The Android
-        profile ships a Chrome UA + ``platform_navigator: "Linux armv8l"``
-        on top of a Gecko/Firefox engine (Camoufox). Detection products
+      * Engine-mismatch profiles (``mobile-ios`` / ``mobile-android``) →
+        require explicit ``OPENLEGION_BROWSER_ALLOW_ENGINE_MISMATCH=1``
+        opt-in. These profiles ship Safari/Chrome UA surfaces on top of a
+        Gecko/Firefox engine (Camoufox). Detection products
         catch this via ``WebGL2RenderingContext.prototype.getParameter``,
         ``RTCRtpSender.getCapabilities`` codec ordering, and
-        ``navigator.userActivation`` shape (Chromium-only). Without the
-        flag this profile is more harmful than helpful — fall back to
+        engine-specific API shape. Without the flag these profiles are more
+        harmful than helpful — fall back to
         the default and surface a loud warning.
 
     The returned dict is the live module-level constant — do not mutate.
@@ -222,7 +223,7 @@ def get_device_profile(name: str | None = None) -> dict:
         return _DEVICE_PROFILES[DEFAULT_DEVICE_PROFILE]
     if name in _ENGINE_MISMATCH_PROFILES and not _engine_mismatch_allowed():
         logger.warning(
-            "BROWSER_DEVICE_PROFILE=%r ships a Chrome UA on a Firefox "
+            "BROWSER_DEVICE_PROFILE=%r ships a non-Firefox UA on a Firefox "
             "engine — strong bot signal on any FP-aware site. Set "
             "OPENLEGION_BROWSER_ALLOW_ENGINE_MISMATCH=1 to opt in. "
             "Falling back to %r.",
@@ -235,7 +236,7 @@ def get_device_profile(name: str | None = None) -> dict:
 # Profiles whose UA + JS surface declare a different engine than the
 # underlying Camoufox (Gecko/Firefox). Each one is a strong tell on any
 # FP-aware site and is opt-in only.
-_ENGINE_MISMATCH_PROFILES = frozenset({"mobile-android"})
+_ENGINE_MISMATCH_PROFILES = frozenset({"mobile-ios", "mobile-android"})
 
 
 def _engine_mismatch_allowed() -> bool:

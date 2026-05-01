@@ -161,8 +161,7 @@ class TestAcceptLanguageCoherence:
 
 
 class TestEngineMismatchOptIn:
-    """``mobile-android`` ships Chrome UA on Firefox engine — strong bot
-    signal on FP-aware sites. Must be opt-in via env flag, not silent."""
+    """Mobile profiles that claim a non-Firefox UA on Firefox are opt-in."""
 
     def test_mobile_android_requires_opt_in(self, monkeypatch):
         from src.browser.stealth import (
@@ -183,12 +182,20 @@ class TestEngineMismatchOptIn:
         out = get_device_profile("mobile-android")
         assert out is _DEVICE_PROFILES["mobile-android"]
 
-    def test_mobile_ios_does_not_require_opt_in(self):
-        # iOS profile (Mobile Safari UA on Gecko) is also engine-mismatched
-        # but the docstring's stated trade-off was already accepted; not
-        # gating to avoid breaking existing iOS-mode operators. Documented
-        # via the explicit allow-list — only ``mobile-android`` is gated.
+    def test_mobile_ios_requires_opt_in(self, monkeypatch):
+        from src.browser.stealth import (
+            _DEVICE_PROFILES,
+            DEFAULT_DEVICE_PROFILE,
+            get_device_profile,
+        )
+
+        monkeypatch.delenv("OPENLEGION_BROWSER_ALLOW_ENGINE_MISMATCH", raising=False)
+        out = get_device_profile("mobile-ios")
+        assert out is _DEVICE_PROFILES[DEFAULT_DEVICE_PROFILE]
+
+    def test_mobile_ios_returns_profile_when_flag_set(self, monkeypatch):
         from src.browser.stealth import _DEVICE_PROFILES, get_device_profile
 
+        monkeypatch.setenv("OPENLEGION_BROWSER_ALLOW_ENGINE_MISMATCH", "1")
         out = get_device_profile("mobile-ios")
         assert out is _DEVICE_PROFILES["mobile-ios"]
