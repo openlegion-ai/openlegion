@@ -3519,6 +3519,33 @@ class BrowserManager:
                 inst.touch()
             return len(self._instances)
 
+    def touch_agent(self, agent_id: str) -> bool:
+        """Reset the idle timer for one agent's browser. Sync, no lock —
+        ``last_activity`` is a single attribute write and the keepalive
+        path runs frequently; pulling the manager lock for that would
+        contend with active browser operations. Returns True if the
+        agent has a running instance, False otherwise.
+        """
+        inst = self._instances.get(agent_id)
+        if inst is None:
+            return False
+        inst.touch()
+        return True
+
+    def get_agent_vnc_port(self, agent_id: str) -> int | None:
+        """Return the per-agent KasmVNC port for ``agent_id``, or None.
+
+        ``None`` means either (a) no browser instance for this agent
+        (never started, or already stopped), or (b) the per-agent
+        display flag is off and the instance is on the legacy shared
+        display. Both surface as 503 to the proxy — viewers see a
+        clean "browser not running" state instead of a stale frame.
+        """
+        inst = self._instances.get(agent_id)
+        if inst is None or inst.display_slot is None:
+            return None
+        return inst.display_slot.vnc_port
+
     async def refocus_active(self) -> None:
         """Re-assert X11 focus on the user's viewed browser window.
 
