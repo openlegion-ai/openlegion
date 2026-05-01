@@ -28,6 +28,10 @@ import pytest
 from src.browser import timing
 from src.browser.captcha import CaptchaSolver
 
+# This file directly exercises ``timing.captcha_solve_delay``; the autouse
+# fast-timing fixture in tests/conftest.py would replace it with a no-op.
+pytestmark = pytest.mark.real_timing
+
 # ── helpers ───────────────────────────────────────────────────────────
 
 
