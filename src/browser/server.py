@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hmac
+import inspect
 import json
 import os
 import re
@@ -32,6 +33,17 @@ logger = setup_logging("browser.server")
 # uploads via /browser/.../upload still fit.
 _MAX_BODY_BYTES = 8 * 1024 * 1024
 _AGENT_ID_RE = re.compile(AGENT_ID_RE_PATTERN)
+
+
+def _websockets_headers_kw(connect, headers: dict[str, str]) -> dict:
+    """Return the header kwarg name supported by the installed websockets."""
+    try:
+        params = inspect.signature(connect).parameters
+    except (TypeError, ValueError):
+        return {"additional_headers": headers}
+    if "additional_headers" in params:
+        return {"additional_headers": headers}
+    return {"extra_headers": headers}
 
 
 def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
@@ -987,7 +999,7 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
             async with _websockets.connect(
                 target,
                 subprotocols=["binary"],
-                additional_headers=extra_headers,
+                **_websockets_headers_kw(_websockets.connect, extra_headers),
                 compression=None,
                 # noVNC handles application-level keepalive; auto-ping
                 # on the websockets library would tear down the link

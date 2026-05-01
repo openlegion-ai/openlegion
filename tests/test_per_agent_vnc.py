@@ -38,6 +38,38 @@ def _make_instance(agent_id: str):
     )
 
 
+class TestWebsocketsCompatibility:
+    def test_browser_service_uses_new_header_kwarg(self):
+        from src.browser.server import _websockets_headers_kw
+
+        def connect(uri, *, additional_headers=None):  # pragma: no cover
+            return uri, additional_headers
+
+        assert _websockets_headers_kw(connect, {"A": "B"}) == {
+            "additional_headers": {"A": "B"},
+        }
+
+    def test_browser_service_uses_legacy_header_kwarg(self):
+        from src.browser.server import _websockets_headers_kw
+
+        def connect(uri, *, extra_headers=None):  # pragma: no cover
+            return uri, extra_headers
+
+        assert _websockets_headers_kw(connect, {"A": "B"}) == {
+            "extra_headers": {"A": "B"},
+        }
+
+    def test_host_proxy_uses_legacy_header_kwarg(self):
+        from src.host.server import _websockets_headers_kw
+
+        def connect(uri, *, extra_headers=None):  # pragma: no cover
+            return uri, extra_headers
+
+        assert _websockets_headers_kw(connect, {"A": "B"}) == {
+            "extra_headers": {"A": "B"},
+        }
+
+
 # ── BrowserManager accessors ─────────────────────────────────────────────
 
 
@@ -350,5 +382,3 @@ class TestBrowserStatusActiveAgents:
         body = resp.json()
         assert body.get("active_browsers", -1) == 0
         assert body.get("agents", "missing") == []
-
-

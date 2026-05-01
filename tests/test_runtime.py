@@ -1249,6 +1249,26 @@ class TestEntrypointHelpers:
         )
         return result.returncode == 0
 
+    @staticmethod
+    def _run_entrypoint_function(function_name: str, *, env: dict[str, str]):
+        import shlex
+        import subprocess
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parent.parent
+        script = repo_root / "docker" / "browser-entrypoint.sh"
+        if not script.exists():
+            import pytest
+            pytest.skip(f"entrypoint script not found at {script}")
+        cmd = f"source {shlex.quote(str(script))} && {function_name}"
+        return subprocess.run(
+            ["/bin/bash", "-c", cmd],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+        )
+
     # ── is_valid_ipv4 ─────────────────────────────────────────
 
     def test_ipv4_accepts_typical_addresses(self):
@@ -1305,3 +1325,19 @@ class TestEntrypointHelpers:
     def test_cidr_rejects_empty(self):
         assert not self._call("is_valid_ipv4_cidr", "")
 
+    def test_egress_filter_fails_closed_without_iptables_restore(self, tmp_path):
+        result = self._run_entrypoint_function(
+            "install_egress_filter",
+            env={"PATH": str(tmp_path)},
+        )
+        assert result.returncode == 1
+        assert "iptables-restore not installed" in result.stderr
+        assert "refusing to start" in result.stderr
+
+    def test_egress_filter_explicit_disable_still_skips(self, tmp_path):
+        result = self._run_entrypoint_function(
+            "install_egress_filter",
+            env={"PATH": str(tmp_path), "BROWSER_EGRESS_DISABLE": "1"},
+        )
+        assert result.returncode == 0
+        assert "skipping firewall setup" in result.stderr

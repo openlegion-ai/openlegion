@@ -3027,9 +3027,14 @@ class BrowserManager:
 
     async def start_cleanup_loop(self):
         """Start background task that cleans up idle browsers."""
-        self._cleanup_task = asyncio.create_task(self._cleanup_loop())
-        self._upload_recv_gc_task = asyncio.create_task(self._upload_recv_gc_loop())
-        self._download_gc_task = asyncio.create_task(self._download_gc_loop())
+        if self._cleanup_task is None or self._cleanup_task.done():
+            self._cleanup_task = asyncio.create_task(self._cleanup_loop())
+        if self._upload_recv_gc_task is None or self._upload_recv_gc_task.done():
+            self._upload_recv_gc_task = asyncio.create_task(
+                self._upload_recv_gc_loop(),
+            )
+        if self._download_gc_task is None or self._download_gc_task.done():
+            self._download_gc_task = asyncio.create_task(self._download_gc_loop())
 
     async def _upload_recv_gc_once(self) -> int:
         """Reap orphan upload-recv files older than the stage TTL.
@@ -4599,6 +4604,11 @@ class BrowserManager:
         """Stop all browser instances and clean up Playwright."""
         if self._cleanup_task:
             self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._cleanup_task = None
         if getattr(self, "_upload_recv_gc_task", None):
             self._upload_recv_gc_task.cancel()
             try:
