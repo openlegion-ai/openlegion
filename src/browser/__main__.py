@@ -21,6 +21,25 @@ from src.shared.utils import setup_logging
 
 logger = setup_logging("browser.main")
 
+# Fail fast if the WebSocket transport library is missing. uvicorn ships
+# WebSocket support only via the ``[standard]`` extra (which pulls in
+# ``websockets``); plain ``uvicorn`` rejects every WS upgrade with HTTP
+# 404 at the protocol layer, BEFORE our route handler runs. The
+# per-agent VNC iframe needs WS upgrades to work, so a missing
+# ``websockets`` package silently breaks the dashboard. Catching it
+# here turns "users see a broken VNC iframe" into "container exits
+# loud at boot".
+try:
+    import websockets as _ws_check  # noqa: F401
+except ImportError:  # pragma: no cover — regression guard
+    logger.critical(
+        "websockets package not installed. The browser service cannot "
+        "serve WS upgrades for /agent-vnc/{agent_id}/{path}. Install "
+        "``uvicorn[standard]`` (or add ``websockets`` explicitly) in "
+        "Dockerfile.browser.",
+    )
+    sys.exit(1)
+
 _API_PORT = int(os.environ.get("API_PORT", "8500"))
 
 
