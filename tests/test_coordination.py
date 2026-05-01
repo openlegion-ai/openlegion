@@ -605,3 +605,248 @@ class TestHandOffOriginPropagation:
         last_call = mc.write_blackboard.call_args_list[-1]
         task_record = last_call.args[1]
         assert "origin" not in task_record
+
+
+class TestOperatorHandoff:
+    """Coverage for the project_agent → operator handoff path (Task 0 hotfix)."""
+
+    @pytest.mark.asyncio
+    async def test_worker_to_operator_writes_to_global_namespace(self):
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="scout")
+        mc.project_name = "growth"
+        mc.is_standalone = False
+        mc.list_agents.return_value = {
+            "operator": {"url": "http://operator:8400", "scope": "global"},
+        }
+
+        result = await hand_off(
+            to="operator",
+            summary="follow up with the user",
+            data='{"note": "ok"}',
+            mesh_client=mc,
+        )
+
+        assert result["handed_off"] is True
+        assert result["task_key"].startswith("global/tasks/operator/")
+        assert result["output_key"].startswith("global/output/scout/")
+        # Both writes must use global_scope=True (NOT the sender's project scope)
+        assert mc.write_blackboard.call_count == 2
+        for call in mc.write_blackboard.call_args_list:
+            assert call.kwargs.get("global_scope") is True
+            assert call.kwargs.get("project") is None
+
+    @pytest.mark.asyncio
+    async def test_operator_check_inbox_lists_global_namespace(self):
+        from src.agent.builtins.coordination_tool import check_inbox
+
+        mc = _make_mesh_client(agent_id="operator", standalone=True)
+        mc.list_blackboard.return_value = [
+            {
+                "key": "global/tasks/operator/ho_xyz",
+                "value": {
+                    "from": "scout",
+                    "summary": "user wants a recap",
+                    "status": "pending",
+                    "ts": 1700000000.0,
+                },
+            },
+        ]
+
+        result = await check_inbox(mesh_client=mc)
+
+        assert "error" not in result
+        assert result["count"] == 1
+        assert result["tasks"][0]["from"] == "scout"
+        # Must be called with global_scope=True
+        mc.list_blackboard.assert_called_once()
+        call = mc.list_blackboard.call_args
+        assert call.args[0] == "global/tasks/operator/"
+        assert call.kwargs.get("global_scope") is True
+
+    @pytest.mark.asyncio
+    async def test_non_operator_standalone_still_blocked(self):
+        """Regression: standalone agents that are not the operator still get the standalone error."""
+        from src.agent.builtins.coordination_tool import check_inbox
+
+        mc = _make_mesh_client(agent_id="lone-wolf", standalone=True)
+
+        result = await check_inbox(mesh_client=mc)
+
+        assert "error" in result
+        assert "not assigned" in result["error"]
+        mc.list_blackboard.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_operator_completes_global_task(self):
+        from src.agent.builtins.coordination_tool import complete_task
+
+        mc = _make_mesh_client(agent_id="operator", standalone=True)
+        mc.read_blackboard = AsyncMock(return_value={
+            "value": {
+                "from": "scout",
+                "summary": "follow up",
+                "status": "pending",
+                "output_key": "global/output/scout/ho_xyz",
+            },
+        })
+
+        result = await complete_task(
+            task_key="global/tasks/operator/ho_xyz",
+            mesh_client=mc,
+        )
+
+        assert result["completed"] is True
+        # Read on the task must use global_scope=True so the standalone
+        # operator's MeshClient does not auto-prefix with project scope.
+        mc.read_blackboard.assert_awaited_once()
+        read_call = mc.read_blackboard.call_args
+        assert read_call.args[0] == "global/tasks/operator/ho_xyz"
+        assert read_call.kwargs.get("global_scope") is True
+        # Both task delete and output delete must use global_scope=True
+        delete_calls = mc.delete_blackboard.call_args_list
+        keys_deleted = [c.args[0] for c in delete_calls]
+        assert "global/tasks/operator/ho_xyz" in keys_deleted
+        assert "global/output/scout/ho_xyz" in keys_deleted
+        for call in delete_calls:
+            assert call.kwargs.get("global_scope") is True
+
+    @pytest.mark.asyncio
+    async def test_hand_off_uses_registry_scope_hint(self):
+        """Defense-in-depth: a registry entry with scope=global triggers
+        global writes even if the target name is not the literal 'operator'.
+        Future-proofs against additional global agents being introduced."""
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="scout")
+        mc.project_name = "growth"
+        mc.is_standalone = False
+        # Hypothetical future global agent — registry advertises scope.
+        mc.list_agents.return_value = {
+            "fleet-monitor": {
+                "url": "http://fleet-monitor:8400",
+                "scope": "global",
+            },
+        }
+
+        result = await hand_off(
+            to="fleet-monitor",
+            summary="alert: agent X failing",
+            mesh_client=mc,
+        )
+
+        assert result["handed_off"] is True
+        assert result["task_key"].startswith("global/tasks/fleet-monitor/")
+        write_call = mc.write_blackboard.call_args
+        assert write_call.kwargs.get("global_scope") is True
+        assert write_call.kwargs.get("project") is None
+
+    @pytest.mark.asyncio
+    async def test_hand_off_to_operator_when_roster_lookup_fails(self):
+        """Resilience: even if list_agents fails, the literal 'operator' name
+        still routes the handoff to the global namespace. The roster-failure
+        path must not silently fall back to project scope, which would make
+        the operator unreachable."""
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="scout")
+        mc.project_name = "growth"
+        mc.is_standalone = False
+        mc.list_agents.side_effect = Exception("mesh down")
+
+        result = await hand_off(
+            to="operator",
+            summary="user wants a recap",
+            mesh_client=mc,
+        )
+
+        assert result["handed_off"] is True
+        assert result["task_key"].startswith("global/tasks/operator/")
+        write_call = mc.write_blackboard.call_args
+        assert write_call.kwargs.get("global_scope") is True
+
+    @pytest.mark.asyncio
+    async def test_operator_update_status_writes_global(self):
+        """Operator's status update goes to the fleet-global namespace —
+        previously it errored out via the standalone gate, leaving status
+        updates broken for the only agent that legitimately needs to write
+        them at the fleet level."""
+        from src.agent.builtins.coordination_tool import update_status
+
+        mc = _make_mesh_client(agent_id="operator", standalone=True)
+
+        result = await update_status(
+            state="working", summary="reviewing fleet", mesh_client=mc,
+        )
+
+        assert "error" not in result
+        assert result["updated"] is True
+        mc.write_blackboard.assert_awaited_once()
+        call = mc.write_blackboard.call_args
+        assert call.args[0] == "global/status/operator"
+        assert call.kwargs.get("global_scope") is True
+
+    @pytest.mark.asyncio
+    async def test_hand_off_to_operator_survives_wake_failure(self):
+        """Regression: wake_agent failure must not prevent the task from
+        being queued. The operator picks it up on its next heartbeat."""
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="scout")
+        mc.project_name = "growth"
+        mc.is_standalone = False
+        mc.list_agents.return_value = {
+            "operator": {"url": "http://operator:8400", "scope": "global"},
+        }
+        mc.wake_agent.side_effect = Exception("wake failed: 403")
+
+        result = await hand_off(
+            to="operator", summary="follow up", mesh_client=mc,
+        )
+
+        # Handoff still succeeds — task is queued, wake is best-effort.
+        assert result["handed_off"] is True
+        assert result["task_key"].startswith("global/tasks/operator/")
+        # The task write happened before the wake attempt.
+        mc.write_blackboard.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_operator_cannot_complete_other_global_inbox(self):
+        """Defense: operator can only complete its own global tasks."""
+        from src.agent.builtins.coordination_tool import complete_task
+
+        mc = _make_mesh_client(agent_id="operator", standalone=True)
+
+        result = await complete_task(
+            task_key="global/tasks/someone-else/ho_1",
+            mesh_client=mc,
+        )
+
+        assert "error" in result
+        assert "your own tasks" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_worker_to_project_peer_unaffected(self):
+        """Regression: cross-project worker → worker handoff still uses project scoping."""
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="scout")
+        mc.project_name = "growth"
+        mc.is_standalone = False
+        mc.list_agents.return_value = {
+            "analyst": {"url": "http://analyst:8400", "project": "research"},
+        }
+
+        result = await hand_off(
+            to="analyst",
+            summary="check this",
+            mesh_client=mc,
+        )
+
+        assert result["handed_off"] is True
+        assert result["task_key"].startswith("tasks/analyst/")
+        # write_project should be the target's project, NOT global
+        write_call = mc.write_blackboard.call_args
+        assert write_call.kwargs.get("project") == "research"
+        assert write_call.kwargs.get("global_scope") is False

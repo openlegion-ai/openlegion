@@ -77,10 +77,10 @@ async def hand_off(
     if not re.fullmatch(AGENT_ID_RE_PATTERN, to):
         return {"error": f"Invalid agent ID: '{to}'"}
 
-    # Resolve target agent's project for cross-project coordination.
-    # The operator (standalone) needs to write to the target's project-scoped
-    # blackboard so the recipient finds the task via check_inbox().
+    # Resolve target agent's project for cross-project coordination, and
+    # detect whether it advertises a fleet-global scope (operator-style).
     target_project: str | None = None
+    target_is_global = False
     try:
         registry = await mesh_client.list_agents()
         if to not in registry:
@@ -89,6 +89,7 @@ async def hand_off(
         target_info = registry.get(to, {})
         if isinstance(target_info, dict):
             target_project = target_info.get("project")
+            target_is_global = target_info.get("scope") == "global"
     except Exception as e:
         # Standalone senders MUST resolve the target project to write to
         # the correct namespace.  Fail closed rather than writing to the
@@ -98,11 +99,16 @@ async def hand_off(
         logger.debug("Fleet roster check failed, proceeding with validated ID: %s", e)
 
     # Determine which project scope to use for blackboard writes.
-    # If sender and target are in the same project (or both standalone),
-    # use normal scoping.  Otherwise, use the target's project so the
-    # recipient can find the task.
+    # Fleet-global agents (operator) need their inbox in a global namespace
+    # because they have no project scope to read from. We trigger on the
+    # literal reserved name AND on the registry hint, so the path stays
+    # correct even when the registry roster lookup fails (no hint available)
+    # and forward-compatible if other global agents are added later.
     write_project: str | None = None  # None = use sender's default scope
-    if target_project and target_project != mesh_client.project_name:
+    write_global = False
+    if to == "operator" or target_is_global:
+        write_global = True
+    elif target_project and target_project != mesh_client.project_name:
         write_project = target_project
 
     handoff_id = generate_id("ho")
@@ -121,11 +127,15 @@ async def hand_off(
             parsed_data = json.loads(data)
         except json.JSONDecodeError:
             parsed_data = {"text": data}
-        output_key = f"output/{from_agent}/{handoff_id}"
+        output_key = (
+            f"global/output/{from_agent}/{handoff_id}"
+            if write_global
+            else f"output/{from_agent}/{handoff_id}"
+        )
         try:
             await mesh_client.write_blackboard(
                 output_key, parsed_data, ttl=_HANDOFF_TTL,
-                project=write_project,
+                project=write_project, global_scope=write_global,
             )
         except Exception as e:
             return {"error": f"Failed to write output: {e}"}
@@ -142,11 +152,15 @@ async def hand_off(
     if origin:
         task_record["origin"] = origin
 
-    task_key = f"tasks/{to}/{handoff_id}"
+    task_key = (
+        f"global/tasks/{to}/{handoff_id}"
+        if write_global
+        else f"tasks/{to}/{handoff_id}"
+    )
     try:
         await mesh_client.write_blackboard(
             task_key, task_record, ttl=_HANDOFF_TTL,
-            project=write_project,
+            project=write_project, global_scope=write_global,
         )
     except Exception as e:
         # Clean up orphaned output if task write fails
@@ -195,16 +209,28 @@ async def hand_off(
 async def check_inbox(*, mesh_client=None) -> dict:
     if mesh_client is None:
         return {"error": "No mesh_client available"}
-    if mesh_client.is_standalone:
-        return {"error": _STANDALONE_ERROR}
 
     agent_id = mesh_client.agent_id
-    prefix = f"tasks/{agent_id}/"
+    is_operator = (agent_id == "operator")
 
-    try:
-        entries = await mesh_client.list_blackboard(prefix)
-    except Exception as e:
-        return {"error": f"Failed to check inbox: {e}"}
+    # Standalone agents normally have no inbox (blackboard is project-scoped).
+    # The operator is the exception: its inbox lives in a fleet-global namespace
+    # so cross-project workers can hand off back to it without knowing its scope.
+    if mesh_client.is_standalone and not is_operator:
+        return {"error": _STANDALONE_ERROR}
+
+    if is_operator:
+        prefix = "global/tasks/operator/"
+        try:
+            entries = await mesh_client.list_blackboard(prefix, global_scope=True)
+        except Exception as e:
+            return {"error": f"Failed to check inbox: {e}"}
+    else:
+        prefix = f"tasks/{agent_id}/"
+        try:
+            entries = await mesh_client.list_blackboard(prefix)
+        except Exception as e:
+            return {"error": f"Failed to check inbox: {e}"}
 
     tasks = []
     for entry in entries:
@@ -263,18 +289,27 @@ async def update_status(
 ) -> dict:
     if mesh_client is None:
         return {"error": "No mesh_client available"}
-    if mesh_client.is_standalone:
-        return {"error": _STANDALONE_ERROR}
 
     agent_id = mesh_client.agent_id
+    is_operator = (agent_id == "operator")
+
+    if mesh_client.is_standalone and not is_operator:
+        return {"error": _STANDALONE_ERROR}
+
     status_data = {
         "state": state,
         "summary": sanitize_for_prompt(summary),
         "ts": time.time(),
     }
 
+    # Operator status writes to the fleet-global status namespace so it
+    # is reachable from any project scope (operator has no project of its
+    # own to scope writes to).
+    status_key = f"global/status/{agent_id}" if is_operator else f"status/{agent_id}"
     try:
-        await mesh_client.write_blackboard(f"status/{agent_id}", status_data)
+        await mesh_client.write_blackboard(
+            status_key, status_data, global_scope=is_operator,
+        )
     except Exception as e:
         return {"error": f"Failed to update status: {e}"}
 
@@ -298,23 +333,30 @@ async def update_status(
 async def complete_task(task_key: str, *, mesh_client=None) -> dict:
     if mesh_client is None:
         return {"error": "No mesh_client available"}
-    if mesh_client.is_standalone:
+
+    agent_id = mesh_client.agent_id
+    is_operator = (agent_id == "operator")
+
+    if mesh_client.is_standalone and not is_operator:
         return {"error": _STANDALONE_ERROR}
 
     # Ownership check — only complete tasks in your own inbox
-    agent_id = mesh_client.agent_id
-    expected_prefix = f"tasks/{agent_id}/"
-    if not task_key.startswith(expected_prefix):
+    allowed_prefixes = [f"tasks/{agent_id}/"]
+    if is_operator:
+        allowed_prefixes.append("global/tasks/operator/")
+    if not any(task_key.startswith(p) for p in allowed_prefixes):
         return {"error": f"Can only complete your own tasks (expected prefix: tasks/{agent_id}/)"}
+
+    is_global_task = task_key.startswith("global/")
 
     try:
         # Read task to find associated output for cleanup
-        existing = await mesh_client.read_blackboard(task_key)
+        existing = await mesh_client.read_blackboard(task_key, global_scope=is_global_task)
         if existing is None:
             return {"error": f"Task '{task_key}' not found"}
 
         # Delete the task entry
-        await mesh_client.delete_blackboard(task_key)
+        await mesh_client.delete_blackboard(task_key, global_scope=is_global_task)
 
         # Best-effort cleanup of associated output data
         value = existing.get("value", existing)
@@ -327,7 +369,8 @@ async def complete_task(task_key: str, *, mesh_client=None) -> dict:
             output_key = value.get("output_key")
             if output_key:
                 try:
-                    await mesh_client.delete_blackboard(output_key)
+                    output_global = output_key.startswith("global/")
+                    await mesh_client.delete_blackboard(output_key, global_scope=output_global)
                 except Exception as exc:
                     logger.debug("Output cleanup for %s skipped: %s", output_key, exc)
     except Exception as e:
