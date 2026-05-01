@@ -175,10 +175,16 @@ class TestGetTenantTotal:
             await cost.add_cost("alpha", 100)
             await cost.add_cost("beta", 50)
             now = datetime.now(timezone.utc)
-            seven_days_ago = now - timedelta(days=7)
-            # ``since`` falling within the current month → live total.
+            # Anchor ``since`` to the first instant of the current
+            # calendar month. The previous ``now - timedelta(days=7)``
+            # crossed the month boundary on days 1–7, so the helper
+            # (which only stores current-month state in memory)
+            # correctly returned 0 — the assertion was the bug.
+            month_start = now.replace(
+                day=1, hour=0, minute=0, second=0, microsecond=0,
+            )
             assert await cost.get_tenant_total(
-                "tenant-a", since=seven_days_ago,
+                "tenant-a", since=month_start,
             ) == 150
 
     @pytest.mark.asyncio
