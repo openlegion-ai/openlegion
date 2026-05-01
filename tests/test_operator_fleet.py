@@ -309,7 +309,10 @@ class TestMeshFleetApplyEndpoint:
         pubsub = PubSub()
         perms = PermissionMatrix.__new__(PermissionMatrix)
         perms.permissions = {}
-        perms._config_path = ""
+        # Point at a path that doesn't exist — _load() handles missing files
+        # gracefully (warns + clears). The fleet apply route now reloads
+        # permissions after writing to disk, so _config_path must be set.
+        perms._config_path = "/tmp/__nonexistent_permissions_for_test.json"
         perms._reload_lock = __import__("threading").Lock()
         agent_registry: dict[str, str] = {}
         router = MessageRouter(permissions=perms, agent_registry=agent_registry)
@@ -375,6 +378,53 @@ class TestMeshFleetApplyEndpoint:
         data = resp.json()
         assert data["template"] == "starter"
 
+    @patch.dict("os.environ", {"OPENLEGION_MAX_AGENTS": "10"})
+    def test_apply_reloads_permissions_after_disk_write(self):
+        """Regression: _apply_template calls _add_agent_permissions for
+        every new agent (writing to config/permissions.json on disk). The
+        live PermissionMatrix has to reload, otherwise every template-
+        spawned agent's /mesh/register call falls through to default/
+        deny-all and they're locked out of coordination until restart."""
+        from fastapi.testclient import TestClient
+
+        app, _, _ = self._make_app(existing_agents={"operator": "http://localhost:8400"})
+        # Find the live PermissionMatrix bound to the app and stub reload
+        # so we can assert it ran. (state_for the matrix instance so we can
+        # find it again — _make_app stores it on perms.)
+        # The mesh app holds permissions in a closure; we pick it up via
+        # the perms passed into _make_app via attribute access on router.
+        router = app.state if hasattr(app, "state") else None  # noqa: F841
+        # Easier: rebuild with a stubbed perms.reload
+        from src.host.mesh import Blackboard, MessageRouter, PubSub
+        from src.host.permissions import PermissionMatrix
+        from src.host.server import create_mesh_app
+
+        bb = Blackboard(db_path=":memory:")
+        pubsub = PubSub()
+        perms = PermissionMatrix.__new__(PermissionMatrix)
+        perms.permissions = {}
+        perms._config_path = ""
+        perms._reload_lock = __import__("threading").Lock()
+        perms.reload = MagicMock()
+
+        agent_registry: dict[str, str] = {"operator": "http://localhost:8400"}
+        router = MessageRouter(permissions=perms, agent_registry=agent_registry)
+        from pathlib import Path
+        cm = MagicMock()
+        cm.project_root = Path("/tmp/test_project")
+        cm.extra_env = {}
+        cm.start_agent.return_value = "http://localhost:8401"
+        cm.wait_for_agent = AsyncMock(return_value=True)
+
+        app2 = create_mesh_app(
+            blackboard=bb, pubsub=pubsub, router=router,
+            permissions=perms, container_manager=cm,
+        )
+        client = TestClient(app2)
+        resp = client.post("/mesh/fleet/apply", json={"template": "starter"})
+        assert resp.status_code == 200
+        perms.reload.assert_called()
+
     def test_apply_no_container_manager(self):
         """Without container manager, apply returns 503."""
         from fastapi.testclient import TestClient
@@ -387,7 +437,7 @@ class TestMeshFleetApplyEndpoint:
         pubsub = PubSub()
         perms = PermissionMatrix.__new__(PermissionMatrix)
         perms.permissions = {}
-        perms._config_path = ""
+        perms._config_path = "/tmp/__nonexistent_permissions_for_test.json"
         perms._reload_lock = __import__("threading").Lock()
         agent_registry: dict[str, str] = {}
         router = MessageRouter(permissions=perms, agent_registry=agent_registry)

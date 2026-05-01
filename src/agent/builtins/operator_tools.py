@@ -26,7 +26,7 @@ _OPERATOR_PERMISSION_CEILING = {
     "can_manage_cron": True,
     "can_use_wallet": False,  # Requires explicit user setup
     "blackboard_read": ["*"],
-    "blackboard_write": ["tasks/*", "context/*", "status/*", "output/*"],
+    "blackboard_write": ["tasks/*", "context/*", "status/*", "output/*", "artifacts/*"],
 }
 
 _VALID_FIELDS = frozenset({

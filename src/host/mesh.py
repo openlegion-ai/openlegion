@@ -758,3 +758,12 @@ class MessageRouter:
             self.agent_registry.pop(agent_id, None)
             self._capabilities_cache.pop(agent_id, None)
             self.agent_roles.pop(agent_id, None)
+
+    def get_capabilities(self, agent_id: str) -> list[str]:
+        """Return the cached capability list for an agent (empty if unknown).
+
+        Returns a copy under the registry lock so callers can't observe a
+        mid-write mutation of the cache.
+        """
+        with self._registry_lock:
+            return list(self._capabilities_cache.get(agent_id, []))
