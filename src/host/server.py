@@ -571,6 +571,23 @@ def create_mesh_app(
 
     app.cleanup_agent = _cleanup_agent  # type: ignore[attr-defined]
 
+    def _extract_bearer(request: Request) -> str | None:
+        """Return the raw ``Authorization: Bearer <token>`` value, or ``None``.
+
+        Unlike ``_extract_verified_agent_id``, this does NOT resolve the
+        token to an agent identity — it returns the raw token string for
+        callers that need to do their own constant-time comparison
+        (e.g. the operator-registration gate in ``/mesh/register``).
+
+        Returns ``None`` when the header is missing or malformed; never
+        raises. The caller decides how strict to be.
+        """
+        auth_header = request.headers.get("authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return None
+        token = auth_header[7:]
+        return token if token else None
+
     def _extract_verified_agent_id(request: Request) -> str:
         """Extract and verify agent identity from a Bearer token.
 
@@ -1406,9 +1423,60 @@ def create_mesh_app(
 
     @app.post("/mesh/register")
     async def register_agent(data: dict, request: Request) -> dict:
-        """Agent registers itself with the mesh on startup."""
-        agent_id = _validate_agent_id(data.get("agent_id", ""))
-        agent_id = _resolve_agent_id(agent_id, request)
+        """Agent registers itself with the mesh on startup.
+
+        Reserved-ID handling (Task 4):
+          * ``mesh`` / ``canary-probe`` — always rejected (system-only).
+          * ``operator`` — accepted only when the caller's bearer token
+            matches ``auth_tokens["operator"]`` (constant-time compare).
+            Fail-closed: if the token pool is empty (no auth configured)
+            the operator path is rejected as well — operator identity is
+            cryptographic, not positional.
+          * everything else — passes the standard
+            ``_validate_agent_id`` regex check and is identified by the
+            Bearer token via ``_resolve_agent_id``.
+        """
+        requested_id = data.get("agent_id", "")
+        # Format check first (so reserved-ID gating below sees a well-formed
+        # claim). Note: we deliberately don't call ``_validate_agent_id``
+        # here — that helper rejects the operator outright, but Task 4
+        # needs to accept the operator's claim when the bearer matches.
+        if not requested_id or not _AGENT_ID_RE.match(requested_id):
+            raise HTTPException(
+                400,
+                "Invalid agent_id: must be 1-64 alphanumeric/hyphen/underscore chars",
+            )
+
+        if requested_id == "operator":
+            # Cryptographic gate: require a bearer matching the
+            # operator-specific token. The error message intentionally
+            # does NOT echo the supplied bearer — comparing in
+            # constant time still leaks via debug logs if we surface it.
+            expected = _auth_tokens.get("operator") if _auth_tokens else None
+            bearer = _extract_bearer(request)
+            if (
+                not expected
+                or not bearer
+                or not hmac.compare_digest(bearer, expected)
+            ):
+                raise HTTPException(
+                    403,
+                    "Reserved agent_id 'operator' requires the operator's bearer token",
+                )
+            agent_id = "operator"
+        elif requested_id in {"mesh", "canary-probe"}:
+            # Stay rejected for any caller, including the operator's
+            # bearer. ``canary-probe`` continues to use the internal-only
+            # registration path (router.register_agent directly).
+            raise HTTPException(
+                403, f"Reserved agent_id '{requested_id}' cannot register",
+            )
+        else:
+            # Standard path: format-validate and resolve identity from
+            # the Bearer token (auth on) or trust the caller (dev/test).
+            agent_id = _validate_agent_id(requested_id)
+            agent_id = _resolve_agent_id(agent_id, request)
+
         capabilities = data.get("capabilities", [])
         if not isinstance(capabilities, list) or len(capabilities) > 200:
             raise HTTPException(400, "capabilities must be a list of at most 200 items")
