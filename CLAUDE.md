@@ -12,7 +12,7 @@ OpenLegion Engine is a container-isolated multi-agent runtime. LLM-powered agent
 User (CLI REPL / Telegram / Discord / Slack / WhatsApp / Webhook)
   → Mesh Host (FastAPI :8420) — routes messages, enforces permissions, proxies APIs, VNC proxy
     → Agent Containers (FastAPI :8400 each) — isolated execution with private memory
-    → Browser Service Container (FastAPI :8500 + KasmVNC :6080) — shared Camoufox browser
+    → Browser Service Container (FastAPI :8500) — per-agent Camoufox + per-agent Xvnc/Openbox/unclutter on displays :100..:163 paired with KasmVNC ports 6100..6163
 ```
 
 Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agents** (untrusted, sandboxed). All cross-zone communication is HTTP + JSON with Pydantic contracts from `src/shared/types.py`.
@@ -23,7 +23,7 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 |---|---|---|
 | `openlegion` CLI | `src/cli/__main__.py` → `src/cli/main.py` | CLI commands: start, stop, status, chat, wallet, version |
 | Agent container | `src/agent/__main__.py` → `src/agent/server.py` | Agent FastAPI server on :8400 |
-| Browser service | `src/browser/__main__.py` → `src/browser/server.py` | KasmVNC + Openbox + FastAPI on :8500 |
+| Browser service | `src/browser/__main__.py` → `src/browser/server.py` | FastAPI on :8500 (per-agent Xvnc/Openbox/unclutter spawned lazily per browser) |
 | Mesh host | `src/host/server.py` | FastAPI app on :8420 (started by CLI) |
 | Dashboard | `src/dashboard/server.py` | Mounted as router on mesh host |
 
@@ -86,7 +86,7 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 | `api_keys.py` | Named API key management — salted SHA-256 hashes stored in `config/api_keys.json`. Raw keys returned once at creation. |
 | `containers.py` | Backward-compat alias for `DockerBackend` (used by E2E tests) |
 | **`src/browser/`** | |
-| `__main__.py` | Starts KasmVNC (Xvnc), Openbox WM, FastAPI command server |
+| `__main__.py` | Starts the FastAPI command server. Per-agent Xvnc + Openbox + unclutter stacks are spawned lazily inside `BrowserManager._spawn_per_agent_x_stack` when each agent's browser starts. |
 | `server.py` | Browser service FastAPI app. Raises `RuntimeError` on startup when auth token missing in production (MESH_AUTH_TOKEN set but BROWSER_AUTH_TOKEN absent); warns only in dev. |
 | `service.py` | BrowserManager with per-agent Camoufox instances. `_MAX_WALK_DEPTH=50` for DOM snapshot. Per-agent X11 WID tracking for targeted VNC focus. §22 fingerprint health monitor: rolling per-agent rejection window (`_FINGERPRINT_WINDOW_SIZE=10`, burn threshold 50%); post-solve page-state monitor probes vendor-specific selectors (Cloudflare 1xxx, DataDome, PerimeterX, Imperva, Akamai BMP) + branded rejection text; burn surfaces `fingerprint_burn=True` + `next_action="retry_with_fresh_profile"` on subsequent captcha envelopes; operator clears manually after profile rotation (no auto-rotate). §24 per-tenant cost telemetry: per-minute threshold-alert pass on the metrics tick (50/80/100% caps via `CAPTCHA_COST_LIMIT_USD_PER_TENANT_MONTH`), once per crossing per month, builds a `tenant_spend_threshold` payload that the mesh poller dispatches as a `browser_metrics` WebSocket event with `data.type == "tenant_spend_threshold"` (there is no top-level `tenant_spend_threshold` `DashboardEvent.type` literal). |
 | `captcha.py` | CAPTCHA solver core (2183 lines). 2captcha + capsolver providers, vendor classifier, `_VALID_CAPTCHA_KINDS` allowlist (behavioral kinds rejected via `request_captcha_help` handoff), millicent (1/100,000 USD) cost accounting, fleet-wide kill switch via `CAPTCHA_DISABLED`, per-agent + per-tenant cost caps, circuit breaker. |
@@ -153,7 +153,7 @@ Provisioner manages engine instances via Docker/systemd on Hetzner VPS:
 - `/mesh/agents` — health check target (provisioner hits via SSH + localhost)
 - `/__auth/callback` — SSO callback (handled by auth gate behind Caddy, not engine code)
 - Dashboard UI on :8420 — user-facing after SSO
-- `/vnc/{path}` — reverse proxy to browser container's KasmVNC
+- `/agent-vnc/{agent_id}/{path}` — per-agent reverse proxy to that agent's KasmVNC port (resolved via the display allocator inside the browser service)
 - `/ws/events` — WebSocket for real-time dashboard updates
 
 ## Patterns & Conventions
@@ -203,7 +203,7 @@ Provisioner manages engine instances via Docker/systemd on Hetzner VPS:
 - **VNC proxy blocks agent Bearer tokens.** Dashboard auth required (`ol_session` cookie on HTTP and WebSocket).
 - **AST validation for skill self-authoring.** `_FORBIDDEN_IMPORTS` (23 modules), `_FORBIDDEN_CALLS` (16 functions incl. eval, exec, open), `_FORBIDDEN_ATTRS` (11 attributes incl. `__dict__`, `__subclasses__`).
 - **SSRF protection.** DNS pinning + IP blocking including `0.0.0.0` (unspecified), CGNAT (`100.64.0.0/10`), IPv4-mapped IPv6, 6to4 (`2002::/16`), Teredo (`2001::/32`). Max 5 redirects with re-validation at each hop.
-- **Browser container network egress filter.** The shared browser service container runs with `cap_drop=["ALL"]` + `cap_add=["NET_ADMIN","SETUID","SETGID"]` — the minimum capability set needed. The entrypoint (`docker/browser-entrypoint.sh`) runs as root, uses `NET_ADMIN` to install an iptables egress filter that REJECTs outbound traffic to RFC1918 / loopback / link-local / CGNAT / IANA-reserved IPv4 ranges and IPv6 equivalents, then execs `tini -- gosu browser:browser python -m src.browser`. tini (PID 1, root) retains the three caps for the container lifetime; no code in this repo asks tini to exercise them (tini's job is to fork/exec its child and reap zombies). The long-running Firefox/FastAPI process runs as UID 1000 via gosu with no effective capabilities (non-root users do not inherit caps, and `no-new-privileges` prevents re-acquisition). This is the authoritative SSRF control for browser-initiated traffic — the mesh-side `_resolve_and_pin()` check is kept as a friendly early-reject. Loopback (`-o lo`) is allowed so the browser can reach in-container services (KasmVNC :6080, FastAPI :8500 — `/browser/*` requires bearer auth, `/uploads/*` intentionally unauthenticated for navigating to user-uploaded files). Host network mode is refused unless `OPENLEGION_BROWSER_ALLOW_HOST_NETWORK=1` is set. Operator allowlist via `BROWSER_EGRESS_ALLOWLIST=cidr,...`; full disable via `BROWSER_EGRESS_DISABLE=1`.
+- **Browser container network egress filter.** The shared browser service container runs with `cap_drop=["ALL"]` + `cap_add=["NET_ADMIN","SETUID","SETGID"]` — the minimum capability set needed. The entrypoint (`docker/browser-entrypoint.sh`) runs as root, uses `NET_ADMIN` to install an iptables egress filter that REJECTs outbound traffic to RFC1918 / loopback / link-local / CGNAT / IANA-reserved IPv4 ranges and IPv6 equivalents, then execs `tini -- gosu browser:browser python -m src.browser`. tini (PID 1, root) retains the three caps for the container lifetime; no code in this repo asks tini to exercise them (tini's job is to fork/exec its child and reap zombies). The long-running Firefox/FastAPI process runs as UID 1000 via gosu with no effective capabilities (non-root users do not inherit caps, and `no-new-privileges` prevents re-acquisition). This is the authoritative SSRF control for browser-initiated traffic — the mesh-side `_resolve_and_pin()` check is kept as a friendly early-reject. Loopback (`-o lo`) is allowed so the browser can reach in-container services (per-agent KasmVNCs on :6100..:6163 reached only by the FastAPI service for the `/agent-vnc/...` proxy hop, and the FastAPI service itself on :8500 — `/browser/*` requires bearer auth, `/uploads/*` intentionally unauthenticated for navigating to user-uploaded files). Host network mode is refused unless `OPENLEGION_BROWSER_ALLOW_HOST_NETWORK=1` is set. Operator allowlist via `BROWSER_EGRESS_ALLOWLIST=cidr,...`; full disable via `BROWSER_EGRESS_DISABLE=1`.
 - **Credential isolation.** Two-tier vault (SYSTEM_*/CRED_*), opaque handles. Dashboard shows masked values (last 4 chars).
 - **Bounded execution.** 20 iterations for tasks, 30 tool rounds for chat, 200 total chat rounds, token budgets per task. Env-var bounds clamped with validation.
 - **Write-then-compact.** Before discarding context, important facts flush to MEMORY.md. Empty summary falls back to hard prune.
@@ -241,7 +241,7 @@ Provisioner manages engine instances via Docker/systemd on Hetzner VPS:
 ### Runtime Infrastructure
 - **Runtime**: Python 3.10+, FastAPI, asyncio
 - **Isolation**: Docker containers per agent, bridge network (`openlegion_agents`). `Dockerfile.agent` and `Dockerfile.browser` in repo root.
-- **Browser**: Shared container with KasmVNC (Xvnc + Openbox), Camoufox, per-agent X11 WID targeting
+- **Browser**: Shared container running one Camoufox + Xvnc + Openbox + unclutter stack per agent (display 100..163, paired KasmVNC ports 6100..6163). Per-agent X11 WID targeting for focus.
 - **Dashboard**: Alpine.js SPA — no React, no build step
 - **CI**: GitHub Actions — lint (ruff) + tests (pytest) on Python 3.11 and 3.12
 - **Dependencies**: `pyproject.toml` uses minimum version bounds (`>=`), no lock file

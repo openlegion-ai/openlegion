@@ -229,19 +229,6 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
                 detail={"error": str(e), "retry_after_s": e.retry_after_s},
             )
 
-    @app.post("/browser/keepalive")
-    async def keepalive(request: Request):
-        """Touch all running browser instances to reset their idle timers.
-
-        Called by the legacy shared-display VNC proxy. Per-agent mode
-        uses ``/browser/{agent_id}/keepalive`` instead so opening one
-        agent's VNC doesn't extend every other agent's idle window.
-        """
-        _verify_auth(request)
-        touched = await manager.touch_all()
-        await manager.refocus_active()
-        return {"touched": touched}
-
     @app.post("/browser/{agent_id}/keepalive")
     async def agent_keepalive(agent_id: str, request: Request):
         """Touch one agent's browser idle timer.
@@ -410,26 +397,17 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         body = None
         if body_bytes:
             body = json.loads(body_bytes)
-        was_focused = manager._user_focused_agent == agent_id
         manager.set_proxy_config(agent_id, body)
-        # If a browser is already running for this agent, restart it so the
-        # new proxy config takes effect on the next get_or_start() call.
-        # reset() is a no-op when no instance exists (stop() checks under lock).
+        # Restart the browser so the new proxy takes effect on the next
+        # get_or_start(). reset() is a no-op when no instance exists.
+        # The operator's iframe is keyed on agent_id (not port) — the
+        # mesh proxy resolves the port at WS-connect time, so the next
+        # noVNC reconnect after teardown lands on the freshly-allocated
+        # display slot transparently.
         try:
             await manager.reset(agent_id)
         except Exception:
             logger.warning("Failed to reset browser for '%s' after proxy change", agent_id, exc_info=True)
-        # Re-focus the agent if it was focused before the reset, so the VNC
-        # viewer doesn't show a purple/blank screen.
-        if was_focused:
-            try:
-                # Re-check: another request may have shifted focus during reset.
-                # stop() clears _user_focused_agent to None, so if it's still
-                # None nobody else claimed focus. If it's our agent, also safe.
-                if manager._user_focused_agent is None or manager._user_focused_agent == agent_id:
-                    await manager.focus(agent_id)
-            except Exception:
-                logger.debug("Failed to re-focus '%s' after proxy reset", agent_id)
         return {"success": True}
 
     @app.post("/browser/{agent_id}/focus")

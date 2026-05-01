@@ -486,14 +486,14 @@ class TestDockerBackendSlimResources:
         mock_client.containers.get.side_effect = _docker.errors.NotFound("not found")
         backend.client = mock_client
 
-        # Mock httpx so API + VNC health checks pass
+        # Mock httpx so the API health check passes (no global VNC to
+        # health-check anymore — per-agent KasmVNCs spawn lazily).
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         with patch("httpx.get", return_value=mock_resp):
             backend.start_browser_service()
 
         assert backend.browser_service_url is not None
-        assert backend.browser_vnc_url is not None
         assert backend.browser_auth_token != ""
         assert backend._browser_container is mock_container
 

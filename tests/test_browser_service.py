@@ -223,36 +223,6 @@ class TestX11WindowTracking:
             mock_run.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_refocus_active_targets_mru_wid(self):
-        """refocus_active() should target the most recently active agent's WID."""
-        from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
-        inst_a = CamoufoxInstance("a", MagicMock(), AsyncMock(), AsyncMock())
-        inst_a.x11_wid = 111
-        inst_a.last_activity = 100
-        inst_b = CamoufoxInstance("b", MagicMock(), AsyncMock(), AsyncMock())
-        inst_b.x11_wid = 222
-        inst_b.last_activity = 200  # more recent
-        mgr._instances = {"a": inst_a, "b": inst_b}
-        with patch("src.browser.service.subprocess.run") as mock_run:
-            await mgr.refocus_active()
-            cmd = mock_run.call_args[0][0]
-            assert "222" in cmd
-            assert "111" not in cmd
-
-    @pytest.mark.asyncio
-    async def test_refocus_active_skips_xdotool_without_wid(self):
-        """refocus_active() should skip xdotool entirely when no WID is stored."""
-        from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
-        inst = CamoufoxInstance("a", MagicMock(), AsyncMock(), AsyncMock())
-        inst.x11_wid = None
-        mgr._instances = {"a": inst}
-        with patch("src.browser.service.subprocess.run") as mock_run:
-            await mgr.refocus_active()
-            mock_run.assert_not_called()
-
-    @pytest.mark.asyncio
     async def test_instance_has_x11_wid_attribute(self):
         """CamoufoxInstance should have x11_wid initialized to None."""
         from src.browser.service import CamoufoxInstance

@@ -150,7 +150,6 @@ class DockerBackend(RuntimeBackend):
         self._next_port = 8401
         self._port_lock = threading.Lock()
         self.browser_service_url: str | None = None
-        self.browser_vnc_url: str | None = None
         self.browser_auth_token: str = ""
         self._browser_container = None
         # User-managed uploads directory.  Mounted read-only in every agent
@@ -510,8 +509,6 @@ class DockerBackend(RuntimeBackend):
         with self._port_lock:
             api_port = self._next_port
             self._next_port += 1
-            vnc_port = self._next_port
-            self._next_port += 1
 
         uploads_path = str(self.uploads_dir.as_posix() if platform.system() == "Windows" else self.uploads_dir)
         run_kwargs: dict[str, Any] = {
@@ -540,7 +537,6 @@ class DockerBackend(RuntimeBackend):
         if self.use_host_network:
             run_kwargs["network_mode"] = "host"
             environment["API_PORT"] = str(api_port)
-            environment["VNC_PORT"] = str(vnc_port)
             # Host network mode shares the host's network namespace. Installing
             # iptables rules inside the container would mutate host networking,
             # so we explicitly disable the egress filter and warn loudly. SSRF
@@ -553,7 +549,7 @@ class DockerBackend(RuntimeBackend):
                 "(use_host_network=False) for production deployments."
             )
         else:
-            run_kwargs["ports"] = {"8500/tcp": api_port, "6080/tcp": vnc_port}
+            run_kwargs["ports"] = {"8500/tcp": api_port}
             if platform.system() == "Linux":
                 run_kwargs["extra_hosts"] = {"host.docker.internal": "host-gateway"}
             # Bridge network mode: grant minimal caps needed by the entrypoint.
@@ -594,16 +590,6 @@ class DockerBackend(RuntimeBackend):
             logger.warning("Browser service API failed to become ready after 15 attempts")
             return
 
-        # Per-agent KasmVNCs spawn lazily inside
-        # ``BrowserManager._spawn_per_agent_x_stack`` when an agent
-        # starts a browser — there is no global KasmVNC to health-check
-        # at boot. The legacy ``self.browser_vnc_url`` setter (which
-        # pointed at ``:6080``) is preserved here as a non-empty marker
-        # so any stale dashboard code that still reads it sees a
-        # truthy value; the actual per-agent URLs are constructed from
-        # ``browser_service_url`` by the dashboard's URL builder.
-        self.browser_vnc_url = self.browser_service_url
-
         # Push saved browser settings (speed + inter-action delay) so
         # they survive container restarts. Pre-fix, only ``browser_speed``
         # was pushed — the dashboard-saved ``browser_delay`` silently
@@ -635,7 +621,7 @@ class DockerBackend(RuntimeBackend):
         except Exception as e:
             logger.debug("Browser settings push skipped: %s", e)
 
-        logger.info("Started browser service at %s (VNC: %s)", self.browser_service_url, self.browser_vnc_url)
+        logger.info("Started browser service at %s", self.browser_service_url)
 
     def stop_browser_service(self) -> None:
         """Stop the browser service container."""
@@ -648,7 +634,6 @@ class DockerBackend(RuntimeBackend):
                 logger.warning("Error stopping browser service: %s", e)
             self._browser_container = None
             self.browser_service_url = None
-            self.browser_vnc_url = None
 
     def stop_agent(self, agent_id: str, *, remove_data: bool = False) -> None:
         if agent_id in self.agents:
