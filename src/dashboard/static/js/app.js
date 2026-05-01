@@ -5143,6 +5143,13 @@ function dashboard() {
         // Staleness guard: if the user switched agents while we were
         // awaiting, abandon — the new agent's toggle will handle it.
         if (this.selectedAgent !== agentId) return;
+        // Optimistic: focusBrowser succeeded → the agent has a browser
+        // by definition. Update agentDetail locally so the iframe
+        // gating (which checks ``browser_running``) doesn't have to
+        // wait for the next /api/agents poll. Next poll will confirm.
+        if (this.agentDetail && this.agentDetail.id === agentId) {
+          this.agentDetail.browser_running = true;
+        }
         this._browserFocusDone = true;
       } finally {
         this._browserToggling = false;

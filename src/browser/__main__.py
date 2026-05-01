@@ -21,24 +21,33 @@ from src.shared.utils import setup_logging
 
 logger = setup_logging("browser.main")
 
-# Fail fast if the WebSocket transport library is missing. uvicorn ships
-# WebSocket support only via the ``[standard]`` extra (which pulls in
-# ``websockets``); plain ``uvicorn`` rejects every WS upgrade with HTTP
-# 404 at the protocol layer, BEFORE our route handler runs. The
-# per-agent VNC iframe needs WS upgrades to work, so a missing
-# ``websockets`` package silently breaks the dashboard. Catching it
-# here turns "users see a broken VNC iframe" into "container exits
-# loud at boot".
-try:
-    import websockets as _ws_check  # noqa: F401
-except ImportError:  # pragma: no cover — regression guard
-    logger.critical(
-        "websockets package not installed. The browser service cannot "
-        "serve WS upgrades for /agent-vnc/{agent_id}/{path}. Install "
-        "``uvicorn[standard]`` (or add ``websockets`` explicitly) in "
-        "Dockerfile.browser.",
-    )
-    sys.exit(1)
+
+def _assert_websockets_available() -> None:
+    """Fail fast at startup if the WebSocket transport library is missing.
+
+    uvicorn ships WebSocket support only via the ``[standard]`` extra
+    (which pulls in ``websockets``); plain ``uvicorn`` rejects every
+    WS upgrade with HTTP 404 at the protocol layer, BEFORE our route
+    handler runs. The per-agent VNC iframe needs WS upgrades to work,
+    so a missing ``websockets`` package silently breaks the dashboard.
+    Catching it here turns "users see a broken VNC iframe" into
+    "container exits loud at boot".
+
+    Lives in a function (not module-level) so importing this module
+    in tests / introspection scripts doesn't ``sys.exit(1)`` when the
+    package happens to be absent in that environment.
+    """
+    try:
+        import websockets  # noqa: F401
+    except ImportError:  # pragma: no cover — regression guard
+        logger.critical(
+            "websockets package not installed. The browser service cannot "
+            "serve WS upgrades for /agent-vnc/{agent_id}/{path}. Install "
+            "``uvicorn[standard]`` (or add ``websockets`` explicitly) in "
+            "Dockerfile.browser.",
+        )
+        sys.exit(1)
+
 
 _API_PORT = int(os.environ.get("API_PORT", "8500"))
 
@@ -228,6 +237,7 @@ def main() -> None:
     exist at boot; nothing to start or tear down here besides the
     FastAPI app and the manager's cleanup loop.
     """
+    _assert_websockets_available()
     manager = BrowserManager(
         profiles_dir="/data/profiles",
         max_concurrent=_MAX_BROWSERS,

@@ -743,6 +743,36 @@ def create_dashboard_router(
             f"{scheme}://{host}/agent-vnc/{agent_id}/index.html?{query}"
         )
 
+    async def _fetch_active_browser_agents() -> set[str]:
+        """Return the set of agent_ids whose browser is currently up.
+
+        Single fan-out to ``/browser/status``; the response includes
+        ``agents: [...]`` listing every running instance. Used by the
+        dashboard's poll path to gate iframe rendering — without this,
+        an agent whose browser stopped (idle timeout, agent reset)
+        keeps a live ``vnc_url`` in the payload, the iframe stays
+        bound, and noVNC retries forever against a 503'ing endpoint.
+
+        Soft-fails to an empty set on error; the caller treats that
+        as "no agents have browsers", which is the safe default
+        (button stays in idle state, no iframe).
+        """
+        if not runtime or not getattr(runtime, "browser_service_url", None):
+            return set()
+        token = getattr(runtime, "browser_auth_token", "")
+        import httpx
+        try:
+            async with httpx.AsyncClient(timeout=2) as client:
+                resp = await client.get(
+                    f"{runtime.browser_service_url}/browser/status",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                if resp.status_code != 200:
+                    return set()
+                return set(resp.json().get("agents", []))
+        except Exception:
+            return set()
+
     # ── Fleet overview ───────────────────────────────────────
 
     @api_router.get("/api/agents")
@@ -758,6 +788,12 @@ def create_dashboard_router(
         cost_map = {c["agent"]: c for c in cost_list}
 
         agent_projects = cfg.get("_agent_projects", {})
+
+        # One fan-out per fleet poll. Drives ``browser_running`` so the
+        # frontend can tear down the iframe when an agent's browser
+        # stops mid-view (idle timeout, reset) instead of letting noVNC
+        # retry forever against a 503'ing endpoint.
+        active_browsers = await _fetch_active_browser_agents()
 
         agents = []
         for agent_id, url in agent_registry.items():
@@ -792,6 +828,7 @@ def create_dashboard_router(
             vnc_url = _browser_vnc_url_for_request(request, agent_id)
             if vnc_url:
                 entry["vnc_url"] = vnc_url
+            entry["browser_running"] = agent_id in active_browsers
             agents.append(entry)
 
         # Append over-limit agents from config that are not running
@@ -1811,10 +1848,15 @@ def create_dashboard_router(
             "spend_week": spend_week,
             "budget": budget,
         }
-        # Include this agent's browser VNC info (per-agent under flag, legacy otherwise)
+        # Include this agent's browser VNC info + live browser-running
+        # state. ``browser_running`` lets the frontend tear down the
+        # iframe when the browser stops (idle timeout, reset) instead
+        # of letting noVNC retry forever against a 503'ing endpoint.
         vnc_url = _browser_vnc_url_for_request(request, agent_id)
         if vnc_url:
             result["vnc_url"] = vnc_url
+        active_browsers = await _fetch_active_browser_agents()
+        result["browser_running"] = agent_id in active_browsers
         return result
 
     # ── Agent config CRUD ────────────────────────────────────
@@ -1910,6 +1952,8 @@ def create_dashboard_router(
         vnc_url = _browser_vnc_url_for_request(request, agent_id)
         if vnc_url:
             cfg_result["vnc_url"] = vnc_url
+        active_browsers = await _fetch_active_browser_agents()
+        cfg_result["browser_running"] = agent_id in active_browsers
         return cfg_result
 
     async def _hot_reload_runtime_config(agent_id: str, payload: dict) -> bool:
