@@ -733,7 +733,12 @@ def create_dashboard_router(
 
         Returns ``None`` if the browser service hasn't been initialized.
         """
-        if not runtime or not hasattr(runtime, 'browser_vnc_url') or not runtime.browser_vnc_url:
+        # Readiness gate: the browser SERVICE is what matters here, not
+        # the legacy ``browser_vnc_url`` (which indicated the global
+        # ``KasmVNC :6080`` and is unset under the per-agent default).
+        # ``browser_service_url`` is set as soon as the FastAPI ``/status``
+        # health probe passes — the right "is the service up" signal.
+        if not runtime or not getattr(runtime, "browser_service_url", None):
             return None
 
         from src.browser.display_allocator import is_per_agent_display_enabled
