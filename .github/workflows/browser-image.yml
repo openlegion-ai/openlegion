@@ -1,0 +1,98 @@
+name: Browser image smoke
+
+# Build Dockerfile.browser end-to-end and verify the resulting image
+# can actually import the runtime dependencies. Catches the regression
+# class from PR #815 (uvicorn → uvicorn[standard], silently broke WS
+# upgrades) one layer beyond the static check in
+# tests/test_dockerfile_browser_deps.py — that test confirms the
+# Dockerfile *requests* the right packages; this workflow confirms pip
+# can actually *resolve* and *install* them in a fresh container.
+#
+# Path-filtered so it only runs when the build inputs change. PRs that
+# don't touch Dockerfile.browser or pyproject.toml (the dep declarations)
+# don't pay the ~5 minute build cost.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Dockerfile.browser"
+      - "docker/browser-entrypoint.sh"
+      - "pyproject.toml"
+      - ".github/workflows/browser-image.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "Dockerfile.browser"
+      - "docker/browser-entrypoint.sh"
+      - "pyproject.toml"
+      - ".github/workflows/browser-image.yml"
+
+jobs:
+  build-and-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free up disk space
+        # The image is ~3.5 GB once Camoufox is extracted. GitHub runners
+        # ship with ~14 GB free; trim some pre-installed bloat we don't
+        # need so the build doesn't ENOSPC at the extract step.
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost \
+                      /usr/local/lib/android "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build browser image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.browser
+          load: true
+          tags: openlegion-browser:ci
+          # Build cache keyed on the workflow's runner. Cold builds take
+          # ~5 minutes; warm ones (no Dockerfile change since last run)
+          # finish in <1 minute.
+          cache-from: type=gha,scope=browser-image
+          cache-to: type=gha,scope=browser-image,mode=max
+
+      - name: Verify runtime imports
+        # The whole point of this workflow. ``import websockets`` is the
+        # one that prevents the PR #815 regression class — uvicorn needs
+        # the package to handle WS upgrades. The others are sanity
+        # checks against partial-Dockerfile-rewrite regressions.
+        run: |
+          docker run --rm --entrypoint python3 openlegion-browser:ci -c '
+          import sys
+          required = ["websockets", "uvicorn", "fastapi", "pydantic", "httpx", "PIL"]
+          missing = []
+          for pkg in required:
+              try:
+                  mod = __import__(pkg)
+                  ver = getattr(mod, "__version__", "ok")
+                  print(pkg + ": " + str(ver))
+              except ImportError as e:
+                  print(pkg + ": MISSING (" + str(e) + ")", file=sys.stderr)
+                  missing.append(pkg)
+          if missing:
+              sys.exit(1)
+          '
+
+      - name: Verify uvicorn WS support is wired
+        # uvicorn auto-detects ``websockets`` or ``wsproto`` at import.
+        # Without one of them, every upgrade returns 404 at the
+        # protocol layer. Assert the import path actually loads a class.
+        run: |
+          docker run --rm --entrypoint python3 openlegion-browser:ci -c '
+          from uvicorn.protocols.websockets.auto import AutoWebSocketsProtocol
+          assert AutoWebSocketsProtocol is not None, (
+              "uvicorn AutoWebSocketsProtocol resolved to None — WS upgrades "
+              "would return HTTP 404. Install uvicorn[standard] or "
+              "websockets explicitly. (Regression for PR #815.)"
+          )
+          print("ws_protocol_class: " + AutoWebSocketsProtocol.__name__)
+          '
