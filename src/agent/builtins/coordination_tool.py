@@ -367,10 +367,26 @@ async def complete_task(task_key: str, *, mesh_client=None) -> dict:
                 value = {}
         if isinstance(value, dict):
             output_key = value.get("output_key")
-            if output_key:
+            if isinstance(output_key, str) and output_key:
                 try:
-                    output_global = output_key.startswith("global/")
-                    await mesh_client.delete_blackboard(output_key, global_scope=output_global)
+                    handoff_id = task_key.rsplit("/", 1)[-1]
+                    sender = value.get("from")
+                    expected_output = None
+                    if isinstance(sender, str) and re.fullmatch(AGENT_ID_RE_PATTERN, sender):
+                        expected_output = (
+                            f"global/output/{sender}/{handoff_id}"
+                            if is_global_task
+                            else f"output/{sender}/{handoff_id}"
+                        )
+                    if output_key == expected_output:
+                        await mesh_client.delete_blackboard(
+                            output_key, global_scope=is_global_task,
+                        )
+                    else:
+                        logger.debug(
+                            "Skipping unexpected output cleanup for task %s: %s",
+                            task_key, output_key,
+                        )
                 except Exception as exc:
                     logger.debug("Output cleanup for %s skipped: %s", output_key, exc)
     except Exception as e:

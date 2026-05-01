@@ -713,6 +713,30 @@ class TestOperatorHandoff:
             assert call.kwargs.get("global_scope") is True
 
     @pytest.mark.asyncio
+    async def test_operator_complete_global_task_skips_unexpected_output_key(self):
+        """A queued operator task cannot make complete_task delete arbitrary global keys."""
+        from src.agent.builtins.coordination_tool import complete_task
+
+        mc = _make_mesh_client(agent_id="operator", standalone=True)
+        mc.read_blackboard = AsyncMock(return_value={
+            "value": {
+                "from": "scout",
+                "summary": "follow up",
+                "status": "pending",
+                "output_key": "global/status/operator",
+            },
+        })
+
+        result = await complete_task(
+            task_key="global/tasks/operator/ho_xyz",
+            mesh_client=mc,
+        )
+
+        assert result["completed"] is True
+        deleted = [c.args[0] for c in mc.delete_blackboard.call_args_list]
+        assert deleted == ["global/tasks/operator/ho_xyz"]
+
+    @pytest.mark.asyncio
     async def test_hand_off_uses_registry_scope_hint(self):
         """Defense-in-depth: a registry entry with scope=global triggers
         global writes even if the target name is not the literal 'operator'.

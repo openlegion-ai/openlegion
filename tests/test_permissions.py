@@ -633,3 +633,22 @@ class TestOperatorInboxGlobalCarveOut:
         assert m.can_write_blackboard("scout", "global/output/analyst/ho_1") is False
         # And NOT arbitrary global keys
         assert m.can_write_blackboard("scout", "global/secrets/x") is False
+
+    def test_only_operator_reads_operator_global_handoff_data(self, tmp_path):
+        """Wildcard reads do not expose the operator's global inbox/output."""
+        cfg = {
+            "permissions": {
+                "scout": {"blackboard_read": ["*"]},
+                "operator": {"blackboard_read": ["*"]},
+            },
+        }
+        path = tmp_path / "permissions.json"
+        path.write_text(json.dumps(cfg))
+        m = PermissionMatrix(config_path=str(path))
+
+        assert m.can_read_blackboard("operator", "global/tasks/operator/ho_1") is True
+        assert m.can_read_blackboard("operator", "global/output/scout/ho_1") is True
+        assert m.can_read_blackboard("scout", "global/tasks/operator/ho_1") is False
+        assert m.can_read_blackboard("scout", "global/output/analyst/ho_1") is False
+        # Sender may inspect only its own submitted output.
+        assert m.can_read_blackboard("scout", "global/output/scout/ho_1") is True
