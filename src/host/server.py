@@ -2805,7 +2805,8 @@ def create_mesh_app(
     async def propose_agent_config_change(agent_id: str, request: Request) -> dict:
         """Create a pending config change for review."""
         _require_any_auth(request)
-        if _resolve_agent_id("", request) != "operator":
+        caller = _resolve_agent_id("", request)
+        if caller != "operator":
             raise HTTPException(403, "Only the operator can propose config changes")
         data = await request.json()
 
@@ -2851,7 +2852,7 @@ def create_mesh_app(
         # gate on ``origin_kind="human"`` (Task 2d). When the X-Origin
         # header is missing or unverifiable the row stores ``None`` and
         # the confirm endpoint will refuse to apply.
-        origin = _validated_origin(request)
+        origin = _validated_origin(request, caller)
         origin_kind = origin.kind if origin is not None else None
 
         # Cap to ``_MAX_PENDING`` rows to bound storage growth -- mirrors
@@ -3048,7 +3049,7 @@ def create_mesh_app(
 
         return {"success": True, "agent_id": agent_id, "field": field}
 
-    def _confirm_origin_check(request: Request) -> None:
+    def _confirm_origin_check(request: Request, caller: str = "") -> None:
         """Task 2d: confirm-side gate — refuse non-human origins.
 
         Pending operator-config edits are durable, so an agent that
@@ -3061,7 +3062,7 @@ def create_mesh_app(
         attempt that arrives without a human X-Origin is refused
         immediately, before we ever consume the row.
         """
-        confirm_origin = _validated_origin(request)
+        confirm_origin = _validated_origin(request, caller)
         if confirm_origin is None or confirm_origin.kind != "human":
             raise HTTPException(403, "Confirmation requires human origin")
 
@@ -3069,9 +3070,10 @@ def create_mesh_app(
     async def update_agent_config(agent_id: str, request: Request) -> dict:
         """Apply a pending config change. Used by confirm_edit tool."""
         _require_any_auth(request)
-        if _resolve_agent_id("", request) != "operator":
+        caller = _resolve_agent_id("", request)
+        if caller != "operator":
             raise HTTPException(403, "Only the operator can apply config changes")
-        _confirm_origin_check(request)
+        _confirm_origin_check(request, caller)
         data = await request.json()
         change_id = data.get("change_id", "")
         client_digest = data.get("payload_digest")
@@ -3106,9 +3108,10 @@ def create_mesh_app(
         ``confirm_edit`` tool.
         """
         _require_any_auth(request)
-        if _resolve_agent_id("", request) != "operator":
+        caller = _resolve_agent_id("", request)
+        if caller != "operator":
             raise HTTPException(403, "Only the operator can confirm config changes")
-        _confirm_origin_check(request)
+        _confirm_origin_check(request, caller)
         data = await request.json()
         change_id = data.get("change_id", "")
         client_digest = data.get("payload_digest")
