@@ -57,8 +57,13 @@ def _fake_budget_http_error(agent: str, monthly_used: float = 50.0) -> httpx.HTT
 
 @pytest.mark.asyncio
 async def test_list_project_status_requires_v2_flag(monkeypatch):
-    """Read tools that consume tasks return a clean error when v2 off."""
-    monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_V2", raising=False)
+    """Read tools that consume tasks return a clean error when v2 off.
+
+    The flag now defaults to ``1`` (rollout) so the off path must
+    explicitly set ``OPENLEGION_ORCHESTRATION_TASKS_V2=0`` rather than
+    relying on the env var being unset.
+    """
+    monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "0")
     from src.agent.builtins.operator_tools import list_project_status
     result = await list_project_status(mesh_client=MagicMock())
     assert "error" in result
@@ -67,7 +72,7 @@ async def test_list_project_status_requires_v2_flag(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_list_agent_queue_requires_v2_flag(monkeypatch):
-    monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_V2", raising=False)
+    monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "0")
     from src.agent.builtins.operator_tools import list_agent_queue
     result = await list_agent_queue("a1", mesh_client=MagicMock())
     assert "error" in result
@@ -76,7 +81,7 @@ async def test_list_agent_queue_requires_v2_flag(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_get_team_outputs_requires_v2_flag(monkeypatch):
-    monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_V2", raising=False)
+    monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "0")
     from src.agent.builtins.operator_tools import get_team_outputs
     result = await get_team_outputs("p1", mesh_client=MagicMock())
     assert "error" in result

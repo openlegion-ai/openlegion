@@ -1096,18 +1096,29 @@ def test_inbox_watch_fires_on_handoff_write(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_list_agents_endpoint_includes_capabilities(tmp_path):
+async def test_list_agents_endpoint_includes_capabilities(tmp_path, monkeypatch):
     """`/mesh/agents` must include a `capabilities` key per agent.
 
     The list_agents builtin (src/agent/builtins/mesh_tool.py) reads
     info.get("capabilities", []) — without this the dashboard and
     coordination tools see every agent as having zero capabilities.
+
+    Pinned to ``OPENLEGION_PROJECT_SCOPE_MODE=warn`` because this test
+    hits the unscoped path with no auth tokens (caller resolves to
+    ``"unknown"``); the new ``enforce`` default would filter the
+    response down to {operator}.
     """
+    import importlib
+
     from httpx import ASGITransport, AsyncClient
 
     from src.host.costs import CostTracker
-    from src.host.server import create_mesh_app
     from src.host.traces import TraceStore
+
+    monkeypatch.setenv("OPENLEGION_PROJECT_SCOPE_MODE", "warn")
+    import src.host.server as server_module
+    importlib.reload(server_module)
+    create_mesh_app = server_module.create_mesh_app
 
     bb = Blackboard(db_path=str(tmp_path / "bb.db"))
     pubsub = PubSub()
@@ -1147,10 +1158,12 @@ async def test_list_agents_endpoint_includes_capabilities(tmp_path):
         bb.close()
         costs.close()
         traces.close()
+        monkeypatch.delenv("OPENLEGION_PROJECT_SCOPE_MODE", raising=False)
+        importlib.reload(server_module)
 
 
 @pytest.mark.asyncio
-async def test_list_agents_project_scope_always_includes_operator(tmp_path):
+async def test_list_agents_project_scope_always_includes_operator(tmp_path, monkeypatch):
     """`/mesh/agents?project=X` must include the operator entry alongside
     project members. The operator is fleet-global by design — project agents
     have to discover it to hand off back. Without this, project_agent →
@@ -1158,15 +1171,25 @@ async def test_list_agents_project_scope_always_includes_operator(tmp_path):
 
     Also verifies the operator entry carries scope=global so coordination
     tools can route the handoff to the global namespace.
+
+    Pinned to ``OPENLEGION_PROJECT_SCOPE_MODE=warn`` because this test
+    uses an unauthenticated caller hitting ``?project=growth`` — under
+    enforce, the caller is not a project member and the response would
+    be empty.
     """
+    import importlib
     from unittest.mock import patch
 
     import yaml
     from httpx import ASGITransport, AsyncClient
 
     from src.host.costs import CostTracker
-    from src.host.server import create_mesh_app
     from src.host.traces import TraceStore
+
+    monkeypatch.setenv("OPENLEGION_PROJECT_SCOPE_MODE", "warn")
+    import src.host.server as server_module
+    importlib.reload(server_module)
+    create_mesh_app = server_module.create_mesh_app
 
     # Minimal project on disk with one member.
     projects_dir = tmp_path / "projects"
@@ -1211,18 +1234,31 @@ async def test_list_agents_project_scope_always_includes_operator(tmp_path):
         bb.close()
         costs.close()
         traces.close()
+        monkeypatch.delenv("OPENLEGION_PROJECT_SCOPE_MODE", raising=False)
+        importlib.reload(server_module)
 
 
 @pytest.mark.asyncio
-async def test_list_agents_unscoped_marks_operator_global(tmp_path):
+async def test_list_agents_unscoped_marks_operator_global(tmp_path, monkeypatch):
     """The fleet-wide /mesh/agents response must also tag the operator with
     scope=global so dashboards and the operator's own list_agents call can
-    distinguish it from per-project agents."""
+    distinguish it from per-project agents.
+
+    Pinned to ``OPENLEGION_PROJECT_SCOPE_MODE=warn`` because the
+    unauthenticated caller resolves to ``"unknown"`` and the unscoped
+    ``enforce`` path would filter the response down to {operator}.
+    """
+    import importlib
+
     from httpx import ASGITransport, AsyncClient
 
     from src.host.costs import CostTracker
-    from src.host.server import create_mesh_app
     from src.host.traces import TraceStore
+
+    monkeypatch.setenv("OPENLEGION_PROJECT_SCOPE_MODE", "warn")
+    import src.host.server as server_module
+    importlib.reload(server_module)
+    create_mesh_app = server_module.create_mesh_app
 
     bb = Blackboard(db_path=str(tmp_path / "bb.db"))
     pubsub = PubSub()
@@ -1253,27 +1289,38 @@ async def test_list_agents_unscoped_marks_operator_global(tmp_path):
         bb.close()
         costs.close()
         traces.close()
+        monkeypatch.delenv("OPENLEGION_PROJECT_SCOPE_MODE", raising=False)
+        importlib.reload(server_module)
 
 
 # ── Task 1 (characterization): /mesh/agents per-caller-type visibility ─
 
 
 @pytest.mark.asyncio
-async def test_list_agents_project_scope_excludes_other_project_members(tmp_path):
+async def test_list_agents_project_scope_excludes_other_project_members(tmp_path, monkeypatch):
     """When ``/mesh/agents?project=X`` is called, members of project Y must
     NOT appear in the response. The endpoint reads members from the project
     metadata on disk and only includes registered agents whose id is a
     member, plus the operator (which is fleet-global). This pins the
     project-isolation invariant for the response shape.
+
+    Pinned to ``OPENLEGION_PROJECT_SCOPE_MODE=warn`` because the
+    unauthenticated caller is not a member of project ``alpha`` — under
+    enforce, the response would be empty rather than scoped-to-members.
     """
+    import importlib
     from unittest.mock import patch
 
     import yaml
     from httpx import ASGITransport, AsyncClient
 
     from src.host.costs import CostTracker
-    from src.host.server import create_mesh_app
     from src.host.traces import TraceStore
+
+    monkeypatch.setenv("OPENLEGION_PROJECT_SCOPE_MODE", "warn")
+    import src.host.server as server_module
+    importlib.reload(server_module)
+    create_mesh_app = server_module.create_mesh_app
 
     projects_dir = tmp_path / "projects"
     # Project alpha has scout.
@@ -1333,19 +1380,32 @@ async def test_list_agents_project_scope_excludes_other_project_members(tmp_path
         bb.close()
         costs.close()
         traces.close()
+        monkeypatch.delenv("OPENLEGION_PROJECT_SCOPE_MODE", raising=False)
+        importlib.reload(server_module)
 
 
 @pytest.mark.asyncio
-async def test_list_agents_internal_caller_sees_full_fleet(tmp_path):
+async def test_list_agents_internal_caller_sees_full_fleet(tmp_path, monkeypatch):
     """Internal callers (loopback / dashboard / mesh-internal) hitting
     ``/mesh/agents`` with no project filter receive every registered
     agent. This pins the unscoped path that dashboards rely on.
+
+    Pinned to ``OPENLEGION_PROJECT_SCOPE_MODE=warn`` to assert legacy
+    fleet-wide behavior under the documented rollback path. The
+    sibling ``test_list_agents_internal_caller_unaffected`` covers
+    enforce mode.
     """
+    import importlib
+
     from httpx import ASGITransport, AsyncClient
 
     from src.host.costs import CostTracker
-    from src.host.server import create_mesh_app
     from src.host.traces import TraceStore
+
+    monkeypatch.setenv("OPENLEGION_PROJECT_SCOPE_MODE", "warn")
+    import src.host.server as server_module
+    importlib.reload(server_module)
+    create_mesh_app = server_module.create_mesh_app
 
     bb = Blackboard(db_path=str(tmp_path / "bb.db"))
     pubsub = PubSub()
@@ -1378,6 +1438,8 @@ async def test_list_agents_internal_caller_sees_full_fleet(tmp_path):
         bb.close()
         costs.close()
         traces.close()
+        monkeypatch.delenv("OPENLEGION_PROJECT_SCOPE_MODE", raising=False)
+        importlib.reload(server_module)
 
 
 @pytest.mark.asyncio
@@ -1665,17 +1727,27 @@ async def test_list_agents_internal_caller_unaffected(
 
 
 @pytest.mark.asyncio
-async def test_list_agents_carries_structured_routing_fields(tmp_path):
+async def test_list_agents_carries_structured_routing_fields(tmp_path, monkeypatch):
     """`/mesh/agents` entries surface Task-8 routing fields under
-    distinct keys from the runtime tool ``capabilities`` list."""
+    distinct keys from the runtime tool ``capabilities`` list.
+
+    Pinned to ``OPENLEGION_PROJECT_SCOPE_MODE=warn`` because the
+    unauthenticated caller resolves to ``"unknown"``; the new enforce
+    default would filter out non-member agents from the response.
+    """
+    import importlib
     from unittest.mock import patch
 
     import yaml as yaml_mod
     from httpx import ASGITransport, AsyncClient
 
     from src.host.costs import CostTracker
-    from src.host.server import create_mesh_app
     from src.host.traces import TraceStore
+
+    monkeypatch.setenv("OPENLEGION_PROJECT_SCOPE_MODE", "warn")
+    import src.host.server as server_module
+    importlib.reload(server_module)
+    create_mesh_app = server_module.create_mesh_app
 
     cfg_dir = tmp_path / "config"
     cfg_dir.mkdir(parents=True)
@@ -1739,6 +1811,8 @@ async def test_list_agents_carries_structured_routing_fields(tmp_path):
         bb.close()
         costs.close()
         traces.close()
+        monkeypatch.delenv("OPENLEGION_PROJECT_SCOPE_MODE", raising=False)
+        importlib.reload(server_module)
 
 
 @pytest.mark.asyncio
