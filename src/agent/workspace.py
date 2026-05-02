@@ -102,6 +102,129 @@ _CORRECTION_SIGNALS = frozenset({
 _MAX_LEARNINGS_SIZE = 50_000
 
 
+# ── INTERFACE.md → structured capabilities derivation ─────────
+#
+# Task 8 introduces structured routing fields on AgentConfig
+# (capabilities / preferred_inputs / expected_outputs / escalation_to /
+# forbidden). For agents created before Task 8 the structured fields are
+# absent; their INTERFACE.md may already declare the same information
+# free-form via headings. ``_derive_capabilities_from_interface`` parses
+# those headings and returns a dict shaped for back-fill into agents.yaml.
+# Best-effort + idempotent: it is intended to run once when
+# ``capabilities`` is missing/empty AND INTERFACE.md is on disk; the
+# caller persists the result and the structured field becomes the source
+# of truth thereafter.
+
+_HEADING_RE = re.compile(r"^\s*##+\s+(.+?)\s*$")
+_BULLET_RE = re.compile(r"^\s*[-*]\s+(.+?)\s*$")
+
+# Heading aliases — case-insensitive. Same header may have alternate
+# phrasings across templates.
+_INTERFACE_SECTIONS: dict[str, tuple[str, ...]] = {
+    "capabilities": ("capabilities", "what i do", "role"),
+    "preferred_inputs": ("preferred inputs", "accepts", "inputs"),
+    "expected_outputs": ("expected outputs", "produces", "outputs"),
+    "forbidden": ("forbidden", "do not", "refuses", "never"),
+}
+_ESCALATION_HEADINGS: tuple[str, ...] = ("escalation", "escalate to", "escalation to")
+
+
+def _empty_interface_fields() -> dict[str, list[str] | str | None]:
+    """Default-empty shape for the derived structured fields."""
+    return {
+        "capabilities": [],
+        "preferred_inputs": [],
+        "expected_outputs": [],
+        "escalation_to": None,
+        "forbidden": [],
+    }
+
+
+def _parse_interface_text(content: str) -> dict[str, list[str] | str | None]:
+    """Parse INTERFACE.md text into structured routing fields.
+
+    Walks markdown headings; for each known section, slurps following
+    bullets up to the next heading. Headings are matched
+    case-insensitively against the alias table. Returns the same shape
+    as :func:`_derive_capabilities_from_interface` — empty defaults
+    when no matching headings are present.
+    """
+    if not content:
+        return _empty_interface_fields()
+
+    current: str | None = None
+    sections: dict[str, list[str]] = {k: [] for k in _INTERFACE_SECTIONS}
+    escalation_lines: list[str] = []
+
+    for raw_line in content.splitlines():
+        m = _HEADING_RE.match(raw_line)
+        if m:
+            heading = m.group(1).strip().lower()
+            current = None
+            for key, aliases in _INTERFACE_SECTIONS.items():
+                if heading in aliases:
+                    current = key
+                    break
+            else:
+                if heading in _ESCALATION_HEADINGS:
+                    current = "__escalation__"
+            continue
+
+        if current is None:
+            continue
+
+        bullet = _BULLET_RE.match(raw_line)
+        if not bullet:
+            continue
+        item = bullet.group(1).strip()
+        if not item:
+            continue
+        if current == "__escalation__":
+            escalation_lines.append(item)
+        else:
+            sections[current].append(item)
+
+    return {
+        "capabilities": sections["capabilities"],
+        "preferred_inputs": sections["preferred_inputs"],
+        "expected_outputs": sections["expected_outputs"],
+        "forbidden": sections["forbidden"],
+        "escalation_to": escalation_lines[0] if escalation_lines else None,
+    }
+
+
+def _derive_capabilities_from_interface(
+    workspace_path: str | Path,
+) -> dict[str, list[str] | str | None]:
+    """Parse INTERFACE.md headings into structured routing fields.
+
+    Returns a dict with the keys ``capabilities``, ``preferred_inputs``,
+    ``expected_outputs``, ``forbidden`` (lists) and ``escalation_to``
+    (string or ``None``). Missing sections produce empty defaults.
+
+    Best-effort: a missing file, unreadable file, or unparseable content
+    yields the empty defaults — never raises. Intended to run once on
+    first read; callers persist the result back to agents.yaml so the
+    derivation is not repeated.
+
+    The parser recognises the standard section headings used by the
+    Task-8 templates (``## Capabilities``, ``## Accepts``, ``## Produces``,
+    ``## Escalation``, ``## Forbidden``) and a few common synonyms used by
+    pre-Task-8 templates (``## Role`` → capabilities, ``## Inputs`` →
+    preferred_inputs, etc.).
+    """
+    path = Path(workspace_path) / "INTERFACE.md"
+    if not path.exists() or not path.is_file():
+        return _empty_interface_fields()
+
+    try:
+        content = path.read_text(errors="replace")
+    except Exception:
+        return _empty_interface_fields()
+
+    return _parse_interface_text(content)
+
+
 class WorkspaceManager:
     """Reads and writes the agent's persistent workspace files."""
 

@@ -242,7 +242,10 @@ class RuntimeContext:
             _ensure_docker_image()
 
     def _create_components(self) -> None:
-        from src.cli.config import _ensure_all_agent_permissions
+        from src.cli.config import (
+            _backfill_capabilities_for_existing_agents,
+            _ensure_all_agent_permissions,
+        )
         from src.dashboard.events import EventBus
         from src.host.costs import CostTracker
         from src.host.credentials import CredentialVault
@@ -252,6 +255,10 @@ class RuntimeContext:
 
         # Backfill permissions for agents missing from permissions.json
         _ensure_all_agent_permissions()
+        # Task 8 — derive structured routing fields from INTERFACE.md for
+        # agents that pre-date the structured schema. Idempotent: only
+        # runs for agents whose ``capabilities`` field is empty.
+        _backfill_capabilities_for_existing_agents()
 
         # Ensure collaborative permissions are up to date before loading
         if self.cfg.get("collaboration", False):

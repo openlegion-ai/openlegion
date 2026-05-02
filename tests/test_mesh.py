@@ -1659,3 +1659,151 @@ async def test_list_agents_internal_caller_unaffected(
             cleanup()
             monkeypatch.delenv("OPENLEGION_PROJECT_SCOPE_MODE", raising=False)
             importlib.reload(server_module)
+
+
+# === Task 8: structured routing fields on /mesh/agents and /profile ===
+
+
+@pytest.mark.asyncio
+async def test_list_agents_carries_structured_routing_fields(tmp_path):
+    """`/mesh/agents` entries surface Task-8 routing fields under
+    distinct keys from the runtime tool ``capabilities`` list."""
+    from unittest.mock import patch
+
+    import yaml as yaml_mod
+    from httpx import ASGITransport, AsyncClient
+
+    from src.host.costs import CostTracker
+    from src.host.server import create_mesh_app
+    from src.host.traces import TraceStore
+
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir(parents=True)
+    agents_path = cfg_dir / "agents.yaml"
+    agents_path.write_text(yaml_mod.dump({"agents": {
+        "scout": {
+            "role": "researcher", "model": "x",
+            "capabilities": ["Web research", "Source analysis"],
+            "preferred_inputs": ["User questions"],
+            "expected_outputs": ["Research reports"],
+            "escalation_to": "operator",
+            "forbidden": ["Speculation as fact"],
+        },
+        "plain": {"role": "x", "model": "y"},
+    }}))
+    (cfg_dir / "mesh.yaml").write_text(yaml_mod.dump({"mesh": {"port": 8420}}))
+    projects_dir = cfg_dir / "projects"
+    projects_dir.mkdir()
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix()
+    router = MessageRouter(perms, {})
+    costs = CostTracker(str(tmp_path / "costs.db"))
+    traces = TraceStore(str(tmp_path / "traces.db"))
+    router.register_agent("scout", "http://scout:8400", ["browser_navigate"])
+    router.register_agent("plain", "http://plain:8400", [])
+
+    app = create_mesh_app(
+        blackboard=bb, pubsub=pubsub, router=router, permissions=perms,
+        cost_tracker=costs, trace_store=traces,
+    )
+
+    try:
+        with patch("src.cli.config.AGENTS_FILE", agents_path), \
+             patch("src.cli.config.CONFIG_FILE", cfg_dir / "mesh.yaml"), \
+             patch("src.cli.config.PROJECTS_DIR", projects_dir):
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test",
+            ) as client:
+                resp = await client.get("/mesh/agents")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        scout = data["scout"]
+        assert scout["interface_capabilities"] == ["Web research", "Source analysis"]
+        assert scout["preferred_inputs"] == ["User questions"]
+        assert scout["expected_outputs"] == ["Research reports"]
+        assert scout["escalation_to"] == "operator"
+        assert scout["forbidden"] == ["Speculation as fact"]
+        # Runtime tool capabilities preserved separately.
+        assert scout["capabilities"] == ["browser_navigate"]
+
+        plain = data["plain"]
+        assert plain["interface_capabilities"] == []
+        assert plain["preferred_inputs"] == []
+        assert plain["expected_outputs"] == []
+        assert plain["escalation_to"] is None
+        assert plain["forbidden"] == []
+    finally:
+        bb.close()
+        costs.close()
+        traces.close()
+
+
+@pytest.mark.asyncio
+async def test_get_agent_profile_carries_structured_routing_fields(tmp_path):
+    """`/mesh/agents/{id}/profile` surfaces Task-8 routing fields."""
+    from unittest.mock import patch
+
+    import yaml as yaml_mod
+    from httpx import ASGITransport, AsyncClient
+
+    from src.host.costs import CostTracker
+    from src.host.server import create_mesh_app
+    from src.host.traces import TraceStore
+
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir(parents=True)
+    agents_path = cfg_dir / "agents.yaml"
+    agents_path.write_text(yaml_mod.dump({"agents": {
+        "writer": {
+            "role": "writer", "model": "x",
+            "capabilities": ["Long-form writing"],
+            "preferred_inputs": ["Outlines"],
+            "expected_outputs": ["Drafts"],
+            "escalation_to": "editor",
+            "forbidden": ["Plagiarism"],
+        },
+    }}))
+    (cfg_dir / "mesh.yaml").write_text(yaml_mod.dump({"mesh": {"port": 8420}}))
+    projects_dir = cfg_dir / "projects"
+    projects_dir.mkdir()
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix()
+    router = MessageRouter(perms, {})
+    costs = CostTracker(str(tmp_path / "costs.db"))
+    traces = TraceStore(str(tmp_path / "traces.db"))
+    router.register_agent("writer", "http://writer:8400", ["file_write"])
+
+    app = create_mesh_app(
+        blackboard=bb, pubsub=pubsub, router=router, permissions=perms,
+        cost_tracker=costs, trace_store=traces,
+    )
+
+    try:
+        with patch("src.cli.config.AGENTS_FILE", agents_path), \
+             patch("src.cli.config.CONFIG_FILE", cfg_dir / "mesh.yaml"), \
+             patch("src.cli.config.PROJECTS_DIR", projects_dir):
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test",
+            ) as client:
+                resp = await client.get(
+                    "/mesh/agents/writer/profile",
+                    headers={"x-mesh-internal": "1"},
+                )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["agent_id"] == "writer"
+        assert data["interface_capabilities"] == ["Long-form writing"]
+        assert data["preferred_inputs"] == ["Outlines"]
+        assert data["expected_outputs"] == ["Drafts"]
+        assert data["escalation_to"] == "editor"
+        assert data["forbidden"] == ["Plagiarism"]
+        assert data["capabilities"] == ["file_write"]
+    finally:
+        bb.close()
+        costs.close()
+        traces.close()
