@@ -819,7 +819,10 @@ class TestTelegramStop:
 class TestChannelTypeAndOriginPropagation:
     @pytest.mark.asyncio
     async def test_channel_type_included_in_origin(self):
-        """When CHANNEL_TYPE is set, dispatch receives origin with channel+user."""
+        """When CHANNEL_TYPE is set, dispatch receives a typed MessageOrigin
+        with kind="human", channel=CHANNEL_TYPE, user=user_id (Task 2b)."""
+        from src.shared.types import MessageOrigin
+
         received_origins = []
 
         async def recording_dispatch(agent, message, **kwargs):
@@ -835,7 +838,9 @@ class TestChannelTypeAndOriginPropagation:
         )
 
         await ch.handle_message("user42", "hello")
-        assert received_origins == [{"channel": "testchannel", "user": "user42"}]
+        assert received_origins == [
+            MessageOrigin(kind="human", channel="testchannel", user="user42"),
+        ]
 
     @pytest.mark.asyncio
     async def test_no_channel_type_origin_is_none(self):

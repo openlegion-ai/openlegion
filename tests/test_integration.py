@@ -2100,8 +2100,15 @@ def test_mesh_wake_propagates_origin_header(tmp_path):
 
 
 def test_mesh_wake_no_origin_header_disables_auto_notify(tmp_path):
-    """POST /mesh/wake without X-Origin enqueues with origin=None, auto_notify=False."""
+    """POST /mesh/wake without X-Origin downgrades to kind="agent" (Task 2b).
+
+    Auto-notify stays disabled because there's no addressable channel/user
+    to notify, but the origin itself is no longer ``None`` — every lane
+    payload now carries an explicit ``kind`` from this slice forward.
+    """
     import time
+
+    from src.shared.types import MessageOrigin
 
     client, captured, loop, bb = _wake_test_app(tmp_path)
     try:
@@ -2116,7 +2123,10 @@ def test_mesh_wake_no_origin_header_disables_auto_notify(tmp_path):
             time.sleep(0.01)
         assert captured
         call = captured[0]
-        assert call["origin"] is None
+        assert isinstance(call["origin"], MessageOrigin)
+        assert call["origin"].kind == "agent"
+        assert call["origin"].channel == ""
+        assert call["origin"].user == ""
         assert call["auto_notify"] is False
     finally:
         loop.call_soon_threadsafe(loop.stop)
@@ -2124,8 +2134,10 @@ def test_mesh_wake_no_origin_header_disables_auto_notify(tmp_path):
 
 
 def test_mesh_wake_invalid_origin_header_ignored(tmp_path):
-    """POST /mesh/wake with malformed X-Origin is treated as no origin."""
+    """POST /mesh/wake with malformed X-Origin downgrades to kind="agent"."""
     import time
+
+    from src.shared.types import MessageOrigin
 
     client, captured, loop, bb = _wake_test_app(tmp_path)
     try:
@@ -2139,7 +2151,8 @@ def test_mesh_wake_invalid_origin_header_ignored(tmp_path):
         while not captured and time.monotonic() < deadline:
             time.sleep(0.01)
         assert captured
-        assert captured[0]["origin"] is None
+        assert isinstance(captured[0]["origin"], MessageOrigin)
+        assert captured[0]["origin"].kind == "agent"
         assert captured[0]["auto_notify"] is False
     finally:
         loop.call_soon_threadsafe(loop.stop)

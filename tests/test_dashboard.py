@@ -4446,3 +4446,64 @@ class TestSpaCatchallChannelsExclusion:
     def test_mesh_path_still_returns_404(self):
         resp = self.client.get("/mesh/agents")
         assert resp.status_code == 404
+
+
+# ── Task 2b: dashboard stamps human-origin on chat / steer ──
+
+
+class TestDashboardOriginStamp:
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir, include_v2=True)
+        self.client = _make_client(self.components)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _origin_from(self, headers: dict | None) -> dict | None:
+        from src.shared.types import MessageOrigin
+        if not headers:
+            return None
+        wire = headers.get("X-Origin") or headers.get("x-origin")
+        if not wire:
+            return None
+        parsed = MessageOrigin.from_header_value(wire)
+        return parsed
+
+    def test_api_chat_stamps_human_dashboard_origin(self):
+        """POST /api/agents/{id}/chat sets X-Origin: kind=human, channel=dashboard."""
+        from src.shared.types import MessageOrigin
+
+        self.components["transport"].request = AsyncMock(
+            return_value={"response": "hi"},
+        )
+        resp = self.client.post(
+            "/dashboard/api/agents/alpha/chat",
+            json={"message": "hello"},
+        )
+        assert resp.status_code == 200
+        call = self.components["transport"].request.await_args
+        hdrs = call.kwargs.get("headers")
+        parsed = self._origin_from(hdrs)
+        assert isinstance(parsed, MessageOrigin)
+        assert parsed.kind == "human"
+        assert parsed.channel == "dashboard"
+        # ``user`` is the operator session digest (or "operator" in dev).
+        assert parsed.user
+
+    def test_api_steer_stamps_human_origin(self):
+        """POST /api/agents/{id}/steer enqueues with kind="human" origin."""
+        from src.shared.types import MessageOrigin
+
+        self.components["lane_manager"].enqueue = AsyncMock(return_value="steered")
+        resp = self.client.post(
+            "/dashboard/api/agents/alpha/steer",
+            json={"message": "hold up"},
+        )
+        assert resp.status_code == 200
+        call = self.components["lane_manager"].enqueue.await_args
+        origin = call.kwargs.get("origin")
+        assert isinstance(origin, MessageOrigin)
+        assert origin.kind == "human"
+        assert origin.channel == "dashboard"

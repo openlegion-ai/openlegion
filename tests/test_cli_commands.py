@@ -1394,3 +1394,66 @@ class TestShellCompletion:
             result = _complete_agent_names(None, None, "c")
             assert "coder" in result
             assert "researcher" not in result
+
+
+# ── Task 2b: CLI REPL stamps human/cli origin on dispatch ──
+
+
+class TestREPLOriginStamp:
+    """``_send_message_streaming`` must stamp ``X-Origin: kind=human``
+    on every CLI-initiated request so the agent / lane sees a typed
+    origin instead of a missing or legacy header.
+    """
+
+    def test_streaming_dispatch_sends_typed_human_origin_header(self):
+        import asyncio
+        import threading
+        from unittest.mock import AsyncMock, MagicMock
+
+        from src.cli.repl import _send_message_streaming
+        from src.host.transport import HttpTransport
+        from src.shared.types import MessageOrigin
+
+        captured_headers: list = []
+
+        async def _fake_stream(*_args, **kwargs):
+            captured_headers.append(kwargs.get("headers"))
+            yield {"type": "done", "response": "ok"}
+
+        transport = MagicMock(spec=HttpTransport)
+        transport.stream_request = _fake_stream
+        transport.request = AsyncMock(return_value={"response": "ok"})
+
+        # _send_message_streaming uses run_coroutine_threadsafe — needs
+        # a real running event loop in a background thread.
+        dispatch_loop = asyncio.new_event_loop()
+        ready = threading.Event()
+
+        def _run():
+            asyncio.set_event_loop(dispatch_loop)
+            dispatch_loop.call_soon(ready.set)
+            dispatch_loop.run_forever()
+
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+        ready.wait()
+
+        try:
+            with patch.dict(os.environ, {"USER": "alice"}):
+                _send_message_streaming(
+                    transport, "researcher", "do thing",
+                    dispatch_loop=dispatch_loop,
+                )
+        finally:
+            dispatch_loop.call_soon_threadsafe(dispatch_loop.stop)
+            t.join(timeout=2)
+            dispatch_loop.close()
+
+        assert captured_headers, "stream_request was never invoked"
+        hdrs = captured_headers[0] or {}
+        assert "X-Origin" in hdrs
+        parsed = MessageOrigin.from_header_value(hdrs["X-Origin"])
+        assert parsed is not None
+        assert parsed.kind == "human"
+        assert parsed.channel == "cli"
+        assert parsed.user == "alice"

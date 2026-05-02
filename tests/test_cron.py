@@ -188,6 +188,44 @@ class TestCronDispatch:
         result = await sched.run_job("nonexistent")
         assert result is None
 
+    # ── Task 2b: cron_dispatch wrapper stamps kind="cron" origin ────
+
+    @pytest.mark.asyncio
+    async def test_cron_dispatch_wrapper_stamps_typed_origin(self):
+        """``RuntimeContext._create_cron_scheduler``'s ``cron_dispatch``
+        wrapper must pass a typed ``MessageOrigin(kind="cron")`` through
+        to ``async_dispatch`` so the lane sees a typed origin instead
+        of ``None``.
+        """
+        from src.cli.runtime import RuntimeContext
+        from src.shared.types import MessageOrigin
+
+        # Synthesize a minimal RuntimeContext with stub dependencies.
+        ctx = RuntimeContext.__new__(RuntimeContext)
+        captured = {}
+
+        async def _fake_async_dispatch(agent, message, **kwargs):
+            captured["agent"] = agent
+            captured["message"] = message
+            captured.update(kwargs)
+            return "ok"
+
+        ctx.async_dispatch = _fake_async_dispatch
+        ctx.transport = MagicMock()
+        ctx.blackboard = None
+        ctx.trace_store = None
+        ctx.event_bus = None
+        ctx.cfg = {}
+
+        ctx._create_cron_scheduler()
+        # The cron_dispatch closure was registered as ``dispatch_fn``.
+        await ctx.cron_scheduler.dispatch_fn("agent1", "tick")
+        origin = captured.get("origin")
+        assert isinstance(origin, MessageOrigin)
+        assert origin.kind == "cron"
+        assert origin.channel == "cron"
+        assert origin.user == ""
+
 
 class TestHeartbeat:
     def setup_method(self):

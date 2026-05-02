@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import click
 
@@ -25,6 +26,9 @@ from src.cli.config import (
 from src.cli.formatting import echo_fail, echo_header, echo_ok
 from src.cli.proxy import build_proxy_env_vars, resolve_agent_proxy
 from src.shared.types import RESERVED_AGENT_IDS
+
+if TYPE_CHECKING:
+    from src.shared.types import MessageOrigin
 
 logger = logging.getLogger("cli")
 
@@ -158,7 +162,7 @@ class RuntimeContext:
     def dispatch(
         self, agent: str, message: str, mode: str = "followup",
         trace_id: str | None = None,
-        origin: dict[str, str] | None = None,
+        origin: "MessageOrigin | dict[str, str] | None" = None,
         auto_notify: bool = False,
     ) -> str:
         """Thread-safe synchronous message dispatch.
@@ -178,7 +182,7 @@ class RuntimeContext:
     async def async_dispatch(
         self, agent: str, message: str, mode: str = "followup",
         trace_id: str | None = None,
-        origin: dict[str, str] | None = None,
+        origin: "MessageOrigin | dict[str, str] | None" = None,
         auto_notify: bool = False,
     ) -> str:
         """Async dispatch: schedules onto the dedicated dispatch loop."""
@@ -463,7 +467,8 @@ class RuntimeContext:
         from src.host.lanes import LaneManager
 
         async def _direct_dispatch(
-            agent_name: str, message: str, origin: dict | None = None,
+            agent_name: str, message: str,
+            origin: "MessageOrigin | dict | None" = None,
             **_kwargs,
         ) -> str:
             from src.shared.trace import current_trace_id, origin_header
@@ -715,8 +720,16 @@ class RuntimeContext:
         from src.host.cron import CronScheduler
 
         async def cron_dispatch(agent_name: str, message: str) -> str:
+            # Task 2b: stamp cron origin so downstream gates can
+            # distinguish a scheduled tick from a human-initiated wake.
             from src.shared.trace import new_trace_id
-            result = await self.async_dispatch(agent_name, message, trace_id=new_trace_id())
+            from src.shared.types import MessageOrigin
+            origin = MessageOrigin(kind="cron", channel="cron", user="")
+            result = await self.async_dispatch(
+                agent_name, message,
+                trace_id=new_trace_id(),
+                origin=origin,
+            )
             return result
 
         async def fetch_heartbeat_context(agent_name: str) -> dict:
@@ -740,12 +753,23 @@ class RuntimeContext:
                 return {"error": str(e)}
 
         async def heartbeat_dispatch(agent_name: str, message: str) -> dict:
-            """Dispatch heartbeat via dedicated /heartbeat endpoint."""
+            """Dispatch heartbeat via dedicated /heartbeat endpoint.
+
+            Task 2b: stamp ``kind="heartbeat"`` origin so the agent's
+            tools (and downstream gates) can identify self-triggered
+            heartbeat work versus a human or cron wake.
+            """
+            from src.shared.trace import origin_header, trace_headers
+            from src.shared.types import MessageOrigin
+            origin = MessageOrigin(kind="heartbeat", channel="heartbeat", user="")
+            headers = trace_headers()
+            headers.update(origin_header(origin))
             try:
                 return await self.transport.request(
                     agent_name, "POST", "/heartbeat",
                     json={"message": message},
                     timeout=120,
+                    headers=headers,
                 )
             except Exception as e:
                 logger.warning("Heartbeat dispatch failed for '%s': %s", agent_name, e)

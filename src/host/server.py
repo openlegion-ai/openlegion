@@ -433,14 +433,23 @@ def create_mesh_app(
             wake_msg = f"You have a new task from {caller}. Call check_inbox() to see it."
 
         from src.shared.trace import parse_origin_header
+        from src.shared.types import MessageOrigin
         origin = parse_origin_header(request.headers.get("x-origin"))
+        # Task 2b: missing/invalid origin downgrades to ``kind="agent"``
+        # (least-trusted) instead of ``None`` so downstream gates always
+        # see an explicit kind. Auto-notify still gated on the original
+        # origin presence — agent-default wakes have no addressable
+        # channel/user, so there is no notification target.
+        had_origin = origin is not None
+        if origin is None:
+            origin = MessageOrigin(kind="agent", channel="", user="")
 
         if lane_manager is not None and dispatch_loop is not None:
             try:
                 asyncio.run_coroutine_threadsafe(
                     lane_manager.enqueue(
                         target, wake_msg, mode="followup",
-                        origin=origin, auto_notify=origin is not None,
+                        origin=origin, auto_notify=had_origin,
                     ),
                     dispatch_loop,
                 )

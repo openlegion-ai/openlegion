@@ -2472,9 +2472,22 @@ def create_dashboard_router(
         if event_bus:
             event_bus.emit("chat_user_message", agent=agent_id,
                 data={"message": message, "session": chat_session})
+        # Task 2b: stamp dashboard chat as human-origin so downstream
+        # authorization gates can distinguish a user-driven chat from
+        # an agent-initiated wake.
+        from src.shared.trace import origin_header, trace_headers
+        from src.shared.types import MessageOrigin
+        origin = MessageOrigin(
+            kind="human",
+            channel="dashboard",
+            user=_operator_session_id(request),
+        )
+        hdrs = trace_headers()
+        hdrs.update(origin_header(origin))
         try:
             result = await transport.request(
                 agent_id, "POST", "/chat", json={"message": message}, timeout=120,
+                headers=hdrs,
             )
             response = result.get("response", "(no response)")
             if event_bus:
@@ -2507,12 +2520,24 @@ def create_dashboard_router(
             event_bus.emit("chat_user_message", agent=agent_id,
                 data={"message": message, "session": chat_session})
 
+        # Task 2b: stamp dashboard streaming chat as human-origin.
+        from src.shared.trace import origin_header, trace_headers
+        from src.shared.types import MessageOrigin
+        _origin = MessageOrigin(
+            kind="human",
+            channel="dashboard",
+            user=_operator_session_id(request),
+        )
+        _hdrs = trace_headers()
+        _hdrs.update(origin_header(_origin))
+
         async def event_generator():
             final_response = ""
             try:
                 async for event in transport.stream_request(
                     agent_id, "POST", "/chat/stream",
                     json={"message": message}, timeout=120,
+                    headers=_hdrs,
                 ):
                     if isinstance(event, dict):
                         yield f"data: {json.dumps(event, default=str)}\n\n"
@@ -2563,11 +2588,23 @@ def create_dashboard_router(
         if not targets:
             return {"responses": {}, "message": "No matching agents"}
 
+        # Task 2b: stamp dashboard broadcast as human-origin.
+        from src.shared.trace import origin_header, trace_headers
+        from src.shared.types import MessageOrigin
+        bc_origin = MessageOrigin(
+            kind="human",
+            channel="dashboard",
+            user=_operator_session_id(request),
+        )
+        bc_hdrs = trace_headers()
+        bc_hdrs.update(origin_header(bc_origin))
+
         results = {}
         async def _send(aid: str) -> tuple[str, str]:
             try:
                 data = await transport.request(
                     aid, "POST", "/chat", json={"message": message}, timeout=120,
+                    headers=bc_hdrs,
                 )
                 return aid, data.get("response", "(no response)")
             except Exception as e:
@@ -2608,6 +2645,17 @@ def create_dashboard_router(
         if not agents:
             return {"responses": {}, "message": "No agents registered"}
 
+        # Task 2b: stamp dashboard streaming broadcast as human-origin.
+        from src.shared.trace import origin_header, trace_headers
+        from src.shared.types import MessageOrigin
+        bcs_origin = MessageOrigin(
+            kind="human",
+            channel="dashboard",
+            user=_operator_session_id(request),
+        )
+        bcs_hdrs = trace_headers()
+        bcs_hdrs.update(origin_header(bcs_origin))
+
         queue: asyncio.Queue = asyncio.Queue()
 
         async def _stream_agent(aid: str) -> None:
@@ -2616,6 +2664,7 @@ def create_dashboard_router(
                 async for event in transport.stream_request(
                     aid, "POST", "/chat/stream",
                     json={"message": message}, timeout=120,
+                    headers=bcs_hdrs,
                 ):
                     if isinstance(event, dict):
                         tagged = {**event, "agent": aid}
@@ -2665,8 +2714,18 @@ def create_dashboard_router(
         if event_bus:
             event_bus.emit("chat_user_message", agent=agent_id,
                 data={"message": f"[steer] {message}", "session": chat_session})
+        # Task 2b: stamp human origin on dashboard-initiated steer.
         from src.shared.trace import new_trace_id
-        result = await lane_manager.enqueue(agent_id, message, mode="steer", trace_id=new_trace_id())
+        from src.shared.types import MessageOrigin
+        origin = MessageOrigin(
+            kind="human",
+            channel="dashboard",
+            user=_operator_session_id(request),
+        )
+        result = await lane_manager.enqueue(
+            agent_id, message, mode="steer",
+            trace_id=new_trace_id(), origin=origin,
+        )
         return {"result": result}
 
     @api_router.post("/api/agents/{agent_id}/reset")
