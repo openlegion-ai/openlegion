@@ -1,7 +1,6 @@
-"""Tests for the SQLite-backed PendingActions store (Task 2d).
+"""Tests for the SQLite-backed PendingActions store.
 
-The legacy in-memory ``_pending_changes`` dict in ``src/host/server.py``
-was replaced with a persistent SQLite-backed store. These tests cover:
+These tests cover:
 
 * basic store / peek / consume semantics
 * atomic single-shot consume (replay protection)

@@ -40,25 +40,18 @@ AGENT_ID_RE_PATTERN = r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
 class MessageOrigin(BaseModel):
     """Typed origin for a message flowing through the mesh.
 
-    The ``kind`` field is the authorization-relevant piece: future tasks
-    gate durable actions on ``kind == "human"`` (Task 2d's pending-action
-    confirm), block worker → operator wakes when ``kind == "agent"``
-    (Task 2e), and downgrade unverifiable channel claims (Task 2c).
+    The ``kind`` field is the authorization-relevant piece: durable
+    actions gate on ``kind == "human"`` (pending-action confirm), worker
+    → operator wakes are blocked when ``kind == "agent"``, and
+    unverifiable channel claims are downgraded.
 
-    ``channel`` and ``user`` are free-form for now; they identify which
-    surface the message came from (cli, dashboard, telegram, …) and the
-    end-user id when one is available.
+    ``channel`` and ``user`` are free-form; they identify which surface
+    the message came from (cli, dashboard, telegram, …) and the end-user
+    id when one is available.
 
     The model is ``frozen=True`` — origins are stamped once at the entry
     point (CLI REPL, dashboard chat, channel adapter, cron tick, …) and
     must not be mutated mid-flight.
-
-    Backward-compat: this PR (Task 2a) introduces the model but does not
-    flip stamp sites yet (Task 2b). Existing call sites that construct
-    raw ``{"channel": ..., "user": ...}`` dicts continue to work; the
-    helpers in ``src.shared.trace`` accept both shapes. Dict-style
-    accessors (``__getitem__`` / ``get``) are provided so readers do not
-    need to branch on type during the migration.
     """
 
     kind: Literal["human", "operator", "agent", "system", "heartbeat", "cron"]
@@ -66,20 +59,6 @@ class MessageOrigin(BaseModel):
     user: str = ""
 
     model_config = {"frozen": True}
-
-    # Dict-style accessors — let readers that still treat origin as a
-    # ``dict[str, str]`` keep working through the Task 2b migration.
-    def __getitem__(self, key: str) -> str:
-        if key in {"kind", "channel", "user"}:
-            return getattr(self, key)
-        raise KeyError(key)
-
-    def get(self, key: str, default: Any = None) -> Any:
-        # Match ``dict.get`` semantics: present-but-empty returns the
-        # empty string, only an unknown key falls back to ``default``.
-        if key in {"kind", "channel", "user"}:
-            return getattr(self, key)
-        return default
 
     def to_header_value(self) -> str:
         """Serialize to a JSON ``X-Origin`` header value.

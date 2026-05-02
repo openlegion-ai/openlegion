@@ -1648,7 +1648,7 @@ class AgentLoop:
 
     async def chat(
         self, user_message: str, *, trace_id: str | None = None,
-        origin: "MessageOrigin | dict[str, str] | None" = None,
+        origin: "MessageOrigin | None" = None,
     ) -> dict:
         """Handle a single chat turn with persistent conversation history.
 
@@ -2471,7 +2471,7 @@ class AgentLoop:
 
     async def chat_stream(
         self, user_message: str, *, trace_id: str | None = None,
-        origin: "MessageOrigin | dict[str, str] | None" = None,
+        origin: "MessageOrigin | None" = None,
     ):
         """Streaming chat that yields SSE events as they happen.
 

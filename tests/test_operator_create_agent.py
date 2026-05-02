@@ -323,16 +323,13 @@ class TestCreateCustomAgent:
         assert resp.status_code == 200
         perms.reload.assert_called()
 
-    @pytest.mark.characterization
     def test_default_capabilities_seed_full_coordination_protocol(
         self, mesh_app, tmp_path,
     ):
-        # CAPTURE-TO-TIGHTEN — this asserts today's broad bootstrap defaults.
-        # Task 3/5 should replace wildcard read plus browser/cron grants with
-        # explicit operator-managed capabilities and project-scoped visibility.
-        """Today operator-created agents get broad coordination defaults written
+        """Operator-created agents get broad coordination defaults written
         to ``permissions.json`` so their imminent ``/mesh/register`` call does
-        not fall through to deny-all. Specifically:
+        not fall through to deny-all. Regression guard for ``3b90a0a``.
+        Specifically:
 
           * ``blackboard_read``  ⊇ ``["*"]``
           * ``blackboard_write`` ⊇ the five coordination namespaces
@@ -341,11 +338,6 @@ class TestCreateCustomAgent:
           * ``can_use_browser``  is True
           * ``can_manage_cron``  is True
           * ``allowed_apis``     ⊇ ``{"llm", "image_gen"}``
-
-        This protects the historical 3b90a0a regression, but the breadth is
-        not a permanent security invariant. Future least-privilege work should
-        flip this test while preserving a narrower "agent can coordinate"
-        bootstrap path.
         """
         import json as _json
 

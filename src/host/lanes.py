@@ -36,10 +36,7 @@ class QueuedTask:
     message: str
     mode: str = "followup"
     trace_id: str | None = None
-    # Task 2b: stamp sites now produce typed ``MessageOrigin``. Legacy
-    # dict shape still accepted during the migration window for paths
-    # that have not been flipped yet (Task 2c will do the recheck).
-    origin: MessageOrigin | dict[str, str] | None = None
+    origin: MessageOrigin | None = None
     auto_notify: bool = False
     future: asyncio.Future = field(default_factory=asyncio.Future)
 
@@ -84,7 +81,7 @@ class LaneManager:
     async def enqueue(
         self, agent: str, message: str, *, mode: str = "followup",
         trace_id: str | None = None,
-        origin: MessageOrigin | dict[str, str] | None = None,
+        origin: MessageOrigin | None = None,
         auto_notify: bool = False,
     ) -> str:
         """Queue a message for an agent with the specified mode.
@@ -112,7 +109,7 @@ class LaneManager:
 
     async def _handle_followup(
         self, agent: str, message: str, *, trace_id: str | None = None,
-        origin: MessageOrigin | dict[str, str] | None = None,
+        origin: MessageOrigin | None = None,
         auto_notify: bool = False,
     ) -> str:
         """Standard FIFO enqueue."""
@@ -262,25 +259,25 @@ class LaneManager:
                     and result != SILENT_REPLY_TOKEN
                 ):
                     fn = self._notify_fn
-                    origin_copy = dict(task.origin)
+                    forward_origin = task.origin
                     task_agent = task.agent
                     task_result = result
 
                     async def _forward():
                         try:
                             await asyncio.wait_for(
-                                fn(origin_copy, task_result, task_agent),
+                                fn(forward_origin, task_result, task_agent),
                                 timeout=_NOTIFY_FORWARD_TIMEOUT,
                             )
                         except asyncio.TimeoutError:
                             logger.warning(
                                 "Lane auto-notify to origin %s timed out after %ds",
-                                origin_copy, _NOTIFY_FORWARD_TIMEOUT,
+                                forward_origin, _NOTIFY_FORWARD_TIMEOUT,
                             )
                         except Exception as fwd_e:
                             logger.warning(
                                 "Lane auto-notify to origin %s failed: %s",
-                                origin_copy, fwd_e,
+                                forward_origin, fwd_e,
                             )
 
                     forward_task = asyncio.create_task(_forward())
