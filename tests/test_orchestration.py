@@ -23,11 +23,11 @@ import pytest
 
 from src.host.orchestration import (
     DEFAULT_RETENTION_SECONDS,
-    InvalidStatusTransition,
     TERMINAL_STATUSES,
+    VALID_STATUSES,
+    InvalidStatusTransition,
     TaskNotFound,
     Tasks,
-    VALID_STATUSES,
 )
 
 
@@ -253,7 +253,7 @@ def test_add_artifact_appends_unique_refs(tmp_path):
 
 def test_list_inbox_excludes_terminal_by_default(tmp_path):
     t = _make_store(tmp_path)
-    pending = t.create(creator="c", assignee="a", title="pending")
+    t.create(creator="c", assignee="a", title="pending")
     t.create(creator="c", assignee="a", title="working")  # will become working
     done = t.create(creator="c", assignee="a", title="done")
     t.update_status(done["id"], "working", actor="a")

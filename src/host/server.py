@@ -28,10 +28,10 @@ from fastapi.responses import StreamingResponse
 
 from src.host.credentials import is_system_credential
 from src.host.orchestration import (
+    VALID_STATUSES,
     InvalidStatusTransition,
     TaskNotFound,
     Tasks,
-    VALID_STATUSES,
 )
 from src.host.pending_actions import PendingActions
 from src.shared.redaction import redact_url
