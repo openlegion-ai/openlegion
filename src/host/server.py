@@ -28,6 +28,12 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.responses import StreamingResponse
 
 from src.host.credentials import is_system_credential
+from src.host.orchestration import (
+    VALID_STATUSES,
+    InvalidStatusTransition,
+    TaskNotFound,
+    Tasks,
+)
 from src.host.pending_actions import PendingActions
 from src.shared.redaction import redact_url
 from src.shared.types import (
@@ -450,6 +456,20 @@ if _PROJECT_SCOPE_MODE not in {"warn", "enforce"}:
     _PROJECT_SCOPE_MODE = "warn"
 
 
+# ── Task 6: Durable orchestration task records ────────────────────────
+#
+# ``OPENLEGION_ORCHESTRATION_TASKS_V2`` is the kill switch for the
+# durable-tasks rollout. Default ``0`` (disabled) — the legacy
+# blackboard-dict path in ``coordination_tool`` runs unchanged. When
+# set to ``1`` the mesh constructs a ``Tasks`` SQLite store and the
+# coordination tool routes hand_off / check_inbox / update_status /
+# complete_task through the new endpoints. **No dual-write.**
+# Read once at module import; runtime flips require a restart.
+_ORCHESTRATION_TASKS_V2 = (
+    os.environ.get("OPENLEGION_ORCHESTRATION_TASKS_V2", "0") == "1"
+)
+
+
 # Counter surfaced on ``/mesh/system/metrics`` as ``scope_warn_total``.
 # Incremented every time a worker's call would have returned a smaller
 # response under enforce mode. Lets ops gauge soak-window readiness
@@ -527,6 +547,20 @@ def create_mesh_app(
     app.pending_actions = pending_actions  # exposed for tests/dashboard
     global _pending_actions_singleton
     _pending_actions_singleton = pending_actions
+
+    # Task 6: durable orchestration task records. The store is only
+    # constructed when the feature flag is on; when off, the new
+    # ``/mesh/tasks*`` endpoints return HTTP 503 so coordination_tool
+    # falls through to the legacy blackboard path.
+    # ``OPENLEGION_ORCHESTRATION_TASKS_DB`` overrides the path — used by
+    # tests to keep the db inside ``tmp_path`` instead of polluting cwd.
+    tasks_store: Tasks | None = None
+    if _ORCHESTRATION_TASKS_V2:
+        _tasks_db_path = os.environ.get(
+            "OPENLEGION_ORCHESTRATION_TASKS_DB", "data/tasks.db",
+        )
+        tasks_store = Tasks(db_path=_tasks_db_path)
+    app.tasks_store = tasks_store  # exposed for tests/dashboard
 
     _auth_tokens = auth_tokens if auth_tokens is not None else {}
     _agent_projects = agent_projects if agent_projects is not None else {}
@@ -3058,6 +3092,279 @@ def create_mesh_app(
         project_md.write_text(f"# {name}\n\n{context}\n")
 
         return {"updated": True, "project": name}
+
+    # === Orchestration Tasks v2 (Task 6) ===
+
+    def _require_tasks_v2() -> Tasks:
+        """Return the tasks store or raise 503 when the flag is off."""
+        if tasks_store is None:
+            raise HTTPException(
+                503,
+                "Orchestration tasks v2 not enabled. "
+                "Set OPENLEGION_ORCHESTRATION_TASKS_V2=1 to opt in.",
+            )
+        return tasks_store
+
+    def _reap_tasks_opportunistically() -> None:
+        """Cheap reap on read paths so retention drops don't need a scheduler."""
+        if tasks_store is None:
+            return
+        try:
+            deleted = tasks_store.reap_expired()
+            if deleted:
+                logger.info("orchestration: reaped %d expired tasks", deleted)
+        except Exception as e:
+            logger.debug("orchestration reap failed: %s", e)
+
+    def _is_project_member(agent_id: str, project_id: str) -> bool:
+        """Membership check for read scoping. Operator + mesh are global."""
+        if agent_id in {"operator", "mesh"}:
+            return True
+        return project_id in _caller_projects(agent_id)
+
+    @app.get("/mesh/orchestration/status")
+    async def orchestration_status(request: Request) -> dict:
+        """Probe endpoint — agents call this to detect whether v2 is on.
+
+        Returns ``{"enabled": True}`` when the store is wired; HTTP 503
+        when the feature flag is off (so callers fail-closed to the
+        legacy blackboard path).
+        """
+        _require_any_auth(request)
+        if tasks_store is None:
+            raise HTTPException(503, "Orchestration tasks v2 not enabled")
+        return {"enabled": True}
+
+    @app.post("/mesh/tasks")
+    async def create_task(request: Request) -> dict:
+        """Create a durable task record.
+
+        Caller must have ``can_route_tasks`` (or be the operator /
+        loopback internal). Body: ``{assignee, title, description?,
+        project?, parent_task_id?, priority?, dependencies?}``.
+        Origin is sourced from the validated ``X-Origin`` header.
+        """
+        store = _require_tasks_v2()
+        caller = _extract_verified_agent_id(request)
+        # ``can_route_tasks`` is the structured permission. The mesh
+        # pseudo-id and operator are auto-permitted by the matrix.
+        if not permissions.can_route_tasks(caller):
+            raise HTTPException(
+                403,
+                f"Agent {caller} cannot route tasks (can_route_tasks not granted)",
+            )
+        body = await request.json()
+        assignee = body.get("assignee", "")
+        title = sanitize_for_prompt(body.get("title", "")).strip()
+        description = sanitize_for_prompt(body.get("description") or "")
+        project_id = body.get("project") or body.get("project_id") or None
+        parent_task_id = body.get("parent_task_id") or None
+        priority = int(body.get("priority", 0) or 0)
+        dependencies = body.get("dependencies") or None
+        artifact_refs = body.get("artifact_refs") or None
+        if not title:
+            raise HTTPException(400, "title is required")
+        if not assignee or not _AGENT_ID_RE.match(assignee):
+            raise HTTPException(400, f"Invalid assignee: {assignee!r}")
+        # Cross-project scope: callers can only create tasks in projects
+        # they belong to (operators / mesh are global). Standalone is
+        # permitted (project_id=None).
+        if project_id and not _is_project_member(caller, project_id):
+            raise HTTPException(
+                403,
+                f"Caller {caller} is not a member of project {project_id!r}",
+            )
+
+        origin = _validated_origin(request, caller)
+        origin_dict = origin.model_dump() if origin is not None else None
+
+        record = store.create(
+            creator=caller,
+            assignee=assignee,
+            title=title,
+            description=description or None,
+            project_id=project_id,
+            parent_task_id=parent_task_id,
+            priority=priority,
+            dependencies=dependencies if isinstance(dependencies, list) else None,
+            artifact_refs=artifact_refs if isinstance(artifact_refs, list) else None,
+            origin=origin_dict,
+        )
+        return record
+
+    @app.get("/mesh/tasks/inbox/{assignee}")
+    async def list_inbox(assignee: str, request: Request) -> dict:
+        """List ``assignee``'s inbox.
+
+        The assignee themself, the operator, and loopback-internal
+        callers are permitted. Other callers receive 403.
+        """
+        store = _require_tasks_v2()
+        caller = _extract_verified_agent_id(request)
+        if (
+            caller != assignee
+            and caller != "operator"
+            and not _is_internal_caller(request)
+        ):
+            raise HTTPException(
+                403,
+                "Only the assignee, operator, or internal callers can read this inbox",
+            )
+        _reap_tasks_opportunistically()
+        rows = store.list_inbox(assignee)
+        return {"tasks": rows, "count": len(rows)}
+
+    @app.get("/mesh/tasks/project/{project_id}")
+    async def list_project_tasks(project_id: str, request: Request) -> dict:
+        """List tasks scoped to a project.
+
+        Caller must be a member of the project (or operator / internal).
+        """
+        store = _require_tasks_v2()
+        caller = _extract_verified_agent_id(request)
+        if not _is_project_member(caller, project_id):
+            raise HTTPException(
+                403,
+                f"Caller {caller} is not a member of project {project_id!r}",
+            )
+        _reap_tasks_opportunistically()
+        rows = store.list_project(project_id)
+        return {"tasks": rows, "count": len(rows)}
+
+    @app.get("/mesh/tasks/{task_id}")
+    async def get_task(task_id: str, request: Request) -> dict:
+        """Read a task by id.
+
+        Visible to creator, assignee, project members, operator, and
+        internal callers. Other callers receive 403.
+        """
+        store = _require_tasks_v2()
+        caller = _extract_verified_agent_id(request)
+        record = store.get(task_id)
+        if record is None:
+            raise HTTPException(404, f"Task '{task_id}' not found")
+        if (
+            caller in (record["creator"], record["assignee"])
+            or caller == "operator"
+            or _is_internal_caller(request)
+            or (record["project_id"] and _is_project_member(caller, record["project_id"]))
+        ):
+            return record
+        raise HTTPException(403, "Not authorized to read this task")
+
+    @app.get("/mesh/tasks/{task_id}/events")
+    async def list_task_events(task_id: str, request: Request) -> dict:
+        """Audit history for a task. Same visibility rules as get_task."""
+        store = _require_tasks_v2()
+        caller = _extract_verified_agent_id(request)
+        record = store.get(task_id)
+        if record is None:
+            raise HTTPException(404, f"Task '{task_id}' not found")
+        if not (
+            caller in (record["creator"], record["assignee"])
+            or caller == "operator"
+            or _is_internal_caller(request)
+            or (record["project_id"] and _is_project_member(caller, record["project_id"]))
+        ):
+            raise HTTPException(403, "Not authorized to read this task")
+        events = store.list_events(task_id)
+        return {"events": events, "count": len(events)}
+
+    @app.post("/mesh/tasks/{task_id}/status")
+    async def update_task_status(task_id: str, request: Request) -> dict:
+        """Update a task's status.
+
+        Caller must be the assignee, the creator, or the operator/internal.
+        Status transitions are validated by the storage layer; an invalid
+        transition becomes HTTP 400.
+        """
+        store = _require_tasks_v2()
+        caller = _extract_verified_agent_id(request)
+        body = await request.json()
+        status = body.get("status", "")
+        blocker_note = body.get("blocker_note")
+        if status not in VALID_STATUSES:
+            raise HTTPException(
+                400,
+                f"Invalid status: {status!r}. Must be one of {sorted(VALID_STATUSES)}",
+            )
+        record = store.get(task_id)
+        if record is None:
+            raise HTTPException(404, f"Task '{task_id}' not found")
+        if not (
+            caller in (record["creator"], record["assignee"])
+            or caller == "operator"
+            or _is_internal_caller(request)
+        ):
+            raise HTTPException(
+                403,
+                "Only the creator, assignee, operator, or internal can update status",
+            )
+        try:
+            updated = store.update_status(
+                task_id, status, actor=caller, blocker_note=blocker_note,
+            )
+        except InvalidStatusTransition as e:
+            raise HTTPException(400, str(e))
+        except TaskNotFound:
+            raise HTTPException(404, f"Task '{task_id}' not found")
+        return updated
+
+    @app.post("/mesh/tasks/{task_id}/reroute")
+    async def reroute_task(task_id: str, request: Request) -> dict:
+        """Reassign a task. Operator-only or callers with ``can_route_tasks``."""
+        store = _require_tasks_v2()
+        caller = _extract_verified_agent_id(request)
+        if not (
+            caller == "operator"
+            or _is_internal_caller(request)
+            or permissions.can_route_tasks(caller)
+        ):
+            raise HTTPException(
+                403,
+                "Reroute requires can_route_tasks (operator-grade permission)",
+            )
+        body = await request.json()
+        new_assignee = body.get("new_assignee", "")
+        reason = sanitize_for_prompt(body.get("reason") or "")
+        if not new_assignee or not _AGENT_ID_RE.match(new_assignee):
+            raise HTTPException(400, f"Invalid new_assignee: {new_assignee!r}")
+        try:
+            updated = store.reroute(
+                task_id, new_assignee, actor=caller, reason=reason,
+            )
+        except TaskNotFound:
+            raise HTTPException(404, f"Task '{task_id}' not found")
+        except InvalidStatusTransition as e:
+            raise HTTPException(400, str(e))
+        return updated
+
+    @app.post("/mesh/tasks/{task_id}/cancel")
+    async def cancel_task(task_id: str, request: Request) -> dict:
+        """Cancel a task. Creator, assignee, or operator/internal."""
+        store = _require_tasks_v2()
+        caller = _extract_verified_agent_id(request)
+        record = store.get(task_id)
+        if record is None:
+            raise HTTPException(404, f"Task '{task_id}' not found")
+        if not (
+            caller in (record["creator"], record["assignee"])
+            or caller == "operator"
+            or _is_internal_caller(request)
+        ):
+            raise HTTPException(
+                403,
+                "Only the creator, assignee, operator, or internal can cancel",
+            )
+        body = await request.json() if (await request.body()) else {}
+        reason = sanitize_for_prompt(body.get("reason") or "") if isinstance(body, dict) else ""
+        try:
+            updated = store.cancel(task_id, actor=caller, reason=reason)
+        except InvalidStatusTransition as e:
+            raise HTTPException(400, str(e))
+        except TaskNotFound:
+            raise HTTPException(404, f"Task '{task_id}' not found")
+        return updated
 
     # === Operator Config Endpoints ===
 
