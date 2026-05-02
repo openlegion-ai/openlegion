@@ -1452,7 +1452,7 @@ class TestREPLOriginStamp:
         assert captured_headers, "stream_request was never invoked"
         hdrs = captured_headers[0] or {}
         assert "X-Origin" in hdrs
-        parsed = MessageOrigin.from_header_value(hdrs["X-Origin"])
+        parsed = MessageOrigin.from_header_value(hdrs["X-Origin"], trust_kind=True)
         assert parsed is not None
         assert parsed.kind == "human"
         assert parsed.channel == "cli"

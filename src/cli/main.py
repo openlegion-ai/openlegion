@@ -15,9 +15,11 @@ from __future__ import annotations
 import json as _json
 import logging
 import os
+import re
 import subprocess
 import sys
 import threading
+from pathlib import Path
 
 import click
 
@@ -30,6 +32,26 @@ from src.cli.config import (
 logger = logging.getLogger("cli")
 
 _json_mode = False
+
+
+def _project_version() -> str:
+    """Return installed package version, falling back for source-tree tests."""
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as pkg_version
+
+    try:
+        return pkg_version("openlegion")
+    except PackageNotFoundError:
+        pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
+        try:
+            match = re.search(
+                r'^version\s*=\s*"([^"]+)"',
+                pyproject.read_text(encoding="utf-8"),
+                re.MULTILINE,
+            )
+        except OSError:
+            match = None
+        return match.group(1) if match else "dev"
 
 
 def _set_json(ctx: click.Context, _param: click.Parameter, value: bool) -> None:
@@ -61,7 +83,7 @@ def _complete_agent_names(ctx, param, incomplete):
 # ── Main group ───────────────────────────────────────────────
 
 @click.group()
-@click.version_option(package_name="openlegion")
+@click.version_option(version=_project_version(), prog_name="openlegion")
 @click.option(
     "--json", "json_flag", is_flag=True, is_eager=True, expose_value=False,
     callback=_set_json, help="Output in JSON format (where supported)",
@@ -701,12 +723,7 @@ def reset(yes: bool):
 def version_cmd(verbose: bool):
     """Show version and environment information."""
     import platform
-    from importlib.metadata import version as pkg_version
-
-    try:
-        ver = pkg_version("openlegion")
-    except Exception:
-        ver = "dev"
+    ver = _project_version()
     click.echo(f"OpenLegion v{ver}")
     if verbose:
         click.echo(f"Python {sys.version.split()[0]}")

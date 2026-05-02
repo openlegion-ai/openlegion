@@ -184,7 +184,16 @@ async def confirm_edit(change_id: str, *, mesh_client=None, _messages=None, **_k
         return result
     except Exception as e:
         error_str = str(e)
-        if "404" in error_str or "not found" in error_str.lower():
+        # Task 2d migrated /mesh/config/confirm from 404 -> 400 with
+        # "Pending action invalid or expired" for unknown/expired/
+        # digest-mismatch/origin-failure rows. Match either form so
+        # existing operator UX (re-propose) keeps working.
+        lower = error_str.lower()
+        if (
+            "404" in error_str
+            or "not found" in lower
+            or "invalid or expired" in lower
+        ):
             return {
                 "error": "change_expired_or_lost",
                 "detail": (
