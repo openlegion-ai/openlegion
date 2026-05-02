@@ -51,6 +51,7 @@ def mesh_app(tmp_path, _mesh_env, container_mgr):
             "operator": {
                 "can_message": ["*"],
                 "can_spawn": True,
+                "can_manage_fleet": True,
                 "blackboard_read": ["*"],
                 "blackboard_write": ["*"],
             },
@@ -66,6 +67,7 @@ def mesh_app(tmp_path, _mesh_env, container_mgr):
             agent_id="operator",
             can_message=["*"],
             can_spawn=True,
+            can_manage_fleet=True,
             blackboard_read=["*"],
             blackboard_write=["*"],
         ),
@@ -320,6 +322,120 @@ class TestCreateCustomAgent:
         )
         assert resp.status_code == 200
         perms.reload.assert_called()
+
+    @pytest.mark.characterization
+    def test_default_capabilities_seed_full_coordination_protocol(
+        self, mesh_app, tmp_path,
+    ):
+        # CAPTURE-TO-TIGHTEN — this asserts today's broad bootstrap defaults.
+        # Task 3/5 should replace wildcard read plus browser/cron grants with
+        # explicit operator-managed capabilities and project-scoped visibility.
+        """Today operator-created agents get broad coordination defaults written
+        to ``permissions.json`` so their imminent ``/mesh/register`` call does
+        not fall through to deny-all. Specifically:
+
+          * ``blackboard_read``  ⊇ ``["*"]``
+          * ``blackboard_write`` ⊇ the five coordination namespaces
+          * ``can_publish``      ⊇ ``["*"]``
+          * ``can_subscribe``    ⊇ ``["*"]``
+          * ``can_use_browser``  is True
+          * ``can_manage_cron``  is True
+          * ``allowed_apis``     ⊇ ``{"llm", "image_gen"}``
+
+        This protects the historical 3b90a0a regression, but the breadth is
+        not a permanent security invariant. Future least-privilege work should
+        flip this test while preserving a narrower "agent can coordinate"
+        bootstrap path.
+        """
+        import json as _json
+
+        client = mesh_app["client"]
+        resp = client.post(
+            "/mesh/agents/create",
+            json={
+                "agent_id": "operator",
+                "name": "freshie",
+                "role": "fresh agent",
+                "model": "openai/gpt-4o-mini",
+                "instructions": "do things",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+
+        # Inspect the on-disk permissions written by _add_agent_permissions.
+        perms_path = tmp_path / "config" / "permissions.json"
+        on_disk = _json.loads(perms_path.read_text())
+        agent_perms = on_disk["permissions"]["freshie"]
+
+        # Blackboard reads — wildcard so the agent can discover any topic.
+        assert "*" in agent_perms["blackboard_read"]
+
+        # Blackboard writes — five coordination namespaces.
+        write = set(agent_perms["blackboard_write"])
+        assert {
+            "tasks/*", "context/*", "status/*", "output/*", "artifacts/*",
+        }.issubset(write), f"missing namespaces from {write!r}"
+
+        # Pubsub.
+        assert "*" in agent_perms["can_publish"]
+        assert "*" in agent_perms["can_subscribe"]
+
+        # Browser + cron capability bits.
+        assert agent_perms["can_use_browser"] is True
+        assert agent_perms["can_manage_cron"] is True
+
+        # API surface — at minimum LLM (so the agent can run) + image_gen.
+        allowed_apis = set(agent_perms.get("allowed_apis", []))
+        assert {"llm", "image_gen"}.issubset(allowed_apis), \
+            f"expected llm + image_gen in {allowed_apis!r}"
+
+        # And the LIVE PermissionMatrix must agree once it's been reloaded
+        # — the in-memory object backs every mesh permission gate the
+        # newly-registered agent will hit. Without reload the agent
+        # registers and immediately gets deny-all.
+        perms = mesh_app["perms"]
+        perms.reload()
+        live = perms.get_permissions("freshie")
+        assert "*" in live.blackboard_read
+        assert "tasks/*" in live.blackboard_write
+        assert live.can_use_browser is True
+        assert live.can_manage_cron is True
+
+    def test_default_capabilities_omit_can_spawn(
+        self, mesh_app, tmp_path,
+    ):
+        """Pin: a newly-created agent does NOT inherit ``can_spawn`` —
+        only the operator (the one calling create) is allowed to create
+        agents. Without this, every operator-created agent could turn
+        around and create more agents itself, defeating the operator
+        gate. The current implementation writes the defaults dict via
+        ``_add_agent_permissions`` and that dict deliberately excludes
+        ``can_spawn`` so the field defaults to False on read.
+        """
+        import json as _json
+
+        client = mesh_app["client"]
+        resp = client.post(
+            "/mesh/agents/create",
+            json={
+                "agent_id": "operator", "name": "noprivs", "role": "fresh",
+                "model": "openai/gpt-4o-mini",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+
+        perms_path = tmp_path / "config" / "permissions.json"
+        on_disk = _json.loads(perms_path.read_text())
+        agent_perms = on_disk["permissions"]["noprivs"]
+        # Field is omitted from the on-disk record (defaults to False at
+        # ``AgentPermissions`` construction time) — the agent has no
+        # spawn ability. We accept either: (a) key absent, or (b) key
+        # present but explicitly False.
+        assert agent_perms.get("can_spawn", False) is False
+
+        # And the live matrix agrees.
+        mesh_app["perms"].reload()
+        assert mesh_app["perms"].can_spawn("noprivs") is False
 
 
 class TestCreateCustomAgentMeshClient:

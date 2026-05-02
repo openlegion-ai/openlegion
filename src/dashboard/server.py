@@ -572,6 +572,12 @@ def create_dashboard_router(
     channel_manager: Any = None,
     wallet_service_ref: list | None = None,
     api_key_manager: Any = None,
+    # Task 9 — Workplace tab + pending action review surface. Both are
+    # optional so existing dashboard tests that don't construct them
+    # keep working; the new endpoints fall back to empty/disabled when
+    # the relevant store is absent.
+    pending_actions: Any = None,
+    tasks_store: Any = None,
 ) -> APIRouter:
     """Create the dashboard FastAPI router."""
     # Plan limits — read once at startup; provisioner restarts engine after updating .env
@@ -2472,9 +2478,22 @@ def create_dashboard_router(
         if event_bus:
             event_bus.emit("chat_user_message", agent=agent_id,
                 data={"message": message, "session": chat_session})
+        # Task 2b: stamp dashboard chat as human-origin so downstream
+        # authorization gates can distinguish a user-driven chat from
+        # an agent-initiated wake.
+        from src.shared.trace import origin_header, trace_headers
+        from src.shared.types import MessageOrigin
+        origin = MessageOrigin(
+            kind="human",
+            channel="dashboard",
+            user=_operator_session_id(request),
+        )
+        hdrs = trace_headers()
+        hdrs.update(origin_header(origin))
         try:
             result = await transport.request(
                 agent_id, "POST", "/chat", json={"message": message}, timeout=120,
+                headers=hdrs,
             )
             response = result.get("response", "(no response)")
             if event_bus:
@@ -2507,12 +2526,24 @@ def create_dashboard_router(
             event_bus.emit("chat_user_message", agent=agent_id,
                 data={"message": message, "session": chat_session})
 
+        # Task 2b: stamp dashboard streaming chat as human-origin.
+        from src.shared.trace import origin_header, trace_headers
+        from src.shared.types import MessageOrigin
+        _origin = MessageOrigin(
+            kind="human",
+            channel="dashboard",
+            user=_operator_session_id(request),
+        )
+        _hdrs = trace_headers()
+        _hdrs.update(origin_header(_origin))
+
         async def event_generator():
             final_response = ""
             try:
                 async for event in transport.stream_request(
                     agent_id, "POST", "/chat/stream",
                     json={"message": message}, timeout=120,
+                    headers=_hdrs,
                 ):
                     if isinstance(event, dict):
                         yield f"data: {json.dumps(event, default=str)}\n\n"
@@ -2563,11 +2594,23 @@ def create_dashboard_router(
         if not targets:
             return {"responses": {}, "message": "No matching agents"}
 
+        # Task 2b: stamp dashboard broadcast as human-origin.
+        from src.shared.trace import origin_header, trace_headers
+        from src.shared.types import MessageOrigin
+        bc_origin = MessageOrigin(
+            kind="human",
+            channel="dashboard",
+            user=_operator_session_id(request),
+        )
+        bc_hdrs = trace_headers()
+        bc_hdrs.update(origin_header(bc_origin))
+
         results = {}
         async def _send(aid: str) -> tuple[str, str]:
             try:
                 data = await transport.request(
                     aid, "POST", "/chat", json={"message": message}, timeout=120,
+                    headers=bc_hdrs,
                 )
                 return aid, data.get("response", "(no response)")
             except Exception as e:
@@ -2608,6 +2651,17 @@ def create_dashboard_router(
         if not agents:
             return {"responses": {}, "message": "No agents registered"}
 
+        # Task 2b: stamp dashboard streaming broadcast as human-origin.
+        from src.shared.trace import origin_header, trace_headers
+        from src.shared.types import MessageOrigin
+        bcs_origin = MessageOrigin(
+            kind="human",
+            channel="dashboard",
+            user=_operator_session_id(request),
+        )
+        bcs_hdrs = trace_headers()
+        bcs_hdrs.update(origin_header(bcs_origin))
+
         queue: asyncio.Queue = asyncio.Queue()
 
         async def _stream_agent(aid: str) -> None:
@@ -2616,6 +2670,7 @@ def create_dashboard_router(
                 async for event in transport.stream_request(
                     aid, "POST", "/chat/stream",
                     json={"message": message}, timeout=120,
+                    headers=bcs_hdrs,
                 ):
                     if isinstance(event, dict):
                         tagged = {**event, "agent": aid}
@@ -2665,8 +2720,18 @@ def create_dashboard_router(
         if event_bus:
             event_bus.emit("chat_user_message", agent=agent_id,
                 data={"message": f"[steer] {message}", "session": chat_session})
+        # Task 2b: stamp human origin on dashboard-initiated steer.
         from src.shared.trace import new_trace_id
-        result = await lane_manager.enqueue(agent_id, message, mode="steer", trace_id=new_trace_id())
+        from src.shared.types import MessageOrigin
+        origin = MessageOrigin(
+            kind="human",
+            channel="dashboard",
+            user=_operator_session_id(request),
+        )
+        result = await lane_manager.enqueue(
+            agent_id, message, mode="steer",
+            trace_id=new_trace_id(), origin=origin,
+        )
         return {"result": result}
 
     @api_router.post("/api/agents/{agent_id}/reset")
@@ -5339,6 +5404,179 @@ def create_dashboard_router(
             parent.rmdir()
             parent = parent.parent
         return {"deleted": True, "name": name}
+
+    # ── Task 9 — Workplace tab + pending-action review ──────────────
+    #
+    # The Workplace tab is a top-level peer of Chat / Agents / System
+    # under ``src/dashboard/static/js/app.js``. It surfaces the durable
+    # task records (Task 6) and the pending-action queue (Task 2d) so a
+    # human can run an agent team end-to-end without inspecting
+    # blackboard keys directly. All endpoints degrade gracefully when
+    # the underlying store is None (orchestration v2 disabled, or
+    # called from a test harness that didn't pass the stores).
+
+    def _orchestration_v2_on() -> bool:
+        # Default-on (rollout). Setting the env var to ``0`` disables
+        # the v2 path; any other value is treated as on so misconfigured
+        # operators don't silently fall back to the legacy path.
+        return os.environ.get("OPENLEGION_ORCHESTRATION_TASKS_V2", "1") != "0"
+
+    @api_router.get("/api/workplace/tasks")
+    async def api_workplace_tasks(
+        project_id: str | None = None,
+        assignee: str | None = None,
+        status: str | None = None,
+    ) -> dict:
+        """List task records for the Workplace board.
+
+        Returns ``{"enabled": False, ...}`` when orchestration v2 is
+        disabled so the SPA can render the empty state with a hint to
+        flip the flag — matches the contract in tests.
+        """
+        if tasks_store is None or not _orchestration_v2_on():
+            return {
+                "enabled": False,
+                "tasks": [],
+                "hint": (
+                    "Set OPENLEGION_ORCHESTRATION_TASKS_V2=1 to enable durable "
+                    "task records and the Workplace board."
+                ),
+            }
+        try:
+            if assignee:
+                rows = tasks_store.list_inbox(
+                    assignee, project_id=project_id, include_terminal=True,
+                )
+            elif project_id:
+                rows = tasks_store.list_project(project_id)
+            else:
+                # Fleet-wide listing — operator-only data is acceptable
+                # because the dashboard is operator-authenticated.
+                with tasks_store._conn() as conn:
+                    sql = (
+                        f"SELECT {tasks_store._SELECT_COLS} FROM tasks "
+                        "ORDER BY created_at DESC LIMIT 500"
+                    )
+                    raw = conn.execute(sql).fetchall()
+                rows = [tasks_store._row_to_dict(r) for r in raw]
+            if status:
+                rows = [r for r in rows if r.get("status") == status]
+            return {"enabled": True, "tasks": rows}
+        except Exception as e:
+            logger.warning("workplace tasks listing failed: %s", e)
+            return {"enabled": True, "tasks": [], "error": str(e)}
+
+    @api_router.get("/api/workplace/projects")
+    async def api_workplace_projects() -> dict:
+        """Project status rollups for the Workplace > project-status tab."""
+        if tasks_store is None or not _orchestration_v2_on():
+            return {"enabled": False, "projects": []}
+        from src.cli.config import _load_projects
+        projects = _load_projects()
+        result = []
+        for pname, pdata in projects.items():
+            try:
+                rows = tasks_store.list_project(pname)
+            except Exception:
+                rows = []
+            counts: dict[str, int] = {}
+            blockers: list[dict] = []
+            for r in rows:
+                counts[r["status"]] = counts.get(r["status"], 0) + 1
+                if r["status"] == "blocked":
+                    blockers.append({
+                        "task_id": r["id"],
+                        "title": r["title"],
+                        "assignee": r["assignee"],
+                        "blocker_note": r.get("blocker_note") or "",
+                    })
+            result.append({
+                "name": pname,
+                "description": pdata.get("description", ""),
+                "members": pdata.get("members", []),
+                "status": pdata.get("status", "active"),
+                "counts": counts,
+                "total": len(rows),
+                "blockers": blockers,
+            })
+        return {"enabled": True, "projects": result}
+
+    @api_router.get("/api/workplace/blockers")
+    async def api_workplace_blockers() -> dict:
+        """Fleet-wide blocked-task list for the Workplace > blockers tab."""
+        if tasks_store is None or not _orchestration_v2_on():
+            return {"enabled": False, "blockers": []}
+        try:
+            with tasks_store._conn() as conn:
+                sql = (
+                    f"SELECT {tasks_store._SELECT_COLS} FROM tasks "
+                    "WHERE status='blocked' ORDER BY updated_at DESC LIMIT 200"
+                )
+                raw = conn.execute(sql).fetchall()
+            rows = [tasks_store._row_to_dict(r) for r in raw]
+        except Exception as e:
+            logger.warning("workplace blockers listing failed: %s", e)
+            rows = []
+        return {"enabled": True, "blockers": rows}
+
+    @api_router.get("/api/workplace/outputs")
+    async def api_workplace_outputs(
+        project_id: str | None = None,
+        limit: int = 100,
+    ) -> dict:
+        """Completed task artifacts for the Workplace > team-outputs tab."""
+        if tasks_store is None or not _orchestration_v2_on():
+            return {"enabled": False, "outputs": []}
+        limit = max(1, min(int(limit or 100), 500))
+        try:
+            with tasks_store._conn() as conn:
+                if project_id:
+                    sql = (
+                        f"SELECT {tasks_store._SELECT_COLS} FROM tasks "
+                        "WHERE status='done' AND project_id=? "
+                        "ORDER BY completed_at DESC LIMIT ?"
+                    )
+                    raw = conn.execute(sql, (project_id, limit)).fetchall()
+                else:
+                    sql = (
+                        f"SELECT {tasks_store._SELECT_COLS} FROM tasks "
+                        "WHERE status='done' ORDER BY completed_at DESC LIMIT ?"
+                    )
+                    raw = conn.execute(sql, (limit,)).fetchall()
+            rows = [tasks_store._row_to_dict(r) for r in raw]
+        except Exception as e:
+            logger.warning("workplace outputs listing failed: %s", e)
+            rows = []
+        return {"enabled": True, "outputs": rows}
+
+    @api_router.get("/api/workplace/pending")
+    async def api_workplace_pending() -> dict:
+        """List open pending actions for inline + System>Operator review."""
+        if pending_actions is None:
+            return {"pending": []}
+        try:
+            pending_actions.reap_expired()
+            rows = pending_actions.list_pending()
+        except Exception as e:
+            logger.warning("workplace pending listing failed: %s", e)
+            rows = []
+        return {"pending": rows}
+
+    @api_router.post("/api/workplace/pending/{nonce}/cancel")
+    async def api_workplace_pending_cancel(nonce: str) -> dict:
+        """Cancel a pending action — backs the dashboard "Cancel" button."""
+        if pending_actions is None:
+            raise HTTPException(404, "Pending action store not available")
+        record = pending_actions.cancel(nonce, actor="operator")
+        if record is None:
+            raise HTTPException(404, "Pending action not found or already expired")
+        return {
+            "ok": True,
+            "nonce": nonce,
+            "target_kind": record["target_kind"],
+            "target_id": record["target_id"],
+            "action_kind": record["action_kind"],
+        }
 
     @api_router.get("/static/{file_path:path}")
     async def static_file(file_path: str, v: str | None = None) -> FileResponse:

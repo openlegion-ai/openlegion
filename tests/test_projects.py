@@ -480,6 +480,38 @@ class TestBlackboardPermissions:
         assert read == ["projects/marketing/*"]
         assert write == ["projects/marketing/*"]
 
+    def test_add_permissions_appends_alongside_existing_patterns(self, tmp_path):
+        """``_add_project_blackboard_permissions`` appends the project
+        pattern; pre-existing narrower patterns survive. Pin: the helper
+        is additive, never a full replacement of the agent's existing
+        ACL. Other tests rely on this when an agent is moved between
+        projects (the ``_add_agent_to_project`` move sequence calls
+        remove-then-add, so the appended pattern is the only project
+        pattern that ever co-exists with non-project patterns)."""
+        perms_file = tmp_path / "permissions.json"
+        perms_file.write_text(json.dumps({
+            "permissions": {
+                "bot": {
+                    "blackboard_read": ["context/global", "tasks/bot/*"],
+                    "blackboard_write": ["output/bot/*"],
+                },
+            },
+        }))
+
+        with patch("src.cli.config.PERMISSIONS_FILE", perms_file):
+            _add_project_blackboard_permissions("bot", "marketing")
+
+        perms = json.loads(perms_file.read_text())
+        read = perms["permissions"]["bot"]["blackboard_read"]
+        write = perms["permissions"]["bot"]["blackboard_write"]
+        # Existing patterns survived.
+        assert "context/global" in read
+        assert "tasks/bot/*" in read
+        assert "output/bot/*" in write
+        # Project pattern was appended.
+        assert "projects/marketing/*" in read
+        assert "projects/marketing/*" in write
+
     def test_remove_permissions(self, tmp_path):
         """Removing project permissions clears ALL blackboard access."""
         perms_file = tmp_path / "permissions.json"
@@ -498,6 +530,44 @@ class TestBlackboardPermissions:
         perms = json.loads(perms_file.read_text())
         assert perms["permissions"]["bot"]["blackboard_read"] == []
         assert perms["permissions"]["bot"]["blackboard_write"] == []
+
+    def test_remove_permissions_only_strips_target_project(self, tmp_path):
+        """``_remove_project_blackboard_permissions`` is targeted: it strips
+        the named project's pattern only. Other patterns (including other
+        projects' patterns and non-project patterns like ``context/global``)
+        survive. Pin: leaving project A does not nuke an agent's access
+        to project B or to fleet-wide / per-agent patterns."""
+        perms_file = tmp_path / "permissions.json"
+        perms_file.write_text(json.dumps({
+            "permissions": {
+                "bot": {
+                    "blackboard_read": [
+                        "context/global",
+                        "projects/marketing/*",
+                        "projects/sales/*",
+                    ],
+                    "blackboard_write": [
+                        "output/bot/*",
+                        "projects/marketing/*",
+                    ],
+                },
+            },
+        }))
+
+        with patch("src.cli.config.PERMISSIONS_FILE", perms_file):
+            _remove_project_blackboard_permissions("bot", "marketing")
+
+        perms = json.loads(perms_file.read_text())
+        read = perms["permissions"]["bot"]["blackboard_read"]
+        write = perms["permissions"]["bot"]["blackboard_write"]
+        # Marketing is gone.
+        assert "projects/marketing/*" not in read
+        assert "projects/marketing/*" not in write
+        # Sales survives (other project).
+        assert "projects/sales/*" in read
+        # Non-project patterns survive.
+        assert "context/global" in read
+        assert "output/bot/*" in write
 
 
 class TestLoadConfigWithProjects:

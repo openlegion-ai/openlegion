@@ -15,6 +15,7 @@ import contextlib
 import hmac
 import inspect
 import json
+import os
 import re
 import time
 import uuid as _uuid
@@ -27,6 +28,13 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.responses import StreamingResponse
 
 from src.host.credentials import is_system_credential
+from src.host.orchestration import (
+    VALID_STATUSES,
+    InvalidStatusTransition,
+    TaskNotFound,
+    Tasks,
+)
+from src.host.pending_actions import PendingActions
 from src.shared.redaction import redact_url
 from src.shared.types import (
     AGENT_ID_RE_PATTERN,
@@ -87,44 +95,420 @@ if TYPE_CHECKING:
     from src.host.runtime import RuntimeBackend
     from src.host.traces import TraceStore
     from src.host.transport import Transport
+    from src.shared.types import MessageOrigin
 
 
-# ── Pending Config Change Store (in-memory) ──────────────────────
-
-_pending_changes: dict[str, dict] = {}
+# ── Pending Config Change Store (SQLite-backed) ──────────────────
+#
+# Task 2d migrated this from an in-memory dict to a SQLite-backed
+# ``PendingActions`` store (``data/pending_actions.db``) so pending
+# operator-config edits survive mesh restarts. Schema carries the
+# payload digest (replay protection) and origin kind (so confirm-side
+# gates can require ``origin_kind="human"``). The mesh app picks the
+# canonical instance up via ``_get_pending_actions_store()`` below;
+# the module-level helpers (kept for backward compatibility with
+# external test imports) delegate to that singleton.
 _MAX_PENDING = 10
 _CHANGE_TTL_SECONDS = 300
 
+# Module-level singleton used by the ``_store_pending_change`` /
+# ``_get_pending_change`` / ``_consume_pending_change`` shims below.
+# ``create_mesh_app`` sets this to its own instance so the helpers and
+# the app share one store; tests that import the helpers directly get
+# an in-memory store the first time they touch one of the shims.
+_pending_actions_singleton: PendingActions | None = None
+
+
+def _get_pending_actions_store() -> PendingActions:
+    """Lazy-init the module-level pending-action store.
+
+    Tests that import ``_store_pending_change`` directly without going
+    through ``create_mesh_app`` will land here; we use ``:memory:`` so
+    they don't pollute the cwd. Production callers run through
+    ``create_mesh_app``, which constructs a disk-backed instance and
+    assigns it to ``_pending_actions_singleton`` before the helpers
+    are ever called.
+    """
+    global _pending_actions_singleton
+    if _pending_actions_singleton is None:
+        _pending_actions_singleton = PendingActions(db_path=":memory:")
+    return _pending_actions_singleton
+
+
+# ── Backward-compat dict view ───────────────────────────────────────
+# Existing tests (``tests/test_operator_audit.py``) imported the legacy
+# ``_pending_changes`` dict directly. They want to ``.clear()`` it,
+# index into it, and mutate ``expires_at`` on a row to force expiry.
+# We expose a thin proxy that forwards each operation to the SQLite
+# store so those existing tests keep passing without leaking the old
+# in-memory dict semantics back into production code.
+
+class _PendingChangesProxy:
+    """Dict-like view over the SQLite pending_actions store.
+
+    Keeps the legacy ``_pending_changes`` import working: ``.clear()``,
+    ``__contains__``, ``__getitem__`` for tests; production code uses
+    :class:`PendingActions` directly.
+    """
+
+    def _store(self) -> PendingActions:
+        return _get_pending_actions_store()
+
+    def clear(self) -> None:
+        with self._store()._conn() as conn:
+            conn.execute("DELETE FROM pending_actions")
+
+    def __contains__(self, change_id: object) -> bool:
+        if not isinstance(change_id, str):
+            return False
+        return self._store().peek(change_id) is not None
+
+    def __len__(self) -> int:
+        return len(self._store().list_pending())
+
+    def __getitem__(self, change_id: str) -> dict:
+        rec = self._store().peek(change_id)
+        if rec is None:
+            raise KeyError(change_id)
+        # Translate from the new schema back to the legacy fields the
+        # old tests asserted on. ``payload`` carries the (old, new)
+        # value pair as a dict, plus ``field`` lives on the row itself.
+        payload = rec.get("payload") or {}
+        return {
+            "agent_id": rec["target_id"],
+            "field": rec["action_kind"],
+            "old_value": payload.get("old_value", ""),
+            "new_value": payload.get("new_value", ""),
+            "expires_at": datetime.fromtimestamp(rec["expires_at"], tz=timezone.utc),
+        }
+
+    def __setitem__(self, change_id: str, value: dict) -> None:
+        # Only the ``expires_at`` mutation is supported -- it's the
+        # only mutation legacy tests perform on this dict (to force
+        # expiry). Other writes go through ``_store_pending_change``.
+        if not isinstance(value, dict) or "expires_at" not in value:
+            raise NotImplementedError(
+                "Use _store_pending_change to insert; only expires_at "
+                "mutations are supported on this proxy.",
+            )
+        new_expiry = value["expires_at"]
+        if isinstance(new_expiry, datetime):
+            new_expiry = new_expiry.timestamp()
+        with self._store()._conn() as conn:
+            conn.execute(
+                "UPDATE pending_actions SET expires_at=? WHERE nonce=?",
+                (new_expiry, change_id),
+            )
+
+
+_pending_changes = _PendingChangesProxy()
+
 
 def _cleanup_expired_changes() -> None:
-    now = datetime.now(timezone.utc)
-    expired = [k for k, v in _pending_changes.items() if v["expires_at"] < now]
-    for k in expired:
-        del _pending_changes[k]
+    """Reap expired pending actions. Kept for backward compatibility."""
+    _get_pending_actions_store().reap_expired()
 
 
 def _store_pending_change(agent_id: str, field: str, old_value: object, new_value: object) -> str:
-    _cleanup_expired_changes()
-    if len(_pending_changes) >= _MAX_PENDING:
-        oldest = min(_pending_changes, key=lambda k: _pending_changes[k]["expires_at"])
-        del _pending_changes[oldest]
+    """Persist a pending config change. Returns a change_id (nonce).
+
+    Backed by ``PendingActions`` (SQLite). Capped at ``_MAX_PENDING``
+    rows per process; oldest expires-first row is evicted to make room.
+    """
+    store = _get_pending_actions_store()
+    store.reap_expired()
+    pending = store.list_pending()
+    if len(pending) >= _MAX_PENDING:
+        # Evict the row whose ``expires_at`` is soonest -- matches the
+        # legacy behavior (``min(...)`` over ``expires_at``).
+        oldest = min(pending, key=lambda r: r["expires_at"])
+        with store._conn() as conn:
+            conn.execute(
+                "DELETE FROM pending_actions WHERE nonce=?", (oldest["nonce"],),
+            )
     change_id = str(_uuid.uuid4())
-    _pending_changes[change_id] = {
-        "agent_id": agent_id, "field": field,
-        "old_value": old_value, "new_value": new_value,
-        "expires_at": datetime.now(timezone.utc) + timedelta(seconds=_CHANGE_TTL_SECONDS),
-    }
+    payload = {"old_value": old_value, "new_value": new_value}
+    store.store(
+        nonce=change_id,
+        actor="operator",
+        target_kind="agent",
+        target_id=agent_id,
+        action_kind=field,
+        payload=payload,
+        ttl=_CHANGE_TTL_SECONDS,
+    )
     return change_id
 
 
 def _get_pending_change(change_id: str) -> dict | None:
-    _cleanup_expired_changes()
-    return _pending_changes.get(change_id)
+    """Read a pending change. Returns the legacy dict shape or None."""
+    store = _get_pending_actions_store()
+    rec = store.peek(change_id)
+    if rec is None:
+        return None
+    payload = rec.get("payload") or {}
+    return {
+        "agent_id": rec["target_id"],
+        "field": rec["action_kind"],
+        "old_value": payload.get("old_value", ""),
+        "new_value": payload.get("new_value", ""),
+        "expires_at": datetime.fromtimestamp(rec["expires_at"], tz=timezone.utc),
+    }
 
 
 def _consume_pending_change(change_id: str) -> dict | None:
-    _cleanup_expired_changes()
-    return _pending_changes.pop(change_id, None)
+    """Atomically consume a pending change. Returns legacy dict shape or None."""
+    store = _get_pending_actions_store()
+    rec = store.consume(change_id)
+    if rec is None:
+        return None
+    payload = rec.get("payload") or {}
+    return {
+        "agent_id": rec["target_id"],
+        "field": rec["action_kind"],
+        "old_value": payload.get("old_value", ""),
+        "new_value": payload.get("new_value", ""),
+        "expires_at": datetime.fromtimestamp(rec["expires_at"], tz=timezone.utc),
+    }
+
+
+# ── Task 2c: Server-side channel origin validation ────────────────
+#
+# ``X-Origin`` is authorization-bearing only after the mesh has a reason
+# to trust the stamping layer. Paired messaging channels are re-checked
+# against their on-disk pairing record; non-paired human channels and
+# privileged non-human kinds are preserved only for trusted callers such
+# as the operator or loopback-internal mesh calls.
+_PAIRED_CHANNELS = frozenset({"telegram", "discord", "slack", "whatsapp", "webhook"})
+_TRUSTED_ORIGIN_CALLERS = frozenset({"mesh", "operator"})
+
+# Tiny TTL cache for pairing-record reads. The on-disk file changes only
+# on ``/pair`` operations, which are rare. 5s staleness is acceptable for
+# a defense-in-depth gate; ``_invalidate_pairing_cache`` lets the pair/
+# unpair flow drop a stale entry on demand.
+_pairing_cache: dict[str, tuple[float, dict | None]] = {}
+_PAIRING_CACHE_TTL = 5.0
+
+
+def _read_pairing_record(channel: str) -> dict | None:
+    """Read the pairing JSON for a channel.
+
+    Returns ``None`` if missing, malformed, or unreadable. Cached for
+    ``_PAIRING_CACHE_TTL`` seconds keyed on channel name.
+    """
+    cached = _pairing_cache.get(channel)
+    if cached and time.monotonic() - cached[0] < _PAIRING_CACHE_TTL:
+        return cached[1]
+    from src.cli.config import PROJECT_ROOT
+    path = PROJECT_ROOT / "config" / f"{channel}_paired.json"
+    record: dict | None
+    if not path.exists():
+        record = None
+    else:
+        try:
+            raw = path.read_text()
+            parsed = json.loads(raw)
+            record = parsed if isinstance(parsed, dict) else None
+        except (json.JSONDecodeError, OSError):
+            record = None
+    _pairing_cache[channel] = (time.monotonic(), record)
+    return record
+
+
+def _invalidate_pairing_cache(channel: str | None = None) -> None:
+    """Drop the cached pairing record for ``channel`` (or all channels).
+
+    Pair/unpair endpoints can call this to force a fresh read on the
+    next ``/mesh/wake`` (or other validated-origin) request. When called
+    with no argument, clears the entire cache — useful in tests.
+    """
+    if channel is None:
+        _pairing_cache.clear()
+        return
+    _pairing_cache.pop(channel, None)
+
+
+def _is_paired_user(channel: str, user: str) -> bool:
+    """Check if ``user`` is paired for ``channel``.
+
+    Mirrors :meth:`PairingManager.is_allowed` semantics: owner match OR
+    membership in the allowed list. Comparisons are stringified so
+    Telegram numeric ids and Slack/Discord string ids round-trip the
+    same way.
+    """
+    record = _read_pairing_record(channel)
+    if not record:
+        return False
+    owner = record.get("owner")
+    allowed = record.get("allowed", [])
+    if not isinstance(allowed, list):
+        allowed = []
+    if owner is not None and str(owner) == str(user):
+        return True
+    return str(user) in (str(u) for u in allowed)
+
+
+def _is_internal_caller(request: Request) -> bool:
+    """Return True for trusted in-process callers (loopback + ``x-mesh-internal``).
+
+    The mesh's own dispatcher, the dashboard router, the CLI manager
+    process, and health checks all hit ``localhost`` with the
+    ``x-mesh-internal: 1`` header. Authorization gates that should let
+    those callers through (e.g. Task 2e's worker → operator wake block)
+    use this predicate.
+
+    Both conditions must hold: the header AND a loopback peer. The
+    header alone is insufficient — a public-internet caller can set any
+    header they like — and a loopback peer alone is insufficient too,
+    since an agent container can be wired to reach the mesh via
+    loopback in some test/dev setups.
+    """
+    if not request.headers.get("x-mesh-internal"):
+        return False
+    client_host = request.client.host if request.client else ""
+    try:
+        import ipaddress
+
+        return ipaddress.ip_address(client_host).is_loopback
+    except (ValueError, AttributeError):
+        return False
+
+
+def _downgrade_origin(origin: "MessageOrigin", reason: str) -> "MessageOrigin":
+    logger.warning(
+        "origin validation failed: %s kind=%s channel=%s user=%s — downgrading to kind=agent",
+        reason,
+        origin.kind,
+        origin.channel,
+        origin.user,
+    )
+    return origin.model_copy(update={"kind": "agent"})
+
+
+def _validated_origin(
+    request: Request, caller: str = "",
+) -> "MessageOrigin | None":
+    """Parse ``X-Origin`` and downgrade unverifiable channel claims.
+
+    This is the authorization-grade origin getter — endpoints that care
+    about an origin's trust level (durable confirms, wakes, pending
+    actions) must use this instead of :func:`parse_origin_header`.
+
+    Behaviour:
+
+    * Missing/malformed header → ``None`` (caller decides what default
+      to use; ``/mesh/wake`` falls back to ``MessageOrigin(kind="agent")``).
+    * Trusted caller (operator/mesh or loopback internal) → returned unchanged.
+    * ``kind == "agent"`` → returned unchanged.
+    * Privileged non-human kinds from other callers → downgraded.
+    * ``kind == "human"`` with a non-paired channel → downgraded.
+    * ``kind == "human"`` with a paired channel and a paired user →
+      returned unchanged.
+    * ``kind == "human"`` with a paired channel and an unpaired/empty
+      user → downgraded to ``kind="agent"`` (warning logged).
+
+    The helper never raises: a forged X-Origin header must not crash a
+    request. ``MessageOrigin`` is ``frozen=True`` (Task 2a), so the
+    downgrade is via :meth:`pydantic.BaseModel.model_copy`, not mutation.
+    """
+    from src.shared.types import MessageOrigin
+
+    raw = request.headers.get("x-origin")
+    # Use ``trust_kind=True`` here because we deliberately want to see
+    # the caller-supplied kind so we can validate it. The validation
+    # below either preserves it (for verified channel claims) or
+    # downgrades it. ``parse_origin_header`` (trust_kind=False) is
+    # still the right call for trace-only / non-authorization paths.
+    origin = MessageOrigin.from_header_value(raw, trust_kind=True)
+    if origin is None:
+        return None
+    if caller in _TRUSTED_ORIGIN_CALLERS or _is_internal_caller(request):
+        return origin
+    if origin.kind == "agent":
+        return origin
+    if origin.kind != "human":
+        return _downgrade_origin(origin, "untrusted non-human origin kind")
+    if origin.channel not in _PAIRED_CHANNELS:
+        return _downgrade_origin(origin, "unverifiable human origin channel")
+    if not origin.user:
+        return _downgrade_origin(origin, "empty paired-channel user")
+    if _is_paired_user(origin.channel, origin.user):
+        return origin
+    return _downgrade_origin(origin, "unpaired channel user")
+
+
+# ── Task 5: Project scope isolation (default enforce) ─────────────────
+#
+# ``OPENLEGION_PROJECT_SCOPE_MODE`` is the kill switch for the project
+# isolation rollout. Default ``enforce`` — workers see only their own
+# project members on ``/mesh/agents`` and only their own project
+# blackboard ACLs. ``warn`` is preserved as an emergency rollback that
+# restores the legacy fleet-wide visibility while still emitting
+# structured warnings on every call that would have been denied under
+# enforce. Read once at module import (env vars don't change at
+# runtime); invalid values fall back to ``enforce`` with a logged
+# warning.
+_PROJECT_SCOPE_MODE = os.environ.get("OPENLEGION_PROJECT_SCOPE_MODE", "enforce").lower()
+if _PROJECT_SCOPE_MODE not in {"warn", "enforce"}:
+    logger.warning(
+        "Invalid OPENLEGION_PROJECT_SCOPE_MODE=%r, defaulting to enforce",
+        _PROJECT_SCOPE_MODE,
+    )
+    _PROJECT_SCOPE_MODE = "enforce"
+
+
+# ── Task 6: Durable orchestration task records ────────────────────────
+#
+# ``OPENLEGION_ORCHESTRATION_TASKS_V2`` is the kill switch for the
+# durable-tasks rollout. Default ``1`` (enabled) — the mesh constructs
+# a ``Tasks`` SQLite store and the coordination tool routes hand_off /
+# check_inbox / update_status / complete_task through the new
+# endpoints. Setting the env var to ``0`` is preserved as an emergency
+# rollback that falls back to the legacy blackboard-dict path in
+# ``coordination_tool``. **No dual-write.** Read once at module import;
+# runtime flips require a restart.
+_ORCHESTRATION_TASKS_V2 = (
+    os.environ.get("OPENLEGION_ORCHESTRATION_TASKS_V2", "1") == "1"
+)
+
+
+# Counter surfaced on ``/mesh/system/metrics`` as ``scope_warn_total``.
+# Incremented every time a worker's call would have returned a smaller
+# response under enforce mode. Lets ops gauge soak-window readiness
+# before flipping the env var to ``enforce``.
+_scope_warn_count = 0
+
+
+def _record_scope_warn() -> None:
+    """Bump the warn-mode counter (visible on ``/mesh/system/metrics``)."""
+    global _scope_warn_count
+    _scope_warn_count += 1
+
+
+def _caller_projects(agent_id: str) -> set[str]:
+    """Return the project memberships visible to ``agent_id``.
+
+    Workers see only projects whose ``metadata.yaml`` lists them as
+    members. The operator and trusted internal callers (``mesh``) are
+    fleet-global by design — they get a sentinel meaning "all projects",
+    represented here as an empty set with the caller_is_global flag the
+    caller computes separately. Use the helper purely as a lookup of
+    *worker* memberships and branch on operator/internal in the caller.
+    """
+    if agent_id in {"operator", "mesh"}:
+        # Operator and the mesh-internal pseudo-id are global; the caller
+        # branches on those identities directly. Returning an empty set
+        # here forces callers to think about the global path and not
+        # silently include "every project" in a worker-style filter.
+        return set()
+    from src.cli.config import _load_projects
+
+    projects = _load_projects()
+    return {
+        name
+        for name, meta in projects.items()
+        if agent_id in meta.get("members", [])
+    }
 
 
 def create_mesh_app(
@@ -154,6 +538,72 @@ def create_mesh_app(
     # Exposed for external callers (dashboard, health monitor) to clean up
     # agent state when agents are removed.
     app.cleanup_agent = lambda agent_id: None  # replaced below
+
+    # Task 2d: persistent pending-action store (replaces the in-memory
+    # ``_pending_changes`` dict). Mirrors the path convention of
+    # ``data/costs.db`` / ``data/traces.db``. The disk-backed instance
+    # is also assigned to the module-level singleton so the legacy
+    # ``_store_pending_change`` / ``_consume_pending_change`` helpers
+    # share state with the endpoints below.
+    pending_actions = PendingActions(db_path="data/pending_actions.db")
+    app.pending_actions = pending_actions  # exposed for tests/dashboard
+    global _pending_actions_singleton
+    _pending_actions_singleton = pending_actions
+    # Task 9 — wire EventBus so store/consume/cancel/reap_expired emit
+    # ``pending_action_*`` events to the dashboard.
+    if event_bus is not None:
+        pending_actions.set_event_bus(event_bus)
+
+    # Task 6: durable orchestration task records. The store is only
+    # constructed when the feature flag is on; when off, the new
+    # ``/mesh/tasks*`` endpoints return HTTP 503 so coordination_tool
+    # falls through to the legacy blackboard path.
+    # ``OPENLEGION_ORCHESTRATION_TASKS_DB`` overrides the path — used by
+    # tests to keep the db inside ``tmp_path`` instead of polluting cwd.
+    tasks_store: Tasks | None = None
+    if _ORCHESTRATION_TASKS_V2:
+        _tasks_db_path = os.environ.get(
+            "OPENLEGION_ORCHESTRATION_TASKS_DB", "data/tasks.db",
+        )
+        tasks_store = Tasks(db_path=_tasks_db_path)
+    app.tasks_store = tasks_store  # exposed for tests/dashboard
+    # Task 9 — wire EventBus so create / update_status / reroute /
+    # cancel emit ``task_*`` events to the dashboard.
+    if tasks_store is not None and event_bus is not None:
+        tasks_store.set_event_bus(event_bus)
+
+    # Rollout: auto-run the legacy blackboard → tasks migration once
+    # at startup so existing fleets transition seamlessly when the v2
+    # flag flips on. The helper is idempotent (keyed on the legacy
+    # ``handoff_id`` → new ``task_id``) so subsequent restarts find
+    # nothing to migrate and are no-ops. Migration failures are logged
+    # but never crash mesh startup — the legacy keys remain in place
+    # and operators can re-run the helper manually.
+    if _ORCHESTRATION_TASKS_V2 and tasks_store is not None:
+        from src.host.orchestration_migration import migrate_blackboard_to_tasks
+        try:
+            _migration_result = migrate_blackboard_to_tasks(blackboard, tasks_store)
+            _migrated = int(_migration_result.get("migrated", 0) or 0)
+            _skipped = int(_migration_result.get("skipped", 0) or 0)
+            _deleted = int(_migration_result.get("deleted", 0) or 0)
+            _errors = _migration_result.get("errors", []) or []
+            _error_count = len(_errors) if isinstance(_errors, list) else int(_errors)
+            if _migrated > 0 or _deleted > 0:
+                logger.info(
+                    "orchestration migration: migrated=%d skipped=%d deleted=%d errors=%d",
+                    _migrated, _skipped, _deleted, _error_count,
+                )
+            else:
+                logger.debug("orchestration migration: no legacy tasks found")
+        except Exception as e:
+            # Migration failure must not crash mesh startup. Logged
+            # loudly so ops can investigate; legacy tasks stay in place
+            # and can be migrated manually later.
+            logger.error(
+                "orchestration migration failed at startup: %s — legacy tasks preserved",
+                e,
+                exc_info=True,
+            )
 
     _auth_tokens = auth_tokens if auth_tokens is not None else {}
     _agent_projects = agent_projects if agent_projects is not None else {}
@@ -268,6 +718,23 @@ def create_mesh_app(
                 logger.warning("Wallet cleanup for '%s' failed: %s", agent_id, e)
 
     app.cleanup_agent = _cleanup_agent  # type: ignore[attr-defined]
+
+    def _extract_bearer(request: Request) -> str | None:
+        """Return the raw ``Authorization: Bearer <token>`` value, or ``None``.
+
+        Unlike ``_extract_verified_agent_id``, this does NOT resolve the
+        token to an agent identity — it returns the raw token string for
+        callers that need to do their own constant-time comparison
+        (e.g. the operator-registration gate in ``/mesh/register``).
+
+        Returns ``None`` when the header is missing or malformed; never
+        raises. The caller decides how strict to be.
+        """
+        auth_header = request.headers.get("authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return None
+        token = auth_header[7:]
+        return token if token else None
 
     def _extract_verified_agent_id(request: Request) -> str:
         """Extract and verify agent identity from a Bearer token.
@@ -432,15 +899,57 @@ def create_mesh_app(
         else:
             wake_msg = f"You have a new task from {caller}. Call check_inbox() to see it."
 
-        from src.shared.trace import parse_origin_header
-        origin = parse_origin_header(request.headers.get("x-origin"))
+        from src.shared.types import MessageOrigin
+        # Task 2c: ``_validated_origin`` re-checks ``kind="human"``
+        # channel claims against the on-disk pairing record. Forged or
+        # unverifiable claims are downgraded to ``kind="agent"`` so the
+        # lane payload (and any downstream auth gate that will be added
+        # in Task 2d/2e) cannot be tricked by a hostile/buggy adapter.
+        origin = _validated_origin(request, caller)
+
+        # Task 2e: block synchronous worker → operator wakes.
+        #
+        # Workers signal operator-bound completion by writing task
+        # records (Task 0 hotfix at ``global/tasks/operator/<id>``); the
+        # operator polls those records on heartbeat. This block prevents
+        # an agent from steering the operator into a privileged action
+        # just by being able to message it.
+        #
+        # Allowed paths (must NOT be blocked):
+        #   * ``caller == "operator"`` — the operator can wake itself
+        #     for self-tests / self-resume.
+        #   * ``_is_internal_caller(request)`` — loopback +
+        #     ``x-mesh-internal``: the dashboard / CLI manager process /
+        #     mesh internals can still wake the operator.
+        #   * ``origin.kind == "human"`` — a real human action that
+        #     survived ``_validated_origin``'s pairing recheck.
+        if (
+            target == "operator"
+            and caller != "operator"
+            and not _is_internal_caller(request)
+            and (origin is None or origin.kind != "human")
+        ):
+            raise HTTPException(
+                403,
+                "Worker agents cannot synchronously wake the operator. "
+                "Hand off via tasks/operator/* instead; the operator "
+                "polls on heartbeat.",
+            )
+        # Task 2b: missing/invalid origin downgrades to ``kind="agent"``
+        # (least-trusted) instead of ``None`` so downstream gates always
+        # see an explicit kind. Auto-notify still gated on the original
+        # origin presence — agent-default wakes have no addressable
+        # channel/user, so there is no notification target.
+        had_origin = origin is not None
+        if origin is None:
+            origin = MessageOrigin(kind="agent", channel="", user="")
 
         if lane_manager is not None and dispatch_loop is not None:
             try:
                 asyncio.run_coroutine_threadsafe(
                     lane_manager.enqueue(
                         target, wake_msg, mode="followup",
-                        origin=origin, auto_notify=origin is not None,
+                        origin=origin, auto_notify=had_origin,
                     ),
                     dispatch_loop,
                 )
@@ -1062,9 +1571,60 @@ def create_mesh_app(
 
     @app.post("/mesh/register")
     async def register_agent(data: dict, request: Request) -> dict:
-        """Agent registers itself with the mesh on startup."""
-        agent_id = _validate_agent_id(data.get("agent_id", ""))
-        agent_id = _resolve_agent_id(agent_id, request)
+        """Agent registers itself with the mesh on startup.
+
+        Reserved-ID handling (Task 4):
+          * ``mesh`` / ``canary-probe`` — always rejected (system-only).
+          * ``operator`` — accepted only when the caller's bearer token
+            matches ``auth_tokens["operator"]`` (constant-time compare).
+            Fail-closed: if the token pool is empty (no auth configured)
+            the operator path is rejected as well — operator identity is
+            cryptographic, not positional.
+          * everything else — passes the standard
+            ``_validate_agent_id`` regex check and is identified by the
+            Bearer token via ``_resolve_agent_id``.
+        """
+        requested_id = data.get("agent_id", "")
+        # Format check first (so reserved-ID gating below sees a well-formed
+        # claim). Note: we deliberately don't call ``_validate_agent_id``
+        # here — that helper rejects the operator outright, but Task 4
+        # needs to accept the operator's claim when the bearer matches.
+        if not requested_id or not _AGENT_ID_RE.match(requested_id):
+            raise HTTPException(
+                400,
+                "Invalid agent_id: must be 1-64 alphanumeric/hyphen/underscore chars",
+            )
+
+        if requested_id == "operator":
+            # Cryptographic gate: require a bearer matching the
+            # operator-specific token. The error message intentionally
+            # does NOT echo the supplied bearer — comparing in
+            # constant time still leaks via debug logs if we surface it.
+            expected = _auth_tokens.get("operator") if _auth_tokens else None
+            bearer = _extract_bearer(request)
+            if (
+                not expected
+                or not bearer
+                or not hmac.compare_digest(bearer, expected)
+            ):
+                raise HTTPException(
+                    403,
+                    "Reserved agent_id 'operator' requires the operator's bearer token",
+                )
+            agent_id = "operator"
+        elif requested_id in {"mesh", "canary-probe"}:
+            # Stay rejected for any caller, including the operator's
+            # bearer. ``canary-probe`` continues to use the internal-only
+            # registration path (router.register_agent directly).
+            raise HTTPException(
+                403, f"Reserved agent_id '{requested_id}' cannot register",
+            )
+        else:
+            # Standard path: format-validate and resolve identity from
+            # the Bearer token (auth on) or trust the caller (dev/test).
+            agent_id = _validate_agent_id(requested_id)
+            agent_id = _resolve_agent_id(agent_id, request)
+
         capabilities = data.get("capabilities", [])
         if not isinstance(capabilities, list) or len(capabilities) > 200:
             raise HTTPException(400, "capabilities must be a list of at most 200 items")
@@ -1135,6 +1695,12 @@ def create_mesh_app(
         """
         agent_id = _resolve_agent_id(data.get("agent_id", ""), request)
         await _check_rate_limit("notify", agent_id)
+        # TODO(Task 4): gate on ``permissions.can_request_user_credentials``.
+        # The capability bit is wired in Task 3 (defaults False for workers,
+        # True for operator), but enforcing it here today would block every
+        # non-operator agent from asking the user for a credential.  Task 4
+        # is responsible for populating the field on workers that actually
+        # need it (template-driven) before this gate flips to enforced.
 
         name = data.get("name", "")
         description = data.get("description", "")
@@ -1277,15 +1843,65 @@ def create_mesh_app(
 
         - project set: return only that project's members
         - agent_id set (standalone): return only that agent
-        - neither (dashboard/internal): return all
+        - neither (dashboard/internal): return all (under enforce mode,
+          worker callers see only their own projects + operator)
+
+        Task 5 layered a per-caller filter on the unscoped path. Today's
+        legacy behavior is "every authenticated agent sees the full
+        fleet" — under ``OPENLEGION_PROJECT_SCOPE_MODE=enforce`` workers
+        see only members of their own projects (plus the always-global
+        operator). Under ``warn`` (the default), the response shape
+        stays legacy and a structured ``scope-warn`` log line is emitted
+        so operators can soak before flipping.
         """
         if agent_id:
             agent_id = _resolve_agent_id(agent_id, request)
         else:
             _require_any_auth(request)
+
+        # Resolve the caller for scope filtering. ``_extract_verified_agent_id``
+        # handles dev/test mode (no auth tokens → ``X-Agent-ID`` header
+        # hint or ``"unknown"``) and production (Bearer token → identity).
+        # Internal loopback callers are treated as global; their
+        # ``X-Agent-ID`` hint is ignored. The endpoint already gated
+        # auth above, so caller resolution can't 401 here.
+        caller_is_internal = _is_internal_caller(request)
+        if caller_is_internal:
+            caller = "mesh"
+        else:
+            try:
+                caller = _extract_verified_agent_id(request)
+            except HTTPException:
+                # Already passed _require_any_auth, but be defensive.
+                caller = "unknown"
+        caller_is_global = caller_is_internal or caller == "operator"
+
+        # Task 8 — pull structured routing fields from agents.yaml. The
+        # ``capabilities`` key on the entry is the runtime tool list
+        # (router.get_capabilities) — keep that name as-is. Surface the
+        # human-routing capabilities + the four siblings under explicit
+        # keys so callers can distinguish them from tool capabilities.
+        from src.cli.config import _load_config as _load_cfg_for_listing
+        try:
+            _cfg_for_listing = _load_cfg_for_listing()
+        except Exception:
+            _cfg_for_listing = {"agents": {}}
+        _agents_cfg_listing = _cfg_for_listing.get("agents", {}) or {}
+
         def _agent_entry(aid: str, url: str) -> dict:
             entry: dict = {"url": url, "role": router.agent_roles.get(aid, "")}
             entry["capabilities"] = router.get_capabilities(aid)
+            acfg = _agents_cfg_listing.get(aid) or {}
+            # Structured routing fields (Task 8). The ``interface_*`` keys
+            # are the human-facing routing surface; the bare
+            # ``capabilities`` key remains the runtime tool/skill list to
+            # avoid breaking back-compat with existing dashboard / CLI
+            # consumers.
+            entry["interface_capabilities"] = list(acfg.get("capabilities") or [])
+            entry["preferred_inputs"] = list(acfg.get("preferred_inputs") or [])
+            entry["expected_outputs"] = list(acfg.get("expected_outputs") or [])
+            entry["escalation_to"] = acfg.get("escalation_to")
+            entry["forbidden"] = list(acfg.get("forbidden") or [])
             proj = _agent_projects.get(aid)
             if proj:
                 entry["project"] = proj
@@ -1301,6 +1917,20 @@ def create_mesh_app(
                 logger.warning("list_agents: unknown project %r", project)
                 return {}
             members = set(pdata.get("members", []))
+
+            # Task 5: only members of the requested project (or global
+            # callers) may scope by it. Under warn mode, log but allow;
+            # under enforce, return empty.
+            if not caller_is_global and caller not in members:
+                _record_scope_warn()
+                logger.warning(
+                    "scope-warn: caller=%s requested /mesh/agents?project=%s "
+                    "but is not a member; mode=%s",
+                    caller, project, _PROJECT_SCOPE_MODE,
+                )
+                if _PROJECT_SCOPE_MODE == "enforce":
+                    return {}
+
             result = {
                 aid: _agent_entry(aid, url)
                 for aid, url in router.agent_registry.items()
@@ -1317,10 +1947,47 @@ def create_mesh_app(
             if url:
                 return {agent_id: _agent_entry(agent_id, url)}
             return {}
-        return {
+
+        # Unscoped path: full fleet for global callers; per-caller-project
+        # filter for workers (warn-logged, enforce-applied).
+        full_fleet = {
             aid: _agent_entry(aid, url)
             for aid, url in router.agent_registry.items()
         }
+        if caller_is_global:
+            return full_fleet
+
+        own_projects = _caller_projects(caller)
+        # Visible set: members of any project the caller belongs to,
+        # plus the always-global operator, plus the caller itself
+        # (a worker should always see its own entry — including
+        # standalone agents who belong to no project).
+        visible_members: set[str] = {caller}
+        if own_projects:
+            from src.cli.config import _load_projects
+            projects = _load_projects()
+            for pname in own_projects:
+                visible_members.update(projects.get(pname, {}).get("members", []))
+        if "operator" in router.agent_registry:
+            visible_members.add("operator")
+
+        filtered = {
+            aid: entry for aid, entry in full_fleet.items()
+            if aid in visible_members
+        }
+
+        # If the filter would have shrunk the response, emit warn
+        # telemetry so ops can size the soak before flipping the flag.
+        if len(filtered) < len(full_fleet):
+            _record_scope_warn()
+            logger.warning(
+                "scope-warn: caller=%s requested /mesh/agents (no project filter); "
+                "would return %d under enforce, returning %d under %s",
+                caller, len(filtered), len(full_fleet), _PROJECT_SCOPE_MODE,
+            )
+            if _PROJECT_SCOPE_MODE == "enforce":
+                return filtered
+        return full_fleet
 
     # === Agent Introspection ===
 
@@ -1616,9 +2283,15 @@ def create_mesh_app(
         # Auth + permission check
         spawned_by = _resolve_agent_id(data.get("spawned_by", "unknown"), request)
         if _auth_tokens:
-            # In authenticated mode, require spawn permission
-            if not permissions.can_spawn(spawned_by):
-                raise HTTPException(403, f"Agent {spawned_by} is not allowed to spawn agents")
+            # Applying a fleet template creates DURABLE named agents — Task 3
+            # split this off ``can_spawn`` (which is now ephemeral-only) onto
+            # the new control-plane permission ``can_manage_fleet``.
+            if not permissions.can_manage_fleet(spawned_by):
+                raise HTTPException(
+                    403,
+                    f"Agent {spawned_by} is not allowed to apply fleet templates "
+                    "(requires can_manage_fleet)",
+                )
 
         template_name = data.get("template", "").strip()
         if not template_name:
@@ -1760,11 +2433,17 @@ def create_mesh_app(
         if container_manager is None:
             raise HTTPException(503, "Container manager not available")
 
-        # Auth + spawn permission
+        # Auth + permission check. Creating a durable named agent is a
+        # control-plane action — Task 3 split this off ``can_spawn`` onto
+        # the dedicated ``can_manage_fleet`` capability.
         agent_id = _resolve_agent_id(data.get("agent_id", ""), request)
         await _check_rate_limit("spawn", agent_id)
-        if not permissions.can_spawn(agent_id):
-            raise HTTPException(403, f"Agent {agent_id} is not allowed to create agents")
+        if not permissions.can_manage_fleet(agent_id):
+            raise HTTPException(
+                403,
+                f"Agent {agent_id} is not allowed to create agents "
+                "(requires can_manage_fleet)",
+            )
 
         # Validate inputs
         name = data.get("name", "")
@@ -2040,6 +2719,23 @@ def create_mesh_app(
             except Exception:
                 logger.debug("Could not fetch INTERFACE.md from %s (direct)", agent_id)
 
+        # Task 8 — structured routing fields from agents.yaml. ``capabilities``
+        # remains the runtime tool/skill list (router.get_capabilities); the
+        # human-routing capabilities live under ``interface_capabilities`` to
+        # avoid the naming collision. The other four sibling fields keep
+        # their natural names (no collision).
+        from src.cli.config import _load_config as _load_cfg_for_profile
+        try:
+            _cfg_for_profile = _load_cfg_for_profile()
+        except Exception:
+            _cfg_for_profile = {"agents": {}}
+        _acfg_profile = (_cfg_for_profile.get("agents", {}) or {}).get(agent_id, {}) or {}
+        interface_capabilities = list(_acfg_profile.get("capabilities") or [])
+        preferred_inputs = list(_acfg_profile.get("preferred_inputs") or [])
+        expected_outputs = list(_acfg_profile.get("expected_outputs") or [])
+        escalation_to = _acfg_profile.get("escalation_to")
+        forbidden = list(_acfg_profile.get("forbidden") or [])
+
         return {
             "agent_id": agent_id,
             "role": role,
@@ -2051,6 +2747,12 @@ def create_mesh_app(
             "recent_writes": recent_writes,
             "capabilities": capabilities,
             "interface": interface,
+            # Task 8 structured routing fields.
+            "interface_capabilities": interface_capabilities,
+            "preferred_inputs": preferred_inputs,
+            "expected_outputs": expected_outputs,
+            "escalation_to": escalation_to,
+            "forbidden": forbidden,
         }
 
     # === Request Traces ===
@@ -2264,6 +2966,13 @@ def create_mesh_app(
                 "max_projects": max_projects,
                 "current_projects": current_projects,
             },
+            # Task 5: count of warn-mode "would have denied" hits since
+            # process start. Operators watch this number drop toward
+            # zero before flipping ``OPENLEGION_PROJECT_SCOPE_MODE`` to
+            # ``enforce``. The flag itself is reported alongside so the
+            # operator dashboard can render the right state.
+            "scope_warn_total": _scope_warn_count,
+            "project_scope_mode": _PROJECT_SCOPE_MODE,
         }
 
     @app.get("/mesh/agents/{agent_id}/metrics")
@@ -2336,20 +3045,29 @@ def create_mesh_app(
     # so operator agents can manage projects using their mesh auth token.
 
     @app.get("/mesh/projects")
-    async def mesh_list_projects(request: Request) -> dict:
-        """List all projects (mesh-authed proxy)."""
-        _require_any_auth(request)
-        if _resolve_agent_id("", request) != "operator":
+    async def mesh_list_projects(request: Request, include_archived: bool = False) -> dict:
+        """List projects (mesh-authed proxy).
+
+        Excludes archived projects by default — pass ``include_archived=true``
+        to include them. Each row carries ``status`` so callers can render
+        the archive state when ``include_archived`` is set.
+        """
+        caller = _extract_verified_agent_id(request)
+        if caller != "operator" and not _is_internal_caller(request):
             raise HTTPException(403, "Only the operator can manage projects")
         from src.cli.config import _load_projects
         projects = _load_projects()
         result = []
         for pname, pdata in sorted(projects.items(), key=lambda x: x[1].get("created_at") or ""):
+            status = pdata.get("status", "active") or "active"
+            if not include_archived and status == "archived":
+                continue
             result.append({
                 "name": pname,
                 "description": pdata.get("description", ""),
                 "members": pdata.get("members", []),
                 "created_at": pdata.get("created_at", ""),
+                "status": status,
             })
         return {"projects": result}
 
@@ -2473,6 +3191,960 @@ def create_mesh_app(
 
         return {"updated": True, "project": name}
 
+    # === Orchestration Tasks v2 (Task 6) ===
+
+    def _require_tasks_v2() -> Tasks:
+        """Return the tasks store or raise 503 when the flag is off."""
+        if tasks_store is None:
+            raise HTTPException(
+                503,
+                "Orchestration tasks v2 not enabled. "
+                "Set OPENLEGION_ORCHESTRATION_TASKS_V2=1 to opt in.",
+            )
+        return tasks_store
+
+    def _reap_tasks_opportunistically() -> None:
+        """Cheap reap on read paths so retention drops don't need a scheduler."""
+        if tasks_store is None:
+            return
+        try:
+            deleted = tasks_store.reap_expired()
+            if deleted:
+                logger.info("orchestration: reaped %d expired tasks", deleted)
+        except Exception as e:
+            logger.debug("orchestration reap failed: %s", e)
+
+    def _is_project_member(agent_id: str, project_id: str) -> bool:
+        """Membership check for read scoping. Operator + mesh are global."""
+        if agent_id in {"operator", "mesh"}:
+            return True
+        return project_id in _caller_projects(agent_id)
+
+    @app.get("/mesh/orchestration/status")
+    async def orchestration_status(request: Request) -> dict:
+        """Probe endpoint — agents call this to detect whether v2 is on.
+
+        Returns ``{"enabled": True}`` when the store is wired; HTTP 503
+        when the feature flag is off (so callers fail-closed to the
+        legacy blackboard path).
+        """
+        _require_any_auth(request)
+        if tasks_store is None:
+            raise HTTPException(503, "Orchestration tasks v2 not enabled")
+        return {"enabled": True}
+
+    @app.post("/mesh/tasks")
+    async def create_task(request: Request) -> dict:
+        """Create a durable task record.
+
+        Caller must have ``can_route_tasks`` (or be the operator /
+        loopback internal). Body: ``{assignee, title, description?,
+        project?, parent_task_id?, priority?, dependencies?}``.
+        Origin is sourced from the validated ``X-Origin`` header.
+        """
+        store = _require_tasks_v2()
+        caller = _extract_verified_agent_id(request)
+        # ``can_route_tasks`` is the structured permission. The mesh
+        # pseudo-id and operator are auto-permitted by the matrix.
+        if not permissions.can_route_tasks(caller):
+            raise HTTPException(
+                403,
+                f"Agent {caller} cannot route tasks (can_route_tasks not granted)",
+            )
+        body = await request.json()
+        assignee = body.get("assignee", "")
+        title = sanitize_for_prompt(body.get("title", "")).strip()
+        description = sanitize_for_prompt(body.get("description") or "")
+        project_id = body.get("project") or body.get("project_id") or None
+        parent_task_id = body.get("parent_task_id") or None
+        priority = int(body.get("priority", 0) or 0)
+        dependencies = body.get("dependencies") or None
+        artifact_refs = body.get("artifact_refs") or None
+        if not title:
+            raise HTTPException(400, "title is required")
+        if not assignee or not _AGENT_ID_RE.match(assignee):
+            raise HTTPException(400, f"Invalid assignee: {assignee!r}")
+        # Cross-project scope: callers can only create tasks in projects
+        # they belong to (operators / mesh are global). Standalone is
+        # permitted (project_id=None).
+        if project_id and not _is_project_member(caller, project_id):
+            raise HTTPException(
+                403,
+                f"Caller {caller} is not a member of project {project_id!r}",
+            )
+
+        origin = _validated_origin(request, caller)
+        origin_dict = origin.model_dump() if origin is not None else None
+
+        record = store.create(
+            creator=caller,
+            assignee=assignee,
+            title=title,
+            description=description or None,
+            project_id=project_id,
+            parent_task_id=parent_task_id,
+            priority=priority,
+            dependencies=dependencies if isinstance(dependencies, list) else None,
+            artifact_refs=artifact_refs if isinstance(artifact_refs, list) else None,
+            origin=origin_dict,
+        )
+        return record
+
+    @app.get("/mesh/tasks/inbox/{assignee}")
+    async def list_inbox(assignee: str, request: Request) -> dict:
+        """List ``assignee``'s inbox.
+
+        The assignee themself, the operator, and loopback-internal
+        callers are permitted. Other callers receive 403.
+        """
+        store = _require_tasks_v2()
+        caller = _extract_verified_agent_id(request)
+        if (
+            caller != assignee
+            and caller != "operator"
+            and not _is_internal_caller(request)
+        ):
+            raise HTTPException(
+                403,
+                "Only the assignee, operator, or internal callers can read this inbox",
+            )
+        _reap_tasks_opportunistically()
+        rows = store.list_inbox(assignee)
+        return {"tasks": rows, "count": len(rows)}
+
+    @app.get("/mesh/tasks/project/{project_id}")
+    async def list_project_tasks(project_id: str, request: Request) -> dict:
+        """List tasks scoped to a project.
+
+        Caller must be a member of the project (or operator / internal).
+        """
+        store = _require_tasks_v2()
+        caller = _extract_verified_agent_id(request)
+        if not _is_project_member(caller, project_id):
+            raise HTTPException(
+                403,
+                f"Caller {caller} is not a member of project {project_id!r}",
+            )
+        _reap_tasks_opportunistically()
+        rows = store.list_project(project_id)
+        return {"tasks": rows, "count": len(rows)}
+
+    @app.get("/mesh/tasks/{task_id}")
+    async def get_task(task_id: str, request: Request) -> dict:
+        """Read a task by id.
+
+        Visible to creator, assignee, project members, operator, and
+        internal callers. Other callers receive 403.
+        """
+        store = _require_tasks_v2()
+        caller = _extract_verified_agent_id(request)
+        record = store.get(task_id)
+        if record is None:
+            raise HTTPException(404, f"Task '{task_id}' not found")
+        if (
+            caller in (record["creator"], record["assignee"])
+            or caller == "operator"
+            or _is_internal_caller(request)
+            or (record["project_id"] and _is_project_member(caller, record["project_id"]))
+        ):
+            return record
+        raise HTTPException(403, "Not authorized to read this task")
+
+    @app.get("/mesh/tasks/{task_id}/events")
+    async def list_task_events(task_id: str, request: Request) -> dict:
+        """Audit history for a task. Same visibility rules as get_task."""
+        store = _require_tasks_v2()
+        caller = _extract_verified_agent_id(request)
+        record = store.get(task_id)
+        if record is None:
+            raise HTTPException(404, f"Task '{task_id}' not found")
+        if not (
+            caller in (record["creator"], record["assignee"])
+            or caller == "operator"
+            or _is_internal_caller(request)
+            or (record["project_id"] and _is_project_member(caller, record["project_id"]))
+        ):
+            raise HTTPException(403, "Not authorized to read this task")
+        events = store.list_events(task_id)
+        return {"events": events, "count": len(events)}
+
+    @app.post("/mesh/tasks/{task_id}/status")
+    async def update_task_status(task_id: str, request: Request) -> dict:
+        """Update a task's status.
+
+        Caller must be the assignee, the creator, or the operator/internal.
+        Status transitions are validated by the storage layer; an invalid
+        transition becomes HTTP 400.
+        """
+        store = _require_tasks_v2()
+        caller = _extract_verified_agent_id(request)
+        body = await request.json()
+        status = body.get("status", "")
+        blocker_note = body.get("blocker_note")
+        if status not in VALID_STATUSES:
+            raise HTTPException(
+                400,
+                f"Invalid status: {status!r}. Must be one of {sorted(VALID_STATUSES)}",
+            )
+        record = store.get(task_id)
+        if record is None:
+            raise HTTPException(404, f"Task '{task_id}' not found")
+        if not (
+            caller in (record["creator"], record["assignee"])
+            or caller == "operator"
+            or _is_internal_caller(request)
+        ):
+            raise HTTPException(
+                403,
+                "Only the creator, assignee, operator, or internal can update status",
+            )
+        try:
+            updated = store.update_status(
+                task_id, status, actor=caller, blocker_note=blocker_note,
+            )
+        except InvalidStatusTransition as e:
+            raise HTTPException(400, str(e))
+        except TaskNotFound:
+            raise HTTPException(404, f"Task '{task_id}' not found")
+        return updated
+
+    def _check_can_schedule(target_agent: str) -> tuple[bool, dict | None]:
+        """Cost-aware preflight: True when the target agent has budget headroom.
+
+        Returns ``(allowed, info_or_none)``. ``info`` carries the
+        offending agent + daily/monthly used vs limit so the operator
+        product tools can surface a structured error to the user.
+        Operator (and the missing-tracker case) always pass — there is
+        nothing to enforce.
+        """
+        if cost_tracker is None or target_agent == "operator":
+            return True, None
+        try:
+            check = cost_tracker.check_budget(target_agent)
+        except Exception as e:
+            logger.debug("check_budget(%s) failed: %s — allowing", target_agent, e)
+            return True, None
+        if check.get("allowed", True):
+            return True, None
+        return False, {
+            "agent": target_agent,
+            "daily_used": check.get("daily_used"),
+            "daily_limit": check.get("daily_limit"),
+            "monthly_used": check.get("monthly_used"),
+            "monthly_limit": check.get("monthly_limit"),
+        }
+
+    @app.post("/mesh/tasks/{task_id}/reroute")
+    async def reroute_task(task_id: str, request: Request) -> dict:
+        """Reassign a task. Operator-only or callers with ``can_route_tasks``.
+
+        Cost-aware: refuses to reroute onto an agent that is already
+        over its daily or monthly budget (HTTP 400, structured error).
+        """
+        store = _require_tasks_v2()
+        caller = _extract_verified_agent_id(request)
+        if not (
+            caller == "operator"
+            or _is_internal_caller(request)
+            or permissions.can_route_tasks(caller)
+        ):
+            raise HTTPException(
+                403,
+                "Reroute requires can_route_tasks (operator-grade permission)",
+            )
+        body = await request.json()
+        new_assignee = body.get("new_assignee", "")
+        reason = sanitize_for_prompt(body.get("reason") or "")
+        if not new_assignee or not _AGENT_ID_RE.match(new_assignee):
+            raise HTTPException(400, f"Invalid new_assignee: {new_assignee!r}")
+        # Budget preflight — before mutating storage.
+        allowed, info = _check_can_schedule(new_assignee)
+        if not allowed:
+            raise HTTPException(
+                400,
+                json.dumps({
+                    "error": "over_budget",
+                    "detail": (
+                        f"Agent {new_assignee!r} is over budget; refusing to "
+                        "reroute task to a target that cannot run."
+                    ),
+                    "budget": info,
+                }),
+            )
+        try:
+            updated = store.reroute(
+                task_id, new_assignee, actor=caller, reason=reason,
+            )
+        except TaskNotFound:
+            raise HTTPException(404, f"Task '{task_id}' not found")
+        except InvalidStatusTransition as e:
+            raise HTTPException(400, str(e))
+        return updated
+
+    @app.post("/mesh/tasks/{task_id}/retry")
+    async def retry_failed_task(task_id: str, request: Request) -> dict:
+        """Retry a failed task by cloning it as a new ``pending`` task.
+
+        Operator product tool surface: clones the existing task into a
+        new id (``task_<hex>``), optionally overriding title / description /
+        assignee from the request body. Original task is left in its
+        terminal state (``failed``) so the audit trail is preserved.
+        Cost-aware: refuses if the (possibly overridden) target assignee
+        is over budget.
+        """
+        store = _require_tasks_v2()
+        caller = _extract_verified_agent_id(request)
+        if not (
+            caller == "operator"
+            or _is_internal_caller(request)
+            or permissions.can_route_tasks(caller)
+        ):
+            raise HTTPException(
+                403,
+                "Retry requires can_route_tasks (operator-grade permission)",
+            )
+        original = store.get(task_id)
+        if original is None:
+            raise HTTPException(404, f"Task '{task_id}' not found")
+        if original["status"] != "failed":
+            raise HTTPException(
+                400,
+                f"Only failed tasks can be retried (status={original['status']!r})",
+            )
+        body = await request.json() if (await request.body()) else {}
+        if not isinstance(body, dict):
+            body = {}
+        # Optional patch: title / description / assignee
+        title = sanitize_for_prompt(body.get("title") or original["title"]).strip()
+        description_override = body.get("description")
+        if description_override is not None:
+            description = sanitize_for_prompt(description_override) or None
+        else:
+            description = original.get("description") or None
+        new_assignee = body.get("assignee") or original["assignee"]
+        if not new_assignee or not _AGENT_ID_RE.match(new_assignee):
+            raise HTTPException(400, f"Invalid assignee: {new_assignee!r}")
+        if not title:
+            raise HTTPException(400, "title is required (and cannot be blank)")
+        # Budget preflight before mutating storage.
+        allowed, info = _check_can_schedule(new_assignee)
+        if not allowed:
+            raise HTTPException(
+                400,
+                json.dumps({
+                    "error": "over_budget",
+                    "detail": (
+                        f"Agent {new_assignee!r} is over budget; refusing to "
+                        "retry the task onto a target that cannot run."
+                    ),
+                    "budget": info,
+                }),
+            )
+        origin = _validated_origin(request, caller)
+        origin_dict = origin.model_dump() if origin is not None else None
+        clone = store.create(
+            creator=caller,
+            assignee=new_assignee,
+            title=title,
+            description=description,
+            project_id=original.get("project_id"),
+            parent_task_id=original["id"],
+            priority=original.get("priority", 0) or 0,
+            origin=origin_dict,
+        )
+        return {"clone": clone, "original_id": original["id"]}
+
+    # === Operator product surface (Task 7) — read tools ===
+    #
+    # Read endpoints surfaced as operator skills. They aggregate over
+    # the tasks store + project metadata and respect the same scoping
+    # rules as the Task 6 endpoints (operator + internal can see all,
+    # other callers can see only their own projects). All return HTTP
+    # 503 when ``OPENLEGION_ORCHESTRATION_TASKS_V2`` is off so the
+    # operator tools can surface a clean error instead of garbled data.
+
+    def _summarize_tasks(rows: list[dict]) -> dict:
+        """Reduce a list of task rows to status counts + recent slices.
+
+        Buckets: ``active`` (pending/accepted/working), ``blocked``,
+        ``done``, ``failed``, ``cancelled``. ``recent_done`` carries the
+        last 5 completed tasks ordered newest-first.
+        """
+        counts = {"active": 0, "blocked": 0, "done": 0, "failed": 0, "cancelled": 0}
+        blocked_rows: list[dict] = []
+        done_rows: list[dict] = []
+        for r in rows:
+            s = r.get("status", "")
+            if s in ("pending", "accepted", "working"):
+                counts["active"] += 1
+            elif s == "blocked":
+                counts["blocked"] += 1
+                blocked_rows.append(r)
+            elif s == "done":
+                counts["done"] += 1
+                done_rows.append(r)
+            elif s == "failed":
+                counts["failed"] += 1
+            elif s == "cancelled":
+                counts["cancelled"] += 1
+        done_rows.sort(key=lambda x: x.get("completed_at") or 0, reverse=True)
+        return {
+            "counts": counts,
+            "blockers": [
+                {
+                    "id": r["id"], "assignee": r["assignee"],
+                    "title": r["title"], "blocker_note": r.get("blocker_note"),
+                }
+                for r in blocked_rows[:5]
+            ],
+            "recent_done": [
+                {
+                    "id": r["id"], "assignee": r["assignee"], "title": r["title"],
+                    "completed_at": r.get("completed_at"),
+                }
+                for r in done_rows[:5]
+            ],
+        }
+
+    @app.get("/mesh/projects/{project_id}/status")
+    async def project_status(project_id: str, request: Request) -> dict:
+        """Per-project status counts + recent blockers/completions.
+
+        Caller must be a project member (or operator/internal). Returns
+        the same structure as ``_summarize_tasks`` plus a ``project``
+        field carrying name and archive status.
+        """
+        store = _require_tasks_v2()
+        caller = _extract_verified_agent_id(request)
+        if not _is_project_member(caller, project_id):
+            raise HTTPException(
+                403,
+                f"Caller {caller} is not a member of project {project_id!r}",
+            )
+        from src.cli.config import _load_projects
+        projects = _load_projects()
+        if project_id not in projects:
+            raise HTTPException(404, f"Project '{project_id}' not found")
+        meta = projects[project_id]
+        _reap_tasks_opportunistically()
+        rows = store.list_project(project_id)
+        result = _summarize_tasks(rows)
+        result["project"] = {
+            "name": project_id,
+            "status": meta.get("status", "active") or "active",
+            "members": meta.get("members", []),
+            "description": meta.get("description", ""),
+        }
+        return result
+
+    @app.get("/mesh/projects/status")
+    async def all_projects_status(request: Request) -> dict:
+        """List status rollups for every project the caller can see.
+
+        Operator / internal callers see all projects (including archived);
+        other callers see only their own. Each row carries the same
+        ``counts``/``blockers``/``recent_done`` shape as the per-project
+        endpoint, plus the project name and status.
+        """
+        store = _require_tasks_v2()
+        caller = _extract_verified_agent_id(request)
+        from src.cli.config import _load_projects
+        projects = _load_projects()
+        visible: list[str]
+        if caller == "operator" or _is_internal_caller(request):
+            visible = list(projects.keys())
+        else:
+            visible = sorted(_caller_projects(caller))
+        _reap_tasks_opportunistically()
+        rows: list[dict] = []
+        for pid in sorted(visible):
+            meta = projects.get(pid, {})
+            project_rows = store.list_project(pid)
+            summary = _summarize_tasks(project_rows)
+            summary["project"] = {
+                "name": pid,
+                "status": meta.get("status", "active") or "active",
+                "members": meta.get("members", []),
+                "description": meta.get("description", ""),
+            }
+            rows.append(summary)
+        return {"projects": rows}
+
+    @app.get("/mesh/agents/{agent_id}/queue")
+    async def agent_queue(
+        agent_id: str, request: Request, limit: int = 10,
+    ) -> dict:
+        """Recent tasks for an agent grouped by status.
+
+        Returns up to ``limit`` rows per status (active / blocked / done /
+        failed / cancelled). Visible to the agent itself, the operator,
+        loopback-internal callers, and project members of the agent's
+        project.
+        """
+        store = _require_tasks_v2()
+        caller = _extract_verified_agent_id(request)
+        if not (
+            caller == agent_id
+            or caller == "operator"
+            or _is_internal_caller(request)
+        ):
+            agent_proj = _agent_projects.get(agent_id)
+            if agent_proj is None or not _is_project_member(caller, agent_proj):
+                raise HTTPException(
+                    403,
+                    f"Caller {caller} cannot view queue for {agent_id!r}",
+                )
+        try:
+            limit = max(1, min(int(limit), 100))
+        except (TypeError, ValueError):
+            limit = 10
+        _reap_tasks_opportunistically()
+        rows = store.list_inbox(agent_id, include_terminal=True)
+        buckets: dict[str, list[dict]] = {
+            "active": [], "blocked": [], "done": [], "failed": [], "cancelled": [],
+        }
+        # Sort newest-first so the "last N" slice is informative.
+        rows.sort(key=lambda r: r.get("updated_at") or 0, reverse=True)
+        for r in rows:
+            s = r.get("status", "")
+            if s in ("pending", "accepted", "working"):
+                key = "active"
+            elif s in buckets:
+                key = s
+            else:
+                continue
+            if len(buckets[key]) >= limit:
+                continue
+            buckets[key].append({
+                "id": r["id"], "title": r["title"],
+                "status": r["status"],
+                "project_id": r.get("project_id"),
+                "blocker_note": r.get("blocker_note"),
+                "updated_at": r.get("updated_at"),
+                "completed_at": r.get("completed_at"),
+            })
+        return {"agent_id": agent_id, "limit": limit, "queue": buckets}
+
+    def _parse_since(since: str | None) -> float:
+        """Parse a since= filter — accepts ISO timestamp, ``"24h"``/``"7d"``, or ``""``."""
+        import time as _time
+        if not since:
+            return _time.time() - (7 * 24 * 60 * 60)
+        s = since.strip().lower()
+        # Duration form: ``Nh`` / ``Nd`` / ``Nm``
+        if s and s[-1] in {"s", "m", "h", "d"} and s[:-1].isdigit():
+            n = int(s[:-1])
+            unit = s[-1]
+            mult = {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
+            return _time.time() - (n * mult)
+        # ISO timestamp
+        try:
+            from datetime import datetime as _dt
+            dt = _dt.fromisoformat(s.replace("z", "+00:00"))
+            return dt.timestamp()
+        except (ValueError, TypeError):
+            return _time.time() - (7 * 24 * 60 * 60)
+
+    @app.get("/mesh/projects/{project_id}/outputs")
+    async def project_outputs(
+        project_id: str, request: Request, since: str = "",
+    ) -> dict:
+        """Completed task artifacts for a project in a time window.
+
+        ``since`` accepts an ISO timestamp or duration string (``"24h"``,
+        ``"7d"``); default is the last 7 days. Returns one entry per
+        completed task with its title, assignee, completion time, and
+        artifact refs.
+        """
+        store = _require_tasks_v2()
+        caller = _extract_verified_agent_id(request)
+        if not _is_project_member(caller, project_id):
+            raise HTTPException(
+                403,
+                f"Caller {caller} is not a member of project {project_id!r}",
+            )
+        floor = _parse_since(since)
+        _reap_tasks_opportunistically()
+        rows = store.list_project(project_id, statuses=["done"])
+        outputs = []
+        for r in rows:
+            completed_at = r.get("completed_at") or 0
+            if completed_at < floor:
+                continue
+            outputs.append({
+                "id": r["id"], "title": r["title"], "assignee": r["assignee"],
+                "completed_at": completed_at,
+                "artifact_refs": r.get("artifact_refs", []) or [],
+            })
+        outputs.sort(key=lambda x: x["completed_at"], reverse=True)
+        return {"project_id": project_id, "since": since, "outputs": outputs}
+
+    @app.get("/mesh/projects/{project_id}/summary")
+    async def project_summary(project_id: str, request: Request) -> dict:
+        """Synthesized status text + structured fields for a project.
+
+        Combines status counts, blocker list, recent completions, and a
+        simple ``ask_for_user`` list (currently mirrors ``blocked`` —
+        operators can later swap in a richer policy here without changing
+        the on-the-wire shape). The narrative ``status_text`` is plain
+        prose so the operator's prompt machinery doesn't have to format
+        it again.
+        """
+        store = _require_tasks_v2()
+        caller = _extract_verified_agent_id(request)
+        if not _is_project_member(caller, project_id):
+            raise HTTPException(
+                403,
+                f"Caller {caller} is not a member of project {project_id!r}",
+            )
+        from src.cli.config import _load_projects
+        projects = _load_projects()
+        if project_id not in projects:
+            raise HTTPException(404, f"Project '{project_id}' not found")
+        meta = projects[project_id]
+        _reap_tasks_opportunistically()
+        rows = store.list_project(project_id)
+        s = _summarize_tasks(rows)
+        active = s["counts"]["active"]
+        blocked = s["counts"]["blocked"]
+        done = s["counts"]["done"]
+        failed = s["counts"]["failed"]
+        if active == 0 and blocked == 0 and done == 0 and failed == 0:
+            status_text = f"No tasks recorded for {project_id!r} yet."
+        else:
+            parts: list[str] = []
+            if active:
+                parts.append(f"{active} active")
+            if blocked:
+                parts.append(f"{blocked} blocked")
+            if done:
+                parts.append(f"{done} done")
+            if failed:
+                parts.append(f"{failed} failed")
+            status_text = ", ".join(parts) + f" in project {project_id!r}."
+        return {
+            "project": {
+                "name": project_id,
+                "status": meta.get("status", "active") or "active",
+                "description": meta.get("description", ""),
+                "members": meta.get("members", []),
+            },
+            "status_text": status_text,
+            "counts": s["counts"],
+            "top_blockers": s["blockers"],
+            "recent_completions": s["recent_done"],
+            "ask_for_user": s["blockers"],
+        }
+
+    # === Operator product surface (Task 7) — archive / delete ===
+    #
+    # Archive endpoints flip a status flag and stop scheduling. Delete
+    # endpoints proxy through the existing ``PendingActions`` store
+    # (Task 2d) — same propose-then-confirm flow as ``propose_edit`` /
+    # ``confirm_edit``, just with ``target_kind="project"`` /
+    # ``"agent"`` and ``action_kind="delete"``. Archive must precede
+    # delete; the gate is enforced server-side at propose time.
+
+    @app.post("/mesh/projects/{name}/archive")
+    async def archive_project_endpoint(name: str, request: Request) -> dict:
+        """Archive a project (operator-only). Idempotent."""
+        caller = _extract_verified_agent_id(request)
+        if caller != "operator" and not _is_internal_caller(request):
+            raise HTTPException(403, "Only the operator can archive projects")
+        from src.cli.config import _archive_project, _load_projects
+        if name not in _load_projects():
+            raise HTTPException(404, f"Project '{name}' not found")
+        try:
+            _archive_project(name)
+        except ValueError as e:
+            raise HTTPException(404, str(e))
+        return {"archived": True, "project": name}
+
+    @app.post("/mesh/projects/{name}/unarchive")
+    async def unarchive_project_endpoint(name: str, request: Request) -> dict:
+        """Unarchive a project (operator-only). Idempotent."""
+        caller = _extract_verified_agent_id(request)
+        if caller != "operator" and not _is_internal_caller(request):
+            raise HTTPException(403, "Only the operator can unarchive projects")
+        from src.cli.config import _load_projects, _unarchive_project
+        if name not in _load_projects():
+            raise HTTPException(404, f"Project '{name}' not found")
+        try:
+            _unarchive_project(name)
+        except ValueError as e:
+            raise HTTPException(404, str(e))
+        return {"archived": False, "project": name}
+
+    @app.post("/mesh/agents/{agent_id}/archive")
+    async def archive_agent_endpoint(agent_id: str, request: Request) -> dict:
+        """Archive an agent (operator-only).
+
+        Stops cron / heartbeat and removes the agent from the live
+        registry. Workspace + history are retained; the agent can be
+        unarchived later. Container is best-effort stopped.
+        """
+        caller = _extract_verified_agent_id(request)
+        if caller != "operator" and not _is_internal_caller(request):
+            raise HTTPException(403, "Only the operator can archive agents")
+        if agent_id == "operator":
+            raise HTTPException(400, "The operator agent cannot be archived")
+        from src.cli.config import _archive_agent, _load_config
+        cfg = _load_config()
+        if agent_id not in cfg.get("agents", {}):
+            raise HTTPException(404, f"Agent '{agent_id}' not found")
+        try:
+            _archive_agent(agent_id)
+        except ValueError as e:
+            raise HTTPException(404, str(e))
+        # Stop scheduling: drop heartbeat and any cron jobs the agent owns.
+        if cron_scheduler is not None:
+            try:
+                cron_scheduler.remove_agent_jobs(agent_id)
+            except Exception as e:
+                logger.warning("archive_agent: cron cleanup for %s failed: %s", agent_id, e)
+        # Best-effort container stop. Failures here don't break archive.
+        if container_manager is not None:
+            try:
+                container_manager.stop_agent(agent_id)
+            except Exception as e:
+                logger.warning("archive_agent: container stop for %s failed: %s", agent_id, e)
+        return {"archived": True, "agent_id": agent_id}
+
+    @app.post("/mesh/agents/{agent_id}/unarchive")
+    async def unarchive_agent_endpoint(agent_id: str, request: Request) -> dict:
+        """Unarchive an agent (operator-only). Restart left to operator."""
+        caller = _extract_verified_agent_id(request)
+        if caller != "operator" and not _is_internal_caller(request):
+            raise HTTPException(403, "Only the operator can unarchive agents")
+        from src.cli.config import _load_config, _unarchive_agent
+        cfg = _load_config()
+        if agent_id not in cfg.get("agents", {}):
+            raise HTTPException(404, f"Agent '{agent_id}' not found")
+        try:
+            _unarchive_agent(agent_id)
+        except ValueError as e:
+            raise HTTPException(404, str(e))
+        return {"archived": False, "agent_id": agent_id}
+
+    @app.post("/mesh/projects/{name}/propose-delete")
+    async def propose_delete_project(name: str, request: Request) -> dict:
+        """Propose deletion of an archived project. Returns nonce for human confirm.
+
+        Pre-conditions:
+          * project exists
+          * project is archived (delete on a live project rejected)
+
+        Stores a pending action with ``target_kind="project"``,
+        ``action_kind="delete"``, ``origin_kind`` from the validated
+        ``X-Origin``. Confirmation goes through the existing
+        ``/mesh/config/confirm`` endpoint, which now dispatches on
+        ``target_kind``.
+        """
+        caller = _extract_verified_agent_id(request)
+        if caller != "operator" and not _is_internal_caller(request):
+            raise HTTPException(403, "Only the operator can delete projects")
+        from src.cli.config import _load_projects, _project_status
+        projects = _load_projects()
+        if name not in projects:
+            raise HTTPException(404, f"Project '{name}' not found")
+        status = _project_status(name)
+        if status != "archived":
+            raise HTTPException(
+                400,
+                "Project must be archived before delete. "
+                "Call /mesh/projects/{name}/archive first.",
+            )
+        origin = _validated_origin(request, caller)
+        origin_kind = origin.kind if origin is not None else None
+        # Cap pending rows to bound storage growth (mirrors propose_edit).
+        pending_actions.reap_expired()
+        existing = pending_actions.list_pending()
+        if len(existing) >= _MAX_PENDING:
+            oldest = min(existing, key=lambda r: r["expires_at"])
+            with pending_actions._conn() as _conn:
+                _conn.execute(
+                    "DELETE FROM pending_actions WHERE nonce=?",
+                    (oldest["nonce"],),
+                )
+        nonce = str(_uuid.uuid4())
+        members = projects[name].get("members", []) or []
+        summary = (
+            f"Delete project {name!r} and unlink {len(members)} agent(s). "
+            "Workspaces and per-agent history are retained; project metadata, "
+            "project.md, and project blackboard rows are removed."
+        )
+        payload = {
+            "name": name,
+            "summary": summary,
+            "members": members,
+        }
+        record = pending_actions.store(
+            nonce=nonce,
+            actor="operator",
+            target_kind="project",
+            target_id=name,
+            action_kind="delete",
+            payload=payload,
+            origin_kind=origin_kind,
+            ttl=_CHANGE_TTL_SECONDS,
+        )
+        return {
+            "change_id": nonce,
+            "summary": summary,
+            "expires_at": datetime.fromtimestamp(
+                record["expires_at"], tz=timezone.utc,
+            ).isoformat(),
+            "payload_digest": record["payload_digest"],
+            "requires_confirmation": True,
+        }
+
+    @app.post("/mesh/agents/{agent_id}/propose-delete")
+    async def propose_delete_agent(agent_id: str, request: Request) -> dict:
+        """Propose deletion of an archived agent. Returns nonce for human confirm.
+
+        Pre-conditions:
+          * agent exists
+          * agent is archived
+          * agent is not ``operator``
+        """
+        caller = _extract_verified_agent_id(request)
+        if caller != "operator" and not _is_internal_caller(request):
+            raise HTTPException(403, "Only the operator can delete agents")
+        if agent_id == "operator":
+            raise HTTPException(400, "The operator agent cannot be deleted")
+        from src.cli.config import _agent_status, _load_config
+        cfg = _load_config()
+        if agent_id not in cfg.get("agents", {}):
+            raise HTTPException(404, f"Agent '{agent_id}' not found")
+        status = _agent_status(agent_id)
+        if status != "archived":
+            raise HTTPException(
+                400,
+                "Agent must be archived before delete. "
+                "Call /mesh/agents/{agent_id}/archive first.",
+            )
+        origin = _validated_origin(request, caller)
+        origin_kind = origin.kind if origin is not None else None
+        pending_actions.reap_expired()
+        existing = pending_actions.list_pending()
+        if len(existing) >= _MAX_PENDING:
+            oldest = min(existing, key=lambda r: r["expires_at"])
+            with pending_actions._conn() as _conn:
+                _conn.execute(
+                    "DELETE FROM pending_actions WHERE nonce=?",
+                    (oldest["nonce"],),
+                )
+        nonce = str(_uuid.uuid4())
+        summary = (
+            f"Delete agent {agent_id!r}. Container stopped, config and "
+            "permissions removed, workspace dropped."
+        )
+        payload = {
+            "agent_id": agent_id,
+            "summary": summary,
+        }
+        record = pending_actions.store(
+            nonce=nonce,
+            actor="operator",
+            target_kind="agent",
+            target_id=agent_id,
+            action_kind="delete",
+            payload=payload,
+            origin_kind=origin_kind,
+            ttl=_CHANGE_TTL_SECONDS,
+        )
+        return {
+            "change_id": nonce,
+            "summary": summary,
+            "expires_at": datetime.fromtimestamp(
+                record["expires_at"], tz=timezone.utc,
+            ).isoformat(),
+            "payload_digest": record["payload_digest"],
+            "requires_confirmation": True,
+        }
+
+    async def _apply_pending_delete(record: dict) -> dict:
+        """Apply a consumed delete pending-action.
+
+        Dispatches on ``target_kind``. Project deletes call
+        ``_delete_project``; agent deletes stop the container, remove
+        the agent from config + permissions, and tear down per-agent
+        runtime state via ``app.cleanup_agent``.
+        """
+        kind = record["target_kind"]
+        target_id = record["target_id"]
+        if kind == "project":
+            from src.cli.config import _delete_project, _load_projects
+            if target_id not in _load_projects():
+                raise HTTPException(404, f"Project '{target_id}' no longer exists")
+            try:
+                _delete_project(target_id)
+            except ValueError as e:
+                raise HTTPException(404, str(e))
+            blackboard.log_audit(
+                action="delete_project", target=target_id,
+                change_id=record["nonce"],
+            )
+            return {"success": True, "deleted": "project", "name": target_id}
+        if kind == "agent":
+            from src.cli.config import _load_config, _remove_agent
+            if target_id not in _load_config().get("agents", {}):
+                raise HTTPException(404, f"Agent '{target_id}' no longer exists")
+            try:
+                _remove_agent(target_id, stop_container=container_manager is not None)
+            except Exception as e:
+                raise HTTPException(500, f"Failed to delete agent: {e}")
+            # Drop runtime state via cleanup_agent (rate buckets, vault,
+            # blackboard, pubsub, lanes, cron, costs, traces, wallets).
+            try:
+                app.cleanup_agent(target_id)
+            except Exception as e:
+                logger.warning("cleanup_agent(%s) failed during delete: %s", target_id, e)
+            try:
+                router.unregister_agent(target_id)
+            except Exception:
+                pass
+            if health_monitor is not None:
+                try:
+                    health_monitor.unregister(target_id)
+                except Exception:
+                    pass
+            blackboard.log_audit(
+                action="delete_agent", target=target_id,
+                change_id=record["nonce"],
+            )
+            return {"success": True, "deleted": "agent", "agent_id": target_id}
+        raise HTTPException(
+            400, f"Unsupported pending-delete target_kind: {kind!r}",
+        )
+
+    @app.post("/mesh/tasks/{task_id}/cancel")
+    async def cancel_task(task_id: str, request: Request) -> dict:
+        """Cancel a task. Creator, assignee, or operator/internal."""
+        store = _require_tasks_v2()
+        caller = _extract_verified_agent_id(request)
+        record = store.get(task_id)
+        if record is None:
+            raise HTTPException(404, f"Task '{task_id}' not found")
+        if not (
+            caller in (record["creator"], record["assignee"])
+            or caller == "operator"
+            or _is_internal_caller(request)
+        ):
+            raise HTTPException(
+                403,
+                "Only the creator, assignee, operator, or internal can cancel",
+            )
+        body = await request.json() if (await request.body()) else {}
+        reason = sanitize_for_prompt(body.get("reason") or "") if isinstance(body, dict) else ""
+        try:
+            updated = store.cancel(task_id, actor=caller, reason=reason)
+        except InvalidStatusTransition as e:
+            raise HTTPException(400, str(e))
+        except TaskNotFound:
+            raise HTTPException(404, f"Task '{task_id}' not found")
+        return updated
+
     # === Operator Config Endpoints ===
 
     _VALID_CONFIG_FIELDS = {
@@ -2504,7 +4176,8 @@ def create_mesh_app(
     async def propose_agent_config_change(agent_id: str, request: Request) -> dict:
         """Create a pending config change for review."""
         _require_any_auth(request)
-        if _resolve_agent_id("", request) != "operator":
+        caller = _resolve_agent_id("", request)
+        if caller != "operator":
             raise HTTPException(403, "Only the operator can propose config changes")
         data = await request.json()
 
@@ -2546,7 +4219,37 @@ def create_mesh_app(
             yaml_key = _CONFIG_FIELD_MAP.get(field, field)
             old_value = agents[agent_id].get(yaml_key, "")
 
-        change_id = _store_pending_change(agent_id, field, old_value, new_value)
+        # Capture the proposer's origin kind so the confirm side can
+        # gate on ``origin_kind="human"`` (Task 2d). When the X-Origin
+        # header is missing or unverifiable the row stores ``None`` and
+        # the confirm endpoint will refuse to apply.
+        origin = _validated_origin(request, caller)
+        origin_kind = origin.kind if origin is not None else None
+
+        # Cap to ``_MAX_PENDING`` rows to bound storage growth -- mirrors
+        # the legacy in-memory eviction behavior.
+        pending_actions.reap_expired()
+        existing = pending_actions.list_pending()
+        if len(existing) >= _MAX_PENDING:
+            oldest = min(existing, key=lambda r: r["expires_at"])
+            with pending_actions._conn() as _conn:
+                _conn.execute(
+                    "DELETE FROM pending_actions WHERE nonce=?",
+                    (oldest["nonce"],),
+                )
+
+        change_id = str(_uuid.uuid4())
+        payload = {"old_value": old_value, "new_value": new_value}
+        record = pending_actions.store(
+            nonce=change_id,
+            actor="operator",
+            target_kind="agent",
+            target_id=agent_id,
+            action_kind=field,
+            payload=payload,
+            origin_kind=origin_kind,
+            ttl=_CHANGE_TTL_SECONDS,
+        )
 
         # Generate preview diff
         old_str = json.dumps(old_value, indent=2) if not isinstance(old_value, str) else old_value
@@ -2566,7 +4269,29 @@ def create_mesh_app(
         return {
             "change_id": change_id,
             "preview_diff": preview,
-            "expires_at": _pending_changes[change_id]["expires_at"].isoformat(),
+            "expires_at": datetime.fromtimestamp(
+                record["expires_at"], tz=timezone.utc,
+            ).isoformat(),
+            "payload_digest": record["payload_digest"],
+        }
+
+    def _record_to_legacy_change(record: dict) -> dict:
+        """Map a ``PendingActions`` record to the legacy change dict.
+
+        ``_apply_pending_change`` was written against the old in-memory
+        shape (``agent_id`` / ``field`` / ``old_value`` / ``new_value``).
+        Rather than rewrite it, the SQLite-backed endpoints translate
+        records on the way in.
+        """
+        payload = record.get("payload") or {}
+        return {
+            "agent_id": record["target_id"],
+            "field": record["action_kind"],
+            "old_value": payload.get("old_value", ""),
+            "new_value": payload.get("new_value", ""),
+            "expires_at": datetime.fromtimestamp(
+                record["expires_at"], tz=timezone.utc,
+            ),
         }
 
     async def _apply_pending_change(change_id: str, change: dict) -> dict:
@@ -2695,49 +4420,188 @@ def create_mesh_app(
 
         return {"success": True, "agent_id": agent_id, "field": field}
 
+    def _confirm_origin_check(request: Request, caller: str = "") -> None:
+        """Task 2d: confirm-side gate — refuse non-human origins.
+
+        Pending operator-config edits are durable, so an agent that
+        spoofed an X-Origin header (or a buggy adapter that promoted a
+        non-human origin) must not be able to flip the lever. The
+        propose endpoint records the proposer's origin kind on the row;
+        ``pending_actions.consume(require_origin_kind="human")`` then
+        rejects rows whose stored origin is not ``human``. We *also*
+        re-check the *current* request's origin here so a confirm
+        attempt that arrives without a human X-Origin is refused
+        immediately, before we ever consume the row.
+        """
+        confirm_origin = _validated_origin(request, caller)
+        if confirm_origin is None or confirm_origin.kind != "human":
+            raise HTTPException(403, "Confirmation requires human origin")
+
     @app.post("/mesh/agents/{agent_id}/config")
     async def update_agent_config(agent_id: str, request: Request) -> dict:
-        """Apply a pending config change. Used by confirm_edit tool."""
+        """Apply a pending config change. Used by confirm_edit tool.
+
+        Refuses delete pending actions — those must go through
+        ``/mesh/config/confirm`` so the destructive dispatcher runs.
+        """
         _require_any_auth(request)
-        if _resolve_agent_id("", request) != "operator":
+        caller = _resolve_agent_id("", request)
+        if caller != "operator":
             raise HTTPException(403, "Only the operator can apply config changes")
+        _confirm_origin_check(request, caller)
         data = await request.json()
         change_id = data.get("change_id", "")
+        client_digest = data.get("payload_digest")
 
-        change = _get_pending_change(change_id)
-        if not change:
-            raise HTTPException(404, "Change not found or expired")
-        if change["agent_id"] != agent_id:
+        # Pre-flight: peek so we can preserve the legacy "agent ID
+        # mismatch" 400 (different from the generic invalid/expired
+        # response). Only ``consume`` actually deletes the row.
+        peek = pending_actions.peek(change_id)
+        if peek is not None and peek.get("target_id") != agent_id:
             raise HTTPException(400, "Agent ID mismatch")
-        # Consume only after validation passes
-        _consume_pending_change(change_id)
+        if peek is not None and peek.get("action_kind") == "delete":
+            raise HTTPException(
+                400,
+                "Use /mesh/config/confirm for delete pending actions",
+            )
 
-        return await _apply_pending_change(change_id, change)
+        record = pending_actions.consume(
+            change_id,
+            confirmer="operator",
+            require_origin_kind="human",
+            expected_payload_digest=client_digest,
+        )
+        if not record:
+            raise HTTPException(400, "Pending action invalid or expired")
+
+        return await _apply_pending_change(
+            change_id, _record_to_legacy_change(record),
+        )
 
     @app.post("/mesh/config/confirm")
     async def confirm_config_change(request: Request) -> dict:
-        """Apply a pending config change by change_id only.
+        """Apply a pending action by change_id only.
 
-        Unlike POST /mesh/agents/{agent_id}/config, this endpoint resolves
-        the agent_id from the pending change itself so callers don't need
-        to know the target agent_id up front.  Used by the operator's
-        ``confirm_edit`` tool.
+        Resolves the target from the pending action itself so callers
+        don't need to know the target ahead of time. Dispatches on
+        ``target_kind``:
+
+        * ``target_kind="agent"`` + standard config field — the legacy
+          ``confirm_edit`` flow (apply through ``_apply_pending_change``).
+        * ``target_kind in {"project", "agent"}`` + ``action_kind="delete"``
+          — Task 7 destructive-confirm flow (apply through
+          ``_apply_pending_delete``).
+
+        Both shapes share the same ``require_origin_kind="human"`` gate
+        and the same atomic single-shot consume.
         """
-        _require_any_auth(request)
-        if _resolve_agent_id("", request) != "operator":
+        caller = _extract_verified_agent_id(request)
+        if caller != "operator" and not _is_internal_caller(request):
             raise HTTPException(403, "Only the operator can confirm config changes")
+        _confirm_origin_check(request, caller)
         data = await request.json()
         change_id = data.get("change_id", "")
+        client_digest = data.get("payload_digest")
 
-        change = _get_pending_change(change_id)
-        if not change:
-            raise HTTPException(404, "Change not found or expired")
-        # Consume before apply to prevent double-apply on retry. If
-        # _apply_pending_change raises, the change is already gone — the
-        # caller must propose a new change rather than retry this one.
-        _consume_pending_change(change_id)
+        # Consume + apply. ``consume`` is atomic: same nonce can only
+        # be applied once. If the apply raises, the row is already
+        # gone — the caller must propose a new change.
+        record = pending_actions.consume(
+            change_id,
+            confirmer="operator",
+            require_origin_kind="human",
+            expected_payload_digest=client_digest,
+        )
+        if not record:
+            raise HTTPException(400, "Pending action invalid or expired")
 
-        return await _apply_pending_change(change_id, change)
+        # Task 7: destructive deletes use ``action_kind="delete"`` plus
+        # ``target_kind in {"project", "agent"}``. Everything else stays
+        # on the legacy config-edit path.
+        if record.get("action_kind") == "delete" and record.get("target_kind") in {
+            "project", "agent",
+        }:
+            return await _apply_pending_delete(record)
+
+        return await _apply_pending_change(
+            change_id, _record_to_legacy_change(record),
+        )
+
+    # === Task 9 — Pending action review surface ===
+    #
+    # The dashboard's System > Operator panel and the inline chat
+    # bubble both call these endpoints. Confirm wraps the existing
+    # ``/mesh/config/confirm`` path; cancel is the additive escape
+    # hatch (delete-without-apply) backed by ``PendingActions.cancel``.
+    # Both inherit CSRF protection (X-Requested-With) from the
+    # dashboard's fetch wrapper and the `_csrf_check` middleware.
+
+    @app.get("/mesh/pending")
+    async def list_pending_actions(request: Request) -> dict:
+        """List every non-expired pending action.
+
+        Operator-or-internal only. Reaps expired rows on the read so
+        the response is immediately accurate. Each row is shape-compatible
+        with the dashboard's existing pending-edit display logic.
+        """
+        _require_operator_or_internal(request)
+        pending_actions.reap_expired()
+        rows = pending_actions.list_pending()
+        return {"pending": rows}
+
+    @app.post("/mesh/pending/{nonce}/confirm")
+    async def pending_confirm(nonce: str, request: Request) -> dict:
+        """Confirm a pending action by nonce.
+
+        Thin wrapper over the existing ``/mesh/config/confirm`` flow:
+        injects ``change_id=nonce`` into the body and dispatches to
+        :func:`confirm_config_change`. Keeps the new surface stable
+        without duplicating the destructive-vs-edit branch logic.
+        """
+        # Resolve and inject the nonce so the underlying confirm
+        # handler reads it from the body the same way the legacy
+        # callers do.
+        body = {}
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        body["change_id"] = nonce
+
+        async def _receive():
+            return {
+                "type": "http.request",
+                "body": json.dumps(body).encode("utf-8"),
+                "more_body": False,
+            }
+
+        # Build a shallow copy of the request with the rewritten body.
+        from starlette.requests import Request as _StarletteRequest
+        forwarded = _StarletteRequest(request.scope, _receive)
+        return await confirm_config_change(forwarded)
+
+    @app.post("/mesh/pending/{nonce}/cancel")
+    async def pending_cancel(nonce: str, request: Request) -> dict:
+        """Cancel a pending action by nonce.
+
+        Operator-or-internal only. Calls ``PendingActions.cancel`` which
+        deletes the row + emits ``pending_action_resolved`` with
+        ``status="cancelled"`` so the dashboard panel and chat bubble
+        clear immediately.
+        """
+        caller = _extract_verified_agent_id(request)
+        if caller != "operator" and not _is_internal_caller(request):
+            raise HTTPException(403, "Only the operator can cancel pending actions")
+        record = pending_actions.cancel(nonce, actor=caller or "operator")
+        if record is None:
+            raise HTTPException(404, "Pending action not found or already expired")
+        return {
+            "ok": True,
+            "nonce": nonce,
+            "target_kind": record["target_kind"],
+            "target_id": record["target_id"],
+            "action_kind": record["action_kind"],
+        }
 
     # === Browser Service Proxy ===
 

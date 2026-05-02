@@ -13,11 +13,14 @@ import asyncio
 import json
 from collections.abc import AsyncIterator, Callable, Coroutine
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from src.channels import AT_MENTION_RE
 from src.host.credentials import SYSTEM_CREDENTIAL_PROVIDERS, is_system_credential
 from src.shared.utils import sanitize_for_prompt, setup_logging
+
+if TYPE_CHECKING:
+    from src.shared.types import MessageOrigin
 
 logger = setup_logging("channels.base")
 
@@ -188,7 +191,7 @@ class Channel(abc.ABC):
 
     async def dispatch(
         self, agent: str, message: str,
-        origin: dict[str, str] | None = None,
+        origin: "MessageOrigin | dict[str, str] | None" = None,
     ) -> str:
         """Route a message to an agent and return the response.
 
@@ -239,10 +242,19 @@ class Channel(abc.ABC):
         if message.startswith("/"):
             return await self._handle_command(user_id, message, current, agents)
 
-        # Normal message: build origin and dispatch to agent
-        origin: dict[str, str] | None = None
+        # Normal message: build origin and dispatch to agent.
+        # Task 2b: stamp typed ``MessageOrigin`` (kind="human") so the
+        # downstream lane / agent sees an authorization-bearing origin
+        # rather than a raw dict.
+        from src.shared.types import MessageOrigin
+
+        origin: MessageOrigin | None = None
         if self.CHANNEL_TYPE and user_id:
-            origin = {"channel": self.CHANNEL_TYPE, "user": str(user_id)}
+            origin = MessageOrigin(
+                kind="human",
+                channel=self.CHANNEL_TYPE,
+                user=str(user_id),
+            )
         response = await self.dispatch(target, message, origin=origin)
         if not response or not response.strip():
             return ""  # Suppress silent/empty responses

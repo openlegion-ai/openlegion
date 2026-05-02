@@ -1096,18 +1096,29 @@ def test_inbox_watch_fires_on_handoff_write(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_list_agents_endpoint_includes_capabilities(tmp_path):
+async def test_list_agents_endpoint_includes_capabilities(tmp_path, monkeypatch):
     """`/mesh/agents` must include a `capabilities` key per agent.
 
     The list_agents builtin (src/agent/builtins/mesh_tool.py) reads
     info.get("capabilities", []) — without this the dashboard and
     coordination tools see every agent as having zero capabilities.
+
+    Pinned to ``OPENLEGION_PROJECT_SCOPE_MODE=warn`` because this test
+    hits the unscoped path with no auth tokens (caller resolves to
+    ``"unknown"``); the new ``enforce`` default would filter the
+    response down to {operator}.
     """
+    import importlib
+
     from httpx import ASGITransport, AsyncClient
 
     from src.host.costs import CostTracker
-    from src.host.server import create_mesh_app
     from src.host.traces import TraceStore
+
+    monkeypatch.setenv("OPENLEGION_PROJECT_SCOPE_MODE", "warn")
+    import src.host.server as server_module
+    importlib.reload(server_module)
+    create_mesh_app = server_module.create_mesh_app
 
     bb = Blackboard(db_path=str(tmp_path / "bb.db"))
     pubsub = PubSub()
@@ -1147,10 +1158,12 @@ async def test_list_agents_endpoint_includes_capabilities(tmp_path):
         bb.close()
         costs.close()
         traces.close()
+        monkeypatch.delenv("OPENLEGION_PROJECT_SCOPE_MODE", raising=False)
+        importlib.reload(server_module)
 
 
 @pytest.mark.asyncio
-async def test_list_agents_project_scope_always_includes_operator(tmp_path):
+async def test_list_agents_project_scope_always_includes_operator(tmp_path, monkeypatch):
     """`/mesh/agents?project=X` must include the operator entry alongside
     project members. The operator is fleet-global by design — project agents
     have to discover it to hand off back. Without this, project_agent →
@@ -1158,15 +1171,25 @@ async def test_list_agents_project_scope_always_includes_operator(tmp_path):
 
     Also verifies the operator entry carries scope=global so coordination
     tools can route the handoff to the global namespace.
+
+    Pinned to ``OPENLEGION_PROJECT_SCOPE_MODE=warn`` because this test
+    uses an unauthenticated caller hitting ``?project=growth`` — under
+    enforce, the caller is not a project member and the response would
+    be empty.
     """
+    import importlib
     from unittest.mock import patch
 
     import yaml
     from httpx import ASGITransport, AsyncClient
 
     from src.host.costs import CostTracker
-    from src.host.server import create_mesh_app
     from src.host.traces import TraceStore
+
+    monkeypatch.setenv("OPENLEGION_PROJECT_SCOPE_MODE", "warn")
+    import src.host.server as server_module
+    importlib.reload(server_module)
+    create_mesh_app = server_module.create_mesh_app
 
     # Minimal project on disk with one member.
     projects_dir = tmp_path / "projects"
@@ -1211,18 +1234,31 @@ async def test_list_agents_project_scope_always_includes_operator(tmp_path):
         bb.close()
         costs.close()
         traces.close()
+        monkeypatch.delenv("OPENLEGION_PROJECT_SCOPE_MODE", raising=False)
+        importlib.reload(server_module)
 
 
 @pytest.mark.asyncio
-async def test_list_agents_unscoped_marks_operator_global(tmp_path):
+async def test_list_agents_unscoped_marks_operator_global(tmp_path, monkeypatch):
     """The fleet-wide /mesh/agents response must also tag the operator with
     scope=global so dashboards and the operator's own list_agents call can
-    distinguish it from per-project agents."""
+    distinguish it from per-project agents.
+
+    Pinned to ``OPENLEGION_PROJECT_SCOPE_MODE=warn`` because the
+    unauthenticated caller resolves to ``"unknown"`` and the unscoped
+    ``enforce`` path would filter the response down to {operator}.
+    """
+    import importlib
+
     from httpx import ASGITransport, AsyncClient
 
     from src.host.costs import CostTracker
-    from src.host.server import create_mesh_app
     from src.host.traces import TraceStore
+
+    monkeypatch.setenv("OPENLEGION_PROJECT_SCOPE_MODE", "warn")
+    import src.host.server as server_module
+    importlib.reload(server_module)
+    create_mesh_app = server_module.create_mesh_app
 
     bb = Blackboard(db_path=str(tmp_path / "bb.db"))
     pubsub = PubSub()
@@ -1249,6 +1285,598 @@ async def test_list_agents_unscoped_marks_operator_global(tmp_path):
         assert data["operator"].get("scope") == "global"
         # Non-operator agents do NOT carry the marker.
         assert "scope" not in data["scout"]
+    finally:
+        bb.close()
+        costs.close()
+        traces.close()
+        monkeypatch.delenv("OPENLEGION_PROJECT_SCOPE_MODE", raising=False)
+        importlib.reload(server_module)
+
+
+# ── Task 1 (characterization): /mesh/agents per-caller-type visibility ─
+
+
+@pytest.mark.asyncio
+async def test_list_agents_project_scope_excludes_other_project_members(tmp_path, monkeypatch):
+    """When ``/mesh/agents?project=X`` is called, members of project Y must
+    NOT appear in the response. The endpoint reads members from the project
+    metadata on disk and only includes registered agents whose id is a
+    member, plus the operator (which is fleet-global). This pins the
+    project-isolation invariant for the response shape.
+
+    Pinned to ``OPENLEGION_PROJECT_SCOPE_MODE=warn`` because the
+    unauthenticated caller is not a member of project ``alpha`` — under
+    enforce, the response would be empty rather than scoped-to-members.
+    """
+    import importlib
+    from unittest.mock import patch
+
+    import yaml
+    from httpx import ASGITransport, AsyncClient
+
+    from src.host.costs import CostTracker
+    from src.host.traces import TraceStore
+
+    monkeypatch.setenv("OPENLEGION_PROJECT_SCOPE_MODE", "warn")
+    import src.host.server as server_module
+    importlib.reload(server_module)
+    create_mesh_app = server_module.create_mesh_app
+
+    projects_dir = tmp_path / "projects"
+    # Project alpha has scout.
+    alpha_dir = projects_dir / "alpha"
+    alpha_dir.mkdir(parents=True)
+    (alpha_dir / "metadata.yaml").write_text(
+        yaml.dump({
+            "name": "alpha", "members": ["scout"],
+            "created_at": "2026-05-02T00:00:00+00:00",
+        }),
+    )
+    # Project beta has analyst.
+    beta_dir = projects_dir / "beta"
+    beta_dir.mkdir(parents=True)
+    (beta_dir / "metadata.yaml").write_text(
+        yaml.dump({
+            "name": "beta", "members": ["analyst"],
+            "created_at": "2026-05-02T00:00:00+00:00",
+        }),
+    )
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix()
+    router = MessageRouter(perms, {})
+    costs = CostTracker(str(tmp_path / "costs.db"))
+    traces = TraceStore(str(tmp_path / "traces.db"))
+
+    router.register_agent("scout", "http://scout:8400", [])
+    router.register_agent("analyst", "http://analyst:8400", [])
+    router.register_agent("operator", "http://operator:8400", [])
+    # A standalone agent that is in NO project.
+    router.register_agent("loner", "http://loner:8400", [])
+
+    app = create_mesh_app(
+        blackboard=bb, pubsub=pubsub, router=router, permissions=perms,
+        cost_tracker=costs, trace_store=traces,
+    )
+
+    try:
+        with patch("src.cli.config.PROJECTS_DIR", projects_dir):
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test",
+            ) as client:
+                resp = await client.get("/mesh/agents", params={"project": "alpha"})
+        assert resp.status_code == 200
+        data = resp.json()
+        # Project member present.
+        assert "scout" in data
+        # Operator is always visible.
+        assert "operator" in data
+        # Other project's member is NOT visible.
+        assert "analyst" not in data
+        # Standalone non-member is NOT visible.
+        assert "loner" not in data
+    finally:
+        bb.close()
+        costs.close()
+        traces.close()
+        monkeypatch.delenv("OPENLEGION_PROJECT_SCOPE_MODE", raising=False)
+        importlib.reload(server_module)
+
+
+@pytest.mark.asyncio
+async def test_list_agents_internal_caller_sees_full_fleet(tmp_path, monkeypatch):
+    """Internal callers (loopback / dashboard / mesh-internal) hitting
+    ``/mesh/agents`` with no project filter receive every registered
+    agent. This pins the unscoped path that dashboards rely on.
+
+    Pinned to ``OPENLEGION_PROJECT_SCOPE_MODE=warn`` to assert legacy
+    fleet-wide behavior under the documented rollback path. The
+    sibling ``test_list_agents_internal_caller_unaffected`` covers
+    enforce mode.
+    """
+    import importlib
+
+    from httpx import ASGITransport, AsyncClient
+
+    from src.host.costs import CostTracker
+    from src.host.traces import TraceStore
+
+    monkeypatch.setenv("OPENLEGION_PROJECT_SCOPE_MODE", "warn")
+    import src.host.server as server_module
+    importlib.reload(server_module)
+    create_mesh_app = server_module.create_mesh_app
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix()
+    router = MessageRouter(perms, {})
+    costs = CostTracker(str(tmp_path / "costs.db"))
+    traces = TraceStore(str(tmp_path / "traces.db"))
+
+    # Mixed fleet across projects + standalone.
+    router.register_agent("operator", "http://operator:8400", [])
+    router.register_agent("scout", "http://scout:8400", [])
+    router.register_agent("analyst", "http://analyst:8400", [])
+    router.register_agent("loner", "http://loner:8400", [])
+
+    app = create_mesh_app(
+        blackboard=bb, pubsub=pubsub, router=router, permissions=perms,
+        cost_tracker=costs, trace_store=traces,
+    )
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            resp = await client.get("/mesh/agents")
+        assert resp.status_code == 200
+        data = resp.json()
+        # Full fleet visible — every registered agent appears.
+        assert set(data.keys()) == {"operator", "scout", "analyst", "loner"}
+    finally:
+        bb.close()
+        costs.close()
+        traces.close()
+        monkeypatch.delenv("OPENLEGION_PROJECT_SCOPE_MODE", raising=False)
+        importlib.reload(server_module)
+
+
+@pytest.mark.asyncio
+async def test_list_agents_unknown_project_returns_empty(tmp_path):
+    """``/mesh/agents?project=X`` for an unknown project name returns an
+    empty mapping — the endpoint logs a warning but does not 404. This
+    pins the 'silent empty' contract that callers (mesh_client) rely on
+    when an agent's project metadata is stale.
+    """
+    from unittest.mock import patch
+
+    from httpx import ASGITransport, AsyncClient
+
+    from src.host.costs import CostTracker
+    from src.host.server import create_mesh_app
+    from src.host.traces import TraceStore
+
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()  # exists but no projects inside
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix()
+    router = MessageRouter(perms, {})
+    costs = CostTracker(str(tmp_path / "costs.db"))
+    traces = TraceStore(str(tmp_path / "traces.db"))
+
+    router.register_agent("operator", "http://operator:8400", [])
+    router.register_agent("scout", "http://scout:8400", [])
+
+    app = create_mesh_app(
+        blackboard=bb, pubsub=pubsub, router=router, permissions=perms,
+        cost_tracker=costs, trace_store=traces,
+    )
+
+    try:
+        with patch("src.cli.config.PROJECTS_DIR", projects_dir):
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test",
+            ) as client:
+                resp = await client.get("/mesh/agents", params={"project": "ghost"})
+        assert resp.status_code == 200
+        # Empty body (no project members + no operator carve-out — the
+        # operator carve-out only fires on an existing project).
+        assert resp.json() == {}
+    finally:
+        bb.close()
+        costs.close()
+        traces.close()
+
+
+# ── Task 5: per-caller project scope filter on /mesh/agents ───────────
+
+
+def _build_scope_test_app(tmp_path, suffix: str = ""):
+    """Helper: build a mesh app + projects layout for Task 5 scope tests.
+
+    Lays out two projects (alpha with scout, beta with analyst) plus a
+    standalone ``loner`` and an ``operator``. Returns (app, projects_dir,
+    cleanup_fns) — caller wraps the projects_dir with the
+    ``PROJECTS_DIR`` patch and runs requests through ASGITransport.
+
+    ``suffix`` lets a single test build multiple isolated apps off the
+    same ``tmp_path`` (for tests that loop over modes).
+    """
+    import yaml
+
+    from src.host.costs import CostTracker
+    from src.host.server import create_mesh_app
+    from src.host.traces import TraceStore
+
+    base = tmp_path / f"scope{suffix}"
+    base.mkdir(parents=True, exist_ok=True)
+    projects_dir = base / "projects"
+    alpha_dir = projects_dir / "alpha"
+    alpha_dir.mkdir(parents=True)
+    (alpha_dir / "metadata.yaml").write_text(
+        yaml.dump({
+            "name": "alpha", "members": ["scout"],
+            "created_at": "2026-05-02T00:00:00+00:00",
+        }),
+    )
+    beta_dir = projects_dir / "beta"
+    beta_dir.mkdir(parents=True)
+    (beta_dir / "metadata.yaml").write_text(
+        yaml.dump({
+            "name": "beta", "members": ["analyst"],
+            "created_at": "2026-05-02T00:00:00+00:00",
+        }),
+    )
+
+    bb = Blackboard(db_path=str(base / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix()
+    router = MessageRouter(perms, {})
+    costs = CostTracker(str(base / "costs.db"))
+    traces = TraceStore(str(base / "traces.db"))
+
+    router.register_agent("operator", "http://operator:8400", [])
+    router.register_agent("scout", "http://scout:8400", [])
+    router.register_agent("analyst", "http://analyst:8400", [])
+    router.register_agent("loner", "http://loner:8400", [])
+
+    app = create_mesh_app(
+        blackboard=bb, pubsub=pubsub, router=router, permissions=perms,
+        cost_tracker=costs, trace_store=traces,
+    )
+
+    def _cleanup():
+        bb.close()
+        costs.close()
+        traces.close()
+
+    return app, projects_dir, _cleanup
+
+
+@pytest.mark.asyncio
+async def test_list_agents_worker_caller_warn_mode_logs_but_returns_legacy(
+    tmp_path, monkeypatch, caplog,
+):
+    """Task 5 warn mode: a worker calling unscoped ``/mesh/agents`` still
+    receives the full fleet (legacy behavior preserved during the soak
+    window) but a structured ``scope-warn`` log line is emitted so ops
+    can size the impact before flipping to enforce.
+    """
+    import importlib
+    import logging
+    from unittest.mock import patch
+
+    from httpx import ASGITransport, AsyncClient
+
+    monkeypatch.setenv("OPENLEGION_PROJECT_SCOPE_MODE", "warn")
+    import src.host.server as server_module
+    importlib.reload(server_module)
+
+    app, projects_dir, cleanup = _build_scope_test_app(tmp_path)
+
+    try:
+        with patch("src.cli.config.PROJECTS_DIR", projects_dir):
+            with caplog.at_level(logging.WARNING, logger="host.server"):
+                async with AsyncClient(
+                    transport=ASGITransport(app=app), base_url="http://test",
+                ) as client:
+                    resp = await client.get(
+                        "/mesh/agents",
+                        headers={"X-Agent-ID": "scout"},
+                    )
+        assert resp.status_code == 200
+        data = resp.json()
+        # Warn mode: full fleet still returned (legacy preserved).
+        assert set(data.keys()) == {"operator", "scout", "analyst", "loner"}
+        # But a structured scope-warn was emitted.
+        warn_lines = [r.message for r in caplog.records if "scope-warn" in r.message]
+        assert warn_lines, f"expected a scope-warn log line, got {[r.message for r in caplog.records]}"
+        assert any("caller=scout" in m for m in warn_lines)
+    finally:
+        cleanup()
+        # Restore default mode for other tests.
+        monkeypatch.delenv("OPENLEGION_PROJECT_SCOPE_MODE", raising=False)
+        importlib.reload(server_module)
+
+
+@pytest.mark.asyncio
+async def test_list_agents_worker_caller_enforce_mode_filters(
+    tmp_path, monkeypatch,
+):
+    """Task 5 enforce mode: a worker call returns only members of the
+    caller's own projects + the always-global operator. Other projects'
+    members and standalone non-members are stripped.
+    """
+    import importlib
+    from unittest.mock import patch
+
+    from httpx import ASGITransport, AsyncClient
+
+    monkeypatch.setenv("OPENLEGION_PROJECT_SCOPE_MODE", "enforce")
+    import src.host.server as server_module
+    importlib.reload(server_module)
+
+    app, projects_dir, cleanup = _build_scope_test_app(tmp_path)
+
+    try:
+        with patch("src.cli.config.PROJECTS_DIR", projects_dir):
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test",
+            ) as client:
+                resp = await client.get(
+                    "/mesh/agents",
+                    headers={"X-Agent-ID": "scout"},
+                )
+        assert resp.status_code == 200
+        data = resp.json()
+        # Enforce mode: scout sees only own-project members + operator.
+        assert "scout" in data        # caller itself
+        assert "operator" in data     # always-global
+        assert "analyst" not in data  # other project
+        assert "loner" not in data    # standalone non-member
+    finally:
+        cleanup()
+        monkeypatch.delenv("OPENLEGION_PROJECT_SCOPE_MODE", raising=False)
+        importlib.reload(server_module)
+
+
+@pytest.mark.asyncio
+async def test_list_agents_operator_caller_unaffected(
+    tmp_path, monkeypatch,
+):
+    """The operator is fleet-global by design. Both warn and enforce
+    modes return the full fleet for the operator's unscoped call.
+    """
+    import importlib
+    from unittest.mock import patch
+
+    from httpx import ASGITransport, AsyncClient
+
+    for mode in ("warn", "enforce"):
+        monkeypatch.setenv("OPENLEGION_PROJECT_SCOPE_MODE", mode)
+        import src.host.server as server_module
+        importlib.reload(server_module)
+
+        app, projects_dir, cleanup = _build_scope_test_app(tmp_path, suffix=f"-op-{mode}")
+
+        try:
+            with patch("src.cli.config.PROJECTS_DIR", projects_dir):
+                async with AsyncClient(
+                    transport=ASGITransport(app=app), base_url="http://test",
+                ) as client:
+                    resp = await client.get(
+                        "/mesh/agents",
+                        headers={"X-Agent-ID": "operator"},
+                    )
+            assert resp.status_code == 200, f"mode={mode}"
+            data = resp.json()
+            assert set(data.keys()) == {"operator", "scout", "analyst", "loner"}, (
+                f"mode={mode}: expected full fleet, got {set(data.keys())}"
+            )
+        finally:
+            cleanup()
+            monkeypatch.delenv("OPENLEGION_PROJECT_SCOPE_MODE", raising=False)
+            importlib.reload(server_module)
+
+
+@pytest.mark.asyncio
+async def test_list_agents_internal_caller_unaffected(
+    tmp_path, monkeypatch,
+):
+    """Internal callers (loopback + ``x-mesh-internal: 1``) are
+    fleet-global like the operator. Both warn and enforce modes return
+    the full fleet — dashboards and the CLI manager process rely on
+    this for fleet rendering.
+    """
+    import importlib
+    from unittest.mock import patch
+
+    from httpx import ASGITransport, AsyncClient
+
+    for mode in ("warn", "enforce"):
+        monkeypatch.setenv("OPENLEGION_PROJECT_SCOPE_MODE", mode)
+        import src.host.server as server_module
+        importlib.reload(server_module)
+
+        app, projects_dir, cleanup = _build_scope_test_app(tmp_path, suffix=f"-int-{mode}")
+
+        try:
+            with patch("src.cli.config.PROJECTS_DIR", projects_dir):
+                async with AsyncClient(
+                    transport=ASGITransport(app=app), base_url="http://test",
+                ) as client:
+                    resp = await client.get(
+                        "/mesh/agents",
+                        headers={"x-mesh-internal": "1"},
+                    )
+            assert resp.status_code == 200, f"mode={mode}"
+            data = resp.json()
+            assert set(data.keys()) == {"operator", "scout", "analyst", "loner"}, (
+                f"mode={mode}: expected full fleet, got {set(data.keys())}"
+            )
+        finally:
+            cleanup()
+            monkeypatch.delenv("OPENLEGION_PROJECT_SCOPE_MODE", raising=False)
+            importlib.reload(server_module)
+
+
+# === Task 8: structured routing fields on /mesh/agents and /profile ===
+
+
+@pytest.mark.asyncio
+async def test_list_agents_carries_structured_routing_fields(tmp_path, monkeypatch):
+    """`/mesh/agents` entries surface Task-8 routing fields under
+    distinct keys from the runtime tool ``capabilities`` list.
+
+    Pinned to ``OPENLEGION_PROJECT_SCOPE_MODE=warn`` because the
+    unauthenticated caller resolves to ``"unknown"``; the new enforce
+    default would filter out non-member agents from the response.
+    """
+    import importlib
+    from unittest.mock import patch
+
+    import yaml as yaml_mod
+    from httpx import ASGITransport, AsyncClient
+
+    from src.host.costs import CostTracker
+    from src.host.traces import TraceStore
+
+    monkeypatch.setenv("OPENLEGION_PROJECT_SCOPE_MODE", "warn")
+    import src.host.server as server_module
+    importlib.reload(server_module)
+    create_mesh_app = server_module.create_mesh_app
+
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir(parents=True)
+    agents_path = cfg_dir / "agents.yaml"
+    agents_path.write_text(yaml_mod.dump({"agents": {
+        "scout": {
+            "role": "researcher", "model": "x",
+            "capabilities": ["Web research", "Source analysis"],
+            "preferred_inputs": ["User questions"],
+            "expected_outputs": ["Research reports"],
+            "escalation_to": "operator",
+            "forbidden": ["Speculation as fact"],
+        },
+        "plain": {"role": "x", "model": "y"},
+    }}))
+    (cfg_dir / "mesh.yaml").write_text(yaml_mod.dump({"mesh": {"port": 8420}}))
+    projects_dir = cfg_dir / "projects"
+    projects_dir.mkdir()
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix()
+    router = MessageRouter(perms, {})
+    costs = CostTracker(str(tmp_path / "costs.db"))
+    traces = TraceStore(str(tmp_path / "traces.db"))
+    router.register_agent("scout", "http://scout:8400", ["browser_navigate"])
+    router.register_agent("plain", "http://plain:8400", [])
+
+    app = create_mesh_app(
+        blackboard=bb, pubsub=pubsub, router=router, permissions=perms,
+        cost_tracker=costs, trace_store=traces,
+    )
+
+    try:
+        with patch("src.cli.config.AGENTS_FILE", agents_path), \
+             patch("src.cli.config.CONFIG_FILE", cfg_dir / "mesh.yaml"), \
+             patch("src.cli.config.PROJECTS_DIR", projects_dir):
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test",
+            ) as client:
+                resp = await client.get("/mesh/agents")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        scout = data["scout"]
+        assert scout["interface_capabilities"] == ["Web research", "Source analysis"]
+        assert scout["preferred_inputs"] == ["User questions"]
+        assert scout["expected_outputs"] == ["Research reports"]
+        assert scout["escalation_to"] == "operator"
+        assert scout["forbidden"] == ["Speculation as fact"]
+        # Runtime tool capabilities preserved separately.
+        assert scout["capabilities"] == ["browser_navigate"]
+
+        plain = data["plain"]
+        assert plain["interface_capabilities"] == []
+        assert plain["preferred_inputs"] == []
+        assert plain["expected_outputs"] == []
+        assert plain["escalation_to"] is None
+        assert plain["forbidden"] == []
+    finally:
+        bb.close()
+        costs.close()
+        traces.close()
+        monkeypatch.delenv("OPENLEGION_PROJECT_SCOPE_MODE", raising=False)
+        importlib.reload(server_module)
+
+
+@pytest.mark.asyncio
+async def test_get_agent_profile_carries_structured_routing_fields(tmp_path):
+    """`/mesh/agents/{id}/profile` surfaces Task-8 routing fields."""
+    from unittest.mock import patch
+
+    import yaml as yaml_mod
+    from httpx import ASGITransport, AsyncClient
+
+    from src.host.costs import CostTracker
+    from src.host.server import create_mesh_app
+    from src.host.traces import TraceStore
+
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir(parents=True)
+    agents_path = cfg_dir / "agents.yaml"
+    agents_path.write_text(yaml_mod.dump({"agents": {
+        "writer": {
+            "role": "writer", "model": "x",
+            "capabilities": ["Long-form writing"],
+            "preferred_inputs": ["Outlines"],
+            "expected_outputs": ["Drafts"],
+            "escalation_to": "editor",
+            "forbidden": ["Plagiarism"],
+        },
+    }}))
+    (cfg_dir / "mesh.yaml").write_text(yaml_mod.dump({"mesh": {"port": 8420}}))
+    projects_dir = cfg_dir / "projects"
+    projects_dir.mkdir()
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix()
+    router = MessageRouter(perms, {})
+    costs = CostTracker(str(tmp_path / "costs.db"))
+    traces = TraceStore(str(tmp_path / "traces.db"))
+    router.register_agent("writer", "http://writer:8400", ["file_write"])
+
+    app = create_mesh_app(
+        blackboard=bb, pubsub=pubsub, router=router, permissions=perms,
+        cost_tracker=costs, trace_store=traces,
+    )
+
+    try:
+        with patch("src.cli.config.AGENTS_FILE", agents_path), \
+             patch("src.cli.config.CONFIG_FILE", cfg_dir / "mesh.yaml"), \
+             patch("src.cli.config.PROJECTS_DIR", projects_dir):
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test",
+            ) as client:
+                resp = await client.get(
+                    "/mesh/agents/writer/profile",
+                    headers={"x-mesh-internal": "1"},
+                )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["agent_id"] == "writer"
+        assert data["interface_capabilities"] == ["Long-form writing"]
+        assert data["preferred_inputs"] == ["Outlines"]
+        assert data["expected_outputs"] == ["Drafts"]
+        assert data["escalation_to"] == "editor"
+        assert data["forbidden"] == ["Plagiarism"]
+        assert data["capabilities"] == ["file_write"]
     finally:
         bb.close()
         costs.close()

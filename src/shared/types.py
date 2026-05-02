@@ -37,6 +37,138 @@ AGENT_ID_RE_PATTERN = r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
 # === Inter-Component Messages ===
 
 
+class MessageOrigin(BaseModel):
+    """Typed origin for a message flowing through the mesh.
+
+    The ``kind`` field is the authorization-relevant piece: future tasks
+    gate durable actions on ``kind == "human"`` (Task 2d's pending-action
+    confirm), block worker → operator wakes when ``kind == "agent"``
+    (Task 2e), and downgrade unverifiable channel claims (Task 2c).
+
+    ``channel`` and ``user`` are free-form for now; they identify which
+    surface the message came from (cli, dashboard, telegram, …) and the
+    end-user id when one is available.
+
+    The model is ``frozen=True`` — origins are stamped once at the entry
+    point (CLI REPL, dashboard chat, channel adapter, cron tick, …) and
+    must not be mutated mid-flight.
+
+    Backward-compat: this PR (Task 2a) introduces the model but does not
+    flip stamp sites yet (Task 2b). Existing call sites that construct
+    raw ``{"channel": ..., "user": ...}`` dicts continue to work; the
+    helpers in ``src.shared.trace`` accept both shapes. Dict-style
+    accessors (``__getitem__`` / ``get``) are provided so readers do not
+    need to branch on type during the migration.
+    """
+
+    kind: Literal["human", "operator", "agent", "system", "heartbeat", "cron"]
+    channel: str = ""
+    user: str = ""
+
+    model_config = {"frozen": True}
+
+    # Dict-style accessors — let readers that still treat origin as a
+    # ``dict[str, str]`` keep working through the Task 2b migration.
+    def __getitem__(self, key: str) -> str:
+        if key in {"kind", "channel", "user"}:
+            return getattr(self, key)
+        raise KeyError(key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        # Match ``dict.get`` semantics: present-but-empty returns the
+        # empty string, only an unknown key falls back to ``default``.
+        if key in {"kind", "channel", "user"}:
+            return getattr(self, key)
+        return default
+
+    def to_header_value(self) -> str:
+        """Serialize to a JSON ``X-Origin`` header value.
+
+        Format keeps the existing JSON shape (``{"channel": ..., "user": ...}``)
+        and adds a ``kind`` key. Old mesh nodes parsing this with the
+        legacy parser whitelist only ``channel`` and ``user`` and silently
+        drop ``kind`` — so the rolling-deploy invariant holds.
+        """
+        import json as _json
+        return _json.dumps(
+            {"kind": self.kind, "channel": self.channel, "user": self.user},
+            separators=(",", ":"),
+        )
+
+    @classmethod
+    def from_header_value(
+        cls, value: str | None, *, trust_kind: bool = False,
+    ) -> "MessageOrigin | None":
+        """Parse an ``X-Origin`` header value back into a model.
+
+        Returns ``None`` on missing or malformed input (never a partial
+        model). Treats a missing ``kind`` segment as ``kind="agent"``
+        (the least-trusted origin). Unless ``trust_kind`` is true, an
+        explicit privileged kind from the header is also downgraded to
+        ``kind="agent"`` so request headers cannot self-assert human,
+        operator, system, heartbeat, or cron authority.
+
+        Field length bounds match the legacy parser
+        (``channel`` ≤ 32, ``user`` ≤ 128, raw blob ≤ 512).
+        """
+        if not value or len(value) > 512:
+            return None
+        import json as _json
+        try:
+            parsed = _json.loads(value)
+        except _json.JSONDecodeError:
+            return None
+        if not isinstance(parsed, dict):
+            return None
+
+        ch = parsed.get("channel", "")
+        us = parsed.get("user", "")
+        kind = parsed.get("kind")
+
+        # Channel/user are required for legacy compatibility unless this
+        # is a typed origin without an addressable surface (cron, system,
+        # heartbeat). The legacy parser rejected empty channel/user, so
+        # legacy headers without ``kind`` must still meet that bar.
+        if not isinstance(ch, str) or not isinstance(us, str):
+            return None
+
+        if kind is None:
+            # Legacy header — least-trusted default.
+            kind = "agent"
+            if not ch or not us:
+                # Legacy parser rejected empty channel/user for headers
+                # without a ``kind`` segment. Preserve that behavior so
+                # downstream auto-notify paths do not see a half-shaped
+                # legacy origin.
+                return None
+
+        if not isinstance(kind, str):
+            return None
+
+        if not trust_kind:
+            # Inbound request headers are not authority. Preserve addressable
+            # channel/user metadata, but downgrade all caller-supplied kinds.
+            kind = "agent"
+            if not ch or not us:
+                return None
+
+        if len(ch) > _MAX_ORIGIN_CHANNEL_LEN or len(us) > _MAX_ORIGIN_USER_LEN:
+            return None
+
+        try:
+            return cls(kind=kind, channel=ch, user=us)
+        except Exception:
+            # Pydantic validation error — bad ``kind`` value.
+            return None
+
+
+# Field-length caps used by ``MessageOrigin.from_header_value`` and
+# ``src.shared.trace.parse_origin_header``. Kept here so the type module
+# is self-contained.
+_MAX_ORIGIN_CHANNEL_LEN = 32
+_MAX_ORIGIN_USER_LEN = 128
+
+
 class AgentMessage(BaseModel):
     """Every message between agents passes through the mesh in this format."""
 
@@ -160,8 +292,25 @@ class AgentPermissions(BaseModel):
                                                # (opt-out restriction).
                                                # [] = no actions (equivalent
                                                # to can_use_browser=False).
+    # ``can_spawn`` (Task 3 narrowed semantics): gates EPHEMERAL spawning
+    # only — subagents, cron-triggered spawns, and template applies that
+    # produce short-lived workers. Durable fleet operations (creating
+    # named agents, managing projects, editing config, viewing fleet
+    # metrics, routing tasks, requesting user credentials) now live on
+    # the dedicated control-plane permissions below. Workers default to
+    # ``can_spawn=False``; the operator gets it via _ensure_operator_agent.
     can_spawn: bool = False
     can_manage_cron: bool = False
+    # Control-plane permissions split from ``can_spawn`` (Task 3).
+    # Workers default to False; operator defaults to True. Missing fields
+    # on existing agent records default to False at load time so
+    # pre-existing configs don't accidentally grant durable powers.
+    can_manage_fleet: bool = False         # /mesh/agents/create, register/deregister
+    can_manage_projects: bool = False      # project create/archive, membership
+    can_edit_agent_config: bool = False    # propose/confirm edits to instructions/soul/etc.
+    can_view_fleet_metrics: bool = False   # /mesh/system/metrics, /mesh/agents/{id}/metrics
+    can_route_tasks: bool = False          # durable task records (Task 6)
+    can_request_user_credentials: bool = False  # request_credential, request_browser_login
     can_use_wallet: bool = False
     wallet_allowed_chains: list[str] = []
     wallet_spend_limit_per_tx_usd: float = 0.0
@@ -170,16 +319,71 @@ class AgentPermissions(BaseModel):
     wallet_allowed_contracts: list[str] = []
 
 
+# === Agent Configuration ===
+
+
+class AgentConfig(BaseModel):
+    """Structured fields for an agent entry in ``config/agents.yaml``.
+
+    Today an entry is a free-form dict (role/model/initial_instructions/…).
+    Task 8 introduces five structured fields for routing — what the agent
+    does, what it accepts, what it produces, where it escalates, what it
+    refuses. These fields are the source of truth for the operator and
+    routing layer; ``INTERFACE.md`` is preserved as a free-text companion
+    for the agent's own context but is no longer parsed at routing time.
+
+    The model is read-only metadata: the loader still persists yaml as a
+    dict (for back-compat with existing tooling that diffs the file). The
+    model is used by callers that want a typed view of the entry, by
+    tests, and by the `/mesh/agents/{id}/profile` endpoint to validate
+    the surfaced shape.
+
+    All five new fields default cleanly so existing agents.yaml files
+    without them load unchanged. ``_derive_capabilities_from_interface``
+    in ``src/agent/workspace.py`` provides a one-shot back-fill from
+    ``INTERFACE.md`` headings on first read; the structured field is the
+    source of truth thereafter.
+    """
+
+    role: str = ""
+    model: str = ""
+    skills_dir: str = ""
+    initial_instructions: str = ""
+    initial_soul: str = ""
+    initial_heartbeat: str = ""
+    initial_interface: str = ""
+    thinking: str = ""
+    status: str = "active"
+    budget: dict[str, Any] | None = None
+    resources: dict[str, Any] | None = None
+
+    # Task 8 — structured routing metadata.
+    capabilities: list[str] = Field(default_factory=list)
+    preferred_inputs: list[str] = Field(default_factory=list)
+    expected_outputs: list[str] = Field(default_factory=list)
+    escalation_to: str | None = None
+    forbidden: list[str] = Field(default_factory=list)
+
+    model_config = {"extra": "allow"}
+
+
 # === Projects ===
 
 
 class ProjectMetadata(BaseModel):
-    """Project definition loaded from config/projects/<name>/metadata.yaml."""
+    """Project definition loaded from config/projects/<name>/metadata.yaml.
+
+    ``status`` defaults to ``"active"``; operator product tools use
+    ``"archived"`` to stop scheduling and hide the project from default
+    list views without deleting its data. Archive is reversible; delete
+    requires archive first plus a separate human-confirmed step.
+    """
 
     name: str
     description: str = ""
     members: list[str] = []
     created_at: str | None = None
+    status: str = "active"
     settings: dict[str, Any] = {}
 
 
@@ -363,6 +567,18 @@ class DashboardEvent(BaseModel):
         # DashboardEvent rejects the emit and the panel never renders.
         "browser_metrics",
         "browser_nav_probe",
+        # Task 9 — Workplace tab + pending-action review surfaces.
+        # ``task_*`` are emitted from ``host/orchestration.py`` (Tasks
+        # store) on create / status_change / reroute / cancel.
+        # ``pending_action_*`` are emitted from ``host/pending_actions.py``
+        # on store / consume(success) / reap_expired so the dashboard's
+        # System > Operator panel and inline chat bubbles render the
+        # operator's review queue without polling.
+        "task_created",
+        "task_status_changed",
+        "pending_action_created",
+        "pending_action_resolved",
+        "pending_action_expired",
     ]
     agent: str = ""
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

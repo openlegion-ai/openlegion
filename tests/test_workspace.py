@@ -1013,3 +1013,106 @@ class TestActivityLog:
         )
         entries = self.ws.load_activity()
         assert len(entries) == 2
+
+
+# ── Task 8: INTERFACE.md → structured capabilities derivation ──
+
+
+class TestDeriveCapabilitiesFromInterface:
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_missing_file_returns_empty_defaults(self):
+        from src.agent.workspace import _derive_capabilities_from_interface
+
+        result = _derive_capabilities_from_interface(self._tmpdir)
+        assert result == {
+            "capabilities": [],
+            "preferred_inputs": [],
+            "expected_outputs": [],
+            "escalation_to": None,
+            "forbidden": [],
+        }
+
+    def test_empty_file_returns_empty_defaults(self):
+        from src.agent.workspace import _derive_capabilities_from_interface
+
+        (Path(self._tmpdir) / "INTERFACE.md").write_text("")
+        result = _derive_capabilities_from_interface(self._tmpdir)
+        assert result["capabilities"] == []
+        assert result["escalation_to"] is None
+
+    def test_parses_canonical_headings(self):
+        from src.agent.workspace import _derive_capabilities_from_interface
+
+        (Path(self._tmpdir) / "INTERFACE.md").write_text(
+            "# Interface\n"
+            "\n"
+            "## Capabilities\n"
+            "- Web research\n"
+            "- File I/O\n"
+            "\n"
+            "## Preferred Inputs\n"
+            "- Direct user messages\n"
+            "\n"
+            "## Expected Outputs\n"
+            "- Notify user with findings\n"
+            "\n"
+            "## Escalation\n"
+            "- pm\n"
+            "\n"
+            "## Forbidden\n"
+            "- Long unattended workflows\n"
+        )
+        result = _derive_capabilities_from_interface(self._tmpdir)
+        assert result["capabilities"] == ["Web research", "File I/O"]
+        assert result["preferred_inputs"] == ["Direct user messages"]
+        assert result["expected_outputs"] == ["Notify user with findings"]
+        assert result["escalation_to"] == "pm"
+        assert result["forbidden"] == ["Long unattended workflows"]
+
+    def test_parses_legacy_synonyms(self):
+        from src.agent.workspace import _derive_capabilities_from_interface
+
+        # Pre-Task-8 templates use ## Accepts / ## Produces. The fallback
+        # ## Role bullet maps to capabilities so legacy interfaces still
+        # populate something useful.
+        (Path(self._tmpdir) / "INTERFACE.md").write_text(
+            "## Role\n"
+            "- Product manager that breaks down features\n"
+            "\n"
+            "## Accepts\n"
+            "- User requests\n"
+            "\n"
+            "## Produces\n"
+            "- Task specs\n"
+        )
+        result = _derive_capabilities_from_interface(self._tmpdir)
+        assert "Product manager that breaks down features" in result["capabilities"]
+        assert result["preferred_inputs"] == ["User requests"]
+        assert result["expected_outputs"] == ["Task specs"]
+
+    def test_unparseable_content_returns_empty(self):
+        from src.agent.workspace import _derive_capabilities_from_interface
+
+        (Path(self._tmpdir) / "INTERFACE.md").write_text(
+            "Just some prose with no headings or bullets at all.\n"
+            "\n"
+            "Another paragraph.\n"
+        )
+        result = _derive_capabilities_from_interface(self._tmpdir)
+        assert result["capabilities"] == []
+        assert result["expected_outputs"] == []
+
+    def test_directory_path_instead_of_file_returns_empty(self):
+        from src.agent.workspace import _derive_capabilities_from_interface
+
+        # If INTERFACE.md is a directory (impossible in practice but
+        # exercises the is_file guard) the function returns empties
+        # rather than raising.
+        (Path(self._tmpdir) / "INTERFACE.md").mkdir()
+        result = _derive_capabilities_from_interface(self._tmpdir)
+        assert result["capabilities"] == []

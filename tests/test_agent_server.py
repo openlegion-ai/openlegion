@@ -731,7 +731,14 @@ class TestChatOriginHeader:
         assert resp.status_code == 200
         mock_loop.chat.assert_awaited_once()
         call_kwargs = mock_loop.chat.call_args.kwargs
-        assert call_kwargs.get("origin") == origin
+        # Task 2a: ``parse_origin_header`` returns a typed ``MessageOrigin``;
+        # legacy headers (no ``kind``) default to least-trusted ``kind="agent"``.
+        from src.shared.types import MessageOrigin
+        passed = call_kwargs.get("origin")
+        assert isinstance(passed, MessageOrigin)
+        assert passed.kind == "agent"
+        assert passed.channel == "whatsapp"
+        assert passed.user == "+1234"
 
     @pytest.mark.asyncio
     async def test_chat_no_origin_header_passes_none(self):
@@ -766,3 +773,118 @@ class TestChatOriginHeader:
         assert resp.status_code == 200
         call_kwargs = mock_loop.chat.call_args.kwargs
         assert call_kwargs.get("origin") is None
+
+    @pytest.mark.asyncio
+    async def test_chat_typed_human_origin_preserved(self):
+        """Task 2b: X-Origin with kind="human" reaches loop.chat untouched."""
+        from src.shared.types import MessageOrigin
+
+        app, mock_loop = _make_app()
+        mock_loop.chat = AsyncMock(return_value={
+            "response": "hi", "tool_outputs": [], "tokens_used": 0,
+        })
+        mock_loop.current_task = None
+
+        wire = MessageOrigin(
+            kind="human", channel="dashboard", user="op-1",
+        ).to_header_value()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/chat",
+                json={"message": "hello"},
+                headers={"x-origin": wire, "x-mesh-internal": "1"},
+            )
+        assert resp.status_code == 200
+        passed = mock_loop.chat.call_args.kwargs.get("origin")
+        assert isinstance(passed, MessageOrigin)
+        assert passed.kind == "human"
+        assert passed.channel == "dashboard"
+        assert passed.user == "op-1"
+
+    @pytest.mark.asyncio
+    async def test_chat_typed_human_origin_direct_call_downgrades(self):
+        """Direct non-mesh callers cannot self-assert human origin."""
+        from src.shared.types import MessageOrigin
+
+        app, mock_loop = _make_app()
+        mock_loop.chat = AsyncMock(return_value={
+            "response": "hi", "tool_outputs": [], "tokens_used": 0,
+        })
+        mock_loop.current_task = None
+
+        wire = MessageOrigin(
+            kind="human", channel="dashboard", user="op-1",
+        ).to_header_value()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/chat",
+                json={"message": "hello"},
+                headers={"x-origin": wire},
+            )
+        assert resp.status_code == 200
+        passed = mock_loop.chat.call_args.kwargs.get("origin")
+        assert isinstance(passed, MessageOrigin)
+        assert passed.kind == "agent"
+        assert passed.channel == "dashboard"
+        assert passed.user == "op-1"
+
+
+# ── Task 2b: heartbeat endpoint stamps kind="heartbeat" on contextvar ──
+
+
+class TestHeartbeatOriginContextVar:
+    @pytest.mark.asyncio
+    async def test_heartbeat_typed_origin_sets_contextvar(self):
+        """POST /heartbeat with kind="heartbeat" origin populates the
+        ``current_origin`` contextvar so any tool / coordination call
+        made during the run sees the typed origin.
+        """
+        from src.shared.trace import current_origin
+        from src.shared.types import MessageOrigin
+
+        app, mock_loop = _make_app()
+        captured: list = []
+
+        async def _capture_heartbeat(_msg):
+            # Read the contextvar from inside the heartbeat run — that's
+            # what tools (e.g. coordination_tool.hand_off) will see.
+            captured.append(current_origin.get())
+            return {"response": "ok", "outcome": "ok", "skipped": False}
+
+        mock_loop.execute_heartbeat = AsyncMock(side_effect=_capture_heartbeat)
+
+        wire = MessageOrigin(
+            kind="heartbeat", channel="heartbeat", user="",
+        ).to_header_value()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/heartbeat",
+                json={"message": "tick"},
+                headers={"x-origin": wire, "x-mesh-internal": "1"},
+            )
+        assert resp.status_code == 200
+        assert len(captured) == 1
+        seen = captured[0]
+        assert isinstance(seen, MessageOrigin)
+        assert seen.kind == "heartbeat"
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_no_origin_header_leaves_contextvar_none(self):
+        """Heartbeat without X-Origin keeps contextvar at None — the
+        agent loop only stamps when an origin was explicitly provided.
+        """
+        from src.shared.trace import current_origin
+
+        app, mock_loop = _make_app()
+        captured: list = []
+
+        async def _capture_heartbeat(_msg):
+            captured.append(current_origin.get())
+            return {"response": "ok", "outcome": "ok", "skipped": False}
+
+        mock_loop.execute_heartbeat = AsyncMock(side_effect=_capture_heartbeat)
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post("/heartbeat", json={"message": "tick"})
+        assert resp.status_code == 200
+        assert captured == [None]

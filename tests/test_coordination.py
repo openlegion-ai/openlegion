@@ -5,8 +5,13 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 
-def _make_mesh_client(agent_id="scout", standalone=False):
-    """Create a mock mesh_client with sensible defaults."""
+def _make_mesh_client(agent_id="scout", standalone=False, v2_enabled=False):
+    """Create a mock mesh_client with sensible defaults.
+
+    ``v2_enabled`` toggles the Task 6 orchestration-tasks path. Default
+    False keeps the legacy blackboard route on so the existing test
+    suite continues to assert legacy semantics.
+    """
     mc = MagicMock()
     mc.agent_id = agent_id
     mc.is_standalone = standalone
@@ -17,6 +22,19 @@ def _make_mesh_client(agent_id="scout", standalone=False):
     mc.list_blackboard = AsyncMock(return_value=[])
     mc.delete_blackboard = AsyncMock(return_value={"deleted": True})
     mc.wake_agent = AsyncMock(return_value={"woken": True})
+    # Task 6 v2 hooks. Default off so legacy tests run unchanged.
+    mc.orchestration_v2_enabled = AsyncMock(return_value=v2_enabled)
+    mc.create_task = AsyncMock(return_value={
+        "id": "task_abc123def456",
+        "creator": agent_id,
+        "assignee": "analyst",
+        "title": "",
+        "status": "pending",
+    })
+    mc.list_task_inbox = AsyncMock(return_value=[])
+    mc.set_task_status = AsyncMock(return_value={
+        "id": "task_abc123def456", "status": "done",
+    })
     return mc
 
 
@@ -588,6 +606,30 @@ class TestHandOffOriginPropagation:
         assert task_record.get("origin") == origin
 
     @pytest.mark.asyncio
+    async def test_hand_off_stores_typed_origin_as_plain_dict(self):
+        """Typed origins must be JSON-serializable when written to blackboard."""
+        from src.agent.builtins.coordination_tool import hand_off
+        from src.shared.trace import current_origin
+        from src.shared.types import MessageOrigin
+
+        mc = _make_mesh_client(agent_id="operator")
+        mc.list_agents.return_value = {"chef": {"role": "chef"}}
+
+        origin = MessageOrigin(kind="human", channel="cli", user="jeff")
+        token = current_origin.set(origin)
+        try:
+            await hand_off(to="chef", summary="do work", mesh_client=mc)
+        finally:
+            current_origin.reset(token)
+
+        task_record = mc.write_blackboard.call_args_list[-1].args[1]
+        assert task_record.get("origin") == {
+            "kind": "human",
+            "channel": "cli",
+            "user": "jeff",
+        }
+
+    @pytest.mark.asyncio
     async def test_hand_off_no_origin_no_origin_in_task_record(self):
         """When current_origin is None, task_record has no 'origin' key."""
         from src.agent.builtins.coordination_tool import hand_off
@@ -874,3 +916,175 @@ class TestOperatorHandoff:
         write_call = mc.write_blackboard.call_args
         assert write_call.kwargs.get("project") == "research"
         assert write_call.kwargs.get("global_scope") is False
+
+
+# ── Task 6: orchestration-tasks v2 integration ──────────────────────
+
+
+class TestCoordinationV2:
+    """When ``orchestration_v2_enabled`` is True, coordination_tool
+    routes hand_off / check_inbox / update_status / complete_task
+    through the durable tasks endpoints instead of the blackboard.
+    """
+
+    @pytest.mark.asyncio
+    async def test_hand_off_v2_creates_task_row(self):
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="scout", v2_enabled=True)
+        mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
+        mc.create_task.return_value = {
+            "id": "task_xyz", "creator": "scout", "assignee": "analyst",
+            "title": "research", "status": "pending",
+        }
+
+        result = await hand_off(
+            to="analyst",
+            summary="research handoff",
+            mesh_client=mc,
+        )
+
+        assert result["handed_off"] is True
+        assert result["to"] == "analyst"
+        assert result["task_id"] == "task_xyz"
+        assert result["handoff_id"] == "task_xyz"  # legacy alias preserved
+        # The legacy blackboard write should NOT have been called.
+        mc.write_blackboard.assert_not_called()
+        # The new tasks endpoint should have been called instead.
+        mc.create_task.assert_called_once()
+        call_kwargs = mc.create_task.call_args.kwargs
+        assert call_kwargs["assignee"] == "analyst"
+        assert "research handoff" in call_kwargs["title"]
+
+    @pytest.mark.asyncio
+    async def test_hand_off_v2_with_data_writes_artifact(self):
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="scout", v2_enabled=True)
+        mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
+        mc.create_task.return_value = {
+            "id": "task_xyz", "creator": "scout", "assignee": "analyst",
+            "title": "x", "status": "pending",
+        }
+
+        result = await hand_off(
+            to="analyst",
+            summary="research done",
+            data='{"sources": [1,2,3]}',
+            mesh_client=mc,
+        )
+
+        assert result["handed_off"] is True
+        # output_key in result is the artifact ref the data was written to
+        assert "output_key" in result
+        # Blackboard.write was called for the artifact (separate from the task row)
+        mc.write_blackboard.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_check_inbox_v2_returns_legacy_dict_shape(self):
+        from src.agent.builtins.coordination_tool import check_inbox
+
+        mc = _make_mesh_client(agent_id="analyst", v2_enabled=True)
+        mc.list_task_inbox.return_value = [
+            {
+                "id": "task_a", "creator": "scout", "assignee": "analyst",
+                "title": "do thing", "status": "pending",
+                "artifact_refs": ["output/scout/ho_1"],
+                "created_at": 1700000000.0,
+            },
+        ]
+
+        result = await check_inbox(mesh_client=mc)
+
+        assert result["count"] == 1
+        task = result["tasks"][0]
+        # Legacy LLM-facing shape preserved
+        assert task["key"] == "task_a"
+        assert task["task_id"] == "task_a"
+        assert task["from"] == "scout"
+        assert task["summary"] == "do thing"
+        assert task["status"] == "pending"
+        assert task["output_key"] == "output/scout/ho_1"
+        assert task["ts"] == 1700000000.0
+        # The new endpoint was hit, NOT the blackboard list.
+        mc.list_task_inbox.assert_called_once_with("analyst")
+        mc.list_blackboard.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_complete_task_v2_transitions_to_done(self):
+        from src.agent.builtins.coordination_tool import complete_task
+
+        mc = _make_mesh_client(agent_id="analyst", v2_enabled=True)
+        mc.set_task_status.return_value = {
+            "id": "task_xyz", "status": "done",
+        }
+
+        result = await complete_task("task_xyz", mesh_client=mc)
+
+        assert result["completed"] is True
+        assert result["task_id"] == "task_xyz"
+        mc.set_task_status.assert_called_once_with("task_xyz", "done")
+        # Legacy delete path was NOT taken.
+        mc.delete_blackboard.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_complete_task_v2_strips_legacy_prefix(self):
+        """Legacy ``tasks/x/ho_abc`` keys still resolve to the bare id."""
+        from src.agent.builtins.coordination_tool import complete_task
+
+        mc = _make_mesh_client(agent_id="analyst", v2_enabled=True)
+        mc.set_task_status.return_value = {"id": "ho_abc", "status": "done"}
+
+        await complete_task("tasks/analyst/ho_abc", mesh_client=mc)
+
+        mc.set_task_status.assert_called_once_with("ho_abc", "done")
+
+    @pytest.mark.asyncio
+    async def test_update_status_v2_targets_most_recent_task(self):
+        from src.agent.builtins.coordination_tool import update_status
+
+        mc = _make_mesh_client(agent_id="analyst", v2_enabled=True)
+        # Two non-terminal tasks; the most-recent (last) is the target.
+        mc.list_task_inbox.return_value = [
+            {"id": "task_old", "status": "pending"},
+            {"id": "task_new", "status": "pending"},
+        ]
+
+        result = await update_status("working", mesh_client=mc)
+
+        assert result["updated"] is True
+        assert result["task_id"] == "task_new"
+        mc.set_task_status.assert_called_once_with(
+            "task_new", "working", blocker_note=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_update_status_v2_blocker_note_passes_summary(self):
+        from src.agent.builtins.coordination_tool import update_status
+
+        mc = _make_mesh_client(agent_id="analyst", v2_enabled=True)
+        mc.list_task_inbox.return_value = [{"id": "task_x", "status": "working"}]
+
+        await update_status("blocked", "waiting on creds", mesh_client=mc)
+
+        mc.set_task_status.assert_called_once_with(
+            "task_x", "blocked", blocker_note="waiting on creds",
+        )
+
+    @pytest.mark.asyncio
+    async def test_v2_probe_failure_falls_back_to_legacy(self):
+        """If the v2 probe raises, hand_off falls through to legacy."""
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="scout")
+        mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
+        mc.orchestration_v2_enabled = AsyncMock(side_effect=RuntimeError("boom"))
+
+        result = await hand_off(
+            to="analyst", summary="legacy fallback", mesh_client=mc,
+        )
+
+        assert result["handed_off"] is True
+        # Legacy blackboard write happened (no v2 path taken).
+        mc.write_blackboard.assert_called_once()
+        mc.create_task.assert_not_called()

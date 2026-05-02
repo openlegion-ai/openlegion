@@ -184,8 +184,13 @@ def test_consume_nonexistent_change():
 def test_expired_changes_cleaned_up():
     """Expired changes are removed during cleanup."""
     change_id = _store_pending_change("alpha", "model", "old", "new")
-    # Manually expire it
-    _pending_changes[change_id]["expires_at"] = datetime.now(timezone.utc) - timedelta(seconds=1)
+    # Manually expire it. ``_pending_changes`` is a SQLite-backed proxy
+    # (Task 2d), so the in-place mutation pattern ``[cid]["expires_at"]
+    # = ...`` no longer round-trips. Use the proxy's ``__setitem__``
+    # which performs a single-column UPDATE on the row.
+    _pending_changes[change_id] = {
+        "expires_at": datetime.now(timezone.utc) - timedelta(seconds=1),
+    }
 
     _cleanup_expired_changes()
     assert change_id not in _pending_changes

@@ -3,6 +3,12 @@
 Higher-level wrappers over the blackboard that encode the standard
 coordination protocol.  Agents use these instead of raw blackboard
 operations for inter-agent work handoffs.
+
+Task 6 introduces a durable ``tasks`` SQLite table behind the
+``OPENLEGION_ORCHESTRATION_TASKS_V2`` flag. When the mesh advertises
+that the flag is on (probed once via ``mesh_client.orchestration_v2_enabled``),
+each tool routes through the new ``/mesh/tasks*`` endpoints. When off,
+the legacy blackboard path runs unchanged.
 """
 
 from __future__ import annotations
@@ -77,6 +83,17 @@ async def hand_off(
     if not re.fullmatch(AGENT_ID_RE_PATTERN, to):
         return {"error": f"Invalid agent ID: '{to}'"}
 
+    # Task 6: route through the durable tasks table when the mesh
+    # advertises v2. Probe is cached per process. On any error we fall
+    # through to the legacy blackboard path so existing fleets keep
+    # working until the flag is flipped.
+    try:
+        v2_enabled = await mesh_client.orchestration_v2_enabled()
+    except Exception:
+        v2_enabled = False
+    if v2_enabled:
+        return await _hand_off_v2(to, summary, data, mesh_client=mesh_client)
+
     # Resolve target agent's project for cross-project coordination, and
     # detect whether it advertises a fleet-global scope (operator-style).
     target_project: str | None = None
@@ -150,7 +167,14 @@ async def hand_off(
     if output_key:
         task_record["output_key"] = output_key
     if origin:
-        task_record["origin"] = origin
+        # ``origin`` may be a typed ``MessageOrigin`` (post-Task-2a stamp
+        # sites) or a legacy raw dict. Persist as plain dict so the
+        # blackboard JSON write doesn't choke on a Pydantic instance and
+        # downstream readers continue to see the same shape.
+        if hasattr(origin, "model_dump"):
+            task_record["origin"] = origin.model_dump()
+        elif isinstance(origin, dict):
+            task_record["origin"] = dict(origin)
 
     task_key = (
         f"global/tasks/{to}/{handoff_id}"
@@ -212,6 +236,14 @@ async def check_inbox(*, mesh_client=None) -> dict:
 
     agent_id = mesh_client.agent_id
     is_operator = (agent_id == "operator")
+
+    # Task 6: route through the durable tasks table when v2 is on.
+    try:
+        v2_enabled = await mesh_client.orchestration_v2_enabled()
+    except Exception:
+        v2_enabled = False
+    if v2_enabled:
+        return await _check_inbox_v2(mesh_client=mesh_client)
 
     # Standalone agents normally have no inbox (blackboard is project-scoped).
     # The operator is the exception: its inbox lives in a fleet-global namespace
@@ -293,6 +325,19 @@ async def update_status(
     agent_id = mesh_client.agent_id
     is_operator = (agent_id == "operator")
 
+    # Task 6: when v2 is on, ``update_status`` updates the assignee's
+    # currently-active task (the most recent non-terminal one). The
+    # legacy blackboard ``status/{agent_id}`` write still happens for
+    # back-compat surfaces that read directly from the blackboard, but
+    # only when v2 is OFF — under v2 the per-task status is the source
+    # of truth.
+    try:
+        v2_enabled = await mesh_client.orchestration_v2_enabled()
+    except Exception:
+        v2_enabled = False
+    if v2_enabled:
+        return await _update_status_v2(state, summary, mesh_client=mesh_client)
+
     if mesh_client.is_standalone and not is_operator:
         return {"error": _STANDALONE_ERROR}
 
@@ -336,6 +381,16 @@ async def complete_task(task_key: str, *, mesh_client=None) -> dict:
 
     agent_id = mesh_client.agent_id
     is_operator = (agent_id == "operator")
+
+    # Task 6: when v2 is on, ``task_key`` is the task id (the storage
+    # layer's primary key). The hand_off v2 path returns this id as
+    # ``handoff_id`` for back-compat with the old result shape.
+    try:
+        v2_enabled = await mesh_client.orchestration_v2_enabled()
+    except Exception:
+        v2_enabled = False
+    if v2_enabled:
+        return await _complete_task_v2(task_key, mesh_client=mesh_client)
 
     if mesh_client.is_standalone and not is_operator:
         return {"error": _STANDALONE_ERROR}
@@ -393,3 +448,191 @@ async def complete_task(task_key: str, *, mesh_client=None) -> dict:
         return {"error": f"Failed to complete task: {e}"}
 
     return {"completed": True, "task_key": task_key}
+
+
+# ── Task 6: durable orchestration tasks v2 helpers ─────────────────
+
+
+def _v2_task_to_legacy_dict(task: dict) -> dict:
+    """Map a v2 task record to the legacy ``check_inbox`` row shape.
+
+    The LLM-facing tool surface stayed the same so existing prompts and
+    skills don't need to change when the flag flips. ``key`` is the
+    task id (also exposed as ``task_id`` for clarity), ``output_key``
+    is the first artifact_ref if present.
+    """
+    artifact_refs = task.get("artifact_refs") or []
+    out: dict = {
+        "key": sanitize_for_prompt(str(task.get("id", ""))),
+        "task_id": str(task.get("id", "")),
+        "from": sanitize_for_prompt(str(task.get("creator", "unknown"))),
+        "summary": sanitize_for_prompt(str(task.get("title", ""))),
+        "status": str(task.get("status", "pending")),
+    }
+    if artifact_refs:
+        out["output_key"] = sanitize_for_prompt(str(artifact_refs[0]))
+    created_at = task.get("created_at")
+    if created_at:
+        out["ts"] = created_at
+    return out
+
+
+async def _hand_off_v2(
+    to: str, summary: str, data: str, *, mesh_client,
+) -> dict:
+    """Task 6 hand_off path — creates a durable task row.
+
+    Mirrors the legacy result shape (``handed_off``, ``to``,
+    ``handoff_id``, ``output_key``, ``task_key``) so callers don't need
+    a flag-aware result handler.
+    """
+    summary = sanitize_for_prompt(summary)
+    description = summary
+    artifact_ref: str | None = None
+
+    # Validate target exists in the registry — same fail-closed behavior
+    # as the legacy path.
+    target_project: str | None = None
+    try:
+        registry = await mesh_client.list_agents()
+        if to not in registry:
+            available = ", ".join(sorted(registry.keys()))
+            return {"error": f"Agent '{to}' not found. Available: {available}"}
+        target_info = registry.get(to, {})
+        if isinstance(target_info, dict):
+            target_project = target_info.get("project")
+    except Exception as e:
+        # Standalone senders need to resolve target project to write
+        # the task into the correct scope.
+        if not mesh_client.project_name:
+            return {"error": f"Cannot hand off: fleet roster unavailable ({e})"}
+        logger.debug("Fleet roster check failed, proceeding with validated ID: %s", e)
+
+    # Pick the project scope:
+    #   - operator handoffs: project=None (fleet-global)
+    #   - cross-project worker handoffs: target's project
+    #   - same-project handoffs: caller's project
+    if to == "operator":
+        write_project = None
+    elif target_project:
+        write_project = target_project
+    else:
+        write_project = mesh_client.project_name
+
+    if data and data.strip():
+        # Optional: stash the payload under an artifact_ref the
+        # recipient can fetch later. We reuse the blackboard for the
+        # actual bytes — the v2 task carries only the reference. This
+        # keeps the table small and matches the pre-existing
+        # output/{from}/{handoff_id} convention.
+        try:
+            parsed_data = json.loads(data)
+        except json.JSONDecodeError:
+            parsed_data = {"text": data}
+        # Generate a placeholder ref now — we'll write under that key.
+        artifact_ref = f"output/{mesh_client.agent_id}/{generate_id('ho')}"
+        try:
+            await mesh_client.write_blackboard(
+                artifact_ref, parsed_data, ttl=_HANDOFF_TTL,
+                project=write_project,
+            )
+        except Exception as e:
+            return {"error": f"Failed to write output: {e}"}
+
+    try:
+        record = await mesh_client.create_task(
+            assignee=to,
+            title=summary[:200] or "(handoff)",
+            description=description,
+            project=write_project,
+            priority=0,
+            artifact_refs=[artifact_ref] if artifact_ref else None,
+        )
+    except Exception as e:
+        return {"error": f"Failed to create task: {e}"}
+
+    task_id = record.get("id", "")
+
+    # Wake the target so they pick up the task immediately. Failures
+    # are logged and swallowed — the task is queued either way.
+    from src.shared.trace import current_origin as _current_origin
+    origin = _current_origin.get()
+    try:
+        await mesh_client.wake_agent(
+            to, f"New task from {mesh_client.agent_id}: {summary[:200]}",
+            origin=origin,
+        )
+    except Exception as e:
+        logger.debug("Wake for %s failed (task still queued): %s", to, e)
+
+    result = {
+        "handed_off": True,
+        "to": to,
+        "handoff_id": task_id,
+        "task_key": task_id,
+        "task_id": task_id,
+    }
+    if artifact_ref:
+        result["output_key"] = artifact_ref
+    return result
+
+
+async def _check_inbox_v2(*, mesh_client) -> dict:
+    """Task 6 check_inbox path — reads the durable tasks table."""
+    try:
+        rows = await mesh_client.list_task_inbox(mesh_client.agent_id)
+    except Exception as e:
+        return {"error": f"Failed to check inbox: {e}"}
+    tasks = [_v2_task_to_legacy_dict(r) for r in rows]
+    return {"tasks": tasks, "count": len(tasks)}
+
+
+async def _update_status_v2(
+    state: str, summary: str, *, mesh_client,
+) -> dict:
+    """Task 6 update_status path — transitions the agent's most recent task.
+
+    When the agent has multiple non-terminal tasks the most-recently-
+    created one wins (``list_inbox`` returns oldest-first; we pick the
+    last). When there is no active task this is a no-op success — the
+    LLM-facing contract didn't return per-task ids historically.
+    """
+    # Map the legacy ``state`` to the v2 status name.  Both share the
+    # same vocabulary except the legacy ``idle`` which has no v2
+    # equivalent — we treat it as a no-op since "idle" wasn't a per-task
+    # status to begin with.
+    if state == "idle":
+        return {"updated": True, "state": state, "noop": "idle has no v2 mapping"}
+    try:
+        rows = await mesh_client.list_task_inbox(mesh_client.agent_id)
+    except Exception as e:
+        return {"error": f"Failed to load inbox: {e}"}
+    if not rows:
+        return {"updated": False, "state": state, "reason": "no active tasks"}
+    target = rows[-1]
+    blocker_note = sanitize_for_prompt(summary) if state == "blocked" else None
+    try:
+        await mesh_client.set_task_status(
+            target["id"], state, blocker_note=blocker_note,
+        )
+    except Exception as e:
+        return {"error": f"Failed to update status: {e}"}
+    return {"updated": True, "state": state, "task_id": target["id"]}
+
+
+async def _complete_task_v2(task_key: str, *, mesh_client) -> dict:
+    """Task 6 complete_task path — transitions a task to ``done``."""
+    # ``task_key`` may be either the raw task id (preferred) or one of
+    # the legacy blackboard-style keys (``tasks/x/ho_abc``). Strip the
+    # legacy prefix when present so flag-flipped fleets can still pass
+    # through the old key shapes for one transition cycle.
+    task_id = task_key.rsplit("/", 1)[-1] if "/" in task_key else task_key
+    try:
+        record = await mesh_client.set_task_status(task_id, "done")
+    except Exception as e:
+        return {"error": f"Failed to complete task: {e}"}
+    return {
+        "completed": True,
+        "task_key": task_key,
+        "task_id": record.get("id", task_id),
+    }

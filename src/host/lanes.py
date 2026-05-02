@@ -19,7 +19,7 @@ from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from typing import Any
 
-from src.shared.types import SILENT_REPLY_TOKEN
+from src.shared.types import SILENT_REPLY_TOKEN, MessageOrigin
 from src.shared.utils import generate_id, setup_logging
 
 logger = setup_logging("host.lanes")
@@ -36,7 +36,10 @@ class QueuedTask:
     message: str
     mode: str = "followup"
     trace_id: str | None = None
-    origin: dict[str, str] | None = None
+    # Task 2b: stamp sites now produce typed ``MessageOrigin``. Legacy
+    # dict shape still accepted during the migration window for paths
+    # that have not been flipped yet (Task 2c will do the recheck).
+    origin: MessageOrigin | dict[str, str] | None = None
     auto_notify: bool = False
     future: asyncio.Future = field(default_factory=asyncio.Future)
 
@@ -81,7 +84,7 @@ class LaneManager:
     async def enqueue(
         self, agent: str, message: str, *, mode: str = "followup",
         trace_id: str | None = None,
-        origin: dict[str, str] | None = None,
+        origin: MessageOrigin | dict[str, str] | None = None,
         auto_notify: bool = False,
     ) -> str:
         """Queue a message for an agent with the specified mode.
@@ -109,7 +112,7 @@ class LaneManager:
 
     async def _handle_followup(
         self, agent: str, message: str, *, trace_id: str | None = None,
-        origin: dict[str, str] | None = None,
+        origin: MessageOrigin | dict[str, str] | None = None,
         auto_notify: bool = False,
     ) -> str:
         """Standard FIFO enqueue."""

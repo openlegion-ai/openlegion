@@ -8,11 +8,15 @@ from __future__ import annotations
 
 import asyncio
 import os
+from typing import TYPE_CHECKING
 
 import httpx
 
 from src.shared.types import MeshEvent
 from src.shared.utils import setup_logging
+
+if TYPE_CHECKING:
+    from src.shared.types import MessageOrigin
 
 logger = setup_logging("agent.mesh_client")
 
@@ -256,7 +260,7 @@ class MeshClient:
 
     async def wake_agent(
         self, target: str, message: str = "",
-        origin: dict | None = None,
+        origin: "MessageOrigin | dict | None" = None,
     ) -> dict:
         """Wake a target agent so it processes work immediately."""
         from src.shared.trace import origin_header
@@ -927,6 +931,262 @@ class MeshClient:
                 f"Unexpected browser_download response: {type(data).__name__}",
             )
         return data
+
+    # ── Orchestration tasks v2 (Task 6) ─────────────────────────
+
+    # Cached probe result. Set on first call so the agent doesn't
+    # round-trip to /mesh/orchestration/status on every coordination
+    # call. ``None`` = not yet probed; ``True``/``False`` once known.
+    _orchestration_v2_cache: bool | None = None
+
+    async def orchestration_v2_enabled(self) -> bool:
+        """Return True when the mesh has v2 enabled. Fail-closed.
+
+        Cached for the process lifetime — the env var only changes on
+        mesh restart, and a restart drops this whole client. Any error
+        (network, 503, malformed JSON) is treated as "v2 off" so the
+        coordination tool falls back to the legacy blackboard path.
+        """
+        if self._orchestration_v2_cache is not None:
+            return self._orchestration_v2_cache
+        try:
+            response = await self._get_with_retry(
+                f"{self.mesh_url}/mesh/orchestration/status",
+                timeout=5,
+            )
+            if response.status_code == 200:
+                data = response.json()
+                self._orchestration_v2_cache = bool(data.get("enabled"))
+            else:
+                self._orchestration_v2_cache = False
+        except Exception as e:
+            logger.debug("orchestration_v2 probe failed (fail-closed): %s", e)
+            self._orchestration_v2_cache = False
+        return self._orchestration_v2_cache
+
+    async def create_task(
+        self,
+        *,
+        assignee: str,
+        title: str,
+        description: str | None = None,
+        project: str | None = None,
+        parent_task_id: str | None = None,
+        priority: int = 0,
+        dependencies: list[str] | None = None,
+        artifact_refs: list[str] | None = None,
+    ) -> dict:
+        """Create a durable task. Returns the new task record."""
+        client = await self._get_client()
+        body: dict = {
+            "assignee": assignee,
+            "title": title,
+            "priority": priority,
+        }
+        if description is not None:
+            body["description"] = description
+        if project is not None:
+            body["project"] = project
+        if parent_task_id is not None:
+            body["parent_task_id"] = parent_task_id
+        if dependencies is not None:
+            body["dependencies"] = dependencies
+        if artifact_refs is not None:
+            body["artifact_refs"] = artifact_refs
+        response = await client.post(
+            f"{self.mesh_url}/mesh/tasks",
+            json=body,
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def get_task(self, task_id: str) -> dict | None:
+        """Read a task by id. Returns None on 404."""
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/tasks/{task_id}",
+        )
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return response.json()
+
+    async def list_task_inbox(self, assignee: str | None = None) -> list[dict]:
+        """List tasks assigned to ``assignee`` (defaults to self)."""
+        target = assignee or self.agent_id
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/tasks/inbox/{target}",
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data.get("tasks", []) if isinstance(data, dict) else []
+
+    async def list_project_tasks(self, project_id: str) -> list[dict]:
+        """List tasks scoped to ``project_id``."""
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/tasks/project/{project_id}",
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data.get("tasks", []) if isinstance(data, dict) else []
+
+    async def set_task_status(
+        self, task_id: str, status: str,
+        blocker_note: str | None = None,
+    ) -> dict:
+        """Transition a task to ``status``."""
+        client = await self._get_client()
+        body: dict = {"status": status}
+        if blocker_note is not None:
+            body["blocker_note"] = blocker_note
+        response = await client.post(
+            f"{self.mesh_url}/mesh/tasks/{task_id}/status",
+            json=body,
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def reroute_task(
+        self, task_id: str, new_assignee: str, reason: str = "",
+    ) -> dict:
+        """Reassign a task to ``new_assignee``."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/tasks/{task_id}/reroute",
+            json={"new_assignee": new_assignee, "reason": reason},
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def cancel_task(self, task_id: str, reason: str = "") -> dict:
+        """Cancel a task."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/tasks/{task_id}/cancel",
+            json={"reason": reason},
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def retry_task(
+        self, task_id: str,
+        title: str | None = None,
+        description: str | None = None,
+        assignee: str | None = None,
+    ) -> dict:
+        """Retry a failed task. Optional patch overrides title/description/assignee."""
+        body: dict = {}
+        if title is not None:
+            body["title"] = title
+        if description is not None:
+            body["description"] = description
+        if assignee is not None:
+            body["assignee"] = assignee
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/tasks/{task_id}/retry",
+            json=body,
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    # ── Operator product surface (Task 7) ────────────────────────
+
+    async def project_status(self, project_id: str) -> dict:
+        """Per-project status counts + recent blockers/completions."""
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/projects/{project_id}/status",
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def all_projects_status(self) -> dict:
+        """Status rollup across every visible project."""
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/projects/status",
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def agent_queue(self, agent_id: str, limit: int = 10) -> dict:
+        """Recent tasks for an agent grouped by status."""
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/agents/{agent_id}/queue",
+            params={"limit": limit},
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def project_outputs(self, project_id: str, since: str = "") -> dict:
+        """Completed task artifacts for a project in a time window."""
+        params = {"since": since} if since else None
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/projects/{project_id}/outputs",
+            params=params,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def project_summary(self, project_id: str) -> dict:
+        """Synthesized status summary for a project."""
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/projects/{project_id}/summary",
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def archive_project(self, name: str) -> dict:
+        """Archive a project."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/projects/{name}/archive",
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def archive_agent(self, agent_id: str) -> dict:
+        """Archive an agent."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/agents/{agent_id}/archive",
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def propose_delete_project(self, name: str) -> dict:
+        """Propose deletion of an archived project. Returns nonce for human confirm."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/projects/{name}/propose-delete",
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def propose_delete_agent(self, agent_id: str) -> dict:
+        """Propose deletion of an archived agent. Returns nonce for human confirm."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/agents/{agent_id}/propose-delete",
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def list_task_events(self, task_id: str) -> list[dict]:
+        """Audit history for a task."""
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/tasks/{task_id}/events",
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data.get("events", []) if isinstance(data, dict) else []
 
     # ── Operator metrics ─────────────────────────────────────────
 

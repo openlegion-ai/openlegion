@@ -652,3 +652,426 @@ class TestOperatorInboxGlobalCarveOut:
         assert m.can_read_blackboard("scout", "global/output/analyst/ho_1") is False
         # Sender may inspect only its own submitted output.
         assert m.can_read_blackboard("scout", "global/output/scout/ho_1") is True
+
+# ── Task 3: can_spawn split ────────────────────────────────────────────
+#
+# Task 3 narrowed ``can_spawn`` to ephemeral spawning only (``/mesh/spawn``)
+# and moved durable fleet operations onto a new ``can_manage_fleet``
+# capability:
+#
+#   * ``permissions.can_spawn``         → ``POST /mesh/spawn``       (ephemeral)
+#   * ``permissions.can_manage_fleet``  → ``POST /mesh/fleet/apply`` (durable)
+#   * ``permissions.can_manage_fleet``  → ``POST /mesh/agents/create`` (durable)
+#
+# The first test below pins ``can_spawn`` keeping ephemeral semantics; the
+# next two assert the new ``can_manage_fleet`` requirement on the durable
+# endpoints (these used to be characterization captures of today's overly
+# broad ``can_spawn`` gate; Task 3 flipped them to enforce the split).
+
+class _SpawnRouteFixture:
+    """Helper that builds a mesh app with a permissive ``container_manager``
+    so the three ``can_spawn`` gates can be exercised end-to-end. We bypass
+    the actual container start by pre-creating an in-memory ``MagicMock``."""
+
+    @staticmethod
+    def build(
+        tmp_path, monkeypatch, *, can_spawn: bool,
+        can_manage_fleet: bool = False, auth_tokens: dict | None = None,
+    ):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from fastapi.testclient import TestClient
+
+        from src.host.mesh import Blackboard, MessageRouter, PubSub
+        from src.host.permissions import PermissionMatrix
+        from src.host.server import create_mesh_app
+
+        cfg_dir = tmp_path / "config"
+        cfg_dir.mkdir(exist_ok=True)
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir(exist_ok=True)
+        templates_dir = tmp_path / "templates"
+        templates_dir.mkdir(exist_ok=True)
+        # Minimal one-agent template for /mesh/fleet/apply.
+        import yaml
+        (templates_dir / "tinybot.yaml").write_text(yaml.dump({
+            "name": "tinybot",
+            "description": "single-agent template for tests",
+            "agents": {
+                "tinybot": {
+                    "role": "tester",
+                    "model": "openai/gpt-4o-mini",
+                    "instructions": "be tiny",
+                },
+            },
+        }))
+
+        monkeypatch.setattr("src.cli.config.PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr("src.cli.config.AGENTS_FILE", cfg_dir / "agents.yaml")
+        monkeypatch.setattr("src.cli.config.PERMISSIONS_FILE",
+                            cfg_dir / "permissions.json")
+        monkeypatch.setattr("src.cli.config.CONFIG_FILE", cfg_dir / "mesh.yaml")
+        monkeypatch.setattr("src.cli.config.TEMPLATES_DIR", templates_dir)
+
+        # Seed the permissions file so reload() preserves our caller.
+        cfg_dir_perms = cfg_dir / "permissions.json"
+        import json as _json
+        cfg_dir_perms.write_text(_json.dumps({
+            "permissions": {
+                "worker": {
+                    "can_spawn": can_spawn,
+                    "can_manage_fleet": can_manage_fleet,
+                    "can_message": ["mesh"],
+                    "blackboard_read": [],
+                    "blackboard_write": [],
+                },
+            },
+        }))
+
+        # Real PermissionMatrix loaded from the seeded file so reload()
+        # in the create route picks up the on-disk write.
+        perms = PermissionMatrix(config_path=str(cfg_dir_perms))
+        # Sanity: the seeded entry was loaded.
+        assert "worker" in perms.permissions
+
+        bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+        pubsub = PubSub()
+        router = MessageRouter(perms, {})
+
+        # Fake container manager — accepts spawn / start, returns a URL.
+        cm = MagicMock()
+        cm.project_root = tmp_path
+        cm.spawn_agent.return_value = "http://localhost:9100"
+        cm.start_agent.return_value = "http://localhost:9101"
+        cm.wait_for_agent = AsyncMock(return_value=True)
+        cm.agents = {}
+
+        app = create_mesh_app(
+            bb, pubsub, router, perms,
+            container_manager=cm,
+            auth_tokens=auth_tokens,
+        )
+        client = TestClient(app)
+        return {
+            "client": client,
+            "perms": perms,
+            "router": router,
+            "container_manager": cm,
+            "bb": bb,
+        }
+
+
+def test_can_spawn_today_gates_mesh_spawn_endpoint(tmp_path, monkeypatch):
+    """Pin (positive): an agent with ``can_spawn=True`` can call
+    ``POST /mesh/spawn``. This is the *legitimate* ephemeral-worker path
+    that should keep working when Task 3 splits ``can_manage_fleet``
+    out — ``can_spawn`` retains ephemeral semantics. Acts as the
+    success-baseline alongside the two capture-to-tighten tests below.
+    No characterization marker: this is a forever-pin.
+    """
+    fx = _SpawnRouteFixture.build(tmp_path, monkeypatch, can_spawn=True)
+    client = fx["client"]
+    resp = client.post(
+        "/mesh/spawn",
+        json={"spawned_by": "worker", "role": "subhelper", "ttl": 120},
+        headers={"X-Agent-ID": "worker"},
+    )
+    # Should NOT be the 403 from the can_spawn gate.
+    assert resp.status_code != 403, resp.text
+    # The fake container manager returns success, so the route should 200.
+    assert resp.status_code == 200, resp.text
+    fx["bb"].close()
+
+
+def test_fleet_apply_requires_can_manage_fleet(tmp_path, monkeypatch):
+    """Task 3: ``/mesh/fleet/apply`` is now gated on ``can_manage_fleet``,
+    not ``can_spawn``. A worker with only ``can_spawn=True`` is rejected;
+    granting ``can_manage_fleet`` lets the call through.
+
+    The ``/mesh/fleet/apply`` permission gate runs only when the mesh app
+    is built with auth tokens (production posture); pass ``auth_tokens``
+    to the fixture so the gate executes.
+    """
+    auth = {"worker": "tok"}
+    headers = {"X-Agent-ID": "worker", "Authorization": "Bearer tok"}
+
+    # 1) can_spawn=True alone is no longer sufficient — 403.
+    fx = _SpawnRouteFixture.build(
+        tmp_path, monkeypatch,
+        can_spawn=True, can_manage_fleet=False, auth_tokens=auth,
+    )
+    resp = fx["client"].post(
+        "/mesh/fleet/apply",
+        json={"spawned_by": "worker", "template": "tinybot"},
+        headers=headers,
+    )
+    assert resp.status_code == 403, resp.text
+    assert "can_manage_fleet" in resp.text
+    fx["bb"].close()
+
+    # 2) Granting can_manage_fleet lets the call past the gate.
+    fx2 = _SpawnRouteFixture.build(
+        tmp_path, monkeypatch,
+        can_spawn=True, can_manage_fleet=True, auth_tokens=auth,
+    )
+    resp2 = fx2["client"].post(
+        "/mesh/fleet/apply",
+        json={"spawned_by": "worker", "template": "tinybot"},
+        headers=headers,
+    )
+    # Past the can_manage_fleet gate — must NOT be 403 from that gate.
+    assert resp2.status_code != 403, resp2.text
+    fx2["bb"].close()
+
+
+def test_agents_create_requires_can_manage_fleet(tmp_path, monkeypatch):
+    """Task 3: ``/mesh/agents/create`` is now gated on ``can_manage_fleet``,
+    not ``can_spawn``. A worker with only ``can_spawn=True`` is rejected;
+    granting ``can_manage_fleet`` lets the call through.
+    """
+    # 1) can_spawn=True alone is no longer sufficient — 403.
+    fx = _SpawnRouteFixture.build(
+        tmp_path, monkeypatch,
+        can_spawn=True, can_manage_fleet=False,
+    )
+    resp = fx["client"].post(
+        "/mesh/agents/create",
+        json={
+            "agent_id": "worker",
+            "name": "freshbot",
+            "role": "tester",
+            "model": "openai/gpt-4o-mini",
+        },
+        headers={"X-Agent-ID": "worker"},
+    )
+    assert resp.status_code == 403, resp.text
+    assert "can_manage_fleet" in resp.text
+    fx["bb"].close()
+
+    # 2) Granting can_manage_fleet lets the call past the gate.
+    fx2 = _SpawnRouteFixture.build(
+        tmp_path, monkeypatch,
+        can_spawn=True, can_manage_fleet=True,
+    )
+    resp2 = fx2["client"].post(
+        "/mesh/agents/create",
+        json={
+            "agent_id": "worker",
+            "name": "freshbot2",
+            "role": "tester",
+            "model": "openai/gpt-4o-mini",
+        },
+        headers={"X-Agent-ID": "worker"},
+    )
+    # Past the can_manage_fleet gate — not the 403 we get when narrow.
+    # Downstream may fail for other reasons (mocked container manager).
+    assert resp2.status_code != 403, resp2.text
+    fx2["bb"].close()
+
+
+# ── Task 3: control-plane permission methods ──────────────────────────
+
+
+class TestControlPlanePermissions:
+    """Task 3: ``can_spawn`` is now narrow; durable fleet operations
+    require new control-plane permissions.
+
+    The six bits split off ``can_spawn``:
+      * ``can_manage_fleet``           — create/register named agents
+      * ``can_manage_projects``        — create/archive projects, membership
+      * ``can_edit_agent_config``      — propose/confirm config edits
+      * ``can_view_fleet_metrics``     — fleet-wide metrics endpoints
+      * ``can_route_tasks``            — durable task records (Task 6)
+      * ``can_request_user_credentials`` — user-facing credential requests
+    """
+
+    _CONTROL_PLANE_FIELDS = (
+        "can_manage_fleet",
+        "can_manage_projects",
+        "can_edit_agent_config",
+        "can_view_fleet_metrics",
+        "can_route_tasks",
+        "can_request_user_credentials",
+    )
+
+    def _matrix(self, tmp_path, perms_dict: dict) -> PermissionMatrix:
+        path = tmp_path / "permissions.json"
+        path.write_text(json.dumps({"permissions": perms_dict}))
+        return PermissionMatrix(config_path=str(path))
+
+    def test_default_worker_lacks_control_plane_permissions(self, tmp_path):
+        # A bare worker entry without any of the new fields → all six False.
+        m = self._matrix(tmp_path, {"worker": {"can_spawn": True}})
+        for field in self._CONTROL_PLANE_FIELDS:
+            assert getattr(m, field)("worker") is False, field
+
+    def test_operator_has_all_control_plane_permissions(self, tmp_path, monkeypatch):
+        # Drive ``_ensure_operator_agent`` against a temp config and verify
+        # the persisted JSON sets all six bits to True.
+        from src.cli import config as cli_config
+        cfg_dir = tmp_path / "config"
+        cfg_dir.mkdir()
+        monkeypatch.setattr(cli_config, "PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr(cli_config, "AGENTS_FILE", cfg_dir / "agents.yaml")
+        monkeypatch.setattr(cli_config, "PERMISSIONS_FILE", cfg_dir / "permissions.json")
+        monkeypatch.setattr(cli_config, "CONFIG_FILE", cfg_dir / "mesh.yaml")
+        cli_config._ensure_operator_agent(default_model="openai/gpt-4o-mini")
+        on_disk = json.loads((cfg_dir / "permissions.json").read_text())
+        op = on_disk["permissions"]["operator"]
+        for field in self._CONTROL_PLANE_FIELDS:
+            assert op.get(field) is True, field
+
+    def test_can_manage_fleet_method(self, tmp_path):
+        m = self._matrix(tmp_path, {
+            "narrow": {"can_spawn": True},
+            "broad": {"can_manage_fleet": True},
+        })
+        assert m.can_manage_fleet("narrow") is False
+        assert m.can_manage_fleet("broad") is True
+        assert m.can_manage_fleet("mesh") is True  # trusted shortcut
+
+    def test_can_manage_projects_method(self, tmp_path):
+        m = self._matrix(tmp_path, {
+            "narrow": {},
+            "broad": {"can_manage_projects": True},
+        })
+        assert m.can_manage_projects("narrow") is False
+        assert m.can_manage_projects("broad") is True
+        assert m.can_manage_projects("mesh") is True
+
+    def test_can_edit_agent_config_method(self, tmp_path):
+        m = self._matrix(tmp_path, {
+            "narrow": {},
+            "broad": {"can_edit_agent_config": True},
+        })
+        assert m.can_edit_agent_config("narrow") is False
+        assert m.can_edit_agent_config("broad") is True
+        assert m.can_edit_agent_config("mesh") is True
+
+    def test_can_view_fleet_metrics_method(self, tmp_path):
+        m = self._matrix(tmp_path, {
+            "narrow": {},
+            "broad": {"can_view_fleet_metrics": True},
+        })
+        assert m.can_view_fleet_metrics("narrow") is False
+        assert m.can_view_fleet_metrics("broad") is True
+        assert m.can_view_fleet_metrics("mesh") is True
+
+    def test_can_route_tasks_method(self, tmp_path):
+        m = self._matrix(tmp_path, {
+            "narrow": {},
+            "broad": {"can_route_tasks": True},
+        })
+        assert m.can_route_tasks("narrow") is False
+        assert m.can_route_tasks("broad") is True
+        assert m.can_route_tasks("mesh") is True
+
+    def test_can_request_user_credentials_method(self, tmp_path):
+        m = self._matrix(tmp_path, {
+            "narrow": {},
+            "broad": {"can_request_user_credentials": True},
+        })
+        assert m.can_request_user_credentials("narrow") is False
+        assert m.can_request_user_credentials("broad") is True
+        assert m.can_request_user_credentials("mesh") is True
+
+
+# ── Task 5: wildcard blackboard ACLs replaced on project membership churn ─
+
+
+def test_wildcard_blackboard_acl_replaced_on_project_add(tmp_path, monkeypatch):
+    """Pin: ``_add_project_blackboard_permissions`` strips any
+    pre-existing ``*`` wildcard and replaces it with the project-scoped
+    grant. An agent with broad fleet-wide reach can no longer carry it
+    forward through a project join.
+    """
+    from src.cli.config import _add_project_blackboard_permissions
+
+    perms_file = tmp_path / "permissions.json"
+    perms_file.write_text(json.dumps({
+        "permissions": {
+            "rover": {
+                "blackboard_read": ["*"],
+                "blackboard_write": ["*"],
+            },
+        },
+    }))
+    monkeypatch.setattr("src.cli.config.PERMISSIONS_FILE", perms_file)
+
+    _add_project_blackboard_permissions("rover", "alpha")
+
+    perms = json.loads(perms_file.read_text())
+    read = perms["permissions"]["rover"]["blackboard_read"]
+    write = perms["permissions"]["rover"]["blackboard_write"]
+    # Wildcard is gone — replaced by the project pattern.
+    assert "*" not in read
+    assert "*" not in write
+    assert "projects/alpha/*" in read
+    assert "projects/alpha/*" in write
+
+
+def test_wildcard_blackboard_acl_replaced_then_stripped_on_remove(tmp_path, monkeypatch):
+    """Pin: add-then-remove leaves the agent without ``*`` and without
+    the project pattern. Task 5 narrows on add, and the remove path
+    strips both the project pattern and any surviving wildcard so an
+    agent cannot reacquire fleet-wide reach by leaving a project.
+    """
+    from src.cli.config import (
+        _add_project_blackboard_permissions,
+        _remove_project_blackboard_permissions,
+    )
+
+    perms_file = tmp_path / "permissions.json"
+    perms_file.write_text(json.dumps({
+        "permissions": {
+            "rover": {
+                "blackboard_read": ["*"],
+                "blackboard_write": ["*"],
+            },
+        },
+    }))
+    monkeypatch.setattr("src.cli.config.PERMISSIONS_FILE", perms_file)
+
+    _add_project_blackboard_permissions("rover", "alpha")
+    _remove_project_blackboard_permissions("rover", "alpha")
+
+    perms = json.loads(perms_file.read_text())
+    read = perms["permissions"]["rover"]["blackboard_read"]
+    write = perms["permissions"]["rover"]["blackboard_write"]
+    # No wildcard, no project pattern — agent is back to standalone.
+    assert "*" not in read
+    assert "*" not in write
+    assert "projects/alpha/*" not in read
+    assert "projects/alpha/*" not in write
+
+
+def test_arbitrary_keys_blocked_after_project_remove_strips_wildcard(tmp_path, monkeypatch):
+    """Pin: live ``PermissionMatrix`` checks reject cross-project reads
+    after the membership system has touched the agent. The wildcard
+    strip on add+remove leaves no pattern that matches another
+    project's keys.
+    """
+    from src.cli.config import (
+        _add_project_blackboard_permissions,
+        _remove_project_blackboard_permissions,
+    )
+
+    perms_file = tmp_path / "permissions.json"
+    perms_file.write_text(json.dumps({
+        "permissions": {
+            "rover": {
+                "blackboard_read": ["*"],
+                "blackboard_write": ["*"],
+            },
+        },
+    }))
+    monkeypatch.setattr("src.cli.config.PERMISSIONS_FILE", perms_file)
+
+    _add_project_blackboard_permissions("rover", "alpha")
+    _remove_project_blackboard_permissions("rover", "alpha")
+
+    pm = PermissionMatrix(config_path=str(perms_file))
+    # No more wildcard reach across namespaces — Task 5 enforced.
+    assert not pm.can_read_blackboard("rover", "projects/alpha/secret")
+    assert not pm.can_read_blackboard("rover", "projects/beta/secret")
+    assert not pm.can_write_blackboard("rover", "projects/beta/note")

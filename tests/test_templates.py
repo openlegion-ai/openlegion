@@ -152,6 +152,38 @@ class TestAddAgentToConfig(_TempConfigMixin):
         assert agent["budget"]["daily_usd"] == 10.0
         assert agent["resources"]["memory_limit"] == "512m"
 
+    def test_structured_routing_fields_persisted(self):
+        """Task 8 — structured fields round-trip through agents.yaml."""
+        _add_agent_to_config(
+            "router", "researcher", "openai/gpt-4o",
+            capabilities=["Web research", "File I/O"],
+            preferred_inputs=["User questions"],
+            expected_outputs=["Research reports"],
+            escalation_to="operator",
+            forbidden=["Long unattended tasks"],
+        )
+        with open(self._agents_path) as f:
+            cfg = yaml.safe_load(f)
+        agent = cfg["agents"]["router"]
+        assert agent["capabilities"] == ["Web research", "File I/O"]
+        assert agent["preferred_inputs"] == ["User questions"]
+        assert agent["expected_outputs"] == ["Research reports"]
+        assert agent["escalation_to"] == "operator"
+        assert agent["forbidden"] == ["Long unattended tasks"]
+
+    def test_empty_structured_fields_not_written(self):
+        """Empty Task-8 fields should not appear in yaml — keeps minimal
+        agent entries from accumulating empty default keys."""
+        _add_agent_to_config("plain", "helper", "openai/gpt-4o")
+        with open(self._agents_path) as f:
+            cfg = yaml.safe_load(f)
+        agent = cfg["agents"]["plain"]
+        for key in (
+            "capabilities", "preferred_inputs", "expected_outputs",
+            "escalation_to", "forbidden",
+        ):
+            assert key not in agent, f"unexpected empty key {key!r} in agents.yaml"
+
 
 class TestAddAgentPermissions(_TempConfigMixin):
     def test_default_permissions(self):
@@ -540,6 +572,164 @@ class TestLoadTemplates:
         for tpl_name, tpl in templates.items():
             for agent_name in tpl.get("agents", {}):
                 _validate_agent_name(agent_name)  # raises on invalid
+
+    def test_starter_has_structured_fields(self):
+        """Task 8 — starter template declares the new fields directly."""
+        from src.cli.config import _load_templates
+        templates = _load_templates()
+        starter = templates.get("starter") or {}
+        assistant = (starter.get("agents") or {}).get("assistant") or {}
+        assert assistant.get("capabilities"), \
+            "starter/assistant must declare structured 'capabilities'"
+        assert assistant.get("preferred_inputs"), \
+            "starter/assistant must declare 'preferred_inputs'"
+        assert assistant.get("expected_outputs"), \
+            "starter/assistant must declare 'expected_outputs'"
+
+    def test_devteam_has_structured_fields(self):
+        """Task 8 — devteam template declares the new fields directly."""
+        from src.cli.config import _load_templates
+        templates = _load_templates()
+        devteam = templates.get("devteam") or {}
+        agents = devteam.get("agents") or {}
+        for role in ("pm", "engineer", "reviewer"):
+            entry = agents.get(role) or {}
+            assert entry.get("capabilities"), \
+                f"devteam/{role} must declare structured 'capabilities'"
+            assert entry.get("preferred_inputs"), \
+                f"devteam/{role} must declare 'preferred_inputs'"
+        # engineer + reviewer escalate to pm
+        assert agents["engineer"].get("escalation_to") == "pm"
+        assert agents["reviewer"].get("escalation_to") == "pm"
+
+    def test_research_has_structured_fields(self):
+        """Task 8 — research template declares the new fields directly."""
+        from src.cli.config import _load_templates
+        templates = _load_templates()
+        research = templates.get("research") or {}
+        researcher = (research.get("agents") or {}).get("researcher") or {}
+        assert researcher.get("capabilities"), \
+            "research/researcher must declare structured 'capabilities'"
+
+class TestBackfillCapabilities(_TempConfigMixin):
+    def test_lazy_derives_for_legacy_agent(self):
+        """Legacy agent entries (no structured fields, only initial_interface)
+        get back-filled on first load."""
+        from src.cli.config import _backfill_capabilities_for_existing_agents
+        _add_agent_to_config(
+            "legacy", "researcher", "openai/gpt-4o",
+            initial_interface=(
+                "# Interface: legacy\n\n"
+                "## Capabilities\n"
+                "- Old-school research\n"
+                "- Source verification\n\n"
+                "## Accepts\n"
+                "- User questions\n\n"
+                "## Produces\n"
+                "- Reports\n"
+            ),
+        )
+        with open(self._agents_path) as f:
+            before = yaml.safe_load(f)
+        assert "capabilities" not in before["agents"]["legacy"]
+
+        _backfill_capabilities_for_existing_agents()
+
+        with open(self._agents_path) as f:
+            after = yaml.safe_load(f)
+        entry = after["agents"]["legacy"]
+        assert "Old-school research" in entry["capabilities"]
+        assert entry["preferred_inputs"] == ["User questions"]
+        assert entry["expected_outputs"] == ["Reports"]
+
+    def test_idempotent_with_existing_capabilities(self):
+        """Back-fill skips agents that already declare structured capabilities."""
+        from src.cli.config import _backfill_capabilities_for_existing_agents
+        _add_agent_to_config(
+            "already", "x", "openai/gpt-4o",
+            capabilities=["Hand-curated"],
+            initial_interface=(
+                "## Capabilities\n- Should not overwrite hand-curated\n"
+            ),
+        )
+        _backfill_capabilities_for_existing_agents()
+        with open(self._agents_path) as f:
+            cfg = yaml.safe_load(f)
+        assert cfg["agents"]["already"]["capabilities"] == ["Hand-curated"]
+
+    def test_no_interface_no_change(self):
+        """Agents with neither structured fields nor INTERFACE.md text
+        are left alone — back-fill never invents content."""
+        from src.cli.config import _backfill_capabilities_for_existing_agents
+        _add_agent_to_config("bare", "x", "openai/gpt-4o")
+        _backfill_capabilities_for_existing_agents()
+        with open(self._agents_path) as f:
+            cfg = yaml.safe_load(f)
+        assert "capabilities" not in cfg["agents"]["bare"]
+
+
+class TestValidateAgentTemplate:
+    def test_warns_on_missing_capabilities_and_no_interface(self):
+        from src.cli.config import _validate_agent_template
+        warnings = _validate_agent_template({
+            "name": "thin",
+            "agents": {"a1": {"role": "x", "model": "y"}},
+        })
+        assert any("capabilities" in w for w in warnings)
+
+    def test_no_warning_when_capabilities_set(self):
+        from src.cli.config import _validate_agent_template
+        warnings = _validate_agent_template({
+            "name": "ok",
+            "agents": {"a1": {
+                "role": "x", "model": "y",
+                "capabilities": ["does things"],
+            }},
+        })
+        assert not any("capabilities" in w for w in warnings)
+
+    def test_no_warning_when_interface_present(self):
+        """Interface text is enough — derivation will fill structured fields."""
+        from src.cli.config import _validate_agent_template
+        warnings = _validate_agent_template({
+            "name": "interfaced",
+            "agents": {"a1": {
+                "role": "x", "model": "y",
+                "initial_interface": "## Capabilities\n- X\n",
+            }},
+        })
+        assert not any("capabilities" in w for w in warnings)
+
+    def test_warns_on_unknown_escalation_target(self):
+        from src.cli.config import _validate_agent_template
+        warnings = _validate_agent_template({
+            "name": "broken-escalation",
+            "agents": {
+                "a1": {
+                    "role": "x", "model": "y",
+                    "capabilities": ["a"],
+                    "escalation_to": "missing",
+                },
+                "a2": {"role": "y", "model": "y", "capabilities": ["b"]},
+            },
+        })
+        assert any("escalation_to" in w and "missing" in w for w in warnings)
+
+    def test_no_warning_for_known_escalation(self):
+        from src.cli.config import _validate_agent_template
+        warnings = _validate_agent_template({
+            "name": "good-escalation",
+            "agents": {
+                "a1": {
+                    "role": "x", "model": "y",
+                    "capabilities": ["a"],
+                    "escalation_to": "a2",
+                },
+                "a2": {"role": "y", "model": "y", "capabilities": ["b"]},
+            },
+        })
+        assert not warnings
+
 
 class TestLoadSkillTemplates:
     def test_returns_flat_list(self):

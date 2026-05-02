@@ -403,8 +403,21 @@ def _add_agent_to_config(
     thinking: str = "",
     budget: dict | None = None,
     resources: dict | None = None,
+    capabilities: list[str] | None = None,
+    preferred_inputs: list[str] | None = None,
+    expected_outputs: list[str] | None = None,
+    escalation_to: str | None = None,
+    forbidden: list[str] | None = None,
 ) -> None:
-    """Add an agent entry to agents.yaml."""
+    """Add an agent entry to agents.yaml.
+
+    Task 8 adds five structured routing fields (``capabilities``,
+    ``preferred_inputs``, ``expected_outputs``, ``escalation_to``,
+    ``forbidden``). Each defaults to its empty form so existing
+    callers that don't pass them continue to work unchanged. They are
+    only persisted when non-empty so untouched yaml entries don't grow
+    noisy default keys.
+    """
     agents_cfg: dict = {"agents": {}}
     if AGENTS_FILE.exists():
         with open(AGENTS_FILE) as f:
@@ -431,6 +444,18 @@ def _add_agent_to_config(
         entry["budget"] = budget
     if resources:
         entry["resources"] = resources
+    # Task 8 — structured routing fields. Persist only when non-empty
+    # so existing minimal yaml entries don't grow empty default keys.
+    if capabilities:
+        entry["capabilities"] = list(capabilities)
+    if preferred_inputs:
+        entry["preferred_inputs"] = list(preferred_inputs)
+    if expected_outputs:
+        entry["expected_outputs"] = list(expected_outputs)
+    if escalation_to:
+        entry["escalation_to"] = escalation_to
+    if forbidden:
+        entry["forbidden"] = list(forbidden)
     agents_cfg["agents"][name] = entry
     AGENTS_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(AGENTS_FILE, "w") as f:
@@ -477,8 +502,16 @@ def _add_agent_permissions(name: str, permissions: dict | None = None) -> None:
                 existing = set(agent_perms.get(key, []))
                 existing.update(tpl_values)
                 agent_perms[key] = sorted(existing)
-        # Boolean flags — template can override defaults
-        for key in ("can_use_browser", "can_spawn", "can_manage_cron"):
+        # Boolean flags — template can override defaults. Includes the
+        # six control-plane permissions from Task 3 so the operator's
+        # explicit grants in ``_ensure_operator_agent`` get persisted to
+        # permissions.json instead of being silently dropped.
+        for key in (
+            "can_use_browser", "can_spawn", "can_manage_cron",
+            "can_manage_fleet", "can_manage_projects", "can_edit_agent_config",
+            "can_view_fleet_metrics", "can_route_tasks",
+            "can_request_user_credentials",
+        ):
             if key in permissions:
                 agent_perms[key] = bool(permissions[key])
 
@@ -680,7 +713,13 @@ def _create_project(
 
 
 def _delete_project(name: str) -> None:
-    """Delete a project directory and clean up agent permissions."""
+    """Delete a project directory and clean up agent permissions.
+
+    Operator product tools (Task 7) require this be preceded by
+    ``_archive_project`` and a human-confirmed pending action; the
+    raw helper retained here is the storage primitive — callers above
+    enforce the propose-then-confirm flow.
+    """
     import shutil
 
     project_dir = PROJECTS_DIR / name
@@ -700,6 +739,160 @@ def _delete_project(name: str) -> None:
         _remove_project_blackboard_permissions(agent, name)
 
     shutil.rmtree(project_dir)
+
+
+def _set_project_status(name: str, status: str) -> None:
+    """Update the ``status`` field on a project's metadata.yaml.
+
+    Used by archive/unarchive flows. Status is a free-string at the
+    storage layer; operator tools restrict valid values to
+    ``{"active", "archived"}``.
+    """
+    project_dir = PROJECTS_DIR / name
+    meta_file = project_dir / "metadata.yaml"
+    if not meta_file.exists():
+        raise ValueError(f"Project '{name}' not found")
+    with open(meta_file) as f:
+        data = yaml.safe_load(f) or {}
+    data["status"] = status
+    with open(meta_file, "w") as f:
+        yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+
+
+def _backfill_capabilities_for_existing_agents() -> None:
+    """One-shot Task 8 back-fill of structured routing fields on agents.yaml.
+
+    For any agent that has an empty ``capabilities`` list AND a non-empty
+    ``initial_interface`` block, parse the markdown headings and persist
+    the derived structured fields back to ``agents.yaml``. Skips agents
+    that already declare ``capabilities`` (idempotent: a populated field
+    is the source of truth).
+
+    This runs once at startup. Failure to parse any single agent never
+    raises — the field stays empty and routing falls back to existing
+    behaviour.
+    """
+    if not AGENTS_FILE.exists():
+        return
+    try:
+        with open(AGENTS_FILE) as f:
+            agents_cfg = yaml.safe_load(f) or {"agents": {}}
+    except Exception:
+        return
+
+    agents = agents_cfg.get("agents", {})
+    if not isinstance(agents, dict) or not agents:
+        return
+
+    from src.agent.workspace import _parse_interface_text
+
+    changed = False
+    for _agent_name, entry in agents.items():
+        if not isinstance(entry, dict):
+            continue
+        # Already declared — structured field wins, do nothing.
+        if entry.get("capabilities"):
+            continue
+        interface_text = entry.get("initial_interface") or ""
+        if not interface_text:
+            continue
+
+        try:
+            derived = _parse_interface_text(interface_text)
+        except Exception:
+            continue
+
+        # Only persist when the derivation produced something useful.
+        if not (
+            derived.get("capabilities")
+            or derived.get("preferred_inputs")
+            or derived.get("expected_outputs")
+            or derived.get("escalation_to")
+            or derived.get("forbidden")
+        ):
+            continue
+
+        if derived.get("capabilities"):
+            entry["capabilities"] = list(derived["capabilities"])
+        if derived.get("preferred_inputs"):
+            entry["preferred_inputs"] = list(derived["preferred_inputs"])
+        if derived.get("expected_outputs"):
+            entry["expected_outputs"] = list(derived["expected_outputs"])
+        if derived.get("escalation_to"):
+            entry["escalation_to"] = derived["escalation_to"]
+        if derived.get("forbidden"):
+            entry["forbidden"] = list(derived["forbidden"])
+        changed = True
+
+    if changed:
+        try:
+            with open(AGENTS_FILE, "w") as f:
+                yaml.dump(agents_cfg, f, default_flow_style=False, sort_keys=False)
+        except Exception:
+            logger.exception("Failed to persist back-filled agent capabilities")
+
+
+def _archive_project(name: str) -> None:
+    """Mark a project as archived without deleting its data."""
+    _set_project_status(name, "archived")
+
+
+def _unarchive_project(name: str) -> None:
+    """Re-activate an archived project."""
+    _set_project_status(name, "active")
+
+
+def _project_status(name: str) -> str:
+    """Read a project's status. Returns ``"active"`` for legacy rows missing the field."""
+    project_dir = PROJECTS_DIR / name
+    meta_file = project_dir / "metadata.yaml"
+    if not meta_file.exists():
+        raise ValueError(f"Project '{name}' not found")
+    with open(meta_file) as f:
+        data = yaml.safe_load(f) or {}
+    return data.get("status", "active") or "active"
+
+
+def _set_agent_status(name: str, status: str) -> None:
+    """Persist a per-agent ``status`` flag in agents.yaml.
+
+    ``status="archived"`` stops scheduling without deleting workspace
+    or history. Live containers continue running until the next restart;
+    operator tools that archive an agent should also stop the container
+    via the runtime backend (the host endpoint handles that).
+    """
+    if not AGENTS_FILE.exists():
+        raise ValueError("Agents config not found")
+    with open(AGENTS_FILE) as f:
+        agents_cfg = yaml.safe_load(f) or {"agents": {}}
+    agents = agents_cfg.get("agents", {})
+    if name not in agents:
+        raise ValueError(f"Agent '{name}' not found")
+    agents[name]["status"] = status
+    with open(AGENTS_FILE, "w") as f:
+        yaml.dump(agents_cfg, f, default_flow_style=False, sort_keys=False)
+
+
+def _archive_agent(name: str) -> None:
+    """Mark an agent as archived (stop scheduling, retain workspace + history)."""
+    _set_agent_status(name, "archived")
+
+
+def _unarchive_agent(name: str) -> None:
+    """Re-activate an archived agent."""
+    _set_agent_status(name, "active")
+
+
+def _agent_status(name: str) -> str:
+    """Read an agent's status. Returns ``"active"`` for legacy rows missing the field."""
+    if not AGENTS_FILE.exists():
+        raise ValueError("Agents config not found")
+    with open(AGENTS_FILE) as f:
+        agents_cfg = yaml.safe_load(f) or {"agents": {}}
+    agents = agents_cfg.get("agents", {})
+    if name not in agents:
+        raise ValueError(f"Agent '{name}' not found")
+    return agents[name].get("status", "active") or "active"
 
 
 def _add_agent_to_project(project: str, agent: str) -> None:
@@ -751,11 +944,18 @@ def _remove_agent_from_project(project: str, agent: str) -> None:
 def _add_project_blackboard_permissions(agent: str, project: str) -> None:
     """Grant blackboard access for a project member.
 
-    Only grants ``projects/{project}/*``.  The MeshClient auto-prefixes
-    all blackboard keys with the project namespace, so agents use natural
-    keys (``context/market``) which are transparently stored as
-    ``projects/{project}/context/market``.  This prevents cross-project
-    leakage — each project's data lives under its own namespace.
+    Grants ``projects/{project}/*`` and strips any pre-existing ``*``
+    wildcard so an agent cannot accumulate fleet-wide reach via project
+    moves (Task 5). The MeshClient auto-prefixes all blackboard keys
+    with the project namespace, so agents use natural keys
+    (``context/market``) which are transparently stored as
+    ``projects/{project}/context/market``. Each project's data lives
+    under its own namespace.
+
+    Pre-Task-5 fleets had ``["*"]`` ACLs that survived membership churn;
+    actively-managed fleets are narrowed here at every join. Legacy
+    in-place ``*`` ACLs that haven't been touched stay intact until
+    enforce mode tightens the read/write hot path.
     """
     perms = _load_permissions()
     agent_perms = perms.get("permissions", {}).get(agent)
@@ -764,17 +964,27 @@ def _add_project_blackboard_permissions(agent: str, project: str) -> None:
     project_pattern = f"projects/{project}/*"
     for field in ("blackboard_read", "blackboard_write"):
         patterns = agent_perms.get(field, [])
-        if project_pattern not in patterns:
-            patterns.append(project_pattern)
-        agent_perms[field] = patterns
+        # Strip any wildcard — replaced by the explicit project pattern
+        # below. This is the active narrowing for Task 5: an agent that
+        # previously had ``["*"]`` and is then added to a project ends
+        # up with ``["projects/{project}/*"]``.
+        narrowed = [p for p in patterns if p != "*"]
+        if project_pattern not in narrowed:
+            narrowed.append(project_pattern)
+        agent_perms[field] = narrowed
     _save_permissions(perms)
 
 
 def _remove_project_blackboard_permissions(agent: str, project: str) -> None:
-    """Revoke all blackboard access when an agent leaves a project.
+    """Revoke project blackboard access when an agent leaves a project.
 
-    Clears the project namespace pattern, restoring the agent to
-    standalone state (no blackboard access).
+    Strips the project namespace pattern AND any pre-existing ``*``
+    wildcard. Leaves an agent with whatever non-wildcard, non-target
+    patterns it had — typically empty for a project member, restoring
+    the agent to a standalone (no-blackboard) state. Wildcard stripping
+    matches the add-side narrowing so an agent that ever had ``*`` does
+    not reacquire fleet-wide reach by being added to and then removed
+    from a project (Task 5).
     """
     perms = _load_permissions()
     agent_perms = perms.get("permissions", {}).get(agent)
@@ -783,9 +993,13 @@ def _remove_project_blackboard_permissions(agent: str, project: str) -> None:
     project_pattern = f"projects/{project}/*"
     for field in ("blackboard_read", "blackboard_write"):
         patterns = agent_perms.get(field, [])
-        if project_pattern in patterns:
-            patterns.remove(project_pattern)
-        agent_perms[field] = patterns
+        # Drop both the target project pattern and any surviving ``*``.
+        # The wildcard strip is the safety net for an agent whose ACL
+        # was never re-narrowed (e.g. config-edited directly): once the
+        # membership system touches it on remove, the wildcard goes.
+        agent_perms[field] = [
+            p for p in patterns if p != project_pattern and p != "*"
+        ]
     _save_permissions(perms)
 
 
@@ -870,8 +1084,65 @@ def _pick_model_interactive(
     return models[model_choice - 1]
 
 
+def _validate_agent_template(template: dict) -> list[str]:
+    """Lightweight validator for fleet templates (Task 8).
+
+    Returns a list of human-readable warnings — informational, not
+    rejection. Callers (``_load_templates``) log them at info level so
+    template authors notice missing routing metadata without breaking
+    existing workflows.
+
+    Validates:
+    - If ``capabilities`` is empty AND there is no ``initial_interface``
+      / ``interface`` block to derive from, warn naming the agent.
+    - If ``escalation_to`` references an agent ID that doesn't exist in
+      the same template, warn naming both.
+
+    Empty templates / missing ``agents`` keys produce no warnings —
+    that's an unrelated structural issue surfaced elsewhere.
+    """
+    warnings: list[str] = []
+    tpl_name = template.get("name", "<unnamed>")
+    agents = template.get("agents") or {}
+    if not isinstance(agents, dict):
+        return warnings
+
+    agent_ids = set(agents.keys())
+    for agent_name, agent_def in agents.items():
+        if not isinstance(agent_def, dict):
+            continue
+        capabilities = agent_def.get("capabilities") or []
+        interface_text = (
+            agent_def.get("initial_interface")
+            or agent_def.get("interface")
+            or ""
+        )
+        if not capabilities and not interface_text:
+            warnings.append(
+                f"template '{tpl_name}' agent '{agent_name}': no "
+                "structured 'capabilities' and no INTERFACE.md to derive "
+                "from — operator routing will see an empty interface."
+            )
+
+        escalation = agent_def.get("escalation_to")
+        if escalation and isinstance(escalation, str):
+            if escalation not in agent_ids:
+                warnings.append(
+                    f"template '{tpl_name}' agent '{agent_name}': "
+                    f"escalation_to='{escalation}' is not defined in "
+                    "this template (cross-template escalations should "
+                    "use a fleet-global agent like 'operator')."
+                )
+    return warnings
+
+
 def _load_templates() -> dict[str, dict]:
-    """Load available team templates from src/templates/."""
+    """Load available team templates from src/templates/.
+
+    Each template is run through ``_validate_agent_template`` for
+    lightweight informational validation (Task 8). Warnings are logged
+    at info level — they never reject a template.
+    """
     available: dict[str, dict] = {}
     if not TEMPLATES_DIR.exists():
         return available
@@ -880,6 +1151,8 @@ def _load_templates() -> dict[str, dict]:
             tpl = yaml.safe_load(f) or {}
         name = tpl.get("name", tpl_file.stem)
         available[name] = tpl
+        for warning in _validate_agent_template(tpl):
+            logger.info("template-validate: %s", warning)
     return available
 
 
@@ -923,6 +1196,11 @@ def _apply_template(template_name: str, tpl: dict) -> list[str]:
             thinking=thinking,
             budget=budget,
             resources=resources,
+            capabilities=agent_def.get("capabilities") or [],
+            preferred_inputs=agent_def.get("preferred_inputs") or [],
+            expected_outputs=agent_def.get("expected_outputs") or [],
+            escalation_to=agent_def.get("escalation_to"),
+            forbidden=agent_def.get("forbidden") or [],
         )
         _add_agent_permissions(agent_name, permissions=agent_permissions)
         skills_dir = PROJECT_ROOT / "skills" / agent_name
@@ -1004,6 +1282,11 @@ def _create_agent_from_template(
         thinking=thinking,
         budget=budget,
         resources=resources,
+        capabilities=agent_def.get("capabilities") or [],
+        preferred_inputs=agent_def.get("preferred_inputs") or [],
+        expected_outputs=agent_def.get("expected_outputs") or [],
+        escalation_to=agent_def.get("escalation_to"),
+        forbidden=agent_def.get("forbidden") or [],
     )
     _add_agent_permissions(name, permissions=agent_permissions)
     skills_dir = PROJECT_ROOT / "skills" / name
@@ -1225,6 +1508,12 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     "list_projects", "get_project", "create_project",
     "add_agents_to_project", "remove_agents_from_project", "update_project_context",
     "vault_list", "request_credential", "request_browser_login",
+    # Task 7: operator product surface — read tools
+    "list_project_status", "list_agent_queue", "get_team_outputs",
+    "summarize_project_progress",
+    # Task 7: operator product surface — action tools
+    "reroute_task", "cancel_task", "retry_failed_task",
+    "archive_project", "archive_agent", "delete_project", "delete_agent",
 ]
 
 _OPERATOR_HEARTBEAT_TOOLS: list[str] = [
@@ -1339,6 +1628,26 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
         if not op_perms.get("blackboard_write"):
             op_perms["blackboard_write"] = ["*"]
             needs_update = True
+        # Control-plane permissions (Task 3). Idempotent: only set when
+        # missing/falsy, so running this block twice is a no-op.
+        if not op_perms.get("can_manage_fleet", False):
+            op_perms["can_manage_fleet"] = True
+            needs_update = True
+        if not op_perms.get("can_manage_projects", False):
+            op_perms["can_manage_projects"] = True
+            needs_update = True
+        if not op_perms.get("can_edit_agent_config", False):
+            op_perms["can_edit_agent_config"] = True
+            needs_update = True
+        if not op_perms.get("can_view_fleet_metrics", False):
+            op_perms["can_view_fleet_metrics"] = True
+            needs_update = True
+        if not op_perms.get("can_route_tasks", False):
+            op_perms["can_route_tasks"] = True
+            needs_update = True
+        if not op_perms.get("can_request_user_credentials", False):
+            op_perms["can_request_user_credentials"] = True
+            needs_update = True
         if needs_update:
             perms.setdefault("permissions", {})[_OPERATOR_AGENT_ID] = op_perms
             _save_permissions(perms)
@@ -1366,6 +1675,13 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
             "blackboard_write": ["*"],
             "can_publish": ["*"],
             "can_subscribe": ["*"],
+            # Control-plane permissions (Task 3) — operator gets all six.
+            "can_manage_fleet": True,
+            "can_manage_projects": True,
+            "can_edit_agent_config": True,
+            "can_view_fleet_metrics": True,
+            "can_route_tasks": True,
+            "can_request_user_credentials": True,
         },
     )
     # Force can_message=["*"] — _add_agent_permissions sets it to []

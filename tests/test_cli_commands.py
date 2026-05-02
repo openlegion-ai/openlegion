@@ -1394,3 +1394,212 @@ class TestShellCompletion:
             result = _complete_agent_names(None, None, "c")
             assert "coder" in result
             assert "researcher" not in result
+
+
+# ── Task 2b: CLI REPL stamps human/cli origin on dispatch ──
+
+
+class TestREPLOriginStamp:
+    """``_send_message_streaming`` must stamp ``X-Origin: kind=human``
+    on every CLI-initiated request so the agent / lane sees a typed
+    origin instead of a missing or legacy header.
+    """
+
+    def test_streaming_dispatch_sends_typed_human_origin_header(self):
+        import asyncio
+        import threading
+        from unittest.mock import AsyncMock, MagicMock
+
+        from src.cli.repl import _send_message_streaming
+        from src.host.transport import HttpTransport
+        from src.shared.types import MessageOrigin
+
+        captured_headers: list = []
+
+        async def _fake_stream(*_args, **kwargs):
+            captured_headers.append(kwargs.get("headers"))
+            yield {"type": "done", "response": "ok"}
+
+        transport = MagicMock(spec=HttpTransport)
+        transport.stream_request = _fake_stream
+        transport.request = AsyncMock(return_value={"response": "ok"})
+
+        # _send_message_streaming uses run_coroutine_threadsafe — needs
+        # a real running event loop in a background thread.
+        dispatch_loop = asyncio.new_event_loop()
+        ready = threading.Event()
+
+        def _run():
+            asyncio.set_event_loop(dispatch_loop)
+            dispatch_loop.call_soon(ready.set)
+            dispatch_loop.run_forever()
+
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+        ready.wait()
+
+        try:
+            with patch.dict(os.environ, {"USER": "alice"}):
+                _send_message_streaming(
+                    transport, "researcher", "do thing",
+                    dispatch_loop=dispatch_loop,
+                )
+        finally:
+            dispatch_loop.call_soon_threadsafe(dispatch_loop.stop)
+            t.join(timeout=2)
+            dispatch_loop.close()
+
+        assert captured_headers, "stream_request was never invoked"
+        hdrs = captured_headers[0] or {}
+        assert "X-Origin" in hdrs
+        parsed = MessageOrigin.from_header_value(hdrs["X-Origin"], trust_kind=True)
+        assert parsed is not None
+        assert parsed.kind == "human"
+        assert parsed.channel == "cli"
+        assert parsed.user == "alice"
+
+
+# === Task 9 — Workplace + pending-action CLI commands ===
+
+
+class TestWorkplaceCLICommands:
+    """``openlegion projects / project / tasks / pending / confirm /
+    cancel`` shell out to the local mesh over httpx — patch the client
+    to assert the right path and shape are returned to stdout."""
+
+    def _patched_get(self, payload, status=200):
+        """Return a context-managed ``patch`` that fakes ``httpx.get``."""
+        from unittest.mock import MagicMock
+
+        resp = MagicMock()
+        resp.status_code = status
+        resp.json.return_value = payload
+        resp.text = json.dumps(payload)
+        return patch("httpx.get", return_value=resp)
+
+    def _patched_post(self, payload, status=200):
+        from unittest.mock import MagicMock
+
+        resp = MagicMock()
+        resp.status_code = status
+        resp.json.return_value = payload
+        resp.text = json.dumps(payload)
+        return patch("httpx.post", return_value=resp)
+
+    def test_projects_command_renders_table(self):
+        runner = CliRunner()
+        with self._patched_get({"projects": [
+            {"name": "research", "status": "active", "total": 3,
+             "members": ["alpha", "beta"], "counts": {"working": 2}},
+        ]}):
+            result = runner.invoke(cli, ["projects"])
+        assert result.exit_code == 0
+        assert "research" in result.output
+        assert "active" in result.output
+
+    def test_projects_command_json_mode(self):
+        runner = CliRunner()
+        with self._patched_get({"projects": [{"name": "research", "status": "active", "total": 0}]}):
+            result = runner.invoke(cli, ["--json", "projects"])
+        assert result.exit_code == 0
+        payload = json.loads(result.output)
+        assert payload["projects"][0]["name"] == "research"
+
+    def test_project_command_shows_one(self):
+        runner = CliRunner()
+        body = {"projects": [
+            {"name": "research", "status": "active", "total": 1,
+             "description": "deep dive", "members": ["alpha"],
+             "counts": {"pending": 1}, "blockers": []},
+        ]}
+        with self._patched_get(body):
+            result = runner.invoke(cli, ["project", "research"])
+        assert result.exit_code == 0
+        assert "research" in result.output
+        assert "deep dive" in result.output
+
+    def test_project_command_unknown_exits_1(self):
+        runner = CliRunner()
+        with self._patched_get({"projects": []}):
+            result = runner.invoke(cli, ["project", "missing"])
+        assert result.exit_code == 1
+        assert "not found" in result.output.lower()
+
+    def test_tasks_command_table_render(self):
+        runner = CliRunner()
+        body = {"enabled": True, "tasks": [
+            {"id": "task_abc", "status": "working", "assignee": "alpha",
+             "project_id": "research", "title": "dig"},
+        ]}
+        with self._patched_get(body):
+            result = runner.invoke(cli, ["tasks"])
+        assert result.exit_code == 0
+        assert "task_abc" in result.output
+        assert "working" in result.output
+
+    def test_tasks_command_disabled_state(self):
+        runner = CliRunner()
+        body = {"enabled": False, "tasks": [],
+                "hint": "Set OPENLEGION_ORCHESTRATION_TASKS_V2=1"}
+        with self._patched_get(body):
+            result = runner.invoke(cli, ["tasks"])
+        assert result.exit_code == 0
+        assert "disabled" in result.output.lower()
+
+    def test_pending_command_table(self):
+        runner = CliRunner()
+        body = {"pending": [
+            {"nonce": "n1", "actor": "operator", "action_kind": "model",
+             "target_kind": "agent", "target_id": "alpha"},
+        ]}
+        with self._patched_get(body):
+            result = runner.invoke(cli, ["pending"])
+        assert result.exit_code == 0
+        assert "n1" in result.output
+        assert "model" in result.output
+
+    def test_pending_command_empty(self):
+        runner = CliRunner()
+        with self._patched_get({"pending": []}):
+            result = runner.invoke(cli, ["pending"])
+        assert result.exit_code == 0
+        assert "No pending" in result.output
+
+    def test_confirm_command_calls_mesh(self):
+        runner = CliRunner()
+        with self._patched_post({"success": True}) as m:
+            result = runner.invoke(cli, ["confirm", "abc-nonce"])
+        assert result.exit_code == 0
+        assert "Confirmed" in result.output
+        assert "abc-nonce" in result.output
+        # URL should be the mesh confirm endpoint
+        called_url = m.call_args.args[0]
+        assert "/mesh/pending/abc-nonce/confirm" in called_url
+
+    def test_confirm_command_propagates_error(self):
+        runner = CliRunner()
+        with self._patched_post({"detail": "expired"}, status=400):
+            result = runner.invoke(cli, ["confirm", "abc-nonce"])
+        assert result.exit_code == 1
+
+    def test_cancel_command_calls_mesh(self):
+        runner = CliRunner()
+        with self._patched_post({"ok": True, "nonce": "abc"}) as m:
+            result = runner.invoke(cli, ["cancel", "abc"])
+        assert result.exit_code == 0
+        assert "Cancelled" in result.output
+        called_url = m.call_args.args[0]
+        assert "/mesh/pending/abc/cancel" in called_url
+
+    def test_cancel_command_includes_csrf_header(self):
+        """The CLI commands must inject X-Requested-With so the dashboard
+        CSRF gate doesn't reject the request."""
+        runner = CliRunner()
+        with self._patched_post({"ok": True, "nonce": "abc"}) as m:
+            runner.invoke(cli, ["cancel", "abc"])
+        kwargs = m.call_args.kwargs
+        headers = kwargs.get("headers") or {}
+        assert headers.get("X-Requested-With") == "XMLHttpRequest"
+        # And X-Origin so the human-confirmation gate accepts it
+        assert "kind=human" in headers.get("X-Origin", "")
+        assert "channel=cli" in headers.get("X-Origin", "")
