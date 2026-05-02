@@ -688,7 +688,13 @@ def _create_project(
 
 
 def _delete_project(name: str) -> None:
-    """Delete a project directory and clean up agent permissions."""
+    """Delete a project directory and clean up agent permissions.
+
+    Operator product tools (Task 7) require this be preceded by
+    ``_archive_project`` and a human-confirmed pending action; the
+    raw helper retained here is the storage primitive — callers above
+    enforce the propose-then-confirm flow.
+    """
     import shutil
 
     project_dir = PROJECTS_DIR / name
@@ -708,6 +714,87 @@ def _delete_project(name: str) -> None:
         _remove_project_blackboard_permissions(agent, name)
 
     shutil.rmtree(project_dir)
+
+
+def _set_project_status(name: str, status: str) -> None:
+    """Update the ``status`` field on a project's metadata.yaml.
+
+    Used by archive/unarchive flows. Status is a free-string at the
+    storage layer; operator tools restrict valid values to
+    ``{"active", "archived"}``.
+    """
+    project_dir = PROJECTS_DIR / name
+    meta_file = project_dir / "metadata.yaml"
+    if not meta_file.exists():
+        raise ValueError(f"Project '{name}' not found")
+    with open(meta_file) as f:
+        data = yaml.safe_load(f) or {}
+    data["status"] = status
+    with open(meta_file, "w") as f:
+        yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+
+
+def _archive_project(name: str) -> None:
+    """Mark a project as archived without deleting its data."""
+    _set_project_status(name, "archived")
+
+
+def _unarchive_project(name: str) -> None:
+    """Re-activate an archived project."""
+    _set_project_status(name, "active")
+
+
+def _project_status(name: str) -> str:
+    """Read a project's status. Returns ``"active"`` for legacy rows missing the field."""
+    project_dir = PROJECTS_DIR / name
+    meta_file = project_dir / "metadata.yaml"
+    if not meta_file.exists():
+        raise ValueError(f"Project '{name}' not found")
+    with open(meta_file) as f:
+        data = yaml.safe_load(f) or {}
+    return data.get("status", "active") or "active"
+
+
+def _set_agent_status(name: str, status: str) -> None:
+    """Persist a per-agent ``status`` flag in agents.yaml.
+
+    ``status="archived"`` stops scheduling without deleting workspace
+    or history. Live containers continue running until the next restart;
+    operator tools that archive an agent should also stop the container
+    via the runtime backend (the host endpoint handles that).
+    """
+    if not AGENTS_FILE.exists():
+        raise ValueError(f"Agents config not found")
+    with open(AGENTS_FILE) as f:
+        agents_cfg = yaml.safe_load(f) or {"agents": {}}
+    agents = agents_cfg.get("agents", {})
+    if name not in agents:
+        raise ValueError(f"Agent '{name}' not found")
+    agents[name]["status"] = status
+    with open(AGENTS_FILE, "w") as f:
+        yaml.dump(agents_cfg, f, default_flow_style=False, sort_keys=False)
+
+
+def _archive_agent(name: str) -> None:
+    """Mark an agent as archived (stop scheduling, retain workspace + history)."""
+    _set_agent_status(name, "archived")
+
+
+def _unarchive_agent(name: str) -> None:
+    """Re-activate an archived agent."""
+    _set_agent_status(name, "active")
+
+
+def _agent_status(name: str) -> str:
+    """Read an agent's status. Returns ``"active"`` for legacy rows missing the field."""
+    if not AGENTS_FILE.exists():
+        raise ValueError(f"Agents config not found")
+    with open(AGENTS_FILE) as f:
+        agents_cfg = yaml.safe_load(f) or {"agents": {}}
+    agents = agents_cfg.get("agents", {})
+    if name not in agents:
+        raise ValueError(f"Agent '{name}' not found")
+    return agents[name].get("status", "active") or "active"
 
 
 def _add_agent_to_project(project: str, agent: str) -> None:
@@ -1254,6 +1341,12 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     "list_projects", "get_project", "create_project",
     "add_agents_to_project", "remove_agents_from_project", "update_project_context",
     "vault_list", "request_credential", "request_browser_login",
+    # Task 7: operator product surface — read tools
+    "list_project_status", "list_agent_queue", "get_team_outputs",
+    "summarize_project_progress",
+    # Task 7: operator product surface — action tools
+    "reroute_task", "cancel_task", "retry_failed_task",
+    "archive_project", "archive_agent", "delete_project", "delete_agent",
 ]
 
 _OPERATOR_HEARTBEAT_TOOLS: list[str] = [

@@ -1071,6 +1071,114 @@ class MeshClient:
         response.raise_for_status()
         return response.json()
 
+    async def retry_task(
+        self, task_id: str,
+        title: str | None = None,
+        description: str | None = None,
+        assignee: str | None = None,
+    ) -> dict:
+        """Retry a failed task. Optional patch overrides title/description/assignee."""
+        body: dict = {}
+        if title is not None:
+            body["title"] = title
+        if description is not None:
+            body["description"] = description
+        if assignee is not None:
+            body["assignee"] = assignee
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/tasks/{task_id}/retry",
+            json=body,
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    # ── Operator product surface (Task 7) ────────────────────────
+
+    async def project_status(self, project_id: str) -> dict:
+        """Per-project status counts + recent blockers/completions."""
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/projects/{project_id}/status",
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def all_projects_status(self) -> dict:
+        """Status rollup across every visible project."""
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/projects/status",
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def agent_queue(self, agent_id: str, limit: int = 10) -> dict:
+        """Recent tasks for an agent grouped by status."""
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/agents/{agent_id}/queue",
+            params={"limit": limit},
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def project_outputs(self, project_id: str, since: str = "") -> dict:
+        """Completed task artifacts for a project in a time window."""
+        params = {"since": since} if since else None
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/projects/{project_id}/outputs",
+            params=params,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def project_summary(self, project_id: str) -> dict:
+        """Synthesized status summary for a project."""
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/projects/{project_id}/summary",
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def archive_project(self, name: str) -> dict:
+        """Archive a project."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/projects/{name}/archive",
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def archive_agent(self, agent_id: str) -> dict:
+        """Archive an agent."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/agents/{agent_id}/archive",
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def propose_delete_project(self, name: str) -> dict:
+        """Propose deletion of an archived project. Returns nonce for human confirm."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/projects/{name}/propose-delete",
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def propose_delete_agent(self, agent_id: str) -> dict:
+        """Propose deletion of an archived agent. Returns nonce for human confirm."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/agents/{agent_id}/propose-delete",
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
     async def list_task_events(self, task_id: str) -> list[dict]:
         """Audit history for a task."""
         response = await self._get_with_retry(

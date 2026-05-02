@@ -323,12 +323,19 @@ class AgentPermissions(BaseModel):
 
 
 class ProjectMetadata(BaseModel):
-    """Project definition loaded from config/projects/<name>/metadata.yaml."""
+    """Project definition loaded from config/projects/<name>/metadata.yaml.
+
+    ``status`` defaults to ``"active"``; operator product tools use
+    ``"archived"`` to stop scheduling and hide the project from default
+    list views without deleting its data. Archive is reversible; delete
+    requires archive first plus a separate human-confirmed step.
+    """
 
     name: str
     description: str = ""
     members: list[str] = []
     created_at: str | None = None
+    status: str = "active"
     settings: dict[str, Any] = {}
 
 
