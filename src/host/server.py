@@ -15,6 +15,7 @@ import contextlib
 import hmac
 import inspect
 import json
+import os
 import re
 import time
 import uuid as _uuid
@@ -428,6 +429,64 @@ def _validated_origin(
     if _is_paired_user(origin.channel, origin.user):
         return origin
     return _downgrade_origin(origin, "unpaired channel user")
+
+
+# ── Task 5: Project scope isolation (warn → enforce) ──────────────────
+#
+# ``OPENLEGION_PROJECT_SCOPE_MODE`` is the kill switch for the project
+# isolation rollout. ``warn`` (the default for the first release) keeps
+# legacy behavior — fleet-wide visibility on ``/mesh/agents``, additive
+# blackboard ACLs — but emits structured warnings whenever a call would
+# be denied under ``enforce``. Operators read the warn telemetry, then
+# flip to ``enforce`` once the soak window is clean. Read once at module
+# import (env vars don't change at runtime); invalid values fall back to
+# ``warn`` with a logged warning.
+_PROJECT_SCOPE_MODE = os.environ.get("OPENLEGION_PROJECT_SCOPE_MODE", "warn").lower()
+if _PROJECT_SCOPE_MODE not in {"warn", "enforce"}:
+    logger.warning(
+        "Invalid OPENLEGION_PROJECT_SCOPE_MODE=%r, defaulting to warn",
+        _PROJECT_SCOPE_MODE,
+    )
+    _PROJECT_SCOPE_MODE = "warn"
+
+
+# Counter surfaced on ``/mesh/system/metrics`` as ``scope_warn_total``.
+# Incremented every time a worker's call would have returned a smaller
+# response under enforce mode. Lets ops gauge soak-window readiness
+# before flipping the env var to ``enforce``.
+_scope_warn_count = 0
+
+
+def _record_scope_warn() -> None:
+    """Bump the warn-mode counter (visible on ``/mesh/system/metrics``)."""
+    global _scope_warn_count
+    _scope_warn_count += 1
+
+
+def _caller_projects(agent_id: str) -> set[str]:
+    """Return the project memberships visible to ``agent_id``.
+
+    Workers see only projects whose ``metadata.yaml`` lists them as
+    members. The operator and trusted internal callers (``mesh``) are
+    fleet-global by design — they get a sentinel meaning "all projects",
+    represented here as an empty set with the caller_is_global flag the
+    caller computes separately. Use the helper purely as a lookup of
+    *worker* memberships and branch on operator/internal in the caller.
+    """
+    if agent_id in {"operator", "mesh"}:
+        # Operator and the mesh-internal pseudo-id are global; the caller
+        # branches on those identities directly. Returning an empty set
+        # here forces callers to think about the global path and not
+        # silently include "every project" in a worker-style filter.
+        return set()
+    from src.cli.config import _load_projects
+
+    projects = _load_projects()
+    return {
+        name
+        for name, meta in projects.items()
+        if agent_id in meta.get("members", [])
+    }
 
 
 def create_mesh_app(
@@ -1707,12 +1766,39 @@ def create_mesh_app(
 
         - project set: return only that project's members
         - agent_id set (standalone): return only that agent
-        - neither (dashboard/internal): return all
+        - neither (dashboard/internal): return all (under enforce mode,
+          worker callers see only their own projects + operator)
+
+        Task 5 layered a per-caller filter on the unscoped path. Today's
+        legacy behavior is "every authenticated agent sees the full
+        fleet" — under ``OPENLEGION_PROJECT_SCOPE_MODE=enforce`` workers
+        see only members of their own projects (plus the always-global
+        operator). Under ``warn`` (the default), the response shape
+        stays legacy and a structured ``scope-warn`` log line is emitted
+        so operators can soak before flipping.
         """
         if agent_id:
             agent_id = _resolve_agent_id(agent_id, request)
         else:
             _require_any_auth(request)
+
+        # Resolve the caller for scope filtering. ``_extract_verified_agent_id``
+        # handles dev/test mode (no auth tokens → ``X-Agent-ID`` header
+        # hint or ``"unknown"``) and production (Bearer token → identity).
+        # Internal loopback callers are treated as global; their
+        # ``X-Agent-ID`` hint is ignored. The endpoint already gated
+        # auth above, so caller resolution can't 401 here.
+        caller_is_internal = _is_internal_caller(request)
+        if caller_is_internal:
+            caller = "mesh"
+        else:
+            try:
+                caller = _extract_verified_agent_id(request)
+            except HTTPException:
+                # Already passed _require_any_auth, but be defensive.
+                caller = "unknown"
+        caller_is_global = caller_is_internal or caller == "operator"
+
         def _agent_entry(aid: str, url: str) -> dict:
             entry: dict = {"url": url, "role": router.agent_roles.get(aid, "")}
             entry["capabilities"] = router.get_capabilities(aid)
@@ -1731,6 +1817,20 @@ def create_mesh_app(
                 logger.warning("list_agents: unknown project %r", project)
                 return {}
             members = set(pdata.get("members", []))
+
+            # Task 5: only members of the requested project (or global
+            # callers) may scope by it. Under warn mode, log but allow;
+            # under enforce, return empty.
+            if not caller_is_global and caller not in members:
+                _record_scope_warn()
+                logger.warning(
+                    "scope-warn: caller=%s requested /mesh/agents?project=%s "
+                    "but is not a member; mode=%s",
+                    caller, project, _PROJECT_SCOPE_MODE,
+                )
+                if _PROJECT_SCOPE_MODE == "enforce":
+                    return {}
+
             result = {
                 aid: _agent_entry(aid, url)
                 for aid, url in router.agent_registry.items()
@@ -1747,10 +1847,47 @@ def create_mesh_app(
             if url:
                 return {agent_id: _agent_entry(agent_id, url)}
             return {}
-        return {
+
+        # Unscoped path: full fleet for global callers; per-caller-project
+        # filter for workers (warn-logged, enforce-applied).
+        full_fleet = {
             aid: _agent_entry(aid, url)
             for aid, url in router.agent_registry.items()
         }
+        if caller_is_global:
+            return full_fleet
+
+        own_projects = _caller_projects(caller)
+        # Visible set: members of any project the caller belongs to,
+        # plus the always-global operator, plus the caller itself
+        # (a worker should always see its own entry — including
+        # standalone agents who belong to no project).
+        visible_members: set[str] = {caller}
+        if own_projects:
+            from src.cli.config import _load_projects
+            projects = _load_projects()
+            for pname in own_projects:
+                visible_members.update(projects.get(pname, {}).get("members", []))
+        if "operator" in router.agent_registry:
+            visible_members.add("operator")
+
+        filtered = {
+            aid: entry for aid, entry in full_fleet.items()
+            if aid in visible_members
+        }
+
+        # If the filter would have shrunk the response, emit warn
+        # telemetry so ops can size the soak before flipping the flag.
+        if len(filtered) < len(full_fleet):
+            _record_scope_warn()
+            logger.warning(
+                "scope-warn: caller=%s requested /mesh/agents (no project filter); "
+                "would return %d under enforce, returning %d under %s",
+                caller, len(filtered), len(full_fleet), _PROJECT_SCOPE_MODE,
+            )
+            if _PROJECT_SCOPE_MODE == "enforce":
+                return filtered
+        return full_fleet
 
     # === Agent Introspection ===
 
@@ -2706,6 +2843,13 @@ def create_mesh_app(
                 "max_projects": max_projects,
                 "current_projects": current_projects,
             },
+            # Task 5: count of warn-mode "would have denied" hits since
+            # process start. Operators watch this number drop toward
+            # zero before flipping ``OPENLEGION_PROJECT_SCOPE_MODE`` to
+            # ``enforce``. The flag itself is reported alongside so the
+            # operator dashboard can render the right state.
+            "scope_warn_total": _scope_warn_count,
+            "project_scope_mode": _PROJECT_SCOPE_MODE,
         }
 
     @app.get("/mesh/agents/{agent_id}/metrics")

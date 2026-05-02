@@ -759,11 +759,18 @@ def _remove_agent_from_project(project: str, agent: str) -> None:
 def _add_project_blackboard_permissions(agent: str, project: str) -> None:
     """Grant blackboard access for a project member.
 
-    Only grants ``projects/{project}/*``.  The MeshClient auto-prefixes
-    all blackboard keys with the project namespace, so agents use natural
-    keys (``context/market``) which are transparently stored as
-    ``projects/{project}/context/market``.  This prevents cross-project
-    leakage — each project's data lives under its own namespace.
+    Grants ``projects/{project}/*`` and strips any pre-existing ``*``
+    wildcard so an agent cannot accumulate fleet-wide reach via project
+    moves (Task 5). The MeshClient auto-prefixes all blackboard keys
+    with the project namespace, so agents use natural keys
+    (``context/market``) which are transparently stored as
+    ``projects/{project}/context/market``. Each project's data lives
+    under its own namespace.
+
+    Pre-Task-5 fleets had ``["*"]`` ACLs that survived membership churn;
+    actively-managed fleets are narrowed here at every join. Legacy
+    in-place ``*`` ACLs that haven't been touched stay intact until
+    enforce mode tightens the read/write hot path.
     """
     perms = _load_permissions()
     agent_perms = perms.get("permissions", {}).get(agent)
@@ -772,17 +779,27 @@ def _add_project_blackboard_permissions(agent: str, project: str) -> None:
     project_pattern = f"projects/{project}/*"
     for field in ("blackboard_read", "blackboard_write"):
         patterns = agent_perms.get(field, [])
-        if project_pattern not in patterns:
-            patterns.append(project_pattern)
-        agent_perms[field] = patterns
+        # Strip any wildcard — replaced by the explicit project pattern
+        # below. This is the active narrowing for Task 5: an agent that
+        # previously had ``["*"]`` and is then added to a project ends
+        # up with ``["projects/{project}/*"]``.
+        narrowed = [p for p in patterns if p != "*"]
+        if project_pattern not in narrowed:
+            narrowed.append(project_pattern)
+        agent_perms[field] = narrowed
     _save_permissions(perms)
 
 
 def _remove_project_blackboard_permissions(agent: str, project: str) -> None:
-    """Revoke all blackboard access when an agent leaves a project.
+    """Revoke project blackboard access when an agent leaves a project.
 
-    Clears the project namespace pattern, restoring the agent to
-    standalone state (no blackboard access).
+    Strips the project namespace pattern AND any pre-existing ``*``
+    wildcard. Leaves an agent with whatever non-wildcard, non-target
+    patterns it had — typically empty for a project member, restoring
+    the agent to a standalone (no-blackboard) state. Wildcard stripping
+    matches the add-side narrowing so an agent that ever had ``*`` does
+    not reacquire fleet-wide reach by being added to and then removed
+    from a project (Task 5).
     """
     perms = _load_permissions()
     agent_perms = perms.get("permissions", {}).get(agent)
@@ -791,9 +808,13 @@ def _remove_project_blackboard_permissions(agent: str, project: str) -> None:
     project_pattern = f"projects/{project}/*"
     for field in ("blackboard_read", "blackboard_write"):
         patterns = agent_perms.get(field, [])
-        if project_pattern in patterns:
-            patterns.remove(project_pattern)
-        agent_perms[field] = patterns
+        # Drop both the target project pattern and any surviving ``*``.
+        # The wildcard strip is the safety net for an agent whose ACL
+        # was never re-narrowed (e.g. config-edited directly): once the
+        # membership system touches it on remove, the wildcard goes.
+        agent_perms[field] = [
+            p for p in patterns if p != project_pattern and p != "*"
+        ]
     _save_permissions(perms)
 
 
