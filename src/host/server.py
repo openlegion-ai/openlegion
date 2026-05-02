@@ -341,13 +341,27 @@ def _is_paired_user(channel: str, user: str) -> bool:
     return str(user) in (str(u) for u in allowed)
 
 
-def _is_loopback_internal_request(request: Request) -> bool:
-    """Return true only for the existing localhost mesh-internal trust path."""
+def _is_internal_caller(request: Request) -> bool:
+    """Return True for trusted in-process callers (loopback + ``x-mesh-internal``).
+
+    The mesh's own dispatcher, the dashboard router, the CLI manager
+    process, and health checks all hit ``localhost`` with the
+    ``x-mesh-internal: 1`` header. Authorization gates that should let
+    those callers through (e.g. Task 2e's worker → operator wake block)
+    use this predicate.
+
+    Both conditions must hold: the header AND a loopback peer. The
+    header alone is insufficient — a public-internet caller can set any
+    header they like — and a loopback peer alone is insufficient too,
+    since an agent container can be wired to reach the mesh via
+    loopback in some test/dev setups.
+    """
     if not request.headers.get("x-mesh-internal"):
         return False
     client_host = request.client.host if request.client else ""
     try:
         import ipaddress
+
         return ipaddress.ip_address(client_host).is_loopback
     except (ValueError, AttributeError):
         return False
@@ -401,7 +415,7 @@ def _validated_origin(
     origin = MessageOrigin.from_header_value(raw, trust_kind=True)
     if origin is None:
         return None
-    if caller in _TRUSTED_ORIGIN_CALLERS or _is_loopback_internal_request(request):
+    if caller in _TRUSTED_ORIGIN_CALLERS or _is_internal_caller(request):
         return origin
     if origin.kind == "agent":
         return origin
@@ -739,6 +753,35 @@ def create_mesh_app(
         # lane payload (and any downstream auth gate that will be added
         # in Task 2d/2e) cannot be tricked by a hostile/buggy adapter.
         origin = _validated_origin(request, caller)
+
+        # Task 2e: block synchronous worker → operator wakes.
+        #
+        # Workers signal operator-bound completion by writing task
+        # records (Task 0 hotfix at ``global/tasks/operator/<id>``); the
+        # operator polls those records on heartbeat. This block prevents
+        # an agent from steering the operator into a privileged action
+        # just by being able to message it.
+        #
+        # Allowed paths (must NOT be blocked):
+        #   * ``caller == "operator"`` — the operator can wake itself
+        #     for self-tests / self-resume.
+        #   * ``_is_internal_caller(request)`` — loopback +
+        #     ``x-mesh-internal``: the dashboard / CLI manager process /
+        #     mesh internals can still wake the operator.
+        #   * ``origin.kind == "human"`` — a real human action that
+        #     survived ``_validated_origin``'s pairing recheck.
+        if (
+            target == "operator"
+            and caller != "operator"
+            and not _is_internal_caller(request)
+            and (origin is None or origin.kind != "human")
+        ):
+            raise HTTPException(
+                403,
+                "Worker agents cannot synchronously wake the operator. "
+                "Hand off via tasks/operator/* instead; the operator "
+                "polls on heartbeat.",
+            )
         # Task 2b: missing/invalid origin downgrades to ``kind="agent"``
         # (least-trusted) instead of ``None`` so downstream gates always
         # see an explicit kind. Auto-notify still gated on the original

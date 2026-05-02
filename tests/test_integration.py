@@ -2165,28 +2165,18 @@ def test_mesh_wake_invalid_origin_header_ignored(tmp_path):
         bb.close()
 
 
-# ── Task 1 (characterization): worker → operator wake is permitted ────
+# ── Task 2e: worker → operator synchronous wake is blocked ────────
 
 
-@pytest.mark.characterization
-def test_project_worker_can_wake_operator_today(tmp_path):
-    # CAPTURE-TO-TIGHTEN — Task 2/4 will block worker → operator wakes;
-    # tasks-records polling replaces direct wake. After Task 2 (origin as
-    # authz) and Task 4 (operator authentication & registration), workers
-    # should signal completion via blackboard task records and the
-    # operator polls them, rather than waking the operator synchronously.
-    # When those tasks land: flip this to assert 403 (or whatever the
-    # gate becomes), and replace it with a positive test asserting the
-    # task-record polling path works for the same hand-off scenario.
-    """Today ``/mesh/wake?target=operator`` is allowed for any caller
-    whose ``can_message`` allowlist permits the operator. A project
-    worker with ``can_message=["*"]`` therefore can wake the operator
-    directly. This pins the un-gated direct-wake path that Task 2/4 will
-    remove in favour of task-record polling.
+def _wake_block_app(tmp_path):
+    """Build a mesh app wired with a worker (``scout``) + operator.
+
+    Mirrors the Task 1 characterization fixture but factored out so the
+    flipped block test and the four positive-path tests share setup.
+    Returns ``(client, captured, loop, bb)``.
     """
     import asyncio
     import threading
-    import time
 
     from fastapi.testclient import TestClient
 
@@ -2198,7 +2188,6 @@ def test_project_worker_can_wake_operator_today(tmp_path):
     bb = Blackboard(db_path=str(tmp_path / "wake_op_bb.db"))
     pubsub = PubSub()
 
-    # Project worker has ``can_message=["*"]`` — the only gate today.
     perms = PermissionMatrix.__new__(PermissionMatrix)
     perms.permissions = {
         "scout": AgentPermissions(
@@ -2218,6 +2207,7 @@ def test_project_worker_can_wake_operator_today(tmp_path):
     router = MessageRouter(permissions=perms, agent_registry={})
     router.register_agent("scout", "http://scout:8400", role="scout")
     router.register_agent("operator", "http://operator:8400", role="operator")
+    router.register_agent("chef", "http://chef:8400", role="chef")
 
     captured: list[dict] = []
 
@@ -2246,30 +2236,190 @@ def test_project_worker_can_wake_operator_today(tmp_path):
         dispatch_loop=loop,
     )
     client = TestClient(app)
+    return client, captured, loop, bb
 
+
+def test_project_worker_cannot_wake_operator_directly(tmp_path):
+    """Workers (origin kind=agent) get HTTP 403 from ``/mesh/wake?target=operator``.
+
+    Post-Task-2e expectation: a worker agent with ``can_message=["*"]``
+    can no longer synchronously steer the operator. It must hand off via
+    ``global/tasks/operator/<id>`` (Task 0 hotfix path); the operator
+    polls those records on heartbeat. Permissions still gate the
+    request, but the wake-the-operator path is gated on top.
+    """
+    import time
+
+    client, captured, loop, bb = _wake_block_app(tmp_path)
     try:
-        # No auth tokens are configured on this app, so the route reads
-        # the caller from the X-Agent-ID header — pin the worker as the
-        # caller. This mirrors what a real bearer token would resolve to.
         resp = client.post(
             "/mesh/wake",
             params={"target": "operator", "message": "task done"},
             headers={"X-Agent-ID": "scout"},
         )
-        # Pin: today this is permitted.
-        assert resp.status_code == 200, resp.text
+        assert resp.status_code == 403, resp.text
         body = resp.json()
-        assert body.get("woken") is True
+        assert "Hand off via" in body.get("detail", ""), body
 
-        # The lane was driven — the operator received a wake-up.
+        # The lane must NOT have been driven — the block fires before
+        # ``lane_manager.enqueue`` runs.
+        deadline = time.monotonic() + 0.5
+        while not captured and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert not captured, "operator lane was driven despite 403"
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        bb.close()
+
+
+def test_operator_self_wake_not_blocked(tmp_path):
+    """The operator can still wake itself (caller == "operator")."""
+    import time
+
+    client, captured, loop, bb = _wake_block_app(tmp_path)
+    try:
+        resp = client.post(
+            "/mesh/wake",
+            params={"target": "operator", "message": "self-resume"},
+            headers={"X-Agent-ID": "operator"},
+        )
+        assert resp.status_code == 200, resp.text
         deadline = time.monotonic() + 2.0
         while not captured and time.monotonic() < deadline:
             time.sleep(0.01)
-        assert captured, "operator was not woken via lane"
+        assert captured, "operator self-wake was not enqueued"
         assert captured[0]["agent"] == "operator"
     finally:
         loop.call_soon_threadsafe(loop.stop)
         bb.close()
+
+
+def test_human_origin_wake_operator_not_blocked(tmp_path, monkeypatch):
+    """A real human action (paired channel + paired user) can wake the operator.
+
+    ``_validated_origin`` resolves ``kind="human"`` after rechecking the
+    pairing record, so the Task 2e block must not fire.
+    """
+    import json
+    import time
+
+    from src.host.server import _invalidate_pairing_cache
+
+    # Pairing record: telegram user "42" is the paired owner.
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    (cfg_dir / "telegram_paired.json").write_text(
+        json.dumps({"owner": 42, "allowed": [42]}),
+    )
+    _patch_pairing_project_root(tmp_path, monkeypatch)
+    _invalidate_pairing_cache()
+
+    client, captured, loop, bb = _wake_block_app(tmp_path)
+    try:
+        # ``scout`` is the (untrusted) caller, but the typed origin
+        # carries a verified human claim (telegram/42 is paired). The
+        # block must defer to the human-origin path.
+        resp = client.post(
+            "/mesh/wake",
+            params={"target": "operator", "message": "ping"},
+            headers={
+                "X-Agent-ID": "scout",
+                "x-origin": json.dumps(
+                    {"kind": "human", "channel": "telegram", "user": "42"},
+                ),
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        deadline = time.monotonic() + 2.0
+        while not captured and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert captured, "human-origin wake was not enqueued"
+        assert captured[0]["agent"] == "operator"
+        assert captured[0]["origin"].kind == "human"
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        bb.close()
+        _invalidate_pairing_cache()
+
+
+def test_worker_can_still_wake_non_operator_target(tmp_path):
+    """Control: the Task 2e block applies only to ``target == "operator"``.
+
+    A worker waking a peer (here ``chef``) is still allowed by the
+    existing ``can_message`` gate.
+    """
+    import time
+
+    client, captured, loop, bb = _wake_block_app(tmp_path)
+    try:
+        resp = client.post(
+            "/mesh/wake",
+            params={"target": "chef", "message": "review this"},
+            headers={"X-Agent-ID": "scout"},
+        )
+        assert resp.status_code == 200, resp.text
+        deadline = time.monotonic() + 2.0
+        while not captured and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert captured, "worker → chef wake was not enqueued"
+        assert captured[0]["agent"] == "chef"
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        bb.close()
+
+
+class _LoopbackClient:
+    """Stand-in for ``Request.client`` with a configurable ``host`` IP."""
+
+    def __init__(self, host: str) -> None:
+        self.host = host
+
+
+class _FakeRequestWithClient:
+    """``_FakeRequest`` superset that also carries a ``client`` attribute.
+
+    ``_is_internal_caller`` reads ``request.client.host`` for the
+    loopback check; the bare ``_FakeRequest`` (used by Task 2c origin
+    tests) doesn't expose one.
+    """
+
+    def __init__(self, headers: dict[str, str], client_host: str | None) -> None:
+        self.headers = _ReqHeaders(headers)
+        self.client = _LoopbackClient(client_host) if client_host is not None else None
+
+
+def test_is_internal_caller_predicate():
+    """Unit-test the ``_is_internal_caller`` predicate directly.
+
+    Both the ``x-mesh-internal`` header AND a loopback peer must be
+    present. The header alone or a loopback peer alone is insufficient.
+    """
+    from src.host.server import _is_internal_caller
+
+    # Both header + loopback IP → True.
+    assert _is_internal_caller(
+        _FakeRequestWithClient({"x-mesh-internal": "1"}, "127.0.0.1"),
+    )
+    assert _is_internal_caller(
+        _FakeRequestWithClient({"x-mesh-internal": "1"}, "::1"),
+    )
+    # Header without loopback peer → False.
+    assert not _is_internal_caller(
+        _FakeRequestWithClient({"x-mesh-internal": "1"}, "203.0.113.7"),
+    )
+    # Loopback peer without header → False.
+    assert not _is_internal_caller(
+        _FakeRequestWithClient({}, "127.0.0.1"),
+    )
+    # No client at all → False (defensive: ASGI in some test setups
+    # sets ``request.client`` to None).
+    assert not _is_internal_caller(
+        _FakeRequestWithClient({"x-mesh-internal": "1"}, None),
+    )
+    # Garbage host string → False (ipaddress raises, helper catches).
+    assert not _is_internal_caller(
+        _FakeRequestWithClient({"x-mesh-internal": "1"}, "not-an-ip"),
+    )
 
 
 # ── Fix 4: RuntimeContext._handle_notify_origin routing ───────────
