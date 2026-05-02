@@ -5416,7 +5416,10 @@ def create_dashboard_router(
     # called from a test harness that didn't pass the stores).
 
     def _orchestration_v2_on() -> bool:
-        return os.environ.get("OPENLEGION_ORCHESTRATION_TASKS_V2", "0") == "1"
+        # Default-on (rollout). Setting the env var to ``0`` disables
+        # the v2 path; any other value is treated as on so misconfigured
+        # operators don't silently fall back to the legacy path.
+        return os.environ.get("OPENLEGION_ORCHESTRATION_TASKS_V2", "1") != "0"
 
     @api_router.get("/api/workplace/tasks")
     async def api_workplace_tasks(

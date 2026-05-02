@@ -5,6 +5,8 @@ Tests the FastAPI endpoints directly using TestClient (no Docker required).
 
 from __future__ import annotations
 
+import importlib
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -15,8 +17,23 @@ from src.shared.types import AgentPermissions
 
 
 @pytest.fixture
-def mesh_components(tmp_path):
-    """Create all mesh components with test configuration."""
+def mesh_components(tmp_path, monkeypatch):
+    """Create all mesh components with test configuration.
+
+    Pinned to ``OPENLEGION_PROJECT_SCOPE_MODE=warn`` because these tests
+    hit ``/mesh/agents`` with anonymous TestClient calls; the new
+    ``enforce`` default would filter the response down to {operator}
+    and break the contract assertions.
+    """
+    monkeypatch.setenv("OPENLEGION_PROJECT_SCOPE_MODE", "warn")
+    import src.host.server as server_module
+    importlib.reload(server_module)
+    # Use the freshly-reloaded module's factory so the new
+    # ``_PROJECT_SCOPE_MODE`` value is honored. Other fixtures in this
+    # file still use the top-level ``create_mesh_app`` import — they
+    # don't drive ``/mesh/agents`` so the default is fine for them.
+    fresh_create_mesh_app = server_module.create_mesh_app
+
     bb = Blackboard(db_path=str(tmp_path / "bb.db"))
 
     pubsub = PubSub()
@@ -43,10 +60,13 @@ def mesh_components(tmp_path):
 
     router = MessageRouter(permissions=perms, agent_registry={})
 
-    app = create_mesh_app(bb, pubsub, router, perms, credential_vault=None)
+    app = fresh_create_mesh_app(bb, pubsub, router, perms, credential_vault=None)
     client = TestClient(app)
 
-    return {"client": client, "blackboard": bb, "pubsub": pubsub, "router": router, "perms": perms}
+    yield {"client": client, "blackboard": bb, "pubsub": pubsub, "router": router, "perms": perms}
+
+    monkeypatch.delenv("OPENLEGION_PROJECT_SCOPE_MODE", raising=False)
+    importlib.reload(server_module)
 
 
 def test_register_agent(mesh_components):

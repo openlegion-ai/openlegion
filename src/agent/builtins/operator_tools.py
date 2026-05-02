@@ -666,8 +666,12 @@ _TASKS_V2_DISABLED = (
 
 
 def _orchestration_v2_on() -> bool:
-    """Read the orchestration v2 flag at call time so monkeypatch tests work."""
-    return os.environ.get("OPENLEGION_ORCHESTRATION_TASKS_V2", "0") == "1"
+    """Read the orchestration v2 flag at call time so monkeypatch tests work.
+
+    Default-on (rollout). Setting the env var to ``0`` disables the v2
+    path; any other value is treated as on.
+    """
+    return os.environ.get("OPENLEGION_ORCHESTRATION_TASKS_V2", "1") != "0"
 
 
 def _parse_over_budget(error: Exception) -> dict | None:

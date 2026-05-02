@@ -425,36 +425,38 @@ def _validated_origin(
     return _downgrade_origin(origin, "unpaired channel user")
 
 
-# ── Task 5: Project scope isolation (warn → enforce) ──────────────────
+# ── Task 5: Project scope isolation (default enforce) ─────────────────
 #
 # ``OPENLEGION_PROJECT_SCOPE_MODE`` is the kill switch for the project
-# isolation rollout. ``warn`` (the default for the first release) keeps
-# legacy behavior — fleet-wide visibility on ``/mesh/agents``, additive
-# blackboard ACLs — but emits structured warnings whenever a call would
-# be denied under ``enforce``. Operators read the warn telemetry, then
-# flip to ``enforce`` once the soak window is clean. Read once at module
-# import (env vars don't change at runtime); invalid values fall back to
-# ``warn`` with a logged warning.
-_PROJECT_SCOPE_MODE = os.environ.get("OPENLEGION_PROJECT_SCOPE_MODE", "warn").lower()
+# isolation rollout. Default ``enforce`` — workers see only their own
+# project members on ``/mesh/agents`` and only their own project
+# blackboard ACLs. ``warn`` is preserved as an emergency rollback that
+# restores the legacy fleet-wide visibility while still emitting
+# structured warnings on every call that would have been denied under
+# enforce. Read once at module import (env vars don't change at
+# runtime); invalid values fall back to ``enforce`` with a logged
+# warning.
+_PROJECT_SCOPE_MODE = os.environ.get("OPENLEGION_PROJECT_SCOPE_MODE", "enforce").lower()
 if _PROJECT_SCOPE_MODE not in {"warn", "enforce"}:
     logger.warning(
-        "Invalid OPENLEGION_PROJECT_SCOPE_MODE=%r, defaulting to warn",
+        "Invalid OPENLEGION_PROJECT_SCOPE_MODE=%r, defaulting to enforce",
         _PROJECT_SCOPE_MODE,
     )
-    _PROJECT_SCOPE_MODE = "warn"
+    _PROJECT_SCOPE_MODE = "enforce"
 
 
 # ── Task 6: Durable orchestration task records ────────────────────────
 #
 # ``OPENLEGION_ORCHESTRATION_TASKS_V2`` is the kill switch for the
-# durable-tasks rollout. Default ``0`` (disabled) — the legacy
-# blackboard-dict path in ``coordination_tool`` runs unchanged. When
-# set to ``1`` the mesh constructs a ``Tasks`` SQLite store and the
-# coordination tool routes hand_off / check_inbox / update_status /
-# complete_task through the new endpoints. **No dual-write.**
-# Read once at module import; runtime flips require a restart.
+# durable-tasks rollout. Default ``1`` (enabled) — the mesh constructs
+# a ``Tasks`` SQLite store and the coordination tool routes hand_off /
+# check_inbox / update_status / complete_task through the new
+# endpoints. Setting the env var to ``0`` is preserved as an emergency
+# rollback that falls back to the legacy blackboard-dict path in
+# ``coordination_tool``. **No dual-write.** Read once at module import;
+# runtime flips require a restart.
 _ORCHESTRATION_TASKS_V2 = (
-    os.environ.get("OPENLEGION_ORCHESTRATION_TASKS_V2", "0") == "1"
+    os.environ.get("OPENLEGION_ORCHESTRATION_TASKS_V2", "1") == "1"
 )
 
 
@@ -557,6 +559,39 @@ def create_mesh_app(
     # cancel emit ``task_*`` events to the dashboard.
     if tasks_store is not None and event_bus is not None:
         tasks_store.set_event_bus(event_bus)
+
+    # Rollout: auto-run the legacy blackboard → tasks migration once
+    # at startup so existing fleets transition seamlessly when the v2
+    # flag flips on. The helper is idempotent (keyed on the legacy
+    # ``handoff_id`` → new ``task_id``) so subsequent restarts find
+    # nothing to migrate and are no-ops. Migration failures are logged
+    # but never crash mesh startup — the legacy keys remain in place
+    # and operators can re-run the helper manually.
+    if _ORCHESTRATION_TASKS_V2 and tasks_store is not None:
+        from src.host.orchestration_migration import migrate_blackboard_to_tasks
+        try:
+            _migration_result = migrate_blackboard_to_tasks(blackboard, tasks_store)
+            _migrated = int(_migration_result.get("migrated", 0) or 0)
+            _skipped = int(_migration_result.get("skipped", 0) or 0)
+            _deleted = int(_migration_result.get("deleted", 0) or 0)
+            _errors = _migration_result.get("errors", []) or []
+            _error_count = len(_errors) if isinstance(_errors, list) else int(_errors)
+            if _migrated > 0 or _deleted > 0:
+                logger.info(
+                    "orchestration migration: migrated=%d skipped=%d deleted=%d errors=%d",
+                    _migrated, _skipped, _deleted, _error_count,
+                )
+            else:
+                logger.debug("orchestration migration: no legacy tasks found")
+        except Exception as e:
+            # Migration failure must not crash mesh startup. Logged
+            # loudly so ops can investigate; legacy tasks stay in place
+            # and can be migrated manually later.
+            logger.error(
+                "orchestration migration failed at startup: %s — legacy tasks preserved",
+                e,
+                exc_info=True,
+            )
 
     _auth_tokens = auth_tokens if auth_tokens is not None else {}
     _agent_projects = agent_projects if agent_projects is not None else {}

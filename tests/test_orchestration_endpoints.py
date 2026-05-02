@@ -24,12 +24,17 @@ def _reload_server(monkeypatch, *, v2: bool, tasks_db: str):
     The orchestration v2 flag is read at module import. Tests that
     flip the flag must reload the module so ``_ORCHESTRATION_TASKS_V2``
     picks up the new value.
+
+    Note: the v2 flag now defaults to ``1`` (rollout) so the off path
+    must explicitly set ``OPENLEGION_ORCHESTRATION_TASKS_V2=0`` rather
+    than relying on the env var being unset.
     """
     if v2:
         monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "1")
         monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_DB", tasks_db)
     else:
-        monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_V2", raising=False)
+        monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "0")
+        monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)
     import src.host.server as server_module
     importlib.reload(server_module)
     return server_module
