@@ -764,7 +764,7 @@ def _set_agent_status(name: str, status: str) -> None:
     via the runtime backend (the host endpoint handles that).
     """
     if not AGENTS_FILE.exists():
-        raise ValueError(f"Agents config not found")
+        raise ValueError("Agents config not found")
     with open(AGENTS_FILE) as f:
         agents_cfg = yaml.safe_load(f) or {"agents": {}}
     agents = agents_cfg.get("agents", {})
@@ -788,7 +788,7 @@ def _unarchive_agent(name: str) -> None:
 def _agent_status(name: str) -> str:
     """Read an agent's status. Returns ``"active"`` for legacy rows missing the field."""
     if not AGENTS_FILE.exists():
-        raise ValueError(f"Agents config not found")
+        raise ValueError("Agents config not found")
     with open(AGENTS_FILE) as f:
         agents_cfg = yaml.safe_load(f) or {"agents": {}}
     agents = agents_cfg.get("agents", {})

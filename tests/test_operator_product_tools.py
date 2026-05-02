@@ -13,8 +13,6 @@ routes through ``ASGITransport``.
 from __future__ import annotations
 
 import importlib
-import os
-from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
