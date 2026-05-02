@@ -15,11 +15,11 @@ from __future__ import annotations
 import json as _json
 import logging
 import os
-from pathlib import Path
 import re
 import subprocess
 import sys
 import threading
+from pathlib import Path
 
 import click
 
@@ -36,7 +36,8 @@ _json_mode = False
 
 def _project_version() -> str:
     """Return installed package version, falling back for source-tree tests."""
-    from importlib.metadata import PackageNotFoundError, version as pkg_version
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as pkg_version
 
     try:
         return pkg_version("openlegion")
