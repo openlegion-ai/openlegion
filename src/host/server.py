@@ -100,22 +100,20 @@ if TYPE_CHECKING:
 
 # ── Pending Config Change Store (SQLite-backed) ──────────────────
 #
-# Task 2d migrated this from an in-memory dict to a SQLite-backed
-# ``PendingActions`` store (``data/pending_actions.db``) so pending
-# operator-config edits survive mesh restarts. Schema carries the
-# payload digest (replay protection) and origin kind (so confirm-side
-# gates can require ``origin_kind="human"``). The mesh app picks the
-# canonical instance up via ``_get_pending_actions_store()`` below;
-# the module-level helpers (kept for backward compatibility with
-# external test imports) delegate to that singleton.
+# Pending operator-config edits live in ``PendingActions``
+# (``data/pending_actions.db``) so they survive mesh restarts. Schema
+# carries the payload digest (replay protection) and origin kind (so
+# confirm-side gates can require ``origin_kind="human"``). The mesh
+# app picks the canonical instance up via ``_get_pending_actions_store()``
+# below; the module-level helpers delegate to that singleton.
 _MAX_PENDING = 10
 _CHANGE_TTL_SECONDS = 300
 
 # Module-level singleton used by the ``_store_pending_change`` /
-# ``_get_pending_change`` / ``_consume_pending_change`` shims below.
+# ``_get_pending_change`` / ``_consume_pending_change`` helpers below.
 # ``create_mesh_app`` sets this to its own instance so the helpers and
 # the app share one store; tests that import the helpers directly get
-# an in-memory store the first time they touch one of the shims.
+# an in-memory store the first time they touch one of the helpers.
 _pending_actions_singleton: PendingActions | None = None
 
 
@@ -135,77 +133,8 @@ def _get_pending_actions_store() -> PendingActions:
     return _pending_actions_singleton
 
 
-# ── Backward-compat dict view ───────────────────────────────────────
-# Existing tests (``tests/test_operator_audit.py``) imported the legacy
-# ``_pending_changes`` dict directly. They want to ``.clear()`` it,
-# index into it, and mutate ``expires_at`` on a row to force expiry.
-# We expose a thin proxy that forwards each operation to the SQLite
-# store so those existing tests keep passing without leaking the old
-# in-memory dict semantics back into production code.
-
-class _PendingChangesProxy:
-    """Dict-like view over the SQLite pending_actions store.
-
-    Keeps the legacy ``_pending_changes`` import working: ``.clear()``,
-    ``__contains__``, ``__getitem__`` for tests; production code uses
-    :class:`PendingActions` directly.
-    """
-
-    def _store(self) -> PendingActions:
-        return _get_pending_actions_store()
-
-    def clear(self) -> None:
-        with self._store()._conn() as conn:
-            conn.execute("DELETE FROM pending_actions")
-
-    def __contains__(self, change_id: object) -> bool:
-        if not isinstance(change_id, str):
-            return False
-        return self._store().peek(change_id) is not None
-
-    def __len__(self) -> int:
-        return len(self._store().list_pending())
-
-    def __getitem__(self, change_id: str) -> dict:
-        rec = self._store().peek(change_id)
-        if rec is None:
-            raise KeyError(change_id)
-        # Translate from the new schema back to the legacy fields the
-        # old tests asserted on. ``payload`` carries the (old, new)
-        # value pair as a dict, plus ``field`` lives on the row itself.
-        payload = rec.get("payload") or {}
-        return {
-            "agent_id": rec["target_id"],
-            "field": rec["action_kind"],
-            "old_value": payload.get("old_value", ""),
-            "new_value": payload.get("new_value", ""),
-            "expires_at": datetime.fromtimestamp(rec["expires_at"], tz=timezone.utc),
-        }
-
-    def __setitem__(self, change_id: str, value: dict) -> None:
-        # Only the ``expires_at`` mutation is supported -- it's the
-        # only mutation legacy tests perform on this dict (to force
-        # expiry). Other writes go through ``_store_pending_change``.
-        if not isinstance(value, dict) or "expires_at" not in value:
-            raise NotImplementedError(
-                "Use _store_pending_change to insert; only expires_at "
-                "mutations are supported on this proxy.",
-            )
-        new_expiry = value["expires_at"]
-        if isinstance(new_expiry, datetime):
-            new_expiry = new_expiry.timestamp()
-        with self._store()._conn() as conn:
-            conn.execute(
-                "UPDATE pending_actions SET expires_at=? WHERE nonce=?",
-                (new_expiry, change_id),
-            )
-
-
-_pending_changes = _PendingChangesProxy()
-
-
 def _cleanup_expired_changes() -> None:
-    """Reap expired pending actions. Kept for backward compatibility."""
+    """Reap expired pending actions."""
     _get_pending_actions_store().reap_expired()
 
 
@@ -539,10 +468,9 @@ def create_mesh_app(
     # agent state when agents are removed.
     app.cleanup_agent = lambda agent_id: None  # replaced below
 
-    # Task 2d: persistent pending-action store (replaces the in-memory
-    # ``_pending_changes`` dict). Mirrors the path convention of
+    # Persistent pending-action store. Mirrors the path convention of
     # ``data/costs.db`` / ``data/traces.db``. The disk-backed instance
-    # is also assigned to the module-level singleton so the legacy
+    # is also assigned to the module-level singleton so the
     # ``_store_pending_change`` / ``_consume_pending_change`` helpers
     # share state with the endpoints below.
     pending_actions = PendingActions(db_path="data/pending_actions.db")

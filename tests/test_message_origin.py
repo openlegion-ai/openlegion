@@ -1,20 +1,19 @@
 """Tests for the typed ``MessageOrigin`` model and ``trace.py`` helpers.
 
-Task 2a (operator orchestration roadmap) introduces ``MessageOrigin`` as
-a typed Pydantic model carrying ``kind``, ``channel``, and ``user``.
+``MessageOrigin`` is a typed Pydantic model carrying ``kind``,
+``channel``, and ``user``.
 
 The test surface here covers three concerns:
 
-* The model itself — validation, defaults, immutability, dict-compat.
+* The model itself — validation, defaults, immutability.
 * The ``X-Origin`` wire format — JSON shape, additive ``kind`` segment,
   legacy back-compat (no ``kind`` → ``kind="agent"``).
 * The ``parse_origin_header`` / ``origin_header`` helpers in
-  ``src.shared.trace`` — accepts both typed and dict input, returns
-  typed output.
+  ``src.shared.trace``.
 
 The "legacy header → kind=agent" case is the security-critical default:
 unauthenticated paths must NOT be able to claim ``kind="human"`` by
-sending the pre-Task-2a header shape.
+sending the pre-typed-origin header shape.
 """
 
 from __future__ import annotations
@@ -64,30 +63,12 @@ class TestMessageOriginModel:
         with pytest.raises(ValidationError):
             m.user = "+1"  # type: ignore[misc]
 
-    def test_dict_style_getitem(self):
-        m = MessageOrigin(kind="human", channel="cli", user="jeff")
-        assert m["kind"] == "human"
-        assert m["channel"] == "cli"
-        assert m["user"] == "jeff"
-        with pytest.raises(KeyError):
-            _ = m["nope"]
-
-    def test_dict_style_get(self):
-        m = MessageOrigin(kind="cron")
-        # Empty channel/user return ``""`` (matches dict semantics where
-        # the key is present but the value is empty).
-        assert m.get("channel") == ""
-        assert m.get("user") == ""
-        assert m.get("kind") == "cron"
-        # Unknown key falls back to default.
-        assert m.get("nope") is None
-        assert m.get("nope", "fallback") == "fallback"
-
     def test_dict_conversion_roundtrip(self):
-        # ``lanes.py`` does ``dict(task.origin)`` — must produce a plain
-        # dict containing all three fields.
+        # ``coordination_tool.hand_off`` persists ``origin.model_dump()``
+        # to the blackboard — must produce a plain dict containing all
+        # three fields.
         m = MessageOrigin(kind="operator", channel="dashboard", user="op-1")
-        d = dict(m)
+        d = m.model_dump()
         assert d == {"kind": "operator", "channel": "dashboard", "user": "op-1"}
 
 
@@ -236,32 +217,8 @@ class TestTraceHelpers:
         parsed = json.loads(h["X-Origin"])
         assert parsed == {"kind": "human", "channel": "cli", "user": "jeff"}
 
-    def test_origin_header_dict_input_back_compat(self):
-        # Stamps not yet migrated still pass dicts. Must serialize.
-        h = origin_header({"kind": "human", "channel": "cli", "user": "jeff"})
-        parsed = json.loads(h["X-Origin"])
-        assert parsed == {"kind": "human", "channel": "cli", "user": "jeff"}
-
-    def test_origin_header_typed_and_dict_produce_identical_payload(self):
-        m = MessageOrigin(kind="operator", channel="dashboard", user="op-1")
-        h_typed = origin_header(m)
-        h_dict = origin_header(
-            {"kind": "operator", "channel": "dashboard", "user": "op-1"}
-        )
-        assert h_typed == h_dict
-
-    def test_origin_header_legacy_dict_no_kind_upgrades_to_agent(self):
-        # Dict without ``kind`` must serialize with ``kind="agent"`` so
-        # the next hop never sees a kind-less origin on the wire.
-        h = origin_header({"channel": "cli", "user": "jeff"})
-        parsed = json.loads(h["X-Origin"])
-        assert parsed["kind"] == "agent"
-        assert parsed["channel"] == "cli"
-        assert parsed["user"] == "jeff"
-
     def test_origin_header_none_returns_empty_dict(self):
         assert origin_header(None) == {}
-        assert origin_header({}) == {}
 
     def test_round_trip_through_helpers(self):
         m = MessageOrigin(kind="human", channel="telegram", user="+99")

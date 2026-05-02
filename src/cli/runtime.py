@@ -162,7 +162,7 @@ class RuntimeContext:
     def dispatch(
         self, agent: str, message: str, mode: str = "followup",
         trace_id: str | None = None,
-        origin: "MessageOrigin | dict[str, str] | None" = None,
+        origin: "MessageOrigin | None" = None,
         auto_notify: bool = False,
     ) -> str:
         """Thread-safe synchronous message dispatch.
@@ -182,7 +182,7 @@ class RuntimeContext:
     async def async_dispatch(
         self, agent: str, message: str, mode: str = "followup",
         trace_id: str | None = None,
-        origin: "MessageOrigin | dict[str, str] | None" = None,
+        origin: "MessageOrigin | None" = None,
         auto_notify: bool = False,
     ) -> str:
         """Async dispatch: schedules onto the dedicated dispatch loop."""
@@ -475,7 +475,7 @@ class RuntimeContext:
 
         async def _direct_dispatch(
             agent_name: str, message: str,
-            origin: "MessageOrigin | dict | None" = None,
+            origin: "MessageOrigin | None" = None,
             **_kwargs,
         ) -> str:
             from src.shared.trace import current_trace_id, origin_header
@@ -558,7 +558,7 @@ class RuntimeContext:
             ), return_exceptions=True)
 
     async def _handle_notify_origin(
-        self, origin: dict, message: str, agent_name: str = "",
+        self, origin: "MessageOrigin", message: str, agent_name: str = "",
     ) -> None:
         """Route a completed task result back to the originating channel+user.
 
@@ -578,8 +578,8 @@ class RuntimeContext:
         """
         if not origin or not self.channel_manager:
             return
-        channel_type = origin.get("channel")
-        user = origin.get("user")
+        channel_type = origin.channel
+        user = origin.user
         if not channel_type or not user:
             return
         ch = self.channel_manager._channel_map.get(channel_type)

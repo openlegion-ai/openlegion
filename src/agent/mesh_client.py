@@ -260,7 +260,7 @@ class MeshClient:
 
     async def wake_agent(
         self, target: str, message: str = "",
-        origin: "MessageOrigin | dict | None" = None,
+        origin: "MessageOrigin | None" = None,
     ) -> dict:
         """Wake a target agent so it processes work immediately."""
         from src.shared.trace import origin_header

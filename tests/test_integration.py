@@ -1952,10 +1952,6 @@ class TestParseOriginHeader:
         assert result.kind == "agent"
         assert result.channel == "whatsapp"
         assert result.user == "+1234"
-        # Dict-compat shim — readers in flight during the Task 2b
-        # migration can still treat it as a dict.
-        assert result.get("channel") == "whatsapp"
-        assert result.get("user") == "+1234"
 
     def test_none_returns_none(self):
         from src.shared.trace import parse_origin_header
@@ -2476,10 +2472,12 @@ class _FakeChannel:
 class TestHandleNotifyOrigin:
     @pytest.mark.asyncio
     async def test_routes_to_channel_with_agent_label(self):
+        from src.shared.types import MessageOrigin
+
         ch = _FakeChannel()
         rt = _stub_runtime_with_channel("whatsapp", ch)
         await rt._handle_notify_origin(
-            {"channel": "whatsapp", "user": "+1234"},
+            MessageOrigin(kind="human", channel="whatsapp", user="+1234"),
             "dinner is ready",
             "chef",
         )
@@ -2487,10 +2485,12 @@ class TestHandleNotifyOrigin:
 
     @pytest.mark.asyncio
     async def test_no_agent_label_when_agent_name_empty(self):
+        from src.shared.types import MessageOrigin
+
         ch = _FakeChannel()
         rt = _stub_runtime_with_channel("whatsapp", ch)
         await rt._handle_notify_origin(
-            {"channel": "whatsapp", "user": "+1234"},
+            MessageOrigin(kind="human", channel="whatsapp", user="+1234"),
             "raw message",
             "",
         )
@@ -2501,12 +2501,13 @@ class TestHandleNotifyOrigin:
         from unittest.mock import MagicMock
 
         from src.cli.runtime import RuntimeContext
+        from src.shared.types import MessageOrigin
         rt = RuntimeContext.__new__(RuntimeContext)
         rt.channel_manager = MagicMock()
         rt.channel_manager._channel_map = {}  # empty
         # No exception raised, no call made
         await rt._handle_notify_origin(
-            {"channel": "discord", "user": "99"},
+            MessageOrigin(kind="human", channel="discord", user="99"),
             "hi",
             "chef",
         )
@@ -2514,37 +2515,48 @@ class TestHandleNotifyOrigin:
     @pytest.mark.asyncio
     async def test_drops_when_channel_manager_missing(self):
         from src.cli.runtime import RuntimeContext
+        from src.shared.types import MessageOrigin
         rt = RuntimeContext.__new__(RuntimeContext)
         rt.channel_manager = None
         # Must be a no-op, not raise
         await rt._handle_notify_origin(
-            {"channel": "whatsapp", "user": "+1"},
+            MessageOrigin(kind="human", channel="whatsapp", user="+1"),
             "hi",
             "chef",
         )
 
     @pytest.mark.asyncio
     async def test_drops_on_invalid_origin(self):
+        from src.shared.types import MessageOrigin
+
         ch = _FakeChannel()
         rt = _stub_runtime_with_channel("whatsapp", ch)
-        # Missing user
-        await rt._handle_notify_origin({"channel": "whatsapp"}, "hi", "chef")
+        # Missing user (empty string user)
+        await rt._handle_notify_origin(
+            MessageOrigin(kind="human", channel="whatsapp", user=""),
+            "hi", "chef",
+        )
         # Missing channel
-        await rt._handle_notify_origin({"user": "+1"}, "hi", "chef")
-        # Empty dict
-        await rt._handle_notify_origin({}, "hi", "chef")
+        await rt._handle_notify_origin(
+            MessageOrigin(kind="human", channel="", user="+1"),
+            "hi", "chef",
+        )
+        # No origin at all
+        await rt._handle_notify_origin(None, "hi", "chef")
         assert ch.sent == []
 
     @pytest.mark.asyncio
     async def test_send_failure_is_caught_not_raised(self):
         from unittest.mock import AsyncMock
 
+        from src.shared.types import MessageOrigin
+
         ch = _FakeChannel()
         ch.send_to_user = AsyncMock(side_effect=RuntimeError("boom"))
         rt = _stub_runtime_with_channel("whatsapp", ch)
         # Must not raise — the warning is logged and swallowed
         await rt._handle_notify_origin(
-            {"channel": "whatsapp", "user": "+1"},
+            MessageOrigin(kind="human", channel="whatsapp", user="+1"),
             "hi",
             "chef",
         )

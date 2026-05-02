@@ -191,7 +191,7 @@ class Channel(abc.ABC):
 
     async def dispatch(
         self, agent: str, message: str,
-        origin: "MessageOrigin | dict[str, str] | None" = None,
+        origin: "MessageOrigin | None" = None,
     ) -> str:
         """Route a message to an agent and return the response.
 

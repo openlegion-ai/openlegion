@@ -12,8 +12,8 @@ from src.host.server import (
     _CHANGE_TTL_SECONDS,
     _cleanup_expired_changes,
     _consume_pending_change,
+    _get_pending_actions_store,
     _get_pending_change,
-    _pending_changes,
     _store_pending_change,
 )
 
@@ -146,12 +146,19 @@ def test_audit_log_empty(blackboard):
 # === Pending Change Store Tests ===
 
 
+def _clear_pending_actions() -> None:
+    """Drop every row from the pending-actions store (test helper)."""
+    store = _get_pending_actions_store()
+    with store._conn() as conn:
+        conn.execute("DELETE FROM pending_actions")
+
+
 @pytest.fixture(autouse=True)
 def clear_pending_changes():
     """Clear the pending changes store before each test."""
-    _pending_changes.clear()
+    _clear_pending_actions()
     yield
-    _pending_changes.clear()
+    _clear_pending_actions()
 
 
 def test_store_and_get_pending_change():
@@ -184,16 +191,17 @@ def test_consume_nonexistent_change():
 def test_expired_changes_cleaned_up():
     """Expired changes are removed during cleanup."""
     change_id = _store_pending_change("alpha", "model", "old", "new")
-    # Manually expire it. ``_pending_changes`` is a SQLite-backed proxy
-    # (Task 2d), so the in-place mutation pattern ``[cid]["expires_at"]
-    # = ...`` no longer round-trips. Use the proxy's ``__setitem__``
-    # which performs a single-column UPDATE on the row.
-    _pending_changes[change_id] = {
-        "expires_at": datetime.now(timezone.utc) - timedelta(seconds=1),
-    }
+    # Force expiry by backdating ``expires_at`` directly on the store.
+    store = _get_pending_actions_store()
+    expired_ts = (datetime.now(timezone.utc) - timedelta(seconds=1)).timestamp()
+    with store._conn() as conn:
+        conn.execute(
+            "UPDATE pending_actions SET expires_at=? WHERE nonce=?",
+            (expired_ts, change_id),
+        )
 
     _cleanup_expired_changes()
-    assert change_id not in _pending_changes
+    assert _get_pending_change(change_id) is None
 
 
 def test_max_pending_evicts_oldest():
@@ -207,7 +215,7 @@ def test_max_pending_evicts_oldest():
 
     # Store one more — should evict the oldest
     new_id = _store_pending_change("alpha", "extra", "old", "new")
-    assert len(_pending_changes) == _MAX_PENDING
+    assert len(_get_pending_actions_store().list_pending()) == _MAX_PENDING
     # The first stored should be gone
     assert _get_pending_change(ids[0]) is None
     # The new one should exist
@@ -222,7 +230,8 @@ def test_get_nonexistent_change():
 def test_change_ttl():
     """Changes have a TTL matching _CHANGE_TTL_SECONDS."""
     change_id = _store_pending_change("alpha", "model", "old", "new")
-    change = _pending_changes[change_id]
+    change = _get_pending_change(change_id)
+    assert change is not None
     expected = datetime.now(timezone.utc) + timedelta(seconds=_CHANGE_TTL_SECONDS)
     # Allow 5 seconds tolerance
     assert abs((change["expires_at"] - expected).total_seconds()) < 5
