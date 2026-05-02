@@ -117,6 +117,12 @@ class PermissionMatrix:
                 browser_actions=default.browser_actions,
                 can_spawn=default.can_spawn,
                 can_manage_cron=default.can_manage_cron,
+                can_manage_fleet=default.can_manage_fleet,
+                can_manage_projects=default.can_manage_projects,
+                can_edit_agent_config=default.can_edit_agent_config,
+                can_view_fleet_metrics=default.can_view_fleet_metrics,
+                can_route_tasks=default.can_route_tasks,
+                can_request_user_credentials=default.can_request_user_credentials,
                 can_use_wallet=default.can_use_wallet,
                 wallet_allowed_chains=default.wallet_allowed_chains,
                 wallet_spend_limit_per_tx_usd=default.wallet_spend_limit_per_tx_usd,
@@ -222,7 +228,15 @@ class PermissionMatrix:
         return action in allowed
 
     def can_spawn(self, agent_id: str) -> bool:
-        """Check if agent is allowed to spawn ephemeral agents."""
+        """Check if agent is allowed to spawn EPHEMERAL workers.
+
+        Task 3 narrowed the semantics: this gates short-lived spawns
+        (subagent / cron-triggered / template apply for transient
+        helpers) only. Durable fleet operations (creating named agents,
+        managing projects, editing config, viewing fleet metrics,
+        routing tasks, requesting user credentials) live on dedicated
+        control-plane checks below.
+        """
         if self._is_trusted(agent_id):
             return True
         perms = self.get_permissions(agent_id)
@@ -234,6 +248,44 @@ class PermissionMatrix:
             return True
         perms = self.get_permissions(agent_id)
         return perms.can_manage_cron
+
+    # === Control-plane permissions (Task 3) ===
+
+    def can_manage_fleet(self, agent_id: str) -> bool:
+        """Check if agent is allowed to create/register durable named agents."""
+        if self._is_trusted(agent_id):
+            return True
+        return self.get_permissions(agent_id).can_manage_fleet
+
+    def can_manage_projects(self, agent_id: str) -> bool:
+        """Check if agent is allowed to create/archive projects and manage membership."""
+        if self._is_trusted(agent_id):
+            return True
+        return self.get_permissions(agent_id).can_manage_projects
+
+    def can_edit_agent_config(self, agent_id: str) -> bool:
+        """Check if agent is allowed to propose/confirm edits to other agents' config."""
+        if self._is_trusted(agent_id):
+            return True
+        return self.get_permissions(agent_id).can_edit_agent_config
+
+    def can_view_fleet_metrics(self, agent_id: str) -> bool:
+        """Check if agent is allowed to read fleet-wide metrics endpoints."""
+        if self._is_trusted(agent_id):
+            return True
+        return self.get_permissions(agent_id).can_view_fleet_metrics
+
+    def can_route_tasks(self, agent_id: str) -> bool:
+        """Check if agent is allowed to create durable task records (Task 6)."""
+        if self._is_trusted(agent_id):
+            return True
+        return self.get_permissions(agent_id).can_route_tasks
+
+    def can_request_user_credentials(self, agent_id: str) -> bool:
+        """Check if agent is allowed to request credentials/login from the user."""
+        if self._is_trusted(agent_id):
+            return True
+        return self.get_permissions(agent_id).can_request_user_credentials
 
     def can_use_api(self, agent_id: str, service: str) -> bool:
         if self._is_trusted(agent_id):

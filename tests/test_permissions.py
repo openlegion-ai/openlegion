@@ -653,20 +653,20 @@ class TestOperatorInboxGlobalCarveOut:
         # Sender may inspect only its own submitted output.
         assert m.can_read_blackboard("scout", "global/output/scout/ho_1") is True
 
-# ── Task 1 (characterization): can_spawn over-broad gate ──────────────
+# ── Task 3: can_spawn split ────────────────────────────────────────────
 #
-# Today ``can_spawn=True`` is one bit gating BOTH ephemeral-worker spawning
-# (subagent / cron / template apply) AND durable fleet operations (creating
-# named agents). Task 3 will introduce ``can_manage_fleet`` and split the
-# durable-fleet path off ``can_spawn``. The tests below pin three current
-# call sites:
+# Task 3 narrowed ``can_spawn`` to ephemeral spawning only (``/mesh/spawn``)
+# and moved durable fleet operations onto a new ``can_manage_fleet``
+# capability:
 #
-#   * ``permissions.can_spawn`` at ``host/server.py:1531``  → ``POST /mesh/spawn``
-#   * ``permissions.can_spawn`` at ``host/server.py:1608``  → ``POST /mesh/fleet/apply``
-#   * ``permissions.can_spawn`` at ``host/server.py:1754``  → ``POST /mesh/agents/create``
+#   * ``permissions.can_spawn``         → ``POST /mesh/spawn``       (ephemeral)
+#   * ``permissions.can_manage_fleet``  → ``POST /mesh/fleet/apply`` (durable)
+#   * ``permissions.can_manage_fleet``  → ``POST /mesh/agents/create`` (durable)
 #
-# The first is ephemeral; the other two are durable fleet operations that
-# Task 3 wants to require ``can_manage_fleet`` for.
+# The first test below pins ``can_spawn`` keeping ephemeral semantics; the
+# next two assert the new ``can_manage_fleet`` requirement on the durable
+# endpoints (these used to be characterization captures of today's overly
+# broad ``can_spawn`` gate; Task 3 flipped them to enforce the split).
 
 class _SpawnRouteFixture:
     """Helper that builds a mesh app with a permissive ``container_manager``
@@ -674,7 +674,10 @@ class _SpawnRouteFixture:
     the actual container start by pre-creating an in-memory ``MagicMock``."""
 
     @staticmethod
-    def build(tmp_path, monkeypatch, *, can_spawn: bool):
+    def build(
+        tmp_path, monkeypatch, *, can_spawn: bool,
+        can_manage_fleet: bool = False, auth_tokens: dict | None = None,
+    ):
         from unittest.mock import AsyncMock, MagicMock
 
         from fastapi.testclient import TestClient
@@ -684,11 +687,11 @@ class _SpawnRouteFixture:
         from src.host.server import create_mesh_app
 
         cfg_dir = tmp_path / "config"
-        cfg_dir.mkdir()
+        cfg_dir.mkdir(exist_ok=True)
         skills_dir = tmp_path / "skills"
-        skills_dir.mkdir()
+        skills_dir.mkdir(exist_ok=True)
         templates_dir = tmp_path / "templates"
-        templates_dir.mkdir()
+        templates_dir.mkdir(exist_ok=True)
         # Minimal one-agent template for /mesh/fleet/apply.
         import yaml
         (templates_dir / "tinybot.yaml").write_text(yaml.dump({
@@ -717,6 +720,7 @@ class _SpawnRouteFixture:
             "permissions": {
                 "worker": {
                     "can_spawn": can_spawn,
+                    "can_manage_fleet": can_manage_fleet,
                     "can_message": ["mesh"],
                     "blackboard_read": [],
                     "blackboard_write": [],
@@ -745,6 +749,7 @@ class _SpawnRouteFixture:
         app = create_mesh_app(
             bb, pubsub, router, perms,
             container_manager=cm,
+            auth_tokens=auth_tokens,
         )
         client = TestClient(app)
         return {
@@ -778,48 +783,58 @@ def test_can_spawn_today_gates_mesh_spawn_endpoint(tmp_path, monkeypatch):
     fx["bb"].close()
 
 
-@pytest.mark.characterization
-def test_can_spawn_today_also_gates_fleet_apply_endpoint(tmp_path, monkeypatch):
-    # CAPTURE-TO-TIGHTEN — this test asserts today's over-broad behavior.
-    # After Task 3 (split can_spawn), this endpoint requires can_manage_fleet.
-    # When Task 3 lands: flip the assertion or delete this test, and add a
-    # negative test in test_permissions.py.
-    """A worker with ``can_spawn=True`` and otherwise-narrow permissions
-    can today reach ``POST /mesh/fleet/apply`` — applying a fleet template
-    is treated as just another spawn. After Task 3 it should require the
-    new ``can_manage_fleet`` capability instead.
+def test_fleet_apply_requires_can_manage_fleet(tmp_path, monkeypatch):
+    """Task 3: ``/mesh/fleet/apply`` is now gated on ``can_manage_fleet``,
+    not ``can_spawn``. A worker with only ``can_spawn=True`` is rejected;
+    granting ``can_manage_fleet`` lets the call through.
+
+    The ``/mesh/fleet/apply`` permission gate runs only when the mesh app
+    is built with auth tokens (production posture); pass ``auth_tokens``
+    to the fixture so the gate executes.
     """
-    fx = _SpawnRouteFixture.build(tmp_path, monkeypatch, can_spawn=True)
-    client = fx["client"]
-    # Auth is not configured on the test app, so the route reads
-    # ``data["spawned_by"]`` directly. We pass our worker.
-    resp = client.post(
+    auth = {"worker": "tok"}
+    headers = {"X-Agent-ID": "worker", "Authorization": "Bearer tok"}
+
+    # 1) can_spawn=True alone is no longer sufficient — 403.
+    fx = _SpawnRouteFixture.build(
+        tmp_path, monkeypatch,
+        can_spawn=True, can_manage_fleet=False, auth_tokens=auth,
+    )
+    resp = fx["client"].post(
         "/mesh/fleet/apply",
         json={"spawned_by": "worker", "template": "tinybot"},
-        headers={"X-Agent-ID": "worker"},
+        headers=headers,
     )
-    # Pin: today's behavior — succeeds because can_spawn is enough.
-    assert resp.status_code != 403, resp.text
-    # Either 200 (succeeded) or 5xx from a downstream stub failing — what
-    # we are pinning is "not 403 from the can_spawn gate."
-    assert resp.status_code < 500, resp.text
+    assert resp.status_code == 403, resp.text
+    assert "can_manage_fleet" in resp.text
     fx["bb"].close()
 
+    # 2) Granting can_manage_fleet lets the call past the gate.
+    fx2 = _SpawnRouteFixture.build(
+        tmp_path, monkeypatch,
+        can_spawn=True, can_manage_fleet=True, auth_tokens=auth,
+    )
+    resp2 = fx2["client"].post(
+        "/mesh/fleet/apply",
+        json={"spawned_by": "worker", "template": "tinybot"},
+        headers=headers,
+    )
+    # Past the can_manage_fleet gate — must NOT be 403 from that gate.
+    assert resp2.status_code != 403, resp2.text
+    fx2["bb"].close()
 
-@pytest.mark.characterization
-def test_can_spawn_today_also_gates_agents_create_endpoint(tmp_path, monkeypatch):
-    # CAPTURE-TO-TIGHTEN — this test asserts today's over-broad behavior.
-    # After Task 3 (split can_spawn), this endpoint requires can_manage_fleet.
-    # When Task 3 lands: flip the assertion or delete this test, and add a
-    # negative test in test_permissions.py.
-    """A worker with ``can_spawn=True`` and otherwise-narrow permissions
-    can today reach ``POST /mesh/agents/create`` — creating a durable
-    custom agent is treated as just another spawn. After Task 3 it
-    should require the new ``can_manage_fleet`` capability instead.
+
+def test_agents_create_requires_can_manage_fleet(tmp_path, monkeypatch):
+    """Task 3: ``/mesh/agents/create`` is now gated on ``can_manage_fleet``,
+    not ``can_spawn``. A worker with only ``can_spawn=True`` is rejected;
+    granting ``can_manage_fleet`` lets the call through.
     """
-    fx = _SpawnRouteFixture.build(tmp_path, monkeypatch, can_spawn=True)
-    client = fx["client"]
-    resp = client.post(
+    # 1) can_spawn=True alone is no longer sufficient — 403.
+    fx = _SpawnRouteFixture.build(
+        tmp_path, monkeypatch,
+        can_spawn=True, can_manage_fleet=False,
+    )
+    resp = fx["client"].post(
         "/mesh/agents/create",
         json={
             "agent_id": "worker",
@@ -829,12 +844,136 @@ def test_can_spawn_today_also_gates_agents_create_endpoint(tmp_path, monkeypatch
         },
         headers={"X-Agent-ID": "worker"},
     )
-    # Pin: today's behavior — succeeds because can_spawn is enough.
-    assert resp.status_code != 403, resp.text
-    # We don't lock to 200 — the downstream container manager is mocked
-    # and may return a 200 or a 500 depending on its internals; the key
-    # invariant here is we did NOT get the 403 from the can_spawn gate.
+    assert resp.status_code == 403, resp.text
+    assert "can_manage_fleet" in resp.text
     fx["bb"].close()
+
+    # 2) Granting can_manage_fleet lets the call past the gate.
+    fx2 = _SpawnRouteFixture.build(
+        tmp_path, monkeypatch,
+        can_spawn=True, can_manage_fleet=True,
+    )
+    resp2 = fx2["client"].post(
+        "/mesh/agents/create",
+        json={
+            "agent_id": "worker",
+            "name": "freshbot2",
+            "role": "tester",
+            "model": "openai/gpt-4o-mini",
+        },
+        headers={"X-Agent-ID": "worker"},
+    )
+    # Past the can_manage_fleet gate — not the 403 we get when narrow.
+    # Downstream may fail for other reasons (mocked container manager).
+    assert resp2.status_code != 403, resp2.text
+    fx2["bb"].close()
+
+
+# ── Task 3: control-plane permission methods ──────────────────────────
+
+
+class TestControlPlanePermissions:
+    """Task 3: ``can_spawn`` is now narrow; durable fleet operations
+    require new control-plane permissions.
+
+    The six bits split off ``can_spawn``:
+      * ``can_manage_fleet``           — create/register named agents
+      * ``can_manage_projects``        — create/archive projects, membership
+      * ``can_edit_agent_config``      — propose/confirm config edits
+      * ``can_view_fleet_metrics``     — fleet-wide metrics endpoints
+      * ``can_route_tasks``            — durable task records (Task 6)
+      * ``can_request_user_credentials`` — user-facing credential requests
+    """
+
+    _CONTROL_PLANE_FIELDS = (
+        "can_manage_fleet",
+        "can_manage_projects",
+        "can_edit_agent_config",
+        "can_view_fleet_metrics",
+        "can_route_tasks",
+        "can_request_user_credentials",
+    )
+
+    def _matrix(self, tmp_path, perms_dict: dict) -> PermissionMatrix:
+        path = tmp_path / "permissions.json"
+        path.write_text(json.dumps({"permissions": perms_dict}))
+        return PermissionMatrix(config_path=str(path))
+
+    def test_default_worker_lacks_control_plane_permissions(self, tmp_path):
+        # A bare worker entry without any of the new fields → all six False.
+        m = self._matrix(tmp_path, {"worker": {"can_spawn": True}})
+        for field in self._CONTROL_PLANE_FIELDS:
+            assert getattr(m, field)("worker") is False, field
+
+    def test_operator_has_all_control_plane_permissions(self, tmp_path, monkeypatch):
+        # Drive ``_ensure_operator_agent`` against a temp config and verify
+        # the persisted JSON sets all six bits to True.
+        from src.cli import config as cli_config
+        cfg_dir = tmp_path / "config"
+        cfg_dir.mkdir()
+        monkeypatch.setattr(cli_config, "PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr(cli_config, "AGENTS_FILE", cfg_dir / "agents.yaml")
+        monkeypatch.setattr(cli_config, "PERMISSIONS_FILE", cfg_dir / "permissions.json")
+        monkeypatch.setattr(cli_config, "CONFIG_FILE", cfg_dir / "mesh.yaml")
+        cli_config._ensure_operator_agent(default_model="openai/gpt-4o-mini")
+        on_disk = json.loads((cfg_dir / "permissions.json").read_text())
+        op = on_disk["permissions"]["operator"]
+        for field in self._CONTROL_PLANE_FIELDS:
+            assert op.get(field) is True, field
+
+    def test_can_manage_fleet_method(self, tmp_path):
+        m = self._matrix(tmp_path, {
+            "narrow": {"can_spawn": True},
+            "broad": {"can_manage_fleet": True},
+        })
+        assert m.can_manage_fleet("narrow") is False
+        assert m.can_manage_fleet("broad") is True
+        assert m.can_manage_fleet("mesh") is True  # trusted shortcut
+
+    def test_can_manage_projects_method(self, tmp_path):
+        m = self._matrix(tmp_path, {
+            "narrow": {},
+            "broad": {"can_manage_projects": True},
+        })
+        assert m.can_manage_projects("narrow") is False
+        assert m.can_manage_projects("broad") is True
+        assert m.can_manage_projects("mesh") is True
+
+    def test_can_edit_agent_config_method(self, tmp_path):
+        m = self._matrix(tmp_path, {
+            "narrow": {},
+            "broad": {"can_edit_agent_config": True},
+        })
+        assert m.can_edit_agent_config("narrow") is False
+        assert m.can_edit_agent_config("broad") is True
+        assert m.can_edit_agent_config("mesh") is True
+
+    def test_can_view_fleet_metrics_method(self, tmp_path):
+        m = self._matrix(tmp_path, {
+            "narrow": {},
+            "broad": {"can_view_fleet_metrics": True},
+        })
+        assert m.can_view_fleet_metrics("narrow") is False
+        assert m.can_view_fleet_metrics("broad") is True
+        assert m.can_view_fleet_metrics("mesh") is True
+
+    def test_can_route_tasks_method(self, tmp_path):
+        m = self._matrix(tmp_path, {
+            "narrow": {},
+            "broad": {"can_route_tasks": True},
+        })
+        assert m.can_route_tasks("narrow") is False
+        assert m.can_route_tasks("broad") is True
+        assert m.can_route_tasks("mesh") is True
+
+    def test_can_request_user_credentials_method(self, tmp_path):
+        m = self._matrix(tmp_path, {
+            "narrow": {},
+            "broad": {"can_request_user_credentials": True},
+        })
+        assert m.can_request_user_credentials("narrow") is False
+        assert m.can_request_user_credentials("broad") is True
+        assert m.can_request_user_credentials("mesh") is True
 
 
 # ── Task 1 (characterization): wildcard blackboard ACL survives project moves ─

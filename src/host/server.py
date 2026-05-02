@@ -1491,6 +1491,12 @@ def create_mesh_app(
         """
         agent_id = _resolve_agent_id(data.get("agent_id", ""), request)
         await _check_rate_limit("notify", agent_id)
+        # TODO(Task 4): gate on ``permissions.can_request_user_credentials``.
+        # The capability bit is wired in Task 3 (defaults False for workers,
+        # True for operator), but enforcing it here today would block every
+        # non-operator agent from asking the user for a credential.  Task 4
+        # is responsible for populating the field on workers that actually
+        # need it (template-driven) before this gate flips to enforced.
 
         name = data.get("name", "")
         description = data.get("description", "")
@@ -1972,9 +1978,15 @@ def create_mesh_app(
         # Auth + permission check
         spawned_by = _resolve_agent_id(data.get("spawned_by", "unknown"), request)
         if _auth_tokens:
-            # In authenticated mode, require spawn permission
-            if not permissions.can_spawn(spawned_by):
-                raise HTTPException(403, f"Agent {spawned_by} is not allowed to spawn agents")
+            # Applying a fleet template creates DURABLE named agents — Task 3
+            # split this off ``can_spawn`` (which is now ephemeral-only) onto
+            # the new control-plane permission ``can_manage_fleet``.
+            if not permissions.can_manage_fleet(spawned_by):
+                raise HTTPException(
+                    403,
+                    f"Agent {spawned_by} is not allowed to apply fleet templates "
+                    "(requires can_manage_fleet)",
+                )
 
         template_name = data.get("template", "").strip()
         if not template_name:
@@ -2116,11 +2128,17 @@ def create_mesh_app(
         if container_manager is None:
             raise HTTPException(503, "Container manager not available")
 
-        # Auth + spawn permission
+        # Auth + permission check. Creating a durable named agent is a
+        # control-plane action — Task 3 split this off ``can_spawn`` onto
+        # the dedicated ``can_manage_fleet`` capability.
         agent_id = _resolve_agent_id(data.get("agent_id", ""), request)
         await _check_rate_limit("spawn", agent_id)
-        if not permissions.can_spawn(agent_id):
-            raise HTTPException(403, f"Agent {agent_id} is not allowed to create agents")
+        if not permissions.can_manage_fleet(agent_id):
+            raise HTTPException(
+                403,
+                f"Agent {agent_id} is not allowed to create agents "
+                "(requires can_manage_fleet)",
+            )
 
         # Validate inputs
         name = data.get("name", "")

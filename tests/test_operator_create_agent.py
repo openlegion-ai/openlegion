@@ -51,6 +51,7 @@ def mesh_app(tmp_path, _mesh_env, container_mgr):
             "operator": {
                 "can_message": ["*"],
                 "can_spawn": True,
+                "can_manage_fleet": True,
                 "blackboard_read": ["*"],
                 "blackboard_write": ["*"],
             },
@@ -66,6 +67,7 @@ def mesh_app(tmp_path, _mesh_env, container_mgr):
             agent_id="operator",
             can_message=["*"],
             can_spawn=True,
+            can_manage_fleet=True,
             blackboard_read=["*"],
             blackboard_write=["*"],
         ),

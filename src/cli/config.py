@@ -477,8 +477,16 @@ def _add_agent_permissions(name: str, permissions: dict | None = None) -> None:
                 existing = set(agent_perms.get(key, []))
                 existing.update(tpl_values)
                 agent_perms[key] = sorted(existing)
-        # Boolean flags — template can override defaults
-        for key in ("can_use_browser", "can_spawn", "can_manage_cron"):
+        # Boolean flags — template can override defaults. Includes the
+        # six control-plane permissions from Task 3 so the operator's
+        # explicit grants in ``_ensure_operator_agent`` get persisted to
+        # permissions.json instead of being silently dropped.
+        for key in (
+            "can_use_browser", "can_spawn", "can_manage_cron",
+            "can_manage_fleet", "can_manage_projects", "can_edit_agent_config",
+            "can_view_fleet_metrics", "can_route_tasks",
+            "can_request_user_credentials",
+        ):
             if key in permissions:
                 agent_perms[key] = bool(permissions[key])
 
@@ -1339,6 +1347,26 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
         if not op_perms.get("blackboard_write"):
             op_perms["blackboard_write"] = ["*"]
             needs_update = True
+        # Control-plane permissions (Task 3). Idempotent: only set when
+        # missing/falsy, so running this block twice is a no-op.
+        if not op_perms.get("can_manage_fleet", False):
+            op_perms["can_manage_fleet"] = True
+            needs_update = True
+        if not op_perms.get("can_manage_projects", False):
+            op_perms["can_manage_projects"] = True
+            needs_update = True
+        if not op_perms.get("can_edit_agent_config", False):
+            op_perms["can_edit_agent_config"] = True
+            needs_update = True
+        if not op_perms.get("can_view_fleet_metrics", False):
+            op_perms["can_view_fleet_metrics"] = True
+            needs_update = True
+        if not op_perms.get("can_route_tasks", False):
+            op_perms["can_route_tasks"] = True
+            needs_update = True
+        if not op_perms.get("can_request_user_credentials", False):
+            op_perms["can_request_user_credentials"] = True
+            needs_update = True
         if needs_update:
             perms.setdefault("permissions", {})[_OPERATOR_AGENT_ID] = op_perms
             _save_permissions(perms)
@@ -1366,6 +1394,13 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
             "blackboard_write": ["*"],
             "can_publish": ["*"],
             "can_subscribe": ["*"],
+            # Control-plane permissions (Task 3) — operator gets all six.
+            "can_manage_fleet": True,
+            "can_manage_projects": True,
+            "can_edit_agent_config": True,
+            "can_view_fleet_metrics": True,
+            "can_route_tasks": True,
+            "can_request_user_credentials": True,
         },
     )
     # Force can_message=["*"] — _add_agent_permissions sets it to []

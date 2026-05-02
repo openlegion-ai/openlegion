@@ -292,8 +292,25 @@ class AgentPermissions(BaseModel):
                                                # (opt-out restriction).
                                                # [] = no actions (equivalent
                                                # to can_use_browser=False).
+    # ``can_spawn`` (Task 3 narrowed semantics): gates EPHEMERAL spawning
+    # only — subagents, cron-triggered spawns, and template applies that
+    # produce short-lived workers. Durable fleet operations (creating
+    # named agents, managing projects, editing config, viewing fleet
+    # metrics, routing tasks, requesting user credentials) now live on
+    # the dedicated control-plane permissions below. Workers default to
+    # ``can_spawn=False``; the operator gets it via _ensure_operator_agent.
     can_spawn: bool = False
     can_manage_cron: bool = False
+    # Control-plane permissions split from ``can_spawn`` (Task 3).
+    # Workers default to False; operator defaults to True. Missing fields
+    # on existing agent records default to False at load time so
+    # pre-existing configs don't accidentally grant durable powers.
+    can_manage_fleet: bool = False         # /mesh/agents/create, register/deregister
+    can_manage_projects: bool = False      # project create/archive, membership
+    can_edit_agent_config: bool = False    # propose/confirm edits to instructions/soul/etc.
+    can_view_fleet_metrics: bool = False   # /mesh/system/metrics, /mesh/agents/{id}/metrics
+    can_route_tasks: bool = False          # durable task records (Task 6)
+    can_request_user_credentials: bool = False  # request_credential, request_browser_login
     can_use_wallet: bool = False
     wallet_allowed_chains: list[str] = []
     wallet_spend_limit_per_tx_usd: float = 0.0
