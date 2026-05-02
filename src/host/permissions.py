@@ -152,11 +152,30 @@ class PermissionMatrix:
     def can_read_blackboard(self, agent_id: str, key: str) -> bool:
         if self._is_trusted(agent_id):
             return True
+        # Fleet-global operator handoff data is not covered by normal
+        # wildcard reads.  Workers can write into the operator mailbox, but
+        # only the operator may inspect queued tasks and submitted outputs.
+        if key.startswith("global/tasks/operator/"):
+            return agent_id == "operator"
+        if key.startswith("global/output/"):
+            return (
+                agent_id == "operator"
+                or key.startswith(f"global/output/{agent_id}/")
+            )
         perms = self.get_permissions(agent_id)
         return any(fnmatch.fnmatch(key, pattern) for pattern in perms.blackboard_read)
 
     def can_write_blackboard(self, agent_id: str, key: str) -> bool:
         if self._is_trusted(agent_id):
+            return True
+        # Operator inbox is a fleet-global mailbox: any registered agent can
+        # hand off a task to the operator. The operator is the only reader
+        # (its blackboard_read=["*"] already covers the read side).
+        if key.startswith("global/tasks/operator/"):
+            return True
+        # Output namespace for operator handoffs is per-sender — only the
+        # writing agent can place output under their own prefix.
+        if key.startswith(f"global/output/{agent_id}/"):
             return True
         perms = self.get_permissions(agent_id)
         return any(fnmatch.fnmatch(key, pattern) for pattern in perms.blackboard_write)

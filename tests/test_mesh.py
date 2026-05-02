@@ -1147,3 +1147,109 @@ async def test_list_agents_endpoint_includes_capabilities(tmp_path):
         bb.close()
         costs.close()
         traces.close()
+
+
+@pytest.mark.asyncio
+async def test_list_agents_project_scope_always_includes_operator(tmp_path):
+    """`/mesh/agents?project=X` must include the operator entry alongside
+    project members. The operator is fleet-global by design — project agents
+    have to discover it to hand off back. Without this, project_agent →
+    operator handoff fails at the lookup with 'Agent operator not found'.
+
+    Also verifies the operator entry carries scope=global so coordination
+    tools can route the handoff to the global namespace.
+    """
+    from unittest.mock import patch
+
+    import yaml
+    from httpx import ASGITransport, AsyncClient
+
+    from src.host.costs import CostTracker
+    from src.host.server import create_mesh_app
+    from src.host.traces import TraceStore
+
+    # Minimal project on disk with one member.
+    projects_dir = tmp_path / "projects"
+    proj_dir = projects_dir / "growth"
+    proj_dir.mkdir(parents=True)
+    (proj_dir / "metadata.yaml").write_text(
+        yaml.dump({"name": "growth", "members": ["scout"], "created_at": "2026-05-02T00:00:00+00:00"}),
+    )
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix()
+    router = MessageRouter(perms, {})
+    costs = CostTracker(str(tmp_path / "costs.db"))
+    traces = TraceStore(str(tmp_path / "traces.db"))
+
+    router.register_agent("scout", "http://scout:8400", ["recon"])
+    router.register_agent("operator", "http://operator:8400", [])
+    router.register_agent("analyst", "http://analyst:8400", [])  # other project
+
+    app = create_mesh_app(
+        blackboard=bb, pubsub=pubsub, router=router, permissions=perms,
+        cost_tracker=costs, trace_store=traces,
+    )
+
+    try:
+        with patch("src.cli.config.PROJECTS_DIR", projects_dir):
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test",
+            ) as client:
+                resp = await client.get("/mesh/agents", params={"project": "growth"})
+        assert resp.status_code == 200
+        data = resp.json()
+        # Project member is present.
+        assert "scout" in data
+        # Operator is always visible to project agents.
+        assert "operator" in data
+        assert data["operator"].get("scope") == "global"
+        # Non-member, non-operator agents are still scoped out.
+        assert "analyst" not in data
+    finally:
+        bb.close()
+        costs.close()
+        traces.close()
+
+
+@pytest.mark.asyncio
+async def test_list_agents_unscoped_marks_operator_global(tmp_path):
+    """The fleet-wide /mesh/agents response must also tag the operator with
+    scope=global so dashboards and the operator's own list_agents call can
+    distinguish it from per-project agents."""
+    from httpx import ASGITransport, AsyncClient
+
+    from src.host.costs import CostTracker
+    from src.host.server import create_mesh_app
+    from src.host.traces import TraceStore
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix()
+    router = MessageRouter(perms, {})
+    costs = CostTracker(str(tmp_path / "costs.db"))
+    traces = TraceStore(str(tmp_path / "traces.db"))
+
+    router.register_agent("operator", "http://operator:8400", [])
+    router.register_agent("scout", "http://scout:8400", [])
+
+    app = create_mesh_app(
+        blackboard=bb, pubsub=pubsub, router=router, permissions=perms,
+        cost_tracker=costs, trace_store=traces,
+    )
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            resp = await client.get("/mesh/agents")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["operator"].get("scope") == "global"
+        # Non-operator agents do NOT carry the marker.
+        assert "scope" not in data["scout"]
+    finally:
+        bb.close()
+        costs.close()
+        traces.close()

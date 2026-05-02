@@ -2129,6 +2129,27 @@ class TestStandaloneBlackboardGuards:
         assert "not assigned to a project" in result["error"]
 
     @pytest.mark.asyncio
+    async def test_operator_can_read_global_handoff_output(self):
+        from src.agent.builtins.mesh_tool import read_blackboard
+        mc = self._standalone_client()
+        mc.agent_id = "operator"
+        mc.read_blackboard = AsyncMock(return_value={
+            "key": "global/output/scout/ho_1",
+            "value": {"result": "done"},
+        })
+
+        result = await read_blackboard(
+            key="global/output/scout/ho_1",
+            mesh_client=mc,
+        )
+
+        assert result["exists"] is True
+        assert result["value"] == {"result": "done"}
+        mc.read_blackboard.assert_awaited_once_with(
+            "global/output/scout/ho_1", global_scope=True,
+        )
+
+    @pytest.mark.asyncio
     async def test_write_blackboard_blocked_for_standalone(self):
         from src.agent.builtins.mesh_tool import write_blackboard
         result = await write_blackboard(

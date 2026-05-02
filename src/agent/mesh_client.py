@@ -132,9 +132,14 @@ class MeshClient:
         )
         response.raise_for_status()
 
-    async def read_blackboard(self, key: str) -> dict | None:
-        """Read a value from the shared blackboard."""
-        scoped = self._scope_key(key)
+    async def read_blackboard(self, key: str, *, global_scope: bool = False) -> dict | None:
+        """Read a value from the shared blackboard.
+
+        If *global_scope* is True, the key is sent as-is, bypassing the
+        per-agent project scoping. Used to read fleet-global keys such as
+        the operator inbox under ``global/tasks/operator/``.
+        """
+        scoped = key if global_scope else self._scope_key(key)
         response = await self._get_with_retry(
             f"{self.mesh_url}/mesh/blackboard/{scoped}",
             params={"agent_id": self.agent_id},
@@ -146,15 +151,21 @@ class MeshClient:
 
     async def write_blackboard(
         self, key: str, value: dict, ttl: int | None = None,
-        *, project: str | None = None,
+        *, project: str | None = None, global_scope: bool = False,
     ) -> dict:
         """Write a value to the shared blackboard.
 
         If *project* is given, scope the key to that project instead of
         this agent's own project.  Used by cross-project coordination
         (e.g. operator handing off work to a project-scoped agent).
+
+        If *global_scope* is True, the key is sent as-is — bypassing both
+        the explicit ``project=`` override and the auto project prefix.
+        Used for fleet-global namespaces such as the operator inbox.
         """
-        if project is not None:
+        if global_scope:
+            scoped = key
+        elif project is not None:
             scoped = f"projects/{project}/{key}"
         else:
             scoped = self._scope_key(key)
@@ -171,9 +182,13 @@ class MeshClient:
         response.raise_for_status()
         return response.json()
 
-    async def delete_blackboard(self, key: str) -> dict:
-        """Delete an entry from the shared blackboard."""
-        scoped = self._scope_key(key)
+    async def delete_blackboard(self, key: str, *, global_scope: bool = False) -> dict:
+        """Delete an entry from the shared blackboard.
+
+        If *global_scope* is True, the key is sent as-is, bypassing project
+        scoping. Used for keys in the fleet-global namespace.
+        """
+        scoped = key if global_scope else self._scope_key(key)
         client = await self._get_client()
         response = await client.delete(
             f"{self.mesh_url}/mesh/blackboard/{scoped}",
@@ -204,17 +219,24 @@ class MeshClient:
         response.raise_for_status()
         return response.json()
 
-    async def list_blackboard(self, prefix: str) -> list[dict]:
-        """List blackboard entries by key prefix."""
-        scoped = self._scope_key(prefix)
+    async def list_blackboard(
+        self, prefix: str, *, global_scope: bool = False,
+    ) -> list[dict]:
+        """List blackboard entries by key prefix.
+
+        If *global_scope* is True, the prefix is sent as-is, bypassing the
+        per-agent project scoping. Used for fleet-global namespaces such
+        as the operator inbox at ``global/tasks/operator/``.
+        """
+        scoped = prefix if global_scope else self._scope_key(prefix)
         response = await self._get_with_retry(
             f"{self.mesh_url}/mesh/blackboard/",
             params={"agent_id": self.agent_id, "prefix": scoped},
         )
         response.raise_for_status()
         entries = response.json()
-        # Strip project prefix from returned keys so agents see natural keys
-        if self.project_name:
+        # Strip project prefix only when we used project scoping
+        if not global_scope and self.project_name:
             scope = f"projects/{self.project_name}/"
             for entry in entries:
                 k = entry.get("key", "")

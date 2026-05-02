@@ -1289,6 +1289,8 @@ def create_mesh_app(
             proj = _agent_projects.get(aid)
             if proj:
                 entry["project"] = proj
+            if aid == "operator":
+                entry["scope"] = "global"
             return entry
 
         if project:
@@ -1299,11 +1301,17 @@ def create_mesh_app(
                 logger.warning("list_agents: unknown project %r", project)
                 return {}
             members = set(pdata.get("members", []))
-            return {
+            result = {
                 aid: _agent_entry(aid, url)
                 for aid, url in router.agent_registry.items()
                 if aid in members
             }
+            # Operator is fleet-global by design: project agents must be able to
+            # discover and hand off back to it regardless of project membership.
+            op_url = router.agent_registry.get("operator")
+            if op_url is not None and "operator" not in result:
+                result["operator"] = _agent_entry("operator", op_url)
+            return result
         if agent_id:
             url = router.agent_registry.get(agent_id)
             if url:

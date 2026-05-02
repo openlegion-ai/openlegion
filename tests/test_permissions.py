@@ -603,3 +603,52 @@ class TestRequestBrowserLoginInKnownActions:
     def test_present(self):
         from src.host.permissions import KNOWN_BROWSER_ACTIONS
         assert "request_browser_login" in KNOWN_BROWSER_ACTIONS
+
+
+# ── Task 0 hotfix: operator inbox carve-out under global/ ─────────────
+
+
+@pytest.fixture()
+def operator_inbox_matrix(tmp_path):
+    """PermissionMatrix where 'scout' has only narrow project-scoped writes."""
+    cfg = {
+        "permissions": {
+            "scout": {
+                "blackboard_write": ["projects/growth/*"],
+            },
+        },
+    }
+    path = tmp_path / "permissions.json"
+    path.write_text(json.dumps(cfg))
+    return PermissionMatrix(config_path=str(path))
+
+
+class TestOperatorInboxGlobalCarveOut:
+    def test_any_agent_can_write_operator_inbox(self, operator_inbox_matrix):
+        """Operator inbox under global/ is a public mailbox."""
+        m = operator_inbox_matrix
+        assert m.can_write_blackboard("scout", "global/tasks/operator/ho_1") is True
+        assert m.can_write_blackboard("scout", "global/output/scout/ho_1") is True
+        # But NOT another agent's output namespace
+        assert m.can_write_blackboard("scout", "global/output/analyst/ho_1") is False
+        # And NOT arbitrary global keys
+        assert m.can_write_blackboard("scout", "global/secrets/x") is False
+
+    def test_only_operator_reads_operator_global_handoff_data(self, tmp_path):
+        """Wildcard reads do not expose the operator's global inbox/output."""
+        cfg = {
+            "permissions": {
+                "scout": {"blackboard_read": ["*"]},
+                "operator": {"blackboard_read": ["*"]},
+            },
+        }
+        path = tmp_path / "permissions.json"
+        path.write_text(json.dumps(cfg))
+        m = PermissionMatrix(config_path=str(path))
+
+        assert m.can_read_blackboard("operator", "global/tasks/operator/ho_1") is True
+        assert m.can_read_blackboard("operator", "global/output/scout/ho_1") is True
+        assert m.can_read_blackboard("scout", "global/tasks/operator/ho_1") is False
+        assert m.can_read_blackboard("scout", "global/output/analyst/ho_1") is False
+        # Sender may inspect only its own submitted output.
+        assert m.can_read_blackboard("scout", "global/output/scout/ho_1") is True

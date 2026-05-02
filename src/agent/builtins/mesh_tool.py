@@ -139,10 +139,20 @@ def _sanitize_value(value):
 async def read_blackboard(key: str, *, mesh_client=None) -> dict:
     if mesh_client is None:
         return {"error": "No mesh_client available"}
-    if mesh_client.is_standalone:
+    operator_global_read = (
+        getattr(mesh_client, "agent_id", "") == "operator"
+        and (
+            key.startswith("global/output/")
+            or key.startswith("global/tasks/operator/")
+        )
+    )
+    if mesh_client.is_standalone and not operator_global_read:
         return {"error": _STANDALONE_ERROR}
     try:
-        entry = await mesh_client.read_blackboard(key)
+        if operator_global_read:
+            entry = await mesh_client.read_blackboard(key, global_scope=True)
+        else:
+            entry = await mesh_client.read_blackboard(key)
         if entry is None:
             return {"key": key, "exists": False, "value": None}
         value = _sanitize_value(entry.get("value", entry))
