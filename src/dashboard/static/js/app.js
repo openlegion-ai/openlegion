@@ -49,6 +49,7 @@ function dashboard() {
     tabs: [
       { id: 'chat', label: 'Chat' },
       { id: 'fleet', label: 'Agents' },
+      { id: 'workplace', label: 'Workplace' },
       { id: 'system', label: 'System' },
     ],
     connected: false,
@@ -82,6 +83,9 @@ function dashboard() {
       'heartbeat_complete', 'cron_change', 'credit_exhausted', 'credential_request',
       'browser_login_request', 'browser_login_completed', 'browser_login_cancelled',
       'browser_captcha_help_request', 'browser_captcha_help_completed', 'browser_captcha_help_cancelled',
+      // Task 9 — Workplace tab + pending action review
+      'task_created', 'task_status_changed',
+      'pending_action_created', 'pending_action_resolved', 'pending_action_expired',
     ],
 
     // Agent detail
@@ -326,6 +330,28 @@ function dashboard() {
     cmdPaletteQuery: '',
     cmdPaletteResults: [],
     cmdPaletteIdx: 0,
+
+    // Task 9 — Workplace tab (peer of Chat / Agents / System).
+    // Sub-tabs: project status, kanban task board, blockers, team outputs.
+    // ``workplaceEnabled`` mirrors the server-side flag
+    // OPENLEGION_ORCHESTRATION_TASKS_V2 so the empty state can hint how
+    // to enable the surface without rendering an error.
+    workplaceTab: 'project-status',
+    workplaceTabs: [
+      { id: 'project-status', label: 'Project status' },
+      { id: 'task-board', label: 'Task board' },
+      { id: 'blockers', label: 'Blockers' },
+      { id: 'team-outputs', label: 'Team outputs' },
+    ],
+    workplaceEnabled: true,
+    workplaceProjects: [],
+    workplaceTasks: [],
+    workplaceBlockers: [],
+    workplaceOutputs: [],
+    workplacePending: [],
+    workplaceLoading: false,
+    workplaceTaskColumns: ['pending', 'accepted', 'working', 'blocked', 'done'],
+    workplaceProjectFilter: '',
 
     // System tab — sub-navigation
     systemTab: 'activity',
@@ -1342,6 +1368,179 @@ function dashboard() {
       }
     },
 
+    // ── Task 9 — Workplace tab loaders / event handlers ────────
+
+    async loadWorkplace() {
+      this.workplaceLoading = true;
+      try {
+        await Promise.all([
+          this.loadWorkplaceProjects(),
+          this.loadWorkplaceTasks(),
+          this.loadWorkplaceBlockers(),
+          this.loadWorkplaceOutputs(),
+          this.loadWorkplacePending(),
+        ]);
+      } finally {
+        this.workplaceLoading = false;
+      }
+    },
+
+    async loadWorkplaceProjects() {
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/workplace/projects`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        this.workplaceEnabled = data.enabled !== false;
+        this.workplaceProjects = data.projects || [];
+      } catch (e) {
+        console.error('Failed to load workplace projects:', e);
+      }
+    },
+
+    async loadWorkplaceTasks() {
+      try {
+        const params = this.workplaceProjectFilter ? `?project_id=${encodeURIComponent(this.workplaceProjectFilter)}` : '';
+        const resp = await fetch(`${window.__config.apiBase}/workplace/tasks${params}`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        this.workplaceEnabled = data.enabled !== false;
+        this.workplaceTasks = data.tasks || [];
+      } catch (e) {
+        console.error('Failed to load workplace tasks:', e);
+      }
+    },
+
+    async loadWorkplaceBlockers() {
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/workplace/blockers`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        this.workplaceEnabled = data.enabled !== false;
+        this.workplaceBlockers = data.blockers || [];
+      } catch (e) {
+        console.error('Failed to load workplace blockers:', e);
+      }
+    },
+
+    async loadWorkplaceOutputs() {
+      try {
+        const params = this.workplaceProjectFilter ? `?project_id=${encodeURIComponent(this.workplaceProjectFilter)}` : '';
+        const resp = await fetch(`${window.__config.apiBase}/workplace/outputs${params}`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        this.workplaceEnabled = data.enabled !== false;
+        this.workplaceOutputs = data.outputs || [];
+      } catch (e) {
+        console.error('Failed to load workplace outputs:', e);
+      }
+    },
+
+    async loadWorkplacePending() {
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/workplace/pending`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        this.workplacePending = data.pending || [];
+      } catch (e) {
+        console.error('Failed to load workplace pending actions:', e);
+      }
+    },
+
+    workplaceTasksByStatus(status) {
+      return (this.workplaceTasks || []).filter(t => t.status === status);
+    },
+
+    workplaceFormatExpiry(expiresAt) {
+      if (!expiresAt) return '';
+      const remain = Math.max(0, Math.floor(expiresAt - (Date.now() / 1000)));
+      if (remain < 60) return `${remain}s`;
+      if (remain < 3600) return `${Math.floor(remain / 60)}m`;
+      return `${Math.floor(remain / 3600)}h`;
+    },
+
+    async confirmPendingAction(nonce) {
+      try {
+        const resp = await fetch(`/mesh/pending/${encodeURIComponent(nonce)}/confirm`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{}',
+        });
+        if (!resp.ok) {
+          const data = await resp.json().catch(() => ({}));
+          this.showToast(`Confirm failed: ${data.detail || resp.status}`);
+          return;
+        }
+        this.workplacePending = this.workplacePending.filter(p => p.nonce !== nonce);
+        this.showToast('Pending action confirmed.');
+      } catch (e) {
+        this.showToast(`Confirm failed: ${e.message || e}`);
+      }
+    },
+
+    async cancelPendingAction(nonce) {
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/workplace/pending/${encodeURIComponent(nonce)}/cancel`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{}',
+        });
+        if (!resp.ok) {
+          const data = await resp.json().catch(() => ({}));
+          this.showToast(`Cancel failed: ${data.detail || resp.status}`);
+          return;
+        }
+        this.workplacePending = this.workplacePending.filter(p => p.nonce !== nonce);
+        this.showToast('Pending action cancelled.');
+      } catch (e) {
+        this.showToast(`Cancel failed: ${e.message || e}`);
+      }
+    },
+
+    // Apply a live event from the WebSocket to the in-memory workplace
+    // state so the user sees changes without reloading. Each handler is
+    // a small upsert into one of the lists; misses are tolerated (the
+    // periodic full-load is the source of truth on reconnect).
+    handleWorkplaceEvent(evt) {
+      if (!evt || !evt.type) return;
+      const data = evt.data || {};
+      if (evt.type === 'task_created') {
+        // Add stub row so the kanban shows the task immediately;
+        // background reload will fill in the rest.
+        const stub = {
+          id: data.task_id,
+          project_id: data.project_id,
+          creator: data.creator,
+          assignee: data.assignee,
+          title: data.title || '(untitled)',
+          status: data.status || 'pending',
+          created_at: data.created_at,
+        };
+        if (!this.workplaceTasks.find(t => t.id === stub.id)) {
+          this.workplaceTasks.unshift(stub);
+        }
+      } else if (evt.type === 'task_status_changed') {
+        const t = this.workplaceTasks.find(x => x.id === data.task_id);
+        if (t) {
+          t.status = data.new_status;
+          if (data.assignee) t.assignee = data.assignee;
+        }
+      } else if (evt.type === 'pending_action_created') {
+        if (!this.workplacePending.find(p => p.nonce === data.nonce)) {
+          this.workplacePending.push({
+            nonce: data.nonce,
+            actor: data.actor,
+            target_kind: data.target_kind,
+            target_id: data.target_id,
+            action_kind: data.action_kind,
+            expires_at: data.expires_at,
+            created_at: Date.now() / 1000,
+          });
+        }
+      } else if (evt.type === 'pending_action_resolved' || evt.type === 'pending_action_expired') {
+        this.workplacePending = this.workplacePending.filter(p => p.nonce !== data.nonce);
+      }
+    },
+
     // ── Markdown rendering for chat messages ─────────────
 
     renderMarkdown(text) {
@@ -1459,6 +1658,16 @@ function dashboard() {
       if (evt.type === 'cron_change') {
         if (this._cronDebounce) clearTimeout(this._cronDebounce);
         this._cronDebounce = setTimeout(() => this.fetchCronJobs(), 500);
+      }
+
+      // Task 9 — Workplace tab + pending action review live updates.
+      // The handler upserts into the Alpine.js state lists so the SPA
+      // reflects task lifecycle and pending-action arrivals without a
+      // full reload.
+      if (evt.type === 'task_created' || evt.type === 'task_status_changed' ||
+          evt.type === 'pending_action_created' || evt.type === 'pending_action_resolved' ||
+          evt.type === 'pending_action_expired') {
+        this.handleWorkplaceEvent(evt);
       }
 
       // Refresh model health on health_change events

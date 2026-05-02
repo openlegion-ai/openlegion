@@ -191,6 +191,9 @@
               <template x-if="tab.id === 'fleet'">
                 <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
               </template>
+              <template x-if="tab.id === 'workplace'">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11H7a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-6a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="8" rx="1"/></svg>
+              </template>
               <template x-if="tab.id === 'system'">
                 <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
               </template>
@@ -292,6 +295,39 @@
                   <div class="text-sm text-gray-400">Your operator is starting up...</div>
                   <div class="text-[10px] text-gray-600 mt-1">This usually takes about 15&ndash;30 seconds.</div>
                 </div>
+              </div>
+
+              <!-- Task 9 — Inline pending-action review.
+                   Renders one bubble per open pending nonce above the
+                   operator chat so the human can confirm/cancel in
+                   context. Backed by the same state as the System >
+                   Operator panel. -->
+              <div x-show="operatorReady && workplacePending.length" x-cloak
+                   class="px-4 pt-3 space-y-2"
+                   x-init="loadWorkplacePending()">
+                <template x-for="p in workplacePending" :key="p.nonce">
+                  <div class="bg-amber-900/15 border border-amber-700/30 rounded-2xl px-3 py-2">
+                    <div class="text-[11px] text-amber-200 font-medium">
+                      Pending action awaiting confirmation
+                    </div>
+                    <div class="text-xs text-gray-200 mt-0.5">
+                      <span class="font-medium" x-text="p.action_kind"></span>
+                      <span class="text-gray-400" x-text="' on ' + (p.target_kind || '?') + ' ' + (p.target_id || '?')"></span>
+                    </div>
+                    <div class="text-[11px] text-gray-400 mt-0.5"
+                         x-text="'expires in ' + workplaceFormatExpiry(p.expires_at) + ' · proposed by ' + (p.actor || '?')"></div>
+                    <div class="flex gap-2 mt-2">
+                      <button @click="confirmPendingAction(p.nonce)"
+                        class="text-[11px] px-2.5 py-1 rounded bg-emerald-700/40 hover:bg-emerald-700/60 text-emerald-200 transition-colors">
+                        Confirm
+                      </button>
+                      <button @click="cancelPendingAction(p.nonce)"
+                        class="text-[11px] px-2.5 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors">
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                </template>
               </div>
 
               <!-- Messages area — reuses existing chatHistories binding -->
@@ -2960,6 +2996,155 @@
         </template>
       </div>
 
+      <!-- Task 9 — Workplace tab. Surfaces durable task records (Task 6)
+           and the pending-action queue (Task 2d) so a human can run an
+           agent team end-to-end without inspecting blackboard keys. -->
+      <div x-show="activeTab === 'workplace'" x-cloak x-init="loadWorkplace()">
+        <!-- Sub-tab bar -->
+        <div class="flex flex-wrap gap-0.5 bg-gray-800/50 rounded-lg p-0.5 mb-4">
+          <template x-for="wt in workplaceTabs" :key="wt.id">
+            <button @click="workplaceTab = wt.id; loadWorkplace()"
+              class="px-3 py-1.5 rounded-md text-sm font-medium transition-all relative whitespace-nowrap"
+              :class="workplaceTab === wt.id ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'">
+              <span x-text="wt.label"></span>
+            </button>
+          </template>
+        </div>
+
+        <!-- Empty state when orchestration v2 is disabled -->
+        <template x-if="!workplaceEnabled">
+          <div class="bg-gray-800/40 border border-gray-700/50 rounded-xl p-6 text-center">
+            <div class="text-gray-300 text-sm font-medium mb-2">Workplace is disabled</div>
+            <div class="text-xs text-gray-400 max-w-md mx-auto">
+              Set <code class="text-gray-200 bg-gray-900/60 px-1 rounded">OPENLEGION_ORCHESTRATION_TASKS_V2=1</code>
+              and restart the runtime to enable durable task records, project status rollups, blocker review,
+              and team-output history on this tab.
+            </div>
+          </div>
+        </template>
+
+        <!-- Project status sub-tab -->
+        <template x-if="workplaceEnabled && workplaceTab === 'project-status'">
+          <div class="space-y-3">
+            <template x-if="!workplaceProjects.length">
+              <div class="text-sm text-gray-500 py-4">No active projects.</div>
+            </template>
+            <template x-for="p in workplaceProjects" :key="p.name">
+              <div class="bg-gray-800/40 border border-gray-700/50 rounded-lg p-4">
+                <div class="flex items-center justify-between mb-2">
+                  <div>
+                    <div class="text-sm font-medium text-white" x-text="p.name"></div>
+                    <div class="text-xs text-gray-400" x-text="p.description || ''"></div>
+                  </div>
+                  <div class="text-xs text-gray-400">
+                    <span x-text="p.total + ' task' + (p.total === 1 ? '' : 's')"></span>
+                    <span class="ml-2 px-1.5 py-0.5 rounded bg-gray-900/60 text-gray-300" x-text="p.status"></span>
+                  </div>
+                </div>
+                <div class="flex flex-wrap gap-1.5 text-[11px]">
+                  <template x-for="status in workplaceTaskColumns" :key="status">
+                    <span class="px-2 py-0.5 rounded bg-gray-900/60 text-gray-300"
+                      x-show="(p.counts && p.counts[status]) || 0">
+                      <span x-text="status"></span>:
+                      <span class="font-mono" x-text="(p.counts && p.counts[status]) || 0"></span>
+                    </span>
+                  </template>
+                </div>
+                <template x-if="p.blockers && p.blockers.length">
+                  <div class="mt-3 pt-2 border-t border-gray-700/40">
+                    <div class="text-[11px] text-yellow-300 mb-1">Blockers:</div>
+                    <template x-for="b in p.blockers" :key="b.task_id">
+                      <div class="text-xs text-gray-300 pl-2">
+                        <span x-text="b.title"></span>
+                        <span class="text-gray-500" x-text="'· ' + (b.assignee || '')"></span>
+                        <div class="text-[11px] text-gray-400" x-text="b.blocker_note"></div>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+              </div>
+            </template>
+          </div>
+        </template>
+
+        <!-- Task board (kanban) sub-tab -->
+        <template x-if="workplaceEnabled && workplaceTab === 'task-board'">
+          <div>
+            <div class="grid grid-cols-1 md:grid-cols-5 gap-3">
+              <template x-for="status in workplaceTaskColumns" :key="status">
+                <div class="bg-gray-800/40 border border-gray-700/50 rounded-lg p-3">
+                  <div class="text-xs font-medium text-gray-300 uppercase tracking-wide mb-2 flex items-center justify-between">
+                    <span x-text="status"></span>
+                    <span class="text-gray-500 font-mono" x-text="workplaceTasksByStatus(status).length"></span>
+                  </div>
+                  <div class="space-y-2">
+                    <template x-for="t in workplaceTasksByStatus(status)" :key="t.id">
+                      <div class="bg-gray-900/60 border border-gray-700/40 rounded-md p-2 text-xs">
+                        <div class="font-medium text-gray-200 truncate" x-text="t.title"></div>
+                        <div class="text-[11px] text-gray-400 mt-1">
+                          <span x-text="t.assignee || ''"></span>
+                          <span x-show="t.project_id" class="text-gray-500"
+                            x-text="' · ' + (t.project_id || '')"></span>
+                        </div>
+                      </div>
+                    </template>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </div>
+        </template>
+
+        <!-- Blockers sub-tab -->
+        <template x-if="workplaceEnabled && workplaceTab === 'blockers'">
+          <div class="space-y-2">
+            <template x-if="!workplaceBlockers.length">
+              <div class="text-sm text-gray-500 py-4">No blocked tasks.</div>
+            </template>
+            <template x-for="t in workplaceBlockers" :key="t.id">
+              <div class="bg-yellow-900/15 border border-yellow-800/30 rounded-lg p-3">
+                <div class="text-sm font-medium text-yellow-100" x-text="t.title"></div>
+                <div class="text-[11px] text-gray-400 mt-1">
+                  <span x-text="t.assignee || ''"></span>
+                  <span x-show="t.project_id" class="text-gray-500"
+                    x-text="' · ' + (t.project_id || '')"></span>
+                </div>
+                <div class="text-xs text-gray-300 mt-2" x-text="t.blocker_note || '(no note)'"></div>
+              </div>
+            </template>
+          </div>
+        </template>
+
+        <!-- Team outputs sub-tab -->
+        <template x-if="workplaceEnabled && workplaceTab === 'team-outputs'">
+          <div class="space-y-2">
+            <template x-if="!workplaceOutputs.length">
+              <div class="text-sm text-gray-500 py-4">No completed tasks yet.</div>
+            </template>
+            <template x-for="t in workplaceOutputs" :key="t.id">
+              <div class="bg-gray-800/40 border border-gray-700/50 rounded-lg p-3">
+                <div class="text-sm font-medium text-gray-100" x-text="t.title"></div>
+                <div class="text-[11px] text-gray-400 mt-1">
+                  <span x-text="t.assignee || ''"></span>
+                  <span x-show="t.project_id" class="text-gray-500"
+                    x-text="' · ' + (t.project_id || '')"></span>
+                  <span x-show="t.completed_at" class="text-gray-500"
+                    x-text="' · completed ' + new Date((t.completed_at || 0) * 1000).toLocaleString()"></span>
+                </div>
+                <template x-if="t.artifact_refs && t.artifact_refs.length">
+                  <div class="mt-2 text-xs text-gray-300">
+                    <span class="text-gray-500">Artifacts:</span>
+                    <template x-for="ref in t.artifact_refs" :key="ref">
+                      <code class="ml-1 px-1.5 py-0.5 rounded bg-gray-900/60 text-gray-200" x-text="ref"></code>
+                    </template>
+                  </div>
+                </template>
+              </div>
+            </template>
+          </div>
+        </template>
+      </div>
+
       <!-- System (Activity + Costs + Automation + Integrations + API Keys + Wallet + Storage + Audit + Settings) -->
       <div x-show="activeTab === 'system'" x-cloak>
         <!-- System sub-tab bar -->
@@ -4812,6 +4997,48 @@
                 <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
                 Restart
               </button>
+            </div>
+          </div>
+
+          <!-- Task 9 — Pending actions review panel.
+               Lists every open propose-edit nonce so the human operator
+               can confirm or cancel before the action lands. CSRF on
+               POST is auto-injected by app.js. -->
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-5"
+               x-init="loadWorkplacePending(); $watch('systemTab', v => { if (v === 'operator') loadWorkplacePending(); })">
+            <div class="flex items-center justify-between mb-4">
+              <div>
+                <h3 class="text-sm font-medium text-gray-200">Pending actions</h3>
+                <p class="text-[10px] text-gray-500 mt-0.5">Operator-proposed edits awaiting human confirmation</p>
+              </div>
+              <button @click="loadWorkplacePending()" class="text-xs px-2.5 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors">Refresh</button>
+            </div>
+            <div x-show="!workplacePending.length" class="text-center py-6 text-gray-600 text-xs">
+              No pending actions. Proposed edits and destructive deletes will surface here for review.
+            </div>
+            <div x-show="workplacePending.length" class="space-y-2">
+              <template x-for="p in workplacePending" :key="p.nonce">
+                <div class="bg-gray-800/40 border border-gray-700/50 rounded-md p-3">
+                  <div class="flex items-center justify-between mb-1">
+                    <div class="text-xs text-gray-300">
+                      <span class="font-medium" x-text="p.action_kind"></span>
+                      <span class="text-gray-500 ml-1" x-text="' on ' + (p.target_kind || '?') + ' ' + (p.target_id || '?')"></span>
+                    </div>
+                    <div class="text-[11px] text-gray-500" x-text="'expires in ' + workplaceFormatExpiry(p.expires_at)"></div>
+                  </div>
+                  <div class="text-[11px] text-gray-500 mb-2" x-text="'proposed by ' + (p.actor || '?')"></div>
+                  <div class="flex gap-2">
+                    <button @click="confirmPendingAction(p.nonce)"
+                      class="text-[11px] px-2.5 py-1 rounded bg-emerald-700/40 hover:bg-emerald-700/60 text-emerald-200 transition-colors">
+                      Confirm
+                    </button>
+                    <button @click="cancelPendingAction(p.nonce)"
+                      class="text-[11px] px-2.5 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors">
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              </template>
             </div>
           </div>
 

@@ -361,3 +361,155 @@ def test_list_pending_ordered_by_created_at(tmp_path):
     )
     rows = pa.list_pending()
     assert [r["nonce"] for r in rows] == ["first", "second"]
+
+
+# ── Task 9 — EventBus integration ─────────────────────────────────
+
+
+def _attach_recording_bus(pa):
+    """Attach a fresh recorder bus to ``pa`` and return the captured list."""
+    captured: list[tuple[str, str, dict]] = []
+
+    class _Recorder:
+        def emit(self, event_type, agent="", data=None):
+            captured.append((event_type, agent, dict(data or {})))
+
+    pa.set_event_bus(_Recorder())
+    return captured
+
+
+def test_event_bus_emits_pending_action_created_on_store(tmp_path):
+    pa = _make_store(tmp_path)
+    captured = _attach_recording_bus(pa)
+    pa.store(
+        nonce="n1", actor="operator", target_kind="agent",
+        target_id="alpha", action_kind="model", payload={"x": 1},
+        origin_kind="human",
+    )
+    types = [c[0] for c in captured]
+    assert "pending_action_created" in types
+    evt = next(c for c in captured if c[0] == "pending_action_created")
+    assert evt[1] == "operator"  # agent = actor
+    assert evt[2]["nonce"] == "n1"
+    assert evt[2]["target_kind"] == "agent"
+    assert evt[2]["target_id"] == "alpha"
+    assert evt[2]["action_kind"] == "model"
+    # expires_at is included so the dashboard can render the countdown
+    assert "expires_at" in evt[2]
+
+
+def test_event_bus_emits_pending_action_resolved_on_consume_success(tmp_path):
+    pa = _make_store(tmp_path)
+    captured = _attach_recording_bus(pa)
+    pa.store(
+        nonce="n1", actor="operator", target_kind="agent",
+        target_id="alpha", action_kind="model", payload={"x": 1},
+        origin_kind="human",
+    )
+    captured.clear()
+    rec = pa.consume("n1", confirmer="operator", require_origin_kind="human")
+    assert rec is not None
+    types = [c[0] for c in captured]
+    assert "pending_action_resolved" in types
+    evt = next(c for c in captured if c[0] == "pending_action_resolved")
+    assert evt[2]["nonce"] == "n1"
+    assert evt[2]["status"] == "confirmed"
+    assert evt[2]["resolver"] == "operator"
+
+
+def test_event_bus_does_not_emit_resolved_on_failed_consume(tmp_path):
+    """Wrong digest / wrong actor / origin mismatch must NOT emit resolved."""
+    pa = _make_store(tmp_path)
+    captured = _attach_recording_bus(pa)
+    pa.store(
+        nonce="n1", actor="operator", target_kind="agent",
+        target_id="alpha", action_kind="model", payload={"x": 1},
+        origin_kind="human",
+    )
+    captured.clear()
+    pa.consume("n1", expected_payload_digest="wrong")
+    assert not [c for c in captured if c[0] == "pending_action_resolved"]
+
+
+def test_event_bus_emits_pending_action_expired_on_reap(tmp_path):
+    pa = _make_store(tmp_path)
+    # Stage rows BEFORE attaching the recorder so the opportunistic
+    # reap that fires on the second store() doesn't drop n1 inside the
+    # bus's history (where it would be a confounder for the assertion
+    # on counts post-clear).
+    pa.store(
+        nonce="n1", actor="operator", target_kind="agent",
+        target_id="alpha", action_kind="model", payload={}, ttl=0,
+    )
+    captured = _attach_recording_bus(pa)
+    time.sleep(0.01)
+    n = pa.reap_expired()
+    assert n == 1
+    expired_events = [c for c in captured if c[0] == "pending_action_expired"]
+    assert len(expired_events) == 1
+    evt = expired_events[0]
+    assert evt[2]["nonce"] == "n1"
+    assert evt[2]["target_kind"] == "agent"
+    assert evt[2]["target_id"] == "alpha"
+    assert evt[2]["action_kind"] == "model"
+    assert "expired_at" in evt[2]
+
+
+def test_event_bus_emits_per_row_on_multi_reap(tmp_path):
+    """When multiple rows expire in one reap pass, one event per row fires."""
+    pa = _make_store(tmp_path)
+    pa.store(
+        nonce="n1", actor="operator", target_kind="agent",
+        target_id="alpha", action_kind="model", payload={}, ttl=60,
+    )
+    pa.store(
+        nonce="n2", actor="operator", target_kind="agent",
+        target_id="beta", action_kind="model", payload={}, ttl=60,
+    )
+    captured = _attach_recording_bus(pa)
+    # Force expiry by hand so the opportunistic ``_safe_reap`` doesn't
+    # drop one row early.
+    with pa._conn() as conn:
+        conn.execute("UPDATE pending_actions SET expires_at = 0 WHERE nonce IN ('n1', 'n2')")
+    n = pa.reap_expired()
+    assert n == 2
+    expired_events = [c for c in captured if c[0] == "pending_action_expired"]
+    assert len(expired_events) == 2
+    nonces = {e[2]["nonce"] for e in expired_events}
+    assert nonces == {"n1", "n2"}
+
+
+def test_event_bus_emits_pending_action_resolved_on_cancel(tmp_path):
+    """``cancel(nonce)`` deletes the row and emits resolved with status='cancelled'."""
+    pa = _make_store(tmp_path)
+    captured = _attach_recording_bus(pa)
+    pa.store(
+        nonce="n1", actor="operator", target_kind="agent",
+        target_id="alpha", action_kind="model", payload={"x": 1},
+    )
+    captured.clear()
+    rec = pa.cancel("n1", actor="operator")
+    assert rec is not None
+    assert rec["status"] == "cancelled"
+    # Row is gone — second cancel returns None (no double-emit).
+    assert pa.cancel("n1") is None
+    resolved = [c for c in captured if c[0] == "pending_action_resolved"]
+    assert len(resolved) == 1
+    assert resolved[0][2]["status"] == "cancelled"
+    assert resolved[0][2]["nonce"] == "n1"
+
+
+def test_cancel_unknown_nonce_returns_none(tmp_path):
+    pa = _make_store(tmp_path)
+    assert pa.cancel("does-not-exist") is None
+
+
+def test_event_bus_unset_disables_emit(tmp_path):
+    pa = _make_store(tmp_path)
+    captured = _attach_recording_bus(pa)
+    pa.set_event_bus(None)
+    pa.store(
+        nonce="n1", actor="operator", target_kind="agent",
+        target_id="alpha", action_kind="model", payload={},
+    )
+    assert captured == []

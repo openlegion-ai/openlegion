@@ -567,6 +567,18 @@ class DashboardEvent(BaseModel):
         # DashboardEvent rejects the emit and the panel never renders.
         "browser_metrics",
         "browser_nav_probe",
+        # Task 9 — Workplace tab + pending-action review surfaces.
+        # ``task_*`` are emitted from ``host/orchestration.py`` (Tasks
+        # store) on create / status_change / reroute / cancel.
+        # ``pending_action_*`` are emitted from ``host/pending_actions.py``
+        # on store / consume(success) / reap_expired so the dashboard's
+        # System > Operator panel and inline chat bubbles render the
+        # operator's review queue without polling.
+        "task_created",
+        "task_status_changed",
+        "pending_action_created",
+        "pending_action_resolved",
+        "pending_action_expired",
     ]
     agent: str = ""
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

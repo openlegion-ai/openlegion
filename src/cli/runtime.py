@@ -658,6 +658,9 @@ class RuntimeContext:
 
         from src.dashboard.server import create_dashboard_router, create_spa_catchall_router
 
+        # Task 9 — pass the mesh's pending-action and tasks stores into
+        # the dashboard so the new ``/api/workplace/*`` endpoints can
+        # render the Workplace tab without a second HTTP hop.
         dashboard_router = create_dashboard_router(
             blackboard=self.blackboard,
             health_monitor=self.health_monitor,
@@ -678,6 +681,8 @@ class RuntimeContext:
             channel_manager=self.channel_manager,
             wallet_service_ref=wallet_ref,
             api_key_manager=self._api_key_manager,
+            pending_actions=getattr(app, "pending_actions", None),
+            tasks_store=getattr(app, "tasks_store", None),
         )
         app.include_router(dashboard_router)
         app.include_router(create_spa_catchall_router())  # Must be last — SPA deep linking

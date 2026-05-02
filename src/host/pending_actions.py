@@ -62,8 +62,13 @@ class PendingActions:
     so two simultaneous consumers serialize and only one wins.
     """
 
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str, *, event_bus=None):
         self.db_path = db_path
+        # Task 9 — optional EventBus for surfacing pending-action
+        # lifecycle to the dashboard. Wired in by ``create_mesh_app``
+        # via :meth:`set_event_bus` (legacy callers in ``server.py``
+        # construct the store before the app builds the bus).
+        self._event_bus = event_bus
         # ``:memory:`` SQLite databases are per-connection -- closing
         # and reopening loses everything. Keep a single long-lived
         # connection for in-memory mode (used in tests + the legacy
@@ -75,6 +80,29 @@ class PendingActions:
             )
             self._shared_conn.execute("PRAGMA busy_timeout=30000")
         self._init_schema()
+
+    def set_event_bus(self, bus) -> None:
+        """Attach (or replace) the EventBus used for dashboard events.
+
+        Mirrors the ``Tasks``/``Blackboard`` integration pattern.
+        Idempotent — pass ``None`` to detach.
+        """
+        self._event_bus = bus
+
+    def _safe_emit(self, event_type: str, agent: str, data: dict) -> None:
+        """Emit a dashboard event, swallowing failures.
+
+        Pending-action mutations are durable in SQLite; the bus emit is a
+        best-effort decoration on top of the commit, so a missing bus or
+        an emit failure must not propagate.
+        """
+        bus = self._event_bus
+        if bus is None:
+            return
+        try:
+            bus.emit(event_type, agent=agent, data=data)
+        except Exception as e:
+            logger.debug("PendingActions event emit failed (%s): %s", event_type, e)
 
     @contextmanager
     def _conn(self):
@@ -163,6 +191,20 @@ class PendingActions:
                     now, expires_at,
                 ),
             )
+        # Task 9 — surface to the dashboard so the System > Operator
+        # panel and the inline chat bubble render the new pending nonce.
+        self._safe_emit(
+            "pending_action_created",
+            agent=actor,
+            data={
+                "nonce": nonce,
+                "actor": actor,
+                "target_kind": target_kind,
+                "target_id": target_id,
+                "action_kind": action_kind,
+                "expires_at": expires_at,
+            },
+        )
         return {
             "nonce": nonce,
             "actor": actor,
@@ -277,6 +319,23 @@ class PendingActions:
             except Exception:
                 conn.execute("ROLLBACK")
                 raise
+        # Task 9 — emit only on successful consume (the row is gone). The
+        # ``status="confirmed"`` payload field distinguishes this from the
+        # ``cancelled`` path emitted by :meth:`cancel`.
+        resolver = confirmer or row[0]
+        self._safe_emit(
+            "pending_action_resolved",
+            agent=resolver,
+            data={
+                "nonce": nonce,
+                "target_kind": row[1],
+                "target_id": row[2],
+                "action_kind": row[3],
+                "status": "confirmed",
+                "resolver": resolver,
+                "ts": time.time(),
+            },
+        )
         return {
             "nonce": nonce,
             "actor": row[0],
@@ -291,16 +350,117 @@ class PendingActions:
             "status": "consumed",
         }
 
+    def cancel(
+        self,
+        nonce: str,
+        *,
+        actor: str | None = None,
+    ) -> dict | None:
+        """Atomically delete a pending action without applying it.
+
+        Used by the Task 9 ``/mesh/pending/{nonce}/cancel`` endpoint and
+        the dashboard's "Cancel" button. Mirrors :meth:`consume` but
+        without the digest / origin / actor gates: cancelling is the
+        operator's escape hatch — they're abandoning the proposed change.
+
+        Returns the record that was cancelled (so the caller can log
+        what was abandoned), or None if the nonce was unknown / already
+        expired. Emits ``pending_action_resolved`` with
+        ``status="cancelled"`` on success so the dashboard can clear
+        the panel and the inline chat bubble.
+        """
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = conn.execute(
+                    "SELECT actor, target_kind, target_id, action_kind, "
+                    "payload_json, payload_digest, origin_kind, created_at, "
+                    "expires_at, status FROM pending_actions WHERE nonce=?",
+                    (nonce,),
+                ).fetchone()
+                if not row:
+                    conn.execute("COMMIT")
+                    return None
+                if time.time() > row[8]:
+                    # Expired — drop the row and report as None so the
+                    # caller can distinguish "still pending" from "gone".
+                    conn.execute(
+                        "DELETE FROM pending_actions WHERE nonce=?", (nonce,),
+                    )
+                    conn.execute("COMMIT")
+                    return None
+                conn.execute(
+                    "DELETE FROM pending_actions WHERE nonce=?", (nonce,),
+                )
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+        resolver = actor or row[0]
+        self._safe_emit(
+            "pending_action_resolved",
+            agent=resolver,
+            data={
+                "nonce": nonce,
+                "target_kind": row[1],
+                "target_id": row[2],
+                "action_kind": row[3],
+                "status": "cancelled",
+                "resolver": resolver,
+                "ts": time.time(),
+            },
+        )
+        return {
+            "nonce": nonce,
+            "actor": row[0],
+            "target_kind": row[1],
+            "target_id": row[2],
+            "action_kind": row[3],
+            "payload": json.loads(row[4]),
+            "payload_digest": row[5],
+            "origin_kind": row[6],
+            "created_at": row[7],
+            "expires_at": row[8],
+            "status": "cancelled",
+        }
+
     # ── Maintenance / surfacing ────────────────────────────────────
 
     def reap_expired(self) -> int:
-        """Delete every row past its expiry. Returns count deleted."""
+        """Delete every row past its expiry. Returns count deleted.
+
+        Task 9 — capture (target_kind, target_id, action_kind, nonce)
+        of each row being dropped so the dashboard can render an
+        ``pending_action_expired`` event per nonce. We snapshot before
+        the DELETE so the emit list reflects what actually went away.
+        """
+        now = time.time()
         with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT nonce, target_kind, target_id, action_kind "
+                "FROM pending_actions WHERE expires_at < ?",
+                (now,),
+            ).fetchall()
             cur = conn.execute(
                 "DELETE FROM pending_actions WHERE expires_at < ?",
-                (time.time(),),
+                (now,),
             )
-            return cur.rowcount
+            count = cur.rowcount
+        # Emit outside the SQLite txn so a slow listener never holds the
+        # connection. ``_safe_emit`` swallows individual failures.
+        for nonce, target_kind, target_id, action_kind in rows:
+            self._safe_emit(
+                "pending_action_expired",
+                agent="",
+                data={
+                    "nonce": nonce,
+                    "target_kind": target_kind,
+                    "target_id": target_id,
+                    "action_kind": action_kind,
+                    "expired_at": now,
+                },
+            )
+        return count
 
     def _safe_reap(self) -> None:
         """Reap-expired wrapper that never raises in a request path."""

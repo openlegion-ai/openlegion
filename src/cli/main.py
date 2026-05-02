@@ -596,6 +596,213 @@ def status(port: int, wide: bool, watch_interval: int | None, as_json: bool):
     _print_status(agents_data, mesh_online, configured)
 
 
+# ── Task 9 — Workplace / orchestration CLI commands ──────────
+
+
+def _mesh_get(port: int, path: str) -> dict | list:
+    """GET against the local mesh, raise SystemExit(1) on failure."""
+    import httpx
+
+    try:
+        resp = httpx.get(f"http://localhost:{port}{path}", timeout=10)
+    except httpx.ConnectError:
+        _fail("Mesh is not running. Start it first: openlegion start")
+    except Exception as e:
+        _fail(f"Error contacting mesh: {e}")
+    if resp.status_code >= 400:
+        _fail(f"HTTP {resp.status_code}: {resp.text}")
+    try:
+        return resp.json()
+    except Exception:
+        return {}
+
+
+def _mesh_post(port: int, path: str, body: dict | None = None) -> dict:
+    """POST against the local mesh with the dashboard CSRF header."""
+    import httpx
+
+    headers = {
+        "X-Requested-With": "XMLHttpRequest",
+        "X-Origin": f"kind=human,channel=cli,user={os.getenv('USER', 'cli')}",
+    }
+    try:
+        resp = httpx.post(
+            f"http://localhost:{port}{path}",
+            json=body or {}, headers=headers, timeout=15,
+        )
+    except httpx.ConnectError:
+        _fail("Mesh is not running. Start it first: openlegion start")
+    except Exception as e:
+        _fail(f"Error contacting mesh: {e}")
+    if resp.status_code >= 400:
+        _fail(f"HTTP {resp.status_code}: {resp.text}")
+    try:
+        return resp.json()
+    except Exception:
+        return {}
+
+
+@cli.command("projects")
+@click.option("--port", default=8420, type=int, help="Mesh host port")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def projects_cmd(port: int, as_json: bool):
+    """List active projects (Task 9)."""
+    as_json = as_json or _json_mode
+    data = _mesh_get(port, "/dashboard/api/workplace/projects")
+    projects = data.get("projects", []) if isinstance(data, dict) else []
+    if as_json:
+        click.echo(_json.dumps({"projects": projects}, default=str))
+        return
+    if not projects:
+        click.echo("No active projects.")
+        return
+    click.echo(f"{'Project':<24} {'Status':<10} {'Tasks':<8} {'Members'}")
+    click.echo("-" * 70)
+    for p in projects:
+        members = ", ".join(p.get("members", [])) or "-"
+        if len(members) > 30:
+            members = members[:27] + "..."
+        click.echo(
+            f"{p.get('name', '?'):<24} {p.get('status', 'active'):<10} "
+            f"{p.get('total', 0):<8} {members}"
+        )
+
+
+@cli.command("project")
+@click.argument("project_id")
+@click.option("--port", default=8420, type=int, help="Mesh host port")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def project_cmd(project_id: str, port: int, as_json: bool):
+    """Show status for a single project."""
+    as_json = as_json or _json_mode
+    data = _mesh_get(port, "/dashboard/api/workplace/projects")
+    projects = data.get("projects", []) if isinstance(data, dict) else []
+    match = next((p for p in projects if p.get("name") == project_id), None)
+    if match is None:
+        _fail(f"Project '{project_id}' not found")
+    if as_json:
+        click.echo(_json.dumps(match, default=str))
+        return
+    click.echo(f"Project: {match.get('name')}")
+    click.echo(f"  Status:      {match.get('status', 'active')}")
+    click.echo(f"  Description: {match.get('description', '') or '-'}")
+    click.echo(f"  Members:     {', '.join(match.get('members', []) or ['-'])}")
+    click.echo(f"  Total tasks: {match.get('total', 0)}")
+    counts = match.get("counts") or {}
+    if counts:
+        click.echo("  By status:")
+        for status, n in sorted(counts.items()):
+            click.echo(f"    {status:<10} {n}")
+    blockers = match.get("blockers") or []
+    if blockers:
+        click.echo(f"  Blockers ({len(blockers)}):")
+        for b in blockers:
+            click.echo(
+                f"    - {b.get('title', '?')} ({b.get('assignee', '?')}): "
+                f"{b.get('blocker_note', '')}"
+            )
+
+
+@cli.command("tasks")
+@click.option("--agent", default=None, help="Filter by assignee")
+@click.option("--project", default=None, help="Filter by project ID")
+@click.option(
+    "--status", default=None,
+    help="Filter by status (pending/accepted/working/blocked/done/failed/cancelled)",
+)
+@click.option("--port", default=8420, type=int, help="Mesh host port")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def tasks_cmd(agent, project, status, port, as_json):
+    """List/filter durable task records (Task 9)."""
+    as_json = as_json or _json_mode
+    qs = []
+    if agent:
+        qs.append(f"assignee={agent}")
+    if project:
+        qs.append(f"project_id={project}")
+    if status:
+        qs.append(f"status={status}")
+    suffix = ("?" + "&".join(qs)) if qs else ""
+    data = _mesh_get(port, f"/dashboard/api/workplace/tasks{suffix}")
+    if not isinstance(data, dict):
+        data = {}
+    if not data.get("enabled", True):
+        if as_json:
+            click.echo(_json.dumps(data, default=str))
+        else:
+            click.echo("Workplace disabled. Set OPENLEGION_ORCHESTRATION_TASKS_V2=1 and restart.")
+        return
+    tasks = data.get("tasks", [])
+    if as_json:
+        click.echo(_json.dumps({"tasks": tasks}, default=str))
+        return
+    if not tasks:
+        click.echo("No tasks.")
+        return
+    click.echo(f"{'ID':<22} {'Status':<10} {'Assignee':<14} {'Project':<14} {'Title'}")
+    click.echo("-" * 90)
+    for t in tasks:
+        title = (t.get("title") or "")[:30]
+        click.echo(
+            f"{(t.get('id') or '')[:22]:<22} {t.get('status', '?'):<10} "
+            f"{(t.get('assignee') or '')[:14]:<14} "
+            f"{(t.get('project_id') or '')[:14]:<14} {title}"
+        )
+
+
+@cli.command("pending")
+@click.option("--port", default=8420, type=int, help="Mesh host port")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def pending_cmd(port: int, as_json: bool):
+    """List open pending actions awaiting human confirmation."""
+    as_json = as_json or _json_mode
+    data = _mesh_get(port, "/dashboard/api/workplace/pending")
+    rows = data.get("pending", []) if isinstance(data, dict) else []
+    if as_json:
+        click.echo(_json.dumps({"pending": rows}, default=str))
+        return
+    if not rows:
+        click.echo("No pending actions.")
+        return
+    click.echo(f"{'Nonce':<38} {'Actor':<12} {'Action':<14} {'Target'}")
+    click.echo("-" * 90)
+    for r in rows:
+        target = f"{r.get('target_kind', '?')}/{r.get('target_id', '?')}"
+        click.echo(
+            f"{(r.get('nonce') or '')[:38]:<38} "
+            f"{(r.get('actor') or '')[:12]:<12} "
+            f"{(r.get('action_kind') or '')[:14]:<14} {target}"
+        )
+
+
+@cli.command("confirm")
+@click.argument("nonce")
+@click.option("--port", default=8420, type=int, help="Mesh host port")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def confirm_cmd(nonce: str, port: int, as_json: bool):
+    """Confirm a pending action by nonce (Task 9)."""
+    as_json = as_json or _json_mode
+    result = _mesh_post(port, f"/mesh/pending/{nonce}/confirm")
+    if as_json:
+        click.echo(_json.dumps(result, default=str))
+    else:
+        click.echo(f"Confirmed: {nonce}")
+
+
+@cli.command("cancel")
+@click.argument("nonce")
+@click.option("--port", default=8420, type=int, help="Mesh host port")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def cancel_cmd(nonce: str, port: int, as_json: bool):
+    """Cancel a pending action by nonce (Task 9)."""
+    as_json = as_json or _json_mode
+    result = _mesh_post(port, f"/mesh/pending/{nonce}/cancel")
+    if as_json:
+        click.echo(_json.dumps(result, default=str))
+    else:
+        click.echo(f"Cancelled: {nonce}")
+
+
 # ── stop ─────────────────────────────────────────────────────
 
 @cli.command()
