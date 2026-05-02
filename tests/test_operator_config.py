@@ -244,10 +244,19 @@ class TestOperatorConstants:
 
     def test_allowed_tools_populated(self):
         from src.cli.config import _OPERATOR_ALLOWED_TOOLS, _OPERATOR_HEARTBEAT_TOOLS
-        assert len(_OPERATOR_ALLOWED_TOOLS) == 23
+        # Task 7 added the operator product surface (4 read + 7 action tools).
+        assert len(_OPERATOR_ALLOWED_TOOLS) == 34
         assert len(_OPERATOR_HEARTBEAT_TOOLS) == 5
         # Heartbeat tools should be a subset of allowed tools
         assert set(_OPERATOR_HEARTBEAT_TOOLS).issubset(set(_OPERATOR_ALLOWED_TOOLS))
+        # Task 7 product tools must be in the allowlist.
+        for tool in (
+            "list_project_status", "list_agent_queue", "get_team_outputs",
+            "summarize_project_progress",
+            "reroute_task", "cancel_task", "retry_failed_task",
+            "archive_project", "archive_agent", "delete_project", "delete_agent",
+        ):
+            assert tool in _OPERATOR_ALLOWED_TOOLS
 
     def test_request_browser_login_in_allowlist(self):
         """Operator must be allowed to delegate browser login requests to workers.

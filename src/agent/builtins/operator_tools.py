@@ -655,3 +655,553 @@ async def update_project_context(
         return await mesh_client.update_project_context(project_name, context)
     except Exception as e:
         return {"error": f"Failed to update project context: {e}"}
+
+
+# ── Task 7: Operator product tools ───────────────────────────
+
+
+_TASKS_V2_DISABLED = (
+    "Orchestration tasks not enabled — flip OPENLEGION_ORCHESTRATION_TASKS_V2=1"
+)
+
+
+def _orchestration_v2_on() -> bool:
+    """Read the orchestration v2 flag at call time so monkeypatch tests work."""
+    return os.environ.get("OPENLEGION_ORCHESTRATION_TASKS_V2", "0") == "1"
+
+
+def _parse_over_budget(error: Exception) -> dict | None:
+    """If a mesh HTTP error wraps an over_budget JSON payload, surface it.
+
+    The reroute / retry endpoints encode a structured budget error in the
+    400 body. ``httpx.HTTPStatusError`` stringifies as something like
+    ``"Client error '400 Bad Request' for url ... \\nFor more ..."``;
+    the JSON body is on ``error.response`` when the client wraps it.
+    Returns the structured dict or None if the error isn't a budget one.
+    """
+    response = getattr(error, "response", None)
+    if response is None:
+        return None
+    try:
+        body = response.json()
+    except Exception:
+        return None
+    detail = body.get("detail") if isinstance(body, dict) else None
+    if isinstance(detail, str):
+        try:
+            parsed = json.loads(detail)
+        except (TypeError, ValueError):
+            parsed = None
+        if isinstance(parsed, dict) and parsed.get("error") == "over_budget":
+            return parsed
+    if isinstance(detail, dict) and detail.get("error") == "over_budget":
+        return detail
+    return None
+
+
+# ── Read tools ──────────────────────────────────────────────
+
+
+@skill(
+    name="list_project_status",
+    description=(
+        "List status rollups for projects. Per-project counts by status, "
+        "top blockers, and recent completions. If `project_id` is omitted, "
+        "returns one row per project the operator can see."
+    ),
+    parameters={
+        "project_id": {
+            "type": "string",
+            "description": "Optional project ID to scope to a single project",
+            "default": "",
+        },
+    },
+)
+async def list_project_status(
+    project_id: str = "",
+    *,
+    mesh_client=None,
+    **_kw,
+) -> dict:
+    """Fleet-wide or per-project status rollup."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    if not _orchestration_v2_on():
+        return {"error": _TASKS_V2_DISABLED}
+    try:
+        if project_id:
+            return await mesh_client.project_status(project_id)
+        return await mesh_client.all_projects_status()
+    except Exception as e:
+        return {"error": f"Failed to read project status: {e}"}
+
+
+@skill(
+    name="list_agent_queue",
+    description=(
+        "Read an agent's task queue: current and recent tasks grouped by "
+        "status (active / blocked / done / failed / cancelled), up to "
+        "`limit` rows per bucket."
+    ),
+    parameters={
+        "agent_id": {
+            "type": "string",
+            "description": "Agent ID to inspect",
+        },
+        "limit": {
+            "type": "integer",
+            "description": "Max rows per status bucket (default 10, max 100)",
+            "default": 10,
+        },
+    },
+)
+async def list_agent_queue(
+    agent_id: str,
+    limit: int = 10,
+    *,
+    mesh_client=None,
+    **_kw,
+) -> dict:
+    """Per-agent task queue grouped by status."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    if not _orchestration_v2_on():
+        return {"error": _TASKS_V2_DISABLED}
+    try:
+        return await mesh_client.agent_queue(agent_id, limit=limit)
+    except Exception as e:
+        return {"error": f"Failed to read queue for {agent_id}: {e}"}
+
+
+@skill(
+    name="get_team_outputs",
+    description=(
+        "Completed task artifacts for a project in a time window. "
+        "`since` accepts ISO timestamps or duration strings ('24h', '7d'); "
+        "default is the last 7 days."
+    ),
+    parameters={
+        "project_id": {
+            "type": "string",
+            "description": "Project ID",
+        },
+        "since": {
+            "type": "string",
+            "description": "ISO timestamp or duration string (e.g. '24h', '7d')",
+            "default": "",
+        },
+    },
+)
+async def get_team_outputs(
+    project_id: str,
+    since: str = "",
+    *,
+    mesh_client=None,
+    **_kw,
+) -> dict:
+    """Completed task artifacts for a project."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    if not _orchestration_v2_on():
+        return {"error": _TASKS_V2_DISABLED}
+    try:
+        return await mesh_client.project_outputs(project_id, since=since)
+    except Exception as e:
+        return {"error": f"Failed to read outputs for {project_id}: {e}"}
+
+
+@skill(
+    name="summarize_project_progress",
+    description=(
+        "Synthesized status summary for a project: structured counts + "
+        "narrative status_text + top blockers + recent completions + "
+        "ask_for_user list."
+    ),
+    parameters={
+        "project_id": {
+            "type": "string",
+            "description": "Project ID",
+        },
+    },
+)
+async def summarize_project_progress(
+    project_id: str,
+    *,
+    mesh_client=None,
+    **_kw,
+) -> dict:
+    """Synthesized progress summary for a project."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    if not _orchestration_v2_on():
+        return {"error": _TASKS_V2_DISABLED}
+    try:
+        return await mesh_client.project_summary(project_id)
+    except Exception as e:
+        return {"error": f"Failed to summarize {project_id}: {e}"}
+
+
+@skill(
+    name="get_agent_profile",
+    description=(
+        "Read an agent's public profile: role, capabilities, health, "
+        "subscriptions, INTERFACE.md contract."
+    ),
+    parameters={
+        "agent_id": {
+            "type": "string",
+            "description": "Agent ID",
+        },
+    },
+)
+async def get_agent_profile(
+    agent_id: str,
+    *,
+    mesh_client=None,
+    **_kw,
+) -> dict:
+    """Read an agent's profile via the mesh."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    try:
+        return await mesh_client.get_agent_profile(agent_id)
+    except Exception as e:
+        return {"error": f"Failed to read profile for {agent_id}: {e}"}
+
+
+# ── Action tools ────────────────────────────────────────────
+
+
+@skill(
+    name="reroute_task",
+    description=(
+        "Reassign a task to a different agent. Cost-aware: refuses if the "
+        "new assignee is over budget (returns a structured error naming the "
+        "offending agent)."
+    ),
+    parameters={
+        "task_id": {
+            "type": "string",
+            "description": "Task ID",
+        },
+        "new_assignee": {
+            "type": "string",
+            "description": "New assignee agent ID",
+        },
+        "reason": {
+            "type": "string",
+            "description": "Optional reason for the reroute",
+            "default": "",
+        },
+    },
+)
+async def reroute_task(
+    task_id: str,
+    new_assignee: str,
+    reason: str = "",
+    *,
+    mesh_client=None,
+    **_kw,
+) -> dict:
+    """Reassign a task. Cost-gated."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    if not _orchestration_v2_on():
+        return {"error": _TASKS_V2_DISABLED}
+    try:
+        return await mesh_client.reroute_task(task_id, new_assignee, reason=reason)
+    except Exception as e:
+        budget = _parse_over_budget(e)
+        if budget is not None:
+            return {
+                "error": "over_budget",
+                "detail": budget.get("detail") or (
+                    f"Agent {budget.get('budget', {}).get('agent', new_assignee)!r} "
+                    "is over budget."
+                ),
+                "budget": budget.get("budget"),
+            }
+        return {"error": f"Failed to reroute task: {e}"}
+
+
+@skill(
+    name="cancel_task",
+    description="Cancel a task with an optional reason recorded on the audit trail.",
+    parameters={
+        "task_id": {
+            "type": "string",
+            "description": "Task ID",
+        },
+        "reason": {
+            "type": "string",
+            "description": "Reason for cancellation",
+            "default": "",
+        },
+    },
+)
+async def cancel_task(
+    task_id: str,
+    reason: str = "",
+    *,
+    mesh_client=None,
+    **_kw,
+) -> dict:
+    """Cancel a task."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    if not _orchestration_v2_on():
+        return {"error": _TASKS_V2_DISABLED}
+    try:
+        return await mesh_client.cancel_task(task_id, reason=reason)
+    except Exception as e:
+        return {"error": f"Failed to cancel task: {e}"}
+
+
+@skill(
+    name="retry_failed_task",
+    description=(
+        "Retry a failed task by cloning it as a new pending task. "
+        "Optional `with_changes` patches title / description / assignee. "
+        "Cost-aware: refuses if the (possibly overridden) target agent is "
+        "over budget."
+    ),
+    parameters={
+        "task_id": {
+            "type": "string",
+            "description": "Task ID of the failed task",
+        },
+        "with_changes": {
+            "type": "object",
+            "description": (
+                "Optional patch with keys 'title', 'description', 'assignee' "
+                "to override on the retry"
+            ),
+            "default": {},
+        },
+    },
+)
+async def retry_failed_task(
+    task_id: str,
+    with_changes: dict | None = None,
+    *,
+    mesh_client=None,
+    **_kw,
+) -> dict:
+    """Retry a failed task. Cost-gated."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    if not _orchestration_v2_on():
+        return {"error": _TASKS_V2_DISABLED}
+    patch = with_changes or {}
+    try:
+        return await mesh_client.retry_task(
+            task_id,
+            title=patch.get("title"),
+            description=patch.get("description"),
+            assignee=patch.get("assignee"),
+        )
+    except Exception as e:
+        budget = _parse_over_budget(e)
+        if budget is not None:
+            return {
+                "error": "over_budget",
+                "detail": budget.get("detail") or "Target agent is over budget.",
+                "budget": budget.get("budget"),
+            }
+        return {"error": f"Failed to retry task: {e}"}
+
+
+@skill(
+    name="archive_project",
+    description=(
+        "Archive a project. Stops scheduling and hides it from default "
+        "list views while retaining all data. Reversible."
+    ),
+    parameters={
+        "project_id": {
+            "type": "string",
+            "description": "Project ID",
+        },
+    },
+)
+async def archive_project(
+    project_id: str,
+    *,
+    mesh_client=None,
+    _messages=None,
+    **_kw,
+) -> dict:
+    """Archive a project. Provenance-gated."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    from src.agent.loop import _last_message_is_user_origin
+    if _messages is None or not _last_message_is_user_origin(_messages):
+        return {
+            "error": "provenance_check_failed",
+            "detail": "User confirmation required to archive a project.",
+        }
+    try:
+        return await mesh_client.archive_project(project_id)
+    except Exception as e:
+        return {"error": f"Failed to archive project: {e}"}
+
+
+@skill(
+    name="archive_agent",
+    description=(
+        "Archive an agent. Stops scheduling, retains workspace and history. "
+        "Reversible. Required pre-condition for delete_agent."
+    ),
+    parameters={
+        "agent_id": {
+            "type": "string",
+            "description": "Agent ID",
+        },
+    },
+)
+async def archive_agent(
+    agent_id: str,
+    *,
+    mesh_client=None,
+    _messages=None,
+    **_kw,
+) -> dict:
+    """Archive an agent. Provenance-gated."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    if agent_id.lower() == _OPERATOR_AGENT_ID:
+        return {"error": "Cannot archive the operator agent."}
+    from src.agent.loop import _last_message_is_user_origin
+    if _messages is None or not _last_message_is_user_origin(_messages):
+        return {
+            "error": "provenance_check_failed",
+            "detail": "User confirmation required to archive an agent.",
+        }
+    try:
+        return await mesh_client.archive_agent(agent_id)
+    except Exception as e:
+        return {"error": f"Failed to archive agent: {e}"}
+
+
+@skill(
+    name="delete_project",
+    description=(
+        "Propose deletion of an archived project. Returns a confirmation "
+        "nonce; the user must confirm via the dashboard or CLI to actually "
+        "delete the project. Pre-condition: project must already be "
+        "archived (call archive_project first)."
+    ),
+    parameters={
+        "project_id": {
+            "type": "string",
+            "description": "Project ID (must be archived)",
+        },
+    },
+)
+async def delete_project(
+    project_id: str,
+    *,
+    mesh_client=None,
+    _messages=None,
+    **_kw,
+) -> dict:
+    """Propose project deletion. Two-step: this returns a nonce for human confirm."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    from src.agent.loop import _last_message_is_user_origin
+    if _messages is None or not _last_message_is_user_origin(_messages):
+        return {
+            "error": "provenance_check_failed",
+            "detail": "User confirmation required to delete a project.",
+        }
+    try:
+        result = await mesh_client.propose_delete_project(project_id)
+        # Surface the propose-then-confirm contract to the operator
+        # prompt so it knows to wait for human confirmation.
+        result.setdefault("requires_confirmation", True)
+        return result
+    except Exception as e:
+        msg = str(e)
+        if "must be archived" in msg.lower() or "400" in msg:
+            return {
+                "error": "archive_required",
+                "detail": (
+                    f"Project {project_id!r} must be archived before delete. "
+                    "Call archive_project first."
+                ),
+            }
+        return {"error": f"Failed to propose delete: {e}"}
+
+
+@skill(
+    name="delete_agent",
+    description=(
+        "Propose deletion of an archived agent. Returns a confirmation "
+        "nonce; the user must confirm via the dashboard or CLI to actually "
+        "delete the agent. Pre-condition: agent must already be archived "
+        "(call archive_agent first)."
+    ),
+    parameters={
+        "agent_id": {
+            "type": "string",
+            "description": "Agent ID (must be archived)",
+        },
+    },
+)
+async def delete_agent(
+    agent_id: str,
+    *,
+    mesh_client=None,
+    _messages=None,
+    **_kw,
+) -> dict:
+    """Propose agent deletion. Two-step: this returns a nonce for human confirm."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    if agent_id.lower() == _OPERATOR_AGENT_ID:
+        return {"error": "Cannot delete the operator agent."}
+    from src.agent.loop import _last_message_is_user_origin
+    if _messages is None or not _last_message_is_user_origin(_messages):
+        return {
+            "error": "provenance_check_failed",
+            "detail": "User confirmation required to delete an agent.",
+        }
+    try:
+        result = await mesh_client.propose_delete_agent(agent_id)
+        result.setdefault("requires_confirmation", True)
+        return result
+    except Exception as e:
+        msg = str(e)
+        if "must be archived" in msg.lower() or "400" in msg:
+            return {
+                "error": "archive_required",
+                "detail": (
+                    f"Agent {agent_id!r} must be archived before delete. "
+                    "Call archive_agent first."
+                ),
+            }
+        return {"error": f"Failed to propose delete: {e}"}

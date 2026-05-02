@@ -2956,20 +2956,29 @@ def create_mesh_app(
     # so operator agents can manage projects using their mesh auth token.
 
     @app.get("/mesh/projects")
-    async def mesh_list_projects(request: Request) -> dict:
-        """List all projects (mesh-authed proxy)."""
-        _require_any_auth(request)
-        if _resolve_agent_id("", request) != "operator":
+    async def mesh_list_projects(request: Request, include_archived: bool = False) -> dict:
+        """List projects (mesh-authed proxy).
+
+        Excludes archived projects by default — pass ``include_archived=true``
+        to include them. Each row carries ``status`` so callers can render
+        the archive state when ``include_archived`` is set.
+        """
+        caller = _extract_verified_agent_id(request)
+        if caller != "operator" and not _is_internal_caller(request):
             raise HTTPException(403, "Only the operator can manage projects")
         from src.cli.config import _load_projects
         projects = _load_projects()
         result = []
         for pname, pdata in sorted(projects.items(), key=lambda x: x[1].get("created_at") or ""):
+            status = pdata.get("status", "active") or "active"
+            if not include_archived and status == "archived":
+                continue
             result.append({
                 "name": pname,
                 "description": pdata.get("description", ""),
                 "members": pdata.get("members", []),
                 "created_at": pdata.get("created_at", ""),
+                "status": status,
             })
         return {"projects": result}
 
@@ -3310,9 +3319,39 @@ def create_mesh_app(
             raise HTTPException(404, f"Task '{task_id}' not found")
         return updated
 
+    def _check_can_schedule(target_agent: str) -> tuple[bool, dict | None]:
+        """Cost-aware preflight: True when the target agent has budget headroom.
+
+        Returns ``(allowed, info_or_none)``. ``info`` carries the
+        offending agent + daily/monthly used vs limit so the operator
+        product tools can surface a structured error to the user.
+        Operator (and the missing-tracker case) always pass — there is
+        nothing to enforce.
+        """
+        if cost_tracker is None or target_agent == "operator":
+            return True, None
+        try:
+            check = cost_tracker.check_budget(target_agent)
+        except Exception as e:
+            logger.debug("check_budget(%s) failed: %s — allowing", target_agent, e)
+            return True, None
+        if check.get("allowed", True):
+            return True, None
+        return False, {
+            "agent": target_agent,
+            "daily_used": check.get("daily_used"),
+            "daily_limit": check.get("daily_limit"),
+            "monthly_used": check.get("monthly_used"),
+            "monthly_limit": check.get("monthly_limit"),
+        }
+
     @app.post("/mesh/tasks/{task_id}/reroute")
     async def reroute_task(task_id: str, request: Request) -> dict:
-        """Reassign a task. Operator-only or callers with ``can_route_tasks``."""
+        """Reassign a task. Operator-only or callers with ``can_route_tasks``.
+
+        Cost-aware: refuses to reroute onto an agent that is already
+        over its daily or monthly budget (HTTP 400, structured error).
+        """
         store = _require_tasks_v2()
         caller = _extract_verified_agent_id(request)
         if not (
@@ -3329,6 +3368,20 @@ def create_mesh_app(
         reason = sanitize_for_prompt(body.get("reason") or "")
         if not new_assignee or not _AGENT_ID_RE.match(new_assignee):
             raise HTTPException(400, f"Invalid new_assignee: {new_assignee!r}")
+        # Budget preflight — before mutating storage.
+        allowed, info = _check_can_schedule(new_assignee)
+        if not allowed:
+            raise HTTPException(
+                400,
+                json.dumps({
+                    "error": "over_budget",
+                    "detail": (
+                        f"Agent {new_assignee!r} is over budget; refusing to "
+                        "reroute task to a target that cannot run."
+                    ),
+                    "budget": info,
+                }),
+            )
         try:
             updated = store.reroute(
                 task_id, new_assignee, actor=caller, reason=reason,
@@ -3338,6 +3391,643 @@ def create_mesh_app(
         except InvalidStatusTransition as e:
             raise HTTPException(400, str(e))
         return updated
+
+    @app.post("/mesh/tasks/{task_id}/retry")
+    async def retry_failed_task(task_id: str, request: Request) -> dict:
+        """Retry a failed task by cloning it as a new ``pending`` task.
+
+        Operator product tool surface: clones the existing task into a
+        new id (``task_<hex>``), optionally overriding title / description /
+        assignee from the request body. Original task is left in its
+        terminal state (``failed``) so the audit trail is preserved.
+        Cost-aware: refuses if the (possibly overridden) target assignee
+        is over budget.
+        """
+        store = _require_tasks_v2()
+        caller = _extract_verified_agent_id(request)
+        if not (
+            caller == "operator"
+            or _is_internal_caller(request)
+            or permissions.can_route_tasks(caller)
+        ):
+            raise HTTPException(
+                403,
+                "Retry requires can_route_tasks (operator-grade permission)",
+            )
+        original = store.get(task_id)
+        if original is None:
+            raise HTTPException(404, f"Task '{task_id}' not found")
+        if original["status"] != "failed":
+            raise HTTPException(
+                400,
+                f"Only failed tasks can be retried (status={original['status']!r})",
+            )
+        body = await request.json() if (await request.body()) else {}
+        if not isinstance(body, dict):
+            body = {}
+        # Optional patch: title / description / assignee
+        title = sanitize_for_prompt(body.get("title") or original["title"]).strip()
+        description_override = body.get("description")
+        if description_override is not None:
+            description = sanitize_for_prompt(description_override) or None
+        else:
+            description = original.get("description") or None
+        new_assignee = body.get("assignee") or original["assignee"]
+        if not new_assignee or not _AGENT_ID_RE.match(new_assignee):
+            raise HTTPException(400, f"Invalid assignee: {new_assignee!r}")
+        if not title:
+            raise HTTPException(400, "title is required (and cannot be blank)")
+        # Budget preflight before mutating storage.
+        allowed, info = _check_can_schedule(new_assignee)
+        if not allowed:
+            raise HTTPException(
+                400,
+                json.dumps({
+                    "error": "over_budget",
+                    "detail": (
+                        f"Agent {new_assignee!r} is over budget; refusing to "
+                        "retry the task onto a target that cannot run."
+                    ),
+                    "budget": info,
+                }),
+            )
+        origin = _validated_origin(request, caller)
+        origin_dict = origin.model_dump() if origin is not None else None
+        clone = store.create(
+            creator=caller,
+            assignee=new_assignee,
+            title=title,
+            description=description,
+            project_id=original.get("project_id"),
+            parent_task_id=original["id"],
+            priority=original.get("priority", 0) or 0,
+            origin=origin_dict,
+        )
+        return {"clone": clone, "original_id": original["id"]}
+
+    # === Operator product surface (Task 7) — read tools ===
+    #
+    # Read endpoints surfaced as operator skills. They aggregate over
+    # the tasks store + project metadata and respect the same scoping
+    # rules as the Task 6 endpoints (operator + internal can see all,
+    # other callers can see only their own projects). All return HTTP
+    # 503 when ``OPENLEGION_ORCHESTRATION_TASKS_V2`` is off so the
+    # operator tools can surface a clean error instead of garbled data.
+
+    def _summarize_tasks(rows: list[dict]) -> dict:
+        """Reduce a list of task rows to status counts + recent slices.
+
+        Buckets: ``active`` (pending/accepted/working), ``blocked``,
+        ``done``, ``failed``, ``cancelled``. ``recent_done`` carries the
+        last 5 completed tasks ordered newest-first.
+        """
+        counts = {"active": 0, "blocked": 0, "done": 0, "failed": 0, "cancelled": 0}
+        blocked_rows: list[dict] = []
+        done_rows: list[dict] = []
+        for r in rows:
+            s = r.get("status", "")
+            if s in ("pending", "accepted", "working"):
+                counts["active"] += 1
+            elif s == "blocked":
+                counts["blocked"] += 1
+                blocked_rows.append(r)
+            elif s == "done":
+                counts["done"] += 1
+                done_rows.append(r)
+            elif s == "failed":
+                counts["failed"] += 1
+            elif s == "cancelled":
+                counts["cancelled"] += 1
+        done_rows.sort(key=lambda x: x.get("completed_at") or 0, reverse=True)
+        return {
+            "counts": counts,
+            "blockers": [
+                {
+                    "id": r["id"], "assignee": r["assignee"],
+                    "title": r["title"], "blocker_note": r.get("blocker_note"),
+                }
+                for r in blocked_rows[:5]
+            ],
+            "recent_done": [
+                {
+                    "id": r["id"], "assignee": r["assignee"], "title": r["title"],
+                    "completed_at": r.get("completed_at"),
+                }
+                for r in done_rows[:5]
+            ],
+        }
+
+    @app.get("/mesh/projects/{project_id}/status")
+    async def project_status(project_id: str, request: Request) -> dict:
+        """Per-project status counts + recent blockers/completions.
+
+        Caller must be a project member (or operator/internal). Returns
+        the same structure as ``_summarize_tasks`` plus a ``project``
+        field carrying name and archive status.
+        """
+        store = _require_tasks_v2()
+        caller = _extract_verified_agent_id(request)
+        if not _is_project_member(caller, project_id):
+            raise HTTPException(
+                403,
+                f"Caller {caller} is not a member of project {project_id!r}",
+            )
+        from src.cli.config import _load_projects
+        projects = _load_projects()
+        if project_id not in projects:
+            raise HTTPException(404, f"Project '{project_id}' not found")
+        meta = projects[project_id]
+        _reap_tasks_opportunistically()
+        rows = store.list_project(project_id)
+        result = _summarize_tasks(rows)
+        result["project"] = {
+            "name": project_id,
+            "status": meta.get("status", "active") or "active",
+            "members": meta.get("members", []),
+            "description": meta.get("description", ""),
+        }
+        return result
+
+    @app.get("/mesh/projects/status")
+    async def all_projects_status(request: Request) -> dict:
+        """List status rollups for every project the caller can see.
+
+        Operator / internal callers see all projects (including archived);
+        other callers see only their own. Each row carries the same
+        ``counts``/``blockers``/``recent_done`` shape as the per-project
+        endpoint, plus the project name and status.
+        """
+        store = _require_tasks_v2()
+        caller = _extract_verified_agent_id(request)
+        from src.cli.config import _load_projects
+        projects = _load_projects()
+        visible: list[str]
+        if caller == "operator" or _is_internal_caller(request):
+            visible = list(projects.keys())
+        else:
+            visible = sorted(_caller_projects(caller))
+        _reap_tasks_opportunistically()
+        rows: list[dict] = []
+        for pid in sorted(visible):
+            meta = projects.get(pid, {})
+            project_rows = store.list_project(pid)
+            summary = _summarize_tasks(project_rows)
+            summary["project"] = {
+                "name": pid,
+                "status": meta.get("status", "active") or "active",
+                "members": meta.get("members", []),
+                "description": meta.get("description", ""),
+            }
+            rows.append(summary)
+        return {"projects": rows}
+
+    @app.get("/mesh/agents/{agent_id}/queue")
+    async def agent_queue(
+        agent_id: str, request: Request, limit: int = 10,
+    ) -> dict:
+        """Recent tasks for an agent grouped by status.
+
+        Returns up to ``limit`` rows per status (active / blocked / done /
+        failed / cancelled). Visible to the agent itself, the operator,
+        loopback-internal callers, and project members of the agent's
+        project.
+        """
+        store = _require_tasks_v2()
+        caller = _extract_verified_agent_id(request)
+        if not (
+            caller == agent_id
+            or caller == "operator"
+            or _is_internal_caller(request)
+        ):
+            agent_proj = _agent_projects.get(agent_id)
+            if agent_proj is None or not _is_project_member(caller, agent_proj):
+                raise HTTPException(
+                    403,
+                    f"Caller {caller} cannot view queue for {agent_id!r}",
+                )
+        try:
+            limit = max(1, min(int(limit), 100))
+        except (TypeError, ValueError):
+            limit = 10
+        _reap_tasks_opportunistically()
+        rows = store.list_inbox(agent_id, include_terminal=True)
+        buckets: dict[str, list[dict]] = {
+            "active": [], "blocked": [], "done": [], "failed": [], "cancelled": [],
+        }
+        # Sort newest-first so the "last N" slice is informative.
+        rows.sort(key=lambda r: r.get("updated_at") or 0, reverse=True)
+        for r in rows:
+            s = r.get("status", "")
+            if s in ("pending", "accepted", "working"):
+                key = "active"
+            elif s in buckets:
+                key = s
+            else:
+                continue
+            if len(buckets[key]) >= limit:
+                continue
+            buckets[key].append({
+                "id": r["id"], "title": r["title"],
+                "status": r["status"],
+                "project_id": r.get("project_id"),
+                "blocker_note": r.get("blocker_note"),
+                "updated_at": r.get("updated_at"),
+                "completed_at": r.get("completed_at"),
+            })
+        return {"agent_id": agent_id, "limit": limit, "queue": buckets}
+
+    def _parse_since(since: str | None) -> float:
+        """Parse a since= filter — accepts ISO timestamp, ``"24h"``/``"7d"``, or ``""``."""
+        import time as _time
+        if not since:
+            return _time.time() - (7 * 24 * 60 * 60)
+        s = since.strip().lower()
+        # Duration form: ``Nh`` / ``Nd`` / ``Nm``
+        if s and s[-1] in {"s", "m", "h", "d"} and s[:-1].isdigit():
+            n = int(s[:-1])
+            unit = s[-1]
+            mult = {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
+            return _time.time() - (n * mult)
+        # ISO timestamp
+        try:
+            from datetime import datetime as _dt
+            dt = _dt.fromisoformat(s.replace("z", "+00:00"))
+            return dt.timestamp()
+        except (ValueError, TypeError):
+            return _time.time() - (7 * 24 * 60 * 60)
+
+    @app.get("/mesh/projects/{project_id}/outputs")
+    async def project_outputs(
+        project_id: str, request: Request, since: str = "",
+    ) -> dict:
+        """Completed task artifacts for a project in a time window.
+
+        ``since`` accepts an ISO timestamp or duration string (``"24h"``,
+        ``"7d"``); default is the last 7 days. Returns one entry per
+        completed task with its title, assignee, completion time, and
+        artifact refs.
+        """
+        store = _require_tasks_v2()
+        caller = _extract_verified_agent_id(request)
+        if not _is_project_member(caller, project_id):
+            raise HTTPException(
+                403,
+                f"Caller {caller} is not a member of project {project_id!r}",
+            )
+        floor = _parse_since(since)
+        _reap_tasks_opportunistically()
+        rows = store.list_project(project_id, statuses=["done"])
+        outputs = []
+        for r in rows:
+            completed_at = r.get("completed_at") or 0
+            if completed_at < floor:
+                continue
+            outputs.append({
+                "id": r["id"], "title": r["title"], "assignee": r["assignee"],
+                "completed_at": completed_at,
+                "artifact_refs": r.get("artifact_refs", []) or [],
+            })
+        outputs.sort(key=lambda x: x["completed_at"], reverse=True)
+        return {"project_id": project_id, "since": since, "outputs": outputs}
+
+    @app.get("/mesh/projects/{project_id}/summary")
+    async def project_summary(project_id: str, request: Request) -> dict:
+        """Synthesized status text + structured fields for a project.
+
+        Combines status counts, blocker list, recent completions, and a
+        simple ``ask_for_user`` list (currently mirrors ``blocked`` —
+        operators can later swap in a richer policy here without changing
+        the on-the-wire shape). The narrative ``status_text`` is plain
+        prose so the operator's prompt machinery doesn't have to format
+        it again.
+        """
+        store = _require_tasks_v2()
+        caller = _extract_verified_agent_id(request)
+        if not _is_project_member(caller, project_id):
+            raise HTTPException(
+                403,
+                f"Caller {caller} is not a member of project {project_id!r}",
+            )
+        from src.cli.config import _load_projects
+        projects = _load_projects()
+        if project_id not in projects:
+            raise HTTPException(404, f"Project '{project_id}' not found")
+        meta = projects[project_id]
+        _reap_tasks_opportunistically()
+        rows = store.list_project(project_id)
+        s = _summarize_tasks(rows)
+        active = s["counts"]["active"]
+        blocked = s["counts"]["blocked"]
+        done = s["counts"]["done"]
+        failed = s["counts"]["failed"]
+        if active == 0 and blocked == 0 and done == 0 and failed == 0:
+            status_text = f"No tasks recorded for {project_id!r} yet."
+        else:
+            parts: list[str] = []
+            if active:
+                parts.append(f"{active} active")
+            if blocked:
+                parts.append(f"{blocked} blocked")
+            if done:
+                parts.append(f"{done} done")
+            if failed:
+                parts.append(f"{failed} failed")
+            status_text = ", ".join(parts) + f" in project {project_id!r}."
+        return {
+            "project": {
+                "name": project_id,
+                "status": meta.get("status", "active") or "active",
+                "description": meta.get("description", ""),
+                "members": meta.get("members", []),
+            },
+            "status_text": status_text,
+            "counts": s["counts"],
+            "top_blockers": s["blockers"],
+            "recent_completions": s["recent_done"],
+            "ask_for_user": s["blockers"],
+        }
+
+    # === Operator product surface (Task 7) — archive / delete ===
+    #
+    # Archive endpoints flip a status flag and stop scheduling. Delete
+    # endpoints proxy through the existing ``PendingActions`` store
+    # (Task 2d) — same propose-then-confirm flow as ``propose_edit`` /
+    # ``confirm_edit``, just with ``target_kind="project"`` /
+    # ``"agent"`` and ``action_kind="delete"``. Archive must precede
+    # delete; the gate is enforced server-side at propose time.
+
+    @app.post("/mesh/projects/{name}/archive")
+    async def archive_project_endpoint(name: str, request: Request) -> dict:
+        """Archive a project (operator-only). Idempotent."""
+        caller = _extract_verified_agent_id(request)
+        if caller != "operator" and not _is_internal_caller(request):
+            raise HTTPException(403, "Only the operator can archive projects")
+        from src.cli.config import _archive_project, _load_projects
+        if name not in _load_projects():
+            raise HTTPException(404, f"Project '{name}' not found")
+        try:
+            _archive_project(name)
+        except ValueError as e:
+            raise HTTPException(404, str(e))
+        return {"archived": True, "project": name}
+
+    @app.post("/mesh/projects/{name}/unarchive")
+    async def unarchive_project_endpoint(name: str, request: Request) -> dict:
+        """Unarchive a project (operator-only). Idempotent."""
+        caller = _extract_verified_agent_id(request)
+        if caller != "operator" and not _is_internal_caller(request):
+            raise HTTPException(403, "Only the operator can unarchive projects")
+        from src.cli.config import _load_projects, _unarchive_project
+        if name not in _load_projects():
+            raise HTTPException(404, f"Project '{name}' not found")
+        try:
+            _unarchive_project(name)
+        except ValueError as e:
+            raise HTTPException(404, str(e))
+        return {"archived": False, "project": name}
+
+    @app.post("/mesh/agents/{agent_id}/archive")
+    async def archive_agent_endpoint(agent_id: str, request: Request) -> dict:
+        """Archive an agent (operator-only).
+
+        Stops cron / heartbeat and removes the agent from the live
+        registry. Workspace + history are retained; the agent can be
+        unarchived later. Container is best-effort stopped.
+        """
+        caller = _extract_verified_agent_id(request)
+        if caller != "operator" and not _is_internal_caller(request):
+            raise HTTPException(403, "Only the operator can archive agents")
+        if agent_id == "operator":
+            raise HTTPException(400, "The operator agent cannot be archived")
+        from src.cli.config import _archive_agent, _load_config
+        cfg = _load_config()
+        if agent_id not in cfg.get("agents", {}):
+            raise HTTPException(404, f"Agent '{agent_id}' not found")
+        try:
+            _archive_agent(agent_id)
+        except ValueError as e:
+            raise HTTPException(404, str(e))
+        # Stop scheduling: drop heartbeat and any cron jobs the agent owns.
+        if cron_scheduler is not None:
+            try:
+                cron_scheduler.remove_agent_jobs(agent_id)
+            except Exception as e:
+                logger.warning("archive_agent: cron cleanup for %s failed: %s", agent_id, e)
+        # Best-effort container stop. Failures here don't break archive.
+        if container_manager is not None:
+            try:
+                container_manager.stop_agent(agent_id)
+            except Exception as e:
+                logger.warning("archive_agent: container stop for %s failed: %s", agent_id, e)
+        return {"archived": True, "agent_id": agent_id}
+
+    @app.post("/mesh/agents/{agent_id}/unarchive")
+    async def unarchive_agent_endpoint(agent_id: str, request: Request) -> dict:
+        """Unarchive an agent (operator-only). Restart left to operator."""
+        caller = _extract_verified_agent_id(request)
+        if caller != "operator" and not _is_internal_caller(request):
+            raise HTTPException(403, "Only the operator can unarchive agents")
+        from src.cli.config import _load_config, _unarchive_agent
+        cfg = _load_config()
+        if agent_id not in cfg.get("agents", {}):
+            raise HTTPException(404, f"Agent '{agent_id}' not found")
+        try:
+            _unarchive_agent(agent_id)
+        except ValueError as e:
+            raise HTTPException(404, str(e))
+        return {"archived": False, "agent_id": agent_id}
+
+    @app.post("/mesh/projects/{name}/propose-delete")
+    async def propose_delete_project(name: str, request: Request) -> dict:
+        """Propose deletion of an archived project. Returns nonce for human confirm.
+
+        Pre-conditions:
+          * project exists
+          * project is archived (delete on a live project rejected)
+
+        Stores a pending action with ``target_kind="project"``,
+        ``action_kind="delete"``, ``origin_kind`` from the validated
+        ``X-Origin``. Confirmation goes through the existing
+        ``/mesh/config/confirm`` endpoint, which now dispatches on
+        ``target_kind``.
+        """
+        caller = _extract_verified_agent_id(request)
+        if caller != "operator" and not _is_internal_caller(request):
+            raise HTTPException(403, "Only the operator can delete projects")
+        from src.cli.config import _load_projects, _project_status
+        projects = _load_projects()
+        if name not in projects:
+            raise HTTPException(404, f"Project '{name}' not found")
+        status = _project_status(name)
+        if status != "archived":
+            raise HTTPException(
+                400,
+                "Project must be archived before delete. "
+                "Call /mesh/projects/{name}/archive first.",
+            )
+        origin = _validated_origin(request, caller)
+        origin_kind = origin.kind if origin is not None else None
+        # Cap pending rows to bound storage growth (mirrors propose_edit).
+        pending_actions.reap_expired()
+        existing = pending_actions.list_pending()
+        if len(existing) >= _MAX_PENDING:
+            oldest = min(existing, key=lambda r: r["expires_at"])
+            with pending_actions._conn() as _conn:
+                _conn.execute(
+                    "DELETE FROM pending_actions WHERE nonce=?",
+                    (oldest["nonce"],),
+                )
+        nonce = str(_uuid.uuid4())
+        members = projects[name].get("members", []) or []
+        summary = (
+            f"Delete project {name!r} and unlink {len(members)} agent(s). "
+            "Workspaces and per-agent history are retained; project metadata, "
+            "project.md, and project blackboard rows are removed."
+        )
+        payload = {
+            "name": name,
+            "summary": summary,
+            "members": members,
+        }
+        record = pending_actions.store(
+            nonce=nonce,
+            actor="operator",
+            target_kind="project",
+            target_id=name,
+            action_kind="delete",
+            payload=payload,
+            origin_kind=origin_kind,
+            ttl=_CHANGE_TTL_SECONDS,
+        )
+        return {
+            "change_id": nonce,
+            "summary": summary,
+            "expires_at": datetime.fromtimestamp(
+                record["expires_at"], tz=timezone.utc,
+            ).isoformat(),
+            "payload_digest": record["payload_digest"],
+            "requires_confirmation": True,
+        }
+
+    @app.post("/mesh/agents/{agent_id}/propose-delete")
+    async def propose_delete_agent(agent_id: str, request: Request) -> dict:
+        """Propose deletion of an archived agent. Returns nonce for human confirm.
+
+        Pre-conditions:
+          * agent exists
+          * agent is archived
+          * agent is not ``operator``
+        """
+        caller = _extract_verified_agent_id(request)
+        if caller != "operator" and not _is_internal_caller(request):
+            raise HTTPException(403, "Only the operator can delete agents")
+        if agent_id == "operator":
+            raise HTTPException(400, "The operator agent cannot be deleted")
+        from src.cli.config import _agent_status, _load_config
+        cfg = _load_config()
+        if agent_id not in cfg.get("agents", {}):
+            raise HTTPException(404, f"Agent '{agent_id}' not found")
+        status = _agent_status(agent_id)
+        if status != "archived":
+            raise HTTPException(
+                400,
+                "Agent must be archived before delete. "
+                "Call /mesh/agents/{agent_id}/archive first.",
+            )
+        origin = _validated_origin(request, caller)
+        origin_kind = origin.kind if origin is not None else None
+        pending_actions.reap_expired()
+        existing = pending_actions.list_pending()
+        if len(existing) >= _MAX_PENDING:
+            oldest = min(existing, key=lambda r: r["expires_at"])
+            with pending_actions._conn() as _conn:
+                _conn.execute(
+                    "DELETE FROM pending_actions WHERE nonce=?",
+                    (oldest["nonce"],),
+                )
+        nonce = str(_uuid.uuid4())
+        summary = (
+            f"Delete agent {agent_id!r}. Container stopped, config and "
+            "permissions removed, workspace dropped."
+        )
+        payload = {
+            "agent_id": agent_id,
+            "summary": summary,
+        }
+        record = pending_actions.store(
+            nonce=nonce,
+            actor="operator",
+            target_kind="agent",
+            target_id=agent_id,
+            action_kind="delete",
+            payload=payload,
+            origin_kind=origin_kind,
+            ttl=_CHANGE_TTL_SECONDS,
+        )
+        return {
+            "change_id": nonce,
+            "summary": summary,
+            "expires_at": datetime.fromtimestamp(
+                record["expires_at"], tz=timezone.utc,
+            ).isoformat(),
+            "payload_digest": record["payload_digest"],
+            "requires_confirmation": True,
+        }
+
+    async def _apply_pending_delete(record: dict) -> dict:
+        """Apply a consumed delete pending-action.
+
+        Dispatches on ``target_kind``. Project deletes call
+        ``_delete_project``; agent deletes stop the container, remove
+        the agent from config + permissions, and tear down per-agent
+        runtime state via ``app.cleanup_agent``.
+        """
+        kind = record["target_kind"]
+        target_id = record["target_id"]
+        if kind == "project":
+            from src.cli.config import _delete_project, _load_projects
+            if target_id not in _load_projects():
+                raise HTTPException(404, f"Project '{target_id}' no longer exists")
+            try:
+                _delete_project(target_id)
+            except ValueError as e:
+                raise HTTPException(404, str(e))
+            blackboard.log_audit(
+                action="delete_project", target=target_id,
+                change_id=record["nonce"],
+            )
+            return {"success": True, "deleted": "project", "name": target_id}
+        if kind == "agent":
+            from src.cli.config import _load_config, _remove_agent
+            if target_id not in _load_config().get("agents", {}):
+                raise HTTPException(404, f"Agent '{target_id}' no longer exists")
+            try:
+                _remove_agent(target_id, stop_container=container_manager is not None)
+            except Exception as e:
+                raise HTTPException(500, f"Failed to delete agent: {e}")
+            # Drop runtime state via cleanup_agent (rate buckets, vault,
+            # blackboard, pubsub, lanes, cron, costs, traces, wallets).
+            try:
+                app.cleanup_agent(target_id)
+            except Exception as e:
+                logger.warning("cleanup_agent(%s) failed during delete: %s", target_id, e)
+            try:
+                router.unregister_agent(target_id)
+            except Exception:
+                pass
+            if health_monitor is not None:
+                try:
+                    health_monitor.unregister(target_id)
+                except Exception:
+                    pass
+            blackboard.log_audit(
+                action="delete_agent", target=target_id,
+                change_id=record["nonce"],
+            )
+            return {"success": True, "deleted": "agent", "agent_id": target_id}
+        raise HTTPException(
+            400, f"Unsupported pending-delete target_kind: {kind!r}",
+        )
 
     @app.post("/mesh/tasks/{task_id}/cancel")
     async def cancel_task(task_id: str, request: Request) -> dict:
@@ -3660,7 +4350,11 @@ def create_mesh_app(
 
     @app.post("/mesh/agents/{agent_id}/config")
     async def update_agent_config(agent_id: str, request: Request) -> dict:
-        """Apply a pending config change. Used by confirm_edit tool."""
+        """Apply a pending config change. Used by confirm_edit tool.
+
+        Refuses delete pending actions — those must go through
+        ``/mesh/config/confirm`` so the destructive dispatcher runs.
+        """
         _require_any_auth(request)
         caller = _resolve_agent_id("", request)
         if caller != "operator":
@@ -3676,6 +4370,11 @@ def create_mesh_app(
         peek = pending_actions.peek(change_id)
         if peek is not None and peek.get("target_id") != agent_id:
             raise HTTPException(400, "Agent ID mismatch")
+        if peek is not None and peek.get("action_kind") == "delete":
+            raise HTTPException(
+                400,
+                "Use /mesh/config/confirm for delete pending actions",
+            )
 
         record = pending_actions.consume(
             change_id,
@@ -3692,16 +4391,23 @@ def create_mesh_app(
 
     @app.post("/mesh/config/confirm")
     async def confirm_config_change(request: Request) -> dict:
-        """Apply a pending config change by change_id only.
+        """Apply a pending action by change_id only.
 
-        Unlike POST /mesh/agents/{agent_id}/config, this endpoint resolves
-        the agent_id from the pending change itself so callers don't need
-        to know the target agent_id up front.  Used by the operator's
-        ``confirm_edit`` tool.
+        Resolves the target from the pending action itself so callers
+        don't need to know the target ahead of time. Dispatches on
+        ``target_kind``:
+
+        * ``target_kind="agent"`` + standard config field — the legacy
+          ``confirm_edit`` flow (apply through ``_apply_pending_change``).
+        * ``target_kind in {"project", "agent"}`` + ``action_kind="delete"``
+          — Task 7 destructive-confirm flow (apply through
+          ``_apply_pending_delete``).
+
+        Both shapes share the same ``require_origin_kind="human"`` gate
+        and the same atomic single-shot consume.
         """
-        _require_any_auth(request)
-        caller = _resolve_agent_id("", request)
-        if caller != "operator":
+        caller = _extract_verified_agent_id(request)
+        if caller != "operator" and not _is_internal_caller(request):
             raise HTTPException(403, "Only the operator can confirm config changes")
         _confirm_origin_check(request, caller)
         data = await request.json()
@@ -3709,8 +4415,8 @@ def create_mesh_app(
         client_digest = data.get("payload_digest")
 
         # Consume + apply. ``consume`` is atomic: same nonce can only
-        # be applied once. If ``_apply_pending_change`` raises, the
-        # row is already gone -- the caller must propose a new change.
+        # be applied once. If the apply raises, the row is already
+        # gone — the caller must propose a new change.
         record = pending_actions.consume(
             change_id,
             confirmer="operator",
@@ -3719,6 +4425,14 @@ def create_mesh_app(
         )
         if not record:
             raise HTTPException(400, "Pending action invalid or expired")
+
+        # Task 7: destructive deletes use ``action_kind="delete"`` plus
+        # ``target_kind in {"project", "agent"}``. Everything else stays
+        # on the legacy config-edit path.
+        if record.get("action_kind") == "delete" and record.get("target_kind") in {
+            "project", "agent",
+        }:
+            return await _apply_pending_delete(record)
 
         return await _apply_pending_change(
             change_id, _record_to_legacy_change(record),
