@@ -150,7 +150,10 @@ async def hand_off(
     if output_key:
         task_record["output_key"] = output_key
     if origin:
-        task_record["origin"] = origin
+        if hasattr(origin, "model_dump"):
+            task_record["origin"] = origin.model_dump()
+        elif isinstance(origin, dict):
+            task_record["origin"] = dict(origin)
 
     task_key = (
         f"global/tasks/{to}/{handoff_id}"

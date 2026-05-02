@@ -1923,9 +1923,18 @@ def test_agent_profile_permission_denied(mesh_components):
 class TestParseOriginHeader:
     def test_valid_header(self):
         from src.shared.trace import parse_origin_header
-        assert parse_origin_header('{"channel":"whatsapp","user":"+1234"}') == {
-            "channel": "whatsapp", "user": "+1234",
-        }
+        from src.shared.types import MessageOrigin
+
+        result = parse_origin_header('{"channel":"whatsapp","user":"+1234"}')
+        assert isinstance(result, MessageOrigin)
+        # Legacy header (no ``kind``) → least-trusted ``kind="agent"``.
+        assert result.kind == "agent"
+        assert result.channel == "whatsapp"
+        assert result.user == "+1234"
+        # Dict-compat shim — readers in flight during the Task 2b
+        # migration can still treat it as a dict.
+        assert result.get("channel") == "whatsapp"
+        assert result.get("user") == "+1234"
 
     def test_none_returns_none(self):
         from src.shared.trace import parse_origin_header
@@ -1949,6 +1958,7 @@ class TestParseOriginHeader:
 
     def test_empty_fields_returns_none(self):
         from src.shared.trace import parse_origin_header
+        # Legacy header (no ``kind``) still requires non-empty channel/user.
         assert parse_origin_header('{"channel":"","user":"+1"}') is None
         assert parse_origin_header('{"channel":"whatsapp","user":""}') is None
 
@@ -1959,10 +1969,18 @@ class TestParseOriginHeader:
 
     def test_extra_fields_stripped(self):
         from src.shared.trace import parse_origin_header
+        from src.shared.types import MessageOrigin
+
         result = parse_origin_header(
             '{"channel":"whatsapp","user":"+1","extra":"dropped","nested":{}}'
         )
-        assert result == {"channel": "whatsapp", "user": "+1"}
+        assert isinstance(result, MessageOrigin)
+        # Only ``kind`` / ``channel`` / ``user`` survive.
+        assert result.channel == "whatsapp"
+        assert result.user == "+1"
+        # No way for arbitrary keys to leak onto the model.
+        assert not hasattr(result, "extra")
+        assert not hasattr(result, "nested")
 
     def test_oversized_raw_header_returns_none(self):
         from src.shared.trace import parse_origin_header
@@ -2067,7 +2085,14 @@ def test_mesh_wake_propagates_origin_header(tmp_path):
         call = captured[0]
         assert call["agent"] == "chef"
         assert call["mode"] == "followup"
-        assert call["origin"] == {"channel": "whatsapp", "user": "+1234"}
+        # ``parse_origin_header`` returns a typed ``MessageOrigin``; legacy
+        # ``X-Origin`` headers without a ``kind`` segment default to
+        # ``kind="agent"`` (least-trusted).
+        from src.shared.types import MessageOrigin
+        assert isinstance(call["origin"], MessageOrigin)
+        assert call["origin"].kind == "agent"
+        assert call["origin"].channel == "whatsapp"
+        assert call["origin"].user == "+1234"
         assert call["auto_notify"] is True
     finally:
         loop.call_soon_threadsafe(loop.stop)

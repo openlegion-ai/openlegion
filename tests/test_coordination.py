@@ -588,6 +588,30 @@ class TestHandOffOriginPropagation:
         assert task_record.get("origin") == origin
 
     @pytest.mark.asyncio
+    async def test_hand_off_stores_typed_origin_as_plain_dict(self):
+        """Typed origins must be JSON-serializable when written to blackboard."""
+        from src.agent.builtins.coordination_tool import hand_off
+        from src.shared.trace import current_origin
+        from src.shared.types import MessageOrigin
+
+        mc = _make_mesh_client(agent_id="operator")
+        mc.list_agents.return_value = {"chef": {"role": "chef"}}
+
+        origin = MessageOrigin(kind="human", channel="cli", user="jeff")
+        token = current_origin.set(origin)
+        try:
+            await hand_off(to="chef", summary="do work", mesh_client=mc)
+        finally:
+            current_origin.reset(token)
+
+        task_record = mc.write_blackboard.call_args_list[-1].args[1]
+        assert task_record.get("origin") == {
+            "kind": "human",
+            "channel": "cli",
+            "user": "jeff",
+        }
+
+    @pytest.mark.asyncio
     async def test_hand_off_no_origin_no_origin_in_task_record(self):
         """When current_origin is None, task_record has no 'origin' key."""
         from src.agent.builtins.coordination_tool import hand_off
