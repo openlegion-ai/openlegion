@@ -2121,6 +2121,113 @@ def test_mesh_wake_invalid_origin_header_ignored(tmp_path):
         bb.close()
 
 
+# ── Task 1 (characterization): worker → operator wake is permitted ────
+
+
+@pytest.mark.characterization
+def test_project_worker_can_wake_operator_today(tmp_path):
+    # CAPTURE-TO-TIGHTEN — Task 2/4 will block worker → operator wakes;
+    # tasks-records polling replaces direct wake. After Task 2 (origin as
+    # authz) and Task 4 (operator authentication & registration), workers
+    # should signal completion via blackboard task records and the
+    # operator polls them, rather than waking the operator synchronously.
+    # When those tasks land: flip this to assert 403 (or whatever the
+    # gate becomes), and replace it with a positive test asserting the
+    # task-record polling path works for the same hand-off scenario.
+    """Today ``/mesh/wake?target=operator`` is allowed for any caller
+    whose ``can_message`` allowlist permits the operator. A project
+    worker with ``can_message=["*"]`` therefore can wake the operator
+    directly. This pins the un-gated direct-wake path that Task 2/4 will
+    remove in favour of task-record polling.
+    """
+    import asyncio
+    import threading
+    import time
+
+    from fastapi.testclient import TestClient
+
+    from src.host.mesh import Blackboard, MessageRouter, PubSub
+    from src.host.permissions import PermissionMatrix
+    from src.host.server import create_mesh_app
+    from src.shared.types import AgentPermissions
+
+    bb = Blackboard(db_path=str(tmp_path / "wake_op_bb.db"))
+    pubsub = PubSub()
+
+    # Project worker has ``can_message=["*"]`` — the only gate today.
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {
+        "scout": AgentPermissions(
+            agent_id="scout",
+            can_message=["*"],
+            blackboard_read=["projects/growth/*"],
+            blackboard_write=["projects/growth/*"],
+        ),
+        "operator": AgentPermissions(
+            agent_id="operator",
+            can_message=["*"],
+            blackboard_read=["*"],
+            blackboard_write=["*"],
+        ),
+    }
+
+    router = MessageRouter(permissions=perms, agent_registry={})
+    router.register_agent("scout", "http://scout:8400", role="scout")
+    router.register_agent("operator", "http://operator:8400", role="operator")
+
+    captured: list[dict] = []
+
+    class _FakeLane:
+        async def enqueue(self, agent, message, **kwargs):
+            captured.append({"agent": agent, "message": message, **kwargs})
+            return ""
+
+    lane_manager = _FakeLane()
+
+    loop = asyncio.new_event_loop()
+    ready = threading.Event()
+
+    def _run():
+        asyncio.set_event_loop(loop)
+        loop.call_soon(ready.set)
+        loop.run_forever()
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    ready.wait()
+
+    app = create_mesh_app(
+        bb, pubsub, router, perms,
+        lane_manager=lane_manager,
+        dispatch_loop=loop,
+    )
+    client = TestClient(app)
+
+    try:
+        # No auth tokens are configured on this app, so the route reads
+        # the caller from the X-Agent-ID header — pin the worker as the
+        # caller. This mirrors what a real bearer token would resolve to.
+        resp = client.post(
+            "/mesh/wake",
+            params={"target": "operator", "message": "task done"},
+            headers={"X-Agent-ID": "scout"},
+        )
+        # Pin: today this is permitted.
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body.get("woken") is True
+
+        # The lane was driven — the operator received a wake-up.
+        deadline = time.monotonic() + 2.0
+        while not captured and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert captured, "operator was not woken via lane"
+        assert captured[0]["agent"] == "operator"
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        bb.close()
+
+
 # ── Fix 4: RuntimeContext._handle_notify_origin routing ───────────
 
 

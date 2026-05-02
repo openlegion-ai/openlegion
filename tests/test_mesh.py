@@ -1253,3 +1253,177 @@ async def test_list_agents_unscoped_marks_operator_global(tmp_path):
         bb.close()
         costs.close()
         traces.close()
+
+
+# ── Task 1 (characterization): /mesh/agents per-caller-type visibility ─
+
+
+@pytest.mark.asyncio
+async def test_list_agents_project_scope_excludes_other_project_members(tmp_path):
+    """When ``/mesh/agents?project=X`` is called, members of project Y must
+    NOT appear in the response. The endpoint reads members from the project
+    metadata on disk and only includes registered agents whose id is a
+    member, plus the operator (which is fleet-global). This pins the
+    project-isolation invariant for the response shape.
+    """
+    from unittest.mock import patch
+
+    import yaml
+    from httpx import ASGITransport, AsyncClient
+
+    from src.host.costs import CostTracker
+    from src.host.server import create_mesh_app
+    from src.host.traces import TraceStore
+
+    projects_dir = tmp_path / "projects"
+    # Project alpha has scout.
+    alpha_dir = projects_dir / "alpha"
+    alpha_dir.mkdir(parents=True)
+    (alpha_dir / "metadata.yaml").write_text(
+        yaml.dump({
+            "name": "alpha", "members": ["scout"],
+            "created_at": "2026-05-02T00:00:00+00:00",
+        }),
+    )
+    # Project beta has analyst.
+    beta_dir = projects_dir / "beta"
+    beta_dir.mkdir(parents=True)
+    (beta_dir / "metadata.yaml").write_text(
+        yaml.dump({
+            "name": "beta", "members": ["analyst"],
+            "created_at": "2026-05-02T00:00:00+00:00",
+        }),
+    )
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix()
+    router = MessageRouter(perms, {})
+    costs = CostTracker(str(tmp_path / "costs.db"))
+    traces = TraceStore(str(tmp_path / "traces.db"))
+
+    router.register_agent("scout", "http://scout:8400", [])
+    router.register_agent("analyst", "http://analyst:8400", [])
+    router.register_agent("operator", "http://operator:8400", [])
+    # A standalone agent that is in NO project.
+    router.register_agent("loner", "http://loner:8400", [])
+
+    app = create_mesh_app(
+        blackboard=bb, pubsub=pubsub, router=router, permissions=perms,
+        cost_tracker=costs, trace_store=traces,
+    )
+
+    try:
+        with patch("src.cli.config.PROJECTS_DIR", projects_dir):
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test",
+            ) as client:
+                resp = await client.get("/mesh/agents", params={"project": "alpha"})
+        assert resp.status_code == 200
+        data = resp.json()
+        # Project member present.
+        assert "scout" in data
+        # Operator is always visible.
+        assert "operator" in data
+        # Other project's member is NOT visible.
+        assert "analyst" not in data
+        # Standalone non-member is NOT visible.
+        assert "loner" not in data
+    finally:
+        bb.close()
+        costs.close()
+        traces.close()
+
+
+@pytest.mark.asyncio
+async def test_list_agents_internal_caller_sees_full_fleet(tmp_path):
+    """Internal callers (loopback / dashboard / mesh-internal) hitting
+    ``/mesh/agents`` with no project filter receive every registered
+    agent. This pins the unscoped path that dashboards rely on.
+    """
+    from httpx import ASGITransport, AsyncClient
+
+    from src.host.costs import CostTracker
+    from src.host.server import create_mesh_app
+    from src.host.traces import TraceStore
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix()
+    router = MessageRouter(perms, {})
+    costs = CostTracker(str(tmp_path / "costs.db"))
+    traces = TraceStore(str(tmp_path / "traces.db"))
+
+    # Mixed fleet across projects + standalone.
+    router.register_agent("operator", "http://operator:8400", [])
+    router.register_agent("scout", "http://scout:8400", [])
+    router.register_agent("analyst", "http://analyst:8400", [])
+    router.register_agent("loner", "http://loner:8400", [])
+
+    app = create_mesh_app(
+        blackboard=bb, pubsub=pubsub, router=router, permissions=perms,
+        cost_tracker=costs, trace_store=traces,
+    )
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            resp = await client.get("/mesh/agents")
+        assert resp.status_code == 200
+        data = resp.json()
+        # Full fleet visible — every registered agent appears.
+        assert set(data.keys()) == {"operator", "scout", "analyst", "loner"}
+    finally:
+        bb.close()
+        costs.close()
+        traces.close()
+
+
+@pytest.mark.asyncio
+async def test_list_agents_unknown_project_returns_empty(tmp_path):
+    """``/mesh/agents?project=X`` for an unknown project name returns an
+    empty mapping — the endpoint logs a warning but does not 404. This
+    pins the 'silent empty' contract that callers (mesh_client) rely on
+    when an agent's project metadata is stale.
+    """
+    from unittest.mock import patch
+
+    from httpx import ASGITransport, AsyncClient
+
+    from src.host.costs import CostTracker
+    from src.host.server import create_mesh_app
+    from src.host.traces import TraceStore
+
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()  # exists but no projects inside
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix()
+    router = MessageRouter(perms, {})
+    costs = CostTracker(str(tmp_path / "costs.db"))
+    traces = TraceStore(str(tmp_path / "traces.db"))
+
+    router.register_agent("operator", "http://operator:8400", [])
+    router.register_agent("scout", "http://scout:8400", [])
+
+    app = create_mesh_app(
+        blackboard=bb, pubsub=pubsub, router=router, permissions=perms,
+        cost_tracker=costs, trace_store=traces,
+    )
+
+    try:
+        with patch("src.cli.config.PROJECTS_DIR", projects_dir):
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test",
+            ) as client:
+                resp = await client.get("/mesh/agents", params={"project": "ghost"})
+        assert resp.status_code == 200
+        # Empty body (no project members + no operator carve-out — the
+        # operator carve-out only fires on an existing project).
+        assert resp.json() == {}
+    finally:
+        bb.close()
+        costs.close()
+        traces.close()

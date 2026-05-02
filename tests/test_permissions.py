@@ -652,3 +652,300 @@ class TestOperatorInboxGlobalCarveOut:
         assert m.can_read_blackboard("scout", "global/output/analyst/ho_1") is False
         # Sender may inspect only its own submitted output.
         assert m.can_read_blackboard("scout", "global/output/scout/ho_1") is True
+
+# ── Task 1 (characterization): can_spawn over-broad gate ──────────────
+#
+# Today ``can_spawn=True`` is one bit gating BOTH ephemeral-worker spawning
+# (subagent / cron / template apply) AND durable fleet operations (creating
+# named agents). Task 3 will introduce ``can_manage_fleet`` and split the
+# durable-fleet path off ``can_spawn``. The tests below pin three current
+# call sites:
+#
+#   * ``permissions.can_spawn`` at ``host/server.py:1531``  → ``POST /mesh/spawn``
+#   * ``permissions.can_spawn`` at ``host/server.py:1608``  → ``POST /mesh/fleet/apply``
+#   * ``permissions.can_spawn`` at ``host/server.py:1754``  → ``POST /mesh/agents/create``
+#
+# The first is ephemeral; the other two are durable fleet operations that
+# Task 3 wants to require ``can_manage_fleet`` for.
+
+class _SpawnRouteFixture:
+    """Helper that builds a mesh app with a permissive ``container_manager``
+    so the three ``can_spawn`` gates can be exercised end-to-end. We bypass
+    the actual container start by pre-creating an in-memory ``MagicMock``."""
+
+    @staticmethod
+    def build(tmp_path, monkeypatch, *, can_spawn: bool):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from fastapi.testclient import TestClient
+
+        from src.host.mesh import Blackboard, MessageRouter, PubSub
+        from src.host.permissions import PermissionMatrix
+        from src.host.server import create_mesh_app
+
+        cfg_dir = tmp_path / "config"
+        cfg_dir.mkdir()
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        templates_dir = tmp_path / "templates"
+        templates_dir.mkdir()
+        # Minimal one-agent template for /mesh/fleet/apply.
+        import yaml
+        (templates_dir / "tinybot.yaml").write_text(yaml.dump({
+            "name": "tinybot",
+            "description": "single-agent template for tests",
+            "agents": {
+                "tinybot": {
+                    "role": "tester",
+                    "model": "openai/gpt-4o-mini",
+                    "instructions": "be tiny",
+                },
+            },
+        }))
+
+        monkeypatch.setattr("src.cli.config.PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr("src.cli.config.AGENTS_FILE", cfg_dir / "agents.yaml")
+        monkeypatch.setattr("src.cli.config.PERMISSIONS_FILE",
+                            cfg_dir / "permissions.json")
+        monkeypatch.setattr("src.cli.config.CONFIG_FILE", cfg_dir / "mesh.yaml")
+        monkeypatch.setattr("src.cli.config.TEMPLATES_DIR", templates_dir)
+
+        # Seed the permissions file so reload() preserves our caller.
+        cfg_dir_perms = cfg_dir / "permissions.json"
+        import json as _json
+        cfg_dir_perms.write_text(_json.dumps({
+            "permissions": {
+                "worker": {
+                    "can_spawn": can_spawn,
+                    "can_message": ["mesh"],
+                    "blackboard_read": [],
+                    "blackboard_write": [],
+                },
+            },
+        }))
+
+        # Real PermissionMatrix loaded from the seeded file so reload()
+        # in the create route picks up the on-disk write.
+        perms = PermissionMatrix(config_path=str(cfg_dir_perms))
+        # Sanity: the seeded entry was loaded.
+        assert "worker" in perms.permissions
+
+        bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+        pubsub = PubSub()
+        router = MessageRouter(perms, {})
+
+        # Fake container manager — accepts spawn / start, returns a URL.
+        cm = MagicMock()
+        cm.project_root = tmp_path
+        cm.spawn_agent.return_value = "http://localhost:9100"
+        cm.start_agent.return_value = "http://localhost:9101"
+        cm.wait_for_agent = AsyncMock(return_value=True)
+        cm.agents = {}
+
+        app = create_mesh_app(
+            bb, pubsub, router, perms,
+            container_manager=cm,
+        )
+        client = TestClient(app)
+        return {
+            "client": client,
+            "perms": perms,
+            "router": router,
+            "container_manager": cm,
+            "bb": bb,
+        }
+
+
+def test_can_spawn_today_gates_mesh_spawn_endpoint(tmp_path, monkeypatch):
+    """Pin (positive): an agent with ``can_spawn=True`` can call
+    ``POST /mesh/spawn``. This is the *legitimate* ephemeral-worker path
+    that should keep working when Task 3 splits ``can_manage_fleet``
+    out — ``can_spawn`` retains ephemeral semantics. Acts as the
+    success-baseline alongside the two capture-to-tighten tests below.
+    No characterization marker: this is a forever-pin.
+    """
+    fx = _SpawnRouteFixture.build(tmp_path, monkeypatch, can_spawn=True)
+    client = fx["client"]
+    resp = client.post(
+        "/mesh/spawn",
+        json={"spawned_by": "worker", "role": "subhelper", "ttl": 120},
+        headers={"X-Agent-ID": "worker"},
+    )
+    # Should NOT be the 403 from the can_spawn gate.
+    assert resp.status_code != 403, resp.text
+    # The fake container manager returns success, so the route should 200.
+    assert resp.status_code == 200, resp.text
+    fx["bb"].close()
+
+
+@pytest.mark.characterization
+def test_can_spawn_today_also_gates_fleet_apply_endpoint(tmp_path, monkeypatch):
+    # CAPTURE-TO-TIGHTEN — this test asserts today's over-broad behavior.
+    # After Task 3 (split can_spawn), this endpoint requires can_manage_fleet.
+    # When Task 3 lands: flip the assertion or delete this test, and add a
+    # negative test in test_permissions.py.
+    """A worker with ``can_spawn=True`` and otherwise-narrow permissions
+    can today reach ``POST /mesh/fleet/apply`` — applying a fleet template
+    is treated as just another spawn. After Task 3 it should require the
+    new ``can_manage_fleet`` capability instead.
+    """
+    fx = _SpawnRouteFixture.build(tmp_path, monkeypatch, can_spawn=True)
+    client = fx["client"]
+    # Auth is not configured on the test app, so the route reads
+    # ``data["spawned_by"]`` directly. We pass our worker.
+    resp = client.post(
+        "/mesh/fleet/apply",
+        json={"spawned_by": "worker", "template": "tinybot"},
+        headers={"X-Agent-ID": "worker"},
+    )
+    # Pin: today's behavior — succeeds because can_spawn is enough.
+    assert resp.status_code != 403, resp.text
+    # Either 200 (succeeded) or 5xx from a downstream stub failing — what
+    # we are pinning is "not 403 from the can_spawn gate."
+    assert resp.status_code < 500, resp.text
+    fx["bb"].close()
+
+
+@pytest.mark.characterization
+def test_can_spawn_today_also_gates_agents_create_endpoint(tmp_path, monkeypatch):
+    # CAPTURE-TO-TIGHTEN — this test asserts today's over-broad behavior.
+    # After Task 3 (split can_spawn), this endpoint requires can_manage_fleet.
+    # When Task 3 lands: flip the assertion or delete this test, and add a
+    # negative test in test_permissions.py.
+    """A worker with ``can_spawn=True`` and otherwise-narrow permissions
+    can today reach ``POST /mesh/agents/create`` — creating a durable
+    custom agent is treated as just another spawn. After Task 3 it
+    should require the new ``can_manage_fleet`` capability instead.
+    """
+    fx = _SpawnRouteFixture.build(tmp_path, monkeypatch, can_spawn=True)
+    client = fx["client"]
+    resp = client.post(
+        "/mesh/agents/create",
+        json={
+            "agent_id": "worker",
+            "name": "freshbot",
+            "role": "tester",
+            "model": "openai/gpt-4o-mini",
+        },
+        headers={"X-Agent-ID": "worker"},
+    )
+    # Pin: today's behavior — succeeds because can_spawn is enough.
+    assert resp.status_code != 403, resp.text
+    # We don't lock to 200 — the downstream container manager is mocked
+    # and may return a 200 or a 500 depending on its internals; the key
+    # invariant here is we did NOT get the 403 from the can_spawn gate.
+    fx["bb"].close()
+
+
+# ── Task 1 (characterization): wildcard blackboard ACL survives project moves ─
+
+
+@pytest.mark.characterization
+def test_wildcard_blackboard_acl_survives_project_add(tmp_path, monkeypatch):
+    # CAPTURE-TO-TIGHTEN — this test asserts today's over-broad behavior.
+    # After Task 5 (project scope warn → enforce), an agent with a wildcard
+    # ACL who is added to a project should have the wildcard narrowed (or
+    # at least denied at the read/write gate when the key is outside the
+    # project namespace). When Task 5 lands: flip the assertion to verify
+    # the wildcard is removed / superseded, or delete this test and replace
+    # it with a positive test asserting "added agent can NOT read other
+    # projects' keys".
+    """``_add_project_blackboard_permissions`` is purely additive: it
+    appends ``projects/{name}/*`` to the agent's existing patterns and
+    never touches a pre-existing ``*``. The wildcard therefore survives
+    the move and the agent retains fleet-wide blackboard access — Task 5
+    will make this scope warn-then-enforce.
+    """
+    from src.cli.config import _add_project_blackboard_permissions
+
+    perms_file = tmp_path / "permissions.json"
+    perms_file.write_text(json.dumps({
+        "permissions": {
+            "rover": {
+                "blackboard_read": ["*"],
+                "blackboard_write": ["*"],
+            },
+        },
+    }))
+    monkeypatch.setattr("src.cli.config.PERMISSIONS_FILE", perms_file)
+
+    _add_project_blackboard_permissions("rover", "alpha")
+
+    perms = json.loads(perms_file.read_text())
+    read = perms["permissions"]["rover"]["blackboard_read"]
+    write = perms["permissions"]["rover"]["blackboard_write"]
+    # Wildcard survives — Task 5 should narrow.
+    assert "*" in read
+    assert "*" in write
+    # Project pattern was appended next to the wildcard.
+    assert "projects/alpha/*" in read
+    assert "projects/alpha/*" in write
+
+
+@pytest.mark.characterization
+def test_wildcard_blackboard_acl_survives_project_remove(tmp_path, monkeypatch):
+    # CAPTURE-TO-TIGHTEN — this test asserts today's over-broad behavior.
+    # After Task 5 (project scope warn → enforce), removing an agent from
+    # a project should leave it standalone, not still wildcarded. When
+    # Task 5 lands: flip the assertion to verify the wildcard was removed
+    # at project-leave time, or delete this test and add a negative test
+    # in this file asserting the agent can no longer read arbitrary keys.
+    """``_remove_project_blackboard_permissions`` only strips the project
+    pattern — a pre-existing ``*`` survives. Combined with the add-side
+    behavior above, this means an agent that ever had ``*`` retains
+    fleet-wide access through any number of project moves.
+    """
+    from src.cli.config import _remove_project_blackboard_permissions
+
+    perms_file = tmp_path / "permissions.json"
+    perms_file.write_text(json.dumps({
+        "permissions": {
+            "rover": {
+                # Both wildcard and project pattern present (the add-side
+                # state from the previous test).
+                "blackboard_read": ["*", "projects/alpha/*"],
+                "blackboard_write": ["*", "projects/alpha/*"],
+            },
+        },
+    }))
+    monkeypatch.setattr("src.cli.config.PERMISSIONS_FILE", perms_file)
+
+    _remove_project_blackboard_permissions("rover", "alpha")
+
+    perms = json.loads(perms_file.read_text())
+    read = perms["permissions"]["rover"]["blackboard_read"]
+    write = perms["permissions"]["rover"]["blackboard_write"]
+    # Project pattern was removed.
+    assert "projects/alpha/*" not in read
+    assert "projects/alpha/*" not in write
+    # But the wildcard survives — Task 5 should narrow.
+    assert "*" in read
+    assert "*" in write
+
+
+@pytest.mark.characterization
+def test_wildcard_blackboard_acl_grants_arbitrary_keys_after_project_remove(tmp_path):
+    # CAPTURE-TO-TIGHTEN — this test asserts today's over-broad behavior.
+    # After Task 5 (project scope warn → enforce), an agent that has been
+    # removed from project alpha should NOT be able to read keys from
+    # project beta. When Task 5 lands: flip these assertions to ``False``
+    # for cross-project keys, or delete this test in favour of a
+    # cross-project-isolation test in this file.
+    """End-to-end check that the surviving wildcard from the two tests
+    above actually grants live access via ``PermissionMatrix``: a
+    standalone-by-membership agent can still read another project's keys.
+    """
+    perms_file = tmp_path / "permissions.json"
+    perms_file.write_text(json.dumps({
+        "permissions": {
+            "rover": {
+                "blackboard_read": ["*"],
+                "blackboard_write": ["*"],
+            },
+        },
+    }))
+    pm = PermissionMatrix(config_path=str(perms_file))
+    # Wildcard reach across namespaces is what Task 5 will enforce away.
+    assert pm.can_read_blackboard("rover", "projects/alpha/secret")
+    assert pm.can_read_blackboard("rover", "projects/beta/secret")
+    assert pm.can_write_blackboard("rover", "projects/beta/note")
