@@ -5,6 +5,22 @@ agents:
     role: General-purpose assistant
     model: "{default_model}"
 
+    # Task 8 — structured routing metadata. Operator + routing layer
+    # read these directly; INTERFACE.md remains a free-text companion.
+    capabilities:
+      - General-purpose task execution
+      - Web research via search and browser
+      - Shell automation and file I/O
+      - Memory retention across sessions
+    preferred_inputs:
+      - Direct user messages with tasks or questions
+    expected_outputs:
+      - Notify user with results
+      - Persisted artifacts for substantial outputs
+    escalation_to: null
+    forbidden:
+      - Long-running unattended workflows without status updates
+
     initial_interface: |
       # Interface: assistant
 

@@ -1,6 +1,7 @@
 """Unit tests for shared Pydantic types."""
 
 from src.shared.types import (
+    AgentConfig,
     AgentMessage,
     AgentStatus,
     TaskAssignment,
@@ -60,5 +61,52 @@ def test_token_budget_record_usage_uses_unified_costs():
     budget2 = TokenBudget(max_tokens=1_000_000)
     budget2.record_usage(1000, "unknown/model")
     assert budget2.estimated_cost_usd > 0
+
+
+# ── Task 8: AgentConfig structured routing fields ──
+
+
+def test_agent_config_defaults_empty():
+    """All five Task-8 routing fields default cleanly so existing
+    agents.yaml entries without them load unchanged."""
+    cfg = AgentConfig(role="researcher", model="openai/gpt-4o-mini")
+    assert cfg.capabilities == []
+    assert cfg.preferred_inputs == []
+    assert cfg.expected_outputs == []
+    assert cfg.escalation_to is None
+    assert cfg.forbidden == []
+
+
+def test_agent_config_accepts_structured_fields():
+    cfg = AgentConfig(
+        role="pm",
+        model="openai/gpt-4o-mini",
+        capabilities=["Break down specs", "Coordinate handoffs"],
+        preferred_inputs=["User requests"],
+        expected_outputs=["Task specs"],
+        escalation_to="operator",
+        forbidden=["Writing code directly"],
+    )
+    assert cfg.capabilities == ["Break down specs", "Coordinate handoffs"]
+    assert cfg.preferred_inputs == ["User requests"]
+    assert cfg.expected_outputs == ["Task specs"]
+    assert cfg.escalation_to == "operator"
+    assert cfg.forbidden == ["Writing code directly"]
+
+
+def test_agent_config_extra_fields_allowed():
+    """Extra keys (e.g., legacy ``initial_interface``) round-trip via
+    ``extra='allow'`` so loading isn't a strict-validation gate."""
+    cfg = AgentConfig(role="pm", model="x", initial_interface="hello")
+    assert cfg.initial_interface == "hello"
+    cfg2 = AgentConfig(
+        role="pm",
+        model="x",
+        capabilities=["a"],
+        legacy_field="ignored-but-kept",  # type: ignore[call-arg]
+    )
+    dumped = cfg2.model_dump()
+    assert dumped["legacy_field"] == "ignored-but-kept"
+    assert dumped["capabilities"] == ["a"]
 
 

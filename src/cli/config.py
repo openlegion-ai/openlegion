@@ -403,8 +403,21 @@ def _add_agent_to_config(
     thinking: str = "",
     budget: dict | None = None,
     resources: dict | None = None,
+    capabilities: list[str] | None = None,
+    preferred_inputs: list[str] | None = None,
+    expected_outputs: list[str] | None = None,
+    escalation_to: str | None = None,
+    forbidden: list[str] | None = None,
 ) -> None:
-    """Add an agent entry to agents.yaml."""
+    """Add an agent entry to agents.yaml.
+
+    Task 8 adds five structured routing fields (``capabilities``,
+    ``preferred_inputs``, ``expected_outputs``, ``escalation_to``,
+    ``forbidden``). Each defaults to its empty form so existing
+    callers that don't pass them continue to work unchanged. They are
+    only persisted when non-empty so untouched yaml entries don't grow
+    noisy default keys.
+    """
     agents_cfg: dict = {"agents": {}}
     if AGENTS_FILE.exists():
         with open(AGENTS_FILE) as f:
@@ -431,6 +444,18 @@ def _add_agent_to_config(
         entry["budget"] = budget
     if resources:
         entry["resources"] = resources
+    # Task 8 — structured routing fields. Persist only when non-empty
+    # so existing minimal yaml entries don't grow empty default keys.
+    if capabilities:
+        entry["capabilities"] = list(capabilities)
+    if preferred_inputs:
+        entry["preferred_inputs"] = list(preferred_inputs)
+    if expected_outputs:
+        entry["expected_outputs"] = list(expected_outputs)
+    if escalation_to:
+        entry["escalation_to"] = escalation_to
+    if forbidden:
+        entry["forbidden"] = list(forbidden)
     agents_cfg["agents"][name] = entry
     AGENTS_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(AGENTS_FILE, "w") as f:
@@ -734,6 +759,79 @@ def _set_project_status(name: str, status: str) -> None:
         yaml.dump(data, f, default_flow_style=False, sort_keys=False)
 
 
+def _backfill_capabilities_for_existing_agents() -> None:
+    """One-shot Task 8 back-fill of structured routing fields on agents.yaml.
+
+    For any agent that has an empty ``capabilities`` list AND a non-empty
+    ``initial_interface`` block, parse the markdown headings and persist
+    the derived structured fields back to ``agents.yaml``. Skips agents
+    that already declare ``capabilities`` (idempotent: a populated field
+    is the source of truth).
+
+    This runs once at startup. Failure to parse any single agent never
+    raises — the field stays empty and routing falls back to existing
+    behaviour.
+    """
+    if not AGENTS_FILE.exists():
+        return
+    try:
+        with open(AGENTS_FILE) as f:
+            agents_cfg = yaml.safe_load(f) or {"agents": {}}
+    except Exception:
+        return
+
+    agents = agents_cfg.get("agents", {})
+    if not isinstance(agents, dict) or not agents:
+        return
+
+    from src.agent.workspace import _parse_interface_text
+
+    changed = False
+    for _agent_name, entry in agents.items():
+        if not isinstance(entry, dict):
+            continue
+        # Already declared — structured field wins, do nothing.
+        if entry.get("capabilities"):
+            continue
+        interface_text = entry.get("initial_interface") or ""
+        if not interface_text:
+            continue
+
+        try:
+            derived = _parse_interface_text(interface_text)
+        except Exception:
+            continue
+
+        # Only persist when the derivation produced something useful.
+        if not (
+            derived.get("capabilities")
+            or derived.get("preferred_inputs")
+            or derived.get("expected_outputs")
+            or derived.get("escalation_to")
+            or derived.get("forbidden")
+        ):
+            continue
+
+        if derived.get("capabilities"):
+            entry["capabilities"] = list(derived["capabilities"])
+        if derived.get("preferred_inputs"):
+            entry["preferred_inputs"] = list(derived["preferred_inputs"])
+        if derived.get("expected_outputs"):
+            entry["expected_outputs"] = list(derived["expected_outputs"])
+        if derived.get("escalation_to"):
+            entry["escalation_to"] = derived["escalation_to"]
+        if derived.get("forbidden"):
+            entry["forbidden"] = list(derived["forbidden"])
+        changed = True
+
+    if changed:
+        try:
+            with open(AGENTS_FILE, "w") as f:
+                yaml.dump(agents_cfg, f, default_flow_style=False, sort_keys=False)
+        except Exception:
+            logger.exception("Failed to persist back-filled agent capabilities")
+
+
 def _archive_project(name: str) -> None:
     """Mark a project as archived without deleting its data."""
     _set_project_status(name, "archived")
@@ -986,8 +1084,65 @@ def _pick_model_interactive(
     return models[model_choice - 1]
 
 
+def _validate_agent_template(template: dict) -> list[str]:
+    """Lightweight validator for fleet templates (Task 8).
+
+    Returns a list of human-readable warnings — informational, not
+    rejection. Callers (``_load_templates``) log them at info level so
+    template authors notice missing routing metadata without breaking
+    existing workflows.
+
+    Validates:
+    - If ``capabilities`` is empty AND there is no ``initial_interface``
+      / ``interface`` block to derive from, warn naming the agent.
+    - If ``escalation_to`` references an agent ID that doesn't exist in
+      the same template, warn naming both.
+
+    Empty templates / missing ``agents`` keys produce no warnings —
+    that's an unrelated structural issue surfaced elsewhere.
+    """
+    warnings: list[str] = []
+    tpl_name = template.get("name", "<unnamed>")
+    agents = template.get("agents") or {}
+    if not isinstance(agents, dict):
+        return warnings
+
+    agent_ids = set(agents.keys())
+    for agent_name, agent_def in agents.items():
+        if not isinstance(agent_def, dict):
+            continue
+        capabilities = agent_def.get("capabilities") or []
+        interface_text = (
+            agent_def.get("initial_interface")
+            or agent_def.get("interface")
+            or ""
+        )
+        if not capabilities and not interface_text:
+            warnings.append(
+                f"template '{tpl_name}' agent '{agent_name}': no "
+                "structured 'capabilities' and no INTERFACE.md to derive "
+                "from — operator routing will see an empty interface."
+            )
+
+        escalation = agent_def.get("escalation_to")
+        if escalation and isinstance(escalation, str):
+            if escalation not in agent_ids:
+                warnings.append(
+                    f"template '{tpl_name}' agent '{agent_name}': "
+                    f"escalation_to='{escalation}' is not defined in "
+                    "this template (cross-template escalations should "
+                    "use a fleet-global agent like 'operator')."
+                )
+    return warnings
+
+
 def _load_templates() -> dict[str, dict]:
-    """Load available team templates from src/templates/."""
+    """Load available team templates from src/templates/.
+
+    Each template is run through ``_validate_agent_template`` for
+    lightweight informational validation (Task 8). Warnings are logged
+    at info level — they never reject a template.
+    """
     available: dict[str, dict] = {}
     if not TEMPLATES_DIR.exists():
         return available
@@ -996,6 +1151,8 @@ def _load_templates() -> dict[str, dict]:
             tpl = yaml.safe_load(f) or {}
         name = tpl.get("name", tpl_file.stem)
         available[name] = tpl
+        for warning in _validate_agent_template(tpl):
+            logger.info("template-validate: %s", warning)
     return available
 
 
@@ -1039,6 +1196,11 @@ def _apply_template(template_name: str, tpl: dict) -> list[str]:
             thinking=thinking,
             budget=budget,
             resources=resources,
+            capabilities=agent_def.get("capabilities") or [],
+            preferred_inputs=agent_def.get("preferred_inputs") or [],
+            expected_outputs=agent_def.get("expected_outputs") or [],
+            escalation_to=agent_def.get("escalation_to"),
+            forbidden=agent_def.get("forbidden") or [],
         )
         _add_agent_permissions(agent_name, permissions=agent_permissions)
         skills_dir = PROJECT_ROOT / "skills" / agent_name
@@ -1120,6 +1282,11 @@ def _create_agent_from_template(
         thinking=thinking,
         budget=budget,
         resources=resources,
+        capabilities=agent_def.get("capabilities") or [],
+        preferred_inputs=agent_def.get("preferred_inputs") or [],
+        expected_outputs=agent_def.get("expected_outputs") or [],
+        escalation_to=agent_def.get("escalation_to"),
+        forbidden=agent_def.get("forbidden") or [],
     )
     _add_agent_permissions(name, permissions=agent_permissions)
     skills_dir = PROJECT_ROOT / "skills" / name

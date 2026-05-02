@@ -5,6 +5,21 @@ agents:
     role: Product manager — breaks down features, writes specs, coordinates work
     model: "{default_model}"
 
+    capabilities:
+      - Break down feature requests into engineering specs
+      - Coordinate handoffs between engineer and reviewer
+      - Report progress to the user
+    preferred_inputs:
+      - User feature requests, bug reports, product questions
+      - Hand-offs from reviewer with completed review results
+    expected_outputs:
+      - Task specs with acceptance criteria handed off to engineer
+      - Review requests handed off to reviewer
+    escalation_to: null
+    forbidden:
+      - Writing implementation code directly
+      - Approving merges without a reviewer pass
+
     initial_interface: |
       # Interface: pm
 
@@ -67,6 +82,19 @@ agents:
   engineer:
     role: Software engineer — writes code, runs tests, implements tasks
     model: "{default_model}"
+
+    capabilities:
+      - Implement task specs with code + tests
+      - Run shell commands and the test suite
+      - Hand completed work back to pm
+    preferred_inputs:
+      - Hand-offs from pm with task specs (description, acceptance criteria, dependencies)
+    expected_outputs:
+      - Implemented code changes with passing tests, returned to pm
+    escalation_to: pm
+    forbidden:
+      - Refactoring code outside of the assigned task
+      - Marking work complete with failing tests
 
     initial_interface: |
       # Interface: engineer
@@ -132,6 +160,19 @@ agents:
   reviewer:
     role: Code reviewer — reviews changes, identifies bugs, verifies tests
     model: "{default_model}"
+
+    capabilities:
+      - Review completed code for correctness and security
+      - Verify test coverage and run the full test suite
+      - Approve or request changes back to pm
+    preferred_inputs:
+      - Hand-offs from pm with completed task specs and engineering results
+    expected_outputs:
+      - Review verdicts (approve / changes needed) with feedback, returned to pm
+    escalation_to: pm
+    forbidden:
+      - Implementing fixes directly (delegate via pm → engineer)
+      - Blocking on style preferences
 
     initial_interface: |
       # Interface: reviewer

@@ -1821,9 +1821,32 @@ def create_mesh_app(
                 caller = "unknown"
         caller_is_global = caller_is_internal or caller == "operator"
 
+        # Task 8 — pull structured routing fields from agents.yaml. The
+        # ``capabilities`` key on the entry is the runtime tool list
+        # (router.get_capabilities) — keep that name as-is. Surface the
+        # human-routing capabilities + the four siblings under explicit
+        # keys so callers can distinguish them from tool capabilities.
+        from src.cli.config import _load_config as _load_cfg_for_listing
+        try:
+            _cfg_for_listing = _load_cfg_for_listing()
+        except Exception:
+            _cfg_for_listing = {"agents": {}}
+        _agents_cfg_listing = _cfg_for_listing.get("agents", {}) or {}
+
         def _agent_entry(aid: str, url: str) -> dict:
             entry: dict = {"url": url, "role": router.agent_roles.get(aid, "")}
             entry["capabilities"] = router.get_capabilities(aid)
+            acfg = _agents_cfg_listing.get(aid) or {}
+            # Structured routing fields (Task 8). The ``interface_*`` keys
+            # are the human-facing routing surface; the bare
+            # ``capabilities`` key remains the runtime tool/skill list to
+            # avoid breaking back-compat with existing dashboard / CLI
+            # consumers.
+            entry["interface_capabilities"] = list(acfg.get("capabilities") or [])
+            entry["preferred_inputs"] = list(acfg.get("preferred_inputs") or [])
+            entry["expected_outputs"] = list(acfg.get("expected_outputs") or [])
+            entry["escalation_to"] = acfg.get("escalation_to")
+            entry["forbidden"] = list(acfg.get("forbidden") or [])
             proj = _agent_projects.get(aid)
             if proj:
                 entry["project"] = proj
@@ -2641,6 +2664,23 @@ def create_mesh_app(
             except Exception:
                 logger.debug("Could not fetch INTERFACE.md from %s (direct)", agent_id)
 
+        # Task 8 — structured routing fields from agents.yaml. ``capabilities``
+        # remains the runtime tool/skill list (router.get_capabilities); the
+        # human-routing capabilities live under ``interface_capabilities`` to
+        # avoid the naming collision. The other four sibling fields keep
+        # their natural names (no collision).
+        from src.cli.config import _load_config as _load_cfg_for_profile
+        try:
+            _cfg_for_profile = _load_cfg_for_profile()
+        except Exception:
+            _cfg_for_profile = {"agents": {}}
+        _acfg_profile = (_cfg_for_profile.get("agents", {}) or {}).get(agent_id, {}) or {}
+        interface_capabilities = list(_acfg_profile.get("capabilities") or [])
+        preferred_inputs = list(_acfg_profile.get("preferred_inputs") or [])
+        expected_outputs = list(_acfg_profile.get("expected_outputs") or [])
+        escalation_to = _acfg_profile.get("escalation_to")
+        forbidden = list(_acfg_profile.get("forbidden") or [])
+
         return {
             "agent_id": agent_id,
             "role": role,
@@ -2652,6 +2692,12 @@ def create_mesh_app(
             "recent_writes": recent_writes,
             "capabilities": capabilities,
             "interface": interface,
+            # Task 8 structured routing fields.
+            "interface_capabilities": interface_capabilities,
+            "preferred_inputs": preferred_inputs,
+            "expected_outputs": expected_outputs,
+            "escalation_to": escalation_to,
+            "forbidden": forbidden,
         }
 
     # === Request Traces ===

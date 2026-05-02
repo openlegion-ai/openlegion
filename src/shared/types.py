@@ -319,6 +319,54 @@ class AgentPermissions(BaseModel):
     wallet_allowed_contracts: list[str] = []
 
 
+# === Agent Configuration ===
+
+
+class AgentConfig(BaseModel):
+    """Structured fields for an agent entry in ``config/agents.yaml``.
+
+    Today an entry is a free-form dict (role/model/initial_instructions/…).
+    Task 8 introduces five structured fields for routing — what the agent
+    does, what it accepts, what it produces, where it escalates, what it
+    refuses. These fields are the source of truth for the operator and
+    routing layer; ``INTERFACE.md`` is preserved as a free-text companion
+    for the agent's own context but is no longer parsed at routing time.
+
+    The model is read-only metadata: the loader still persists yaml as a
+    dict (for back-compat with existing tooling that diffs the file). The
+    model is used by callers that want a typed view of the entry, by
+    tests, and by the `/mesh/agents/{id}/profile` endpoint to validate
+    the surfaced shape.
+
+    All five new fields default cleanly so existing agents.yaml files
+    without them load unchanged. ``_derive_capabilities_from_interface``
+    in ``src/agent/workspace.py`` provides a one-shot back-fill from
+    ``INTERFACE.md`` headings on first read; the structured field is the
+    source of truth thereafter.
+    """
+
+    role: str = ""
+    model: str = ""
+    skills_dir: str = ""
+    initial_instructions: str = ""
+    initial_soul: str = ""
+    initial_heartbeat: str = ""
+    initial_interface: str = ""
+    thinking: str = ""
+    status: str = "active"
+    budget: dict[str, Any] | None = None
+    resources: dict[str, Any] | None = None
+
+    # Task 8 — structured routing metadata.
+    capabilities: list[str] = Field(default_factory=list)
+    preferred_inputs: list[str] = Field(default_factory=list)
+    expected_outputs: list[str] = Field(default_factory=list)
+    escalation_to: str | None = None
+    forbidden: list[str] = Field(default_factory=list)
+
+    model_config = {"extra": "allow"}
+
+
 # === Projects ===
 
 

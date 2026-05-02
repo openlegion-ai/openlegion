@@ -202,6 +202,33 @@ async def test_get_agent_profile_calls_mesh():
     assert result["agent_id"] == "writer"
 
 
+@pytest.mark.asyncio
+async def test_get_agent_profile_returns_structured_routing_fields():
+    """Task 8 — operator profile read surfaces the new structured routing
+    fields (capabilities are tool list; the four siblings + the
+    interface_capabilities field carry the human-routing data)."""
+    from src.agent.builtins.operator_tools import get_agent_profile
+    mc = MagicMock()
+    mc.get_agent_profile = AsyncMock(return_value={
+        "agent_id": "researcher",
+        "role": "researcher",
+        "capabilities": ["browser_navigate", "web_search"],  # tool list
+        "interface_capabilities": ["Web research", "Synthesize findings"],
+        "preferred_inputs": ["User questions"],
+        "expected_outputs": ["Research reports"],
+        "escalation_to": "operator",
+        "forbidden": ["Speculative findings as fact"],
+    })
+    result = await get_agent_profile("researcher", mesh_client=mc)
+    assert result["interface_capabilities"] == ["Web research", "Synthesize findings"]
+    assert result["preferred_inputs"] == ["User questions"]
+    assert result["expected_outputs"] == ["Research reports"]
+    assert result["escalation_to"] == "operator"
+    assert result["forbidden"] == ["Speculative findings as fact"]
+    # Tool capabilities still distinct.
+    assert result["capabilities"] == ["browser_navigate", "web_search"]
+
+
 # ── Action tool: reroute_task with cost gate ──────────────────
 
 

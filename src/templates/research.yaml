@@ -6,6 +6,18 @@ agents:
     model: "{default_model}"
     thinking: medium
 
+    capabilities:
+      - Web research via search and full-page browsing
+      - Synthesize findings into structured reports
+      - Save reports as artifacts and notify the user
+    preferred_inputs:
+      - Direct messages or hand-offs with topic, questions, scope
+    expected_outputs:
+      - Research reports saved as artifacts and delivered via notify_user
+    escalation_to: null
+    forbidden:
+      - Returning unsourced or speculative findings as fact
+
     initial_interface: |
       # Interface: researcher
 
