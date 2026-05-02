@@ -232,7 +232,11 @@ class DockerBackend(RuntimeBackend):
             port = self._next_port
             self._next_port += 1
 
-        # Generate per-agent auth token for mesh request verification
+        # Generate per-agent auth token for mesh request verification.
+        # Task 4 invariant: every agent (including the operator) gets a
+        # distinct token keyed by ``agent_id``; no fleet-shared token
+        # exists. The operator's token is what ``/mesh/register`` checks
+        # to allow the cryptographic ``agent_id="operator"`` claim.
         auth_token = secrets.token_urlsafe(32)
         self.auth_tokens[agent_id] = auth_token
 
@@ -825,7 +829,11 @@ class SandboxBackend(RuntimeBackend):
         else:
             marketplace_dest.mkdir(exist_ok=True)
 
-        # Generate per-agent auth token for mesh request verification
+        # Generate per-agent auth token for mesh request verification.
+        # Task 4 invariant: every agent (including the operator) gets a
+        # distinct token keyed by ``agent_id``; no fleet-shared token
+        # exists. The operator's token is what ``/mesh/register`` checks
+        # to allow the cryptographic ``agent_id="operator"`` claim.
         auth_token = secrets.token_urlsafe(32)
         self.auth_tokens[agent_id] = auth_token
 
