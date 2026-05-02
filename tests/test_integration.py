@@ -2311,7 +2311,7 @@ def test_human_origin_wake_operator_not_blocked(tmp_path, monkeypatch):
     (cfg_dir / "telegram_paired.json").write_text(
         json.dumps({"owner": 42, "allowed": [42]}),
     )
-    monkeypatch.chdir(tmp_path)
+    _patch_pairing_project_root(tmp_path, monkeypatch)
     _invalidate_pairing_cache()
 
     client, captured, loop, bb = _wake_block_app(tmp_path)
