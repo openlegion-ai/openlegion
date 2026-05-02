@@ -403,3 +403,53 @@ async def test_events_endpoint_returns_audit_history(v2_app):
         assert r.status_code == 200
         kinds = [e["event_kind"] for e in r.json()["events"]]
         assert kinds == ["created", "status_changed"]
+
+
+# ── Task 9 — /mesh/pending/* endpoints ─────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_pending_list_endpoint_returns_open_nonces(v2_app):
+    """``GET /mesh/pending`` returns rows from the SQLite store."""
+    app, _, _ = v2_app
+    pa = app.pending_actions
+    pa.store(
+        nonce="n-test", actor="operator", target_kind="agent",
+        target_id="alpha", action_kind="model", payload={"x": 1},
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.get("/mesh/pending", headers={"X-Mesh-Internal": "1"})
+        assert r.status_code == 200
+        rows = r.json()["pending"]
+        assert any(p["nonce"] == "n-test" for p in rows)
+
+
+@pytest.mark.asyncio
+async def test_pending_cancel_endpoint_deletes_row(v2_app):
+    """``POST /mesh/pending/{nonce}/cancel`` deletes the row."""
+    app, _, _ = v2_app
+    pa = app.pending_actions
+    pa.store(
+        nonce="n-cancel", actor="operator", target_kind="agent",
+        target_id="alpha", action_kind="model", payload={"x": 1},
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/pending/n-cancel/cancel",
+            headers={"X-Agent-ID": "operator", "X-Mesh-Internal": "1"},
+        )
+        assert r.status_code == 200
+        assert r.json()["nonce"] == "n-cancel"
+    # Row gone — peek confirms.
+    assert pa.peek("n-cancel") is None
+
+
+@pytest.mark.asyncio
+async def test_pending_cancel_unknown_returns_404(v2_app):
+    app, _, _ = v2_app
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/pending/missing-nonce/cancel",
+            headers={"X-Agent-ID": "operator", "X-Mesh-Internal": "1"},
+        )
+        assert r.status_code == 404

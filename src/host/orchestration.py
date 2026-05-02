@@ -90,10 +90,17 @@ class Tasks:
         db_path: str,
         *,
         retention_seconds: int = DEFAULT_RETENTION_SECONDS,
+        event_bus=None,
     ):
         self.db_path = db_path
         self.retention_seconds = retention_seconds
         self._shared_conn: sqlite3.Connection | None = None
+        # Task 9 — optional EventBus for surfacing task lifecycle to the
+        # dashboard. Wired in by ``create_mesh_app`` after construction
+        # via :meth:`set_event_bus` so callers that build the store
+        # eagerly (tests, the legacy in-memory shim path) don't need to
+        # pass a bus.
+        self._event_bus = event_bus
         # In-memory mode keeps a long-lived connection so schema and rows
         # survive across calls inside a single process (mirrors
         # ``PendingActions``).
@@ -107,6 +114,30 @@ class Tasks:
         # connection.
         self._mem_lock = threading.Lock()
         self._init_schema()
+
+    def set_event_bus(self, bus) -> None:
+        """Attach (or replace) the EventBus used for dashboard events.
+
+        Mirrors the ``Blackboard``/``HealthMonitor`` integration pattern.
+        Idempotent — safe to call multiple times. Pass ``None`` to detach.
+        """
+        self._event_bus = bus
+
+    def _safe_emit(self, event_type: str, agent: str, data: dict) -> None:
+        """Emit a dashboard event, swallowing failures.
+
+        The bus is best-effort decoration on top of the durable SQLite
+        write — if emission fails (no bus, bus raises, dashboard is
+        offline) the underlying task transaction has already committed
+        and we must not propagate the error.
+        """
+        bus = self._event_bus
+        if bus is None:
+            return
+        try:
+            bus.emit(event_type, agent=agent, data=data)
+        except Exception as e:
+            logger.debug("Tasks event emit failed (%s): %s", event_type, e)
 
     @contextmanager
     def _conn(self):
@@ -292,6 +323,21 @@ class Tasks:
                     "project_id": project_id,
                 },
             )
+        # Task 9 — surface to the dashboard. Compact payload (title, no
+        # description) so WS frames stay small.
+        self._safe_emit(
+            "task_created",
+            agent=creator,
+            data={
+                "task_id": tid,
+                "project_id": project_id,
+                "creator": creator,
+                "assignee": assignee,
+                "title": title,
+                "status": "pending",
+                "created_at": now,
+            },
+        )
         return self.get(tid)  # type: ignore[return-value]
 
     def get(self, task_id: str) -> dict | None:
@@ -400,16 +446,20 @@ class Tasks:
         if status not in VALID_STATUSES:
             raise ValueError(f"unknown status: {status!r}")
         now = time.time()
+        # Captured outside the txn so the event-emit (which goes through
+        # the bus / asyncio loop) doesn't run while we hold BEGIN IMMEDIATE.
+        emitted_change: tuple[str, str, str | None, str | None] | None = None
         with self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 row = conn.execute(
-                    "SELECT status FROM tasks WHERE id=?", (task_id,),
+                    "SELECT status, project_id, assignee FROM tasks WHERE id=?",
+                    (task_id,),
                 ).fetchone()
                 if not row:
                     conn.execute("ROLLBACK")
                     raise TaskNotFound(task_id)
-                current = row[0]
+                current, project_id, assignee = row[0], row[1], row[2]
                 if current == status:
                     # No-op transition. Record the event so the audit
                     # trail still shows the call, but skip the row update.
@@ -451,11 +501,27 @@ class Tasks:
                     },
                 )
                 conn.execute("COMMIT")
+                emitted_change = (current, status, project_id, assignee)
             except (TaskNotFound, InvalidStatusTransition):
                 raise
             except Exception:
                 conn.execute("ROLLBACK")
                 raise
+        if emitted_change is not None:
+            old_status, new_status, project_id, assignee = emitted_change
+            self._safe_emit(
+                "task_status_changed",
+                agent=actor,
+                data={
+                    "task_id": task_id,
+                    "project_id": project_id,
+                    "assignee": assignee,
+                    "old_status": old_status,
+                    "new_status": new_status,
+                    "actor": actor,
+                    "ts": now,
+                },
+            )
         return self.get(task_id)  # type: ignore[return-value]
 
     def reroute(
@@ -465,17 +531,18 @@ class Tasks:
         if not new_assignee:
             raise ValueError("new_assignee is required")
         now = time.time()
+        emitted: tuple[str, str | None] | None = None
         with self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 row = conn.execute(
-                    "SELECT assignee, status FROM tasks WHERE id=?",
+                    "SELECT assignee, status, project_id FROM tasks WHERE id=?",
                     (task_id,),
                 ).fetchone()
                 if not row:
                     conn.execute("ROLLBACK")
                     raise TaskNotFound(task_id)
-                old_assignee, current_status = row
+                old_assignee, current_status, project_id = row
                 if current_status in TERMINAL_STATUSES:
                     conn.execute("ROLLBACK")
                     raise InvalidStatusTransition(
@@ -490,11 +557,31 @@ class Tasks:
                     {"from": old_assignee, "to": new_assignee, "reason": reason},
                 )
                 conn.execute("COMMIT")
+                emitted = (current_status, project_id)
             except (TaskNotFound, InvalidStatusTransition):
                 raise
             except Exception:
                 conn.execute("ROLLBACK")
                 raise
+        if emitted is not None:
+            current_status, project_id = emitted
+            # Task 9 — reroute is a status_changed event with old==new
+            # status; the assignee field carries the *new* assignee so
+            # the dashboard sees who picked up the work. The audit row
+            # already records ``rerouted`` separately for full history.
+            self._safe_emit(
+                "task_status_changed",
+                agent=actor,
+                data={
+                    "task_id": task_id,
+                    "project_id": project_id,
+                    "assignee": new_assignee,
+                    "old_status": current_status,
+                    "new_status": current_status,
+                    "actor": actor,
+                    "ts": now,
+                },
+            )
         return self.get(task_id)  # type: ignore[return-value]
 
     def cancel(

@@ -535,6 +535,10 @@ def create_mesh_app(
     app.pending_actions = pending_actions  # exposed for tests/dashboard
     global _pending_actions_singleton
     _pending_actions_singleton = pending_actions
+    # Task 9 — wire EventBus so store/consume/cancel/reap_expired emit
+    # ``pending_action_*`` events to the dashboard.
+    if event_bus is not None:
+        pending_actions.set_event_bus(event_bus)
 
     # Task 6: durable orchestration task records. The store is only
     # constructed when the feature flag is on; when off, the new
@@ -549,6 +553,10 @@ def create_mesh_app(
         )
         tasks_store = Tasks(db_path=_tasks_db_path)
     app.tasks_store = tasks_store  # exposed for tests/dashboard
+    # Task 9 — wire EventBus so create / update_status / reroute /
+    # cancel emit ``task_*`` events to the dashboard.
+    if tasks_store is not None and event_bus is not None:
+        tasks_store.set_event_bus(event_bus)
 
     _auth_tokens = auth_tokens if auth_tokens is not None else {}
     _agent_projects = agent_projects if agent_projects is not None else {}
@@ -4471,6 +4479,82 @@ def create_mesh_app(
         return await _apply_pending_change(
             change_id, _record_to_legacy_change(record),
         )
+
+    # === Task 9 — Pending action review surface ===
+    #
+    # The dashboard's System > Operator panel and the inline chat
+    # bubble both call these endpoints. Confirm wraps the existing
+    # ``/mesh/config/confirm`` path; cancel is the additive escape
+    # hatch (delete-without-apply) backed by ``PendingActions.cancel``.
+    # Both inherit CSRF protection (X-Requested-With) from the
+    # dashboard's fetch wrapper and the `_csrf_check` middleware.
+
+    @app.get("/mesh/pending")
+    async def list_pending_actions(request: Request) -> dict:
+        """List every non-expired pending action.
+
+        Operator-or-internal only. Reaps expired rows on the read so
+        the response is immediately accurate. Each row is shape-compatible
+        with the dashboard's existing pending-edit display logic.
+        """
+        _require_operator_or_internal(request)
+        pending_actions.reap_expired()
+        rows = pending_actions.list_pending()
+        return {"pending": rows}
+
+    @app.post("/mesh/pending/{nonce}/confirm")
+    async def pending_confirm(nonce: str, request: Request) -> dict:
+        """Confirm a pending action by nonce.
+
+        Thin wrapper over the existing ``/mesh/config/confirm`` flow:
+        injects ``change_id=nonce`` into the body and dispatches to
+        :func:`confirm_config_change`. Keeps the new surface stable
+        without duplicating the destructive-vs-edit branch logic.
+        """
+        # Resolve and inject the nonce so the underlying confirm
+        # handler reads it from the body the same way the legacy
+        # callers do.
+        body = {}
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        body["change_id"] = nonce
+
+        async def _receive():
+            return {
+                "type": "http.request",
+                "body": json.dumps(body).encode("utf-8"),
+                "more_body": False,
+            }
+
+        # Build a shallow copy of the request with the rewritten body.
+        from starlette.requests import Request as _StarletteRequest
+        forwarded = _StarletteRequest(request.scope, _receive)
+        return await confirm_config_change(forwarded)
+
+    @app.post("/mesh/pending/{nonce}/cancel")
+    async def pending_cancel(nonce: str, request: Request) -> dict:
+        """Cancel a pending action by nonce.
+
+        Operator-or-internal only. Calls ``PendingActions.cancel`` which
+        deletes the row + emits ``pending_action_resolved`` with
+        ``status="cancelled"`` so the dashboard panel and chat bubble
+        clear immediately.
+        """
+        caller = _extract_verified_agent_id(request)
+        if caller != "operator" and not _is_internal_caller(request):
+            raise HTTPException(403, "Only the operator can cancel pending actions")
+        record = pending_actions.cancel(nonce, actor=caller or "operator")
+        if record is None:
+            raise HTTPException(404, "Pending action not found or already expired")
+        return {
+            "ok": True,
+            "nonce": nonce,
+            "target_kind": record["target_kind"],
+            "target_id": record["target_id"],
+            "action_kind": record["action_kind"],
+        }
 
     # === Browser Service Proxy ===
 

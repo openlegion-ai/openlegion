@@ -34,6 +34,29 @@ def test_dashboard_event_invalid_type():
         DashboardEvent(type="invalid_type")
 
 
+def test_dashboard_event_task_9_event_types_accepted():
+    """Task 9 — five new Workplace + pending-action types are accepted."""
+    new_types = [
+        "task_created",
+        "task_status_changed",
+        "pending_action_created",
+        "pending_action_resolved",
+        "pending_action_expired",
+    ]
+    for t in new_types:
+        evt = DashboardEvent(type=t, agent="operator", data={"key": "v"})
+        assert evt.type == t
+
+
+def test_dashboard_event_task_9_typo_rejected():
+    """A typo'd Task 9 type still trips validation — guards against
+    silent emit of typoed event names."""
+    with pytest.raises(Exception):
+        DashboardEvent(type="task_creates")  # missing 'd'
+    with pytest.raises(Exception):
+        DashboardEvent(type="pending_action_create")  # missing 'd'
+
+
 def test_dashboard_event_serialization():
     """DashboardEvent serializes to JSON-compatible dict."""
     evt = DashboardEvent(type="llm_call", agent="a1", data={"model": "gpt-4o"})

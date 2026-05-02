@@ -4507,3 +4507,161 @@ class TestDashboardOriginStamp:
         assert isinstance(origin, MessageOrigin)
         assert origin.kind == "human"
         assert origin.channel == "dashboard"
+
+
+# === Task 9 — Workplace tab + pending action review ===
+
+
+class TestWorkplaceTabRoutes:
+    """Verify the new /api/workplace/* endpoints respond with the right
+    shape for both ``OPENLEGION_ORCHESTRATION_TASKS_V2=0`` (empty state)
+    and the v2-on / store-attached case (real data)."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir)
+        # The Workplace surface is independent of the v2-included extras
+        # so we don't use include_v2=True; we attach the stores directly.
+        from src.host.orchestration import Tasks
+        from src.host.pending_actions import PendingActions
+        self.tasks_store = Tasks(db_path=os.path.join(self._tmpdir, "tasks.db"))
+        self.pending_actions = PendingActions(
+            db_path=os.path.join(self._tmpdir, "pa.db"),
+        )
+        self.components["tasks_store"] = self.tasks_store
+        self.components["pending_actions"] = self.pending_actions
+
+    def teardown_method(self):
+        try:
+            self.tasks_store.close()
+        except Exception:
+            pass
+        try:
+            self.pending_actions.close()
+        except Exception:
+            pass
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+        os.environ.pop("OPENLEGION_ORCHESTRATION_TASKS_V2", None)
+
+    def _set_v2(self, enabled: bool):
+        """Set the runtime flag on the live env. Caller is responsible
+        for restoring it via ``teardown_method``'s shutil cleanup of the
+        tmp_path or via ``self._restore_v2()`` when running multiple
+        clients in one test.
+        """
+        if enabled:
+            os.environ["OPENLEGION_ORCHESTRATION_TASKS_V2"] = "1"
+        else:
+            os.environ["OPENLEGION_ORCHESTRATION_TASKS_V2"] = "0"
+
+    def _client_with_v2(self, enabled: bool):
+        self._set_v2(enabled)
+        return _make_client(self.components)
+
+    def test_workplace_tasks_empty_state_when_v2_off(self):
+        client = self._client_with_v2(False)
+        resp = client.get("/dashboard/api/workplace/tasks")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["enabled"] is False
+        assert data["tasks"] == []
+        assert "OPENLEGION_ORCHESTRATION_TASKS_V2" in data["hint"]
+
+    def test_workplace_tasks_returns_rows_when_v2_on(self):
+        client = self._client_with_v2(True)
+        rec = self.tasks_store.create(
+            creator="operator", assignee="alpha", title="dig",
+            project_id="research",
+        )
+        resp = client.get("/dashboard/api/workplace/tasks")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["enabled"] is True
+        ids = [t["id"] for t in data["tasks"]]
+        assert rec["id"] in ids
+
+    def test_workplace_tasks_filter_by_assignee(self):
+        client = self._client_with_v2(True)
+        self.tasks_store.create(creator="op", assignee="alpha", title="A")
+        self.tasks_store.create(creator="op", assignee="beta", title="B")
+        resp = client.get("/dashboard/api/workplace/tasks?assignee=alpha")
+        assert resp.status_code == 200
+        rows = resp.json()["tasks"]
+        assert all(r["assignee"] == "alpha" for r in rows)
+
+    def test_workplace_projects_empty_state(self):
+        client = self._client_with_v2(False)
+        resp = client.get("/dashboard/api/workplace/projects")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["enabled"] is False
+        assert data["projects"] == []
+
+    def test_workplace_blockers_empty_state(self):
+        client = self._client_with_v2(False)
+        resp = client.get("/dashboard/api/workplace/blockers")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["enabled"] is False
+        assert data["blockers"] == []
+
+    def test_workplace_blockers_returns_blocked_tasks(self):
+        client = self._client_with_v2(True)
+        rec = self.tasks_store.create(
+            creator="op", assignee="alpha", title="stuck",
+        )
+        self.tasks_store.update_status(rec["id"], "working", actor="alpha")
+        self.tasks_store.update_status(
+            rec["id"], "blocked", actor="alpha",
+            blocker_note="needs creds",
+        )
+        resp = client.get("/dashboard/api/workplace/blockers")
+        assert resp.status_code == 200
+        rows = resp.json()["blockers"]
+        assert any(r["id"] == rec["id"] for r in rows)
+
+    def test_workplace_outputs_returns_done_tasks(self):
+        client = self._client_with_v2(True)
+        rec = self.tasks_store.create(
+            creator="op", assignee="alpha", title="done one",
+            project_id="research",
+        )
+        self.tasks_store.update_status(rec["id"], "working", actor="alpha")
+        self.tasks_store.update_status(rec["id"], "done", actor="alpha")
+        resp = client.get("/dashboard/api/workplace/outputs?project_id=research")
+        assert resp.status_code == 200
+        rows = resp.json()["outputs"]
+        assert any(r["id"] == rec["id"] for r in rows)
+
+    def test_workplace_pending_lists_open_nonces(self):
+        # No need for v2 — pending list is independent of orchestration.
+        client = self._client_with_v2(False)
+        self.pending_actions.store(
+            nonce="n1", actor="operator", target_kind="agent",
+            target_id="alpha", action_kind="model", payload={"x": 1},
+        )
+        resp = client.get("/dashboard/api/workplace/pending")
+        assert resp.status_code == 200
+        rows = resp.json()["pending"]
+        assert any(r["nonce"] == "n1" for r in rows)
+
+    def test_workplace_pending_cancel_succeeds(self):
+        client = self._client_with_v2(False)
+        self.pending_actions.store(
+            nonce="n1", actor="operator", target_kind="agent",
+            target_id="alpha", action_kind="model", payload={"x": 1},
+        )
+        resp = client.post("/dashboard/api/workplace/pending/n1/cancel")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is True
+        assert body["nonce"] == "n1"
+        # Row gone — second cancel returns 404.
+        resp2 = client.post("/dashboard/api/workplace/pending/n1/cancel")
+        assert resp2.status_code == 404
+
+    def test_workplace_pending_cancel_unknown_returns_404(self):
+        client = self._client_with_v2(False)
+        resp = client.post("/dashboard/api/workplace/pending/missing/cancel")
+        assert resp.status_code == 404

@@ -445,3 +445,101 @@ def test_valid_statuses_constant():
     assert "pending" in VALID_STATUSES
     assert "done" in VALID_STATUSES
     assert "bogus" not in VALID_STATUSES
+
+
+# ── Task 9 — EventBus integration ─────────────────────────────────
+
+
+def _attach_event_bus(store):
+    """Attach a fresh ``EventBus`` and return ``(bus, captured)`` where
+    ``captured`` is a list of (type, agent, data) tuples for assertion.
+    """
+    from src.dashboard.events import EventBus
+    bus = EventBus()
+    captured: list[tuple[str, str, dict]] = []
+
+    class _Recorder:
+        def emit(self, event_type, agent="", data=None):
+            captured.append((event_type, agent, dict(data or {})))
+            bus.emit(event_type, agent=agent, data=data or {})
+
+    store.set_event_bus(_Recorder())
+    return bus, captured
+
+
+def test_event_bus_emits_task_created(tmp_path):
+    """``Tasks.create`` emits ``task_created`` with the documented payload."""
+    t = _make_store(tmp_path)
+    _bus, captured = _attach_event_bus(t)
+    rec = t.create(creator="scout", assignee="analyst", title="dig")
+    types = [c[0] for c in captured]
+    assert "task_created" in types
+    evt = next(c for c in captured if c[0] == "task_created")
+    assert evt[1] == "scout"  # agent = creator
+    assert evt[2]["task_id"] == rec["id"]
+    assert evt[2]["creator"] == "scout"
+    assert evt[2]["assignee"] == "analyst"
+    assert evt[2]["title"] == "dig"
+    assert evt[2]["status"] == "pending"
+
+
+def test_event_bus_emits_task_status_changed(tmp_path):
+    """``Tasks.update_status`` emits ``task_status_changed``."""
+    t = _make_store(tmp_path)
+    _bus, captured = _attach_event_bus(t)
+    rec = t.create(creator="scout", assignee="analyst", title="dig")
+    captured.clear()
+    t.update_status(rec["id"], "accepted", actor="analyst")
+    types = [c[0] for c in captured]
+    assert types == ["task_status_changed"]
+    evt = captured[0]
+    assert evt[2]["task_id"] == rec["id"]
+    assert evt[2]["old_status"] == "pending"
+    assert evt[2]["new_status"] == "accepted"
+    assert evt[2]["actor"] == "analyst"
+
+
+def test_event_bus_no_emit_on_no_op_status_transition(tmp_path):
+    """Repeating a status doesn't emit (the no-op branch)."""
+    t = _make_store(tmp_path)
+    _bus, captured = _attach_event_bus(t)
+    rec = t.create(creator="scout", assignee="analyst", title="dig")
+    captured.clear()
+    t.update_status(rec["id"], "pending", actor="scout")
+    assert not [c for c in captured if c[0] == "task_status_changed"]
+
+
+def test_event_bus_emits_on_reroute(tmp_path):
+    t = _make_store(tmp_path)
+    _bus, captured = _attach_event_bus(t)
+    rec = t.create(creator="scout", assignee="analyst", title="dig")
+    captured.clear()
+    t.reroute(rec["id"], "writer", actor="operator")
+    types = [c[0] for c in captured]
+    assert "task_status_changed" in types
+    evt = next(c for c in captured if c[0] == "task_status_changed")
+    assert evt[2]["assignee"] == "writer"
+    assert evt[2]["actor"] == "operator"
+
+
+def test_event_bus_emits_on_cancel(tmp_path):
+    """``cancel`` chains through ``update_status('cancelled')`` and emits."""
+    t = _make_store(tmp_path)
+    _bus, captured = _attach_event_bus(t)
+    rec = t.create(creator="scout", assignee="analyst", title="dig")
+    t.update_status(rec["id"], "working", actor="analyst")
+    captured.clear()
+    t.cancel(rec["id"], actor="operator", reason="not needed")
+    types = [c[0] for c in captured]
+    assert "task_status_changed" in types
+    evt = next(c for c in captured if c[0] == "task_status_changed")
+    assert evt[2]["new_status"] == "cancelled"
+
+
+def test_event_bus_unset_disables_emit(tmp_path):
+    """Detaching the bus stops emits (without breaking the txn)."""
+    t = _make_store(tmp_path)
+    _bus, captured = _attach_event_bus(t)
+    t.set_event_bus(None)
+    t.create(creator="scout", assignee="analyst", title="dig")
+    assert captured == []
