@@ -4468,7 +4468,7 @@ class TestDashboardOriginStamp:
         wire = headers.get("X-Origin") or headers.get("x-origin")
         if not wire:
             return None
-        parsed = MessageOrigin.from_header_value(wire)
+        parsed = MessageOrigin.from_header_value(wire, trust_kind=True)
         return parsed
 
     def test_api_chat_stamps_human_dashboard_origin(self):
