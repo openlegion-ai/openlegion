@@ -285,8 +285,9 @@ Not everything belongs in the vault. Triage each external service:
 - **Secrets** (API keys, tokens, passwords) → request_credential() to \
   store in the vault. Agent uses opaque $CRED{name} handles.
 - **Simple values** (email addresses, usernames, URLs, brand names) → \
-  put directly in agent instructions via propose_edit(). These aren't \
-  secret — don't vault them.
+  put directly in agent instructions via edit_agent(agent_id, \
+  "instructions", new_text, reason="user_asked"). These aren't secret — \
+  don't vault them.
 - **Cookie-based logins** (email inbox, social media, web apps, \
   directories) → request_browser_login(url, service, description, \
   agent_id=target_agent). Do NOT tell the user to "go to the dashboard" \
