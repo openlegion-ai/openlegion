@@ -207,13 +207,15 @@ The following tools are only available to the **operator agent** (when `ALLOWED_
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
+| `inspect_agents` | `agent_id` (default ""), `depth` (default `"summary"`; values: `summary` / `profile` / `history`) | Look up agents. Empty `agent_id` lists the fleet at `summary` depth; passing an `agent_id` with `profile` returns the collaboration interface, or with `history` returns recent conversation history. Replaces `list_agents` / `get_agent_profile` / `read_agent_history` for the operator. |
+| `inspect_projects` | `detail` (default `"names"`; values: `names` / `status` / `full`), `project_name` (default "") | Look up projects. With no `project_name`, `names` returns name+description, `status` returns task-count rollups. Passing a `project_name` returns the full record. Replaces `list_projects` / `list_project_status` / `get_project` for the operator. |
+| `manage_project` | `project_name`, `action` (enum: `archive` / `delete`) | Lifecycle for a project. `delete` requires the project to already be archived. Replaces `archive_project` / `delete_project`. |
+| `manage_agent` | `agent_id`, `action` (enum: `archive` / `delete`) | Lifecycle for an agent. Same archive-then-delete contract as `manage_project`. Replaces `archive_agent` / `delete_agent`. |
+| `manage_task` | `task_id`, `action` (enum: `cancel` / `reroute` / `retry`), `new_assignee` (default "", only for `reroute`) | Single entry point for task ops. Replaces `cancel_task` / `reroute_task` / `retry_failed_task`. |
 | `propose_edit` | `agent_id`, `field` (enum: `instructions` / `soul` / `model` / `role` / `heartbeat` / `thinking` / `budget` / `permissions`), `value` | Propose a config change for an agent. Returns a `change_id` that must be confirmed. |
 | `confirm_edit` | `change_id` | Apply a previously proposed edit. |
 | `save_observations` | `fleet_summary`, `agents_attention` (default []), `cost_trend`, `notes` (default "") | Persist fleet health observations for human review. |
-| `read_agent_history` | `agent_id`, `period` (default "today"; values: `today` / `yesterday` / `week`) | Read an agent's conversation history with period filtering (operator version). |
 | `create_agent` | `name`, `role`, `model` (default ""), `instructions`, `soul` (default "") | Create a new agent. |
-| `list_projects` | -- | List all projects. |
-| `get_project` | `project_name` | Get details for a project. |
 | `create_project` | `name`, `description`, `agent_ids` (default []) | Create a new project and optionally add agents. |
 | `add_agents_to_project` | `project_name`, `agent_ids` | Add one or more agents to a project. |
 | `remove_agents_from_project` | `project_name`, `agent_ids` | Remove one or more agents from a project. |
