@@ -81,10 +81,11 @@ function dashboard() {
       'tool_start', 'tool_result', 'text_delta', 'llm_call',
       'blackboard_write', 'health_change', 'notification', 'workspace_updated',
       'heartbeat_complete', 'cron_change', 'credit_exhausted', 'credential_request',
+      'credential_request_cancelled',
       'browser_login_request', 'browser_login_completed', 'browser_login_cancelled',
       'browser_captcha_help_request', 'browser_captcha_help_completed', 'browser_captcha_help_cancelled',
       // Task 9 — Workplace tab + pending action review
-      'task_created', 'task_status_changed',
+      'task_created', 'task_status_changed', 'task_outcome',
       'pending_action_created', 'pending_action_resolved', 'pending_action_expired',
     ],
 
@@ -357,6 +358,17 @@ function dashboard() {
     workplaceLoading: false,
     workplaceTaskColumns: ['pending', 'accepted', 'working', 'blocked', 'done'],
     workplaceProjectFilter: '',
+
+    // Workplace task drill-in modal (PR 4) — populated lazily on
+    // card click. ``drillInData`` carries ``{task, events, artifacts}``
+    // from /api/workplace/tasks/{id}; the comment box is reset on
+    // every open so prior text doesn't bleed across tasks.
+    drillInTaskId: null,
+    drillInData: null,
+    drillInComment: '',
+    drillInLoading: false,
+    drillInSubmitting: false,
+    drillInError: '',
 
     // System tab — sub-navigation
     systemTab: 'activity',
@@ -1473,33 +1485,185 @@ function dashboard() {
     // template emoji-free; tweak here without touching the markup.
     workplaceFeedIcon(eventType, taskStatus) {
       if (eventType === 'created') return '+';
-      if (eventType === 'rerouted') return '→';        // →
-      if (eventType === 'cancelled') return '✕';        // ✕
-      if (eventType === 'artifact_added') return '▻';   // ▻
-      if (eventType === 'task_outcome') return '★';     // ★ — operator graded the task
+      if (eventType === 'rerouted') return '→';
+      if (eventType === 'cancelled') return '✕';
+      if (eventType === 'artifact_added') return '▻';
+      if (eventType === 'task_outcome') return '★';
       if (eventType === 'status_changed') {
-        if (taskStatus === 'done') return '✓';          // ✓
-        if (taskStatus === 'blocked') return '⚠';       // ⚠
-        if (taskStatus === 'failed') return '✕';        // ✕
+        if (taskStatus === 'done') return '✓';
+        if (taskStatus === 'blocked') return '⚠';
+        if (taskStatus === 'failed') return '✕';
         if (taskStatus === 'cancelled') return '✕';
-        if (taskStatus === 'working') return '▶';       // ▶
-        return '●';                                      // •
+        if (taskStatus === 'working') return '▶';
+        return '●';
       }
       return '●';
     },
 
-    // Open the task drill-in modal. PR 4 ships the actual modal loader
-    // (``loadTaskDrillIn``); until that ships we fall back to a toast so
-    // the integration is testable in either merge order. Detect at call
-    // time so a later PR 4 merge "just works" without a re-deploy of the
-    // bundle.
-    openTaskDrillIn(taskId) {
+    // ── Task drill-in modal (PR 4) ────────────────────────
+    //
+    // Exposed as ``loadTaskDrillIn`` so the activity-feed PR's
+    // ``openTaskDrillIn`` shim (which feature-detects this method by
+    // name) delegates here cleanly when both PRs are merged. The
+    // ``openTaskDrillIn`` alias keeps PR 4's own templates working in
+    // isolation and survives merges in either order.
+
+    async loadTaskDrillIn(taskId) {
       if (!taskId) return;
-      if (typeof this.loadTaskDrillIn === 'function') {
-        this.loadTaskDrillIn(taskId);
-        return;
+      this.drillInTaskId = taskId;
+      this.drillInData = null;
+      this.drillInComment = '';
+      this.drillInError = '';
+      this.drillInLoading = true;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/workplace/tasks/${encodeURIComponent(taskId)}`);
+        if (!resp.ok) {
+          const data = await resp.json().catch(() => ({}));
+          this.drillInError = data.detail || `Failed to load task (HTTP ${resp.status})`;
+          return;
+        }
+        this.drillInData = await resp.json();
+      } catch (e) {
+        this.drillInError = e.message || String(e);
+      } finally {
+        this.drillInLoading = false;
       }
-      this.showToast(`Open task ${taskId}`);
+    },
+
+    async openTaskDrillIn(taskId) {
+      // Alias kept so PR 4's templates (and any caller that races the
+      // activity-feed PR's shim) reach the same loader.
+      return this.loadTaskDrillIn(taskId);
+    },
+
+    closeTaskDrillIn() {
+      this.drillInTaskId = null;
+      this.drillInData = null;
+      this.drillInComment = '';
+      this.drillInError = '';
+      this.drillInLoading = false;
+      this.drillInSubmitting = false;
+    },
+
+    drillInIsTerminal() {
+      const t = this.drillInData?.task;
+      if (!t) return false;
+      return t.status === 'done' || t.status === 'failed' || t.status === 'cancelled';
+    },
+
+    drillInOutcomeLabel(outcome) {
+      if (outcome === 'accepted') return 'Accepted';
+      if (outcome === 'rework') return 'Marked for rework';
+      if (outcome === 'rejected') return 'Rejected';
+      return '';
+    },
+
+    drillInTimeToComplete() {
+      const t = this.drillInData?.task;
+      if (!t || !t.created_at || !t.completed_at) return '';
+      const secs = Math.max(0, Math.round(t.completed_at - t.created_at));
+      if (secs < 60) return `${secs}s`;
+      const mins = Math.floor(secs / 60);
+      if (mins < 60) return `${mins}m ${secs % 60}s`;
+      const hrs = Math.floor(mins / 60);
+      return `${hrs}h ${mins % 60}m`;
+    },
+
+    drillInFormatTimestamp(ts) {
+      if (!ts) return '';
+      try {
+        return new Date(ts * 1000).toLocaleString();
+      } catch (_) {
+        return '';
+      }
+    },
+
+    drillInCanSubmit(outcome) {
+      if (this.drillInSubmitting) return false;
+      if (!this.drillInData?.task) return false;
+      // Outcomes are write-many — an existing rating can be overwritten
+      // (e.g. operator hit "Reject" by accident). The submit button for
+      // the existing rating is disabled to prevent a no-op double-click.
+      if (this.drillInData.task.outcome === outcome) return false;
+      if (outcome === 'accepted') return true;
+      return Boolean((this.drillInComment || '').trim());
+    },
+
+    async submitOutcome(outcome) {
+      if (!this.drillInTaskId) return;
+      if (!this.drillInCanSubmit(outcome)) return;
+      this.drillInSubmitting = true;
+      try {
+        const resp = await fetch(
+          `${window.__config.apiBase}/workplace/tasks/${encodeURIComponent(this.drillInTaskId)}/outcome`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Requested-With': 'XMLHttpRequest',
+            },
+            body: JSON.stringify({ outcome, feedback: this.drillInComment || '' }),
+          }
+        );
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          this.drillInError = data.detail || `Submit failed (HTTP ${resp.status})`;
+          return;
+        }
+        // Optimistically reflect outcome in the local lists so the
+        // kanban / outputs tab shows the rating without waiting for
+        // the next reload.
+        const updated = data.task || {};
+        for (const list of [this.workplaceTasks, this.workplaceOutputs]) {
+          const row = (list || []).find(r => r.id === this.drillInTaskId);
+          if (row) {
+            row.outcome = updated.outcome || outcome;
+            row.feedback_text = updated.feedback_text ?? (this.drillInComment || null);
+          }
+        }
+        if (outcome === 'rework' && data.rework_task_id) {
+          this.showToast(`Rework task created${data.rework_assignee ? ' for ' + data.rework_assignee : ''}.`);
+        } else if (outcome === 'rework' && data.rework_error) {
+          // Surface the rework spawn failure prominently — the outcome
+          // saved but no follow-up task was created, so the operator
+          // needs to know to retry from the rework task tools.
+          this.showToast(
+            `Outcome saved as needs-rework, but rework task could not be `
+            + `spawned: ${data.rework_error}. Please retry from the rework `
+            + `task tools.`
+          );
+        } else {
+          this.showToast(`Outcome recorded: ${this.drillInOutcomeLabel(outcome) || outcome}.`);
+        }
+        this.closeTaskDrillIn();
+      } catch (e) {
+        this.drillInError = e.message || String(e);
+      } finally {
+        this.drillInSubmitting = false;
+      }
+    },
+
+    handleDrillInKey(evt) {
+      // Modal-scoped shortcuts. Skip when typing in the comment
+      // textarea so 'a'/'r'/'x' keys don't fire while writing
+      // feedback. Also skip when no task is loaded.
+      if (!this.drillInTaskId || !this.drillInData?.task) return;
+      const tag = (evt.target?.tagName || '').toLowerCase();
+      if (tag === 'textarea' || tag === 'input' || tag === 'select') return;
+      const key = evt.key?.toLowerCase();
+      if (key === 'a' && this.drillInCanSubmit('accepted')) {
+        evt.preventDefault();
+        this.submitOutcome('accepted');
+      } else if (key === 'r') {
+        evt.preventDefault();
+        // Focus the comment box so the operator can type the rework brief.
+        const ta = document.getElementById('drill-in-comment');
+        if (ta) ta.focus();
+      } else if (key === 'x') {
+        evt.preventDefault();
+        const ta = document.getElementById('drill-in-comment');
+        if (ta) ta.focus();
+      }
     },
 
     workplaceFormatExpiry(expiresAt) {
@@ -1592,6 +1756,21 @@ function dashboard() {
           || newStatus === 'blocked'
         ) {
           this.loadWorkplaceBlockers();
+        }
+      } else if (evt.type === 'task_outcome') {
+        // Reflect the rating across every list that may show this
+        // task. Background reload remains the source of truth.
+        for (const list of [this.workplaceTasks, this.workplaceOutputs]) {
+          const row = (list || []).find(r => r.id === data.task_id);
+          if (row) {
+            row.outcome = data.outcome;
+            row.feedback_text = data.feedback || row.feedback_text || null;
+          }
+        }
+        // If this task is open in the drill-in modal, sync it too.
+        if (this.drillInData?.task && this.drillInData.task.id === data.task_id) {
+          this.drillInData.task.outcome = data.outcome;
+          this.drillInData.task.feedback_text = data.feedback || null;
         }
       } else if (evt.type === 'pending_action_created') {
         if (!this.workplacePending.find(p => p.nonce === data.nonce)) {
@@ -1785,6 +1964,7 @@ function dashboard() {
       // reflects task lifecycle and pending-action arrivals without a
       // full reload.
       if (evt.type === 'task_created' || evt.type === 'task_status_changed' ||
+          evt.type === 'task_outcome' ||
           evt.type === 'pending_action_created' || evt.type === 'pending_action_resolved' ||
           evt.type === 'pending_action_expired') {
         this.handleWorkplaceEvent(evt);
@@ -2001,6 +2181,8 @@ function dashboard() {
           name: evt.data.name,
           service: evt.data.service || '',
           saved: false,
+          cancelled: false,
+          request_id: evt.data.request_id || '',
           ts: evtTs,
         };
         // Show in the requesting agent's chat
@@ -2031,6 +2213,27 @@ function dashboard() {
         }
       }
 
+      // Sync credential_request card across agent chat + operator chat
+      // when the user cancels (PR 3). Match by request_id when present
+      // (new flow); fall back to name (legacy messages without an id).
+      if (evt.type === 'credential_request_cancelled' && agent && evt.data) {
+        const reqId = evt.data.request_id || '';
+        const name = evt.data.name || '';
+        for (const chatId of [agent, 'operator']) {
+          const hist = this.chatHistories[chatId];
+          if (!hist) continue;
+          for (const m of hist) {
+            if (m.role !== 'credential_request') continue;
+            if (chatId !== agent && m._from_agent !== agent) continue;
+            const matchById = reqId && m.request_id === reqId;
+            const matchByName = !reqId && name && m.name === name;
+            if (matchById || matchByName) {
+              m.cancelled = true;
+            }
+          }
+        }
+      }
+
       // Surface browser login requests as interactive VNC cards in chat.
       if (evt.type === 'browser_login_request' && agent && evt.data && evt.data.service) {
         const evtTs = this._normalizeEventTs(evt);
@@ -2041,6 +2244,7 @@ function dashboard() {
           url: evt.data.url || '',
           completed: false,
           cancelled: false,
+          request_id: evt.data.request_id || '',
           ts: evtTs,
         };
         // Show in the requesting agent's chat
@@ -2110,6 +2314,7 @@ function dashboard() {
           url: evt.data.url || '',
           completed: false,
           cancelled: false,
+          request_id: evt.data.request_id || '',
           ts: evtTs,
         };
         // Show in the requesting agent's chat
@@ -5384,17 +5589,65 @@ function dashboard() {
     async _cancelBrowserLogin(msg, agentId) {
       const prev = { completed: msg.completed, cancelled: msg.cancelled };
       msg.cancelled = true;
+      // PR 3: prefer the request_id-scoped endpoint when the message
+      // carries one — that path also pushes a cancellation steer to the
+      // awaiting agent so it can react instead of waiting on a TTL.
+      // Old messages (pre-PR 3) fall back to the legacy endpoint.
       try {
-        const resp = await fetch(window.__config.apiBase + '/browser-login/cancel', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-          body: JSON.stringify({ agent_id: agentId || '', service: msg.service }),
-        });
+        let resp;
+        if (msg.request_id) {
+          resp = await fetch(
+            window.__config.apiBase
+              + '/browser-login-request/' + encodeURIComponent(msg.request_id) + '/cancel',
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+              body: JSON.stringify({ reason: 'user_cancelled' }),
+            },
+          );
+        } else {
+          resp = await fetch(window.__config.apiBase + '/browser-login/cancel', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+            body: JSON.stringify({ agent_id: agentId || '', service: msg.service }),
+          });
+        }
         if (!resp.ok) {
           msg.cancelled = prev.cancelled;
           this.showToast('Failed to notify agent — please try again');
         }
       } catch (_) {
+        msg.cancelled = prev.cancelled;
+        this.showToast('Network error — please try again');
+      }
+    },
+
+    async _cancelCredentialRequest(msg) {
+      // PR 3: cancel an open credential request via the new
+      // request_id-scoped endpoint. The mesh emits
+      // ``credential_request_cancelled`` (other card copies sync
+      // from the same handler that watches for the event) and pushes
+      // a steer to the awaiting agent.
+      if (!msg || !msg.request_id) return;
+      const prev = { saved: msg.saved, cancelled: msg.cancelled };
+      msg.cancelled = true;
+      try {
+        const resp = await fetch(
+          window.__config.apiBase
+            + '/credential-request/' + encodeURIComponent(msg.request_id) + '/cancel',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+            body: JSON.stringify({ reason: 'user_cancelled' }),
+          },
+        );
+        if (!resp.ok) {
+          msg.saved = prev.saved;
+          msg.cancelled = prev.cancelled;
+          this.showToast('Failed to cancel — please try again');
+        }
+      } catch (_) {
+        msg.saved = prev.saved;
         msg.cancelled = prev.cancelled;
         this.showToast('Network error — please try again');
       }
@@ -5422,12 +5675,26 @@ function dashboard() {
     async _cancelBrowserCaptchaHelp(msg, agentId) {
       const prev = { completed: msg.completed, cancelled: msg.cancelled };
       msg.cancelled = true;
+      // PR 3: prefer request_id-scoped endpoint when available.
       try {
-        const resp = await fetch(window.__config.apiBase + '/browser-captcha-help/cancel', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-          body: JSON.stringify({ agent_id: agentId || '', service: msg.service }),
-        });
+        let resp;
+        if (msg.request_id) {
+          resp = await fetch(
+            window.__config.apiBase
+              + '/browser-captcha-help-request/' + encodeURIComponent(msg.request_id) + '/cancel',
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+              body: JSON.stringify({ reason: 'user_cancelled' }),
+            },
+          );
+        } else {
+          resp = await fetch(window.__config.apiBase + '/browser-captcha-help/cancel', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+            body: JSON.stringify({ agent_id: agentId || '', service: msg.service }),
+          });
+        }
         if (!resp.ok) {
           msg.cancelled = prev.cancelled;
           this.showToast('Failed to notify agent — please try again');

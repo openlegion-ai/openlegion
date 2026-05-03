@@ -402,24 +402,39 @@
                               <span class="text-xs font-medium text-indigo-300" x-text="'Credential needed: ' + (msg.service || msg.name)"></span>
                             </div>
                             <p class="text-xs text-gray-300 mb-3" x-text="msg.content"></p>
-                            <div x-show="!msg.saved" x-data="{ credValue: '', saving: false, saveError: '' }">
+                            <div x-show="!msg.saved && !msg.cancelled" x-data="{ credValue: '', saving: false, saveError: '' }">
                               <input type="password" x-model="credValue"
                                 class="w-full px-3 py-1.5 rounded-lg bg-gray-900 border border-gray-700 text-xs text-white placeholder-gray-500 focus:border-indigo-500 focus:outline-none mb-2"
                                 :placeholder="'Paste your ' + msg.name.replace(/[_.\-]/g, ' ').replace(/^\w/, c => c.toUpperCase())">
                               <div x-show="saveError" class="text-[10px] text-red-400 mb-1.5" x-text="saveError"></div>
-                              <button @click="if (credValue.trim()) { saving = true; saveError = ''; fetch(window.__config.apiBase + '/credentials/agent', { method: 'POST', headers: {'Content-Type':'application/json', 'X-Requested-With':'XMLHttpRequest'}, body: JSON.stringify({service: msg.name, key: credValue.trim(), agent_id: msg._from_agent || ''}) }).then(r => { if (r.ok) { msg.saved = true; credValue = ''; } else { saveError = 'Failed to save. Please try again.'; } saving = false; }).catch(() => { saveError = 'Network error. Please try again.'; saving = false; }); }"
-                                :disabled="!credValue.trim() || saving"
-                                class="w-full px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
-                                :class="credValue.trim() && !saving ? 'bg-indigo-600 hover:bg-indigo-500 text-white' : 'bg-gray-700 text-gray-500 cursor-not-allowed'">
-                                <span x-show="!saving">Save to Vault</span>
-                                <span x-show="saving">Saving...</span>
-                              </button>
+                              <div class="flex gap-2">
+                                <button @click="if (credValue.trim()) { saving = true; saveError = ''; fetch(window.__config.apiBase + '/credentials/agent', { method: 'POST', headers: {'Content-Type':'application/json', 'X-Requested-With':'XMLHttpRequest'}, body: JSON.stringify({service: msg.name, key: credValue.trim(), agent_id: msg._from_agent || ''}) }).then(r => { if (r.ok) { msg.saved = true; credValue = ''; } else { saveError = 'Failed to save. Please try again.'; } saving = false; }).catch(() => { saveError = 'Network error. Please try again.'; saving = false; }); }"
+                                  :disabled="!credValue.trim() || saving"
+                                  class="flex-1 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
+                                  :class="credValue.trim() && !saving ? 'bg-indigo-600 hover:bg-indigo-500 text-white' : 'bg-gray-700 text-gray-500 cursor-not-allowed'">
+                                  <span x-show="!saving">Save to Vault</span>
+                                  <span x-show="saving">Saving...</span>
+                                </button>
+                                <template x-if="msg.request_id">
+                                  <button @click="_cancelCredentialRequest(msg)"
+                                    :disabled="saving"
+                                    class="px-3 py-1.5 rounded-lg text-xs font-medium bg-gray-700/50 hover:bg-gray-600 text-gray-300 transition-colors">
+                                    Cancel
+                                  </button>
+                                </template>
+                              </div>
                             </div>
                             <div x-show="msg.saved" class="flex items-center gap-1.5 text-xs text-emerald-400">
                               <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
                                 <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/>
                               </svg>
                               <span>Saved securely. The agent can now use this credential.</span>
+                            </div>
+                            <div x-show="msg.cancelled" class="flex items-center gap-1.5 text-xs text-gray-400">
+                              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
+                              </svg>
+                              <span x-text="'Credential request for ' + (msg.service || msg.name) + ' was cancelled.'"></span>
                             </div>
                           </div>
                         </div>
@@ -3134,7 +3149,8 @@
                   <div class="mt-3 pt-2 border-t border-gray-700/40">
                     <div class="text-[11px] text-yellow-300 mb-1">Blockers:</div>
                     <template x-for="b in p.blockers" :key="b.task_id">
-                      <div class="text-xs text-gray-300 pl-2">
+                      <div class="text-xs text-gray-300 pl-2 cursor-pointer hover:text-white"
+                        @click="openTaskDrillIn(b.task_id)">
                         <span x-text="b.title"></span>
                         <span class="text-gray-500" x-text="'· ' + (b.assignee || '')"></span>
                         <div class="text-[11px] text-gray-400" x-text="b.blocker_note"></div>
@@ -3159,12 +3175,22 @@
                   </div>
                   <div class="space-y-2">
                     <template x-for="t in workplaceTasksByStatus(status)" :key="t.id">
-                      <div class="bg-gray-900/60 border border-gray-700/40 rounded-md p-2 text-xs">
+                      <div class="bg-gray-900/60 border border-gray-700/40 rounded-md p-2 text-xs cursor-pointer hover:bg-gray-900/90 hover:border-gray-600 transition-colors"
+                        @click="openTaskDrillIn(t.id)">
                         <div class="font-medium text-gray-200 truncate" x-text="t.title"></div>
-                        <div class="text-[11px] text-gray-400 mt-1">
+                        <div class="text-[11px] text-gray-400 mt-1 flex items-center gap-1.5">
                           <span x-text="t.assignee || ''"></span>
                           <span x-show="t.project_id" class="text-gray-500"
-                            x-text="' · ' + (t.project_id || '')"></span>
+                            x-text="'· ' + (t.project_id || '')"></span>
+                          <template x-if="t.outcome">
+                            <span class="ml-auto px-1.5 py-0.5 rounded text-[10px] font-medium"
+                              :class="{
+                                'bg-emerald-900/30 text-emerald-300': t.outcome === 'accepted',
+                                'bg-amber-900/30 text-amber-300': t.outcome === 'rework',
+                                'bg-red-900/30 text-red-300': t.outcome === 'rejected',
+                              }"
+                              x-text="t.outcome"></span>
+                          </template>
                         </div>
                       </div>
                     </template>
@@ -3185,8 +3211,20 @@
               <div class="text-sm text-gray-500 py-4">No completed tasks yet.</div>
             </template>
             <template x-for="t in workplaceOutputs" :key="t.id">
-              <div class="bg-gray-800/40 border border-gray-700/50 rounded-lg p-3">
-                <div class="text-sm font-medium text-gray-100" x-text="t.title"></div>
+              <div class="bg-gray-800/40 border border-gray-700/50 rounded-lg p-3 cursor-pointer hover:bg-gray-800/70 hover:border-gray-600/60 transition-colors"
+                @click="openTaskDrillIn(t.id)">
+                <div class="flex items-start justify-between gap-2">
+                  <div class="text-sm font-medium text-gray-100 flex-1" x-text="t.title"></div>
+                  <template x-if="t.outcome">
+                    <span class="px-1.5 py-0.5 rounded text-[10px] font-medium shrink-0"
+                      :class="{
+                        'bg-emerald-900/30 text-emerald-300': t.outcome === 'accepted',
+                        'bg-amber-900/30 text-amber-300': t.outcome === 'rework',
+                        'bg-red-900/30 text-red-300': t.outcome === 'rejected',
+                      }"
+                      x-text="t.outcome"></span>
+                  </template>
+                </div>
                 <div class="text-[11px] text-gray-400 mt-1">
                   <span x-text="t.assignee || ''"></span>
                   <span x-show="t.project_id" class="text-gray-500"
@@ -3204,6 +3242,215 @@
                 </template>
               </div>
             </template>
+          </div>
+        </template>
+
+        <!-- Task drill-in modal (PR 4) — opens on click of any task
+             card. Shows brief, full event timeline, inline artifacts,
+             and the Accept / Rework / Reject action row. Modal-scoped
+             keyboard shortcuts ('a' / 'r' / 'x') are wired via the
+             window keydown handler below; the handler skips itself
+             when no task is loaded so the global shortcuts stay
+             intact when the modal is closed. -->
+        <template x-if="drillInTaskId">
+          <div class="fixed inset-0 z-[60] flex items-center justify-center p-4"
+            x-data="{ rerating: false }"
+            @keydown.escape.window="closeTaskDrillIn()"
+            @keydown.window="handleDrillInKey($event)">
+            <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" @click="closeTaskDrillIn()"></div>
+            <div class="relative w-full max-w-3xl max-h-[90vh] flex flex-col bg-gray-900 border border-gray-700 rounded-xl shadow-2xl overflow-hidden">
+              <!-- Header -->
+              <div class="flex items-start justify-between gap-3 p-5 border-b border-gray-800">
+                <div class="min-w-0 flex-1">
+                  <template x-if="drillInLoading">
+                    <div class="h-5 w-2/3 bg-gray-800 rounded animate-pulse"></div>
+                  </template>
+                  <template x-if="!drillInLoading && drillInData?.task">
+                    <h3 class="text-base font-semibold text-white" x-text="drillInData.task.title"></h3>
+                  </template>
+                  <template x-if="!drillInLoading && drillInData?.task">
+                    <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-gray-400">
+                      <span><span class="text-gray-500">assignee:</span> <span class="text-gray-200" x-text="drillInData.task.assignee || '—'"></span></span>
+                      <span x-show="drillInData.task.project_id"><span class="text-gray-500">project:</span> <span class="text-gray-200" x-text="drillInData.task.project_id"></span></span>
+                      <span><span class="text-gray-500">status:</span> <span class="text-gray-200" x-text="drillInData.task.status"></span></span>
+                      <span x-show="drillInData.task.created_at"><span class="text-gray-500">created:</span> <span class="text-gray-200" x-text="drillInFormatTimestamp(drillInData.task.created_at)"></span></span>
+                      <span x-show="drillInData.task.completed_at"><span class="text-gray-500">completed:</span> <span class="text-gray-200" x-text="drillInFormatTimestamp(drillInData.task.completed_at)"></span></span>
+                      <span x-show="drillInTimeToComplete()"><span class="text-gray-500">duration:</span> <span class="text-gray-200" x-text="drillInTimeToComplete()"></span></span>
+                    </div>
+                  </template>
+                </div>
+                <button @click="closeTaskDrillIn()" class="text-gray-500 hover:text-gray-300 text-xl leading-none shrink-0" aria-label="Close">&times;</button>
+              </div>
+
+              <!-- Body (scrolls) -->
+              <div class="flex-1 overflow-y-auto p-5 space-y-4">
+                <template x-if="drillInError">
+                  <div class="text-xs text-red-300 bg-red-900/20 border border-red-800/30 rounded px-3 py-2"
+                    x-text="drillInError"></div>
+                </template>
+
+                <template x-if="drillInLoading">
+                  <div class="space-y-3">
+                    <div class="h-3 w-1/2 bg-gray-800 rounded animate-pulse"></div>
+                    <div class="h-3 w-3/4 bg-gray-800 rounded animate-pulse"></div>
+                    <div class="h-3 w-2/3 bg-gray-800 rounded animate-pulse"></div>
+                  </div>
+                </template>
+
+                <!-- Outcome banner (if rated) -->
+                <template x-if="!drillInLoading && drillInData?.task?.outcome">
+                  <div class="rounded-lg border px-3 py-2"
+                    :class="{
+                      'bg-emerald-900/15 border-emerald-800/40': drillInData.task.outcome === 'accepted',
+                      'bg-amber-900/15 border-amber-800/40': drillInData.task.outcome === 'rework',
+                      'bg-red-900/15 border-red-800/40': drillInData.task.outcome === 'rejected',
+                    }">
+                    <div class="text-xs font-medium"
+                      :class="{
+                        'text-emerald-200': drillInData.task.outcome === 'accepted',
+                        'text-amber-200': drillInData.task.outcome === 'rework',
+                        'text-red-200': drillInData.task.outcome === 'rejected',
+                      }"
+                      x-text="drillInOutcomeLabel(drillInData.task.outcome)"></div>
+                    <template x-if="drillInData.task.feedback_text">
+                      <div class="mt-1 text-xs text-gray-300 whitespace-pre-wrap"
+                        x-text="drillInData.task.feedback_text"></div>
+                    </template>
+                  </div>
+                </template>
+
+                <!-- Brief -->
+                <template x-if="!drillInLoading && drillInData?.task">
+                  <div>
+                    <div class="text-[11px] uppercase tracking-wide text-gray-500 mb-1">Brief</div>
+                    <div class="text-xs text-gray-200 whitespace-pre-wrap bg-gray-950/60 border border-gray-800 rounded px-3 py-2"
+                      x-text="drillInData.task.description || '(no brief)'"></div>
+                  </div>
+                </template>
+
+                <!-- Artifacts -->
+                <template x-if="!drillInLoading && drillInData?.artifacts && drillInData.artifacts.length">
+                  <div>
+                    <div class="text-[11px] uppercase tracking-wide text-gray-500 mb-1">Artifacts</div>
+                    <div class="space-y-2">
+                      <template x-for="a in drillInData.artifacts" :key="a.ref">
+                        <div class="bg-gray-950/60 border border-gray-800 rounded px-3 py-2">
+                          <div class="text-[10px] font-mono text-gray-500 break-all" x-text="a.ref"></div>
+                          <template x-if="a.kind === 'text' && a.content">
+                            <pre class="mt-1 text-xs text-gray-200 whitespace-pre-wrap font-mono leading-snug max-h-72 overflow-auto" x-text="a.content"></pre>
+                          </template>
+                          <template x-if="a.kind === 'text' && a.content_truncated">
+                            <div class="mt-1 text-[10px] text-amber-300/80">(truncated — first 10k chars shown)</div>
+                          </template>
+                          <template x-if="a.kind === 'missing'">
+                            <div class="mt-1 text-[11px] text-gray-500 italic">Artifact no longer available.</div>
+                          </template>
+                          <template x-if="a.kind === 'error'">
+                            <div class="mt-1 text-[11px] text-red-300/80">Error resolving artifact: <span x-text="a.error || '(unknown)'"></span></div>
+                          </template>
+                          <template x-if="a.kind === 'url'">
+                            <a :href="a.url" target="_blank" rel="noopener noreferrer"
+                              class="text-xs text-indigo-300 hover:text-indigo-200 underline">Open</a>
+                          </template>
+                        </div>
+                      </template>
+                    </div>
+                  </div>
+                </template>
+
+                <!-- Event timeline -->
+                <template x-if="!drillInLoading && drillInData?.events">
+                  <div>
+                    <div class="text-[11px] uppercase tracking-wide text-gray-500 mb-1">Timeline</div>
+                    <template x-if="!drillInData.events.length">
+                      <div class="text-xs text-gray-500 italic">(no events)</div>
+                    </template>
+                    <ol class="space-y-1.5">
+                      <template x-for="evt in drillInData.events" :key="evt.event_id">
+                        <li class="text-xs text-gray-300 bg-gray-950/40 border border-gray-800/60 rounded px-3 py-1.5">
+                          <div class="flex items-center justify-between gap-2">
+                            <span class="font-medium text-gray-200" x-text="evt.event_kind"></span>
+                            <span class="text-[10px] text-gray-500" x-text="drillInFormatTimestamp(evt.created_at)"></span>
+                          </div>
+                          <div class="text-[11px] text-gray-400">
+                            <span x-text="'by ' + (evt.actor || '?')"></span>
+                          </div>
+                          <template x-if="evt.payload">
+                            <pre class="mt-1 text-[11px] text-gray-400 whitespace-pre-wrap font-mono" x-text="JSON.stringify(evt.payload, null, 2)"></pre>
+                          </template>
+                        </li>
+                      </template>
+                    </ol>
+                  </div>
+                </template>
+              </div>
+
+              <!-- Action footer (terminal + (not yet rated OR re-rating)) -->
+              <template x-if="!drillInLoading && drillInData?.task && drillInIsTerminal() && (!drillInData.task.outcome || rerating)">
+                <div class="border-t border-gray-800 p-4 space-y-2">
+                  <textarea id="drill-in-comment"
+                    x-model="drillInComment"
+                    rows="2"
+                    placeholder="Add a comment (required for Rework / Reject; optional for Accept). Press 'a' for Accept, 'r' for Rework, 'x' for Reject."
+                    class="w-full text-xs bg-gray-950 border border-gray-800 rounded px-2 py-1.5 text-gray-200 focus:border-indigo-500 focus:outline-none resize-none"></textarea>
+                  <div class="flex items-center justify-between gap-2">
+                    <div class="text-[10px] text-gray-500">
+                      <kbd class="px-1 py-0.5 bg-gray-800 rounded">a</kbd> accept ·
+                      <kbd class="px-1 py-0.5 bg-gray-800 rounded">r</kbd> rework ·
+                      <kbd class="px-1 py-0.5 bg-gray-800 rounded">x</kbd> reject ·
+                      <kbd class="px-1 py-0.5 bg-gray-800 rounded">esc</kbd> close
+                    </div>
+                    <div class="flex gap-2">
+                      <template x-if="rerating">
+                        <button @click="rerating = false"
+                          class="text-xs px-3 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-300 transition-colors">
+                          Cancel
+                        </button>
+                      </template>
+                      <button @click="submitOutcome('rejected')"
+                        :disabled="!drillInCanSubmit('rejected')"
+                        class="text-xs px-3 py-1.5 rounded bg-red-900/40 hover:bg-red-900/60 text-red-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
+                        Reject
+                      </button>
+                      <button @click="submitOutcome('rework')"
+                        :disabled="!drillInCanSubmit('rework')"
+                        class="text-xs px-3 py-1.5 rounded bg-amber-900/40 hover:bg-amber-900/60 text-amber-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
+                        Needs rework
+                      </button>
+                      <button @click="submitOutcome('accepted')"
+                        :disabled="!drillInCanSubmit('accepted')"
+                        class="text-xs px-3 py-1.5 rounded bg-emerald-700 hover:bg-emerald-600 text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
+                        Accept
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </template>
+
+              <!-- Footer-only close when no actions available -->
+              <template x-if="!drillInLoading && drillInData?.task && !rerating && (!drillInIsTerminal() || drillInData.task.outcome)">
+                <div class="border-t border-gray-800 p-3 flex items-center justify-between">
+                  <div class="text-[11px] text-gray-500">
+                    <template x-if="!drillInIsTerminal()">
+                      <span>Outcome rating is available once the task reaches a terminal status.</span>
+                    </template>
+                    <template x-if="drillInIsTerminal() && drillInData.task.outcome">
+                      <span>Already rated. You can change the rating if this was a mistake.</span>
+                    </template>
+                  </div>
+                  <div class="flex gap-2">
+                    <template x-if="drillInIsTerminal() && drillInData.task.outcome">
+                      <button @click="rerating = true; drillInComment = drillInData?.task?.feedback_text || ''"
+                        class="text-xs px-3 py-1.5 rounded bg-gray-700 hover:bg-gray-600 text-gray-200 transition-colors">
+                        Change rating
+                      </button>
+                    </template>
+                    <button @click="closeTaskDrillIn()"
+                      class="text-xs px-3 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-300 transition-colors">Close</button>
+                  </div>
+                </div>
+              </template>
+            </div>
           </div>
         </template>
       </div>
@@ -6358,24 +6605,39 @@
                         <span class="text-xs font-medium text-indigo-300" x-text="'Credential needed: ' + (msg.service || msg.name)"></span>
                       </div>
                       <p class="text-xs text-gray-300 mb-3" x-text="msg.content"></p>
-                      <div x-show="!msg.saved" x-data="{ credValue: '', saving: false, saveError: '' }">
+                      <div x-show="!msg.saved && !msg.cancelled" x-data="{ credValue: '', saving: false, saveError: '' }">
                         <input type="password" x-model="credValue"
                           class="w-full px-3 py-1.5 rounded-lg bg-gray-900 border border-gray-700 text-xs text-white placeholder-gray-500 focus:border-indigo-500 focus:outline-none mb-2"
                           :placeholder="'Paste your ' + msg.name.replace(/[_.\-]/g, ' ').replace(/^\w/, c => c.toUpperCase())">
                         <div x-show="saveError" class="text-[10px] text-red-400 mb-1.5" x-text="saveError"></div>
-                        <button @click="if (credValue.trim()) { saving = true; saveError = ''; fetch(window.__config.apiBase + '/credentials/agent', { method: 'POST', headers: {'Content-Type':'application/json', 'X-Requested-With':'XMLHttpRequest'}, body: JSON.stringify({service: msg.name, key: credValue.trim(), agent_id: activeChatId || ''}) }).then(r => { if (r.ok) { msg.saved = true; credValue = ''; } else { saveError = 'Failed to save. Please try again.'; } saving = false; }).catch(() => { saveError = 'Network error. Please try again.'; saving = false; }); }"
-                          :disabled="!credValue.trim() || saving"
-                          class="w-full px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
-                          :class="credValue.trim() && !saving ? 'bg-indigo-600 hover:bg-indigo-500 text-white' : 'bg-gray-700 text-gray-500 cursor-not-allowed'">
-                          <span x-show="!saving">Save to Vault</span>
-                          <span x-show="saving">Saving...</span>
-                        </button>
+                        <div class="flex gap-2">
+                          <button @click="if (credValue.trim()) { saving = true; saveError = ''; fetch(window.__config.apiBase + '/credentials/agent', { method: 'POST', headers: {'Content-Type':'application/json', 'X-Requested-With':'XMLHttpRequest'}, body: JSON.stringify({service: msg.name, key: credValue.trim(), agent_id: activeChatId || ''}) }).then(r => { if (r.ok) { msg.saved = true; credValue = ''; } else { saveError = 'Failed to save. Please try again.'; } saving = false; }).catch(() => { saveError = 'Network error. Please try again.'; saving = false; }); }"
+                            :disabled="!credValue.trim() || saving"
+                            class="flex-1 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
+                            :class="credValue.trim() && !saving ? 'bg-indigo-600 hover:bg-indigo-500 text-white' : 'bg-gray-700 text-gray-500 cursor-not-allowed'">
+                            <span x-show="!saving">Save to Vault</span>
+                            <span x-show="saving">Saving...</span>
+                          </button>
+                          <template x-if="msg.request_id">
+                            <button @click="_cancelCredentialRequest(msg)"
+                              :disabled="saving"
+                              class="px-3 py-1.5 rounded-lg text-xs font-medium bg-gray-700/50 hover:bg-gray-600 text-gray-300 transition-colors">
+                              Cancel
+                            </button>
+                          </template>
+                        </div>
                       </div>
                       <div x-show="msg.saved" class="flex items-center gap-1.5 text-xs text-emerald-400">
                         <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
                           <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/>
                         </svg>
                         <span>Saved securely. The agent can now use this credential.</span>
+                      </div>
+                      <div x-show="msg.cancelled" class="flex items-center gap-1.5 text-xs text-gray-400">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+                          <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
+                        </svg>
+                        <span x-text="'Credential request for ' + (msg.service || msg.name) + ' was cancelled.'"></span>
                       </div>
                     </div>
                   </div>
