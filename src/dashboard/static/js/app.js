@@ -1462,8 +1462,14 @@ function dashboard() {
     },
 
     // ── Task drill-in modal (PR 4) ────────────────────────
+    //
+    // Exposed as ``loadTaskDrillIn`` so the activity-feed PR's
+    // ``openTaskDrillIn`` shim (which feature-detects this method by
+    // name) delegates here cleanly when both PRs are merged. The
+    // ``openTaskDrillIn`` alias keeps PR 4's own templates working in
+    // isolation and survives merges in either order.
 
-    async openTaskDrillIn(taskId) {
+    async loadTaskDrillIn(taskId) {
       if (!taskId) return;
       this.drillInTaskId = taskId;
       this.drillInData = null;
@@ -1483,6 +1489,12 @@ function dashboard() {
       } finally {
         this.drillInLoading = false;
       }
+    },
+
+    async openTaskDrillIn(taskId) {
+      // Alias kept so PR 4's templates (and any caller that races the
+      // activity-feed PR's shim) reach the same loader.
+      return this.loadTaskDrillIn(taskId);
     },
 
     closeTaskDrillIn() {
