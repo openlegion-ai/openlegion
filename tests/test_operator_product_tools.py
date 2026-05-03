@@ -741,8 +741,14 @@ async def test_endpoint_delete_project_happy_path(v2_app):
         r = await c.post("/mesh/projects/research/propose-delete",
                          headers=_human_origin_headers())
         assert r.status_code == 200, r.text
-        nonce = r.json()["change_id"]
-        digest = r.json()["payload_digest"]
+        body = r.json()
+        nonce = body["change_id"]
+        digest = body["payload_digest"]
+        # PR #2: response carries the human-readable summary so the
+        # inline pending-action card can render without a follow-up
+        # round-trip.
+        assert "delete project" in body["summary"].lower()
+        assert "'research'" in body["summary"]
         # Confirm with human origin succeeds
         r = await c.post("/mesh/config/confirm",
                          json={"change_id": nonce, "payload_digest": digest},
@@ -794,8 +800,13 @@ async def test_endpoint_archive_agent_then_delete(v2_app):
         r = await c.post("/mesh/agents/scout/propose-delete",
                          headers=_human_origin_headers())
         assert r.status_code == 200, r.text
-        nonce = r.json()["change_id"]
-        digest = r.json()["payload_digest"]
+        body = r.json()
+        nonce = body["change_id"]
+        digest = body["payload_digest"]
+        # PR #2: agent-delete summary is short and names the target
+        # so the inline pending-action card is self-describing.
+        assert "delete agent" in body["summary"].lower()
+        assert "'scout'" in body["summary"]
         # Confirm
         r = await c.post("/mesh/config/confirm",
                          json={"change_id": nonce, "payload_digest": digest},

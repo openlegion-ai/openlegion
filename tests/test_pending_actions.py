@@ -512,3 +512,67 @@ def test_event_bus_unset_disables_emit(tmp_path):
         target_id="alpha", action_kind="model", payload={},
     )
     assert captured == []
+
+
+# ── Inline pending-action card metadata (PR #2) ──────────────────
+
+
+def test_store_persists_summary_and_preview_diff(tmp_path):
+    """The dashboard's inline pending-action card needs both the
+    summary and the preview_diff to render without a follow-up
+    round-trip. ``store`` accepts both, persists them to the row,
+    and ``peek`` / ``list_pending`` / ``consume`` / ``cancel`` all
+    return them."""
+    pa = _make_store(tmp_path)
+    rec = pa.store(
+        nonce="n1", actor="operator", target_kind="agent",
+        target_id="alpha", action_kind="model", payload={"x": 1},
+        summary="Switch alpha's model from gpt-4o to claude-opus",
+        preview_diff="--- model\n+++ model\n- gpt-4o\n+ claude-opus\n",
+    )
+    assert rec["summary"].startswith("Switch alpha")
+    assert "+ claude-opus" in rec["preview_diff"]
+
+    peeked = pa.peek("n1")
+    assert peeked is not None
+    assert peeked["summary"] == rec["summary"]
+    assert peeked["preview_diff"] == rec["preview_diff"]
+
+    listed = pa.list_pending()
+    assert len(listed) == 1
+    assert listed[0]["summary"] == rec["summary"]
+    assert listed[0]["preview_diff"] == rec["preview_diff"]
+
+    consumed = pa.consume("n1", confirmer="operator")
+    assert consumed is not None
+    assert consumed["summary"] == rec["summary"]
+    assert consumed["preview_diff"] == rec["preview_diff"]
+
+
+def test_store_summary_and_preview_diff_default_to_none(tmp_path):
+    """Existing call sites that don't pass the new args must keep
+    working — the columns are nullable and the dict carries None."""
+    pa = _make_store(tmp_path)
+    rec = pa.store(
+        nonce="n1", actor="operator", target_kind="agent",
+        target_id="alpha", action_kind="model", payload={"x": 1},
+    )
+    assert rec["summary"] is None
+    assert rec["preview_diff"] is None
+    assert pa.peek("n1")["summary"] is None
+
+
+def test_pending_action_created_event_carries_summary_and_diff(tmp_path):
+    """The event payload must carry summary + preview_diff so the
+    dashboard can render the inline card from the event alone."""
+    pa = _make_store(tmp_path)
+    captured = _attach_recording_bus(pa)
+    pa.store(
+        nonce="n1", actor="operator", target_kind="agent",
+        target_id="alpha", action_kind="model", payload={"x": 1},
+        summary="Switch alpha's model from gpt-4o to claude",
+        preview_diff="diff goes here",
+    )
+    evt = next(c for c in captured if c[0] == "pending_action_created")
+    assert evt[2]["summary"] == "Switch alpha's model from gpt-4o to claude"
+    assert evt[2]["preview_diff"] == "diff goes here"
