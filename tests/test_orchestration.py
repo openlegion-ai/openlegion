@@ -624,14 +624,32 @@ def test_set_outcome_rejects_non_terminal_status(tmp_path):
         t.set_outcome(rec["id"], "accepted", "")
 
 
-def test_set_outcome_rejects_double_set(tmp_path):
+def test_set_outcome_allows_re_rating(tmp_path):
+    """Outcomes are write-many — operators can re-rate after a misclick.
+
+    Each submission appends a fresh ``task_outcome`` audit event so the
+    full re-rating history stays queryable, but ``tasks.outcome`` and
+    ``tasks.feedback_text`` reflect only the latest value.
+    """
     t = _make_store(tmp_path)
     rec = t.create(creator="scout", assignee="analyst", title="dig")
     t.update_status(rec["id"], "working", actor="analyst")
     t.update_status(rec["id"], "done", actor="analyst")
-    t.set_outcome(rec["id"], "accepted", "")
-    with pytest.raises(InvalidStatusTransition, match="already set"):
-        t.set_outcome(rec["id"], "rework", "actually no")
+    first = t.set_outcome(rec["id"], "rejected", "wrong angle")
+    assert first["outcome"] == "rejected"
+    second = t.set_outcome(rec["id"], "accepted", "actually fine")
+    assert second["outcome"] == "accepted"
+    assert second["feedback_text"] == "actually fine"
+    # Both submissions produce a task_outcome audit row.
+    events = t.list_events(rec["id"])
+    outcome_events = [e for e in events if e["event_kind"] == "task_outcome"]
+    assert len(outcome_events) == 2
+    # The newer event records the prior outcome so audit/analytics can
+    # detect re-ratings without scanning the whole history.
+    assert outcome_events[0]["payload"]["outcome"] == "rejected"
+    assert outcome_events[0]["payload"]["previous_outcome"] is None
+    assert outcome_events[1]["payload"]["outcome"] == "accepted"
+    assert outcome_events[1]["payload"]["previous_outcome"] == "rejected"
 
 
 def test_set_outcome_rejects_unknown_outcome(tmp_path):

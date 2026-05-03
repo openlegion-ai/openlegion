@@ -1530,7 +1530,10 @@ function dashboard() {
     drillInCanSubmit(outcome) {
       if (this.drillInSubmitting) return false;
       if (!this.drillInData?.task) return false;
-      if (this.drillInData.task.outcome) return false;  // single-rating
+      // Outcomes are write-many — an existing rating can be overwritten
+      // (e.g. operator hit "Reject" by accident). The submit button for
+      // the existing rating is disabled to prevent a no-op double-click.
+      if (this.drillInData.task.outcome === outcome) return false;
       if (outcome === 'accepted') return true;
       return Boolean((this.drillInComment || '').trim());
     },
@@ -1570,7 +1573,14 @@ function dashboard() {
         if (outcome === 'rework' && data.rework_task_id) {
           this.showToast(`Rework task created${data.rework_assignee ? ' for ' + data.rework_assignee : ''}.`);
         } else if (outcome === 'rework' && data.rework_error) {
-          this.showToast(`Outcome saved, but rework spawn failed: ${data.rework_error}`);
+          // Surface the rework spawn failure prominently — the outcome
+          // saved but no follow-up task was created, so the operator
+          // needs to know to retry from the rework task tools.
+          this.showToast(
+            `Outcome saved as needs-rework, but rework task could not be `
+            + `spawned: ${data.rework_error}. Please retry from the rework `
+            + `task tools.`
+          );
         } else {
           this.showToast(`Outcome recorded: ${this.drillInOutcomeLabel(outcome) || outcome}.`);
         }

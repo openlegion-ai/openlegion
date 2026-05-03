@@ -46,9 +46,11 @@ VALID_STATUSES: frozenset[str] = frozenset({
 TERMINAL_STATUSES: frozenset[str] = frozenset({"done", "failed", "cancelled"})
 
 # Outcome enum (Task 9 PR 4) — operator-supplied judgement on a
-# completed task. ``None`` means "not yet rated"; the three concrete
-# values are write-once (re-rating requires an explicit unset path
-# which we do not implement at this slice).
+# completed task. ``None`` means "not yet rated". Outcomes are
+# write-many: every submission appends a ``task_outcome`` audit event
+# and the ``tasks.outcome`` column reflects the LATEST rating, so an
+# operator who clicks the wrong button can re-rate without admin
+# intervention.
 VALID_OUTCOMES: frozenset[str] = frozenset({"accepted", "rework", "rejected"})
 
 # Feedback length cap (chars). Bounded so the SQLite row stays small
@@ -687,9 +689,14 @@ class Tasks:
         ``outcome`` must be one of :data:`VALID_OUTCOMES`. The task must
         already be in a terminal status (``done`` / ``failed`` /
         ``cancelled``) — outcome ratings only make sense for finished
-        work. Outcomes are write-once at this slice; re-rating raises
-        :class:`InvalidStatusTransition` so the audit trail stays
-        unambiguous.
+        work.
+
+        Outcomes are write-many: re-rating overwrites ``tasks.outcome``
+        and ``tasks.feedback_text`` with the latest values and appends
+        a fresh ``task_outcome`` event row so the audit trail records
+        every submission. The emitted bus payload includes
+        ``previous_outcome`` so dashboards can render "re-rated"
+        affordances.
 
         Emits a ``task_outcome`` audit event row + a ``task_outcome``
         EventBus notification so the dashboard can update the modal /
@@ -706,7 +713,7 @@ class Tasks:
                 f"feedback_text exceeds {MAX_FEEDBACK_CHARS} chars"
             )
         now = time.time()
-        emitted: tuple[str, str | None, str | None] | None = None
+        emitted: tuple[str, str | None, str | None, str | None] | None = None
         with self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
@@ -725,12 +732,6 @@ class Tasks:
                         f"cannot set outcome on non-terminal task {task_id} "
                         f"(status={current_status!r})"
                     )
-                if current_outcome is not None:
-                    conn.execute("ROLLBACK")
-                    raise InvalidStatusTransition(
-                        f"outcome already set for {task_id} "
-                        f"(current={current_outcome!r})"
-                    )
                 conn.execute(
                     "UPDATE tasks SET outcome=?, feedback_text=?, "
                     "updated_at=? WHERE id=?",
@@ -738,17 +739,21 @@ class Tasks:
                 )
                 self._emit_event(
                     conn, task_id, "task_outcome", actor,
-                    {"outcome": outcome, "feedback": feedback},
+                    {
+                        "outcome": outcome,
+                        "feedback": feedback,
+                        "previous_outcome": current_outcome,
+                    },
                 )
                 conn.execute("COMMIT")
-                emitted = (current_status, project_id, assignee)
+                emitted = (current_status, project_id, assignee, current_outcome)
             except (TaskNotFound, InvalidStatusTransition):
                 raise
             except Exception:
                 conn.execute("ROLLBACK")
                 raise
         if emitted is not None:
-            current_status, project_id, assignee = emitted
+            current_status, project_id, assignee, previous_outcome = emitted
             self._safe_emit(
                 "task_outcome",
                 agent=actor,
@@ -758,6 +763,7 @@ class Tasks:
                     "assignee": assignee,
                     "status": current_status,
                     "outcome": outcome,
+                    "previous_outcome": previous_outcome,
                     "feedback": feedback,
                     "actor": actor,
                     "ts": now,

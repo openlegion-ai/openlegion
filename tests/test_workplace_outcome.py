@@ -187,20 +187,30 @@ class TestWorkplaceOutcome:
         )
         assert resp.status_code == 409
 
-    def test_outcome_double_set_returns_409(self):
+    def test_outcome_re_rating_overwrites_latest(self):
+        """Outcomes are write-many: a re-rating updates ``tasks.outcome``
+        in place and appends a fresh ``task_outcome`` audit row so the
+        full history stays inspectable."""
         rec = _create_done_task(
             self.tasks, creator="op", assignee="analyst", title="t",
         )
         first = self.client.post(
             f"/dashboard/api/workplace/tasks/{rec['id']}/outcome",
-            json={"outcome": "accepted", "feedback": ""},
+            json={"outcome": "rejected", "feedback": "wrong"},
         )
         assert first.status_code == 200
+        assert first.json()["task"]["outcome"] == "rejected"
         second = self.client.post(
             f"/dashboard/api/workplace/tasks/{rec['id']}/outcome",
-            json={"outcome": "rework", "feedback": "actually no"},
+            json={"outcome": "accepted", "feedback": "fine on reread"},
         )
-        assert second.status_code == 409
+        assert second.status_code == 200
+        body = second.json()
+        assert body["task"]["outcome"] == "accepted"
+        assert body["task"]["feedback_text"] == "fine on reread"
+        events = self.tasks.list_events(rec["id"])
+        outcome_events = [e for e in events if e["event_kind"] == "task_outcome"]
+        assert len(outcome_events) == 2
 
     def test_outcome_oversize_feedback_rejected(self):
         rec = _create_done_task(

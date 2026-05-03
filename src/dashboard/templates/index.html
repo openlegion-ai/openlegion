@@ -3177,6 +3177,7 @@
              intact when the modal is closed. -->
         <template x-if="drillInTaskId">
           <div class="fixed inset-0 z-[60] flex items-center justify-center p-4"
+            x-data="{ rerating: false }"
             @keydown.escape.window="closeTaskDrillIn()"
             @keydown.window="handleDrillInKey($event)">
             <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" @click="closeTaskDrillIn()"></div>
@@ -3307,8 +3308,8 @@
                 </template>
               </div>
 
-              <!-- Action footer (only when terminal + not yet rated) -->
-              <template x-if="!drillInLoading && drillInData?.task && drillInIsTerminal() && !drillInData.task.outcome">
+              <!-- Action footer (terminal + (not yet rated OR re-rating)) -->
+              <template x-if="!drillInLoading && drillInData?.task && drillInIsTerminal() && (!drillInData.task.outcome || rerating)">
                 <div class="border-t border-gray-800 p-4 space-y-2">
                   <textarea id="drill-in-comment"
                     x-model="drillInComment"
@@ -3323,6 +3324,12 @@
                       <kbd class="px-1 py-0.5 bg-gray-800 rounded">esc</kbd> close
                     </div>
                     <div class="flex gap-2">
+                      <template x-if="rerating">
+                        <button @click="rerating = false"
+                          class="text-xs px-3 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-300 transition-colors">
+                          Cancel
+                        </button>
+                      </template>
                       <button @click="submitOutcome('rejected')"
                         :disabled="!drillInCanSubmit('rejected')"
                         class="text-xs px-3 py-1.5 rounded bg-red-900/40 hover:bg-red-900/60 text-red-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
@@ -3344,18 +3351,26 @@
               </template>
 
               <!-- Footer-only close when no actions available -->
-              <template x-if="!drillInLoading && drillInData?.task && (!drillInIsTerminal() || drillInData.task.outcome)">
+              <template x-if="!drillInLoading && drillInData?.task && !rerating && (!drillInIsTerminal() || drillInData.task.outcome)">
                 <div class="border-t border-gray-800 p-3 flex items-center justify-between">
                   <div class="text-[11px] text-gray-500">
                     <template x-if="!drillInIsTerminal()">
                       <span>Outcome rating is available once the task reaches a terminal status.</span>
                     </template>
                     <template x-if="drillInIsTerminal() && drillInData.task.outcome">
-                      <span>Outcomes are write-once at this slice.</span>
+                      <span>Already rated. You can change the rating if this was a mistake.</span>
                     </template>
                   </div>
-                  <button @click="closeTaskDrillIn()"
-                    class="text-xs px-3 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-300 transition-colors">Close</button>
+                  <div class="flex gap-2">
+                    <template x-if="drillInIsTerminal() && drillInData.task.outcome">
+                      <button @click="rerating = true; drillInComment = drillInData?.task?.feedback_text || ''"
+                        class="text-xs px-3 py-1.5 rounded bg-gray-700 hover:bg-gray-600 text-gray-200 transition-colors">
+                        Change rating
+                      </button>
+                    </template>
+                    <button @click="closeTaskDrillIn()"
+                      class="text-xs px-3 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-300 transition-colors">Close</button>
+                  </div>
                 </div>
               </template>
             </div>
