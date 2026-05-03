@@ -5752,6 +5752,75 @@ def create_dashboard_router(
                 result["rework_assignee"] = rework["assignee"]
         return result
 
+    async def _proxy_help_cancel(
+        kind: str, request_id: str, body: dict | None,
+    ) -> dict:
+        """Proxy a Cancel-card click to the matching mesh endpoint.
+
+        Goes over loopback with ``x-mesh-internal: 1`` so the mesh
+        treats the dashboard as a trusted internal caller (same
+        contract as ``X-Agent-ID: operator`` would have used). Single
+        round-trip — both processes are co-located in the runtime.
+        """
+        import httpx
+        url = f"http://127.0.0.1:{mesh_port}/mesh/{kind}-request/{request_id}/cancel"
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                resp = await client.post(
+                    url,
+                    json=body or {},
+                    headers={
+                        "x-mesh-internal": "1",
+                        "X-Agent-ID": "operator",
+                        "Content-Type": "application/json",
+                    },
+                )
+        except Exception as e:
+            raise HTTPException(502, f"mesh cancel proxy failed: {e}")
+        if resp.status_code == 404:
+            raise HTTPException(404, "Request not found or already resolved")
+        if resp.status_code >= 400:
+            raise HTTPException(resp.status_code, resp.text)
+        try:
+            return resp.json()
+        except Exception:
+            return {"ok": True}
+
+    @api_router.post("/api/credential-request/{request_id}/cancel")
+    async def api_credential_request_cancel(
+        request_id: str, request: Request,
+    ) -> dict:
+        """Cancel an open credential-request card (PR 3)."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        return await _proxy_help_cancel("credential", request_id, body)
+
+    @api_router.post("/api/browser-login-request/{request_id}/cancel")
+    async def api_browser_login_request_cancel(
+        request_id: str, request: Request,
+    ) -> dict:
+        """Cancel an open browser-login-request card (PR 3)."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        return await _proxy_help_cancel("browser-login", request_id, body)
+
+    @api_router.post("/api/browser-captcha-help-request/{request_id}/cancel")
+    async def api_browser_captcha_help_request_cancel(
+        request_id: str, request: Request,
+    ) -> dict:
+        """Cancel an open browser-captcha-help-request card (PR 3)."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        return await _proxy_help_cancel(
+            "browser-captcha-help", request_id, body,
+        )
+
     @api_router.get("/static/{file_path:path}")
     async def static_file(file_path: str, v: str | None = None) -> FileResponse:
         full = (_STATIC_DIR / file_path).resolve()

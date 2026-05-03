@@ -97,7 +97,11 @@ _CRED_NAME_RE = re.compile(r'^[a-zA-Z0-9_.\-]{1,128}$')
         "through a secure input in their chat. The credential is stored "
         "directly in the vault — you never see the actual value. After "
         "the user saves it, use the handle $CRED{name} in HTTP requests "
-        "or browser logins."
+        "or browser logins. The user can also CANCEL the request from "
+        "their dashboard; if they do, you'll receive a steer message "
+        "telling you the request was cancelled. Don't immediately "
+        "re-request the same credential — skip the step or ask "
+        "differently."
     ),
     parameters={
         "name": {
@@ -147,19 +151,27 @@ async def request_credential(
         pass  # Vault may not be available yet; proceed with the request
 
     # Emit credential request event to the dashboard via the mesh
+    request_id = ""
     try:
-        await mesh_client.request_credential_from_user(
+        resp = await mesh_client.request_credential_from_user(
             name=name, description=description, service=service or name,
         )
+        if isinstance(resp, dict):
+            request_id = str(resp.get("request_id") or "")
     except Exception:
         pass  # Best effort — the tool result itself is the primary mechanism
 
-    return {
+    result: dict = {
         "requested": True,
         "name": name,
         "handle": f"$CRED{{{name}}}",
         "message": (
             f"Credential request sent to user. "
-            f"Once they save it, use $CRED{{{name}}} in your requests."
+            f"Once they save it, use $CRED{{{name}}} in your requests. "
+            f"If the user cancels, you will receive a steer message — "
+            f"do not re-request immediately."
         ),
     }
+    if request_id:
+        result["request_id"] = request_id
+    return result

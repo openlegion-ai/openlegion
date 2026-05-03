@@ -132,13 +132,15 @@ class TestPlaybookConstants:
             assert "1." in content, f"{name} should have numbered steps"
 
     def test_tool_map_covers_all_action_tools(self):
-        # All action tools should be mapped
+        # All action tools should be mapped after the PR 0 consolidation
+        # (vault_list and read_agent_history were dropped from the operator
+        # surface, so they're no longer trigger tools).
         expected_tools = {
             "create_agent", "apply_template", "create_project",
             "add_agents_to_project", "remove_agents_from_project",
             "update_project_context", "propose_edit", "confirm_edit",
-            "read_agent_history", "save_observations",
-            "request_credential", "vault_list", "request_browser_login",
+            "save_observations",
+            "request_credential", "request_browser_login",
         }
         assert set(_TOOL_PLAYBOOK_MAP.keys()) == expected_tools
 
@@ -154,7 +156,6 @@ class TestPlaybookConstants:
         assert "apply_template" in _PLAYBOOK_TEAM_BUILD
         assert "add_agents_to_project" in _PLAYBOOK_TEAM_BUILD
         assert "update_project_context" in _PLAYBOOK_TEAM_BUILD
-        assert "vault_list" in _PLAYBOOK_TEAM_BUILD
         assert "request_credential" in _PLAYBOOK_TEAM_BUILD
         assert "request_browser_login" in _PLAYBOOK_TEAM_BUILD
 
@@ -165,7 +166,6 @@ class TestPlaybookConstants:
         assert "get_system_status" in _PLAYBOOK_MONITOR
         assert "save_observations" in _PLAYBOOK_MONITOR
 
-        assert "vault_list" in _PLAYBOOK_CREDENTIALS
         assert "request_credential" in _PLAYBOOK_CREDENTIALS
         assert "request_browser_login" in _PLAYBOOK_CREDENTIALS
 

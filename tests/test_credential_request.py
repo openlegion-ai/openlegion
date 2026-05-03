@@ -237,6 +237,9 @@ class TestCredentialRequestEndpoint:
         data = resp.json()
         assert data["requested"] is True
         assert data["name"] == "twitter_api_key"
+        # PR 3: server-generated request_id is returned to the agent
+        assert data["request_id"]
+        assert isinstance(data["request_id"], str)
 
         # Verify event_bus.emit was called with correct args
         self.event_bus.emit.assert_called_once()
@@ -246,6 +249,9 @@ class TestCredentialRequestEndpoint:
         assert call_args[1]["data"]["name"] == "twitter_api_key"
         assert call_args[1]["data"]["description"] == "Your Twitter API key"
         assert call_args[1]["data"]["service"] == "Twitter"
+        # PR 3: request_id travels in the dashboard event so the
+        # cancel button can address it.
+        assert call_args[1]["data"]["request_id"] == data["request_id"]
 
     @pytest.mark.asyncio
     async def test_rejects_missing_name(self, _app):
@@ -296,5 +302,8 @@ class TestCredentialRequestEndpoint:
         assert "value" not in call_data
         assert "key" not in call_data
         assert "secret" not in call_data.get("name", "").lower() or True  # name is fine
-        # Only name, description, service are allowed
-        assert set(call_data.keys()) == {"name", "description", "service"}
+        # Only name, description, service, request_id are allowed
+        # (request_id added in PR 3 to scope cancel buttons).
+        assert set(call_data.keys()) == {
+            "name", "description", "service", "request_id",
+        }
