@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.responses import StreamingResponse
 
+from src.host.change_history import ChangeHistory
 from src.host.credentials import is_system_credential
 from src.host.orchestration import (
     VALID_STATUSES,
@@ -34,7 +35,6 @@ from src.host.orchestration import (
     TaskNotFound,
     Tasks,
 )
-from src.host.change_history import ChangeHistory
 from src.host.pending_actions import PendingActions
 from src.shared.redaction import redact_url
 from src.shared.types import (
