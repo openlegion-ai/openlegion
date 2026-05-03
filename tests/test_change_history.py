@@ -207,3 +207,46 @@ def test_list_recent_includes_consumed(tmp_path):
     rows = ch.list_recent()
     assert len(rows) == 1
     assert rows[0]["consumed"] is True
+
+
+# ── list_unconsumed_for_field (supersede detection) ────────────
+
+
+def test_list_unconsumed_for_field_returns_only_matching(tmp_path):
+    """Used by the soft-edit endpoint to find receipts the new edit makes stale."""
+    ch = _make_store(tmp_path)
+    ch.record(
+        undo_token="a1", actor="operator", agent_id="writer",
+        field="instructions", old_value="x", new_value="y",
+    )
+    ch.record(
+        undo_token="a2", actor="operator", agent_id="writer",
+        field="soul", old_value="x", new_value="y",
+    )
+    ch.record(
+        undo_token="a3", actor="operator", agent_id="researcher",
+        field="instructions", old_value="x", new_value="y",
+    )
+    rows = ch.list_unconsumed_for_field("writer", "instructions")
+    assert [r["undo_token"] for r in rows] == ["a1"]
+
+
+def test_list_unconsumed_for_field_excludes_consumed_and_expired(tmp_path):
+    ch = _make_store(tmp_path)
+    ch.record(
+        undo_token="live", actor="operator", agent_id="w",
+        field="instructions", old_value="x", new_value="y",
+    )
+    ch.record(
+        undo_token="dead", actor="operator", agent_id="w",
+        field="instructions", old_value="x", new_value="y",
+    )
+    ch.consume_for_undo("dead")
+    ch.record(
+        undo_token="expired", actor="operator", agent_id="w",
+        field="instructions", old_value="x", new_value="y",
+        ttl=0,
+    )
+    time.sleep(0.01)
+    rows = ch.list_unconsumed_for_field("w", "instructions")
+    assert [r["undo_token"] for r in rows] == ["live"]

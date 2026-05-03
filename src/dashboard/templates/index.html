@@ -427,6 +427,9 @@
                               </div>
                             </details>
                             <div x-show="undoError" class="text-[10px] text-red-400 mt-1.5" x-text="undoError"></div>
+                            <template x-if="msg._superseded && !undone">
+                              <div class="text-[10px] text-amber-300/80 mt-1.5">Superseded by a newer edit on this field — undoing here will also discard the newer change(s).</div>
+                            </template>
                             <div class="flex items-center gap-2 mt-2">
                               <template x-if="!undone && !expired">
                                 <button @click="undoing = true; undoError = ''; fetch(window.__config.apiBase + '/changes/undo/' + encodeURIComponent(msg.undo_token), { method: 'POST', headers: {'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'}, body: '{}' }).then(r => { if (r.ok) { undone = true; } else { r.json().then(d => undoError = (d.detail || 'Undo failed.')).catch(() => undoError = 'Undo failed.'); } undoing = false; }).catch(() => { undoError = 'Network error.'; undoing = false; })"

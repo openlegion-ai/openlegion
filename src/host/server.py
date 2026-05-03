@@ -4273,7 +4273,16 @@ def create_mesh_app(
                     monthly_usd=_monthly,
                 )
 
-        # Hot-reload: push to running agent's workspace
+        # Hot-reload: push to running agent's workspace.
+        #
+        # Receipt-ordering note: callers (soft-edit / confirm-edit /
+        # undo) emit the operator_action_receipt event AFTER this
+        # function returns. Hot-reload failures here are intentionally
+        # swallowed because the YAML write is the source of truth —
+        # the running agent will pick up the change on its next
+        # restart even if the live PUT fails. So a receipt is emitted
+        # for any change whose YAML write succeeded, regardless of
+        # whether the running agent's in-memory state caught up.
         if transport and agent_id in router.agent_registry:
             workspace_map = {
                 "instructions": "INSTRUCTIONS.md",
@@ -4454,6 +4463,16 @@ def create_mesh_app(
             },
         )
 
+        # Detect older unconsumed receipts on the same field BEFORE we
+        # record the new one. They stay revertible, but rolling them
+        # back from the latest value would silently overwrite this
+        # edit; the dashboard renders a "superseded" warning so the
+        # operator knows. We compute the list before record() so we
+        # don't have to filter ourselves out.
+        prior_unconsumed = change_history.list_unconsumed_for_field(
+            agent_id, field,
+        )
+
         # Record the change for undo. Summary uses humanized field names
         # so receipt cards read naturally ("Updated writer's personality")
         # without the dashboard having to do its own field translation.
@@ -4472,7 +4491,11 @@ def create_mesh_app(
 
         # Emit the receipt event. Dashboard listens for this and appends
         # the receipt card to the operator's chat so the user sees what
-        # happened with [View diff] [Undo] buttons.
+        # happened with [View diff] [Undo] buttons. ``supersedes_count``
+        # tells the UI how many older revertible receipts on the same
+        # field this edit makes stale (the older receipts can still be
+        # undone — but doing so would erase this edit, so the dashboard
+        # surfaces a warning).
         if event_bus is not None:
             try:
                 event_bus.emit(
@@ -4489,10 +4512,36 @@ def create_mesh_app(
                         "expires_at": record["expires_at"],
                         "reason": reason,
                         "origin_kind": origin_kind,
+                        "supersedes_count": len(prior_unconsumed),
                     },
                 )
             except Exception as e:
                 logger.debug("operator_action_receipt emit failed: %s", e)
+
+        # For each older unconsumed receipt on this field, emit a
+        # ``operator_action_receipt_superseded`` event so the dashboard
+        # can transition the older card into a "superseded by newer
+        # edits" state. The older receipt is still revertible — the
+        # event is purely a UX hint that an undo here would also
+        # discard the newer edits.
+        if event_bus is not None and prior_unconsumed:
+            for prior in prior_unconsumed:
+                try:
+                    event_bus.emit(
+                        "operator_action_receipt_superseded",
+                        agent="operator",
+                        data={
+                            "undo_token": prior["undo_token"],
+                            "agent_id": agent_id,
+                            "field": field,
+                            "superseded_by_token": undo_token,
+                            "superseded_by_count": 1,
+                        },
+                    )
+                except Exception as e:
+                    logger.debug(
+                        "operator_action_receipt_superseded emit failed: %s", e,
+                    )
 
         return {
             "success": True,
@@ -4503,6 +4552,7 @@ def create_mesh_app(
                 record["expires_at"], tz=timezone.utc,
             ).isoformat(),
             "summary": summary,
+            "supersedes_count": len(prior_unconsumed),
         }
 
     @app.post("/mesh/changes/undo/{undo_token}")

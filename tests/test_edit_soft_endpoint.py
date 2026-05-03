@@ -247,6 +247,76 @@ async def test_edit_soft_emits_receipt_event(mesh_app):
 
 
 @pytest.mark.asyncio
+async def test_edit_soft_supersede_emits_marker_for_prior_receipts(mesh_app):
+    """A second soft-edit on the same field must mark the prior receipt
+    as superseded so the dashboard can warn the operator before they
+    click [Undo] (which would silently discard the newer edit)."""
+    app, server_module, tmp_path = mesh_app
+    events: list[tuple[str, str, dict]] = []
+
+    class _Bus:
+        def emit(self, event_type, agent="", data=None):
+            events.append((event_type, agent, data))
+
+    blackboard = Blackboard(str(tmp_path / "bb3.db"))
+    pubsub = PubSub()
+    permissions = PermissionMatrix()
+    permissions.permissions["operator"] = AgentPermissions(
+        agent_id="operator", can_route_tasks=True,
+    )
+    router = MessageRouter(permissions, {})
+    bus = _Bus()
+    app2 = server_module.create_mesh_app(
+        blackboard=blackboard,
+        pubsub=pubsub,
+        router=router,
+        permissions=permissions,
+        event_bus=bus,
+    )
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app2), base_url="http://t") as c:
+            r1 = await c.post(
+                "/mesh/agents/writer/edit-soft",
+                json={"field": "instructions", "value": "v1"},
+                headers=_human_origin_headers(),
+            )
+            assert r1.status_code == 200, r1.text
+            assert r1.json()["supersedes_count"] == 0
+            tok1 = r1.json()["undo_token"]
+
+            r2 = await c.post(
+                "/mesh/agents/writer/edit-soft",
+                json={"field": "instructions", "value": "v2"},
+                headers=_human_origin_headers(),
+            )
+            assert r2.status_code == 200, r2.text
+            # The second edit reports it supersedes one prior receipt.
+            assert r2.json()["supersedes_count"] == 1
+
+        # Two receipts emitted, plus a superseded marker for the first.
+        kinds = [e[0] for e in events]
+        assert kinds.count("operator_action_receipt") == 2
+        superseded = [e for e in events if e[0] == "operator_action_receipt_superseded"]
+        assert len(superseded) == 1
+        assert superseded[0][2]["undo_token"] == tok1
+        assert superseded[0][2]["agent_id"] == "writer"
+        assert superseded[0][2]["field"] == "instructions"
+
+        # A different field should NOT trigger a supersede event.
+        events.clear()
+        async with AsyncClient(transport=ASGITransport(app=app2), base_url="http://t") as c:
+            r3 = await c.post(
+                "/mesh/agents/writer/edit-soft",
+                json={"field": "soul", "value": "calm"},
+                headers=_human_origin_headers(),
+            )
+            assert r3.status_code == 200
+        assert not any(e[0] == "operator_action_receipt_superseded" for e in events)
+    finally:
+        blackboard.close()
+
+
+@pytest.mark.asyncio
 async def test_edit_soft_records_audit_log(mesh_app):
     """The shared _apply_pending_change writes to the audit log; soft-edit
     must inherit that so the activity feed has a record."""

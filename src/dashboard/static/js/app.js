@@ -88,6 +88,7 @@ function dashboard() {
       'pending_action_created', 'pending_action_resolved', 'pending_action_expired',
       // PR 1 — soft-edit receipts + undo
       'operator_action_receipt', 'operator_action_receipt_undone',
+      'operator_action_receipt_superseded',
     ],
 
     // Agent detail
@@ -1705,6 +1706,26 @@ function dashboard() {
             for (const m of this.chatHistories[aid] || []) {
               if (m.role === 'operator_action_receipt' && m.undo_token === token) {
                 m._undone = true;
+              }
+            }
+          }
+        }
+      }
+      if (evt.type === 'operator_action_receipt_superseded') {
+        // Mark prior receipt(s) on the same agent_id+field that pre-date
+        // a newer edit. The older receipt's [Undo] still works, but
+        // doing so would erase the intervening edit(s) — the card
+        // shows a "superseded by newer edits" warning so the operator
+        // is aware before clicking.
+        const data = evt.data || {};
+        const token = data.undo_token;
+        if (token) {
+          for (const aid of Object.keys(this.chatHistories || {})) {
+            for (const m of this.chatHistories[aid] || []) {
+              if (m.role === 'operator_action_receipt' && m.undo_token === token) {
+                m._superseded = true;
+                m._supersededByCount = (m._supersededByCount || 0)
+                  + (data.superseded_by_count || 1);
               }
             }
           }

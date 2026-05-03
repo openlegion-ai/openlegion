@@ -273,6 +273,59 @@ class ChangeHistory:
             "consumed_at": now,
         }
 
+    def list_unconsumed_for_field(
+        self, agent_id: str, field: str, *, before: float | None = None,
+    ) -> list[dict]:
+        """Return unconsumed (and unexpired) receipts for ``agent_id``+``field``.
+
+        Used to detect "superseded" receipts: when a new soft-edit lands
+        on the same field, the prior receipt's undo button still works
+        but rolling back from the latest value would silently lose the
+        intervening edits. The endpoint uses this to flag affected
+        receipts so the UI can warn the operator.
+
+        ``before`` is an optional epoch cut-off — pass the new edit's
+        ``created_at`` to exclude itself when called immediately after
+        ``record``.
+        """
+        now = time.time()
+        clauses = [
+            "agent_id = ?",
+            "field = ?",
+            "consumed = 0",
+            "expires_at > ?",
+        ]
+        params: list[Any] = [agent_id, field, now]
+        if before is not None:
+            clauses.append("created_at < ?")
+            params.append(before)
+        sql = (
+            "SELECT undo_token, actor, agent_id, field, "
+            "old_value_json, new_value_json, summary, reason, "
+            "created_at, expires_at, consumed, consumed_at "
+            "FROM change_history WHERE " + " AND ".join(clauses)
+            + " ORDER BY created_at ASC"
+        )
+        with self._conn() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        out = []
+        for r in rows:
+            out.append({
+                "undo_token": r[0],
+                "actor": r[1],
+                "agent_id": r[2],
+                "field": r[3],
+                "old_value": json.loads(r[4]),
+                "new_value": json.loads(r[5]),
+                "summary": r[6] or "",
+                "reason": r[7] or "",
+                "created_at": r[8],
+                "expires_at": r[9],
+                "consumed": bool(r[10]),
+                "consumed_at": r[11],
+            })
+        return out
+
     # ── Maintenance ────────────────────────────────────────────────
 
     def reap_expired(self) -> int:
