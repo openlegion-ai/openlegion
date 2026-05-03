@@ -207,8 +207,9 @@ The following tools are only available to the **operator agent** (when `ALLOWED_
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `propose_edit` | `agent_id`, `field` (enum: `instructions` / `soul` / `model` / `role` / `heartbeat` / `thinking` / `budget` / `permissions`), `value` | Propose a config change for an agent. Returns a `change_id` that must be confirmed. |
-| `confirm_edit` | `change_id` | Apply a previously proposed edit. |
+| `edit_agent` | `agent_id`, `field` (enum: `instructions` / `soul` / `role` / `heartbeat` / `interface` / `model` / `thinking` / `budget` / `permissions`), `value`, `reason` (default `"user_asked"`; values: `user_asked` / `operator_proactive`) | Single entry point for agent config changes. Soft fields (instructions/soul/role/heartbeat/interface) apply immediately and surface as a receipt with 5-minute Undo. Hard fields (model/thinking/budget/permissions) return a `change_id` that must be confirmed via `confirm_edit`. |
+| `undo_change` | `undo_token` | Reverse a soft-edit applied via `edit_agent`. Token is returned with the edit and remains valid for 5 minutes. |
+| `confirm_edit` | `change_id` | Apply a previously proposed hard-field edit (model/thinking/budget/permissions). |
 | `save_observations` | `fleet_summary`, `agents_attention` (default []), `cost_trend`, `notes` (default "") | Persist fleet health observations for human review. |
 | `read_agent_history` | `agent_id`, `period` (default "today"; values: `today` / `yesterday` / `week`) | Read an agent's conversation history with period filtering (operator version). |
 | `create_agent` | `name`, `role`, `model` (default ""), `instructions`, `soul` (default "") | Create a new agent. |
