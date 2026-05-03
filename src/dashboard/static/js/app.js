@@ -337,18 +337,23 @@ function dashboard() {
     // ``workplaceEnabled`` mirrors the server-side flag
     // OPENLEGION_ORCHESTRATION_TASKS_V2 so the empty state can hint how
     // to enable the surface without rendering an error.
-    workplaceTab: 'project-status',
+    // PR 5: feed becomes the default workplace landing — kanban demoted
+    // to a non-default Board sub-tab; standalone blockers tab removed
+    // (pinned at the top of the feed instead).
+    workplaceTab: 'feed',
     workplaceTabs: [
-      { id: 'project-status', label: 'Project status' },
-      { id: 'task-board', label: 'Task board' },
-      { id: 'blockers', label: 'Blockers' },
-      { id: 'team-outputs', label: 'Team outputs' },
+      { id: 'feed', label: 'Activity' },
+      { id: 'project-status', label: 'Projects' },
+      { id: 'task-board', label: 'Board' },
+      { id: 'team-outputs', label: 'Outputs' },
     ],
     workplaceEnabled: true,
     workplaceProjects: [],
     workplaceTasks: [],
     workplaceBlockers: [],
     workplaceOutputs: [],
+    workplaceFeed: [],
+    workplaceFeedCap: 200,
     workplacePending: [],
     workplaceLoading: false,
     workplaceTaskColumns: ['pending', 'accepted', 'working', 'blocked', 'done'],
@@ -1390,6 +1395,7 @@ function dashboard() {
           this.loadWorkplaceTasks(),
           this.loadWorkplaceBlockers(),
           this.loadWorkplaceOutputs(),
+          this.loadWorkplaceFeed(),
           this.loadWorkplacePending(),
         ]);
       } finally {
@@ -1458,8 +1464,40 @@ function dashboard() {
       }
     },
 
+    async loadWorkplaceFeed() {
+      try {
+        const params = this.workplaceProjectFilter ? `?project_id=${encodeURIComponent(this.workplaceProjectFilter)}` : '';
+        const resp = await fetch(`${window.__config.apiBase}/workplace/feed${params}`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        this.workplaceEnabled = data.enabled !== false;
+        this.workplaceFeed = data.feed || [];
+      } catch (e) {
+        console.error('Failed to load workplace feed:', e);
+      }
+    },
+
     workplaceTasksByStatus(status) {
       return (this.workplaceTasks || []).filter(t => t.status === status);
+    },
+
+    // Icon for an activity feed entry. Plain text glyphs keep the
+    // template emoji-free; tweak here without touching the markup.
+    workplaceFeedIcon(eventType, taskStatus) {
+      if (eventType === 'created') return '+';
+      if (eventType === 'rerouted') return '→';
+      if (eventType === 'cancelled') return '✕';
+      if (eventType === 'artifact_added') return '▻';
+      if (eventType === 'task_outcome') return '★';
+      if (eventType === 'status_changed') {
+        if (taskStatus === 'done') return '✓';
+        if (taskStatus === 'blocked') return '⚠';
+        if (taskStatus === 'failed') return '✕';
+        if (taskStatus === 'cancelled') return '✕';
+        if (taskStatus === 'working') return '▶';
+        return '●';
+      }
+      return '●';
     },
 
     // ── Task drill-in modal (PR 4) ────────────────────────
@@ -1696,11 +1734,28 @@ function dashboard() {
         if (!this.workplaceTasks.find(t => t.id === stub.id)) {
           this.workplaceTasks.unshift(stub);
         }
+        this._pushWorkplaceFeedFromEvent('created', data, stub);
       } else if (evt.type === 'task_status_changed') {
         const t = this.workplaceTasks.find(x => x.id === data.task_id);
+        const prevStatus = t ? t.status : (data.from_status || data.old_status || '');
         if (t) {
           t.status = data.new_status;
           if (data.assignee) t.assignee = data.assignee;
+          if (data.blocker_note !== undefined) t.blocker_note = data.blocker_note;
+        }
+        // Surface in feed too. Background reload is source of truth on
+        // reconnect; the client-built summary is best-effort.
+        this._pushWorkplaceFeedFromEvent('status_changed', data, t);
+        // Pinned blockers list lives on a separate endpoint; refresh it
+        // whenever a task transitions in to or out of ``blocked`` (or
+        // when its blocker note may have changed) so the strip at the
+        // top of the feed doesn't go stale.
+        const newStatus = data.new_status || '';
+        if (
+          prevStatus === 'blocked'
+          || newStatus === 'blocked'
+        ) {
+          this.loadWorkplaceBlockers();
         }
       } else if (evt.type === 'task_outcome') {
         // Reflect the rating across every list that may show this
@@ -1731,6 +1786,57 @@ function dashboard() {
         }
       } else if (evt.type === 'pending_action_resolved' || evt.type === 'pending_action_expired') {
         this.workplacePending = this.workplacePending.filter(p => p.nonce !== data.nonce);
+      }
+    },
+
+    // Build a feed entry from a live WS event and prepend it. Caps the
+    // in-memory feed so long-lived sessions don't grow unbounded; the
+    // periodic full reload is the source of truth.
+    _pushWorkplaceFeedFromEvent(eventType, data, taskHint) {
+      if (!data || !data.task_id) return;
+      const t = taskHint || this.workplaceTasks.find(x => x.id === data.task_id) || {};
+      const title = data.title || t.title || '(untitled)';
+      const projectId = data.project_id || t.project_id || '';
+      const assignee = data.assignee || t.assignee || '';
+      const actor = data.actor || data.creator || data.assignee || 'unknown';
+      const status = data.new_status || t.status || '';
+      let summary;
+      if (eventType === 'created') {
+        const forWho = assignee ? ` for ${assignee}` : '';
+        const where = projectId ? ` in project ${projectId}` : '';
+        summary = `${actor} created task '${title}'${forWho}${where}`;
+      } else if (status === 'done') {
+        summary = `${actor} completed task '${title}'`;
+      } else if (status === 'blocked') {
+        const note = data.blocker_note || '';
+        summary = `${actor} marked task '${title}' as blocked${note ? ': ' + note : ''}`;
+      } else if (status === 'failed') {
+        summary = `${actor} failed task '${title}'`;
+      } else if (status === 'cancelled') {
+        summary = `${actor} cancelled task '${title}'`;
+      } else if (status === 'working') {
+        summary = `${actor} started task '${title}'`;
+      } else if (status === 'accepted') {
+        summary = `${actor} accepted task '${title}'`;
+      } else {
+        summary = `${actor} ${eventType} on task '${title}'`;
+      }
+      const entry = {
+        event_id: `live-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        event_type: eventType,
+        task_id: data.task_id,
+        task_title: title,
+        project_id: projectId,
+        assignee: assignee,
+        actor: actor,
+        task_status: status,
+        blocker_note: data.blocker_note || '',
+        timestamp: Date.now() / 1000,
+        summary,
+      };
+      this.workplaceFeed.unshift(entry);
+      if (this.workplaceFeed.length > this.workplaceFeedCap) {
+        this.workplaceFeed.length = this.workplaceFeedCap;
       }
     },
 

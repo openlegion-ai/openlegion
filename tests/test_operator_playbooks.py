@@ -138,7 +138,8 @@ class TestPlaybookConstants:
         expected_tools = {
             "create_agent", "apply_template", "create_project",
             "add_agents_to_project", "remove_agents_from_project",
-            "update_project_context", "propose_edit", "confirm_edit",
+            "update_project_context", "set_project_goal",
+            "propose_edit", "confirm_edit",
             "save_observations",
             "request_credential", "request_browser_login",
         }
@@ -156,6 +157,9 @@ class TestPlaybookConstants:
         assert "apply_template" in _PLAYBOOK_TEAM_BUILD
         assert "add_agents_to_project" in _PLAYBOOK_TEAM_BUILD
         assert "update_project_context" in _PLAYBOOK_TEAM_BUILD
+        # PR 5: the operator should proactively save the goal as a north star.
+        assert "set_project_goal" in _PLAYBOOK_TEAM_BUILD
+        assert "north star" in _PLAYBOOK_TEAM_BUILD.lower()
         assert "request_credential" in _PLAYBOOK_TEAM_BUILD
         assert "request_browser_login" in _PLAYBOOK_TEAM_BUILD
 

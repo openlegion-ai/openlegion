@@ -3038,6 +3038,67 @@
           </div>
         </template>
 
+        <!-- Activity feed sub-tab (default) -->
+        <template x-if="workplaceEnabled && workplaceTab === 'feed'">
+          <div class="space-y-3">
+            <!-- Pinned blockers strip — visible whenever any tasks are blocked. -->
+            <template x-if="workplaceBlockers && workplaceBlockers.length">
+              <div class="bg-yellow-900/15 border border-yellow-800/30 rounded-lg p-3">
+                <div class="text-xs font-medium text-yellow-200 mb-2">
+                  <span>&#9888;</span>
+                  <span x-text="workplaceBlockers.length + ' blocked task' + (workplaceBlockers.length === 1 ? '' : 's') + ' need attention'"></span>
+                </div>
+                <div class="space-y-1.5">
+                  <template x-for="b in workplaceBlockers" :key="b.id">
+                    <div class="flex items-start justify-between gap-2 text-xs text-gray-200 bg-yellow-900/10 rounded px-2 py-1.5">
+                      <div class="min-w-0">
+                        <span class="font-medium" x-text="b.title"></span>
+                        <span class="text-gray-400" x-text="' (' + (b.assignee || '') + (b.project_id ? ', ' + b.project_id : '') + ')'"></span>
+                        <div class="text-[11px] text-gray-400 mt-0.5" x-text="b.blocker_note || '(no note)'"></div>
+                      </div>
+                      <button class="text-[11px] px-2 py-0.5 rounded bg-yellow-800/30 hover:bg-yellow-800/50 text-yellow-100 whitespace-nowrap"
+                        @click="openTaskDrillIn(b.id)">Drill in</button>
+                    </div>
+                  </template>
+                </div>
+              </div>
+            </template>
+
+            <!-- Empty state for the feed itself. When there are no
+                 projects yet, suggest a concrete next step instead of a
+                 plain "no activity" line; once a project exists the
+                 message reverts to the calm waiting state. -->
+            <template x-if="!workplaceFeed.length && !workplaceProjects.length">
+              <div class="text-sm text-gray-400 py-4">
+                No projects yet. Ask the operator to create one — say something like
+                <span class="italic text-gray-200">"create a project for &lt;goal&gt;"</span>
+                in the chat to get started.
+              </div>
+            </template>
+            <template x-if="!workplaceFeed.length && workplaceProjects.length">
+              <div class="text-sm text-gray-500 py-4">No recent activity. Once agents start working, you'll see it here.</div>
+            </template>
+
+            <!-- Chronological activity list, latest first. -->
+            <template x-for="ev in workplaceFeed" :key="ev.event_id">
+              <button type="button"
+                class="w-full text-left bg-gray-800/40 border border-gray-700/50 rounded-lg p-3 hover:bg-gray-800/70 transition-colors"
+                @click="openTaskDrillIn(ev.task_id)">
+                <div class="flex items-start gap-2">
+                  <span class="text-base leading-none mt-0.5" x-text="workplaceFeedIcon(ev.event_type, ev.task_status)"></span>
+                  <div class="min-w-0 flex-1">
+                    <div class="text-sm text-gray-100" x-text="ev.summary"></div>
+                    <div class="text-[11px] text-gray-500 mt-0.5">
+                      <span x-text="formatRelativeTime((ev.timestamp || 0) * 1000) || 'just now'"></span>
+                      <span x-show="ev.project_id" class="ml-2" x-text="'· ' + ev.project_id"></span>
+                    </div>
+                  </div>
+                </div>
+              </button>
+            </template>
+          </div>
+        </template>
+
         <!-- Project status sub-tab -->
         <template x-if="workplaceEnabled && workplaceTab === 'project-status'">
           <div class="space-y-3">
@@ -3055,6 +3116,25 @@
                     <span x-text="p.total + ' task' + (p.total === 1 ? '' : 's')"></span>
                     <span class="ml-2 px-1.5 py-0.5 rounded bg-gray-900/60 text-gray-300" x-text="p.status"></span>
                   </div>
+                </div>
+                <!-- North star + success criteria — the project's goal as a first-class artifact. -->
+                <div class="mb-3 pb-2 border-b border-gray-700/40">
+                  <template x-if="p.north_star">
+                    <div>
+                      <div class="text-[10px] uppercase tracking-wide text-gray-500 mb-1">North star</div>
+                      <div class="text-xs italic text-gray-200" x-text="'“' + p.north_star + '”'"></div>
+                      <template x-if="p.success_criteria && p.success_criteria.length">
+                        <ul class="mt-2 space-y-0.5">
+                          <template x-for="sc in p.success_criteria" :key="sc">
+                            <li class="text-[11px] text-gray-300 pl-3 relative before:content-['\\2022'] before:absolute before:left-0 before:text-gray-500" x-text="sc"></li>
+                          </template>
+                        </ul>
+                      </template>
+                    </div>
+                  </template>
+                  <template x-if="!p.north_star">
+                    <div class="text-[11px] text-gray-500 italic">No goal set yet. Ask the operator to set one.</div>
+                  </template>
                 </div>
                 <div class="flex flex-wrap gap-1.5 text-[11px]">
                   <template x-for="status in workplaceTaskColumns" :key="status">
@@ -3121,26 +3201,8 @@
           </div>
         </template>
 
-        <!-- Blockers sub-tab -->
-        <template x-if="workplaceEnabled && workplaceTab === 'blockers'">
-          <div class="space-y-2">
-            <template x-if="!workplaceBlockers.length">
-              <div class="text-sm text-gray-500 py-4">No blocked tasks.</div>
-            </template>
-            <template x-for="t in workplaceBlockers" :key="t.id">
-              <div class="bg-yellow-900/15 border border-yellow-800/30 rounded-lg p-3 cursor-pointer hover:bg-yellow-900/20 hover:border-yellow-700/50 transition-colors"
-                @click="openTaskDrillIn(t.id)">
-                <div class="text-sm font-medium text-yellow-100" x-text="t.title"></div>
-                <div class="text-[11px] text-gray-400 mt-1">
-                  <span x-text="t.assignee || ''"></span>
-                  <span x-show="t.project_id" class="text-gray-500"
-                    x-text="' · ' + (t.project_id || '')"></span>
-                </div>
-                <div class="text-xs text-gray-300 mt-2" x-text="t.blocker_note || '(no note)'"></div>
-              </div>
-            </template>
-          </div>
-        </template>
+        <!-- (Blockers no longer have their own sub-tab — pinned at the top
+             of the activity feed instead.) -->
 
         <!-- Team outputs sub-tab -->
         <template x-if="workplaceEnabled && workplaceTab === 'team-outputs'">

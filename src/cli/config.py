@@ -1513,6 +1513,8 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     "create_agent", "create_project",
     # Project membership + context
     "add_agents_to_project", "remove_agents_from_project", "update_project_context",
+    # PR 5 — north-star setter is no-confirmation meta-config.
+    "set_project_goal",
     # Lifecycle (consolidated archive/delete)
     "manage_project", "manage_agent", "manage_task",
     # Credential + browser handoff

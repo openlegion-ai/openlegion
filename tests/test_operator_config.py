@@ -244,8 +244,9 @@ class TestOperatorConstants:
 
     def test_allowed_tools_populated(self):
         from src.cli.config import _OPERATOR_ALLOWED_TOOLS, _OPERATOR_HEARTBEAT_TOOLS
-        # Operator's chat-tier surface after PR 0 consolidation.
-        assert len(_OPERATOR_ALLOWED_TOOLS) == 24
+        # PR 0 consolidated to 24 tools; PR 5 adds set_project_goal so the
+        # operator can save the user's stated goal as a first-class artifact.
+        assert len(_OPERATOR_ALLOWED_TOOLS) == 25
         assert len(_OPERATOR_HEARTBEAT_TOOLS) == 4
         # Heartbeat tools should be a subset of allowed tools
         assert set(_OPERATOR_HEARTBEAT_TOOLS).issubset(set(_OPERATOR_ALLOWED_TOOLS))
@@ -255,6 +256,8 @@ class TestOperatorConstants:
             "list_agent_queue", "get_team_outputs",
             "summarize_project_progress",
             "manage_project", "manage_agent", "manage_task",
+            # PR 5 — north-star setter is no-confirmation meta-config.
+            "set_project_goal",
         ):
             assert tool in _OPERATOR_ALLOWED_TOOLS
         # Dropped dead-weight + replaced tools must be gone.

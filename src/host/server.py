@@ -3357,6 +3357,83 @@ def create_mesh_app(
 
         return {"updated": True, "project": name}
 
+    @app.post("/mesh/projects/{name}/goal")
+    async def mesh_set_project_goal(name: str, request: Request) -> dict:
+        """Set a project's north star + success criteria (mesh-authed proxy).
+
+        Operator-only (or internal localhost callers). Validates length
+        limits then persists to ``metadata.yaml`` in place. No confirmation
+        gate — this is meta-config the user explicitly asked for.
+        """
+        _require_any_auth(request)
+        caller = _extract_verified_agent_id(request)
+        if caller != "operator" and not _is_internal_caller(request):
+            raise HTTPException(403, "Only the operator can manage projects")
+        from src.cli.config import PROJECTS_DIR, _load_projects
+
+        body = await request.json()
+        north_star_raw = body.get("north_star")
+        success_criteria_raw = body.get("success_criteria")
+
+        # Normalize and validate.
+        if north_star_raw is None:
+            north_star: str | None = None
+        else:
+            north_star = sanitize_for_prompt(str(north_star_raw)).strip()
+            if len(north_star) > 2000:
+                raise HTTPException(
+                    400, "north_star must be 2000 characters or fewer",
+                )
+            if not north_star:
+                north_star = None
+
+        success_criteria: list[str] | None
+        if success_criteria_raw is None:
+            success_criteria = None
+        else:
+            if not isinstance(success_criteria_raw, list):
+                raise HTTPException(
+                    400, "success_criteria must be a list of strings",
+                )
+            if len(success_criteria_raw) > 10:
+                raise HTTPException(
+                    400, "success_criteria may contain at most 10 items",
+                )
+            cleaned: list[str] = []
+            for item in success_criteria_raw:
+                sc = sanitize_for_prompt(str(item)).strip()
+                if not sc:
+                    continue
+                if len(sc) > 200:
+                    raise HTTPException(
+                        400,
+                        "each success_criteria entry must be 200 characters or fewer",
+                    )
+                cleaned.append(sc)
+            success_criteria = cleaned or None
+
+        projects = _load_projects()
+        if name not in projects:
+            raise HTTPException(404, f"Project '{name}' not found")
+
+        import yaml
+        meta_file = PROJECTS_DIR / name / "metadata.yaml"
+        if not meta_file.exists():
+            raise HTTPException(404, f"Project '{name}' has no metadata file")
+        with open(meta_file) as f:
+            meta = yaml.safe_load(f) or {}
+        meta["north_star"] = north_star
+        meta["success_criteria"] = success_criteria
+        with open(meta_file, "w") as f:
+            yaml.dump(meta, f, default_flow_style=False, sort_keys=False)
+
+        return {
+            "success": True,
+            "project_name": name,
+            "north_star": north_star,
+            "success_criteria": success_criteria,
+        }
+
     # === Orchestration Tasks v2 (Task 6) ===
 
     def _require_tasks_v2() -> Tasks:
