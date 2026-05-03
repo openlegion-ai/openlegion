@@ -257,6 +257,17 @@ def _summarize_task_event(
         ref_part = f" ({ref})" if ref else ""
         return f"{actor} added an artifact to task {quoted}{ref_part}"
 
+    if event_kind == "task_outcome":
+        # Emitted by orchestration when the operator grades a finished
+        # task (PR 4). Render the rating cleanly so the feed reads as
+        # "<actor> rated task '<title>' accepted" instead of falling
+        # through to the generic "<actor> task_outcome on task ..." line.
+        p = payload or {}
+        outcome = p.get("outcome") or "rated"
+        previous = p.get("previous_outcome") or ""
+        verb = "re-rated" if previous and previous != outcome else "rated"
+        return f"{actor} {verb} task {quoted} {outcome}{where}"
+
     # Fall-through: still useful, just less polished.
     return f"{actor} {event_kind} on task {quoted}{where}"
 

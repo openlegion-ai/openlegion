@@ -1476,6 +1476,7 @@ function dashboard() {
       if (eventType === 'rerouted') return '→';        // →
       if (eventType === 'cancelled') return '✕';        // ✕
       if (eventType === 'artifact_added') return '▻';   // ▻
+      if (eventType === 'task_outcome') return '★';     // ★ — operator graded the task
       if (eventType === 'status_changed') {
         if (taskStatus === 'done') return '✓';          // ✓
         if (taskStatus === 'blocked') return '⚠';       // ⚠

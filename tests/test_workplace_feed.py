@@ -207,3 +207,45 @@ class TestWorkplaceFeed:
         resp = client.get("/dashboard/api/workplace/feed?limit=2")
         assert resp.status_code == 200
         assert len(resp.json()["feed"]) == 2
+
+
+class TestFeedEventSummarizer:
+    """Direct unit coverage for ``_summarize_task_event``.
+
+    Workplace task drill-in (PR 4) emits ``task_outcome`` events the feed
+    needs to render in plain English. Exercise the summarizer directly so
+    PR 5 doesn't depend on PR 4's ``Tasks.set_outcome`` API to verify the
+    branch.
+    """
+
+    def test_task_outcome_first_rating(self):
+        from src.dashboard.server import _summarize_task_event
+
+        out = _summarize_task_event(
+            event_kind="task_outcome",
+            actor="operator",
+            title="Draft hero",
+            project_id="growth",
+            assignee="writer-1",
+            blocker_note="",
+            payload={"outcome": "accepted", "previous_outcome": None},
+        )
+        assert "operator" in out
+        assert "rated" in out
+        assert "Draft hero" in out
+        assert "accepted" in out
+
+    def test_task_outcome_re_rating_uses_re_rated_verb(self):
+        from src.dashboard.server import _summarize_task_event
+
+        out = _summarize_task_event(
+            event_kind="task_outcome",
+            actor="operator",
+            title="Edit copy",
+            project_id="",
+            assignee="reviewer",
+            blocker_note="",
+            payload={"outcome": "accepted", "previous_outcome": "rejected"},
+        )
+        assert "re-rated" in out
+        assert "accepted" in out
