@@ -190,6 +190,77 @@ def _parse_positive_float(value: Any, field: str, fallback: float) -> float:
     return result
 
 
+def _summarize_task_event(
+    *,
+    event_kind: str,
+    actor: str,
+    title: str,
+    project_id: str,
+    assignee: str,
+    blocker_note: str,
+    payload: dict | None,
+) -> str:
+    """Build a one-line human-readable summary of a task_events row.
+
+    Examples (keep these snappy — the feed renders one per line):
+        "writer-1 completed task 'Draft Q4 plan' in project work"
+        "reviewer-1 marked task 'Edit copy' as blocked: needs SEO data"
+        "ops created task 'Fetch metrics' for analyst-1"
+    """
+    actor = actor or "unknown"
+    where = f" in project {project_id}" if project_id else ""
+    quoted = f"'{title}'"
+
+    if event_kind == "created":
+        for_who = f" for {assignee}" if assignee else ""
+        return f"{actor} created task {quoted}{for_who}{where}"
+
+    if event_kind == "status_changed":
+        # ``orchestration.py`` writes ``from``/``to``; tolerate
+        # ``old_status``/``new_status`` too in case future emitters
+        # standardize on the WS payload's naming.
+        p = payload or {}
+        new_status = p.get("to") or p.get("new_status") or ""
+        old_status = p.get("from") or p.get("old_status") or ""
+        if new_status == "done":
+            return f"{actor} completed task {quoted}{where}"
+        if new_status == "blocked":
+            note = blocker_note or (payload or {}).get("blocker_note") or ""
+            tail = f": {note}" if note else ""
+            return f"{actor} marked task {quoted} as blocked{tail}"
+        if new_status == "failed":
+            return f"{actor} failed task {quoted}{where}"
+        if new_status == "cancelled":
+            return f"{actor} cancelled task {quoted}{where}"
+        if new_status == "working":
+            return f"{actor} started task {quoted}{where}"
+        if new_status == "accepted":
+            return f"{actor} accepted task {quoted}{where}"
+        from_part = f" from {old_status}" if old_status else ""
+        return f"{actor} moved task {quoted} to {new_status}{from_part}{where}"
+
+    if event_kind == "rerouted":
+        # ``orchestration.py`` writes ``to`` (the new assignee).
+        p = payload or {}
+        new_assignee = p.get("to") or p.get("new_assignee") or ""
+        if new_assignee:
+            return f"{actor} rerouted task {quoted} to {new_assignee}{where}"
+        return f"{actor} rerouted task {quoted}{where}"
+
+    if event_kind == "cancelled":
+        reason = (payload or {}).get("reason") or ""
+        tail = f": {reason}" if reason else ""
+        return f"{actor} cancelled task {quoted}{tail}"
+
+    if event_kind == "artifact_added":
+        ref = (payload or {}).get("ref") or ""
+        ref_part = f" ({ref})" if ref else ""
+        return f"{actor} added an artifact to task {quoted}{ref_part}"
+
+    # Fall-through: still useful, just less polished.
+    return f"{actor} {event_kind} on task {quoted}{where}"
+
+
 def _log_cron_task_exception(task: object) -> None:
     """Log unhandled exceptions from fire-and-forget cron tasks."""
     import asyncio
@@ -5495,6 +5566,8 @@ def create_dashboard_router(
                 "description": pdata.get("description", ""),
                 "members": pdata.get("members", []),
                 "status": pdata.get("status", "active"),
+                "north_star": pdata.get("north_star"),
+                "success_criteria": pdata.get("success_criteria"),
                 "counts": counts,
                 "total": len(rows),
                 "blockers": blockers,
@@ -5548,6 +5621,86 @@ def create_dashboard_router(
             logger.warning("workplace outputs listing failed: %s", e)
             rows = []
         return {"enabled": True, "outputs": rows}
+
+    @api_router.get("/api/workplace/feed")
+    async def api_workplace_feed(
+        project_id: str | None = None,
+        limit: int = 100,
+    ) -> dict:
+        """Activity feed for the Workplace > feed tab.
+
+        Returns the most recent ``task_events`` rows joined back to their
+        parent task so each entry can render a humanized one-line summary
+        ("writer-1 completed task 'Draft Q4 plan' in project work").
+        Sorted descending by event timestamp; ``limit`` is clamped to
+        ``[1, 500]``.
+        """
+        if tasks_store is None or not _orchestration_v2_on():
+            return {"enabled": False, "feed": []}
+        limit = max(1, min(int(limit or 100), 500))
+        try:
+            with tasks_store._conn() as conn:
+                if project_id:
+                    sql = (
+                        "SELECT e.event_id, e.task_id, e.event_kind, "
+                        "e.actor, e.payload_json, e.created_at, "
+                        "t.title, t.project_id, t.assignee, t.status, "
+                        "t.blocker_note "
+                        "FROM task_events e "
+                        "JOIN tasks t ON t.id = e.task_id "
+                        "WHERE t.project_id = ? "
+                        "ORDER BY e.created_at DESC, e.event_id DESC "
+                        "LIMIT ?"
+                    )
+                    raw = conn.execute(sql, (project_id, limit)).fetchall()
+                else:
+                    sql = (
+                        "SELECT e.event_id, e.task_id, e.event_kind, "
+                        "e.actor, e.payload_json, e.created_at, "
+                        "t.title, t.project_id, t.assignee, t.status, "
+                        "t.blocker_note "
+                        "FROM task_events e "
+                        "JOIN tasks t ON t.id = e.task_id "
+                        "ORDER BY e.created_at DESC, e.event_id DESC "
+                        "LIMIT ?"
+                    )
+                    raw = conn.execute(sql, (limit,)).fetchall()
+        except Exception as e:
+            logger.warning("workplace feed listing failed: %s", e)
+            return {"enabled": True, "feed": [], "error": str(e)}
+
+        feed: list[dict] = []
+        for row in raw:
+            payload = json.loads(row[4]) if row[4] else None
+            event_kind = row[2]
+            actor = row[3]
+            title = row[6] or "(untitled)"
+            proj = row[7] or ""
+            assignee = row[8] or ""
+            blocker_note = row[10] or ""
+            summary = _summarize_task_event(
+                event_kind=event_kind,
+                actor=actor,
+                title=title,
+                project_id=proj,
+                assignee=assignee,
+                blocker_note=blocker_note,
+                payload=payload,
+            )
+            feed.append({
+                "event_id": row[0],
+                "event_type": event_kind,
+                "task_id": row[1],
+                "task_title": title,
+                "project_id": proj,
+                "assignee": assignee,
+                "actor": actor,
+                "task_status": row[9],
+                "blocker_note": blocker_note,
+                "timestamp": row[5],
+                "summary": summary,
+            })
+        return {"enabled": True, "feed": feed}
 
     @api_router.get("/api/workplace/pending")
     async def api_workplace_pending() -> dict:

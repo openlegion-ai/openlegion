@@ -1507,6 +1507,7 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     "read_agent_history", "propose_edit", "confirm_edit", "create_agent",
     "list_projects", "get_project", "create_project",
     "add_agents_to_project", "remove_agents_from_project", "update_project_context",
+    "set_project_goal",
     "vault_list", "request_credential", "request_browser_login",
     # Task 7: operator product surface — read tools
     "list_project_status", "list_agent_queue", "get_team_outputs",

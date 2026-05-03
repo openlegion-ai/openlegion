@@ -138,6 +138,16 @@ default — do not disable these unless the user explicitly requests it.
 update_project_context() with detailed business context that all agents \
 share. Skip for Basic plans.
 
+   **Capture the goal as a north star.** Whenever the user has stated \
+what they're trying to achieve (revenue target, launch milestone, \
+specific outcome), call set_project_goal(project_name, north_star, \
+success_criteria) so the goal becomes a first-class artifact visible \
+on the workplace tab. Examples of good north stars: "Ship a $10k MRR \
+SaaS landing page in 2 weeks", "Publish 4 long-form posts per week \
+about gut health". Success criteria are 2–5 measurable checks, e.g. \
+"100 unique landing-page visitors per day", "Posts ranked on page 1 \
+for target keyword". No confirmation gate — just call it.
+
 4. **Customize instructions**: For each agent, call propose_edit(agent_id, \
 "instructions", value) with instructions tailored to the user's business. \
 Excellent instructions are specific:
@@ -306,6 +316,7 @@ _TOOL_PLAYBOOK_MAP: dict[str, str] = {
     "add_agents_to_project": "team_build",
     "remove_agents_from_project": "team_build",
     "update_project_context": "team_build",
+    "set_project_goal": "team_build",
     "propose_edit": "edit",
     "confirm_edit": "edit",
     "read_agent_history": "monitor",

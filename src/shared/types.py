@@ -356,6 +356,11 @@ class ProjectMetadata(BaseModel):
     ``"archived"`` to stop scheduling and hide the project from default
     list views without deleting its data. Archive is reversible; delete
     requires archive first plus a separate human-confirmed step.
+
+    ``north_star`` and ``success_criteria`` capture the project's goal as
+    first-class fields. Both are nullable for backwards compatibility —
+    projects that predate this schema simply have ``None`` and the UI
+    renders an empty-state placeholder.
     """
 
     name: str
@@ -364,6 +369,8 @@ class ProjectMetadata(BaseModel):
     created_at: str | None = None
     status: str = "active"
     settings: dict[str, Any] = {}
+    north_star: str | None = None
+    success_criteria: list[str] | None = None
 
 
 # === Coordination Requests ===

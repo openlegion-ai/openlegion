@@ -657,6 +657,91 @@ async def update_project_context(
         return {"error": f"Failed to update project context: {e}"}
 
 
+@skill(
+    name="set_project_goal",
+    description=(
+        "Set or update a project's north star (vision statement) and "
+        "success criteria (measurable outcomes). The north star answers "
+        "'what are we moving toward'; success criteria are the concrete "
+        "checks that tell us we got there. No confirmation required — "
+        "this is meta-config the user explicitly asked for.\n\n"
+        "Call this proactively whenever the user describes a goal for a "
+        "project so it becomes a first-class artifact visible in the "
+        "workplace tab."
+    ),
+    parameters={
+        "project_name": {
+            "type": "string",
+            "description": "Project to set the goal on (use list_projects to find names)",
+        },
+        "north_star": {
+            "type": "string",
+            "description": (
+                "Free-text vision statement, ≤500 characters. "
+                "e.g. 'Ship a $10k MRR SaaS landing page in 2 weeks'."
+            ),
+        },
+        "success_criteria": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Up to 10 measurable outcomes, each ≤200 characters. "
+                "Optional — pass an empty list or omit to clear."
+            ),
+        },
+    },
+)
+async def set_project_goal(
+    project_name: str,
+    north_star: str,
+    success_criteria: list[str] | None = None,
+    *,
+    mesh_client=None,
+    **_kw,
+) -> dict:
+    """Set the project's north_star + success_criteria. No gate."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+
+    if not isinstance(project_name, str) or not project_name.strip():
+        return {"error": "project_name is required"}
+    if not isinstance(north_star, str):
+        return {"error": "north_star must be a string"}
+    if len(north_star) > 500:
+        return {"error": "north_star must be 500 characters or fewer"}
+
+    cleaned_criteria: list[str] | None
+    if success_criteria is None:
+        cleaned_criteria = None
+    else:
+        if not isinstance(success_criteria, list):
+            return {"error": "success_criteria must be a list of strings"}
+        if len(success_criteria) > 10:
+            return {"error": "success_criteria may contain at most 10 items"}
+        cleaned_criteria = []
+        for item in success_criteria:
+            if not isinstance(item, str):
+                return {"error": "each success_criteria entry must be a string"}
+            if len(item) > 200:
+                return {
+                    "error": "each success_criteria entry must be 200 characters or fewer",
+                }
+            stripped = item.strip()
+            if stripped:
+                cleaned_criteria.append(stripped)
+        if not cleaned_criteria:
+            cleaned_criteria = None
+
+    try:
+        return await mesh_client.set_project_goal(
+            project_name, north_star.strip() or None, cleaned_criteria,
+        )
+    except Exception as e:
+        return {"error": f"Failed to set project goal: {e}"}
+
+
 # ── Task 7: Operator product tools ───────────────────────────
 
 

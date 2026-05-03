@@ -244,8 +244,10 @@ class TestOperatorConstants:
 
     def test_allowed_tools_populated(self):
         from src.cli.config import _OPERATOR_ALLOWED_TOOLS, _OPERATOR_HEARTBEAT_TOOLS
-        # Task 7 added the operator product surface (4 read + 7 action tools).
-        assert len(_OPERATOR_ALLOWED_TOOLS) == 34
+        # Task 7 added the operator product surface (4 read + 7 action tools);
+        # PR 5 adds set_project_goal so the operator can save the user's
+        # stated goal as a first-class artifact.
+        assert len(_OPERATOR_ALLOWED_TOOLS) == 35
         assert len(_OPERATOR_HEARTBEAT_TOOLS) == 5
         # Heartbeat tools should be a subset of allowed tools
         assert set(_OPERATOR_HEARTBEAT_TOOLS).issubset(set(_OPERATOR_ALLOWED_TOOLS))
@@ -255,6 +257,8 @@ class TestOperatorConstants:
             "summarize_project_progress",
             "reroute_task", "cancel_task", "retry_failed_task",
             "archive_project", "archive_agent", "delete_project", "delete_agent",
+            # PR 5 — north-star setter is no-confirmation meta-config.
+            "set_project_goal",
         ):
             assert tool in _OPERATOR_ALLOWED_TOOLS
 

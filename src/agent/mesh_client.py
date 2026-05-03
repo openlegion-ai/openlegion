@@ -815,6 +815,25 @@ class MeshClient:
         response.raise_for_status()
         return response.json()
 
+    async def set_project_goal(
+        self,
+        project_name: str,
+        north_star: str | None,
+        success_criteria: list[str] | None = None,
+    ) -> dict:
+        """Set a project's north star + success criteria via mesh proxy."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/projects/{project_name}/goal",
+            json={
+                "north_star": north_star,
+                "success_criteria": success_criteria,
+            },
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
     async def browser_command(
         self, action: str, params: dict | None = None,
         target_agent_id: str | None = None,
