@@ -16,9 +16,7 @@ import os
 import shutil
 import tempfile
 
-import pytest
 from fastapi import FastAPI
-from fastapi.testclient import TestClient
 
 # Reuse the same component-builder + CSRF client used by the rest of the
 # dashboard suite so this file stays in lockstep with that fixture.
