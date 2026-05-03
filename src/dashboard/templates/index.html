@@ -297,38 +297,14 @@
                 </div>
               </div>
 
-              <!-- Task 9 — Inline pending-action review.
-                   Renders one bubble per open pending nonce above the
-                   operator chat so the human can confirm/cancel in
-                   context. Backed by the same state as the System >
-                   Operator panel. -->
-              <div x-show="operatorReady && workplacePending.length" x-cloak
-                   class="px-4 pt-3 space-y-2"
-                   x-init="loadWorkplacePending()">
-                <template x-for="p in workplacePending" :key="p.nonce">
-                  <div class="bg-amber-900/15 border border-amber-700/30 rounded-2xl px-3 py-2">
-                    <div class="text-[11px] text-amber-200 font-medium">
-                      Pending action awaiting confirmation
-                    </div>
-                    <div class="text-xs text-gray-200 mt-0.5">
-                      <span class="font-medium" x-text="p.action_kind"></span>
-                      <span class="text-gray-400" x-text="' on ' + (p.target_kind || '?') + ' ' + (p.target_id || '?')"></span>
-                    </div>
-                    <div class="text-[11px] text-gray-400 mt-0.5"
-                         x-text="'expires in ' + workplaceFormatExpiry(p.expires_at) + ' · proposed by ' + (p.actor || '?')"></div>
-                    <div class="flex gap-2 mt-2">
-                      <button @click="confirmPendingAction(p.nonce)"
-                        class="text-[11px] px-2.5 py-1 rounded bg-emerald-700/40 hover:bg-emerald-700/60 text-emerald-200 transition-colors">
-                        Confirm
-                      </button>
-                      <button @click="cancelPendingAction(p.nonce)"
-                        class="text-[11px] px-2.5 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors">
-                        Cancel
-                      </button>
-                    </div>
-                  </div>
-                </template>
-              </div>
+              <!-- PR 1: removed the amber pending-action bubble above
+                   operator chat. Soft edits now apply immediately and
+                   surface as inline receipt cards (operator_action_receipt)
+                   in the chat history. Hard edits / destructive ops still
+                   land in workplacePending; PR 2 will replace the amber
+                   bubble with a dedicated inline confirmation card per
+                   nonce. For now the System > Operator panel remains the
+                   review surface for those. -->
 
               <!-- Messages area — reuses existing chatHistories binding -->
               <div x-show="operatorReady" id="chat-messages-operator" class="flex-1 overflow-y-auto overflow-x-hidden px-4 py-3 space-y-3">
@@ -420,6 +396,52 @@
                                 <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/>
                               </svg>
                               <span>Saved securely. The agent can now use this credential.</span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </template>
+                    <!-- PR 1: Operator action receipt — soft-edit confirmation card -->
+                    <template x-if="msg.role === 'operator_action_receipt'">
+                      <div class="flex justify-start gap-2.5">
+                        <div class="shrink-0 mt-1">
+                          <img src="/dashboard/static/avatars/operator.png" alt="Operator" class="w-6 h-6 rounded-full">
+                        </div>
+                        <div class="max-w-[80%] min-w-0">
+                          <div class="px-3 py-2 rounded-2xl rounded-bl-md bg-gray-800/70 border border-gray-700"
+                               x-data="{ open: false, undoing: false, undone: false, expired: false, _tick: 0, undoError: '' }"
+                               x-init="$watch('_tick', () => {}); setInterval(() => { _tick++; if (msg.expires_at && (Date.now()/1000) > msg.expires_at && !undone) expired = true; }, 1000); if (msg.expires_at && (Date.now()/1000) > msg.expires_at) expired = true;">
+                            <div class="flex items-center gap-2">
+                              <svg class="w-3.5 h-3.5 text-gray-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/>
+                              </svg>
+                              <span class="text-xs text-gray-200" x-text="msg.summary || ('Updated ' + (msg.agent_id || '?') + ' ' + (msg.field || ''))"></span>
+                            </div>
+                            <details class="mt-1.5" x-bind:open="open" @toggle="open = $event.target.open">
+                              <summary class="text-[11px] text-gray-500 hover:text-gray-300 cursor-pointer select-none">
+                                <span x-text="open ? 'Hide diff' : 'View diff'"></span>
+                              </summary>
+                              <div class="mt-1.5 bg-gray-900/60 rounded p-2 text-[11px] font-mono text-gray-300 max-h-48 overflow-auto whitespace-pre-wrap break-words">
+                                <div class="text-red-300/80" x-text="'- ' + (typeof msg.old_value === 'string' ? msg.old_value : JSON.stringify(msg.old_value, null, 2))"></div>
+                                <div class="text-emerald-300/80 mt-1" x-text="'+ ' + (typeof msg.new_value === 'string' ? msg.new_value : JSON.stringify(msg.new_value, null, 2))"></div>
+                              </div>
+                            </details>
+                            <div x-show="undoError" class="text-[10px] text-red-400 mt-1.5" x-text="undoError"></div>
+                            <div class="flex items-center gap-2 mt-2">
+                              <template x-if="!undone && !expired">
+                                <button @click="undoing = true; undoError = ''; fetch(window.__config.apiBase + '/changes/undo/' + encodeURIComponent(msg.undo_token), { method: 'POST', headers: {'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'}, body: '{}' }).then(r => { if (r.ok) { undone = true; } else { r.json().then(d => undoError = (d.detail || 'Undo failed.')).catch(() => undoError = 'Undo failed.'); } undoing = false; }).catch(() => { undoError = 'Network error.'; undoing = false; })"
+                                  :disabled="undoing"
+                                  class="text-[11px] px-2.5 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-200 transition-colors disabled:opacity-50">
+                                  <span x-show="!undoing">Undo</span>
+                                  <span x-show="undoing">Undoing...</span>
+                                </button>
+                              </template>
+                              <template x-if="undone">
+                                <span class="text-[11px] text-emerald-400">Reverted.</span>
+                              </template>
+                              <template x-if="expired && !undone">
+                                <span class="text-[11px] text-gray-500">Undo window expired.</span>
+                              </template>
                             </div>
                           </div>
                         </div>
@@ -6318,6 +6340,49 @@
                   </div>
                 </div>
               </template>
+              <!-- PR 1: Operator action receipt — soft-edit confirmation card -->
+              <template x-if="msg.role === 'operator_action_receipt'">
+                <div class="flex justify-start">
+                  <div class="max-w-[80%] min-w-0">
+                    <div class="px-3 py-2 rounded-2xl rounded-bl-md bg-gray-800/70 border border-gray-700"
+                         x-data="{ open: false, undoing: false, undone: false, expired: false, _tick: 0, undoError: '' }"
+                         x-init="$watch('_tick', () => {}); setInterval(() => { _tick++; if (msg.expires_at && (Date.now()/1000) > msg.expires_at && !undone) expired = true; }, 1000); if (msg.expires_at && (Date.now()/1000) > msg.expires_at) expired = true;">
+                      <div class="flex items-center gap-2">
+                        <svg class="w-3.5 h-3.5 text-gray-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+                          <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/>
+                        </svg>
+                        <span class="text-xs text-gray-200" x-text="msg.summary || ('Updated ' + (msg.agent_id || '?') + ' ' + (msg.field || ''))"></span>
+                      </div>
+                      <details class="mt-1.5" x-bind:open="open" @toggle="open = $event.target.open">
+                        <summary class="text-[11px] text-gray-500 hover:text-gray-300 cursor-pointer select-none">
+                          <span x-text="open ? 'Hide diff' : 'View diff'"></span>
+                        </summary>
+                        <div class="mt-1.5 bg-gray-900/60 rounded p-2 text-[11px] font-mono text-gray-300 max-h-48 overflow-auto whitespace-pre-wrap break-words">
+                          <div class="text-red-300/80" x-text="'- ' + (typeof msg.old_value === 'string' ? msg.old_value : JSON.stringify(msg.old_value, null, 2))"></div>
+                          <div class="text-emerald-300/80 mt-1" x-text="'+ ' + (typeof msg.new_value === 'string' ? msg.new_value : JSON.stringify(msg.new_value, null, 2))"></div>
+                        </div>
+                      </details>
+                      <div x-show="undoError" class="text-[10px] text-red-400 mt-1.5" x-text="undoError"></div>
+                      <div class="flex items-center gap-2 mt-2">
+                        <template x-if="!undone && !expired">
+                          <button @click="undoing = true; undoError = ''; fetch(window.__config.apiBase + '/changes/undo/' + encodeURIComponent(msg.undo_token), { method: 'POST', headers: {'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'}, body: '{}' }).then(r => { if (r.ok) { undone = true; } else { r.json().then(d => undoError = (d.detail || 'Undo failed.')).catch(() => undoError = 'Undo failed.'); } undoing = false; }).catch(() => { undoError = 'Network error.'; undoing = false; })"
+                            :disabled="undoing"
+                            class="text-[11px] px-2.5 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-200 transition-colors disabled:opacity-50">
+                            <span x-show="!undoing">Undo</span>
+                            <span x-show="undoing">Undoing...</span>
+                          </button>
+                        </template>
+                        <template x-if="undone">
+                          <span class="text-[11px] text-emerald-400">Reverted.</span>
+                        </template>
+                        <template x-if="expired && !undone">
+                          <span class="text-[11px] text-gray-500">Undo window expired.</span>
+                        </template>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </template>
               <!-- Browser login request card -->
               <template x-if="msg.role === 'browser_login_request'">
                 <div class="flex justify-start">
@@ -6500,7 +6565,7 @@
                 </div>
               </template>
               <!-- Chat bubble -->
-              <template x-if="msg.role !== 'system' && msg.role !== 'credential_request' && msg.role !== 'credit_exhausted' && msg.role !== 'browser_login_request' && msg.role !== 'browser_captcha_help_request'">
+              <template x-if="msg.role !== 'system' && msg.role !== 'credential_request' && msg.role !== 'credit_exhausted' && msg.role !== 'browser_login_request' && msg.role !== 'browser_captcha_help_request' && msg.role !== 'operator_action_receipt'">
               <div :class="msg.role === 'user' ? 'flex justify-end' : 'flex justify-start'">
               <div class="max-w-[80%] px-3 py-2 rounded-2xl text-xs"
                 :class="{

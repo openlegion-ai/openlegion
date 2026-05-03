@@ -86,6 +86,8 @@ function dashboard() {
       // Task 9 — Workplace tab + pending action review
       'task_created', 'task_status_changed',
       'pending_action_created', 'pending_action_resolved', 'pending_action_expired',
+      // PR 1 — soft-edit receipts + undo
+      'operator_action_receipt', 'operator_action_receipt_undone',
     ],
 
     // Agent detail
@@ -1668,6 +1670,45 @@ function dashboard() {
           evt.type === 'pending_action_created' || evt.type === 'pending_action_resolved' ||
           evt.type === 'pending_action_expired') {
         this.handleWorkplaceEvent(evt);
+      }
+
+      // PR 1 — operator_action_receipt: append a receipt card to the
+      // operator chat history so the user sees what was changed and gets
+      // a one-click [Undo]. Also append into the affected agent's chat
+      // (if open) so they see the change without switching tabs.
+      if (evt.type === 'operator_action_receipt') {
+        const data = evt.data || {};
+        const card = {
+          role: 'operator_action_receipt',
+          agent_id: data.agent_id,
+          field: data.field,
+          summary: data.summary,
+          old_value: data.old_value,
+          new_value: data.new_value,
+          undo_token: data.undo_token,
+          expires_at: data.expires_at,
+          reason: data.reason,
+          ts: Date.now() / 1000,
+        };
+        if (!this.chatHistories['operator']) this.chatHistories['operator'] = [];
+        this.chatHistories['operator'].push(card);
+        if (data.agent_id && data.agent_id !== 'operator') {
+          if (!this.chatHistories[data.agent_id]) this.chatHistories[data.agent_id] = [];
+          this.chatHistories[data.agent_id].push({ ...card });
+        }
+      }
+      if (evt.type === 'operator_action_receipt_undone') {
+        const data = evt.data || {};
+        const token = data.undo_token;
+        if (token) {
+          for (const aid of Object.keys(this.chatHistories || {})) {
+            for (const m of this.chatHistories[aid] || []) {
+              if (m.role === 'operator_action_receipt' && m.undo_token === token) {
+                m._undone = true;
+              }
+            }
+          }
+        }
       }
 
       // Refresh model health on health_change events
