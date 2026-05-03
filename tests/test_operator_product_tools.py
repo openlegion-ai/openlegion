@@ -28,7 +28,7 @@ from src.shared.types import AgentPermissions, MessageOrigin
 
 @pytest.fixture(autouse=True)
 def _set_operator_env(monkeypatch):
-    monkeypatch.setenv("ALLOWED_TOOLS", "list_project_status,list_agent_queue")
+    monkeypatch.setenv("ALLOWED_TOOLS", "inspect_projects,list_agent_queue")
 
 
 # ── Helper: simulate an HTTP error wrapping an over_budget body ────
@@ -56,7 +56,7 @@ def _fake_budget_http_error(agent: str, monthly_used: float = 50.0) -> httpx.HTT
 
 
 @pytest.mark.asyncio
-async def test_list_project_status_requires_v2_flag(monkeypatch):
+async def test_inspect_projects_status_requires_v2_flag(monkeypatch):
     """Read tools that consume tasks return a clean error when v2 off.
 
     The flag now defaults to ``1`` (rollout) so the off path must
@@ -64,8 +64,8 @@ async def test_list_project_status_requires_v2_flag(monkeypatch):
     relying on the env var being unset.
     """
     monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "0")
-    from src.agent.builtins.operator_tools import list_project_status
-    result = await list_project_status(mesh_client=MagicMock())
+    from src.agent.builtins.operator_tools import inspect_projects
+    result = await inspect_projects(detail="status", mesh_client=MagicMock())
     assert "error" in result
     assert "OPENLEGION_ORCHESTRATION_TASKS_V2" in result["error"]
 
@@ -96,38 +96,40 @@ async def test_summarize_project_progress_requires_v2_flag(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_reroute_task_requires_v2_flag(monkeypatch):
+async def test_manage_task_reroute_requires_v2_flag(monkeypatch):
     monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_V2", raising=False)
-    from src.agent.builtins.operator_tools import reroute_task
-    result = await reroute_task("t1", "writer", mesh_client=MagicMock())
+    from src.agent.builtins.operator_tools import manage_task
+    result = await manage_task("t1", "reroute", new_assignee="writer",
+                                mesh_client=MagicMock())
     assert "error" in result
 
 
 @pytest.mark.asyncio
-async def test_cancel_task_requires_v2_flag(monkeypatch):
+async def test_manage_task_cancel_requires_v2_flag(monkeypatch):
     monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_V2", raising=False)
-    from src.agent.builtins.operator_tools import cancel_task
-    result = await cancel_task("t1", mesh_client=MagicMock())
+    from src.agent.builtins.operator_tools import manage_task
+    result = await manage_task("t1", "cancel", mesh_client=MagicMock())
     assert "error" in result
 
 
 @pytest.mark.asyncio
-async def test_retry_failed_task_requires_v2_flag(monkeypatch):
+async def test_manage_task_retry_requires_v2_flag(monkeypatch):
     monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_V2", raising=False)
-    from src.agent.builtins.operator_tools import retry_failed_task
-    result = await retry_failed_task("t1", mesh_client=MagicMock())
+    from src.agent.builtins.operator_tools import manage_task
+    result = await manage_task("t1", "retry", mesh_client=MagicMock())
     assert "error" in result
 
 
 @pytest.mark.asyncio
-async def test_archive_project_works_without_v2_flag(monkeypatch):
-    """Archive/delete project/agent tools work regardless of the v2 flag."""
+async def test_manage_project_archive_works_without_v2_flag(monkeypatch):
+    """Archive/delete project tools work regardless of the v2 flag."""
     monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_V2", raising=False)
-    from src.agent.builtins.operator_tools import archive_project
+    from src.agent.builtins.operator_tools import manage_project
     mc = MagicMock()
     mc.archive_project = AsyncMock(return_value={"archived": True, "project": "growth"})
     messages = [{"role": "user", "content": "yes", "_origin": "user"}]
-    result = await archive_project("growth", mesh_client=mc, _messages=messages)
+    result = await manage_project("growth", "archive",
+                                   mesh_client=mc, _messages=messages)
     assert result["archived"] is True
 
 
@@ -135,31 +137,18 @@ async def test_archive_project_works_without_v2_flag(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_list_project_status_all_projects(monkeypatch):
+async def test_inspect_projects_status_all_projects(monkeypatch):
     monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "1")
-    from src.agent.builtins.operator_tools import list_project_status
+    from src.agent.builtins.operator_tools import inspect_projects
     mc = MagicMock()
     mc.all_projects_status = AsyncMock(
         return_value={"projects": [
             {"project": {"name": "p1"}, "counts": {"active": 2}},
         ]},
     )
-    result = await list_project_status(mesh_client=mc)
+    result = await inspect_projects(detail="status", mesh_client=mc)
     assert "projects" in result
     mc.all_projects_status.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_list_project_status_single_project(monkeypatch):
-    monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "1")
-    from src.agent.builtins.operator_tools import list_project_status
-    mc = MagicMock()
-    mc.project_status = AsyncMock(
-        return_value={"project": {"name": "growth"}, "counts": {"active": 1}},
-    )
-    result = await list_project_status("growth", mesh_client=mc)
-    mc.project_status.assert_awaited_once_with("growth")
-    assert result["project"]["name"] == "growth"
 
 
 @pytest.mark.asyncio
@@ -198,21 +187,21 @@ async def test_summarize_project_progress_calls_mesh(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_get_agent_profile_calls_mesh():
-    """get_agent_profile is not gated on v2 — calls /mesh/agents/{id}/profile."""
-    from src.agent.builtins.operator_tools import get_agent_profile
+async def test_inspect_agents_profile_calls_mesh():
+    """inspect_agents(depth='profile') calls /mesh/agents/{id}/profile."""
+    from src.agent.builtins.operator_tools import inspect_agents
     mc = MagicMock()
     mc.get_agent_profile = AsyncMock(return_value={"agent_id": "writer", "role": "writer"})
-    result = await get_agent_profile("writer", mesh_client=mc)
+    result = await inspect_agents("writer", depth="profile", mesh_client=mc)
     assert result["agent_id"] == "writer"
 
 
 @pytest.mark.asyncio
-async def test_get_agent_profile_returns_structured_routing_fields():
+async def test_inspect_agents_profile_returns_structured_routing_fields():
     """Task 8 — operator profile read surfaces the new structured routing
     fields (capabilities are tool list; the four siblings + the
     interface_capabilities field carry the human-routing data)."""
-    from src.agent.builtins.operator_tools import get_agent_profile
+    from src.agent.builtins.operator_tools import inspect_agents
     mc = MagicMock()
     mc.get_agent_profile = AsyncMock(return_value={
         "agent_id": "researcher",
@@ -224,7 +213,7 @@ async def test_get_agent_profile_returns_structured_routing_fields():
         "escalation_to": "operator",
         "forbidden": ["Speculative findings as fact"],
     })
-    result = await get_agent_profile("researcher", mesh_client=mc)
+    result = await inspect_agents("researcher", depth="profile", mesh_client=mc)
     assert result["interface_capabilities"] == ["Web research", "Synthesize findings"]
     assert result["preferred_inputs"] == ["User questions"]
     assert result["expected_outputs"] == ["Research reports"]
@@ -234,56 +223,69 @@ async def test_get_agent_profile_returns_structured_routing_fields():
     assert result["capabilities"] == ["browser_navigate", "web_search"]
 
 
-# ── Action tool: reroute_task with cost gate ──────────────────
+# ── Action tool: manage_task with cost gate ──────────────────
 
 
 @pytest.mark.asyncio
-async def test_reroute_task_success(monkeypatch):
+async def test_manage_task_reroute_success(monkeypatch):
     monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "1")
-    from src.agent.builtins.operator_tools import reroute_task
+    from src.agent.builtins.operator_tools import manage_task
     mc = MagicMock()
     mc.reroute_task = AsyncMock(
         return_value={"id": "task_1", "assignee": "writer", "status": "pending"},
     )
-    result = await reroute_task("task_1", "writer", reason="capacity",
-                                mesh_client=mc)
+    result = await manage_task("task_1", "reroute", new_assignee="writer",
+                                reason="capacity", mesh_client=mc)
     mc.reroute_task.assert_awaited_once_with("task_1", "writer", reason="capacity")
     assert result["assignee"] == "writer"
 
 
 @pytest.mark.asyncio
-async def test_reroute_task_over_budget_returns_structured_error(monkeypatch):
+async def test_manage_task_reroute_requires_new_assignee(monkeypatch):
+    """`reroute` action without new_assignee returns a clear error."""
+    monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "1")
+    from src.agent.builtins.operator_tools import manage_task
+    result = await manage_task("task_1", "reroute", mesh_client=MagicMock())
+    assert "error" in result
+    assert "new_assignee" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_manage_task_reroute_over_budget_returns_structured_error(monkeypatch):
     """Over-budget surface from the mesh wraps a structured payload."""
     monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "1")
-    from src.agent.builtins.operator_tools import reroute_task
+    from src.agent.builtins.operator_tools import manage_task
     mc = MagicMock()
     mc.reroute_task = AsyncMock(side_effect=_fake_budget_http_error("writer"))
-    result = await reroute_task("task_1", "writer", mesh_client=mc)
+    result = await manage_task("task_1", "reroute", new_assignee="writer",
+                                mesh_client=mc)
     assert result["error"] == "over_budget"
     assert "writer" in (result.get("budget") or {}).get("agent", "")
 
 
 @pytest.mark.asyncio
-async def test_cancel_task_success(monkeypatch):
+async def test_manage_task_cancel_success(monkeypatch):
     monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "1")
-    from src.agent.builtins.operator_tools import cancel_task
+    from src.agent.builtins.operator_tools import manage_task
     mc = MagicMock()
     mc.cancel_task = AsyncMock(return_value={"id": "task_1", "status": "cancelled"})
-    result = await cancel_task("task_1", reason="bad scope", mesh_client=mc)
+    result = await manage_task("task_1", "cancel", reason="bad scope",
+                                mesh_client=mc)
     assert result["status"] == "cancelled"
     mc.cancel_task.assert_awaited_once_with("task_1", reason="bad scope")
 
 
 @pytest.mark.asyncio
-async def test_retry_failed_task_with_changes(monkeypatch):
+async def test_manage_task_retry_with_changes(monkeypatch):
     monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "1")
-    from src.agent.builtins.operator_tools import retry_failed_task
+    from src.agent.builtins.operator_tools import manage_task
     mc = MagicMock()
     mc.retry_task = AsyncMock(
         return_value={"clone": {"id": "task_2"}, "original_id": "task_1"},
     )
-    result = await retry_failed_task(
-        "task_1", with_changes={"assignee": "scout", "title": "v2"},
+    result = await manage_task(
+        "task_1", "retry",
+        with_changes={"assignee": "scout", "title": "v2"},
         mesh_client=mc,
     )
     assert result["original_id"] == "task_1"
@@ -293,12 +295,12 @@ async def test_retry_failed_task_with_changes(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_retry_failed_task_over_budget(monkeypatch):
+async def test_manage_task_retry_over_budget(monkeypatch):
     monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "1")
-    from src.agent.builtins.operator_tools import retry_failed_task
+    from src.agent.builtins.operator_tools import manage_task
     mc = MagicMock()
     mc.retry_task = AsyncMock(side_effect=_fake_budget_http_error("scout"))
-    result = await retry_failed_task("task_1", mesh_client=mc)
+    result = await manage_task("task_1", "retry", mesh_client=mc)
     assert result["error"] == "over_budget"
     assert (result.get("budget") or {}).get("agent") == "scout"
 
@@ -307,44 +309,48 @@ async def test_retry_failed_task_over_budget(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_archive_project_provenance_required():
-    from src.agent.builtins.operator_tools import archive_project
+async def test_manage_project_archive_provenance_required():
+    from src.agent.builtins.operator_tools import manage_project
     messages = [{"role": "user", "content": "x", "_origin": "system:heartbeat"}]
-    result = await archive_project("p1", mesh_client=MagicMock(), _messages=messages)
+    result = await manage_project("p1", "archive",
+                                    mesh_client=MagicMock(), _messages=messages)
     assert result["error"] == "provenance_check_failed"
 
 
 @pytest.mark.asyncio
-async def test_archive_project_success():
-    from src.agent.builtins.operator_tools import archive_project
+async def test_manage_project_archive_success():
+    from src.agent.builtins.operator_tools import manage_project
     mc = MagicMock()
     mc.archive_project = AsyncMock(return_value={"archived": True, "project": "p1"})
     messages = [{"role": "user", "content": "yes", "_origin": "user"}]
-    result = await archive_project("p1", mesh_client=mc, _messages=messages)
+    result = await manage_project("p1", "archive",
+                                    mesh_client=mc, _messages=messages)
     assert result["archived"] is True
 
 
 @pytest.mark.asyncio
-async def test_archive_agent_blocks_operator():
-    from src.agent.builtins.operator_tools import archive_agent
+async def test_manage_agent_archive_blocks_operator():
+    from src.agent.builtins.operator_tools import manage_agent
     messages = [{"role": "user", "content": "yes", "_origin": "user"}]
-    result = await archive_agent("operator", mesh_client=MagicMock(), _messages=messages)
+    result = await manage_agent("operator", "archive",
+                                  mesh_client=MagicMock(), _messages=messages)
     assert "operator" in result["error"].lower()
 
 
 @pytest.mark.asyncio
-async def test_archive_agent_success():
-    from src.agent.builtins.operator_tools import archive_agent
+async def test_manage_agent_archive_success():
+    from src.agent.builtins.operator_tools import manage_agent
     mc = MagicMock()
     mc.archive_agent = AsyncMock(return_value={"archived": True, "agent_id": "writer"})
     messages = [{"role": "user", "content": "yes", "_origin": "user"}]
-    result = await archive_agent("writer", mesh_client=mc, _messages=messages)
+    result = await manage_agent("writer", "archive",
+                                  mesh_client=mc, _messages=messages)
     assert result["archived"] is True
 
 
 @pytest.mark.asyncio
-async def test_delete_project_returns_nonce_for_confirmation():
-    from src.agent.builtins.operator_tools import delete_project
+async def test_manage_project_delete_returns_nonce_for_confirmation():
+    from src.agent.builtins.operator_tools import manage_project
     mc = MagicMock()
     mc.propose_delete_project = AsyncMock(return_value={
         "change_id": "abc-123",
@@ -354,42 +360,46 @@ async def test_delete_project_returns_nonce_for_confirmation():
         "requires_confirmation": True,
     })
     messages = [{"role": "user", "content": "yes", "_origin": "user"}]
-    result = await delete_project("growth", mesh_client=mc, _messages=messages)
+    result = await manage_project("growth", "delete",
+                                    mesh_client=mc, _messages=messages)
     assert result["requires_confirmation"] is True
     assert result["change_id"] == "abc-123"
     assert "summary" in result
 
 
 @pytest.mark.asyncio
-async def test_delete_project_provenance_required():
-    from src.agent.builtins.operator_tools import delete_project
+async def test_manage_project_delete_provenance_required():
+    from src.agent.builtins.operator_tools import manage_project
     messages = [{"role": "user", "content": "hb", "_origin": "system:heartbeat"}]
-    result = await delete_project("growth", mesh_client=MagicMock(), _messages=messages)
+    result = await manage_project("growth", "delete",
+                                    mesh_client=MagicMock(), _messages=messages)
     assert result["error"] == "provenance_check_failed"
 
 
 @pytest.mark.asyncio
-async def test_delete_project_archive_required():
+async def test_manage_project_delete_archive_required():
     """If the mesh rejects with 400, the tool surfaces a friendly hint."""
-    from src.agent.builtins.operator_tools import delete_project
+    from src.agent.builtins.operator_tools import manage_project
     mc = MagicMock()
     mc.propose_delete_project = AsyncMock(side_effect=RuntimeError("400: Project must be archived"))
     messages = [{"role": "user", "content": "yes", "_origin": "user"}]
-    result = await delete_project("growth", mesh_client=mc, _messages=messages)
+    result = await manage_project("growth", "delete",
+                                    mesh_client=mc, _messages=messages)
     assert result["error"] == "archive_required"
 
 
 @pytest.mark.asyncio
-async def test_delete_agent_blocks_operator():
-    from src.agent.builtins.operator_tools import delete_agent
+async def test_manage_agent_delete_blocks_operator():
+    from src.agent.builtins.operator_tools import manage_agent
     messages = [{"role": "user", "content": "yes", "_origin": "user"}]
-    result = await delete_agent("operator", mesh_client=MagicMock(), _messages=messages)
+    result = await manage_agent("operator", "delete",
+                                  mesh_client=MagicMock(), _messages=messages)
     assert "operator" in result["error"].lower()
 
 
 @pytest.mark.asyncio
-async def test_delete_agent_returns_nonce():
-    from src.agent.builtins.operator_tools import delete_agent
+async def test_manage_agent_delete_returns_nonce():
+    from src.agent.builtins.operator_tools import manage_agent
     mc = MagicMock()
     mc.propose_delete_agent = AsyncMock(return_value={
         "change_id": "n1",
@@ -399,7 +409,8 @@ async def test_delete_agent_returns_nonce():
         "requires_confirmation": True,
     })
     messages = [{"role": "user", "content": "yes", "_origin": "user"}]
-    result = await delete_agent("writer", mesh_client=mc, _messages=messages)
+    result = await manage_agent("writer", "delete",
+                                  mesh_client=mc, _messages=messages)
     assert result["change_id"] == "n1"
     assert result["requires_confirmation"] is True
 

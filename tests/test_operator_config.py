@@ -244,19 +244,43 @@ class TestOperatorConstants:
 
     def test_allowed_tools_populated(self):
         from src.cli.config import _OPERATOR_ALLOWED_TOOLS, _OPERATOR_HEARTBEAT_TOOLS
-        # Task 7 added the operator product surface (4 read + 7 action tools).
-        assert len(_OPERATOR_ALLOWED_TOOLS) == 34
-        assert len(_OPERATOR_HEARTBEAT_TOOLS) == 5
+        # PR 0 consolidated to 24, PR 5 added set_project_goal (=25),
+        # PR 1 swaps propose_edit (-1) for edit_agent + undo_change (+2) → +1.
+        assert len(_OPERATOR_ALLOWED_TOOLS) == 26
+        assert len(_OPERATOR_HEARTBEAT_TOOLS) == 4
         # Heartbeat tools should be a subset of allowed tools
         assert set(_OPERATOR_HEARTBEAT_TOOLS).issubset(set(_OPERATOR_ALLOWED_TOOLS))
-        # Task 7 product tools must be in the allowlist.
+        # Consolidated product tools (read + lifecycle) must be present.
         for tool in (
-            "list_project_status", "list_agent_queue", "get_team_outputs",
+            "inspect_projects", "inspect_agents",
+            "list_agent_queue", "get_team_outputs",
             "summarize_project_progress",
-            "reroute_task", "cancel_task", "retry_failed_task",
-            "archive_project", "archive_agent", "delete_project", "delete_agent",
+            "manage_project", "manage_agent", "manage_task",
+            # PR 5 — north-star setter is no-confirmation meta-config.
+            "set_project_goal",
         ):
             assert tool in _OPERATOR_ALLOWED_TOOLS
+        # Dropped dead-weight + replaced tools must be gone.
+        for tool in (
+            "update_status", "vault_list",
+            "list_projects", "get_project", "list_project_status",
+            "list_agents", "get_agent_profile", "read_agent_history",
+            "archive_project", "delete_project",
+            "archive_agent", "delete_agent",
+            "reroute_task", "cancel_task", "retry_failed_task",
+        ):
+            assert tool not in _OPERATOR_ALLOWED_TOOLS
+
+    def test_pr1_edit_tools_present(self):
+        """PR 1 — edit_agent + undo_change in allowlist; propose_edit removed."""
+        from src.cli.config import _OPERATOR_ALLOWED_TOOLS
+        assert "edit_agent" in _OPERATOR_ALLOWED_TOOLS
+        assert "undo_change" in _OPERATOR_ALLOWED_TOOLS
+        # propose_edit is no longer LLM-facing — the operator uses
+        # edit_agent which branches on field severity internally.
+        assert "propose_edit" not in _OPERATOR_ALLOWED_TOOLS
+        # confirm_edit is kept for the hard-field confirm step.
+        assert "confirm_edit" in _OPERATOR_ALLOWED_TOOLS
 
     def test_request_browser_login_in_allowlist(self):
         """Operator must be allowed to delegate browser login requests to workers.
@@ -300,10 +324,13 @@ class TestOperatorConstants:
             _PLAYBOOK_TEAM_BUILD,
         )
 
-        assert "propose_edit" in _PLAYBOOK_TEAM_BUILD
+        # PR 1 — playbook now references edit_agent for soft fields and
+        # confirm_edit for the hard-field follow-up step.
+        assert "edit_agent" in _PLAYBOOK_TEAM_BUILD
+        assert "edit_agent" in _PLAYBOOK_EDIT
         assert "confirm_edit" in _PLAYBOOK_EDIT
-        assert "get_agent_profile" in _PLAYBOOK_MONITOR
-        assert "vault_list" in _PLAYBOOK_CREDENTIALS
+        assert "inspect_agents" in _PLAYBOOK_MONITOR
+        assert "request_credential" in _PLAYBOOK_CREDENTIALS
 
     def test_core_has_plan_tiers(self):
         from src.shared.operator_playbooks import _OPERATOR_CORE

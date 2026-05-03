@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.responses import StreamingResponse
 
+from src.host.change_history import ChangeHistory
 from src.host.credentials import is_system_credential
 from src.host.orchestration import (
     VALID_STATUSES,
@@ -482,6 +483,14 @@ def create_mesh_app(
     if event_bus is not None:
         pending_actions.set_event_bus(event_bus)
 
+    # PR 1 — soft-edit receipts + 5-minute Undo. Mirrors the pending_actions
+    # plumbing: SQLite-backed, exposed on the app for tests/dashboard,
+    # event_bus wired so the dashboard can render receipt cards live.
+    change_history = ChangeHistory(db_path="data/change_history.db")
+    app.change_history = change_history
+    if event_bus is not None:
+        change_history.set_event_bus(event_bus)
+
     # Task 6: durable orchestration task records. The store is only
     # constructed when the feature flag is on; when off, the new
     # ``/mesh/tasks*`` endpoints return HTTP 503 so coordination_tool
@@ -499,6 +508,41 @@ def create_mesh_app(
     # cancel emit ``task_*`` events to the dashboard.
     if tasks_store is not None and event_bus is not None:
         tasks_store.set_event_bus(event_bus)
+
+    # In-memory registry of open "agent asks user for help" requests:
+    # credential_request, browser_login_request, browser_captcha_help_request.
+    # Keyed by request_id (uuid). The dict lets the cancel endpoints
+    # address a specific request and lets the dashboard cancel-button
+    # path resolve a card without needing to reconstruct (agent_id,
+    # service) identity. State is small (a handful of open asks at a
+    # time per fleet) and intentionally NOT persisted: a mesh restart
+    # already loses the in-flight steer-message contract anyway, so the
+    # cards just become stale on the dashboard and gracefully degrade
+    # (the Cancel button 404s, which the UI handles).
+    help_requests: dict[str, dict] = {}
+    _MAX_HELP_REQUESTS = 256  # cap so a noisy agent can't OOM the host
+    app.help_requests = help_requests  # exposed for tests + dashboard
+
+    def _record_help_request(
+        kind: str, agent_id: str, payload: dict,
+    ) -> str:
+        """Register an open help request and return its request_id."""
+        if len(help_requests) >= _MAX_HELP_REQUESTS:
+            # Evict oldest to bound growth.
+            oldest = min(
+                help_requests.items(),
+                key=lambda kv: kv[1].get("created_at", 0),
+            )[0]
+            help_requests.pop(oldest, None)
+        request_id = str(_uuid.uuid4())
+        help_requests[request_id] = {
+            "kind": kind,
+            "agent_id": agent_id,
+            "created_at": time.time(),
+            "status": "open",
+            "payload": payload,
+        }
+        return request_id
 
     # Rollout: auto-run the legacy blackboard → tasks migration once
     # at startup so existing fleets transition seamlessly when the v2
@@ -1639,6 +1683,12 @@ def create_mesh_app(
         if not re.match(r"^[a-zA-Z0-9_.\-]{1,128}$", name):
             raise HTTPException(400, "Invalid credential name")
 
+        request_id = _record_help_request(
+            "credential_request",
+            agent_id,
+            {"name": name, "service": service[:128]},
+        )
+
         if event_bus:
             event_bus.emit(
                 "credential_request",
@@ -1647,10 +1697,11 @@ def create_mesh_app(
                     "name": name,
                     "description": description[:500],
                     "service": service[:128],
+                    "request_id": request_id,
                 },
             )
 
-        return {"requested": True, "name": name}
+        return {"requested": True, "name": name, "request_id": request_id}
 
     @app.post("/mesh/browser-login-request")
     async def browser_login_request(data: dict, request: Request) -> dict:
@@ -1698,6 +1749,12 @@ def create_mesh_app(
         if not service:
             raise HTTPException(400, "Service name is required")
 
+        request_id = _record_help_request(
+            "browser_login_request",
+            agent_id,
+            {"service": service[:128]},
+        )
+
         if event_bus:
             # OAuth callback URLs (?code=...&state=...) and other
             # query-string secrets must not leak to the dashboard event
@@ -1711,10 +1768,16 @@ def create_mesh_app(
                     "url": redact_url(url)[:2048],
                     "service": service[:128],
                     "description": description[:500],
+                    "request_id": request_id,
                 },
             )
 
-        return {"requested": True, "service": service, "target_agent": agent_id}
+        return {
+            "requested": True,
+            "service": service,
+            "target_agent": agent_id,
+            "request_id": request_id,
+        }
 
     @app.post("/mesh/browser-captcha-help-request")
     async def browser_captcha_help_request(
@@ -1753,6 +1816,12 @@ def create_mesh_app(
         if not description:
             raise HTTPException(400, "Description is required")
 
+        request_id = _record_help_request(
+            "browser_captcha_help_request",
+            agent_id,
+            {"service": service[:128]},
+        )
+
         if event_bus:
             event_bus.emit(
                 "browser_captcha_help_request",
@@ -1760,10 +1829,188 @@ def create_mesh_app(
                 data={
                     "service": service[:128],
                     "description": description[:500],
+                    "request_id": request_id,
                 },
             )
 
-        return {"requested": True, "service": service, "target_agent": agent_id}
+        return {
+            "requested": True,
+            "service": service,
+            "target_agent": agent_id,
+            "request_id": request_id,
+        }
+
+    def _cancel_help_request(
+        kind: str, request_id: str, reason: str,
+    ) -> dict:
+        """Resolve an open help request as cancelled.
+
+        Returns the popped record. Raises HTTPException(404) if the id
+        is unknown or already resolved. Caller is responsible for
+        emitting any follow-up event / steer.
+        """
+        record = help_requests.get(request_id)
+        if record is None:
+            raise HTTPException(
+                404, f"{kind} request not found or already resolved",
+            )
+        if record.get("kind") != kind:
+            raise HTTPException(
+                404, f"{kind} request not found or already resolved",
+            )
+        if record.get("status") != "open":
+            raise HTTPException(
+                404, f"{kind} request not found or already resolved",
+            )
+        record["status"] = "cancelled"
+        record["reason"] = reason
+        # Pop after mutating so the dict is the source of truth on
+        # whether the request is still resolvable.
+        help_requests.pop(request_id, None)
+        return record
+
+    async def _enqueue_cancel_steer(agent_id: str, message: str) -> None:
+        """Push a steer message to the awaiting agent.
+
+        Best-effort: silently swallows if no lane manager is wired
+        (mesh-only test setup) or the agent isn't registered.
+        """
+        if lane_manager is None or not agent_id:
+            return
+        try:
+            from src.shared.trace import new_trace_id
+            await lane_manager.enqueue(
+                agent_id, sanitize_for_prompt(message),
+                mode="steer", trace_id=new_trace_id(),
+            )
+        except Exception as e:
+            logger.warning("cancel-steer enqueue failed for %s: %s", agent_id, e)
+
+    @app.post("/mesh/credential-request/{request_id}/cancel")
+    async def credential_request_cancel(
+        request_id: str, data: dict, request: Request,
+    ) -> dict:
+        """User cancelled a pending credential request from the dashboard.
+
+        Pops the open record, emits ``credential_request_cancelled``
+        so all card copies update, and pushes a steer message to the
+        requesting agent so it can react instead of waiting on a
+        credential that will never arrive.
+        """
+        # Loopback or operator only — same access model as the dashboard
+        # cancel proxy that fronts this.
+        caller = _extract_verified_agent_id(request)
+        if caller != "operator" and not _is_internal_caller(request):
+            raise HTTPException(
+                403, "Only the operator can cancel a credential request",
+            )
+        reason = (data or {}).get("reason", "user_cancelled")
+        record = _cancel_help_request("credential_request", request_id, reason)
+        agent_id = record["agent_id"]
+        service = record["payload"].get("service") or record["payload"].get("name", "")
+        name = record["payload"].get("name", "")
+        if event_bus:
+            event_bus.emit(
+                "credential_request_cancelled",
+                agent=agent_id,
+                data={
+                    "request_id": request_id,
+                    "name": name,
+                    "service": service,
+                    "reason": reason,
+                },
+            )
+        await _enqueue_cancel_steer(
+            agent_id,
+            f"The user cancelled your request for credential '{name}'. "
+            f"They did not provide it. Skip this step or ask "
+            f"differently — do not retry the same request immediately.",
+        )
+        return {
+            "ok": True,
+            "request_id": request_id,
+            "status": "cancelled",
+            "reason": reason,
+        }
+
+    @app.post("/mesh/browser-login-request/{request_id}/cancel")
+    async def browser_login_request_cancel(
+        request_id: str, data: dict, request: Request,
+    ) -> dict:
+        """User cancelled a pending browser login request."""
+        caller = _extract_verified_agent_id(request)
+        if caller != "operator" and not _is_internal_caller(request):
+            raise HTTPException(
+                403, "Only the operator can cancel a browser login request",
+            )
+        reason = (data or {}).get("reason", "user_cancelled")
+        record = _cancel_help_request(
+            "browser_login_request", request_id, reason,
+        )
+        agent_id = record["agent_id"]
+        service = record["payload"].get("service", "")
+        if event_bus:
+            event_bus.emit(
+                "browser_login_cancelled",
+                agent=agent_id,
+                data={
+                    "request_id": request_id,
+                    "service": service,
+                    "reason": reason,
+                },
+            )
+        await _enqueue_cancel_steer(
+            agent_id,
+            f"The user cancelled the browser login for {service}. "
+            f"You may need to find an alternative approach or ask "
+            f"again later. Do not retry the same login immediately.",
+        )
+        return {
+            "ok": True,
+            "request_id": request_id,
+            "status": "cancelled",
+            "reason": reason,
+        }
+
+    @app.post("/mesh/browser-captcha-help-request/{request_id}/cancel")
+    async def browser_captcha_help_request_cancel(
+        request_id: str, data: dict, request: Request,
+    ) -> dict:
+        """User cancelled a pending CAPTCHA-help request."""
+        caller = _extract_verified_agent_id(request)
+        if caller != "operator" and not _is_internal_caller(request):
+            raise HTTPException(
+                403, "Only the operator can cancel a CAPTCHA-help request",
+            )
+        reason = (data or {}).get("reason", "user_cancelled")
+        record = _cancel_help_request(
+            "browser_captcha_help_request", request_id, reason,
+        )
+        agent_id = record["agent_id"]
+        service = record["payload"].get("service", "")
+        if event_bus:
+            event_bus.emit(
+                "browser_captcha_help_cancelled",
+                agent=agent_id,
+                data={
+                    "request_id": request_id,
+                    "service": service,
+                    "reason": reason,
+                },
+            )
+        await _enqueue_cancel_steer(
+            agent_id,
+            f"The user cancelled the CAPTCHA help request for "
+            f"{service}. Try a different approach (wait + retry, "
+            f"escalate via notify_user). Do not re-request the same "
+            f"captcha help immediately.",
+        )
+        return {
+            "ok": True,
+            "request_id": request_id,
+            "status": "cancelled",
+            "reason": reason,
+        }
 
     @app.get("/mesh/agents")
     async def list_agents(request: Request, project: str = "", agent_id: str = "") -> dict:
@@ -3119,6 +3366,83 @@ def create_mesh_app(
 
         return {"updated": True, "project": name}
 
+    @app.post("/mesh/projects/{name}/goal")
+    async def mesh_set_project_goal(name: str, request: Request) -> dict:
+        """Set a project's north star + success criteria (mesh-authed proxy).
+
+        Operator-only (or internal localhost callers). Validates length
+        limits then persists to ``metadata.yaml`` in place. No confirmation
+        gate — this is meta-config the user explicitly asked for.
+        """
+        _require_any_auth(request)
+        caller = _extract_verified_agent_id(request)
+        if caller != "operator" and not _is_internal_caller(request):
+            raise HTTPException(403, "Only the operator can manage projects")
+        from src.cli.config import PROJECTS_DIR, _load_projects
+
+        body = await request.json()
+        north_star_raw = body.get("north_star")
+        success_criteria_raw = body.get("success_criteria")
+
+        # Normalize and validate.
+        if north_star_raw is None:
+            north_star: str | None = None
+        else:
+            north_star = sanitize_for_prompt(str(north_star_raw)).strip()
+            if len(north_star) > 2000:
+                raise HTTPException(
+                    400, "north_star must be 2000 characters or fewer",
+                )
+            if not north_star:
+                north_star = None
+
+        success_criteria: list[str] | None
+        if success_criteria_raw is None:
+            success_criteria = None
+        else:
+            if not isinstance(success_criteria_raw, list):
+                raise HTTPException(
+                    400, "success_criteria must be a list of strings",
+                )
+            if len(success_criteria_raw) > 10:
+                raise HTTPException(
+                    400, "success_criteria may contain at most 10 items",
+                )
+            cleaned: list[str] = []
+            for item in success_criteria_raw:
+                sc = sanitize_for_prompt(str(item)).strip()
+                if not sc:
+                    continue
+                if len(sc) > 200:
+                    raise HTTPException(
+                        400,
+                        "each success_criteria entry must be 200 characters or fewer",
+                    )
+                cleaned.append(sc)
+            success_criteria = cleaned or None
+
+        projects = _load_projects()
+        if name not in projects:
+            raise HTTPException(404, f"Project '{name}' not found")
+
+        import yaml
+        meta_file = PROJECTS_DIR / name / "metadata.yaml"
+        if not meta_file.exists():
+            raise HTTPException(404, f"Project '{name}' has no metadata file")
+        with open(meta_file) as f:
+            meta = yaml.safe_load(f) or {}
+        meta["north_star"] = north_star
+        meta["success_criteria"] = success_criteria
+        with open(meta_file, "w") as f:
+            yaml.dump(meta, f, default_flow_style=False, sort_keys=False)
+
+        return {
+            "success": True,
+            "project_name": name,
+            "north_star": north_star,
+            "success_criteria": success_criteria,
+        }
+
     # === Orchestration Tasks v2 (Task 6) ===
 
     def _require_tasks_v2() -> Tasks:
@@ -4290,7 +4614,16 @@ def create_mesh_app(
                     monthly_usd=_monthly,
                 )
 
-        # Hot-reload: push to running agent's workspace
+        # Hot-reload: push to running agent's workspace.
+        #
+        # Receipt-ordering note: callers (soft-edit / confirm-edit /
+        # undo) emit the operator_action_receipt event AFTER this
+        # function returns. Hot-reload failures here are intentionally
+        # swallowed because the YAML write is the source of truth —
+        # the running agent will pick up the change on its next
+        # restart even if the live PUT fails. So a receipt is emitted
+        # for any change whose YAML write succeeded, regardless of
+        # whether the running agent's in-memory state caught up.
         if transport and agent_id in router.agent_registry:
             workspace_map = {
                 "instructions": "INSTRUCTIONS.md",
@@ -4373,6 +4706,267 @@ def create_mesh_app(
         )
 
         return {"success": True, "agent_id": agent_id, "field": field}
+
+    # === PR 1 — soft-edit / undo flow ===
+    #
+    # Soft fields apply directly with no propose+confirm round-trip.
+    # Hard fields keep the existing propose/confirm path. The split
+    # is a UX pattern — both still pass through the agent's
+    # provenance gate at the operator-tool layer.
+    _SOFT_EDIT_FIELDS = {
+        "instructions", "soul", "heartbeat", "interface", "role",
+    }
+    _HARD_EDIT_FIELDS = {"model", "budget", "permissions", "thinking"}
+
+    def _humanize_field(field: str) -> str:
+        """Display name for a field — used in receipt summaries."""
+        return {
+            "instructions": "instructions",
+            "soul": "personality",
+            "heartbeat": "heartbeat",
+            "interface": "interface contract",
+            "role": "role",
+        }.get(field, field)
+
+    @app.post("/mesh/agents/{agent_id}/edit-soft")
+    async def edit_agent_soft(agent_id: str, request: Request) -> dict:
+        """Apply a soft-edit immediately and emit a revertible receipt.
+
+        Path constraints:
+          * Caller must be ``operator`` (or an internal caller for tests).
+          * ``X-Origin`` must validate (``_validated_origin``) — the
+            operator-tool layer already did its own provenance check, so
+            here we just require *some* validatable origin and store the
+            kind on the audit trail. Soft edits intentionally do NOT
+            require ``kind="human"`` because the receipt+undo card is
+            the safety net (the user can always revert within 5min).
+          * ``field`` must be in :data:`_SOFT_EDIT_FIELDS`. Hard fields
+            return 400 with a "use propose-edit for {field}" message so
+            the operator tool can fall through to the existing path.
+
+        Returns ``{success, undo_token, expires_at, summary}``. The
+        ``operator_action_receipt`` event is emitted on the bus so the
+        dashboard can render the inline receipt card immediately.
+        """
+        _require_any_auth(request)
+        caller = _extract_verified_agent_id(request)
+        if caller != "operator" and not _is_internal_caller(request):
+            raise HTTPException(403, "Only the operator can edit agent config")
+        # We require *a* validatable origin so request-level audit fields
+        # are populated; we do NOT require human kind (see docstring).
+        origin = _validated_origin(request, caller)
+        origin_kind = origin.kind if origin is not None else None
+
+        data = await request.json()
+        field = data.get("field", "")
+        new_value = data.get("value")
+        reason = data.get("reason", "user_asked")
+        if not field:
+            raise HTTPException(400, "field is required")
+        if field in _HARD_EDIT_FIELDS:
+            raise HTTPException(
+                400,
+                f"Use /mesh/agents/{{id}}/propose for {field!r} (hard field — "
+                "requires explicit confirmation).",
+            )
+        if field not in _SOFT_EDIT_FIELDS:
+            raise HTTPException(
+                400,
+                f"Invalid field {field!r}. Soft fields: {sorted(_SOFT_EDIT_FIELDS)}",
+            )
+
+        # Self-modification block. The operator-tool layer also blocks
+        # this, but enforce server-side too in case a future caller
+        # bypasses the tool.
+        if agent_id == "operator":
+            raise HTTPException(400, "The operator agent cannot be edited via soft-edit")
+
+        from src.cli.config import _load_config
+        agent_cfg = _load_config()
+        agents = agent_cfg.get("agents", {})
+        if agent_id not in agents:
+            raise HTTPException(404, f"Agent '{agent_id}' not found")
+
+        yaml_key = _CONFIG_FIELD_MAP.get(field, field)
+        old_value = agents[agent_id].get(yaml_key, "")
+
+        # Apply directly via the same write helper used by the confirm
+        # path. ``_apply_pending_change`` is async and handles audit
+        # logging, hot-reload, and heartbeat schedule sync.
+        undo_token = str(_uuid.uuid4())
+        await _apply_pending_change(
+            undo_token,
+            {
+                "agent_id": agent_id,
+                "field": field,
+                "old_value": old_value,
+                "new_value": new_value,
+            },
+        )
+
+        # Detect older unconsumed receipts on the same field BEFORE we
+        # record the new one. They stay revertible, but rolling them
+        # back from the latest value would silently overwrite this
+        # edit; the dashboard renders a "superseded" warning so the
+        # operator knows. We compute the list before record() so we
+        # don't have to filter ourselves out.
+        prior_unconsumed = change_history.list_unconsumed_for_field(
+            agent_id, field,
+        )
+
+        # Record the change for undo. Summary uses humanized field names
+        # so receipt cards read naturally ("Updated writer's personality")
+        # without the dashboard having to do its own field translation.
+        summary = f"Updated {agent_id}'s {_humanize_field(field)}"
+        record = change_history.record(
+            undo_token=undo_token,
+            actor=caller,
+            agent_id=agent_id,
+            field=field,
+            old_value=old_value,
+            new_value=new_value,
+            summary=summary,
+            reason=reason,
+            ttl=_CHANGE_TTL_SECONDS,
+        )
+
+        # Emit the receipt event. Dashboard listens for this and appends
+        # the receipt card to the operator's chat so the user sees what
+        # happened with [View diff] [Undo] buttons. ``supersedes_count``
+        # tells the UI how many older revertible receipts on the same
+        # field this edit makes stale (the older receipts can still be
+        # undone — but doing so would erase this edit, so the dashboard
+        # surfaces a warning).
+        if event_bus is not None:
+            try:
+                event_bus.emit(
+                    "operator_action_receipt",
+                    agent="operator",
+                    data={
+                        "actor": caller,
+                        "agent_id": agent_id,
+                        "field": field,
+                        "summary": summary,
+                        "old_value": old_value,
+                        "new_value": new_value,
+                        "undo_token": undo_token,
+                        "expires_at": record["expires_at"],
+                        "reason": reason,
+                        "origin_kind": origin_kind,
+                        "supersedes_count": len(prior_unconsumed),
+                    },
+                )
+            except Exception as e:
+                logger.debug("operator_action_receipt emit failed: %s", e)
+
+        # For each older unconsumed receipt on this field, emit a
+        # ``operator_action_receipt_superseded`` event so the dashboard
+        # can transition the older card into a "superseded by newer
+        # edits" state. The older receipt is still revertible — the
+        # event is purely a UX hint that an undo here would also
+        # discard the newer edits.
+        if event_bus is not None and prior_unconsumed:
+            for prior in prior_unconsumed:
+                try:
+                    event_bus.emit(
+                        "operator_action_receipt_superseded",
+                        agent="operator",
+                        data={
+                            "undo_token": prior["undo_token"],
+                            "agent_id": agent_id,
+                            "field": field,
+                            "superseded_by_token": undo_token,
+                            "superseded_by_count": 1,
+                        },
+                    )
+                except Exception as e:
+                    logger.debug(
+                        "operator_action_receipt_superseded emit failed: %s", e,
+                    )
+
+        return {
+            "success": True,
+            "agent_id": agent_id,
+            "field": field,
+            "undo_token": undo_token,
+            "expires_at": datetime.fromtimestamp(
+                record["expires_at"], tz=timezone.utc,
+            ).isoformat(),
+            "summary": summary,
+            "supersedes_count": len(prior_unconsumed),
+        }
+
+    @app.post("/mesh/changes/undo/{undo_token}")
+    async def undo_change(undo_token: str, request: Request) -> dict:
+        """Reverse a recent soft edit. 5-minute TTL.
+
+        Looks up the token, atomically claims it (single-shot, no
+        double-undo), and reapplies the OLD value via
+        ``_apply_pending_change``. Caller must be the operator or an
+        internal caller — same bar as the soft-edit endpoint.
+        """
+        _require_any_auth(request)
+        caller = _extract_verified_agent_id(request)
+        if caller != "operator" and not _is_internal_caller(request):
+            raise HTTPException(403, "Only the operator can undo changes")
+
+        record = change_history.consume_for_undo(undo_token)
+        if record is None:
+            # Distinguish "never existed" from "expired/consumed" via
+            # peek so the dashboard can render the right copy. Both
+            # collapse to 404 from the HTTP boundary.
+            raise HTTPException(
+                404, "Undo token unknown, expired, or already used",
+            )
+
+        # Reapply the old value. Note swap: new=old (the value the user
+        # had before the edit), old=new (the value being reverted).
+        try:
+            await _apply_pending_change(
+                undo_token,
+                {
+                    "agent_id": record["agent_id"],
+                    "field": record["field"],
+                    "old_value": record["new_value"],
+                    "new_value": record["old_value"],
+                },
+            )
+        except HTTPException:
+            # Agent might have been deleted between record + undo.
+            # Surface a clean 4xx; the row has already been marked
+            # consumed so it can't be retried.
+            raise
+        except Exception as e:
+            raise HTTPException(500, f"Undo apply failed: {e}")
+
+        # Emit a "receipt undone" event so the dashboard can transition
+        # the original receipt card into a "Reverted" state.
+        if event_bus is not None:
+            try:
+                event_bus.emit(
+                    "operator_action_receipt_undone",
+                    agent="operator",
+                    data={
+                        "actor": caller,
+                        "agent_id": record["agent_id"],
+                        "field": record["field"],
+                        "summary": (
+                            f"Reverted {record['agent_id']}'s "
+                            f"{_humanize_field(record['field'])}"
+                        ),
+                        "undo_token": undo_token,
+                        "restored_value": record["old_value"],
+                    },
+                )
+            except Exception as e:
+                logger.debug("operator_action_receipt_undone emit failed: %s", e)
+
+        return {
+            "success": True,
+            "agent_id": record["agent_id"],
+            "field": record["field"],
+            "restored_value": record["old_value"],
+        }
 
     def _confirm_origin_check(request: Request, caller: str = "") -> None:
         """Task 2d: confirm-side gate — refuse non-human origins.

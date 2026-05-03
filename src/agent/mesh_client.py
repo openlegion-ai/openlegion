@@ -743,6 +743,40 @@ class MeshClient:
         response.raise_for_status()
         return response.json()
 
+    async def edit_soft(self, agent_id: str, field: str, value, reason: str) -> dict:
+        """Apply a soft-edit immediately. Returns ``undo_token``+``expires_at``.
+
+        Backed by ``POST /mesh/agents/{id}/edit-soft``. The endpoint
+        rejects hard fields (model/budget/permissions/thinking) with 400,
+        in which case the operator-tool layer should fall through to the
+        propose+confirm path. Soft edits are revertible for 5 minutes
+        via ``undo_change``.
+        """
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/agents/{agent_id}/edit-soft",
+            json={"field": field, "value": value, "reason": reason},
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def undo_change(self, undo_token: str) -> dict:
+        """Reverse a recent soft edit by undo_token.
+
+        404 if the token is unknown, expired (5min TTL), or already used.
+        On success returns the restored value so the operator can echo
+        what was reverted to the user.
+        """
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/changes/undo/{undo_token}",
+            json={},
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
     async def get_agent_config(self, agent_id: str) -> dict:
         """Get the current config for an agent."""
         response = await self._get_with_retry(
@@ -810,6 +844,25 @@ class MeshClient:
         response = await client.put(
             f"{self.mesh_url}/mesh/projects/{project_name}/context",
             json={"context": context},
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def set_project_goal(
+        self,
+        project_name: str,
+        north_star: str | None,
+        success_criteria: list[str] | None = None,
+    ) -> dict:
+        """Set a project's north star + success criteria via mesh proxy."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/projects/{project_name}/goal",
+            json={
+                "north_star": north_star,
+                "success_criteria": success_criteria,
+            },
             headers=self._trace_headers(),
         )
         response.raise_for_status()

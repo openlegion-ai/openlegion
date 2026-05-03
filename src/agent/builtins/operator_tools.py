@@ -34,26 +34,98 @@ _VALID_FIELDS = frozenset({
     "interface", "thinking", "budget", "permissions",
 })
 
+# PR 1 — soft edits apply immediately + emit a receipt with 5min Undo;
+# hard edits keep the propose+confirm dance (model swap, budget change,
+# and permissions are too consequential to undo via a button).
+_SOFT_EDIT_FIELDS = frozenset({
+    "instructions", "soul", "heartbeat", "interface", "role",
+})
+_HARD_EDIT_FIELDS = frozenset({"model", "budget", "permissions", "thinking"})
+
+# Audited reasons the operator can declare. ``user_asked`` is the common
+# path (the user said "do X"); ``operator_proactive`` is the "I noticed"
+# case which still skips the gate for soft edits but logs differently.
+_VALID_EDIT_REASONS = frozenset({"user_asked", "operator_proactive"})
+
 _OPERATOR_AGENT_ID = "operator"
+
+
+def _validate_edit(agent_id: str, field: str, value) -> dict | None:
+    """Shared validation for edit_agent / propose_edit. Returns error dict or None.
+
+    Centralises the common gates (self-modification block, valid field,
+    permission ceiling, budget bounds, thinking enum) so both the
+    propose-flow and the new edit_agent tool produce identical error
+    messages for the same misuse. Returns ``None`` when the call is
+    safe to forward to the mesh.
+    """
+    if agent_id.lower() == _OPERATOR_AGENT_ID:
+        return {
+            "error": (
+                "Cannot modify the operator agent. "
+                "Use the dashboard to change operator settings."
+            ),
+        }
+    if field not in _VALID_FIELDS:
+        return {
+            "error": (
+                f"Invalid field '{field}'. "
+                f"Must be one of: {sorted(_VALID_FIELDS)}"
+            ),
+        }
+    if field == "permissions" and isinstance(value, dict):
+        for key, max_val in _OPERATOR_PERMISSION_CEILING.items():
+            if key not in value:
+                continue
+            if isinstance(max_val, bool):
+                if value[key] and not max_val:
+                    return {
+                        "error": (
+                            f"Permission ceiling exceeded: '{key}' cannot be set "
+                            "to True by the operator. Use the dashboard for "
+                            "advanced permissions."
+                        ),
+                    }
+            elif isinstance(max_val, list):
+                requested = set(value.get(key, []))
+                allowed = set(max_val)
+                if "*" not in allowed and not requested.issubset(allowed):
+                    excess = requested - allowed
+                    return {
+                        "error": (
+                            f"Permission ceiling exceeded: '{key}' patterns "
+                            f"{excess} exceed allowed {allowed}. Use the "
+                            "dashboard for advanced permissions."
+                        ),
+                    }
+    if field == "budget" and isinstance(value, dict):
+        daily = value.get("daily_usd", 0)
+        monthly = value.get("monthly_usd", 0)
+        if not isinstance(daily, (int, float)) or not (0.01 <= daily <= 1000):
+            return {"error": f"daily_usd must be 0.01-1000, got {daily}"}
+        if not isinstance(monthly, (int, float)) or not (0.10 <= monthly <= 30000):
+            return {"error": f"monthly_usd must be 0.10-30000, got {monthly}"}
+    if field == "thinking" and value not in ("off", "low", "medium", "high"):
+        return {
+            "error": (
+                f"thinking must be 'off', 'low', 'medium', or 'high', "
+                f"got '{value}'"
+            ),
+        }
+    return None
 
 
 @skill(
     name="propose_edit",
     description=(
-        "Propose a change to an agent's configuration. Returns a preview diff "
-        "and change_id for confirmation. Always show the preview to the user "
-        "and wait for their approval before calling confirm_edit.\n\n"
-        "Fields: instructions, soul, model, role, heartbeat, interface, thinking, budget, permissions.\n"
-        "Value format: string for text fields, object for budget/permissions.\n"
-        "- budget: {\"daily_usd\": float, \"monthly_usd\": float}\n"
-        "- permissions: {\"can_use_browser\": bool, ...}\n"
-        "- thinking: \"off\", \"low\", \"medium\", \"high\"\n"
-        "- model: e.g. \"anthropic/claude-sonnet-4-20250514\""
+        "Propose a change to an agent's config. Returns a preview diff and "
+        "change_id; show the preview and get user approval before calling "
+        "confirm_edit. See INSTRUCTIONS.md for field formats."
     ),
     parameters={
         "agent_id": {
             "type": "string",
-            "description": "Target agent ID (use list_agents to find IDs)",
+            "description": "Target agent ID",
         },
         "field": {
             "type": "string",
@@ -204,6 +276,193 @@ async def confirm_edit(change_id: str, *, mesh_client=None, _messages=None, **_k
         return {"error": f"Failed to confirm edit: {e}"}
 
 
+@skill(
+    name="edit_agent",
+    description=(
+        "Change an agent's configuration. Branches internally on field severity:\n"
+        "- Soft fields (instructions, soul, heartbeat, interface, role) "
+        "apply IMMEDIATELY. The user sees a receipt card with [View diff] "
+        "[Undo] (5-minute undo window). No confirmation step needed — "
+        "act decisively on what the user asked for.\n"
+        "- Hard fields (model, budget, permissions, thinking) return a "
+        "preview + change_id. Show the preview to the user; on explicit "
+        "confirmation call confirm_edit(change_id).\n\n"
+        "Always pass `reason` so the audit trail captures intent.\n\n"
+        "Fields & value formats:\n"
+        "- instructions/soul/heartbeat/interface/role: string\n"
+        "- budget: {\"daily_usd\": float, \"monthly_usd\": float}\n"
+        "- permissions: {\"can_use_browser\": bool, ...}\n"
+        "- thinking: \"off\" | \"low\" | \"medium\" | \"high\"\n"
+        "- model: e.g. \"anthropic/claude-sonnet-4-20250514\""
+    ),
+    parameters={
+        "agent_id": {
+            "type": "string",
+            "description": "Target agent ID (use list_agents to find IDs)",
+        },
+        "field": {
+            "type": "string",
+            "description": "Config field to change",
+            "enum": [
+                "instructions", "soul", "model", "role", "heartbeat",
+                "interface", "thinking", "budget", "permissions",
+            ],
+        },
+        "value": {
+            "type": ["string", "object"],
+            "description": "New value for the field",
+        },
+        "reason": {
+            "type": "string",
+            "description": (
+                "Why you're making this change. 'user_asked' when the user "
+                "directly requested it; 'operator_proactive' when you "
+                "noticed an opportunity yourself."
+            ),
+            "enum": ["user_asked", "operator_proactive"],
+            "default": "user_asked",
+        },
+    },
+)
+async def edit_agent(
+    agent_id: str,
+    field: str,
+    value,
+    reason: str = "user_asked",
+    *,
+    mesh_client=None,
+    _messages=None,
+    **_kw,
+) -> dict:
+    """Change agent config — soft fields direct-apply, hard fields propose.
+
+    For soft fields: skips the provenance gate and writes immediately;
+    the receipt card with [Undo] is the safety net (user can always
+    revert within 5 minutes). For hard fields: behaves like the legacy
+    propose_edit — the operator must show preview to the user and wait
+    for explicit confirm before calling confirm_edit(change_id).
+    """
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    if reason not in _VALID_EDIT_REASONS:
+        return {
+            "error": (
+                f"reason must be one of {sorted(_VALID_EDIT_REASONS)}, "
+                f"got {reason!r}"
+            ),
+        }
+
+    err = _validate_edit(agent_id, field, value)
+    if err is not None:
+        return err
+
+    if field in _SOFT_EDIT_FIELDS:
+        # Soft path: direct write + receipt + undo. Provenance is NOT
+        # required because the receipt card with [Undo] gives the user
+        # a 5-minute reversal window. ``operator_proactive`` is logged
+        # via ``reason`` for audit but doesn't change the gate.
+        if reason == "operator_proactive":
+            logger.info(
+                "operator_proactive soft-edit: agent=%s field=%s",
+                agent_id, field,
+            )
+        try:
+            result = await mesh_client.edit_soft(agent_id, field, value, reason)
+        except Exception as e:
+            return {"error": f"Failed to apply edit: {e}"}
+        return {
+            "success": True,
+            "applied": True,
+            "agent_id": agent_id,
+            "field": field,
+            "undo_token": result.get("undo_token"),
+            "expires_at": result.get("expires_at"),
+            "summary": result.get("summary"),
+            "message": (
+                "Done. The user sees a receipt card and can Undo within 5 minutes."
+            ),
+        }
+
+    # Hard path: provenance gate + propose+confirm. Mirrors the legacy
+    # propose_edit behaviour so existing dashboard surfacing keeps
+    # working until PR 2 swaps the amber bubble for an inline card.
+    from src.agent.loop import _last_message_is_user_origin
+
+    if _messages is None or not _last_message_is_user_origin(_messages):
+        return {
+            "error": "provenance_check_failed",
+            "detail": (
+                f"Hard field {field!r} requires explicit user request. "
+                "Ask the user, then retry edit_agent after they confirm."
+            ),
+        }
+
+    try:
+        result = await mesh_client.propose_config_change(agent_id, field, value)
+    except Exception as e:
+        return {"error": f"Failed to propose edit: {e}"}
+    # Annotate so the operator's prompt machinery knows it must show the
+    # preview and wait for confirmation before calling confirm_edit.
+    result.setdefault("requires_confirmation", True)
+    result.setdefault(
+        "next_step",
+        "Show the preview_diff to the user. On explicit confirmation, "
+        "call confirm_edit(change_id).",
+    )
+    return result
+
+
+@skill(
+    name="undo_change",
+    description=(
+        "Reverse a recent soft edit by undo_token. Use this if you realize "
+        "mid-conversation that an edit you applied was wrong, OR if the user "
+        "asks you to undo a change. 5-minute window from when the edit was "
+        "made; 404 if expired or already undone."
+    ),
+    parameters={
+        "undo_token": {
+            "type": "string",
+            "description": "The undo_token from a prior edit_agent call",
+        },
+    },
+)
+async def undo_change(
+    undo_token: str,
+    *,
+    mesh_client=None,
+    **_kw,
+) -> dict:
+    """Reverse a recent soft edit. Single-shot; double-undo returns 404."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    if not undo_token or not isinstance(undo_token, str):
+        return {"error": "undo_token is required"}
+    try:
+        result = await mesh_client.undo_change(undo_token)
+    except Exception as e:
+        msg = str(e)
+        if "404" in msg or "not found" in msg.lower() or "expired" in msg.lower():
+            return {
+                "error": "undo_unavailable",
+                "detail": (
+                    "Undo token unknown, expired (5min window passed), or "
+                    "already used."
+                ),
+            }
+        return {"error": f"Failed to undo change: {e}"}
+    return {
+        "success": True,
+        "agent_id": result.get("agent_id"),
+        "field": result.get("field"),
+        "restored_value": result.get("restored_value"),
+    }
+
+
 # ── Observations ─────────────────────────────────────────────
 
 
@@ -300,60 +559,14 @@ async def save_observations(
     return {"saved": True, "timestamp": timestamp, "chars": len(content)}
 
 
-# ── Agent History ────────────────────────────────────────────
-
-
-@skill(
-    name="read_agent_history",
-    description=(
-        "Read an agent's activity history for a time period. "
-        "Shows tasks completed, failures, and key events."
-    ),
-    parameters={
-        "agent_id": {
-            "type": "string",
-            "description": "Agent ID to check",
-        },
-        "period": {
-            "type": "string",
-            "description": "Time period",
-            "enum": ["today", "yesterday", "week"],
-            "default": "today",
-        },
-    },
-)
-async def read_agent_history(
-    agent_id: str,
-    period: str = "today",
-    *,
-    mesh_client=None,
-    **_kw,
-) -> dict:
-    """Read an agent's activity history via the mesh."""
-    if not _is_operator():
-        return {"error": "This tool is only available to the operator agent."}
-    if mesh_client is None:
-        return {"error": "No mesh_client available"}
-    try:
-        response = await mesh_client._get_with_retry(
-            f"{mesh_client.mesh_url}/mesh/agents/{agent_id}/history",
-            params={"period": period},
-        )
-        response.raise_for_status()
-        return response.json()
-    except Exception as e:
-        return {"error": f"Failed to read history: {e}"}
-
-
 # ── Create Agent ─────────────────────────────────────────────
 
 
 @skill(
     name="create_agent",
     description=(
-        "Create a new custom agent with specified role, model, and instructions. "
-        "Essential for Basic plan users who need a custom agent that doesn't "
-        "match any template. Requires user confirmation."
+        "Create a new custom agent with role/model/instructions. "
+        "Requires user confirmation."
     ),
     parameters={
         "name": {
@@ -421,47 +634,65 @@ async def create_agent(
 
 
 @skill(
-    name="list_projects",
-    description="List all projects with their members and descriptions.",
-    parameters={},
+    name="inspect_projects",
+    description=(
+        "Read project info. detail='names' lists name+description; "
+        "detail='status' adds task-count rollups (requires v2). "
+        "Setting project_name returns full detail for that project."
+    ),
+    parameters={
+        "detail": {
+            "type": "string",
+            "description": "names | status | full",
+            "enum": ["names", "status", "full"],
+            "default": "names",
+        },
+        "project_name": {
+            "type": "string",
+            "description": "Optional — return full detail for this project only",
+            "default": "",
+        },
+    },
 )
-async def list_projects(*, mesh_client=None, **_kw) -> dict:
-    """List all projects (read-only, no provenance gate)."""
+async def inspect_projects(
+    detail: str = "names",
+    project_name: str = "",
+    *,
+    mesh_client=None,
+    **_kw,
+) -> dict:
+    """Consolidated project read tool (replaces list_projects /
+    get_project / list_project_status).
+    """
     if not _is_operator():
         return {"error": "This tool is only available to the operator agent."}
     if mesh_client is None:
         return {"error": "No mesh_client available"}
+
+    # Single-project lookup always returns full detail.
+    if project_name:
+        try:
+            result = await mesh_client.list_projects()
+        except Exception as e:
+            return {"error": f"Failed to inspect project: {e}"}
+        for p in result.get("projects", []):
+            if p.get("name") == project_name:
+                return p
+        return {"error": f"Project '{project_name}' not found"}
+
+    if detail == "status":
+        if not _orchestration_v2_on():
+            return {"error": _TASKS_V2_DISABLED}
+        try:
+            return await mesh_client.all_projects_status()
+        except Exception as e:
+            return {"error": f"Failed to read project status: {e}"}
+
+    # detail == "names" (also the default for "full" without project_name)
     try:
         return await mesh_client.list_projects()
     except Exception as e:
         return {"error": f"Failed to list projects: {e}"}
-
-
-@skill(
-    name="get_project",
-    description="Get details for a specific project including members and description.",
-    parameters={
-        "project_name": {
-            "type": "string",
-            "description": "Project name",
-        },
-    },
-)
-async def get_project(project_name: str, *, mesh_client=None, **_kw) -> dict:
-    """Get a single project's details (read-only, no provenance gate)."""
-    if not _is_operator():
-        return {"error": "This tool is only available to the operator agent."}
-    if mesh_client is None:
-        return {"error": "No mesh_client available"}
-    try:
-        result = await mesh_client.list_projects()
-        projects = result.get("projects", [])
-        for p in projects:
-            if p.get("name") == project_name:
-                return p
-        return {"error": f"Project '{project_name}' not found"}
-    except Exception as e:
-        return {"error": f"Failed to get project: {e}"}
 
 
 @skill(
@@ -657,6 +888,91 @@ async def update_project_context(
         return {"error": f"Failed to update project context: {e}"}
 
 
+@skill(
+    name="set_project_goal",
+    description=(
+        "Set or update a project's north star (vision statement) and "
+        "success criteria (measurable outcomes). The north star answers "
+        "'what are we moving toward'; success criteria are the concrete "
+        "checks that tell us we got there. No confirmation required — "
+        "this is meta-config the user explicitly asked for.\n\n"
+        "Call this proactively whenever the user describes a goal for a "
+        "project so it becomes a first-class artifact visible in the "
+        "workplace tab."
+    ),
+    parameters={
+        "project_name": {
+            "type": "string",
+            "description": "Project to set the goal on (use list_projects to find names)",
+        },
+        "north_star": {
+            "type": "string",
+            "description": (
+                "Free-text vision statement, ≤2000 characters. "
+                "e.g. 'Ship a $10k MRR SaaS landing page in 2 weeks'."
+            ),
+        },
+        "success_criteria": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Up to 10 measurable outcomes, each ≤200 characters. "
+                "Optional — pass an empty list or omit to clear."
+            ),
+        },
+    },
+)
+async def set_project_goal(
+    project_name: str,
+    north_star: str,
+    success_criteria: list[str] | None = None,
+    *,
+    mesh_client=None,
+    **_kw,
+) -> dict:
+    """Set the project's north_star + success_criteria. No gate."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+
+    if not isinstance(project_name, str) or not project_name.strip():
+        return {"error": "project_name is required"}
+    if not isinstance(north_star, str):
+        return {"error": "north_star must be a string"}
+    if len(north_star) > 2000:
+        return {"error": "north_star must be 2000 characters or fewer"}
+
+    cleaned_criteria: list[str] | None
+    if success_criteria is None:
+        cleaned_criteria = None
+    else:
+        if not isinstance(success_criteria, list):
+            return {"error": "success_criteria must be a list of strings"}
+        if len(success_criteria) > 10:
+            return {"error": "success_criteria may contain at most 10 items"}
+        cleaned_criteria = []
+        for item in success_criteria:
+            if not isinstance(item, str):
+                return {"error": "each success_criteria entry must be a string"}
+            if len(item) > 200:
+                return {
+                    "error": "each success_criteria entry must be 200 characters or fewer",
+                }
+            stripped = item.strip()
+            if stripped:
+                cleaned_criteria.append(stripped)
+        if not cleaned_criteria:
+            cleaned_criteria = None
+
+    try:
+        return await mesh_client.set_project_goal(
+            project_name, north_star.strip() or None, cleaned_criteria,
+        )
+    except Exception as e:
+        return {"error": f"Failed to set project goal: {e}"}
+
+
 # ── Task 7: Operator product tools ───────────────────────────
 
 
@@ -704,42 +1020,6 @@ def _parse_over_budget(error: Exception) -> dict | None:
 
 
 # ── Read tools ──────────────────────────────────────────────
-
-
-@skill(
-    name="list_project_status",
-    description=(
-        "List status rollups for projects. Per-project counts by status, "
-        "top blockers, and recent completions. If `project_id` is omitted, "
-        "returns one row per project the operator can see."
-    ),
-    parameters={
-        "project_id": {
-            "type": "string",
-            "description": "Optional project ID to scope to a single project",
-            "default": "",
-        },
-    },
-)
-async def list_project_status(
-    project_id: str = "",
-    *,
-    mesh_client=None,
-    **_kw,
-) -> dict:
-    """Fleet-wide or per-project status rollup."""
-    if not _is_operator():
-        return {"error": "This tool is only available to the operator agent."}
-    if mesh_client is None:
-        return {"error": "No mesh_client available"}
-    if not _orchestration_v2_on():
-        return {"error": _TASKS_V2_DISABLED}
-    try:
-        if project_id:
-            return await mesh_client.project_status(project_id)
-        return await mesh_client.all_projects_status()
-    except Exception as e:
-        return {"error": f"Failed to read project status: {e}"}
 
 
 @skill(
@@ -854,29 +1134,63 @@ async def summarize_project_progress(
 
 
 @skill(
-    name="get_agent_profile",
+    name="inspect_agents",
     description=(
-        "Read an agent's public profile: role, capabilities, health, "
-        "subscriptions, INTERFACE.md contract."
+        "Read agents. Without agent_id: roster summary. With agent_id: "
+        "depth='profile' returns role/capabilities/INTERFACE; "
+        "depth='history' adds recent activity log. depth defaults to summary."
     ),
     parameters={
         "agent_id": {
             "type": "string",
-            "description": "Agent ID",
+            "description": "Optional — target agent for profile/history",
+            "default": "",
+        },
+        "depth": {
+            "type": "string",
+            "description": "summary | profile | history",
+            "enum": ["summary", "profile", "history"],
+            "default": "summary",
         },
     },
 )
-async def get_agent_profile(
-    agent_id: str,
+async def inspect_agents(
+    agent_id: str = "",
+    depth: str = "summary",
     *,
     mesh_client=None,
     **_kw,
 ) -> dict:
-    """Read an agent's profile via the mesh."""
+    """Consolidated agent read tool (replaces operator's use of list_agents
+    / get_agent_profile / read_agent_history).
+    """
     if not _is_operator():
         return {"error": "This tool is only available to the operator agent."}
     if mesh_client is None:
         return {"error": "No mesh_client available"}
+
+    # No agent_id → roster (always summary regardless of depth).
+    if not agent_id:
+        try:
+            registry = await mesh_client.list_agents()
+        except Exception as e:
+            return {"error": f"Failed to list agents: {e}"}
+        agents = []
+        for name, info in registry.items():
+            entry: dict = {"name": name}
+            if isinstance(info, dict):
+                entry["role"] = info.get("role", "")
+                entry["capabilities"] = info.get("capabilities", [])
+            agents.append(entry)
+        return {"agents": agents, "count": len(agents)}
+
+    if depth == "history":
+        try:
+            return await mesh_client.get_agent_history(agent_id)
+        except Exception as e:
+            return {"error": f"Failed to read history for {agent_id}: {e}"}
+
+    # depth == "profile" or "summary" with an agent_id → profile call
     try:
         return await mesh_client.get_agent_profile(agent_id)
     except Exception as e:
@@ -887,171 +1201,146 @@ async def get_agent_profile(
 
 
 @skill(
-    name="reroute_task",
+    name="manage_task",
     description=(
-        "Reassign a task to a different agent. Cost-aware: refuses if the "
-        "new assignee is over budget (returns a structured error naming the "
-        "offending agent)."
+        "Cancel, reroute, or retry a task. action='cancel' stops the task; "
+        "action='reroute' moves it to new_assignee (required); "
+        "action='retry' clones a failed task (optionally overriding "
+        "assignee/title/description via with_changes). Reroute and retry "
+        "refuse if the target agent is over budget."
     ),
     parameters={
         "task_id": {
             "type": "string",
             "description": "Task ID",
+        },
+        "action": {
+            "type": "string",
+            "description": "cancel | reroute | retry",
+            "enum": ["cancel", "reroute", "retry"],
         },
         "new_assignee": {
             "type": "string",
-            "description": "New assignee agent ID",
+            "description": "Required for reroute; optional override for retry",
+            "default": "",
         },
         "reason": {
             "type": "string",
-            "description": "Optional reason for the reroute",
+            "description": "Optional reason recorded on the audit trail",
             "default": "",
-        },
-    },
-)
-async def reroute_task(
-    task_id: str,
-    new_assignee: str,
-    reason: str = "",
-    *,
-    mesh_client=None,
-    **_kw,
-) -> dict:
-    """Reassign a task. Cost-gated."""
-    if not _is_operator():
-        return {"error": "This tool is only available to the operator agent."}
-    if mesh_client is None:
-        return {"error": "No mesh_client available"}
-    if not _orchestration_v2_on():
-        return {"error": _TASKS_V2_DISABLED}
-    try:
-        return await mesh_client.reroute_task(task_id, new_assignee, reason=reason)
-    except Exception as e:
-        budget = _parse_over_budget(e)
-        if budget is not None:
-            return {
-                "error": "over_budget",
-                "detail": budget.get("detail") or (
-                    f"Agent {budget.get('budget', {}).get('agent', new_assignee)!r} "
-                    "is over budget."
-                ),
-                "budget": budget.get("budget"),
-            }
-        return {"error": f"Failed to reroute task: {e}"}
-
-
-@skill(
-    name="cancel_task",
-    description="Cancel a task with an optional reason recorded on the audit trail.",
-    parameters={
-        "task_id": {
-            "type": "string",
-            "description": "Task ID",
-        },
-        "reason": {
-            "type": "string",
-            "description": "Reason for cancellation",
-            "default": "",
-        },
-    },
-)
-async def cancel_task(
-    task_id: str,
-    reason: str = "",
-    *,
-    mesh_client=None,
-    **_kw,
-) -> dict:
-    """Cancel a task."""
-    if not _is_operator():
-        return {"error": "This tool is only available to the operator agent."}
-    if mesh_client is None:
-        return {"error": "No mesh_client available"}
-    if not _orchestration_v2_on():
-        return {"error": _TASKS_V2_DISABLED}
-    try:
-        return await mesh_client.cancel_task(task_id, reason=reason)
-    except Exception as e:
-        return {"error": f"Failed to cancel task: {e}"}
-
-
-@skill(
-    name="retry_failed_task",
-    description=(
-        "Retry a failed task by cloning it as a new pending task. "
-        "Optional `with_changes` patches title / description / assignee. "
-        "Cost-aware: refuses if the (possibly overridden) target agent is "
-        "over budget."
-    ),
-    parameters={
-        "task_id": {
-            "type": "string",
-            "description": "Task ID of the failed task",
         },
         "with_changes": {
             "type": "object",
             "description": (
-                "Optional patch with keys 'title', 'description', 'assignee' "
-                "to override on the retry"
+                "retry only: optional patch with 'title', 'description', "
+                "'assignee' overrides"
             ),
             "default": {},
         },
     },
 )
-async def retry_failed_task(
+async def manage_task(
     task_id: str,
+    action: str,
+    new_assignee: str = "",
+    reason: str = "",
     with_changes: dict | None = None,
     *,
     mesh_client=None,
     **_kw,
 ) -> dict:
-    """Retry a failed task. Cost-gated."""
+    """Consolidated task action tool (replaces cancel_task / reroute_task /
+    retry_failed_task).
+    """
     if not _is_operator():
         return {"error": "This tool is only available to the operator agent."}
     if mesh_client is None:
         return {"error": "No mesh_client available"}
     if not _orchestration_v2_on():
         return {"error": _TASKS_V2_DISABLED}
-    patch = with_changes or {}
-    try:
-        return await mesh_client.retry_task(
-            task_id,
-            title=patch.get("title"),
-            description=patch.get("description"),
-            assignee=patch.get("assignee"),
-        )
-    except Exception as e:
-        budget = _parse_over_budget(e)
-        if budget is not None:
-            return {
-                "error": "over_budget",
-                "detail": budget.get("detail") or "Target agent is over budget.",
-                "budget": budget.get("budget"),
-            }
-        return {"error": f"Failed to retry task: {e}"}
+
+    if action == "cancel":
+        try:
+            return await mesh_client.cancel_task(task_id, reason=reason)
+        except Exception as e:
+            return {"error": f"Failed to cancel task: {e}"}
+
+    if action == "reroute":
+        if not new_assignee:
+            return {"error": "reroute requires new_assignee"}
+        try:
+            return await mesh_client.reroute_task(
+                task_id, new_assignee, reason=reason,
+            )
+        except Exception as e:
+            budget = _parse_over_budget(e)
+            if budget is not None:
+                return {
+                    "error": "over_budget",
+                    "detail": budget.get("detail") or (
+                        f"Agent "
+                        f"{budget.get('budget', {}).get('agent', new_assignee)!r} "
+                        "is over budget."
+                    ),
+                    "budget": budget.get("budget"),
+                }
+            return {"error": f"Failed to reroute task: {e}"}
+
+    if action == "retry":
+        patch = dict(with_changes or {})
+        # `new_assignee` is a convenience shortcut for retry overrides.
+        if new_assignee and "assignee" not in patch:
+            patch["assignee"] = new_assignee
+        try:
+            return await mesh_client.retry_task(
+                task_id,
+                title=patch.get("title"),
+                description=patch.get("description"),
+                assignee=patch.get("assignee"),
+            )
+        except Exception as e:
+            budget = _parse_over_budget(e)
+            if budget is not None:
+                return {
+                    "error": "over_budget",
+                    "detail": budget.get("detail") or "Target agent is over budget.",
+                    "budget": budget.get("budget"),
+                }
+            return {"error": f"Failed to retry task: {e}"}
+
+    return {"error": f"Unknown action {action!r}; use cancel|reroute|retry"}
 
 
 @skill(
-    name="archive_project",
+    name="manage_project",
     description=(
-        "Archive a project. Stops scheduling and hides it from default "
-        "list views while retaining all data. Reversible."
+        "Archive or delete a project. action='archive' is reversible and "
+        "stops scheduling. action='delete' returns a confirmation nonce; "
+        "the project must already be archived."
     ),
     parameters={
-        "project_id": {
+        "project_name": {
             "type": "string",
-            "description": "Project ID",
+            "description": "Project name",
+        },
+        "action": {
+            "type": "string",
+            "description": "archive | delete",
+            "enum": ["archive", "delete"],
         },
     },
 )
-async def archive_project(
-    project_id: str,
+async def manage_project(
+    project_name: str,
+    action: str,
     *,
     mesh_client=None,
     _messages=None,
     **_kw,
 ) -> dict:
-    """Archive a project. Provenance-gated."""
+    """Consolidated project lifecycle tool (archive | delete).
+    Provenance-gated.
+    """
     if not _is_operator():
         return {"error": "This tool is only available to the operator agent."}
     if mesh_client is None:
@@ -1060,152 +1349,99 @@ async def archive_project(
     if _messages is None or not _last_message_is_user_origin(_messages):
         return {
             "error": "provenance_check_failed",
-            "detail": "User confirmation required to archive a project.",
+            "detail": f"User confirmation required to {action} a project.",
         }
-    try:
-        return await mesh_client.archive_project(project_id)
-    except Exception as e:
-        return {"error": f"Failed to archive project: {e}"}
+
+    if action == "archive":
+        try:
+            return await mesh_client.archive_project(project_name)
+        except Exception as e:
+            return {"error": f"Failed to archive project: {e}"}
+
+    if action == "delete":
+        try:
+            result = await mesh_client.propose_delete_project(project_name)
+            result.setdefault("requires_confirmation", True)
+            return result
+        except Exception as e:
+            msg = str(e)
+            if "must be archived" in msg.lower() or "400" in msg:
+                return {
+                    "error": "archive_required",
+                    "detail": (
+                        f"Project {project_name!r} must be archived first. "
+                        "Call manage_project(action='archive') first."
+                    ),
+                }
+            return {"error": f"Failed to propose delete: {e}"}
+
+    return {"error": f"Unknown action {action!r}; use archive|delete"}
 
 
 @skill(
-    name="archive_agent",
+    name="manage_agent",
     description=(
-        "Archive an agent. Stops scheduling, retains workspace and history. "
-        "Reversible. Required pre-condition for delete_agent."
+        "Archive or delete an agent. action='archive' is reversible and "
+        "stops scheduling. action='delete' returns a confirmation nonce; "
+        "the agent must already be archived."
     ),
     parameters={
         "agent_id": {
             "type": "string",
             "description": "Agent ID",
         },
+        "action": {
+            "type": "string",
+            "description": "archive | delete",
+            "enum": ["archive", "delete"],
+        },
     },
 )
-async def archive_agent(
+async def manage_agent(
     agent_id: str,
+    action: str,
     *,
     mesh_client=None,
     _messages=None,
     **_kw,
 ) -> dict:
-    """Archive an agent. Provenance-gated."""
+    """Consolidated agent lifecycle tool (archive | delete).
+    Provenance-gated.
+    """
     if not _is_operator():
         return {"error": "This tool is only available to the operator agent."}
     if mesh_client is None:
         return {"error": "No mesh_client available"}
     if agent_id.lower() == _OPERATOR_AGENT_ID:
-        return {"error": "Cannot archive the operator agent."}
+        return {"error": f"Cannot {action} the operator agent."}
     from src.agent.loop import _last_message_is_user_origin
     if _messages is None or not _last_message_is_user_origin(_messages):
         return {
             "error": "provenance_check_failed",
-            "detail": "User confirmation required to archive an agent.",
+            "detail": f"User confirmation required to {action} an agent.",
         }
-    try:
-        return await mesh_client.archive_agent(agent_id)
-    except Exception as e:
-        return {"error": f"Failed to archive agent: {e}"}
 
+    if action == "archive":
+        try:
+            return await mesh_client.archive_agent(agent_id)
+        except Exception as e:
+            return {"error": f"Failed to archive agent: {e}"}
 
-@skill(
-    name="delete_project",
-    description=(
-        "Propose deletion of an archived project. Returns a confirmation "
-        "nonce; the user must confirm via the dashboard or CLI to actually "
-        "delete the project. Pre-condition: project must already be "
-        "archived (call archive_project first)."
-    ),
-    parameters={
-        "project_id": {
-            "type": "string",
-            "description": "Project ID (must be archived)",
-        },
-    },
-)
-async def delete_project(
-    project_id: str,
-    *,
-    mesh_client=None,
-    _messages=None,
-    **_kw,
-) -> dict:
-    """Propose project deletion. Two-step: this returns a nonce for human confirm."""
-    if not _is_operator():
-        return {"error": "This tool is only available to the operator agent."}
-    if mesh_client is None:
-        return {"error": "No mesh_client available"}
-    from src.agent.loop import _last_message_is_user_origin
-    if _messages is None or not _last_message_is_user_origin(_messages):
-        return {
-            "error": "provenance_check_failed",
-            "detail": "User confirmation required to delete a project.",
-        }
-    try:
-        result = await mesh_client.propose_delete_project(project_id)
-        # Surface the propose-then-confirm contract to the operator
-        # prompt so it knows to wait for human confirmation.
-        result.setdefault("requires_confirmation", True)
-        return result
-    except Exception as e:
-        msg = str(e)
-        if "must be archived" in msg.lower() or "400" in msg:
-            return {
-                "error": "archive_required",
-                "detail": (
-                    f"Project {project_id!r} must be archived before delete. "
-                    "Call archive_project first."
-                ),
-            }
-        return {"error": f"Failed to propose delete: {e}"}
+    if action == "delete":
+        try:
+            result = await mesh_client.propose_delete_agent(agent_id)
+            result.setdefault("requires_confirmation", True)
+            return result
+        except Exception as e:
+            msg = str(e)
+            if "must be archived" in msg.lower() or "400" in msg:
+                return {
+                    "error": "archive_required",
+                    "detail": (
+                        f"Agent {agent_id!r} must be archived first. "
+                        "Call manage_agent(action='archive') first."
+                    ),
+                }
+            return {"error": f"Failed to propose delete: {e}"}
 
-
-@skill(
-    name="delete_agent",
-    description=(
-        "Propose deletion of an archived agent. Returns a confirmation "
-        "nonce; the user must confirm via the dashboard or CLI to actually "
-        "delete the agent. Pre-condition: agent must already be archived "
-        "(call archive_agent first)."
-    ),
-    parameters={
-        "agent_id": {
-            "type": "string",
-            "description": "Agent ID (must be archived)",
-        },
-    },
-)
-async def delete_agent(
-    agent_id: str,
-    *,
-    mesh_client=None,
-    _messages=None,
-    **_kw,
-) -> dict:
-    """Propose agent deletion. Two-step: this returns a nonce for human confirm."""
-    if not _is_operator():
-        return {"error": "This tool is only available to the operator agent."}
-    if mesh_client is None:
-        return {"error": "No mesh_client available"}
-    if agent_id.lower() == _OPERATOR_AGENT_ID:
-        return {"error": "Cannot delete the operator agent."}
-    from src.agent.loop import _last_message_is_user_origin
-    if _messages is None or not _last_message_is_user_origin(_messages):
-        return {
-            "error": "provenance_check_failed",
-            "detail": "User confirmation required to delete an agent.",
-        }
-    try:
-        result = await mesh_client.propose_delete_agent(agent_id)
-        result.setdefault("requires_confirmation", True)
-        return result
-    except Exception as e:
-        msg = str(e)
-        if "must be archived" in msg.lower() or "400" in msg:
-            return {
-                "error": "archive_required",
-                "detail": (
-                    f"Agent {agent_id!r} must be archived before delete. "
-                    "Call archive_agent first."
-                ),
-            }
-        return {"error": f"Failed to propose delete: {e}"}
+    return {"error": f"Unknown action {action!r}; use archive|delete"}

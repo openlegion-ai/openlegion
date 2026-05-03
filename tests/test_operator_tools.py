@@ -472,51 +472,68 @@ async def test_save_observations_history_cap(tmp_path):
     assert last_entry["fleet_summary"] == "check 54"
 
 
-# ── read_agent_history tests ────────────────────────────────
+# ── inspect_agents tests ────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_read_agent_history_no_mesh_client():
-    from src.agent.builtins.operator_tools import read_agent_history
+async def test_inspect_agents_no_mesh_client():
+    from src.agent.builtins.operator_tools import inspect_agents
 
-    result = await read_agent_history("writer")
+    result = await inspect_agents()
     assert "error" in result
     assert "mesh_client" in result["error"].lower()
 
 
 @pytest.mark.asyncio
-async def test_read_agent_history_success():
-    from src.agent.builtins.operator_tools import read_agent_history
-
-    mock_response = MagicMock()
-    mock_response.status_code = 200
-    mock_response.raise_for_status = MagicMock()
-    mock_response.json.return_value = {
-        "agent_id": "writer",
-        "entries": [{"time": "10:00", "event": "task_completed"}],
-    }
+async def test_inspect_agents_summary_returns_roster():
+    """No agent_id → roster summary built from list_agents()."""
+    from src.agent.builtins.operator_tools import inspect_agents
 
     mc = MagicMock()
-    mc.mesh_url = "http://localhost:8420"
-    mc._get_with_retry = AsyncMock(return_value=mock_response)
-
-    result = await read_agent_history("writer", period="today", mesh_client=mc)
-    assert result["agent_id"] == "writer"
-    mc._get_with_retry.assert_awaited_once()
-    call_args = mc._get_with_retry.call_args
-    assert "/mesh/agents/writer/history" in call_args[0][0]
-    assert call_args[1]["params"]["period"] == "today"
+    mc.list_agents = AsyncMock(return_value={
+        "writer": {"role": "writer", "capabilities": ["http_request"]},
+        "scout":  {"role": "researcher", "capabilities": ["web_search"]},
+    })
+    result = await inspect_agents(mesh_client=mc)
+    assert result["count"] == 2
+    names = {a["name"] for a in result["agents"]}
+    assert names == {"writer", "scout"}
 
 
 @pytest.mark.asyncio
-async def test_read_agent_history_error():
-    from src.agent.builtins.operator_tools import read_agent_history
+async def test_inspect_agents_profile_calls_get_agent_profile():
+    from src.agent.builtins.operator_tools import inspect_agents
 
     mc = MagicMock()
-    mc.mesh_url = "http://localhost:8420"
-    mc._get_with_retry = AsyncMock(side_effect=RuntimeError("connection refused"))
+    mc.get_agent_profile = AsyncMock(return_value={
+        "agent_id": "writer", "role": "writer",
+    })
+    result = await inspect_agents("writer", depth="profile", mesh_client=mc)
+    assert result["agent_id"] == "writer"
+    mc.get_agent_profile.assert_awaited_once_with("writer")
 
-    result = await read_agent_history("writer", mesh_client=mc)
+
+@pytest.mark.asyncio
+async def test_inspect_agents_history_calls_get_agent_history():
+    from src.agent.builtins.operator_tools import inspect_agents
+
+    mc = MagicMock()
+    mc.get_agent_history = AsyncMock(return_value={
+        "agent_id": "writer",
+        "entries": [{"time": "10:00", "event": "task_completed"}],
+    })
+    result = await inspect_agents("writer", depth="history", mesh_client=mc)
+    assert result["agent_id"] == "writer"
+    mc.get_agent_history.assert_awaited_once_with("writer")
+
+
+@pytest.mark.asyncio
+async def test_inspect_agents_error_surfaces():
+    from src.agent.builtins.operator_tools import inspect_agents
+
+    mc = MagicMock()
+    mc.get_agent_history = AsyncMock(side_effect=RuntimeError("connection refused"))
+    result = await inspect_agents("writer", depth="history", mesh_client=mc)
     assert "error" in result
     assert "connection refused" in result["error"]
 
@@ -598,36 +615,57 @@ async def test_create_agent_no_messages_fails_closed():
     assert result["error"] == "provenance_check_failed"
 
 
-# ── list_projects tests ─────────────────────────────────────
+# ── inspect_projects tests ──────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_list_projects_no_mesh_client():
-    from src.agent.builtins.operator_tools import list_projects
+async def test_inspect_projects_no_mesh_client():
+    from src.agent.builtins.operator_tools import inspect_projects
 
-    result = await list_projects()
+    result = await inspect_projects()
     assert "error" in result
 
 
 @pytest.mark.asyncio
-async def test_list_projects_success():
-    from src.agent.builtins.operator_tools import list_projects
+async def test_inspect_projects_names_lists_all():
+    from src.agent.builtins.operator_tools import inspect_projects
 
     mc = MagicMock()
     mc.list_projects = AsyncMock(
         return_value={"projects": [{"name": "proj1", "members": ["a1"]}]},
     )
-    result = await list_projects(mesh_client=mc)
+    result = await inspect_projects(detail="names", mesh_client=mc)
     assert len(result["projects"]) == 1
     assert result["projects"][0]["name"] == "proj1"
 
 
-# ── get_project tests ───────────────────────────────────────
+@pytest.mark.asyncio
+async def test_inspect_projects_status_calls_all_projects_status(monkeypatch):
+    """detail='status' calls the v2 endpoint."""
+    monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "1")
+    from src.agent.builtins.operator_tools import inspect_projects
+
+    mc = MagicMock()
+    mc.all_projects_status = AsyncMock(
+        return_value={"projects": [{"project": {"name": "p1"}, "counts": {"active": 2}}]},
+    )
+    result = await inspect_projects(detail="status", mesh_client=mc)
+    assert "projects" in result
+    mc.all_projects_status.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_get_project_found():
-    from src.agent.builtins.operator_tools import get_project
+async def test_inspect_projects_status_requires_v2_flag(monkeypatch):
+    monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "0")
+    from src.agent.builtins.operator_tools import inspect_projects
+
+    result = await inspect_projects(detail="status", mesh_client=MagicMock())
+    assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_inspect_projects_named_returns_full_detail():
+    from src.agent.builtins.operator_tools import inspect_projects
 
     mc = MagicMock()
     mc.list_projects = AsyncMock(
@@ -636,19 +674,19 @@ async def test_get_project_found():
             {"name": "proj2", "members": ["a2"]},
         ]},
     )
-    result = await get_project("proj2", mesh_client=mc)
+    result = await inspect_projects(project_name="proj2", mesh_client=mc)
     assert result["name"] == "proj2"
 
 
 @pytest.mark.asyncio
-async def test_get_project_not_found():
-    from src.agent.builtins.operator_tools import get_project
+async def test_inspect_projects_named_not_found():
+    from src.agent.builtins.operator_tools import inspect_projects
 
     mc = MagicMock()
     mc.list_projects = AsyncMock(
         return_value={"projects": [{"name": "proj1"}]},
     )
-    result = await get_project("nonexistent", mesh_client=mc)
+    result = await inspect_projects(project_name="nonexistent", mesh_client=mc)
     assert "error" in result
     assert "not found" in result["error"]
 
@@ -824,3 +862,202 @@ async def test_update_project_context_mesh_error():
     )
     assert "error" in result
     assert "not found" in result["error"]
+
+
+# ── PR 1 — edit_agent and undo_change ───────────────────────
+
+
+@pytest.mark.asyncio
+async def test_edit_agent_soft_field_calls_edit_soft_immediately():
+    """instructions is a soft field — must hit edit_soft and skip provenance."""
+    from src.agent.builtins.operator_tools import edit_agent
+
+    mc = MagicMock()
+    mc.edit_soft = AsyncMock(return_value={
+        "success": True,
+        "undo_token": "tok-abc",
+        "expires_at": "2026-05-02T00:05:00+00:00",
+        "summary": "Updated writer's instructions",
+    })
+    # No _messages → would normally fail provenance, but soft-edits skip it.
+    result = await edit_agent(
+        "writer", "instructions", "be punchier",
+        reason="user_asked",
+        mesh_client=mc,
+    )
+    assert result["success"] is True
+    assert result["applied"] is True
+    assert result["undo_token"] == "tok-abc"
+    assert "Undo" in result["message"]
+    mc.edit_soft.assert_awaited_once_with(
+        "writer", "instructions", "be punchier", "user_asked",
+    )
+
+
+@pytest.mark.asyncio
+async def test_edit_agent_soft_field_proactive_reason_logs_but_applies():
+    from src.agent.builtins.operator_tools import edit_agent
+
+    mc = MagicMock()
+    mc.edit_soft = AsyncMock(return_value={
+        "success": True, "undo_token": "tok-x", "expires_at": "now",
+        "summary": "Updated",
+    })
+    result = await edit_agent(
+        "writer", "soul", "calmer",
+        reason="operator_proactive",
+        mesh_client=mc,
+    )
+    assert result["success"] is True
+    mc.edit_soft.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_edit_agent_hard_field_proposes_with_provenance():
+    """model is a hard field — must call propose_config_change AFTER provenance."""
+    from src.agent.builtins.operator_tools import edit_agent
+
+    mc = MagicMock()
+    mc.propose_config_change = AsyncMock(return_value={
+        "change_id": "cid-1", "preview_diff": "...",
+    })
+    messages = [{"role": "user", "content": "switch to opus", "_origin": "user"}]
+    result = await edit_agent(
+        "writer", "model", "anthropic/claude-opus-4",
+        reason="user_asked",
+        mesh_client=mc, _messages=messages,
+    )
+    assert result["change_id"] == "cid-1"
+    assert result["requires_confirmation"] is True
+    assert "next_step" in result
+    mc.propose_config_change.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_edit_agent_hard_field_no_provenance_fails():
+    """Hard fields keep the provenance gate — no user message → error."""
+    from src.agent.builtins.operator_tools import edit_agent
+
+    mc = MagicMock()
+    mc.propose_config_change = AsyncMock(return_value={"change_id": "x"})
+    result = await edit_agent(
+        "writer", "model", "anthropic/claude-opus",
+        mesh_client=mc, _messages=None,
+    )
+    assert result["error"] == "provenance_check_failed"
+    mc.propose_config_change.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_edit_agent_blocks_self_modification():
+    from src.agent.builtins.operator_tools import edit_agent
+
+    result = await edit_agent(
+        "operator", "instructions", "x", mesh_client=MagicMock(),
+    )
+    assert "error" in result
+    assert "operator" in result["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_edit_agent_invalid_field():
+    from src.agent.builtins.operator_tools import edit_agent
+
+    result = await edit_agent(
+        "writer", "made_up", "x", mesh_client=MagicMock(),
+    )
+    assert "error" in result
+    assert "Invalid field" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_edit_agent_invalid_reason():
+    from src.agent.builtins.operator_tools import edit_agent
+
+    result = await edit_agent(
+        "writer", "instructions", "x",
+        reason="just_because",
+        mesh_client=MagicMock(),
+    )
+    assert "error" in result
+    assert "reason" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_edit_agent_permission_ceiling_still_enforced():
+    """Hard-field permission ceiling still blocks even via edit_agent."""
+    from src.agent.builtins.operator_tools import edit_agent
+
+    result = await edit_agent(
+        "writer", "permissions", {"can_spawn": True},
+        mesh_client=MagicMock(),
+    )
+    assert "error" in result
+    assert "ceiling" in result["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_edit_agent_no_mesh_client():
+    from src.agent.builtins.operator_tools import edit_agent
+
+    result = await edit_agent("writer", "instructions", "x")
+    assert "error" in result
+    assert "mesh_client" in result["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_edit_agent_soft_propagates_mesh_error():
+    from src.agent.builtins.operator_tools import edit_agent
+
+    mc = MagicMock()
+    mc.edit_soft = AsyncMock(side_effect=RuntimeError("connection refused"))
+    result = await edit_agent(
+        "writer", "instructions", "x", mesh_client=mc,
+    )
+    assert "error" in result
+    assert "connection refused" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_undo_change_happy_path():
+    from src.agent.builtins.operator_tools import undo_change
+
+    mc = MagicMock()
+    mc.undo_change = AsyncMock(return_value={
+        "success": True,
+        "agent_id": "writer",
+        "field": "instructions",
+        "restored_value": "# original",
+    })
+    result = await undo_change("tok-abc", mesh_client=mc)
+    assert result["success"] is True
+    assert result["restored_value"] == "# original"
+    mc.undo_change.assert_awaited_once_with("tok-abc")
+
+
+@pytest.mark.asyncio
+async def test_undo_change_404_maps_to_unavailable():
+    from src.agent.builtins.operator_tools import undo_change
+
+    mc = MagicMock()
+    mc.undo_change = AsyncMock(side_effect=RuntimeError("404 Not Found"))
+    result = await undo_change("tok-x", mesh_client=mc)
+    assert result["error"] == "undo_unavailable"
+    assert "expired" in result["detail"].lower() or "used" in result["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_undo_change_no_token():
+    from src.agent.builtins.operator_tools import undo_change
+
+    result = await undo_change("", mesh_client=MagicMock())
+    assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_undo_change_no_mesh_client():
+    from src.agent.builtins.operator_tools import undo_change
+
+    result = await undo_change("tok-1")
+    assert "error" in result
+    assert "mesh_client" in result["error"].lower()
