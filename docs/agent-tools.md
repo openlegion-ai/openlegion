@@ -207,18 +207,21 @@ The following tools are only available to the **operator agent** (when `ALLOWED_
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
+| `inspect_agents` | `agent_id` (default ""), `depth` (default `"summary"`; values: `summary` / `profile` / `history`) | Look up agents. Empty `agent_id` lists the fleet at `summary` depth; passing an `agent_id` with `profile` returns the collaboration interface, or with `history` returns recent conversation history. Replaces `list_agents` / `get_agent_profile` / `read_agent_history` for the operator. |
+| `inspect_projects` | `detail` (default `"names"`; values: `names` / `status` / `full`), `project_name` (default "") | Look up projects. With no `project_name`, `names` returns name+description, `status` returns task-count rollups. Passing a `project_name` returns the full record. Replaces `list_projects` / `list_project_status` / `get_project` for the operator. |
+| `manage_project` | `project_name`, `action` (enum: `archive` / `delete`) | Lifecycle for a project. `delete` requires the project to already be archived. Replaces `archive_project` / `delete_project`. |
+| `manage_agent` | `agent_id`, `action` (enum: `archive` / `delete`) | Lifecycle for an agent. Same archive-then-delete contract as `manage_project`. Replaces `archive_agent` / `delete_agent`. |
+| `manage_task` | `task_id`, `action` (enum: `cancel` / `reroute` / `retry`), `new_assignee` (default "", only for `reroute`) | Single entry point for task ops. Replaces `cancel_task` / `reroute_task` / `retry_failed_task`. |
 | `edit_agent` | `agent_id`, `field` (enum: `instructions` / `soul` / `role` / `heartbeat` / `interface` / `model` / `thinking` / `budget` / `permissions`), `value`, `reason` (default `"user_asked"`; values: `user_asked` / `operator_proactive`) | Single entry point for agent config changes. Soft fields (instructions/soul/role/heartbeat/interface) apply immediately and surface as a receipt with 5-minute Undo. Hard fields (model/thinking/budget/permissions) return a `change_id` that must be confirmed via `confirm_edit`. |
 | `undo_change` | `undo_token` | Reverse a soft-edit applied via `edit_agent`. Token is returned with the edit and remains valid for 5 minutes. |
 | `confirm_edit` | `change_id` | Apply a previously proposed hard-field edit (model/thinking/budget/permissions). |
 | `save_observations` | `fleet_summary`, `agents_attention` (default []), `cost_trend`, `notes` (default "") | Persist fleet health observations for human review. |
-| `read_agent_history` | `agent_id`, `period` (default "today"; values: `today` / `yesterday` / `week`) | Read an agent's conversation history with period filtering (operator version). |
 | `create_agent` | `name`, `role`, `model` (default ""), `instructions`, `soul` (default "") | Create a new agent. |
-| `list_projects` | -- | List all projects. |
-| `get_project` | `project_name` | Get details for a project. |
 | `create_project` | `name`, `description`, `agent_ids` (default []) | Create a new project and optionally add agents. |
 | `add_agents_to_project` | `project_name`, `agent_ids` | Add one or more agents to a project. |
 | `remove_agents_from_project` | `project_name`, `agent_ids` | Remove one or more agents from a project. |
 | `update_project_context` | `project_name`, `context` | Update the shared context text (`PROJECT.md`) for a project. |
+| `set_project_goal` | `project_name`, `north_star`, `success_criteria` (default []) | Save the project's vision (≤2000 chars) and up to 10 success criteria (each ≤200 chars). Rendered prominently on every project card in the Workplace tab. Pass empty values to clear. |
 
 **Permission ceiling:** The operator cannot grant `can_spawn=true` or `can_use_wallet=true` to agents. Budget limits: daily $0.01–$1000, monthly $0.10–$30000.
 

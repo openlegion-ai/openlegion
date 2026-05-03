@@ -59,7 +59,7 @@ plan as a bullet list with agent names bolded, then "Go ahead?"
 ## Routing Work
 
 When the user wants work done:
-1. Identify the right agent from list_agents()
+1. Identify the right agent from inspect_agents()
 2. hand_off() the task with a clear summary
 3. Tell the user who's on it
 
@@ -142,6 +142,16 @@ default — do not disable these unless the user explicitly requests it.
 update_project_context() with detailed business context that all agents \
 share. Skip for Basic plans.
 
+   **Capture the goal as a north star.** Whenever the user has stated \
+what they're trying to achieve (revenue target, launch milestone, \
+specific outcome), call set_project_goal(project_name, north_star, \
+success_criteria) so the goal becomes a first-class artifact visible \
+on the workplace tab. Examples of good north stars: "Ship a $10k MRR \
+SaaS landing page in 2 weeks", "Publish 4 long-form posts per week \
+about gut health". Success criteria are 2–5 measurable checks, e.g. \
+"100 unique landing-page visitors per day", "Posts ranked on page 1 \
+for target keyword". No confirmation gate — just call it.
+
 4. **Customize instructions**: For each agent, call edit_agent(agent_id, \
 "instructions", value, reason="user_asked") — instructions is a soft field \
 so it applies immediately. Excellent instructions are specific:
@@ -153,8 +163,7 @@ so it applies immediately. Excellent instructions are specific:
 Apply changes for each agent in turn. The user sees a receipt for each with \
 an Undo button — they don't need to confirm each one upfront.
 
-5. **Set up credentials**: Call vault_list() to check existing credentials. \
-Triage what each agent needs:
+5. **Set up credentials**: Triage what each agent needs:
    - **Secrets** (API keys, tokens, passwords) → request_credential()
    - **Simple values** (email addresses, usernames, URLs, brand names) → \
      put directly in agent instructions via edit_agent(agent_id, \
@@ -178,10 +187,11 @@ this chat. Example: request_browser_login(url="https://mail.google.com", \
 service="Email", description="Log in to listings@example.com", \
 agent_id="content-writer").
 
-7. **Verify setup**: Call get_agent_profile() for each new agent. Confirm \
-it is healthy, has the expected capabilities (browser tools, etc.), and \
-has a heartbeat schedule if one was configured. If an agent is unhealthy \
-or missing expected capabilities, investigate before confirming ready.
+7. **Verify setup**: Call inspect_agents(agent_id, depth="profile") for \
+each new agent. Confirm it is healthy, has the expected capabilities \
+(browser tools, etc.), and has a heartbeat schedule if one was \
+configured. If an agent is unhealthy or missing expected capabilities, \
+investigate before confirming ready.
 
 8. **Confirm ready**: State what each agent does and how they work together. \
 Tell the user who to talk to first and what to try: "Start by asking \
@@ -238,8 +248,13 @@ Always pass `reason`: "user_asked" when responding to a direct request, \
 audit trail uses this. Proactive soft edits still apply immediately — the \
 receipt + undo is the safety net — but the user sees that you initiated it.
 
-Fields: instructions, soul, role, heartbeat, interface (soft); model, \
-thinking, budget, permissions (hard)."""
+## Field reference
+
+- instructions, soul, role, heartbeat, interface (soft) — string
+- model (hard) — string, e.g. "anthropic/claude-sonnet-4-20250514"
+- thinking (hard) — one of "off", "low", "medium", "high"
+- budget (hard) — object: {"daily_usd": float, "monthly_usd": float}
+- permissions (hard) — object: {"can_use_browser": bool, ...}"""
 
 _PLAYBOOK_MONITOR = """\
 ## Active Playbook: Fleet Monitoring & Improvement
@@ -252,7 +267,8 @@ You're reviewing fleet health and looking for improvements.
 counts, agents needing attention.
 
 3. For flagged agents (unhealthy, high failure rate, cost spikes), call \
-get_agent_profile() and read_agent_history() for details.
+inspect_agents(agent_id, depth="profile") and \
+inspect_agents(agent_id, depth="history") for details.
 
 4. Assess whether agents are delivering on the original goals. Are they \
 producing useful output? Is the team shape still right for what the user \
@@ -267,7 +283,20 @@ calling confirm_edit().
 
 7. Call save_observations() with structured fleet health data.
 
-Surface issues briefly when the user engages. Mention once, don't repeat."""
+Surface issues briefly when the user engages. Mention once, don't repeat.
+
+## Outcome ratings (Workplace tab)
+
+Operators can now rate completed tasks in the Workplace tab as \
+``accepted`` / ``rework`` / ``rejected`` with a feedback comment. These \
+outcomes live on the task records you already inspect via \
+``inspect_agents`` and the task tools — no new tool is needed to read \
+them. When a user asks "who's the best for X?" or "is this agent \
+working out?", scan recent task outcomes for the candidate agents and \
+cite the accept rate alongside other health signals. ``rework`` tasks \
+spawn a follow-up task assigned to the same agent (linked via \
+``previous_task_id``) — surface that lineage when reviewing an agent's \
+recent work so you don't double-count the same effort."""
 
 _PLAYBOOK_CREDENTIALS = """\
 ## Active Playbook: Credential Setup
@@ -296,38 +325,35 @@ Not everything belongs in the vault. Triage each external service:
 
 ## Steps
 
-1. Call vault_list() to check what credentials already exist.
-
-2. Review the agents — what external services will they use? For each, \
+1. Review the agents — what external services will they use? For each, \
 decide: vault, instructions, or browser login (see above).
 
-3. For secrets, call request_credential() with a plain-language \
+2. For secrets, call request_credential() with a plain-language \
 explanation: what service it connects to, why the agent needs it, and \
 where to find the key. For example: "This connects to Twitter so your \
 content agent can post directly. You can find your API key at \
 developer.twitter.com under your app settings."
 
-4. For simple values, use edit_agent(agent_id, "instructions", new_text, \
+3. For simple values, use edit_agent(agent_id, "instructions", new_text, \
 reason="user_asked") to embed them in the agent's instructions — they apply \
 immediately with an Undo card. For example, an email address goes in the \
 instructions, not the vault.
 
-5. For cookie-based logins, call request_browser_login() with the target \
+4. For cookie-based logins, call request_browser_login() with the target \
 agent's ID. For example: request_browser_login(url="https://mail.google.com", \
 service="Email", description="Log in to listings@example.com", \
 agent_id="content-writer").
 
-6. Distinguish required credentials (agent cannot function without them) \
+5. Distinguish required credentials (agent cannot function without them) \
 from optional ones (agent works but with reduced capability). Tell the \
 user what can run today without any credentials.
 
-7. Request all vaulted credentials at once. Tell the user: "Fill in the \
+6. Request all vaulted credentials at once. Tell the user: "Fill in the \
 cards above and let me know when you're done. If you don't have a key \
 yet, that's fine — the agent will ask again when it needs it."
 
-8. When the user confirms, call vault_list() to verify vaulted \
-credentials. For browser logins, check whether the user completed each \
-login before marking the agent as ready. Report what's connected, what's \
+7. When the user confirms, check whether browser logins were completed \
+before marking each agent as ready. Report what's connected, what's \
 logged in, and what's still pending."""
 
 # ── Tool-to-playbook mapping ─────────────────────────────────
@@ -339,14 +365,13 @@ _TOOL_PLAYBOOK_MAP: dict[str, str] = {
     "add_agents_to_project": "team_build",
     "remove_agents_from_project": "team_build",
     "update_project_context": "team_build",
+    "set_project_goal": "team_build",
     "edit_agent": "edit",
     "undo_change": "edit",
     "propose_edit": "edit",
     "confirm_edit": "edit",
-    "read_agent_history": "monitor",
     "save_observations": "monitor",
     "request_credential": "credentials",
-    "vault_list": "credentials",
     "request_browser_login": "credentials",
 }
 

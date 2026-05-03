@@ -1500,31 +1500,31 @@ def _setup_agent_wizard(model: str) -> str:
 _OPERATOR_AGENT_ID = "operator"
 
 _OPERATOR_ALLOWED_TOOLS: list[str] = [
-    # Heartbeat tier (5)
-    "list_agents", "get_agent_profile", "get_system_status", "notify_user", "save_observations",
-    # Chat tier
-    "list_templates", "apply_template", "hand_off", "check_inbox", "update_status",
-    "read_agent_history",
-    # PR 1: edit_agent collapses propose_edit + confirm_edit into one tool.
-    # confirm_edit stays in the registry but only as an internal helper for
-    # hard-field follow-ups; the LLM sees `edit_agent` (and `confirm_edit`
-    # for the explicit hard-field confirm step). undo_change lets the
-    # operator self-revert mistakes.
+    # Monitoring + heartbeat
+    "get_system_status", "notify_user", "save_observations",
+    # Inspection (consolidated read tools)
+    "inspect_agents", "inspect_projects",
+    "list_agent_queue", "get_team_outputs", "summarize_project_progress",
+    # Coordination + chat
+    "list_templates", "apply_template", "hand_off", "check_inbox",
+    # Configuration edits — PR 1: edit_agent collapses the soft/hard branch
+    # behind one tool; confirm_edit stays for the explicit hard-field step;
+    # undo_change lets the operator self-revert soft edits within the TTL.
     "edit_agent", "confirm_edit", "undo_change",
-    "create_agent",
-    "list_projects", "get_project", "create_project",
+    # Creation
+    "create_agent", "create_project",
+    # Project membership + context
     "add_agents_to_project", "remove_agents_from_project", "update_project_context",
-    "vault_list", "request_credential", "request_browser_login",
-    # Task 7: operator product surface — read tools
-    "list_project_status", "list_agent_queue", "get_team_outputs",
-    "summarize_project_progress",
-    # Task 7: operator product surface — action tools
-    "reroute_task", "cancel_task", "retry_failed_task",
-    "archive_project", "archive_agent", "delete_project", "delete_agent",
+    # PR 5 — north-star setter is no-confirmation meta-config.
+    "set_project_goal",
+    # Lifecycle (consolidated archive/delete)
+    "manage_project", "manage_agent", "manage_task",
+    # Credential + browser handoff
+    "request_credential", "request_browser_login",
 ]
 
 _OPERATOR_HEARTBEAT_TOOLS: list[str] = [
-    "list_agents", "get_agent_profile", "get_system_status", "notify_user", "save_observations",
+    "inspect_agents", "get_system_status", "notify_user", "save_observations",
 ]
 
 _OPERATOR_SOUL = """\
@@ -1554,11 +1554,11 @@ Your previous observations are included above in OBSERVATIONS.md.
    - Pre-computed agents_needing_attention list
    - Plan limits and current usage
 
-3. Call list_agents() for per-agent status overview.
+3. Call inspect_agents() for per-agent status overview.
 
 4. For agents flagged in agents_needing_attention or with new concerning signals
    (unhealthy, failure_rate > 0.30, cost_vs_yesterday_ratio > 2.0),
-   call get_agent_profile() for details.
+   call inspect_agents(agent_id, depth="profile") for details.
 
 5. Call save_observations() with:
    - fleet_summary: one-line health (e.g. "5/6 healthy, cost stable")

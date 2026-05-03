@@ -472,51 +472,68 @@ async def test_save_observations_history_cap(tmp_path):
     assert last_entry["fleet_summary"] == "check 54"
 
 
-# ── read_agent_history tests ────────────────────────────────
+# ── inspect_agents tests ────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_read_agent_history_no_mesh_client():
-    from src.agent.builtins.operator_tools import read_agent_history
+async def test_inspect_agents_no_mesh_client():
+    from src.agent.builtins.operator_tools import inspect_agents
 
-    result = await read_agent_history("writer")
+    result = await inspect_agents()
     assert "error" in result
     assert "mesh_client" in result["error"].lower()
 
 
 @pytest.mark.asyncio
-async def test_read_agent_history_success():
-    from src.agent.builtins.operator_tools import read_agent_history
-
-    mock_response = MagicMock()
-    mock_response.status_code = 200
-    mock_response.raise_for_status = MagicMock()
-    mock_response.json.return_value = {
-        "agent_id": "writer",
-        "entries": [{"time": "10:00", "event": "task_completed"}],
-    }
+async def test_inspect_agents_summary_returns_roster():
+    """No agent_id → roster summary built from list_agents()."""
+    from src.agent.builtins.operator_tools import inspect_agents
 
     mc = MagicMock()
-    mc.mesh_url = "http://localhost:8420"
-    mc._get_with_retry = AsyncMock(return_value=mock_response)
-
-    result = await read_agent_history("writer", period="today", mesh_client=mc)
-    assert result["agent_id"] == "writer"
-    mc._get_with_retry.assert_awaited_once()
-    call_args = mc._get_with_retry.call_args
-    assert "/mesh/agents/writer/history" in call_args[0][0]
-    assert call_args[1]["params"]["period"] == "today"
+    mc.list_agents = AsyncMock(return_value={
+        "writer": {"role": "writer", "capabilities": ["http_request"]},
+        "scout":  {"role": "researcher", "capabilities": ["web_search"]},
+    })
+    result = await inspect_agents(mesh_client=mc)
+    assert result["count"] == 2
+    names = {a["name"] for a in result["agents"]}
+    assert names == {"writer", "scout"}
 
 
 @pytest.mark.asyncio
-async def test_read_agent_history_error():
-    from src.agent.builtins.operator_tools import read_agent_history
+async def test_inspect_agents_profile_calls_get_agent_profile():
+    from src.agent.builtins.operator_tools import inspect_agents
 
     mc = MagicMock()
-    mc.mesh_url = "http://localhost:8420"
-    mc._get_with_retry = AsyncMock(side_effect=RuntimeError("connection refused"))
+    mc.get_agent_profile = AsyncMock(return_value={
+        "agent_id": "writer", "role": "writer",
+    })
+    result = await inspect_agents("writer", depth="profile", mesh_client=mc)
+    assert result["agent_id"] == "writer"
+    mc.get_agent_profile.assert_awaited_once_with("writer")
 
-    result = await read_agent_history("writer", mesh_client=mc)
+
+@pytest.mark.asyncio
+async def test_inspect_agents_history_calls_get_agent_history():
+    from src.agent.builtins.operator_tools import inspect_agents
+
+    mc = MagicMock()
+    mc.get_agent_history = AsyncMock(return_value={
+        "agent_id": "writer",
+        "entries": [{"time": "10:00", "event": "task_completed"}],
+    })
+    result = await inspect_agents("writer", depth="history", mesh_client=mc)
+    assert result["agent_id"] == "writer"
+    mc.get_agent_history.assert_awaited_once_with("writer")
+
+
+@pytest.mark.asyncio
+async def test_inspect_agents_error_surfaces():
+    from src.agent.builtins.operator_tools import inspect_agents
+
+    mc = MagicMock()
+    mc.get_agent_history = AsyncMock(side_effect=RuntimeError("connection refused"))
+    result = await inspect_agents("writer", depth="history", mesh_client=mc)
     assert "error" in result
     assert "connection refused" in result["error"]
 
@@ -598,36 +615,57 @@ async def test_create_agent_no_messages_fails_closed():
     assert result["error"] == "provenance_check_failed"
 
 
-# ── list_projects tests ─────────────────────────────────────
+# ── inspect_projects tests ──────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_list_projects_no_mesh_client():
-    from src.agent.builtins.operator_tools import list_projects
+async def test_inspect_projects_no_mesh_client():
+    from src.agent.builtins.operator_tools import inspect_projects
 
-    result = await list_projects()
+    result = await inspect_projects()
     assert "error" in result
 
 
 @pytest.mark.asyncio
-async def test_list_projects_success():
-    from src.agent.builtins.operator_tools import list_projects
+async def test_inspect_projects_names_lists_all():
+    from src.agent.builtins.operator_tools import inspect_projects
 
     mc = MagicMock()
     mc.list_projects = AsyncMock(
         return_value={"projects": [{"name": "proj1", "members": ["a1"]}]},
     )
-    result = await list_projects(mesh_client=mc)
+    result = await inspect_projects(detail="names", mesh_client=mc)
     assert len(result["projects"]) == 1
     assert result["projects"][0]["name"] == "proj1"
 
 
-# ── get_project tests ───────────────────────────────────────
+@pytest.mark.asyncio
+async def test_inspect_projects_status_calls_all_projects_status(monkeypatch):
+    """detail='status' calls the v2 endpoint."""
+    monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "1")
+    from src.agent.builtins.operator_tools import inspect_projects
+
+    mc = MagicMock()
+    mc.all_projects_status = AsyncMock(
+        return_value={"projects": [{"project": {"name": "p1"}, "counts": {"active": 2}}]},
+    )
+    result = await inspect_projects(detail="status", mesh_client=mc)
+    assert "projects" in result
+    mc.all_projects_status.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_get_project_found():
-    from src.agent.builtins.operator_tools import get_project
+async def test_inspect_projects_status_requires_v2_flag(monkeypatch):
+    monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "0")
+    from src.agent.builtins.operator_tools import inspect_projects
+
+    result = await inspect_projects(detail="status", mesh_client=MagicMock())
+    assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_inspect_projects_named_returns_full_detail():
+    from src.agent.builtins.operator_tools import inspect_projects
 
     mc = MagicMock()
     mc.list_projects = AsyncMock(
@@ -636,19 +674,19 @@ async def test_get_project_found():
             {"name": "proj2", "members": ["a2"]},
         ]},
     )
-    result = await get_project("proj2", mesh_client=mc)
+    result = await inspect_projects(project_name="proj2", mesh_client=mc)
     assert result["name"] == "proj2"
 
 
 @pytest.mark.asyncio
-async def test_get_project_not_found():
-    from src.agent.builtins.operator_tools import get_project
+async def test_inspect_projects_named_not_found():
+    from src.agent.builtins.operator_tools import inspect_projects
 
     mc = MagicMock()
     mc.list_projects = AsyncMock(
         return_value={"projects": [{"name": "proj1"}]},
     )
-    result = await get_project("nonexistent", mesh_client=mc)
+    result = await inspect_projects(project_name="nonexistent", mesh_client=mc)
     assert "error" in result
     assert "not found" in result["error"]
 

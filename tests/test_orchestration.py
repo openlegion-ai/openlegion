@@ -543,3 +543,210 @@ def test_event_bus_unset_disables_emit(tmp_path):
     t.set_event_bus(None)
     t.create(creator="scout", assignee="analyst", title="dig")
     assert captured == []
+
+
+# ── PR 4 — outcome capture + rework spawning ──────────────────────
+
+
+def test_outcome_columns_exist_after_init(tmp_path):
+    """Migration adds outcome / feedback_text / previous_task_id columns."""
+    t = _make_store(tmp_path)
+    with t._conn() as conn:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()}
+    assert "outcome" in cols
+    assert "feedback_text" in cols
+    assert "previous_task_id" in cols
+
+
+def test_init_schema_idempotent_with_outcome_migration(tmp_path):
+    """Re-instantiating against the same DB does not re-add columns or error."""
+    db_path = str(tmp_path / "tasks.db")
+    t1 = Tasks(db_path=db_path)
+    t1.close()
+    t2 = Tasks(db_path=db_path)  # second init must succeed
+    with t2._conn() as conn:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()}
+    assert "outcome" in cols and "feedback_text" in cols and "previous_task_id" in cols
+    t2.close()
+
+
+def test_row_to_dict_exposes_new_fields_default_null(tmp_path):
+    """Newly created tasks have outcome / feedback_text / previous_task_id as None."""
+    t = _make_store(tmp_path)
+    rec = t.create(creator="scout", assignee="analyst", title="dig")
+    assert rec["outcome"] is None
+    assert rec["feedback_text"] is None
+    assert rec["previous_task_id"] is None
+
+
+def test_set_outcome_happy_path_done(tmp_path):
+    t = _make_store(tmp_path)
+    rec = t.create(creator="scout", assignee="analyst", title="dig")
+    t.update_status(rec["id"], "working", actor="analyst")
+    t.update_status(rec["id"], "done", actor="analyst")
+    updated = t.set_outcome(
+        rec["id"], "accepted", "great work", actor="operator",
+    )
+    assert updated["outcome"] == "accepted"
+    assert updated["feedback_text"] == "great work"
+    events = t.list_events(rec["id"])
+    kinds = [e["event_kind"] for e in events]
+    assert kinds.count("task_outcome") == 1
+    payload = next(e["payload"] for e in events if e["event_kind"] == "task_outcome")
+    assert payload["outcome"] == "accepted"
+    assert payload["feedback"] == "great work"
+
+
+def test_set_outcome_rework_with_feedback(tmp_path):
+    t = _make_store(tmp_path)
+    rec = t.create(creator="scout", assignee="analyst", title="dig")
+    t.update_status(rec["id"], "working", actor="analyst")
+    t.update_status(rec["id"], "done", actor="analyst")
+    updated = t.set_outcome(rec["id"], "rework", "missed the deadline angle")
+    assert updated["outcome"] == "rework"
+    assert updated["feedback_text"] == "missed the deadline angle"
+
+
+def test_set_outcome_rejected_persists(tmp_path):
+    t = _make_store(tmp_path)
+    rec = t.create(creator="scout", assignee="analyst", title="dig")
+    t.update_status(rec["id"], "working", actor="analyst")
+    t.update_status(rec["id"], "failed", actor="analyst")
+    updated = t.set_outcome(rec["id"], "rejected", "irrelevant")
+    assert updated["outcome"] == "rejected"
+
+
+def test_set_outcome_rejects_non_terminal_status(tmp_path):
+    t = _make_store(tmp_path)
+    rec = t.create(creator="scout", assignee="analyst", title="dig")
+    t.update_status(rec["id"], "working", actor="analyst")
+    with pytest.raises(InvalidStatusTransition, match="non-terminal"):
+        t.set_outcome(rec["id"], "accepted", "")
+
+
+def test_set_outcome_allows_re_rating(tmp_path):
+    """Outcomes are write-many — operators can re-rate after a misclick.
+
+    Each submission appends a fresh ``task_outcome`` audit event so the
+    full re-rating history stays queryable, but ``tasks.outcome`` and
+    ``tasks.feedback_text`` reflect only the latest value.
+    """
+    t = _make_store(tmp_path)
+    rec = t.create(creator="scout", assignee="analyst", title="dig")
+    t.update_status(rec["id"], "working", actor="analyst")
+    t.update_status(rec["id"], "done", actor="analyst")
+    first = t.set_outcome(rec["id"], "rejected", "wrong angle")
+    assert first["outcome"] == "rejected"
+    second = t.set_outcome(rec["id"], "accepted", "actually fine")
+    assert second["outcome"] == "accepted"
+    assert second["feedback_text"] == "actually fine"
+    # Both submissions produce a task_outcome audit row.
+    events = t.list_events(rec["id"])
+    outcome_events = [e for e in events if e["event_kind"] == "task_outcome"]
+    assert len(outcome_events) == 2
+    # The newer event records the prior outcome so audit/analytics can
+    # detect re-ratings without scanning the whole history.
+    assert outcome_events[0]["payload"]["outcome"] == "rejected"
+    assert outcome_events[0]["payload"]["previous_outcome"] is None
+    assert outcome_events[1]["payload"]["outcome"] == "accepted"
+    assert outcome_events[1]["payload"]["previous_outcome"] == "rejected"
+
+
+def test_set_outcome_rejects_unknown_outcome(tmp_path):
+    t = _make_store(tmp_path)
+    rec = t.create(creator="scout", assignee="analyst", title="dig")
+    t.update_status(rec["id"], "working", actor="analyst")
+    t.update_status(rec["id"], "done", actor="analyst")
+    with pytest.raises(ValueError, match="unknown outcome"):
+        t.set_outcome(rec["id"], "meh", "")
+
+
+def test_set_outcome_rejects_oversized_feedback(tmp_path):
+    from src.host.orchestration import MAX_FEEDBACK_CHARS
+    t = _make_store(tmp_path)
+    rec = t.create(creator="scout", assignee="analyst", title="dig")
+    t.update_status(rec["id"], "working", actor="analyst")
+    t.update_status(rec["id"], "done", actor="analyst")
+    huge = "x" * (MAX_FEEDBACK_CHARS + 1)
+    with pytest.raises(ValueError, match="exceeds"):
+        t.set_outcome(rec["id"], "accepted", huge)
+
+
+def test_set_outcome_unknown_task(tmp_path):
+    t = _make_store(tmp_path)
+    with pytest.raises(TaskNotFound):
+        t.set_outcome("task_missing", "accepted", "")
+
+
+def test_set_outcome_emits_event_bus(tmp_path):
+    t = _make_store(tmp_path)
+    _bus, captured = _attach_event_bus(t)
+    rec = t.create(creator="scout", assignee="analyst", title="dig")
+    t.update_status(rec["id"], "working", actor="analyst")
+    t.update_status(rec["id"], "done", actor="analyst")
+    captured.clear()
+    t.set_outcome(rec["id"], "accepted", "good")
+    types = [c[0] for c in captured]
+    assert "task_outcome" in types
+    payload = next(c[2] for c in captured if c[0] == "task_outcome")
+    assert payload["task_id"] == rec["id"]
+    assert payload["outcome"] == "accepted"
+    assert payload["feedback"] == "good"
+
+
+def test_create_rework_task_links_to_previous(tmp_path):
+    t = _make_store(tmp_path)
+    rec = t.create(
+        creator="op", assignee="analyst", title="research X",
+        project_id="research", priority=3,
+        origin={"kind": "human", "channel": "telegram", "user": "u1"},
+    )
+    new = t.create_rework_task(rec["id"], "go deeper on the legal angle")
+    assert new["previous_task_id"] == rec["id"]
+    assert new["title"] == "Rework: research X"
+    assert new["assignee"] == "analyst"
+    assert new["project_id"] == "research"
+    assert new["description"] == "go deeper on the legal angle"
+    assert new["status"] == "pending"
+    assert new["origin"] == {"kind": "human", "channel": "telegram", "user": "u1"}
+    assert new["creator"] == "operator"  # the actor (default)
+
+
+def test_create_rework_task_requires_feedback(tmp_path):
+    t = _make_store(tmp_path)
+    rec = t.create(creator="op", assignee="analyst", title="t")
+    with pytest.raises(ValueError, match="required"):
+        t.create_rework_task(rec["id"], "")
+
+
+def test_create_rework_task_unknown_previous(tmp_path):
+    t = _make_store(tmp_path)
+    with pytest.raises(TaskNotFound):
+        t.create_rework_task("task_missing", "do better")
+
+
+def test_create_rework_task_emits_task_created(tmp_path):
+    t = _make_store(tmp_path)
+    _bus, captured = _attach_event_bus(t)
+    rec = t.create(creator="op", assignee="analyst", title="t")
+    captured.clear()
+    new = t.create_rework_task(rec["id"], "redo")
+    types = [c[0] for c in captured]
+    assert "task_created" in types
+    evt = next(c for c in captured if c[0] == "task_created")
+    assert evt[2]["task_id"] == new["id"]
+    assert evt[2]["previous_task_id"] == rec["id"]
+
+
+def test_create_rework_task_records_creation_event(tmp_path):
+    """Audit trail records ``created`` event with kind=rework + previous link."""
+    t = _make_store(tmp_path)
+    rec = t.create(creator="op", assignee="analyst", title="t")
+    new = t.create_rework_task(rec["id"], "redo")
+    events = t.list_events(new["id"])
+    assert any(
+        e["event_kind"] == "created"
+        and e["payload"].get("previous_task_id") == rec["id"]
+        and e["payload"].get("kind") == "rework"
+        for e in events
+    )

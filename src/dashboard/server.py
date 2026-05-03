@@ -190,6 +190,88 @@ def _parse_positive_float(value: Any, field: str, fallback: float) -> float:
     return result
 
 
+def _summarize_task_event(
+    *,
+    event_kind: str,
+    actor: str,
+    title: str,
+    project_id: str,
+    assignee: str,
+    blocker_note: str,
+    payload: dict | None,
+) -> str:
+    """Build a one-line human-readable summary of a task_events row.
+
+    Examples (keep these snappy — the feed renders one per line):
+        "writer-1 completed task 'Draft Q4 plan' in project work"
+        "reviewer-1 marked task 'Edit copy' as blocked: needs SEO data"
+        "ops created task 'Fetch metrics' for analyst-1"
+    """
+    actor = actor or "unknown"
+    where = f" in project {project_id}" if project_id else ""
+    quoted = f"'{title}'"
+
+    if event_kind == "created":
+        for_who = f" for {assignee}" if assignee else ""
+        return f"{actor} created task {quoted}{for_who}{where}"
+
+    if event_kind == "status_changed":
+        # ``orchestration.py`` writes ``from``/``to``; tolerate
+        # ``old_status``/``new_status`` too in case future emitters
+        # standardize on the WS payload's naming.
+        p = payload or {}
+        new_status = p.get("to") or p.get("new_status") or ""
+        old_status = p.get("from") or p.get("old_status") or ""
+        if new_status == "done":
+            return f"{actor} completed task {quoted}{where}"
+        if new_status == "blocked":
+            note = blocker_note or (payload or {}).get("blocker_note") or ""
+            tail = f": {note}" if note else ""
+            return f"{actor} marked task {quoted} as blocked{tail}"
+        if new_status == "failed":
+            return f"{actor} failed task {quoted}{where}"
+        if new_status == "cancelled":
+            return f"{actor} cancelled task {quoted}{where}"
+        if new_status == "working":
+            return f"{actor} started task {quoted}{where}"
+        if new_status == "accepted":
+            return f"{actor} accepted task {quoted}{where}"
+        from_part = f" from {old_status}" if old_status else ""
+        return f"{actor} moved task {quoted} to {new_status}{from_part}{where}"
+
+    if event_kind == "rerouted":
+        # ``orchestration.py`` writes ``to`` (the new assignee).
+        p = payload or {}
+        new_assignee = p.get("to") or p.get("new_assignee") or ""
+        if new_assignee:
+            return f"{actor} rerouted task {quoted} to {new_assignee}{where}"
+        return f"{actor} rerouted task {quoted}{where}"
+
+    if event_kind == "cancelled":
+        reason = (payload or {}).get("reason") or ""
+        tail = f": {reason}" if reason else ""
+        return f"{actor} cancelled task {quoted}{tail}"
+
+    if event_kind == "artifact_added":
+        ref = (payload or {}).get("ref") or ""
+        ref_part = f" ({ref})" if ref else ""
+        return f"{actor} added an artifact to task {quoted}{ref_part}"
+
+    if event_kind == "task_outcome":
+        # Emitted by orchestration when the operator grades a finished
+        # task (PR 4). Render the rating cleanly so the feed reads as
+        # "<actor> rated task '<title>' accepted" instead of falling
+        # through to the generic "<actor> task_outcome on task ..." line.
+        p = payload or {}
+        outcome = p.get("outcome") or "rated"
+        previous = p.get("previous_outcome") or ""
+        verb = "re-rated" if previous and previous != outcome else "rated"
+        return f"{actor} {verb} task {quoted} {outcome}{where}"
+
+    # Fall-through: still useful, just less polished.
+    return f"{actor} {event_kind} on task {quoted}{where}"
+
+
 def _log_cron_task_exception(task: object) -> None:
     """Log unhandled exceptions from fire-and-forget cron tasks."""
     import asyncio
@@ -5495,6 +5577,8 @@ def create_dashboard_router(
                 "description": pdata.get("description", ""),
                 "members": pdata.get("members", []),
                 "status": pdata.get("status", "active"),
+                "north_star": pdata.get("north_star"),
+                "success_criteria": pdata.get("success_criteria"),
                 "counts": counts,
                 "total": len(rows),
                 "blockers": blockers,
@@ -5549,6 +5633,86 @@ def create_dashboard_router(
             rows = []
         return {"enabled": True, "outputs": rows}
 
+    @api_router.get("/api/workplace/feed")
+    async def api_workplace_feed(
+        project_id: str | None = None,
+        limit: int = 100,
+    ) -> dict:
+        """Activity feed for the Workplace > feed tab.
+
+        Returns the most recent ``task_events`` rows joined back to their
+        parent task so each entry can render a humanized one-line summary
+        ("writer-1 completed task 'Draft Q4 plan' in project work").
+        Sorted descending by event timestamp; ``limit`` is clamped to
+        ``[1, 500]``.
+        """
+        if tasks_store is None or not _orchestration_v2_on():
+            return {"enabled": False, "feed": []}
+        limit = max(1, min(int(limit or 100), 500))
+        try:
+            with tasks_store._conn() as conn:
+                if project_id:
+                    sql = (
+                        "SELECT e.event_id, e.task_id, e.event_kind, "
+                        "e.actor, e.payload_json, e.created_at, "
+                        "t.title, t.project_id, t.assignee, t.status, "
+                        "t.blocker_note "
+                        "FROM task_events e "
+                        "JOIN tasks t ON t.id = e.task_id "
+                        "WHERE t.project_id = ? "
+                        "ORDER BY e.created_at DESC, e.event_id DESC "
+                        "LIMIT ?"
+                    )
+                    raw = conn.execute(sql, (project_id, limit)).fetchall()
+                else:
+                    sql = (
+                        "SELECT e.event_id, e.task_id, e.event_kind, "
+                        "e.actor, e.payload_json, e.created_at, "
+                        "t.title, t.project_id, t.assignee, t.status, "
+                        "t.blocker_note "
+                        "FROM task_events e "
+                        "JOIN tasks t ON t.id = e.task_id "
+                        "ORDER BY e.created_at DESC, e.event_id DESC "
+                        "LIMIT ?"
+                    )
+                    raw = conn.execute(sql, (limit,)).fetchall()
+        except Exception as e:
+            logger.warning("workplace feed listing failed: %s", e)
+            return {"enabled": True, "feed": [], "error": str(e)}
+
+        feed: list[dict] = []
+        for row in raw:
+            payload = json.loads(row[4]) if row[4] else None
+            event_kind = row[2]
+            actor = row[3]
+            title = row[6] or "(untitled)"
+            proj = row[7] or ""
+            assignee = row[8] or ""
+            blocker_note = row[10] or ""
+            summary = _summarize_task_event(
+                event_kind=event_kind,
+                actor=actor,
+                title=title,
+                project_id=proj,
+                assignee=assignee,
+                blocker_note=blocker_note,
+                payload=payload,
+            )
+            feed.append({
+                "event_id": row[0],
+                "event_type": event_kind,
+                "task_id": row[1],
+                "task_title": title,
+                "project_id": proj,
+                "assignee": assignee,
+                "actor": actor,
+                "task_status": row[9],
+                "blocker_note": blocker_note,
+                "timestamp": row[5],
+                "summary": summary,
+            })
+        return {"enabled": True, "feed": feed}
+
     @api_router.get("/api/workplace/pending")
     async def api_workplace_pending() -> dict:
         """List open pending actions for inline + System>Operator review."""
@@ -5582,6 +5746,7 @@ def create_dashboard_router(
     async def api_changes_undo(undo_token: str, request: Request) -> dict:
         """Reverse a recent soft edit (PR 1).
 
+
         Backs the [Undo] button on the operator_action_receipt card.
         Proxies to the mesh's ``/mesh/changes/undo/{token}`` endpoint over
         loopback so the YAML/permissions writes go through the canonical
@@ -5613,6 +5778,249 @@ def create_dashboard_router(
                 detail = resp.text
             raise HTTPException(resp.status_code, detail)
         return resp.json()
+
+    # ── Task 9 PR 4 — Workplace task drill-in + outcome capture ────
+    #
+    # Three endpoints back the per-task modal: a full snapshot
+    # (task + events + resolved artifacts), a polling-cheap events-only
+    # variant, and the POST that records an operator outcome (and
+    # optionally spawns a rework task with the same assignee).
+
+    _ARTIFACT_INLINE_CHAR_CAP = 10_000
+
+    def _resolve_artifact(ref: str) -> dict:
+        """Resolve a task ``artifact_ref`` to an inline-renderable dict.
+
+        Today every artifact_ref is a Blackboard key (the
+        ``output/{agent}/{handoff_id}`` pattern that
+        ``coordination_tool.hand_off`` writes). The dict shape is
+        ``{ref, kind, content?, content_truncated?, error?}`` so the
+        UI can render text inline (kind=``text``) and surface
+        unresolved refs (kind=``missing`` / ``error``) without
+        crashing the whole drill-in. Future storage backends (S3,
+        signed URLs) plug in here by returning ``kind="url"`` with a
+        ``url`` field.
+        """
+        out: dict = {"ref": ref}
+        if not ref:
+            out.update({"kind": "missing", "error": "empty ref"})
+            return out
+        try:
+            entry = blackboard.read(ref)
+        except Exception as e:
+            out.update({"kind": "error", "error": str(e)})
+            return out
+        if entry is None:
+            out.update({"kind": "missing"})
+            return out
+        value = entry.value
+        # Render the parsed JSON value back to text for display so
+        # the modal can show whatever the agent wrote without a
+        # second round-trip. We treat the dict ``{text: ...}`` shape
+        # specially because hand_off wraps free text that way.
+        if isinstance(value, dict) and set(value.keys()) == {"text"}:
+            text = str(value.get("text") or "")
+        elif isinstance(value, str):
+            text = value
+        else:
+            try:
+                text = json.dumps(value, indent=2, default=str)
+            except (TypeError, ValueError):
+                text = str(value)
+        truncated = False
+        if len(text) > _ARTIFACT_INLINE_CHAR_CAP:
+            text = text[:_ARTIFACT_INLINE_CHAR_CAP]
+            truncated = True
+        out.update({
+            "kind": "text",
+            "content": text,
+            "content_truncated": truncated,
+            "written_by": entry.written_by,
+            "updated_at": entry.updated_at,
+        })
+        return out
+
+    @api_router.get("/api/workplace/tasks/{task_id}")
+    async def api_workplace_task_detail(task_id: str) -> dict:
+        """Return a task plus its event timeline and resolved artifacts.
+
+        Used by the Workplace drill-in modal. ``artifacts`` is a list of
+        ``{ref, kind, content, ...}`` dicts — text is inlined up to
+        10 k chars, missing/error refs return a ``kind`` marker rather
+        than 500'ing so a partial timeline still renders.
+        """
+        if tasks_store is None or not _orchestration_v2_on():
+            raise HTTPException(404, "Tasks store not available")
+        try:
+            task = tasks_store.get(task_id)
+        except Exception as e:
+            logger.warning("workplace task fetch failed: %s", e)
+            raise HTTPException(500, "task fetch failed") from e
+        if task is None:
+            raise HTTPException(404, "Task not found")
+        try:
+            events = tasks_store.list_events(task_id)
+        except Exception as e:
+            logger.warning("workplace task events fetch failed: %s", e)
+            events = []
+        artifacts = [_resolve_artifact(ref) for ref in task.get("artifact_refs") or []]
+        return {"task": task, "events": events, "artifacts": artifacts}
+
+    @api_router.get("/api/workplace/tasks/{task_id}/events")
+    async def api_workplace_task_events(task_id: str) -> dict:
+        """Return just the event timeline for a task (cheap to poll)."""
+        if tasks_store is None or not _orchestration_v2_on():
+            raise HTTPException(404, "Tasks store not available")
+        if tasks_store.get(task_id) is None:
+            raise HTTPException(404, "Task not found")
+        try:
+            events = tasks_store.list_events(task_id)
+        except Exception as e:
+            logger.warning("workplace task events fetch failed: %s", e)
+            events = []
+        return {"task_id": task_id, "events": events}
+
+    @api_router.post("/api/workplace/tasks/{task_id}/outcome")
+    async def api_workplace_task_outcome(
+        task_id: str, request: Request,
+    ) -> dict:
+        """Record an operator outcome rating on a completed task.
+
+        Body: ``{outcome: "accepted"|"rework"|"rejected", feedback: str}``.
+        For ``rework``, also spawns a new linked task with the feedback
+        as its brief and the same assignee — the new task id is returned
+        in ``rework_task_id``.
+        """
+        from src.host.orchestration import (
+            MAX_FEEDBACK_CHARS,
+            VALID_OUTCOMES,
+            InvalidStatusTransition,
+            TaskNotFound,
+        )
+        if tasks_store is None or not _orchestration_v2_on():
+            raise HTTPException(404, "Tasks store not available")
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError) as e:
+            raise HTTPException(400, "Invalid JSON body") from e
+        if not isinstance(body, dict):
+            raise HTTPException(400, "Body must be a JSON object")
+        outcome = body.get("outcome")
+        feedback = body.get("feedback") or ""
+        if outcome not in VALID_OUTCOMES:
+            raise HTTPException(
+                400,
+                f"outcome must be one of {sorted(VALID_OUTCOMES)}",
+            )
+        if not isinstance(feedback, str):
+            raise HTTPException(400, "feedback must be a string")
+        feedback = feedback.strip()
+        if len(feedback) > MAX_FEEDBACK_CHARS:
+            raise HTTPException(
+                400, f"feedback exceeds {MAX_FEEDBACK_CHARS} chars",
+            )
+        # Rework + reject require a non-empty comment so the agent /
+        # audit trail has something to learn from. Accept can be
+        # silent (the rating itself is the signal).
+        if outcome in ("rework", "rejected") and not feedback:
+            raise HTTPException(
+                400, f"feedback is required for outcome={outcome!r}",
+            )
+        try:
+            updated = tasks_store.set_outcome(
+                task_id, outcome, feedback or None, actor="operator",
+            )
+        except TaskNotFound as e:
+            raise HTTPException(404, "Task not found") from e
+        except InvalidStatusTransition as e:
+            raise HTTPException(409, str(e)) from e
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        result: dict = {"ok": True, "task": updated}
+        if outcome == "rework":
+            try:
+                rework = tasks_store.create_rework_task(
+                    task_id, feedback, actor="operator",
+                )
+            except (TaskNotFound, ValueError) as e:
+                # The outcome itself committed; surface the rework
+                # failure in the response without rolling back the
+                # rating.
+                logger.warning("rework spawn failed for %s: %s", task_id, e)
+                result["rework_error"] = str(e)
+            else:
+                result["rework_task_id"] = rework["id"]
+                result["rework_assignee"] = rework["assignee"]
+        return result
+
+    async def _proxy_help_cancel(
+        kind: str, request_id: str, body: dict | None,
+    ) -> dict:
+        """Proxy a Cancel-card click to the matching mesh endpoint.
+
+        Goes over loopback with ``x-mesh-internal: 1`` so the mesh
+        treats the dashboard as a trusted internal caller (same
+        contract as ``X-Agent-ID: operator`` would have used). Single
+        round-trip — both processes are co-located in the runtime.
+        """
+        import httpx
+        url = f"http://127.0.0.1:{mesh_port}/mesh/{kind}-request/{request_id}/cancel"
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                resp = await client.post(
+                    url,
+                    json=body or {},
+                    headers={
+                        "x-mesh-internal": "1",
+                        "X-Agent-ID": "operator",
+                        "Content-Type": "application/json",
+                    },
+                )
+        except Exception as e:
+            raise HTTPException(502, f"mesh cancel proxy failed: {e}")
+        if resp.status_code == 404:
+            raise HTTPException(404, "Request not found or already resolved")
+        if resp.status_code >= 400:
+            raise HTTPException(resp.status_code, resp.text)
+        try:
+            return resp.json()
+        except Exception:
+            return {"ok": True}
+
+    @api_router.post("/api/credential-request/{request_id}/cancel")
+    async def api_credential_request_cancel(
+        request_id: str, request: Request,
+    ) -> dict:
+        """Cancel an open credential-request card (PR 3)."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        return await _proxy_help_cancel("credential", request_id, body)
+
+    @api_router.post("/api/browser-login-request/{request_id}/cancel")
+    async def api_browser_login_request_cancel(
+        request_id: str, request: Request,
+    ) -> dict:
+        """Cancel an open browser-login-request card (PR 3)."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        return await _proxy_help_cancel("browser-login", request_id, body)
+
+    @api_router.post("/api/browser-captcha-help-request/{request_id}/cancel")
+    async def api_browser_captcha_help_request_cancel(
+        request_id: str, request: Request,
+    ) -> dict:
+        """Cancel an open browser-captcha-help-request card (PR 3)."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        return await _proxy_help_cancel(
+            "browser-captcha-help", request_id, body,
+        )
 
     @api_router.get("/static/{file_path:path}")
     async def static_file(file_path: str, v: str | None = None) -> FileResponse:

@@ -509,6 +509,41 @@ def create_mesh_app(
     if tasks_store is not None and event_bus is not None:
         tasks_store.set_event_bus(event_bus)
 
+    # In-memory registry of open "agent asks user for help" requests:
+    # credential_request, browser_login_request, browser_captcha_help_request.
+    # Keyed by request_id (uuid). The dict lets the cancel endpoints
+    # address a specific request and lets the dashboard cancel-button
+    # path resolve a card without needing to reconstruct (agent_id,
+    # service) identity. State is small (a handful of open asks at a
+    # time per fleet) and intentionally NOT persisted: a mesh restart
+    # already loses the in-flight steer-message contract anyway, so the
+    # cards just become stale on the dashboard and gracefully degrade
+    # (the Cancel button 404s, which the UI handles).
+    help_requests: dict[str, dict] = {}
+    _MAX_HELP_REQUESTS = 256  # cap so a noisy agent can't OOM the host
+    app.help_requests = help_requests  # exposed for tests + dashboard
+
+    def _record_help_request(
+        kind: str, agent_id: str, payload: dict,
+    ) -> str:
+        """Register an open help request and return its request_id."""
+        if len(help_requests) >= _MAX_HELP_REQUESTS:
+            # Evict oldest to bound growth.
+            oldest = min(
+                help_requests.items(),
+                key=lambda kv: kv[1].get("created_at", 0),
+            )[0]
+            help_requests.pop(oldest, None)
+        request_id = str(_uuid.uuid4())
+        help_requests[request_id] = {
+            "kind": kind,
+            "agent_id": agent_id,
+            "created_at": time.time(),
+            "status": "open",
+            "payload": payload,
+        }
+        return request_id
+
     # Rollout: auto-run the legacy blackboard → tasks migration once
     # at startup so existing fleets transition seamlessly when the v2
     # flag flips on. The helper is idempotent (keyed on the legacy
@@ -1648,6 +1683,12 @@ def create_mesh_app(
         if not re.match(r"^[a-zA-Z0-9_.\-]{1,128}$", name):
             raise HTTPException(400, "Invalid credential name")
 
+        request_id = _record_help_request(
+            "credential_request",
+            agent_id,
+            {"name": name, "service": service[:128]},
+        )
+
         if event_bus:
             event_bus.emit(
                 "credential_request",
@@ -1656,10 +1697,11 @@ def create_mesh_app(
                     "name": name,
                     "description": description[:500],
                     "service": service[:128],
+                    "request_id": request_id,
                 },
             )
 
-        return {"requested": True, "name": name}
+        return {"requested": True, "name": name, "request_id": request_id}
 
     @app.post("/mesh/browser-login-request")
     async def browser_login_request(data: dict, request: Request) -> dict:
@@ -1707,6 +1749,12 @@ def create_mesh_app(
         if not service:
             raise HTTPException(400, "Service name is required")
 
+        request_id = _record_help_request(
+            "browser_login_request",
+            agent_id,
+            {"service": service[:128]},
+        )
+
         if event_bus:
             # OAuth callback URLs (?code=...&state=...) and other
             # query-string secrets must not leak to the dashboard event
@@ -1720,10 +1768,16 @@ def create_mesh_app(
                     "url": redact_url(url)[:2048],
                     "service": service[:128],
                     "description": description[:500],
+                    "request_id": request_id,
                 },
             )
 
-        return {"requested": True, "service": service, "target_agent": agent_id}
+        return {
+            "requested": True,
+            "service": service,
+            "target_agent": agent_id,
+            "request_id": request_id,
+        }
 
     @app.post("/mesh/browser-captcha-help-request")
     async def browser_captcha_help_request(
@@ -1762,6 +1816,12 @@ def create_mesh_app(
         if not description:
             raise HTTPException(400, "Description is required")
 
+        request_id = _record_help_request(
+            "browser_captcha_help_request",
+            agent_id,
+            {"service": service[:128]},
+        )
+
         if event_bus:
             event_bus.emit(
                 "browser_captcha_help_request",
@@ -1769,10 +1829,188 @@ def create_mesh_app(
                 data={
                     "service": service[:128],
                     "description": description[:500],
+                    "request_id": request_id,
                 },
             )
 
-        return {"requested": True, "service": service, "target_agent": agent_id}
+        return {
+            "requested": True,
+            "service": service,
+            "target_agent": agent_id,
+            "request_id": request_id,
+        }
+
+    def _cancel_help_request(
+        kind: str, request_id: str, reason: str,
+    ) -> dict:
+        """Resolve an open help request as cancelled.
+
+        Returns the popped record. Raises HTTPException(404) if the id
+        is unknown or already resolved. Caller is responsible for
+        emitting any follow-up event / steer.
+        """
+        record = help_requests.get(request_id)
+        if record is None:
+            raise HTTPException(
+                404, f"{kind} request not found or already resolved",
+            )
+        if record.get("kind") != kind:
+            raise HTTPException(
+                404, f"{kind} request not found or already resolved",
+            )
+        if record.get("status") != "open":
+            raise HTTPException(
+                404, f"{kind} request not found or already resolved",
+            )
+        record["status"] = "cancelled"
+        record["reason"] = reason
+        # Pop after mutating so the dict is the source of truth on
+        # whether the request is still resolvable.
+        help_requests.pop(request_id, None)
+        return record
+
+    async def _enqueue_cancel_steer(agent_id: str, message: str) -> None:
+        """Push a steer message to the awaiting agent.
+
+        Best-effort: silently swallows if no lane manager is wired
+        (mesh-only test setup) or the agent isn't registered.
+        """
+        if lane_manager is None or not agent_id:
+            return
+        try:
+            from src.shared.trace import new_trace_id
+            await lane_manager.enqueue(
+                agent_id, sanitize_for_prompt(message),
+                mode="steer", trace_id=new_trace_id(),
+            )
+        except Exception as e:
+            logger.warning("cancel-steer enqueue failed for %s: %s", agent_id, e)
+
+    @app.post("/mesh/credential-request/{request_id}/cancel")
+    async def credential_request_cancel(
+        request_id: str, data: dict, request: Request,
+    ) -> dict:
+        """User cancelled a pending credential request from the dashboard.
+
+        Pops the open record, emits ``credential_request_cancelled``
+        so all card copies update, and pushes a steer message to the
+        requesting agent so it can react instead of waiting on a
+        credential that will never arrive.
+        """
+        # Loopback or operator only — same access model as the dashboard
+        # cancel proxy that fronts this.
+        caller = _extract_verified_agent_id(request)
+        if caller != "operator" and not _is_internal_caller(request):
+            raise HTTPException(
+                403, "Only the operator can cancel a credential request",
+            )
+        reason = (data or {}).get("reason", "user_cancelled")
+        record = _cancel_help_request("credential_request", request_id, reason)
+        agent_id = record["agent_id"]
+        service = record["payload"].get("service") or record["payload"].get("name", "")
+        name = record["payload"].get("name", "")
+        if event_bus:
+            event_bus.emit(
+                "credential_request_cancelled",
+                agent=agent_id,
+                data={
+                    "request_id": request_id,
+                    "name": name,
+                    "service": service,
+                    "reason": reason,
+                },
+            )
+        await _enqueue_cancel_steer(
+            agent_id,
+            f"The user cancelled your request for credential '{name}'. "
+            f"They did not provide it. Skip this step or ask "
+            f"differently — do not retry the same request immediately.",
+        )
+        return {
+            "ok": True,
+            "request_id": request_id,
+            "status": "cancelled",
+            "reason": reason,
+        }
+
+    @app.post("/mesh/browser-login-request/{request_id}/cancel")
+    async def browser_login_request_cancel(
+        request_id: str, data: dict, request: Request,
+    ) -> dict:
+        """User cancelled a pending browser login request."""
+        caller = _extract_verified_agent_id(request)
+        if caller != "operator" and not _is_internal_caller(request):
+            raise HTTPException(
+                403, "Only the operator can cancel a browser login request",
+            )
+        reason = (data or {}).get("reason", "user_cancelled")
+        record = _cancel_help_request(
+            "browser_login_request", request_id, reason,
+        )
+        agent_id = record["agent_id"]
+        service = record["payload"].get("service", "")
+        if event_bus:
+            event_bus.emit(
+                "browser_login_cancelled",
+                agent=agent_id,
+                data={
+                    "request_id": request_id,
+                    "service": service,
+                    "reason": reason,
+                },
+            )
+        await _enqueue_cancel_steer(
+            agent_id,
+            f"The user cancelled the browser login for {service}. "
+            f"You may need to find an alternative approach or ask "
+            f"again later. Do not retry the same login immediately.",
+        )
+        return {
+            "ok": True,
+            "request_id": request_id,
+            "status": "cancelled",
+            "reason": reason,
+        }
+
+    @app.post("/mesh/browser-captcha-help-request/{request_id}/cancel")
+    async def browser_captcha_help_request_cancel(
+        request_id: str, data: dict, request: Request,
+    ) -> dict:
+        """User cancelled a pending CAPTCHA-help request."""
+        caller = _extract_verified_agent_id(request)
+        if caller != "operator" and not _is_internal_caller(request):
+            raise HTTPException(
+                403, "Only the operator can cancel a CAPTCHA-help request",
+            )
+        reason = (data or {}).get("reason", "user_cancelled")
+        record = _cancel_help_request(
+            "browser_captcha_help_request", request_id, reason,
+        )
+        agent_id = record["agent_id"]
+        service = record["payload"].get("service", "")
+        if event_bus:
+            event_bus.emit(
+                "browser_captcha_help_cancelled",
+                agent=agent_id,
+                data={
+                    "request_id": request_id,
+                    "service": service,
+                    "reason": reason,
+                },
+            )
+        await _enqueue_cancel_steer(
+            agent_id,
+            f"The user cancelled the CAPTCHA help request for "
+            f"{service}. Try a different approach (wait + retry, "
+            f"escalate via notify_user). Do not re-request the same "
+            f"captcha help immediately.",
+        )
+        return {
+            "ok": True,
+            "request_id": request_id,
+            "status": "cancelled",
+            "reason": reason,
+        }
 
     @app.get("/mesh/agents")
     async def list_agents(request: Request, project: str = "", agent_id: str = "") -> dict:
@@ -3127,6 +3365,83 @@ def create_mesh_app(
         project_md.write_text(f"# {name}\n\n{context}\n")
 
         return {"updated": True, "project": name}
+
+    @app.post("/mesh/projects/{name}/goal")
+    async def mesh_set_project_goal(name: str, request: Request) -> dict:
+        """Set a project's north star + success criteria (mesh-authed proxy).
+
+        Operator-only (or internal localhost callers). Validates length
+        limits then persists to ``metadata.yaml`` in place. No confirmation
+        gate — this is meta-config the user explicitly asked for.
+        """
+        _require_any_auth(request)
+        caller = _extract_verified_agent_id(request)
+        if caller != "operator" and not _is_internal_caller(request):
+            raise HTTPException(403, "Only the operator can manage projects")
+        from src.cli.config import PROJECTS_DIR, _load_projects
+
+        body = await request.json()
+        north_star_raw = body.get("north_star")
+        success_criteria_raw = body.get("success_criteria")
+
+        # Normalize and validate.
+        if north_star_raw is None:
+            north_star: str | None = None
+        else:
+            north_star = sanitize_for_prompt(str(north_star_raw)).strip()
+            if len(north_star) > 2000:
+                raise HTTPException(
+                    400, "north_star must be 2000 characters or fewer",
+                )
+            if not north_star:
+                north_star = None
+
+        success_criteria: list[str] | None
+        if success_criteria_raw is None:
+            success_criteria = None
+        else:
+            if not isinstance(success_criteria_raw, list):
+                raise HTTPException(
+                    400, "success_criteria must be a list of strings",
+                )
+            if len(success_criteria_raw) > 10:
+                raise HTTPException(
+                    400, "success_criteria may contain at most 10 items",
+                )
+            cleaned: list[str] = []
+            for item in success_criteria_raw:
+                sc = sanitize_for_prompt(str(item)).strip()
+                if not sc:
+                    continue
+                if len(sc) > 200:
+                    raise HTTPException(
+                        400,
+                        "each success_criteria entry must be 200 characters or fewer",
+                    )
+                cleaned.append(sc)
+            success_criteria = cleaned or None
+
+        projects = _load_projects()
+        if name not in projects:
+            raise HTTPException(404, f"Project '{name}' not found")
+
+        import yaml
+        meta_file = PROJECTS_DIR / name / "metadata.yaml"
+        if not meta_file.exists():
+            raise HTTPException(404, f"Project '{name}' has no metadata file")
+        with open(meta_file) as f:
+            meta = yaml.safe_load(f) or {}
+        meta["north_star"] = north_star
+        meta["success_criteria"] = success_criteria
+        with open(meta_file, "w") as f:
+            yaml.dump(meta, f, default_flow_style=False, sort_keys=False)
+
+        return {
+            "success": True,
+            "project_name": name,
+            "north_star": north_star,
+            "success_criteria": success_criteria,
+        }
 
     # === Orchestration Tasks v2 (Task 6) ===
 
