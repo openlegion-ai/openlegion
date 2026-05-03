@@ -84,7 +84,7 @@ function dashboard() {
       'browser_login_request', 'browser_login_completed', 'browser_login_cancelled',
       'browser_captcha_help_request', 'browser_captcha_help_completed', 'browser_captcha_help_cancelled',
       // Task 9 — Workplace tab + pending action review
-      'task_created', 'task_status_changed',
+      'task_created', 'task_status_changed', 'task_outcome',
       'pending_action_created', 'pending_action_resolved', 'pending_action_expired',
     ],
 
@@ -352,6 +352,17 @@ function dashboard() {
     workplaceLoading: false,
     workplaceTaskColumns: ['pending', 'accepted', 'working', 'blocked', 'done'],
     workplaceProjectFilter: '',
+
+    // Workplace task drill-in modal (PR 4) — populated lazily on
+    // card click. ``drillInData`` carries ``{task, events, artifacts}``
+    // from /api/workplace/tasks/{id}; the comment box is reset on
+    // every open so prior text doesn't bleed across tasks.
+    drillInTaskId: null,
+    drillInData: null,
+    drillInComment: '',
+    drillInLoading: false,
+    drillInSubmitting: false,
+    drillInError: '',
 
     // System tab — sub-navigation
     systemTab: 'activity',
@@ -1450,6 +1461,150 @@ function dashboard() {
       return (this.workplaceTasks || []).filter(t => t.status === status);
     },
 
+    // ── Task drill-in modal (PR 4) ────────────────────────
+
+    async openTaskDrillIn(taskId) {
+      if (!taskId) return;
+      this.drillInTaskId = taskId;
+      this.drillInData = null;
+      this.drillInComment = '';
+      this.drillInError = '';
+      this.drillInLoading = true;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/workplace/tasks/${encodeURIComponent(taskId)}`);
+        if (!resp.ok) {
+          const data = await resp.json().catch(() => ({}));
+          this.drillInError = data.detail || `Failed to load task (HTTP ${resp.status})`;
+          return;
+        }
+        this.drillInData = await resp.json();
+      } catch (e) {
+        this.drillInError = e.message || String(e);
+      } finally {
+        this.drillInLoading = false;
+      }
+    },
+
+    closeTaskDrillIn() {
+      this.drillInTaskId = null;
+      this.drillInData = null;
+      this.drillInComment = '';
+      this.drillInError = '';
+      this.drillInLoading = false;
+      this.drillInSubmitting = false;
+    },
+
+    drillInIsTerminal() {
+      const t = this.drillInData?.task;
+      if (!t) return false;
+      return t.status === 'done' || t.status === 'failed' || t.status === 'cancelled';
+    },
+
+    drillInOutcomeLabel(outcome) {
+      if (outcome === 'accepted') return 'Accepted';
+      if (outcome === 'rework') return 'Marked for rework';
+      if (outcome === 'rejected') return 'Rejected';
+      return '';
+    },
+
+    drillInTimeToComplete() {
+      const t = this.drillInData?.task;
+      if (!t || !t.created_at || !t.completed_at) return '';
+      const secs = Math.max(0, Math.round(t.completed_at - t.created_at));
+      if (secs < 60) return `${secs}s`;
+      const mins = Math.floor(secs / 60);
+      if (mins < 60) return `${mins}m ${secs % 60}s`;
+      const hrs = Math.floor(mins / 60);
+      return `${hrs}h ${mins % 60}m`;
+    },
+
+    drillInFormatTimestamp(ts) {
+      if (!ts) return '';
+      try {
+        return new Date(ts * 1000).toLocaleString();
+      } catch (_) {
+        return '';
+      }
+    },
+
+    drillInCanSubmit(outcome) {
+      if (this.drillInSubmitting) return false;
+      if (!this.drillInData?.task) return false;
+      if (this.drillInData.task.outcome) return false;  // single-rating
+      if (outcome === 'accepted') return true;
+      return Boolean((this.drillInComment || '').trim());
+    },
+
+    async submitOutcome(outcome) {
+      if (!this.drillInTaskId) return;
+      if (!this.drillInCanSubmit(outcome)) return;
+      this.drillInSubmitting = true;
+      try {
+        const resp = await fetch(
+          `${window.__config.apiBase}/workplace/tasks/${encodeURIComponent(this.drillInTaskId)}/outcome`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Requested-With': 'XMLHttpRequest',
+            },
+            body: JSON.stringify({ outcome, feedback: this.drillInComment || '' }),
+          }
+        );
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          this.drillInError = data.detail || `Submit failed (HTTP ${resp.status})`;
+          return;
+        }
+        // Optimistically reflect outcome in the local lists so the
+        // kanban / outputs tab shows the rating without waiting for
+        // the next reload.
+        const updated = data.task || {};
+        for (const list of [this.workplaceTasks, this.workplaceOutputs]) {
+          const row = (list || []).find(r => r.id === this.drillInTaskId);
+          if (row) {
+            row.outcome = updated.outcome || outcome;
+            row.feedback_text = updated.feedback_text ?? (this.drillInComment || null);
+          }
+        }
+        if (outcome === 'rework' && data.rework_task_id) {
+          this.showToast(`Rework task created${data.rework_assignee ? ' for ' + data.rework_assignee : ''}.`);
+        } else if (outcome === 'rework' && data.rework_error) {
+          this.showToast(`Outcome saved, but rework spawn failed: ${data.rework_error}`);
+        } else {
+          this.showToast(`Outcome recorded: ${this.drillInOutcomeLabel(outcome) || outcome}.`);
+        }
+        this.closeTaskDrillIn();
+      } catch (e) {
+        this.drillInError = e.message || String(e);
+      } finally {
+        this.drillInSubmitting = false;
+      }
+    },
+
+    handleDrillInKey(evt) {
+      // Modal-scoped shortcuts. Skip when typing in the comment
+      // textarea so 'a'/'r'/'x' keys don't fire while writing
+      // feedback. Also skip when no task is loaded.
+      if (!this.drillInTaskId || !this.drillInData?.task) return;
+      const tag = (evt.target?.tagName || '').toLowerCase();
+      if (tag === 'textarea' || tag === 'input' || tag === 'select') return;
+      const key = evt.key?.toLowerCase();
+      if (key === 'a' && this.drillInCanSubmit('accepted')) {
+        evt.preventDefault();
+        this.submitOutcome('accepted');
+      } else if (key === 'r') {
+        evt.preventDefault();
+        // Focus the comment box so the operator can type the rework brief.
+        const ta = document.getElementById('drill-in-comment');
+        if (ta) ta.focus();
+      } else if (key === 'x') {
+        evt.preventDefault();
+        const ta = document.getElementById('drill-in-comment');
+        if (ta) ta.focus();
+      }
+    },
+
     workplaceFormatExpiry(expiresAt) {
       if (!expiresAt) return '';
       const remain = Math.max(0, Math.floor(expiresAt - (Date.now() / 1000)));
@@ -1523,6 +1678,21 @@ function dashboard() {
         if (t) {
           t.status = data.new_status;
           if (data.assignee) t.assignee = data.assignee;
+        }
+      } else if (evt.type === 'task_outcome') {
+        // Reflect the rating across every list that may show this
+        // task. Background reload remains the source of truth.
+        for (const list of [this.workplaceTasks, this.workplaceOutputs]) {
+          const row = (list || []).find(r => r.id === data.task_id);
+          if (row) {
+            row.outcome = data.outcome;
+            row.feedback_text = data.feedback || row.feedback_text || null;
+          }
+        }
+        // If this task is open in the drill-in modal, sync it too.
+        if (this.drillInData?.task && this.drillInData.task.id === data.task_id) {
+          this.drillInData.task.outcome = data.outcome;
+          this.drillInData.task.feedback_text = data.feedback || null;
         }
       } else if (evt.type === 'pending_action_created') {
         if (!this.workplacePending.find(p => p.nonce === data.nonce)) {
@@ -1665,6 +1835,7 @@ function dashboard() {
       // reflects task lifecycle and pending-action arrivals without a
       // full reload.
       if (evt.type === 'task_created' || evt.type === 'task_status_changed' ||
+          evt.type === 'task_outcome' ||
           evt.type === 'pending_action_created' || evt.type === 'pending_action_resolved' ||
           evt.type === 'pending_action_expired') {
         this.handleWorkplaceEvent(evt);

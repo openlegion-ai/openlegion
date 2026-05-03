@@ -45,6 +45,16 @@ VALID_STATUSES: frozenset[str] = frozenset({
 
 TERMINAL_STATUSES: frozenset[str] = frozenset({"done", "failed", "cancelled"})
 
+# Outcome enum (Task 9 PR 4) — operator-supplied judgement on a
+# completed task. ``None`` means "not yet rated"; the three concrete
+# values are write-once (re-rating requires an explicit unset path
+# which we do not implement at this slice).
+VALID_OUTCOMES: frozenset[str] = frozenset({"accepted", "rework", "rejected"})
+
+# Feedback length cap (chars). Bounded so the SQLite row stays small
+# and the UI textarea doesn't smuggle a multi-MB blob into the table.
+MAX_FEEDBACK_CHARS: int = 2000
+
 # Allowed status transitions. Keys are FROM, values are sets of valid TOs.
 # Terminal states (done / failed / cancelled) appear here with empty sets
 # so the validator's lookup never KeyErrors.
@@ -204,6 +214,29 @@ class Tasks:
                 CREATE INDEX IF NOT EXISTS idx_task_events_task
                     ON task_events (task_id, created_at);
             """)
+            # Task 9 PR 4 — outcome capture migration. Existing
+            # databases predate the outcome / feedback columns; ALTER
+            # TABLE ... ADD COLUMN is a metadata-only op in SQLite so
+            # this is fast on populated DBs and safe to re-run after
+            # the column already exists (we filter known names below).
+            existing = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
+            }
+            outcome_columns = (
+                ("outcome", "TEXT"),
+                ("feedback_text", "TEXT"),
+                ("previous_task_id", "TEXT"),
+            )
+            for col_name, col_type in outcome_columns:
+                if col_name not in existing:
+                    conn.execute(
+                        f"ALTER TABLE tasks ADD COLUMN {col_name} {col_type}"
+                    )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tasks_previous_task "
+                "ON tasks (previous_task_id)"
+            )
 
     # ── Helpers ─────────────────────────────────────────────────
 
@@ -236,13 +269,17 @@ class Tasks:
             "updated_at": row[16],
             "completed_at": row[17],
             "retention_until": row[18],
+            "outcome": row[19],
+            "feedback_text": row[20],
+            "previous_task_id": row[21],
         }
 
     _SELECT_COLS = (
         "id, project_id, parent_task_id, title, description, creator, "
         "assignee, status, priority, dependencies_json, artifact_refs_json, "
         "blocker_note, origin_kind, origin_channel, origin_user, "
-        "created_at, updated_at, completed_at, retention_until"
+        "created_at, updated_at, completed_at, retention_until, "
+        "outcome, feedback_text, previous_task_id"
     )
 
     def _emit_event(
@@ -634,6 +671,185 @@ class Tasks:
                 conn.execute("ROLLBACK")
                 raise
         return self.get(task_id)  # type: ignore[return-value]
+
+    # ── Outcome capture (Task 9 PR 4) ───────────────────────────
+
+    def set_outcome(
+        self,
+        task_id: str,
+        outcome: str,
+        feedback_text: str | None = None,
+        *,
+        actor: str = "operator",
+    ) -> dict:
+        """Record an operator outcome rating for a completed task.
+
+        ``outcome`` must be one of :data:`VALID_OUTCOMES`. The task must
+        already be in a terminal status (``done`` / ``failed`` /
+        ``cancelled``) — outcome ratings only make sense for finished
+        work. Outcomes are write-once at this slice; re-rating raises
+        :class:`InvalidStatusTransition` so the audit trail stays
+        unambiguous.
+
+        Emits a ``task_outcome`` audit event row + a ``task_outcome``
+        EventBus notification so the dashboard can update the modal /
+        kanban without a full reload.
+        """
+        if outcome not in VALID_OUTCOMES:
+            raise ValueError(
+                f"unknown outcome: {outcome!r} "
+                f"(expected one of {sorted(VALID_OUTCOMES)})"
+            )
+        feedback = (feedback_text or "").strip() or None
+        if feedback is not None and len(feedback) > MAX_FEEDBACK_CHARS:
+            raise ValueError(
+                f"feedback_text exceeds {MAX_FEEDBACK_CHARS} chars"
+            )
+        now = time.time()
+        emitted: tuple[str, str | None, str | None] | None = None
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = conn.execute(
+                    "SELECT status, outcome, project_id, assignee "
+                    "FROM tasks WHERE id=?",
+                    (task_id,),
+                ).fetchone()
+                if not row:
+                    conn.execute("ROLLBACK")
+                    raise TaskNotFound(task_id)
+                current_status, current_outcome, project_id, assignee = row
+                if current_status not in TERMINAL_STATUSES:
+                    conn.execute("ROLLBACK")
+                    raise InvalidStatusTransition(
+                        f"cannot set outcome on non-terminal task {task_id} "
+                        f"(status={current_status!r})"
+                    )
+                if current_outcome is not None:
+                    conn.execute("ROLLBACK")
+                    raise InvalidStatusTransition(
+                        f"outcome already set for {task_id} "
+                        f"(current={current_outcome!r})"
+                    )
+                conn.execute(
+                    "UPDATE tasks SET outcome=?, feedback_text=?, "
+                    "updated_at=? WHERE id=?",
+                    (outcome, feedback, now, task_id),
+                )
+                self._emit_event(
+                    conn, task_id, "task_outcome", actor,
+                    {"outcome": outcome, "feedback": feedback},
+                )
+                conn.execute("COMMIT")
+                emitted = (current_status, project_id, assignee)
+            except (TaskNotFound, InvalidStatusTransition):
+                raise
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+        if emitted is not None:
+            current_status, project_id, assignee = emitted
+            self._safe_emit(
+                "task_outcome",
+                agent=actor,
+                data={
+                    "task_id": task_id,
+                    "project_id": project_id,
+                    "assignee": assignee,
+                    "status": current_status,
+                    "outcome": outcome,
+                    "feedback": feedback,
+                    "actor": actor,
+                    "ts": now,
+                },
+            )
+        return self.get(task_id)  # type: ignore[return-value]
+
+    def create_rework_task(
+        self,
+        previous_task_id: str,
+        feedback_text: str,
+        *,
+        actor: str = "operator",
+    ) -> dict:
+        """Spawn a new task from a "needs rework" outcome.
+
+        Inherits ``assignee`` and ``project_id`` from ``previous_task_id``
+        so the same agent picks up the redo. The new task's title is
+        ``"Rework: {previous_title}"`` and its description (the brief
+        the agent reads) is the operator's feedback. ``previous_task_id``
+        is set on the new row so the lineage is queryable.
+
+        Raises :class:`TaskNotFound` if the source task does not exist
+        and :class:`ValueError` if the feedback is empty / oversized.
+        """
+        feedback = (feedback_text or "").strip()
+        if not feedback:
+            raise ValueError("feedback_text is required for rework")
+        if len(feedback) > MAX_FEEDBACK_CHARS:
+            raise ValueError(
+                f"feedback_text exceeds {MAX_FEEDBACK_CHARS} chars"
+            )
+        previous = self.get(previous_task_id)
+        if previous is None:
+            raise TaskNotFound(previous_task_id)
+        new_title = f"Rework: {previous['title']}"[:200]
+        new_id = f"task_{uuid.uuid4().hex[:12]}"
+        now = time.time()
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO tasks "
+                "(id, project_id, parent_task_id, title, description, "
+                "creator, assignee, status, priority, dependencies_json, "
+                "artifact_refs_json, blocker_note, origin_kind, "
+                "origin_channel, origin_user, created_at, updated_at, "
+                "completed_at, retention_until, outcome, feedback_text, "
+                "previous_task_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, NULL, NULL, "
+                "NULL, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?)",
+                (
+                    new_id,
+                    previous.get("project_id"),
+                    previous.get("parent_task_id"),
+                    new_title,
+                    feedback,
+                    actor,
+                    previous["assignee"],
+                    previous.get("priority", 0),
+                    (previous.get("origin") or {}).get("kind"),
+                    (previous.get("origin") or {}).get("channel"),
+                    (previous.get("origin") or {}).get("user"),
+                    now, now,
+                    previous_task_id,
+                ),
+            )
+            self._emit_event(
+                conn, new_id, "created", actor,
+                {
+                    "title": new_title,
+                    "assignee": previous["assignee"],
+                    "project_id": previous.get("project_id"),
+                    "previous_task_id": previous_task_id,
+                    "kind": "rework",
+                },
+            )
+        # Surface to the dashboard so the kanban / activity feed
+        # picks up the new card without polling.
+        self._safe_emit(
+            "task_created",
+            agent=actor,
+            data={
+                "task_id": new_id,
+                "project_id": previous.get("project_id"),
+                "creator": actor,
+                "assignee": previous["assignee"],
+                "title": new_title,
+                "status": "pending",
+                "previous_task_id": previous_task_id,
+                "created_at": now,
+            },
+        )
+        return self.get(new_id)  # type: ignore[return-value]
 
     def list_events(self, task_id: str) -> list[dict]:
         """Return audit events for ``task_id`` ordered oldest-first."""
