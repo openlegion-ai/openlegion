@@ -1503,7 +1503,11 @@ async def browser_solve_captcha(
         "auto-solve attempts, or when ``browser_solve_captcha`` returned "
         "``rate_limited`` / ``cost_cap``. Mirrors ``request_browser_login`` "
         "— a handoff card appears in the dashboard, and you receive a "
-        "steer notification when the operator finishes (success or cancel)."
+        "steer notification when the operator finishes (success or cancel). "
+        "If the user cancels via the dashboard Cancel button, you'll get "
+        "a steer telling you so — do NOT immediately re-request the same "
+        "captcha help; try a different approach (wait + retry, or "
+        "escalate via notify_user)."
     ),
     parameters={
         "service": {
@@ -1547,10 +1551,13 @@ async def request_captcha_help(
         return {"error": f"browser-side captcha-help record failed: {e}"}
 
     # Then emit the dashboard handoff card via the mesh helper.
+    request_id = ""
     try:
-        await mesh_client.request_captcha_help(
+        resp = await mesh_client.request_captcha_help(
             service=service, description=description,
         )
+        if isinstance(resp, dict):
+            request_id = str(resp.get("request_id") or "")
     except Exception as e:
         logger.warning(
             "Failed to emit captcha help request for %s: %s", service, e,
@@ -1565,7 +1572,7 @@ async def request_captcha_help(
             ),
         }
 
-    return {
+    result: dict = {
         "requested": True,
         "service": service,
         "message": (
@@ -1575,6 +1582,9 @@ async def request_captcha_help(
             f"message. Do NOT use browser tools until then."
         ),
     }
+    if request_id:
+        result["request_id"] = request_id
+    return result
 
 
 @skill(
@@ -1585,7 +1595,10 @@ async def request_captcha_help(
         "login that can't be done via API keys (e.g. Twitter, LinkedIn, "
         "TikTok web). The browser navigates to the login URL and an "
         "interactive VNC viewer appears in the user's chat. After the user "
-        "finishes, you receive a notification.\n\n"
+        "finishes, you receive a notification. The user can also CANCEL "
+        "via the dashboard's Cancel button; if so, you'll get a steer "
+        "telling you the login was cancelled — do NOT immediately retry "
+        "the same login. Find an alternative or ask the user differently.\n\n"
         "IMPORTANT: session cookies persist in the TARGET agent's browser "
         "profile. If you're orchestrating a login for another agent (e.g. "
         "operator setting up a login for social-manager), pass ``agent_id`` "
@@ -1645,11 +1658,14 @@ async def request_browser_login(
         return {"error": f"Failed to navigate browser to {url}: {e}"}
 
     # Emit browser login request event to the dashboard
+    request_id = ""
     try:
-        await mesh_client.request_browser_login(
+        resp = await mesh_client.request_browser_login(
             url=url, service=service, description=description,
             target_agent_id=target,
         )
+        if isinstance(resp, dict):
+            request_id = str(resp.get("request_id") or "")
     except Exception as e:
         logger.warning("Failed to emit browser login request for %s: %s", service, e)
         return {
@@ -1664,7 +1680,7 @@ async def request_browser_login(
             ),
         }
 
-    return {
+    result: dict = {
         "requested": True,
         "service": service,
         "url": url,
@@ -1675,6 +1691,9 @@ async def request_browser_login(
             f"Do NOT use browser tools until the user confirms."
         ),
     }
+    if request_id:
+        result["request_id"] = request_id
+    return result
 
 
 @skill(

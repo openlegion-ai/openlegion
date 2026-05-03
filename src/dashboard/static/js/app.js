@@ -81,6 +81,7 @@ function dashboard() {
       'tool_start', 'tool_result', 'text_delta', 'llm_call',
       'blackboard_write', 'health_change', 'notification', 'workspace_updated',
       'heartbeat_complete', 'cron_change', 'credit_exhausted', 'credential_request',
+      'credential_request_cancelled',
       'browser_login_request', 'browser_login_completed', 'browser_login_cancelled',
       'browser_captcha_help_request', 'browser_captcha_help_completed', 'browser_captcha_help_cancelled',
       // Task 9 — Workplace tab + pending action review
@@ -1881,6 +1882,8 @@ function dashboard() {
           name: evt.data.name,
           service: evt.data.service || '',
           saved: false,
+          cancelled: false,
+          request_id: evt.data.request_id || '',
           ts: evtTs,
         };
         // Show in the requesting agent's chat
@@ -1911,6 +1914,27 @@ function dashboard() {
         }
       }
 
+      // Sync credential_request card across agent chat + operator chat
+      // when the user cancels (PR 3). Match by request_id when present
+      // (new flow); fall back to name (legacy messages without an id).
+      if (evt.type === 'credential_request_cancelled' && agent && evt.data) {
+        const reqId = evt.data.request_id || '';
+        const name = evt.data.name || '';
+        for (const chatId of [agent, 'operator']) {
+          const hist = this.chatHistories[chatId];
+          if (!hist) continue;
+          for (const m of hist) {
+            if (m.role !== 'credential_request') continue;
+            if (chatId !== agent && m._from_agent !== agent) continue;
+            const matchById = reqId && m.request_id === reqId;
+            const matchByName = !reqId && name && m.name === name;
+            if (matchById || matchByName) {
+              m.cancelled = true;
+            }
+          }
+        }
+      }
+
       // Surface browser login requests as interactive VNC cards in chat.
       if (evt.type === 'browser_login_request' && agent && evt.data && evt.data.service) {
         const evtTs = this._normalizeEventTs(evt);
@@ -1921,6 +1945,7 @@ function dashboard() {
           url: evt.data.url || '',
           completed: false,
           cancelled: false,
+          request_id: evt.data.request_id || '',
           ts: evtTs,
         };
         // Show in the requesting agent's chat
@@ -1990,6 +2015,7 @@ function dashboard() {
           url: evt.data.url || '',
           completed: false,
           cancelled: false,
+          request_id: evt.data.request_id || '',
           ts: evtTs,
         };
         // Show in the requesting agent's chat
@@ -5264,17 +5290,65 @@ function dashboard() {
     async _cancelBrowserLogin(msg, agentId) {
       const prev = { completed: msg.completed, cancelled: msg.cancelled };
       msg.cancelled = true;
+      // PR 3: prefer the request_id-scoped endpoint when the message
+      // carries one — that path also pushes a cancellation steer to the
+      // awaiting agent so it can react instead of waiting on a TTL.
+      // Old messages (pre-PR 3) fall back to the legacy endpoint.
       try {
-        const resp = await fetch(window.__config.apiBase + '/browser-login/cancel', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-          body: JSON.stringify({ agent_id: agentId || '', service: msg.service }),
-        });
+        let resp;
+        if (msg.request_id) {
+          resp = await fetch(
+            window.__config.apiBase
+              + '/browser-login-request/' + encodeURIComponent(msg.request_id) + '/cancel',
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+              body: JSON.stringify({ reason: 'user_cancelled' }),
+            },
+          );
+        } else {
+          resp = await fetch(window.__config.apiBase + '/browser-login/cancel', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+            body: JSON.stringify({ agent_id: agentId || '', service: msg.service }),
+          });
+        }
         if (!resp.ok) {
           msg.cancelled = prev.cancelled;
           this.showToast('Failed to notify agent — please try again');
         }
       } catch (_) {
+        msg.cancelled = prev.cancelled;
+        this.showToast('Network error — please try again');
+      }
+    },
+
+    async _cancelCredentialRequest(msg) {
+      // PR 3: cancel an open credential request via the new
+      // request_id-scoped endpoint. The mesh emits
+      // ``credential_request_cancelled`` (other card copies sync
+      // from the same handler that watches for the event) and pushes
+      // a steer to the awaiting agent.
+      if (!msg || !msg.request_id) return;
+      const prev = { saved: msg.saved, cancelled: msg.cancelled };
+      msg.cancelled = true;
+      try {
+        const resp = await fetch(
+          window.__config.apiBase
+            + '/credential-request/' + encodeURIComponent(msg.request_id) + '/cancel',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+            body: JSON.stringify({ reason: 'user_cancelled' }),
+          },
+        );
+        if (!resp.ok) {
+          msg.saved = prev.saved;
+          msg.cancelled = prev.cancelled;
+          this.showToast('Failed to cancel — please try again');
+        }
+      } catch (_) {
+        msg.saved = prev.saved;
         msg.cancelled = prev.cancelled;
         this.showToast('Network error — please try again');
       }
@@ -5302,12 +5376,26 @@ function dashboard() {
     async _cancelBrowserCaptchaHelp(msg, agentId) {
       const prev = { completed: msg.completed, cancelled: msg.cancelled };
       msg.cancelled = true;
+      // PR 3: prefer request_id-scoped endpoint when available.
       try {
-        const resp = await fetch(window.__config.apiBase + '/browser-captcha-help/cancel', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-          body: JSON.stringify({ agent_id: agentId || '', service: msg.service }),
-        });
+        let resp;
+        if (msg.request_id) {
+          resp = await fetch(
+            window.__config.apiBase
+              + '/browser-captcha-help-request/' + encodeURIComponent(msg.request_id) + '/cancel',
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+              body: JSON.stringify({ reason: 'user_cancelled' }),
+            },
+          );
+        } else {
+          resp = await fetch(window.__config.apiBase + '/browser-captcha-help/cancel', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+            body: JSON.stringify({ agent_id: agentId || '', service: msg.service }),
+          });
+        }
         if (!resp.ok) {
           msg.cancelled = prev.cancelled;
           this.showToast('Failed to notify agent — please try again');
