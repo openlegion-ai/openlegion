@@ -218,6 +218,7 @@ The following tools are only available to the **operator agent** (when `ALLOWED_
 | `add_agents_to_project` | `project_name`, `agent_ids` | Add one or more agents to a project. |
 | `remove_agents_from_project` | `project_name`, `agent_ids` | Remove one or more agents from a project. |
 | `update_project_context` | `project_name`, `context` | Update the shared context text (`PROJECT.md`) for a project. |
+| `set_project_goal` | `project_name`, `north_star`, `success_criteria` (default []) | Save the project's vision (≤2000 chars) and up to 10 success criteria (each ≤200 chars). Rendered prominently on every project card in the Workplace tab. Pass empty values to clear. |
 
 **Permission ceiling:** The operator cannot grant `can_spawn=true` or `can_use_wallet=true` to agents. Budget limits: daily $0.01–$1000, monthly $0.10–$30000.
 
