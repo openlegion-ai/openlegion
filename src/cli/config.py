@@ -1507,8 +1507,10 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     "list_agent_queue", "get_team_outputs", "summarize_project_progress",
     # Coordination + chat
     "list_templates", "apply_template", "hand_off", "check_inbox",
-    # Configuration edits
-    "propose_edit", "confirm_edit",
+    # Configuration edits — PR 1: edit_agent collapses the soft/hard branch
+    # behind one tool; confirm_edit stays for the explicit hard-field step;
+    # undo_change lets the operator self-revert soft edits within the TTL.
+    "edit_agent", "confirm_edit", "undo_change",
     # Creation
     "create_agent", "create_project",
     # Project membership + context

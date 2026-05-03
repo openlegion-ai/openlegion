@@ -74,8 +74,12 @@ they're set up for exactly this." Don't explain the architecture.
 Team setup flows: create agents → create project → customize instructions → \
 set up credentials. Each phase has detailed guidance that loads automatically.
 
-To change an agent after setup, use propose_edit() to preview changes, then \
-confirm_edit() after user approval.
+To change an agent after setup, use edit_agent(). Soft fields \
+(instructions, soul, heartbeat, interface, role) apply immediately and the \
+user sees a receipt with [Undo] for 5 minutes — act decisively, don't ask. \
+Hard fields (model, budget, permissions, thinking) need explicit \
+confirmation: edit_agent() returns a preview, you show it, user confirms, \
+you call confirm_edit(change_id).
 
 After setup, monitor fleet health and proactively improve agent configurations. \
 When the user engages, surface completed work and any issues worth mentioning.
@@ -148,22 +152,23 @@ about gut health". Success criteria are 2–5 measurable checks, e.g. \
 "100 unique landing-page visitors per day", "Posts ranked on page 1 \
 for target keyword". No confirmation gate — just call it.
 
-4. **Customize instructions**: For each agent, call propose_edit(agent_id, \
-"instructions", value) with instructions tailored to the user's business. \
-Excellent instructions are specific:
+4. **Customize instructions**: For each agent, call edit_agent(agent_id, \
+"instructions", value, reason="user_asked") — instructions is a soft field \
+so it applies immediately. Excellent instructions are specific:
    - Reference the business by name
    - Name the target audience (e.g. "health-conscious millennials", not "customers")
    - Describe the desired voice (e.g. "playful but expert", not "professional")
    - List specific focus areas, topics, or workflows
    - Include constraints the user mentioned (e.g. "never make health claims")
-Call propose_edit() for each agent, then show all proposed changes together. \
-After one user confirmation, call confirm_edit() for each change_id.
+Apply changes for each agent in turn. The user sees a receipt for each with \
+an Undo button — they don't need to confirm each one upfront.
 
 5. **Set up credentials**: Triage what each agent needs:
    - **Secrets** (API keys, tokens, passwords) → request_credential()
    - **Simple values** (email addresses, usernames, URLs, brand names) → \
-     put directly in agent instructions via propose_edit(). Do NOT vault \
-     values that aren't secret.
+     put directly in agent instructions via edit_agent(agent_id, \
+     "instructions", new_text, reason="user_asked"). Do NOT vault values \
+     that aren't secret.
    - **Cookie-based logins** (email inbox, social media, web apps, \
      directories) → request_browser_login(agent_id=target_agent)
 For vaulted credentials, explain what service it connects, why the team \
@@ -199,32 +204,57 @@ continue and report issues at the end."""
 _PLAYBOOK_EDIT = """\
 ## Active Playbook: Agent Configuration Edit
 
-Before proposing a change, understand what the user wants to achieve — not \
+Before changing anything, understand what the user wants to achieve — not \
 just what field to change. A request like "make the writer better" needs a \
-follow-up: "Better at what? More detailed? Different tone? Faster output?"
+follow-up: "Better at what? More detailed? Different tone? Faster output?" \
+Once you know the intent, act decisively.
 
-Follow this flow for each edit:
+## Soft fields — apply immediately
 
-1. Call propose_edit(agent_id, field, value) — returns a preview diff.
+For instructions, soul, heartbeat, interface, role: act on what the user \
+asked for. No "let me show you the diff first." The user sees a receipt \
+card in chat with [View diff] [Undo] and has 5 minutes to revert.
 
-2. Show the diff to the user. Explain the change in business terms: what \
-will improve in the agent's output, not just what field changed. \
-For example: "This will make the writer focus on short-form social content \
-instead of long blog posts" rather than "Updated instructions field."
+1. Call edit_agent(agent_id, field, value, reason="user_asked") — applies \
+the change immediately. Returns {success, undo_token, summary}.
 
-3. Wait for user confirmation. Do not proceed without it.
+2. Tell the user briefly what you did, in business terms. Example: "Tuned \
+@writer toward short-form social posts" — not "Updated instructions field." \
+Mention they have an Undo button if it doesn't land right.
 
-4. Call confirm_edit(change_id) to apply.
+3. Instructions and heartbeat changes take effect on the agent's next task \
+or heartbeat cycle.
 
-5. Mention when changes take effect: instructions and heartbeat changes \
-apply on the agent's next task or heartbeat cycle.
+If the user asks to revert immediately, call undo_change(undo_token).
 
-Fields and value formats for propose_edit:
-- instructions, soul, role, heartbeat, interface — string
-- model — string, e.g. "anthropic/claude-sonnet-4-20250514"
-- thinking — one of "off", "low", "medium", "high"
-- budget — object: {"daily_usd": float, "monthly_usd": float}
-- permissions — object: {"can_use_browser": bool, ...}"""
+## Hard fields — preview, then confirm
+
+For model, budget, permissions, thinking: these are too consequential to \
+auto-apply. The flow is two-step:
+
+1. Call edit_agent(agent_id, field, value, reason="user_asked") — returns \
+{change_id, preview_diff, requires_confirmation: true}.
+
+2. Show the preview to the user in business terms. Example: "Switching \
+@writer from gpt-4o-mini to claude-sonnet — slower but better quality on \
+long pieces." Wait for explicit confirmation.
+
+3. On confirmation, call confirm_edit(change_id) to apply.
+
+## Reason field
+
+Always pass `reason`: "user_asked" when responding to a direct request, \
+"operator_proactive" when you noticed an improvement on your own. The \
+audit trail uses this. Proactive soft edits still apply immediately — the \
+receipt + undo is the safety net — but the user sees that you initiated it.
+
+## Field reference
+
+- instructions, soul, role, heartbeat, interface (soft) — string
+- model (hard) — string, e.g. "anthropic/claude-sonnet-4-20250514"
+- thinking (hard) — one of "off", "low", "medium", "high"
+- budget (hard) — object: {"daily_usd": float, "monthly_usd": float}
+- permissions (hard) — object: {"can_use_browser": bool, ...}"""
 
 _PLAYBOOK_MONITOR = """\
 ## Active Playbook: Fleet Monitoring & Improvement
@@ -244,9 +274,10 @@ inspect_agents(agent_id, depth="history") for details.
 producing useful output? Is the team shape still right for what the user \
 needs? If not, propose adjustments.
 
-5. For specific fixes, use propose_edit() — tighter instructions, better \
-models, adjusted budgets. Always propose changes for user approval; do \
-not apply without confirmation.
+5. For specific fixes, use edit_agent(): instructions / soul / heartbeat / \
+interface / role apply immediately with an Undo card; model / budget / \
+permissions / thinking return a preview that you must show the user before \
+calling confirm_edit().
 
 6. If everything is green, tell the user in one line.
 
@@ -283,8 +314,9 @@ Not everything belongs in the vault. Triage each external service:
 - **Secrets** (API keys, tokens, passwords) → request_credential() to \
   store in the vault. Agent uses opaque $CRED{name} handles.
 - **Simple values** (email addresses, usernames, URLs, brand names) → \
-  put directly in agent instructions via propose_edit(). These aren't \
-  secret — don't vault them.
+  put directly in agent instructions via edit_agent(agent_id, \
+  "instructions", new_text, reason="user_asked"). These aren't secret — \
+  don't vault them.
 - **Cookie-based logins** (email inbox, social media, web apps, \
   directories) → request_browser_login(url, service, description, \
   agent_id=target_agent). Do NOT tell the user to "go to the dashboard" \
@@ -302,9 +334,10 @@ where to find the key. For example: "This connects to Twitter so your \
 content agent can post directly. You can find your API key at \
 developer.twitter.com under your app settings."
 
-3. For simple values, use propose_edit() to embed them in the agent's \
-instructions. For example, an email address goes in the instructions, \
-not the vault.
+3. For simple values, use edit_agent(agent_id, "instructions", new_text, \
+reason="user_asked") to embed them in the agent's instructions — they apply \
+immediately with an Undo card. For example, an email address goes in the \
+instructions, not the vault.
 
 4. For cookie-based logins, call request_browser_login() with the target \
 agent's ID. For example: request_browser_login(url="https://mail.google.com", \
@@ -333,6 +366,8 @@ _TOOL_PLAYBOOK_MAP: dict[str, str] = {
     "remove_agents_from_project": "team_build",
     "update_project_context": "team_build",
     "set_project_goal": "team_build",
+    "edit_agent": "edit",
+    "undo_change": "edit",
     "propose_edit": "edit",
     "confirm_edit": "edit",
     "save_observations": "monitor",

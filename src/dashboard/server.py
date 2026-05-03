@@ -5742,6 +5742,43 @@ def create_dashboard_router(
             "action_kind": record["action_kind"],
         }
 
+    @api_router.post("/api/changes/undo/{undo_token}")
+    async def api_changes_undo(undo_token: str, request: Request) -> dict:
+        """Reverse a recent soft edit (PR 1).
+
+
+        Backs the [Undo] button on the operator_action_receipt card.
+        Proxies to the mesh's ``/mesh/changes/undo/{token}`` endpoint over
+        loopback so the YAML/permissions writes go through the canonical
+        mesh helper rather than being duplicated here. Sets the
+        ``x-mesh-internal`` + ``X-Agent-ID: operator`` headers so the
+        mesh's ``_resolve_agent_id`` recognizes us as the operator
+        (the dashboard is the trusted in-process caller).
+        """
+        import httpx
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.post(
+                    f"http://127.0.0.1:{mesh_port}/mesh/changes/undo/{undo_token}",
+                    json={},
+                    headers={
+                        "X-Requested-With": "XMLHttpRequest",
+                        "x-mesh-internal": "1",
+                        "X-Agent-ID": "operator",
+                    },
+                )
+        except Exception as e:
+            raise HTTPException(502, f"Mesh unreachable: {e}")
+        if resp.status_code == 404:
+            raise HTTPException(404, "Undo token unknown, expired, or already used")
+        if resp.status_code >= 400:
+            try:
+                detail = resp.json().get("detail", resp.text)
+            except Exception:
+                detail = resp.text
+            raise HTTPException(resp.status_code, detail)
+        return resp.json()
+
     # ── Task 9 PR 4 — Workplace task drill-in + outcome capture ────
     #
     # Three endpoints back the per-task modal: a full snapshot

@@ -34,7 +34,85 @@ _VALID_FIELDS = frozenset({
     "interface", "thinking", "budget", "permissions",
 })
 
+# PR 1 — soft edits apply immediately + emit a receipt with 5min Undo;
+# hard edits keep the propose+confirm dance (model swap, budget change,
+# and permissions are too consequential to undo via a button).
+_SOFT_EDIT_FIELDS = frozenset({
+    "instructions", "soul", "heartbeat", "interface", "role",
+})
+_HARD_EDIT_FIELDS = frozenset({"model", "budget", "permissions", "thinking"})
+
+# Audited reasons the operator can declare. ``user_asked`` is the common
+# path (the user said "do X"); ``operator_proactive`` is the "I noticed"
+# case which still skips the gate for soft edits but logs differently.
+_VALID_EDIT_REASONS = frozenset({"user_asked", "operator_proactive"})
+
 _OPERATOR_AGENT_ID = "operator"
+
+
+def _validate_edit(agent_id: str, field: str, value) -> dict | None:
+    """Shared validation for edit_agent / propose_edit. Returns error dict or None.
+
+    Centralises the common gates (self-modification block, valid field,
+    permission ceiling, budget bounds, thinking enum) so both the
+    propose-flow and the new edit_agent tool produce identical error
+    messages for the same misuse. Returns ``None`` when the call is
+    safe to forward to the mesh.
+    """
+    if agent_id.lower() == _OPERATOR_AGENT_ID:
+        return {
+            "error": (
+                "Cannot modify the operator agent. "
+                "Use the dashboard to change operator settings."
+            ),
+        }
+    if field not in _VALID_FIELDS:
+        return {
+            "error": (
+                f"Invalid field '{field}'. "
+                f"Must be one of: {sorted(_VALID_FIELDS)}"
+            ),
+        }
+    if field == "permissions" and isinstance(value, dict):
+        for key, max_val in _OPERATOR_PERMISSION_CEILING.items():
+            if key not in value:
+                continue
+            if isinstance(max_val, bool):
+                if value[key] and not max_val:
+                    return {
+                        "error": (
+                            f"Permission ceiling exceeded: '{key}' cannot be set "
+                            "to True by the operator. Use the dashboard for "
+                            "advanced permissions."
+                        ),
+                    }
+            elif isinstance(max_val, list):
+                requested = set(value.get(key, []))
+                allowed = set(max_val)
+                if "*" not in allowed and not requested.issubset(allowed):
+                    excess = requested - allowed
+                    return {
+                        "error": (
+                            f"Permission ceiling exceeded: '{key}' patterns "
+                            f"{excess} exceed allowed {allowed}. Use the "
+                            "dashboard for advanced permissions."
+                        ),
+                    }
+    if field == "budget" and isinstance(value, dict):
+        daily = value.get("daily_usd", 0)
+        monthly = value.get("monthly_usd", 0)
+        if not isinstance(daily, (int, float)) or not (0.01 <= daily <= 1000):
+            return {"error": f"daily_usd must be 0.01-1000, got {daily}"}
+        if not isinstance(monthly, (int, float)) or not (0.10 <= monthly <= 30000):
+            return {"error": f"monthly_usd must be 0.10-30000, got {monthly}"}
+    if field == "thinking" and value not in ("off", "low", "medium", "high"):
+        return {
+            "error": (
+                f"thinking must be 'off', 'low', 'medium', or 'high', "
+                f"got '{value}'"
+            ),
+        }
+    return None
 
 
 @skill(
@@ -196,6 +274,193 @@ async def confirm_edit(change_id: str, *, mesh_client=None, _messages=None, **_k
                 ),
             }
         return {"error": f"Failed to confirm edit: {e}"}
+
+
+@skill(
+    name="edit_agent",
+    description=(
+        "Change an agent's configuration. Branches internally on field severity:\n"
+        "- Soft fields (instructions, soul, heartbeat, interface, role) "
+        "apply IMMEDIATELY. The user sees a receipt card with [View diff] "
+        "[Undo] (5-minute undo window). No confirmation step needed — "
+        "act decisively on what the user asked for.\n"
+        "- Hard fields (model, budget, permissions, thinking) return a "
+        "preview + change_id. Show the preview to the user; on explicit "
+        "confirmation call confirm_edit(change_id).\n\n"
+        "Always pass `reason` so the audit trail captures intent.\n\n"
+        "Fields & value formats:\n"
+        "- instructions/soul/heartbeat/interface/role: string\n"
+        "- budget: {\"daily_usd\": float, \"monthly_usd\": float}\n"
+        "- permissions: {\"can_use_browser\": bool, ...}\n"
+        "- thinking: \"off\" | \"low\" | \"medium\" | \"high\"\n"
+        "- model: e.g. \"anthropic/claude-sonnet-4-20250514\""
+    ),
+    parameters={
+        "agent_id": {
+            "type": "string",
+            "description": "Target agent ID (use list_agents to find IDs)",
+        },
+        "field": {
+            "type": "string",
+            "description": "Config field to change",
+            "enum": [
+                "instructions", "soul", "model", "role", "heartbeat",
+                "interface", "thinking", "budget", "permissions",
+            ],
+        },
+        "value": {
+            "type": ["string", "object"],
+            "description": "New value for the field",
+        },
+        "reason": {
+            "type": "string",
+            "description": (
+                "Why you're making this change. 'user_asked' when the user "
+                "directly requested it; 'operator_proactive' when you "
+                "noticed an opportunity yourself."
+            ),
+            "enum": ["user_asked", "operator_proactive"],
+            "default": "user_asked",
+        },
+    },
+)
+async def edit_agent(
+    agent_id: str,
+    field: str,
+    value,
+    reason: str = "user_asked",
+    *,
+    mesh_client=None,
+    _messages=None,
+    **_kw,
+) -> dict:
+    """Change agent config — soft fields direct-apply, hard fields propose.
+
+    For soft fields: skips the provenance gate and writes immediately;
+    the receipt card with [Undo] is the safety net (user can always
+    revert within 5 minutes). For hard fields: behaves like the legacy
+    propose_edit — the operator must show preview to the user and wait
+    for explicit confirm before calling confirm_edit(change_id).
+    """
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    if reason not in _VALID_EDIT_REASONS:
+        return {
+            "error": (
+                f"reason must be one of {sorted(_VALID_EDIT_REASONS)}, "
+                f"got {reason!r}"
+            ),
+        }
+
+    err = _validate_edit(agent_id, field, value)
+    if err is not None:
+        return err
+
+    if field in _SOFT_EDIT_FIELDS:
+        # Soft path: direct write + receipt + undo. Provenance is NOT
+        # required because the receipt card with [Undo] gives the user
+        # a 5-minute reversal window. ``operator_proactive`` is logged
+        # via ``reason`` for audit but doesn't change the gate.
+        if reason == "operator_proactive":
+            logger.info(
+                "operator_proactive soft-edit: agent=%s field=%s",
+                agent_id, field,
+            )
+        try:
+            result = await mesh_client.edit_soft(agent_id, field, value, reason)
+        except Exception as e:
+            return {"error": f"Failed to apply edit: {e}"}
+        return {
+            "success": True,
+            "applied": True,
+            "agent_id": agent_id,
+            "field": field,
+            "undo_token": result.get("undo_token"),
+            "expires_at": result.get("expires_at"),
+            "summary": result.get("summary"),
+            "message": (
+                "Done. The user sees a receipt card and can Undo within 5 minutes."
+            ),
+        }
+
+    # Hard path: provenance gate + propose+confirm. Mirrors the legacy
+    # propose_edit behaviour so existing dashboard surfacing keeps
+    # working until PR 2 swaps the amber bubble for an inline card.
+    from src.agent.loop import _last_message_is_user_origin
+
+    if _messages is None or not _last_message_is_user_origin(_messages):
+        return {
+            "error": "provenance_check_failed",
+            "detail": (
+                f"Hard field {field!r} requires explicit user request. "
+                "Ask the user, then retry edit_agent after they confirm."
+            ),
+        }
+
+    try:
+        result = await mesh_client.propose_config_change(agent_id, field, value)
+    except Exception as e:
+        return {"error": f"Failed to propose edit: {e}"}
+    # Annotate so the operator's prompt machinery knows it must show the
+    # preview and wait for confirmation before calling confirm_edit.
+    result.setdefault("requires_confirmation", True)
+    result.setdefault(
+        "next_step",
+        "Show the preview_diff to the user. On explicit confirmation, "
+        "call confirm_edit(change_id).",
+    )
+    return result
+
+
+@skill(
+    name="undo_change",
+    description=(
+        "Reverse a recent soft edit by undo_token. Use this if you realize "
+        "mid-conversation that an edit you applied was wrong, OR if the user "
+        "asks you to undo a change. 5-minute window from when the edit was "
+        "made; 404 if expired or already undone."
+    ),
+    parameters={
+        "undo_token": {
+            "type": "string",
+            "description": "The undo_token from a prior edit_agent call",
+        },
+    },
+)
+async def undo_change(
+    undo_token: str,
+    *,
+    mesh_client=None,
+    **_kw,
+) -> dict:
+    """Reverse a recent soft edit. Single-shot; double-undo returns 404."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    if not undo_token or not isinstance(undo_token, str):
+        return {"error": "undo_token is required"}
+    try:
+        result = await mesh_client.undo_change(undo_token)
+    except Exception as e:
+        msg = str(e)
+        if "404" in msg or "not found" in msg.lower() or "expired" in msg.lower():
+            return {
+                "error": "undo_unavailable",
+                "detail": (
+                    "Undo token unknown, expired (5min window passed), or "
+                    "already used."
+                ),
+            }
+        return {"error": f"Failed to undo change: {e}"}
+    return {
+        "success": True,
+        "agent_id": result.get("agent_id"),
+        "field": result.get("field"),
+        "restored_value": result.get("restored_value"),
+    }
 
 
 # ── Observations ─────────────────────────────────────────────

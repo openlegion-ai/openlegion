@@ -212,8 +212,9 @@ The following tools are only available to the **operator agent** (when `ALLOWED_
 | `manage_project` | `project_name`, `action` (enum: `archive` / `delete`) | Lifecycle for a project. `delete` requires the project to already be archived. Replaces `archive_project` / `delete_project`. |
 | `manage_agent` | `agent_id`, `action` (enum: `archive` / `delete`) | Lifecycle for an agent. Same archive-then-delete contract as `manage_project`. Replaces `archive_agent` / `delete_agent`. |
 | `manage_task` | `task_id`, `action` (enum: `cancel` / `reroute` / `retry`), `new_assignee` (default "", only for `reroute`) | Single entry point for task ops. Replaces `cancel_task` / `reroute_task` / `retry_failed_task`. |
-| `propose_edit` | `agent_id`, `field` (enum: `instructions` / `soul` / `model` / `role` / `heartbeat` / `thinking` / `budget` / `permissions`), `value` | Propose a config change for an agent. Returns a `change_id` that must be confirmed. |
-| `confirm_edit` | `change_id` | Apply a previously proposed edit. |
+| `edit_agent` | `agent_id`, `field` (enum: `instructions` / `soul` / `role` / `heartbeat` / `interface` / `model` / `thinking` / `budget` / `permissions`), `value`, `reason` (default `"user_asked"`; values: `user_asked` / `operator_proactive`) | Single entry point for agent config changes. Soft fields (instructions/soul/role/heartbeat/interface) apply immediately and surface as a receipt with 5-minute Undo. Hard fields (model/thinking/budget/permissions) return a `change_id` that must be confirmed via `confirm_edit`. |
+| `undo_change` | `undo_token` | Reverse a soft-edit applied via `edit_agent`. Token is returned with the edit and remains valid for 5 minutes. |
+| `confirm_edit` | `change_id` | Apply a previously proposed hard-field edit (model/thinking/budget/permissions). |
 | `save_observations` | `fleet_summary`, `agents_attention` (default []), `cost_trend`, `notes` (default "") | Persist fleet health observations for human review. |
 | `create_agent` | `name`, `role`, `model` (default ""), `instructions`, `soul` (default "") | Create a new agent. |
 | `create_project` | `name`, `description`, `agent_ids` (default []) | Create a new project and optionally add agents. |

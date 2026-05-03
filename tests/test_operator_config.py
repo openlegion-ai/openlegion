@@ -244,9 +244,9 @@ class TestOperatorConstants:
 
     def test_allowed_tools_populated(self):
         from src.cli.config import _OPERATOR_ALLOWED_TOOLS, _OPERATOR_HEARTBEAT_TOOLS
-        # PR 0 consolidated to 24 tools; PR 5 adds set_project_goal so the
-        # operator can save the user's stated goal as a first-class artifact.
-        assert len(_OPERATOR_ALLOWED_TOOLS) == 25
+        # PR 0 consolidated to 24, PR 5 added set_project_goal (=25),
+        # PR 1 swaps propose_edit (-1) for edit_agent + undo_change (+2) → +1.
+        assert len(_OPERATOR_ALLOWED_TOOLS) == 26
         assert len(_OPERATOR_HEARTBEAT_TOOLS) == 4
         # Heartbeat tools should be a subset of allowed tools
         assert set(_OPERATOR_HEARTBEAT_TOOLS).issubset(set(_OPERATOR_ALLOWED_TOOLS))
@@ -270,6 +270,17 @@ class TestOperatorConstants:
             "reroute_task", "cancel_task", "retry_failed_task",
         ):
             assert tool not in _OPERATOR_ALLOWED_TOOLS
+
+    def test_pr1_edit_tools_present(self):
+        """PR 1 — edit_agent + undo_change in allowlist; propose_edit removed."""
+        from src.cli.config import _OPERATOR_ALLOWED_TOOLS
+        assert "edit_agent" in _OPERATOR_ALLOWED_TOOLS
+        assert "undo_change" in _OPERATOR_ALLOWED_TOOLS
+        # propose_edit is no longer LLM-facing — the operator uses
+        # edit_agent which branches on field severity internally.
+        assert "propose_edit" not in _OPERATOR_ALLOWED_TOOLS
+        # confirm_edit is kept for the hard-field confirm step.
+        assert "confirm_edit" in _OPERATOR_ALLOWED_TOOLS
 
     def test_request_browser_login_in_allowlist(self):
         """Operator must be allowed to delegate browser login requests to workers.
@@ -313,7 +324,10 @@ class TestOperatorConstants:
             _PLAYBOOK_TEAM_BUILD,
         )
 
-        assert "propose_edit" in _PLAYBOOK_TEAM_BUILD
+        # PR 1 — playbook now references edit_agent for soft fields and
+        # confirm_edit for the hard-field follow-up step.
+        assert "edit_agent" in _PLAYBOOK_TEAM_BUILD
+        assert "edit_agent" in _PLAYBOOK_EDIT
         assert "confirm_edit" in _PLAYBOOK_EDIT
         assert "inspect_agents" in _PLAYBOOK_MONITOR
         assert "request_credential" in _PLAYBOOK_CREDENTIALS

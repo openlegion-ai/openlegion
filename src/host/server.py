@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.responses import StreamingResponse
 
+from src.host.change_history import ChangeHistory
 from src.host.credentials import is_system_credential
 from src.host.orchestration import (
     VALID_STATUSES,
@@ -481,6 +482,14 @@ def create_mesh_app(
     # ``pending_action_*`` events to the dashboard.
     if event_bus is not None:
         pending_actions.set_event_bus(event_bus)
+
+    # PR 1 — soft-edit receipts + 5-minute Undo. Mirrors the pending_actions
+    # plumbing: SQLite-backed, exposed on the app for tests/dashboard,
+    # event_bus wired so the dashboard can render receipt cards live.
+    change_history = ChangeHistory(db_path="data/change_history.db")
+    app.change_history = change_history
+    if event_bus is not None:
+        change_history.set_event_bus(event_bus)
 
     # Task 6: durable orchestration task records. The store is only
     # constructed when the feature flag is on; when off, the new
@@ -4579,7 +4588,16 @@ def create_mesh_app(
                     monthly_usd=_monthly,
                 )
 
-        # Hot-reload: push to running agent's workspace
+        # Hot-reload: push to running agent's workspace.
+        #
+        # Receipt-ordering note: callers (soft-edit / confirm-edit /
+        # undo) emit the operator_action_receipt event AFTER this
+        # function returns. Hot-reload failures here are intentionally
+        # swallowed because the YAML write is the source of truth —
+        # the running agent will pick up the change on its next
+        # restart even if the live PUT fails. So a receipt is emitted
+        # for any change whose YAML write succeeded, regardless of
+        # whether the running agent's in-memory state caught up.
         if transport and agent_id in router.agent_registry:
             workspace_map = {
                 "instructions": "INSTRUCTIONS.md",
@@ -4662,6 +4680,267 @@ def create_mesh_app(
         )
 
         return {"success": True, "agent_id": agent_id, "field": field}
+
+    # === PR 1 — soft-edit / undo flow ===
+    #
+    # Soft fields apply directly with no propose+confirm round-trip.
+    # Hard fields keep the existing propose/confirm path. The split
+    # is a UX pattern — both still pass through the agent's
+    # provenance gate at the operator-tool layer.
+    _SOFT_EDIT_FIELDS = {
+        "instructions", "soul", "heartbeat", "interface", "role",
+    }
+    _HARD_EDIT_FIELDS = {"model", "budget", "permissions", "thinking"}
+
+    def _humanize_field(field: str) -> str:
+        """Display name for a field — used in receipt summaries."""
+        return {
+            "instructions": "instructions",
+            "soul": "personality",
+            "heartbeat": "heartbeat",
+            "interface": "interface contract",
+            "role": "role",
+        }.get(field, field)
+
+    @app.post("/mesh/agents/{agent_id}/edit-soft")
+    async def edit_agent_soft(agent_id: str, request: Request) -> dict:
+        """Apply a soft-edit immediately and emit a revertible receipt.
+
+        Path constraints:
+          * Caller must be ``operator`` (or an internal caller for tests).
+          * ``X-Origin`` must validate (``_validated_origin``) — the
+            operator-tool layer already did its own provenance check, so
+            here we just require *some* validatable origin and store the
+            kind on the audit trail. Soft edits intentionally do NOT
+            require ``kind="human"`` because the receipt+undo card is
+            the safety net (the user can always revert within 5min).
+          * ``field`` must be in :data:`_SOFT_EDIT_FIELDS`. Hard fields
+            return 400 with a "use propose-edit for {field}" message so
+            the operator tool can fall through to the existing path.
+
+        Returns ``{success, undo_token, expires_at, summary}``. The
+        ``operator_action_receipt`` event is emitted on the bus so the
+        dashboard can render the inline receipt card immediately.
+        """
+        _require_any_auth(request)
+        caller = _extract_verified_agent_id(request)
+        if caller != "operator" and not _is_internal_caller(request):
+            raise HTTPException(403, "Only the operator can edit agent config")
+        # We require *a* validatable origin so request-level audit fields
+        # are populated; we do NOT require human kind (see docstring).
+        origin = _validated_origin(request, caller)
+        origin_kind = origin.kind if origin is not None else None
+
+        data = await request.json()
+        field = data.get("field", "")
+        new_value = data.get("value")
+        reason = data.get("reason", "user_asked")
+        if not field:
+            raise HTTPException(400, "field is required")
+        if field in _HARD_EDIT_FIELDS:
+            raise HTTPException(
+                400,
+                f"Use /mesh/agents/{{id}}/propose for {field!r} (hard field — "
+                "requires explicit confirmation).",
+            )
+        if field not in _SOFT_EDIT_FIELDS:
+            raise HTTPException(
+                400,
+                f"Invalid field {field!r}. Soft fields: {sorted(_SOFT_EDIT_FIELDS)}",
+            )
+
+        # Self-modification block. The operator-tool layer also blocks
+        # this, but enforce server-side too in case a future caller
+        # bypasses the tool.
+        if agent_id == "operator":
+            raise HTTPException(400, "The operator agent cannot be edited via soft-edit")
+
+        from src.cli.config import _load_config
+        agent_cfg = _load_config()
+        agents = agent_cfg.get("agents", {})
+        if agent_id not in agents:
+            raise HTTPException(404, f"Agent '{agent_id}' not found")
+
+        yaml_key = _CONFIG_FIELD_MAP.get(field, field)
+        old_value = agents[agent_id].get(yaml_key, "")
+
+        # Apply directly via the same write helper used by the confirm
+        # path. ``_apply_pending_change`` is async and handles audit
+        # logging, hot-reload, and heartbeat schedule sync.
+        undo_token = str(_uuid.uuid4())
+        await _apply_pending_change(
+            undo_token,
+            {
+                "agent_id": agent_id,
+                "field": field,
+                "old_value": old_value,
+                "new_value": new_value,
+            },
+        )
+
+        # Detect older unconsumed receipts on the same field BEFORE we
+        # record the new one. They stay revertible, but rolling them
+        # back from the latest value would silently overwrite this
+        # edit; the dashboard renders a "superseded" warning so the
+        # operator knows. We compute the list before record() so we
+        # don't have to filter ourselves out.
+        prior_unconsumed = change_history.list_unconsumed_for_field(
+            agent_id, field,
+        )
+
+        # Record the change for undo. Summary uses humanized field names
+        # so receipt cards read naturally ("Updated writer's personality")
+        # without the dashboard having to do its own field translation.
+        summary = f"Updated {agent_id}'s {_humanize_field(field)}"
+        record = change_history.record(
+            undo_token=undo_token,
+            actor=caller,
+            agent_id=agent_id,
+            field=field,
+            old_value=old_value,
+            new_value=new_value,
+            summary=summary,
+            reason=reason,
+            ttl=_CHANGE_TTL_SECONDS,
+        )
+
+        # Emit the receipt event. Dashboard listens for this and appends
+        # the receipt card to the operator's chat so the user sees what
+        # happened with [View diff] [Undo] buttons. ``supersedes_count``
+        # tells the UI how many older revertible receipts on the same
+        # field this edit makes stale (the older receipts can still be
+        # undone — but doing so would erase this edit, so the dashboard
+        # surfaces a warning).
+        if event_bus is not None:
+            try:
+                event_bus.emit(
+                    "operator_action_receipt",
+                    agent="operator",
+                    data={
+                        "actor": caller,
+                        "agent_id": agent_id,
+                        "field": field,
+                        "summary": summary,
+                        "old_value": old_value,
+                        "new_value": new_value,
+                        "undo_token": undo_token,
+                        "expires_at": record["expires_at"],
+                        "reason": reason,
+                        "origin_kind": origin_kind,
+                        "supersedes_count": len(prior_unconsumed),
+                    },
+                )
+            except Exception as e:
+                logger.debug("operator_action_receipt emit failed: %s", e)
+
+        # For each older unconsumed receipt on this field, emit a
+        # ``operator_action_receipt_superseded`` event so the dashboard
+        # can transition the older card into a "superseded by newer
+        # edits" state. The older receipt is still revertible — the
+        # event is purely a UX hint that an undo here would also
+        # discard the newer edits.
+        if event_bus is not None and prior_unconsumed:
+            for prior in prior_unconsumed:
+                try:
+                    event_bus.emit(
+                        "operator_action_receipt_superseded",
+                        agent="operator",
+                        data={
+                            "undo_token": prior["undo_token"],
+                            "agent_id": agent_id,
+                            "field": field,
+                            "superseded_by_token": undo_token,
+                            "superseded_by_count": 1,
+                        },
+                    )
+                except Exception as e:
+                    logger.debug(
+                        "operator_action_receipt_superseded emit failed: %s", e,
+                    )
+
+        return {
+            "success": True,
+            "agent_id": agent_id,
+            "field": field,
+            "undo_token": undo_token,
+            "expires_at": datetime.fromtimestamp(
+                record["expires_at"], tz=timezone.utc,
+            ).isoformat(),
+            "summary": summary,
+            "supersedes_count": len(prior_unconsumed),
+        }
+
+    @app.post("/mesh/changes/undo/{undo_token}")
+    async def undo_change(undo_token: str, request: Request) -> dict:
+        """Reverse a recent soft edit. 5-minute TTL.
+
+        Looks up the token, atomically claims it (single-shot, no
+        double-undo), and reapplies the OLD value via
+        ``_apply_pending_change``. Caller must be the operator or an
+        internal caller — same bar as the soft-edit endpoint.
+        """
+        _require_any_auth(request)
+        caller = _extract_verified_agent_id(request)
+        if caller != "operator" and not _is_internal_caller(request):
+            raise HTTPException(403, "Only the operator can undo changes")
+
+        record = change_history.consume_for_undo(undo_token)
+        if record is None:
+            # Distinguish "never existed" from "expired/consumed" via
+            # peek so the dashboard can render the right copy. Both
+            # collapse to 404 from the HTTP boundary.
+            raise HTTPException(
+                404, "Undo token unknown, expired, or already used",
+            )
+
+        # Reapply the old value. Note swap: new=old (the value the user
+        # had before the edit), old=new (the value being reverted).
+        try:
+            await _apply_pending_change(
+                undo_token,
+                {
+                    "agent_id": record["agent_id"],
+                    "field": record["field"],
+                    "old_value": record["new_value"],
+                    "new_value": record["old_value"],
+                },
+            )
+        except HTTPException:
+            # Agent might have been deleted between record + undo.
+            # Surface a clean 4xx; the row has already been marked
+            # consumed so it can't be retried.
+            raise
+        except Exception as e:
+            raise HTTPException(500, f"Undo apply failed: {e}")
+
+        # Emit a "receipt undone" event so the dashboard can transition
+        # the original receipt card into a "Reverted" state.
+        if event_bus is not None:
+            try:
+                event_bus.emit(
+                    "operator_action_receipt_undone",
+                    agent="operator",
+                    data={
+                        "actor": caller,
+                        "agent_id": record["agent_id"],
+                        "field": record["field"],
+                        "summary": (
+                            f"Reverted {record['agent_id']}'s "
+                            f"{_humanize_field(record['field'])}"
+                        ),
+                        "undo_token": undo_token,
+                        "restored_value": record["old_value"],
+                    },
+                )
+            except Exception as e:
+                logger.debug("operator_action_receipt_undone emit failed: %s", e)
+
+        return {
+            "success": True,
+            "agent_id": record["agent_id"],
+            "field": record["field"],
+            "restored_value": record["old_value"],
+        }
 
     def _confirm_origin_check(request: Request, caller: str = "") -> None:
         """Task 2d: confirm-side gate — refuse non-human origins.

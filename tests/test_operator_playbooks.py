@@ -132,13 +132,17 @@ class TestPlaybookConstants:
             assert "1." in content, f"{name} should have numbered steps"
 
     def test_tool_map_covers_all_action_tools(self):
-        # All action tools should be mapped after the PR 0 consolidation
-        # (vault_list and read_agent_history were dropped from the operator
-        # surface, so they're no longer trigger tools).
+        # PR 0 consolidation dropped vault_list/read_agent_history from the
+        # operator surface. PR 5 added set_project_goal. PR 1 added
+        # edit_agent + undo_change to the edit playbook; propose_edit and
+        # confirm_edit remain mapped because they're still defined as
+        # helpers (the operator may emit a tool_call for confirm_edit on
+        # hard fields).
         expected_tools = {
             "create_agent", "apply_template", "create_project",
             "add_agents_to_project", "remove_agents_from_project",
             "update_project_context", "set_project_goal",
+            "edit_agent", "undo_change",
             "propose_edit", "confirm_edit",
             "save_observations",
             "request_credential", "request_browser_login",
@@ -150,8 +154,10 @@ class TestPlaybookConstants:
 
     def test_playbooks_have_key_tools(self):
         """Each playbook references the tools it guides the operator to use."""
-        assert "propose_edit" in _PLAYBOOK_TEAM_BUILD
-        assert "confirm_edit" in _PLAYBOOK_TEAM_BUILD
+        # PR 1 — edit_agent replaces propose_edit/confirm_edit guidance in
+        # team_build; the edit playbook references both edit_agent (always)
+        # and confirm_edit (hard-field follow-up step).
+        assert "edit_agent" in _PLAYBOOK_TEAM_BUILD
         assert "create_project" in _PLAYBOOK_TEAM_BUILD
         assert "create_agent" in _PLAYBOOK_TEAM_BUILD
         assert "apply_template" in _PLAYBOOK_TEAM_BUILD
@@ -163,8 +169,12 @@ class TestPlaybookConstants:
         assert "request_credential" in _PLAYBOOK_TEAM_BUILD
         assert "request_browser_login" in _PLAYBOOK_TEAM_BUILD
 
-        assert "propose_edit" in _PLAYBOOK_EDIT
+        assert "edit_agent" in _PLAYBOOK_EDIT
         assert "confirm_edit" in _PLAYBOOK_EDIT
+        # New guidance for the act-and-undo posture must be present.
+        assert "Undo" in _PLAYBOOK_EDIT
+        assert "soft" in _PLAYBOOK_EDIT.lower()
+        assert "hard" in _PLAYBOOK_EDIT.lower()
 
         assert "check_inbox" in _PLAYBOOK_MONITOR
         assert "get_system_status" in _PLAYBOOK_MONITOR
