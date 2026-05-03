@@ -242,7 +242,20 @@ not apply without confirmation.
 
 7. Call save_observations() with structured fleet health data.
 
-Surface issues briefly when the user engages. Mention once, don't repeat."""
+Surface issues briefly when the user engages. Mention once, don't repeat.
+
+## Outcome ratings (Workplace tab)
+
+Operators can now rate completed tasks in the Workplace tab as \
+``accepted`` / ``rework`` / ``rejected`` with a feedback comment. These \
+outcomes live on the task records you already inspect via \
+``inspect_agents`` and the task tools — no new tool is needed to read \
+them. When a user asks "who's the best for X?" or "is this agent \
+working out?", scan recent task outcomes for the candidate agents and \
+cite the accept rate alongside other health signals. ``rework`` tasks \
+spawn a follow-up task assigned to the same agent (linked via \
+``previous_task_id``) — surface that lineage when reviewing an agent's \
+recent work so you don't double-count the same effort."""
 
 _PLAYBOOK_CREDENTIALS = """\
 ## Active Playbook: Credential Setup

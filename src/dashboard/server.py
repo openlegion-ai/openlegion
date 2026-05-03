@@ -5578,6 +5578,180 @@ def create_dashboard_router(
             "action_kind": record["action_kind"],
         }
 
+    # ── Task 9 PR 4 — Workplace task drill-in + outcome capture ────
+    #
+    # Three endpoints back the per-task modal: a full snapshot
+    # (task + events + resolved artifacts), a polling-cheap events-only
+    # variant, and the POST that records an operator outcome (and
+    # optionally spawns a rework task with the same assignee).
+
+    _ARTIFACT_INLINE_CHAR_CAP = 10_000
+
+    def _resolve_artifact(ref: str) -> dict:
+        """Resolve a task ``artifact_ref`` to an inline-renderable dict.
+
+        Today every artifact_ref is a Blackboard key (the
+        ``output/{agent}/{handoff_id}`` pattern that
+        ``coordination_tool.hand_off`` writes). The dict shape is
+        ``{ref, kind, content?, content_truncated?, error?}`` so the
+        UI can render text inline (kind=``text``) and surface
+        unresolved refs (kind=``missing`` / ``error``) without
+        crashing the whole drill-in. Future storage backends (S3,
+        signed URLs) plug in here by returning ``kind="url"`` with a
+        ``url`` field.
+        """
+        out: dict = {"ref": ref}
+        if not ref:
+            out.update({"kind": "missing", "error": "empty ref"})
+            return out
+        try:
+            entry = blackboard.read(ref)
+        except Exception as e:
+            out.update({"kind": "error", "error": str(e)})
+            return out
+        if entry is None:
+            out.update({"kind": "missing"})
+            return out
+        value = entry.value
+        # Render the parsed JSON value back to text for display so
+        # the modal can show whatever the agent wrote without a
+        # second round-trip. We treat the dict ``{text: ...}`` shape
+        # specially because hand_off wraps free text that way.
+        if isinstance(value, dict) and set(value.keys()) == {"text"}:
+            text = str(value.get("text") or "")
+        elif isinstance(value, str):
+            text = value
+        else:
+            try:
+                text = json.dumps(value, indent=2, default=str)
+            except (TypeError, ValueError):
+                text = str(value)
+        truncated = False
+        if len(text) > _ARTIFACT_INLINE_CHAR_CAP:
+            text = text[:_ARTIFACT_INLINE_CHAR_CAP]
+            truncated = True
+        out.update({
+            "kind": "text",
+            "content": text,
+            "content_truncated": truncated,
+            "written_by": entry.written_by,
+            "updated_at": entry.updated_at,
+        })
+        return out
+
+    @api_router.get("/api/workplace/tasks/{task_id}")
+    async def api_workplace_task_detail(task_id: str) -> dict:
+        """Return a task plus its event timeline and resolved artifacts.
+
+        Used by the Workplace drill-in modal. ``artifacts`` is a list of
+        ``{ref, kind, content, ...}`` dicts — text is inlined up to
+        10 k chars, missing/error refs return a ``kind`` marker rather
+        than 500'ing so a partial timeline still renders.
+        """
+        if tasks_store is None or not _orchestration_v2_on():
+            raise HTTPException(404, "Tasks store not available")
+        try:
+            task = tasks_store.get(task_id)
+        except Exception as e:
+            logger.warning("workplace task fetch failed: %s", e)
+            raise HTTPException(500, "task fetch failed") from e
+        if task is None:
+            raise HTTPException(404, "Task not found")
+        try:
+            events = tasks_store.list_events(task_id)
+        except Exception as e:
+            logger.warning("workplace task events fetch failed: %s", e)
+            events = []
+        artifacts = [_resolve_artifact(ref) for ref in task.get("artifact_refs") or []]
+        return {"task": task, "events": events, "artifacts": artifacts}
+
+    @api_router.get("/api/workplace/tasks/{task_id}/events")
+    async def api_workplace_task_events(task_id: str) -> dict:
+        """Return just the event timeline for a task (cheap to poll)."""
+        if tasks_store is None or not _orchestration_v2_on():
+            raise HTTPException(404, "Tasks store not available")
+        if tasks_store.get(task_id) is None:
+            raise HTTPException(404, "Task not found")
+        try:
+            events = tasks_store.list_events(task_id)
+        except Exception as e:
+            logger.warning("workplace task events fetch failed: %s", e)
+            events = []
+        return {"task_id": task_id, "events": events}
+
+    @api_router.post("/api/workplace/tasks/{task_id}/outcome")
+    async def api_workplace_task_outcome(
+        task_id: str, request: Request,
+    ) -> dict:
+        """Record an operator outcome rating on a completed task.
+
+        Body: ``{outcome: "accepted"|"rework"|"rejected", feedback: str}``.
+        For ``rework``, also spawns a new linked task with the feedback
+        as its brief and the same assignee — the new task id is returned
+        in ``rework_task_id``.
+        """
+        from src.host.orchestration import (
+            MAX_FEEDBACK_CHARS,
+            VALID_OUTCOMES,
+            InvalidStatusTransition,
+            TaskNotFound,
+        )
+        if tasks_store is None or not _orchestration_v2_on():
+            raise HTTPException(404, "Tasks store not available")
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError) as e:
+            raise HTTPException(400, "Invalid JSON body") from e
+        if not isinstance(body, dict):
+            raise HTTPException(400, "Body must be a JSON object")
+        outcome = body.get("outcome")
+        feedback = body.get("feedback") or ""
+        if outcome not in VALID_OUTCOMES:
+            raise HTTPException(
+                400,
+                f"outcome must be one of {sorted(VALID_OUTCOMES)}",
+            )
+        if not isinstance(feedback, str):
+            raise HTTPException(400, "feedback must be a string")
+        feedback = feedback.strip()
+        if len(feedback) > MAX_FEEDBACK_CHARS:
+            raise HTTPException(
+                400, f"feedback exceeds {MAX_FEEDBACK_CHARS} chars",
+            )
+        # Rework + reject require a non-empty comment so the agent /
+        # audit trail has something to learn from. Accept can be
+        # silent (the rating itself is the signal).
+        if outcome in ("rework", "rejected") and not feedback:
+            raise HTTPException(
+                400, f"feedback is required for outcome={outcome!r}",
+            )
+        try:
+            updated = tasks_store.set_outcome(
+                task_id, outcome, feedback or None, actor="operator",
+            )
+        except TaskNotFound as e:
+            raise HTTPException(404, "Task not found") from e
+        except InvalidStatusTransition as e:
+            raise HTTPException(409, str(e)) from e
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        result: dict = {"ok": True, "task": updated}
+        if outcome == "rework":
+            try:
+                rework = tasks_store.create_rework_task(
+                    task_id, feedback, actor="operator",
+                )
+            except (TaskNotFound, ValueError) as e:
+                # The outcome itself committed; surface the rework
+                # failure in the response without rolling back the
+                # rating.
+                logger.warning("rework spawn failed for %s: %s", task_id, e)
+                result["rework_error"] = str(e)
+            else:
+                result["rework_task_id"] = rework["id"]
+                result["rework_assignee"] = rework["assignee"]
+        return result
+
     async def _proxy_help_cancel(
         kind: str, request_id: str, body: dict | None,
     ) -> dict:
