@@ -121,10 +121,25 @@ async def test_set_project_goal_requires_operator(monkeypatch):
 async def test_set_project_goal_validates_north_star_length():
     from src.agent.builtins.operator_tools import set_project_goal
 
-    too_long = "x" * 501
+    too_long = "x" * 2001
     result = await set_project_goal("growth", too_long, mesh_client=MagicMock())
     assert "error" in result
-    assert "500" in result["error"]
+    assert "2000" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_set_project_goal_accepts_long_vision_statement():
+    """A real vision statement at the 2000-char ceiling must round-trip."""
+    from src.agent.builtins.operator_tools import set_project_goal
+
+    mc = MagicMock()
+    mc.set_project_goal = AsyncMock(return_value={"success": True})
+    long_vision = "ship it. " * 200  # ~1800 chars
+    assert 500 < len(long_vision) <= 2000
+    result = await set_project_goal(
+        "growth", long_vision, mesh_client=mc,
+    )
+    assert "error" not in result
 
 
 @pytest.mark.asyncio
@@ -300,7 +315,7 @@ async def test_endpoint_set_goal_north_star_too_long_400(goal_app):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         r = await c.post(
             "/mesh/projects/growth/goal",
-            json={"north_star": "x" * 501},
+            json={"north_star": "x" * 2001},
             headers={"X-Agent-ID": "operator"},
         )
     assert r.status_code == 400

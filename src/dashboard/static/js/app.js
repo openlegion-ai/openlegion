@@ -1487,11 +1487,17 @@ function dashboard() {
       return '●';
     },
 
-    // Open the task drill-in modal. PR 4 ships the actual modal — until
-    // then this stub at least surfaces the click in the toast queue so
-    // the integration is testable.
+    // Open the task drill-in modal. PR 4 ships the actual modal loader
+    // (``loadTaskDrillIn``); until that ships we fall back to a toast so
+    // the integration is testable in either merge order. Detect at call
+    // time so a later PR 4 merge "just works" without a re-deploy of the
+    // bundle.
     openTaskDrillIn(taskId) {
       if (!taskId) return;
+      if (typeof this.loadTaskDrillIn === 'function') {
+        this.loadTaskDrillIn(taskId);
+        return;
+      }
       this.showToast(`Open task ${taskId}`);
     },
 
@@ -1566,13 +1572,26 @@ function dashboard() {
         this._pushWorkplaceFeedFromEvent('created', data, stub);
       } else if (evt.type === 'task_status_changed') {
         const t = this.workplaceTasks.find(x => x.id === data.task_id);
+        const prevStatus = t ? t.status : (data.from_status || data.old_status || '');
         if (t) {
           t.status = data.new_status;
           if (data.assignee) t.assignee = data.assignee;
+          if (data.blocker_note !== undefined) t.blocker_note = data.blocker_note;
         }
         // Surface in feed too. Background reload is source of truth on
         // reconnect; the client-built summary is best-effort.
         this._pushWorkplaceFeedFromEvent('status_changed', data, t);
+        // Pinned blockers list lives on a separate endpoint; refresh it
+        // whenever a task transitions in to or out of ``blocked`` (or
+        // when its blocker note may have changed) so the strip at the
+        // top of the feed doesn't go stale.
+        const newStatus = data.new_status || '';
+        if (
+          prevStatus === 'blocked'
+          || newStatus === 'blocked'
+        ) {
+          this.loadWorkplaceBlockers();
+        }
       } else if (evt.type === 'pending_action_created') {
         if (!this.workplacePending.find(p => p.nonce === data.nonce)) {
           this.workplacePending.push({

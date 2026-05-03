@@ -677,7 +677,7 @@ async def update_project_context(
         "north_star": {
             "type": "string",
             "description": (
-                "Free-text vision statement, ≤500 characters. "
+                "Free-text vision statement, ≤2000 characters. "
                 "e.g. 'Ship a $10k MRR SaaS landing page in 2 weeks'."
             ),
         },
@@ -709,8 +709,8 @@ async def set_project_goal(
         return {"error": "project_name is required"}
     if not isinstance(north_star, str):
         return {"error": "north_star must be a string"}
-    if len(north_star) > 500:
-        return {"error": "north_star must be 500 characters or fewer"}
+    if len(north_star) > 2000:
+        return {"error": "north_star must be 2000 characters or fewer"}
 
     cleaned_criteria: list[str] | None
     if success_criteria is None:

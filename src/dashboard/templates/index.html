@@ -3049,8 +3049,18 @@
               </div>
             </template>
 
-            <!-- Empty state for the feed itself -->
-            <template x-if="!workplaceFeed.length">
+            <!-- Empty state for the feed itself. When there are no
+                 projects yet, suggest a concrete next step instead of a
+                 plain "no activity" line; once a project exists the
+                 message reverts to the calm waiting state. -->
+            <template x-if="!workplaceFeed.length && !workplaceProjects.length">
+              <div class="text-sm text-gray-400 py-4">
+                No projects yet. Ask the operator to create one — say something like
+                <span class="italic text-gray-200">"create a project for &lt;goal&gt;"</span>
+                in the chat to get started.
+              </div>
+            </template>
+            <template x-if="!workplaceFeed.length && workplaceProjects.length">
               <div class="text-sm text-gray-500 py-4">No recent activity. Once agents start working, you'll see it here.</div>
             </template>
 

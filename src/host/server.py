@@ -3142,9 +3142,9 @@ def create_mesh_app(
             north_star: str | None = None
         else:
             north_star = sanitize_for_prompt(str(north_star_raw)).strip()
-            if len(north_star) > 500:
+            if len(north_star) > 2000:
                 raise HTTPException(
-                    400, "north_star must be 500 characters or fewer",
+                    400, "north_star must be 2000 characters or fewer",
                 )
             if not north_star:
                 north_star = None
