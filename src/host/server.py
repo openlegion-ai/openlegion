@@ -3896,10 +3896,11 @@ def create_mesh_app(
                 )
         nonce = str(_uuid.uuid4())
         members = projects[name].get("members", []) or []
+        # Short headline shown in the inline chat card (max ~80 chars
+        # so it doesn't wrap awkwardly). The longer policy explanation
+        # is kept in the payload for the legacy CLI surface.
         summary = (
-            f"Delete project {name!r} and unlink {len(members)} agent(s). "
-            "Workspaces and per-agent history are retained; project metadata, "
-            "project.md, and project blackboard rows are removed."
+            f"Delete project {name!r} and unlink {len(members)} agent(s)"
         )
         payload = {
             "name": name,
@@ -3915,6 +3916,8 @@ def create_mesh_app(
             payload=payload,
             origin_kind=origin_kind,
             ttl=_CHANGE_TTL_SECONDS,
+            summary=summary,
+            preview_diff=None,
         )
         return {
             "change_id": nonce,
@@ -3963,10 +3966,7 @@ def create_mesh_app(
                     (oldest["nonce"],),
                 )
         nonce = str(_uuid.uuid4())
-        summary = (
-            f"Delete agent {agent_id!r}. Container stopped, config and "
-            "permissions removed, workspace dropped."
-        )
+        summary = f"Delete agent {agent_id!r} permanently"
         payload = {
             "agent_id": agent_id,
             "summary": summary,
@@ -3980,6 +3980,8 @@ def create_mesh_app(
             payload=payload,
             origin_kind=origin_kind,
             ttl=_CHANGE_TTL_SECONDS,
+            summary=summary,
+            preview_diff=None,
         )
         return {
             "change_id": nonce,
@@ -4168,18 +4170,10 @@ def create_mesh_app(
 
         change_id = str(_uuid.uuid4())
         payload = {"old_value": old_value, "new_value": new_value}
-        record = pending_actions.store(
-            nonce=change_id,
-            actor="operator",
-            target_kind="agent",
-            target_id=agent_id,
-            action_kind=field,
-            payload=payload,
-            origin_kind=origin_kind,
-            ttl=_CHANGE_TTL_SECONDS,
-        )
 
-        # Generate preview diff
+        # Generate preview diff. Computed up-front so we can persist it
+        # alongside the row — the dashboard's inline pending-action card
+        # renders the diff inline without an extra round-trip.
         old_str = json.dumps(old_value, indent=2) if not isinstance(old_value, str) else old_value
         new_str = json.dumps(new_value, indent=2) if not isinstance(new_value, str) else new_value
 
@@ -4194,8 +4188,40 @@ def create_mesh_app(
                 if line not in old_lines:
                     preview += f"+ {line}\n"
 
+        # Build a one-line summary for the chat-card title. Free-text
+        # fields (instructions, soul) get a "(updated)" pseudo-summary
+        # because the diff is what carries the meaning; scalar fields
+        # show old → new with the values truncated to keep the headline
+        # readable. Full diff lives in ``preview_diff``.
+        humanized_field = field.replace("_", " ")
+        if field in ("instructions", "soul", "permissions"):
+            summary = f"Update {agent_id}'s {humanized_field}"
+        else:
+            def _short(v: object, n: int = 40) -> str:
+                s = v if isinstance(v, str) else json.dumps(v, default=str)
+                s = s.replace("\n", " ").strip()
+                return s if len(s) <= n else s[: n - 1] + "…"
+            summary = (
+                f"Switch {agent_id}'s {humanized_field} "
+                f"from {_short(old_value)} to {_short(new_value)}"
+            )
+
+        record = pending_actions.store(
+            nonce=change_id,
+            actor="operator",
+            target_kind="agent",
+            target_id=agent_id,
+            action_kind=field,
+            payload=payload,
+            origin_kind=origin_kind,
+            ttl=_CHANGE_TTL_SECONDS,
+            summary=summary,
+            preview_diff=preview,
+        )
+
         return {
             "change_id": change_id,
+            "summary": summary,
             "preview_diff": preview,
             "expires_at": datetime.fromtimestamp(
                 record["expires_at"], tz=timezone.utc,

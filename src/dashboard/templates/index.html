@@ -297,41 +297,20 @@
                 </div>
               </div>
 
-              <!-- Task 9 — Inline pending-action review.
-                   Renders one bubble per open pending nonce above the
-                   operator chat so the human can confirm/cancel in
-                   context. Backed by the same state as the System >
-                   Operator panel. -->
-              <div x-show="operatorReady && workplacePending.length" x-cloak
-                   class="px-4 pt-3 space-y-2"
-                   x-init="loadWorkplacePending()">
-                <template x-for="p in workplacePending" :key="p.nonce">
-                  <div class="bg-amber-900/15 border border-amber-700/30 rounded-2xl px-3 py-2">
-                    <div class="text-[11px] text-amber-200 font-medium">
-                      Pending action awaiting confirmation
-                    </div>
-                    <div class="text-xs text-gray-200 mt-0.5">
-                      <span class="font-medium" x-text="p.action_kind"></span>
-                      <span class="text-gray-400" x-text="' on ' + (p.target_kind || '?') + ' ' + (p.target_id || '?')"></span>
-                    </div>
-                    <div class="text-[11px] text-gray-400 mt-0.5"
-                         x-text="'expires in ' + workplaceFormatExpiry(p.expires_at) + ' · proposed by ' + (p.actor || '?')"></div>
-                    <div class="flex gap-2 mt-2">
-                      <button @click="confirmPendingAction(p.nonce)"
-                        class="text-[11px] px-2.5 py-1 rounded bg-emerald-700/40 hover:bg-emerald-700/60 text-emerald-200 transition-colors">
-                        Confirm
-                      </button>
-                      <button @click="cancelPendingAction(p.nonce)"
-                        class="text-[11px] px-2.5 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors">
-                        Cancel
-                      </button>
-                    </div>
-                  </div>
-                </template>
-              </div>
+              <!-- Pending operator-proposed actions render inline as
+                   ``pending_action_card`` chat messages (see template
+                   below) — matching the credential / browser-login
+                   pattern. The legacy amber bubble that used to live
+                   here was removed to keep one visual language for
+                   "operator wants the human to act." -->
 
-              <!-- Messages area — reuses existing chatHistories binding -->
-              <div x-show="operatorReady" id="chat-messages-operator" class="flex-1 overflow-y-auto overflow-x-hidden px-4 py-3 space-y-3">
+              <!-- Messages area — reuses existing chatHistories binding.
+                   On mount we backfill any open pending actions so the
+                   inline card surface survives a page reload (the WS
+                   stream alone only delivers events going forward). -->
+              <div x-show="operatorReady" id="chat-messages-operator"
+                   x-init="loadWorkplacePending()"
+                   class="flex-1 overflow-y-auto overflow-x-hidden px-4 py-3 space-y-3">
                 <!-- Render messages from chatHistories['operator'] -->
                 <template x-for="(msg, i) in (chatHistories['operator'] || [])" :key="i">
                   <div>
@@ -606,6 +585,109 @@
                                   <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
                                 </svg>
                                 <span x-text="'CAPTCHA help for ' + msg.service + ' was cancelled.'"></span>
+                              </div>
+                            </template>
+                          </div>
+                        </div>
+                      </div>
+                    </template>
+                    <!-- Pending operator action card. One visual
+                         language for "operator wants the human to act":
+                         matches the credential / browser-login pattern.
+                         Renders a one-line summary, a collapsible diff
+                         (config edits), an optional type-to-confirm gate
+                         (destructive ops), Confirm/Cancel buttons, and
+                         a TTL countdown. Auto-transitions to Confirmed,
+                         Cancelled, or Expired in place when the
+                         ``pending_action_resolved`` / ``..._expired``
+                         event lands. -->
+                    <template x-if="msg.role === 'pending_action_card'">
+                      <div class="flex justify-start gap-2.5">
+                        <div class="shrink-0 mt-1">
+                          <img src="/dashboard/static/avatars/operator.png" alt="Operator" class="w-6 h-6 rounded-full">
+                        </div>
+                        <div class="max-w-[80%] min-w-0">
+                          <div class="px-4 py-3 rounded-2xl rounded-bl-md bg-gray-800"
+                            :class="msg._isDestructive ? 'border border-rose-600/40' : 'border border-indigo-600/30'"
+                            x-data="{ diffOpen: false, typed: '', acting: false }">
+                            <!-- Pending state -->
+                            <template x-if="!msg.resolved_status">
+                              <div>
+                                <div class="flex items-center gap-2 mb-2">
+                                  <template x-if="msg._isDestructive">
+                                    <svg class="w-4 h-4 text-rose-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+                                      <path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M1 7h22M9 7V4a2 2 0 012-2h2a2 2 0 012 2v3"/>
+                                    </svg>
+                                  </template>
+                                  <template x-if="!msg._isDestructive">
+                                    <svg class="w-4 h-4 text-indigo-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+                                      <path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/>
+                                      <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+                                    </svg>
+                                  </template>
+                                  <span class="text-xs font-medium shrink-0"
+                                    :class="msg._isDestructive ? 'text-rose-300' : 'text-indigo-300'"
+                                    x-text="msg._isDestructive ? 'Confirm destructive action' : 'Confirm change'"></span>
+                                  <span class="ml-auto text-[10px] text-gray-500 shrink-0"
+                                    x-text="'Expires in ' + workplaceFormatExpiry(msg.expires_at)"></span>
+                                </div>
+                                <p class="text-xs text-gray-200 mb-2" x-text="msg.summary || (msg.action_kind + ' on ' + (msg.target_kind || '?') + ' ' + (msg.target_id || '?'))"></p>
+                                <template x-if="msg.preview_diff">
+                                  <div class="mb-3">
+                                    <button @click="diffOpen = !diffOpen"
+                                      class="text-[10px] text-gray-400 hover:text-gray-200 transition-colors flex items-center gap-1">
+                                      <svg class="w-2.5 h-2.5 transition-transform" :class="diffOpen && 'rotate-90'" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg>
+                                      <span x-text="diffOpen ? 'Hide diff' : 'View diff'"></span>
+                                    </button>
+                                    <pre x-show="diffOpen" x-cloak
+                                      class="mt-2 text-[10px] font-mono whitespace-pre-wrap break-all max-h-48 overflow-y-auto bg-gray-900/60 rounded px-2 py-2 text-gray-300 custom-scrollbar"
+                                      x-text="msg.preview_diff"></pre>
+                                  </div>
+                                </template>
+                                <template x-if="msg._isDestructive">
+                                  <div class="mb-2">
+                                    <label class="block text-[10px] text-gray-400 mb-1"
+                                      x-text="'Type ' + (msg.target_id || '') + ' to confirm'"></label>
+                                    <input type="text" x-model="typed"
+                                      class="w-full px-3 py-1.5 rounded-lg bg-gray-900 border border-gray-700 text-xs text-white placeholder-gray-500 focus:border-rose-500 focus:outline-none"
+                                      :placeholder="msg.target_id || ''">
+                                  </div>
+                                </template>
+                                <div class="flex gap-2">
+                                  <button
+                                    @click="acting = true; confirmPendingActionCard(msg).finally(() => acting = false)"
+                                    :disabled="acting || (msg._isDestructive && typed !== msg.target_id)"
+                                    class="flex-1 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
+                                    :class="(acting || (msg._isDestructive && typed !== msg.target_id))
+                                      ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
+                                      : (msg._isDestructive ? 'bg-rose-600 hover:bg-rose-500 text-white' : 'bg-indigo-600 hover:bg-indigo-500 text-white')"
+                                    x-text="acting ? 'Working...' : 'Confirm'"></button>
+                                  <button
+                                    @click="acting = true; cancelPendingActionCard(msg).finally(() => acting = false)"
+                                    :disabled="acting"
+                                    class="px-3 py-1.5 rounded-lg text-xs font-medium bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors">
+                                    Cancel
+                                  </button>
+                                </div>
+                              </div>
+                            </template>
+                            <!-- Resolved (confirmed / cancelled / expired) -->
+                            <template x-if="msg.resolved_status === 'confirmed'">
+                              <div class="flex items-center gap-1.5 text-xs text-emerald-400">
+                                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                                <span x-text="(msg.summary || 'Action') + ' — confirmed.'"></span>
+                              </div>
+                            </template>
+                            <template x-if="msg.resolved_status === 'cancelled'">
+                              <div class="flex items-center gap-1.5 text-xs text-gray-400">
+                                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+                                <span x-text="(msg.summary || 'Action') + ' — cancelled.'"></span>
+                              </div>
+                            </template>
+                            <template x-if="msg.resolved_status === 'expired'">
+                              <div class="flex items-center gap-1.5 text-xs text-amber-400/80">
+                                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                                <span x-text="(msg.summary || 'Action') + ' — expired without confirmation.'"></span>
                               </div>
                             </template>
                           </div>
@@ -5000,46 +5082,23 @@
             </div>
           </div>
 
-          <!-- Task 9 — Pending actions review panel.
-               Lists every open propose-edit nonce so the human operator
-               can confirm or cancel before the action lands. CSRF on
-               POST is auto-injected by app.js. -->
-          <div class="bg-gray-900 border border-gray-800 rounded-lg p-5"
-               x-init="loadWorkplacePending(); $watch('systemTab', v => { if (v === 'operator') loadWorkplacePending(); })">
-            <div class="flex items-center justify-between mb-4">
-              <div>
-                <h3 class="text-sm font-medium text-gray-200">Pending actions</h3>
-                <p class="text-[10px] text-gray-500 mt-0.5">Operator-proposed edits awaiting human confirmation</p>
-              </div>
-              <button @click="loadWorkplacePending()" class="text-xs px-2.5 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors">Refresh</button>
+          <!-- Pending actions surface — replaced by the inline
+               ``pending_action_card`` chat message. Kept as a small
+               empty-state pointer so users coming from the previous
+               UX know where to look now. -->
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-5">
+            <div class="flex items-center gap-2 mb-2">
+              <svg class="w-4 h-4 text-gray-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
+              </svg>
+              <h3 class="text-sm font-medium text-gray-200">Pending actions</h3>
             </div>
-            <div x-show="!workplacePending.length" class="text-center py-6 text-gray-600 text-xs">
-              No pending actions. Proposed edits and destructive deletes will surface here for review.
-            </div>
-            <div x-show="workplacePending.length" class="space-y-2">
-              <template x-for="p in workplacePending" :key="p.nonce">
-                <div class="bg-gray-800/40 border border-gray-700/50 rounded-md p-3">
-                  <div class="flex items-center justify-between mb-1">
-                    <div class="text-xs text-gray-300">
-                      <span class="font-medium" x-text="p.action_kind"></span>
-                      <span class="text-gray-500 ml-1" x-text="' on ' + (p.target_kind || '?') + ' ' + (p.target_id || '?')"></span>
-                    </div>
-                    <div class="text-[11px] text-gray-500" x-text="'expires in ' + workplaceFormatExpiry(p.expires_at)"></div>
-                  </div>
-                  <div class="text-[11px] text-gray-500 mb-2" x-text="'proposed by ' + (p.actor || '?')"></div>
-                  <div class="flex gap-2">
-                    <button @click="confirmPendingAction(p.nonce)"
-                      class="text-[11px] px-2.5 py-1 rounded bg-emerald-700/40 hover:bg-emerald-700/60 text-emerald-200 transition-colors">
-                      Confirm
-                    </button>
-                    <button @click="cancelPendingAction(p.nonce)"
-                      class="text-[11px] px-2.5 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors">
-                      Cancel
-                    </button>
-                  </div>
-                </div>
-              </template>
-            </div>
+            <p class="text-xs text-gray-500">
+              Pending confirmations now appear inline in the operator chat — look for the
+              <span class="text-indigo-300">Confirm change</span> /
+              <span class="text-rose-300">Confirm destructive action</span>
+              cards there.
+            </p>
           </div>
 
           <!-- Audit log -->
@@ -6499,8 +6558,100 @@
                   </div>
                 </div>
               </template>
+              <!-- Pending operator action card. Mirror of the
+                   operator-panel template above so the same card
+                   renders in the main chat when the active surface is
+                   the operator. See app.js for the dispatch logic. -->
+              <template x-if="msg.role === 'pending_action_card'">
+                <div class="flex justify-start">
+                  <div class="max-w-[80%] min-w-0">
+                    <div class="px-4 py-3 rounded-2xl rounded-bl-md bg-gray-800"
+                      :class="msg._isDestructive ? 'border border-rose-600/40' : 'border border-indigo-600/30'"
+                      x-data="{ diffOpen: false, typed: '', acting: false }">
+                      <template x-if="!msg.resolved_status">
+                        <div>
+                          <div class="flex items-center gap-2 mb-2">
+                            <template x-if="msg._isDestructive">
+                              <svg class="w-4 h-4 text-rose-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M1 7h22M9 7V4a2 2 0 012-2h2a2 2 0 012 2v3"/>
+                              </svg>
+                            </template>
+                            <template x-if="!msg._isDestructive">
+                              <svg class="w-4 h-4 text-indigo-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/>
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+                              </svg>
+                            </template>
+                            <span class="text-xs font-medium shrink-0"
+                              :class="msg._isDestructive ? 'text-rose-300' : 'text-indigo-300'"
+                              x-text="msg._isDestructive ? 'Confirm destructive action' : 'Confirm change'"></span>
+                            <span class="ml-auto text-[10px] text-gray-500 shrink-0"
+                              x-text="'Expires in ' + workplaceFormatExpiry(msg.expires_at)"></span>
+                          </div>
+                          <p class="text-xs text-gray-200 mb-2" x-text="msg.summary || (msg.action_kind + ' on ' + (msg.target_kind || '?') + ' ' + (msg.target_id || '?'))"></p>
+                          <template x-if="msg.preview_diff">
+                            <div class="mb-3">
+                              <button @click="diffOpen = !diffOpen"
+                                class="text-[10px] text-gray-400 hover:text-gray-200 transition-colors flex items-center gap-1">
+                                <svg class="w-2.5 h-2.5 transition-transform" :class="diffOpen && 'rotate-90'" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg>
+                                <span x-text="diffOpen ? 'Hide diff' : 'View diff'"></span>
+                              </button>
+                              <pre x-show="diffOpen" x-cloak
+                                class="mt-2 text-[10px] font-mono whitespace-pre-wrap break-all max-h-48 overflow-y-auto bg-gray-900/60 rounded px-2 py-2 text-gray-300 custom-scrollbar"
+                                x-text="msg.preview_diff"></pre>
+                            </div>
+                          </template>
+                          <template x-if="msg._isDestructive">
+                            <div class="mb-2">
+                              <label class="block text-[10px] text-gray-400 mb-1"
+                                x-text="'Type ' + (msg.target_id || '') + ' to confirm'"></label>
+                              <input type="text" x-model="typed"
+                                class="w-full px-3 py-1.5 rounded-lg bg-gray-900 border border-gray-700 text-xs text-white placeholder-gray-500 focus:border-rose-500 focus:outline-none"
+                                :placeholder="msg.target_id || ''">
+                            </div>
+                          </template>
+                          <div class="flex gap-2">
+                            <button
+                              @click="acting = true; confirmPendingActionCard(msg).finally(() => acting = false)"
+                              :disabled="acting || (msg._isDestructive && typed !== msg.target_id)"
+                              class="flex-1 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
+                              :class="(acting || (msg._isDestructive && typed !== msg.target_id))
+                                ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
+                                : (msg._isDestructive ? 'bg-rose-600 hover:bg-rose-500 text-white' : 'bg-indigo-600 hover:bg-indigo-500 text-white')"
+                              x-text="acting ? 'Working...' : 'Confirm'"></button>
+                            <button
+                              @click="acting = true; cancelPendingActionCard(msg).finally(() => acting = false)"
+                              :disabled="acting"
+                              class="px-3 py-1.5 rounded-lg text-xs font-medium bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors">
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      </template>
+                      <template x-if="msg.resolved_status === 'confirmed'">
+                        <div class="flex items-center gap-1.5 text-xs text-emerald-400">
+                          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                          <span x-text="(msg.summary || 'Action') + ' — confirmed.'"></span>
+                        </div>
+                      </template>
+                      <template x-if="msg.resolved_status === 'cancelled'">
+                        <div class="flex items-center gap-1.5 text-xs text-gray-400">
+                          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+                          <span x-text="(msg.summary || 'Action') + ' — cancelled.'"></span>
+                        </div>
+                      </template>
+                      <template x-if="msg.resolved_status === 'expired'">
+                        <div class="flex items-center gap-1.5 text-xs text-amber-400/80">
+                          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                          <span x-text="(msg.summary || 'Action') + ' — expired without confirmation.'"></span>
+                        </div>
+                      </template>
+                    </div>
+                  </div>
+                </div>
+              </template>
               <!-- Chat bubble -->
-              <template x-if="msg.role !== 'system' && msg.role !== 'credential_request' && msg.role !== 'credit_exhausted' && msg.role !== 'browser_login_request' && msg.role !== 'browser_captcha_help_request'">
+              <template x-if="msg.role !== 'system' && msg.role !== 'credential_request' && msg.role !== 'credit_exhausted' && msg.role !== 'browser_login_request' && msg.role !== 'browser_captcha_help_request' && msg.role !== 'pending_action_card'">
               <div :class="msg.role === 'user' ? 'flex justify-end' : 'flex justify-start'">
               <div class="max-w-[80%] px-3 py-2 rounded-2xl text-xs"
                 :class="{

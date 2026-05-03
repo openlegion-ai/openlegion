@@ -1441,6 +1441,22 @@ function dashboard() {
         if (!resp.ok) return;
         const data = await resp.json();
         this.workplacePending = data.pending || [];
+        // Backfill the inline chat-card surface so a page reload still
+        // shows any open pending actions in the operator chat. The
+        // injection helper is idempotent on event_id so this is safe
+        // to call alongside the live WS stream.
+        for (const p of this.workplacePending) {
+          this._injectPendingActionCard({
+            nonce: p.nonce,
+            actor: p.actor,
+            target_kind: p.target_kind,
+            target_id: p.target_id,
+            action_kind: p.action_kind,
+            summary: p.summary,
+            preview_diff: p.preview_diff,
+            expires_at: p.expires_at,
+          });
+        }
       } catch (e) {
         console.error('Failed to load workplace pending actions:', e);
       }
@@ -1496,6 +1512,93 @@ function dashboard() {
       }
     },
 
+    // Confirm-button handler for the inline pending_action_card.
+    // Routes through the legacy ``/mesh/pending/{nonce}/confirm`` thin
+    // wrapper which dispatches to the right backend (config edit vs.
+    // destructive delete) by inspecting the stored row. The card's
+    // ``resolved_status`` flips to ``confirmed`` when the
+    // ``pending_action_resolved`` WS event lands; we don't mutate the
+    // message here so the round-trip stays the source of truth.
+    async confirmPendingActionCard(msg) {
+      try {
+        const resp = await fetch(`/mesh/pending/${encodeURIComponent(msg.event_id)}/confirm`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+          body: JSON.stringify({ payload_digest: msg.payload_digest || undefined }),
+        });
+        if (!resp.ok) {
+          const data = await resp.json().catch(() => ({}));
+          this.showToast(`Confirm failed: ${data.detail || resp.status}`);
+          return;
+        }
+      } catch (e) {
+        this.showToast(`Confirm failed: ${e.message || e}`);
+      }
+    },
+
+    async cancelPendingActionCard(msg) {
+      try {
+        const resp = await fetch(`/mesh/pending/${encodeURIComponent(msg.event_id)}/cancel`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+          body: '{}',
+        });
+        if (!resp.ok) {
+          const data = await resp.json().catch(() => ({}));
+          this.showToast(`Cancel failed: ${data.detail || resp.status}`);
+          return;
+        }
+      } catch (e) {
+        this.showToast(`Cancel failed: ${e.message || e}`);
+      }
+    },
+
+    // Inject a pending_action_card into the operator's chat history (and,
+    // if the user is currently viewing the operator in the main chat,
+    // into ``activeChatId === 'operator'`` — which is the same array
+    // because chatHistories is keyed by agent ID). Idempotent on
+    // event_id so a reload that re-fires the WS event doesn't duplicate
+    // the card.
+    _injectPendingActionCard(data) {
+      const target = 'operator';
+      if (!this.chatHistories[target]) this.chatHistories[target] = [];
+      const existing = this.chatHistories[target].find(
+        m => m.role === 'pending_action_card' && m.event_id === data.nonce,
+      );
+      if (existing) return;
+      const isDestructive = (
+        data.action_kind === 'delete'
+        && (data.target_kind === 'project' || data.target_kind === 'agent')
+      );
+      this.chatHistories[target].push({
+        role: 'pending_action_card',
+        event_id: data.nonce,
+        actor: data.actor || 'operator',
+        target_kind: data.target_kind || '',
+        target_id: data.target_id || '',
+        action_kind: data.action_kind || '',
+        summary: data.summary || '',
+        preview_diff: data.preview_diff || '',
+        expires_at: data.expires_at || 0,
+        _isDestructive: isDestructive,
+        resolved_status: null,
+        ts: Date.now() / 1000,
+      });
+    },
+
+    // Find the matching card by event_id and stamp a terminal state.
+    // Skips silently if the card isn't in history (e.g. WS event arrived
+    // for a nonce we never injected because the operator chat wasn't
+    // loaded yet).
+    _resolvePendingActionCard(eventId, status) {
+      for (const key of Object.keys(this.chatHistories || {})) {
+        const arr = this.chatHistories[key];
+        if (!Array.isArray(arr)) continue;
+        const m = arr.find(x => x.role === 'pending_action_card' && x.event_id === eventId);
+        if (m) m.resolved_status = status;
+      }
+    },
+
     // Apply a live event from the WebSocket to the in-memory workplace
     // state so the user sees changes without reloading. Each handler is
     // a small upsert into one of the lists; misses are tolerated (the
@@ -1532,12 +1635,23 @@ function dashboard() {
             target_kind: data.target_kind,
             target_id: data.target_id,
             action_kind: data.action_kind,
+            summary: data.summary,
+            preview_diff: data.preview_diff,
             expires_at: data.expires_at,
             created_at: Date.now() / 1000,
           });
         }
-      } else if (evt.type === 'pending_action_resolved' || evt.type === 'pending_action_expired') {
+        // Also surface as an inline chat card in the operator chat —
+        // the new single visual language for "operator wants the human
+        // to act." Idempotent on event_id.
+        this._injectPendingActionCard(data);
+      } else if (evt.type === 'pending_action_resolved') {
         this.workplacePending = this.workplacePending.filter(p => p.nonce !== data.nonce);
+        // ``status`` is "confirmed" (success) or "cancelled".
+        this._resolvePendingActionCard(data.nonce, data.status || 'confirmed');
+      } else if (evt.type === 'pending_action_expired') {
+        this.workplacePending = this.workplacePending.filter(p => p.nonce !== data.nonce);
+        this._resolvePendingActionCard(data.nonce, 'expired');
       }
     },
 
