@@ -531,6 +531,7 @@ class DashboardEvent(BaseModel):
         "chat_reset",
         "credit_exhausted",
         "credential_request",
+        "credential_request_cancelled",
         "credential_stored",
         "browser_login_request",
         "browser_login_completed",
