@@ -13,10 +13,10 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+from unittest.mock import MagicMock
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from unittest.mock import MagicMock
 
 from src.dashboard.events import EventBus
 from src.host.costs import CostTracker
