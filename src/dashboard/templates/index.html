@@ -3251,24 +3251,42 @@
                session (no re-collapse behavior). -->
           <div class="space-y-2 max-h-[40vh] overflow-y-auto custom-scrollbar pr-0.5">
             <template x-for="item in (needsYouExpanded ? needsYouItems : needsYouItems.slice(0, needsYouCollapsedCap))" :key="item.id">
-              <div class="bg-gray-900/50 border border-gray-700/50 rounded-lg p-2.5 sm:p-3 flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3">
-                <div class="flex items-start gap-2.5 min-w-0 flex-1">
-                  <span class="shrink-0 w-6 h-6 rounded-full bg-amber-700/30 text-amber-200 text-[11px] font-bold flex items-center justify-center"
-                    x-text="item.icon"></span>
-                  <div class="min-w-0 flex-1">
-                    <div class="text-sm text-gray-200 break-words" x-text="item.title"></div>
-                    <div x-show="item.subtitle" class="text-[11px] text-gray-400 mt-0.5 break-words" x-text="item.subtitle"></div>
+              <div class="bg-gray-900/50 border border-gray-700/50 rounded-lg p-2.5 sm:p-3">
+                <div class="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3">
+                  <div class="flex items-start gap-2.5 min-w-0 flex-1">
+                    <span class="shrink-0 w-6 h-6 rounded-full bg-amber-700/30 text-amber-200 text-[11px] font-bold flex items-center justify-center"
+                      x-text="item.icon"></span>
+                    <div class="min-w-0 flex-1">
+                      <div class="text-sm text-gray-200 break-words" x-text="item.title"></div>
+                      <div x-show="item.subtitle" class="text-[11px] text-gray-400 mt-0.5 break-words" x-text="item.subtitle"></div>
+                    </div>
+                  </div>
+                  <div class="flex flex-wrap gap-1.5 shrink-0 sm:justify-end">
+                    <template x-for="action in item.actions" :key="action.label">
+                      <button type="button"
+                        @click="action.handler()"
+                        :class="needsYouButtonClass(action.style)"
+                        :aria-expanded="action.ariaExpanded"
+                        :aria-controls="action.ariaControls"
+                        class="text-[11px] font-medium px-2.5 py-1 rounded transition-colors whitespace-nowrap"
+                        x-text="action.label"></button>
+                    </template>
                   </div>
                 </div>
-                <div class="flex flex-wrap gap-1.5 shrink-0 sm:justify-end">
-                  <template x-for="action in item.actions" :key="action.label">
-                    <button type="button"
-                      @click="action.handler()"
-                      :class="needsYouButtonClass(action.style)"
-                      class="text-[11px] font-medium px-2.5 py-1 rounded transition-colors whitespace-nowrap"
-                      x-text="action.label"></button>
-                  </template>
-                </div>
+                <!-- Preview disclosure for pending actions that carry
+                     a server-side diff. Hidden by default; clicking
+                     "Review" in the action row flips item.previewExpanded
+                     and re-runs the getter so this <pre> renders. The
+                     primary button label then changes to "Confirm" so
+                     the user has had a chance to see what they're
+                     approving. aria-controls points at the <pre> id. -->
+                <template x-if="item.previewDiff && item.previewExpanded">
+                  <div class="mt-2 pl-8">
+                    <pre :id="item.previewToggleAriaId"
+                      class="text-[10px] font-mono whitespace-pre-wrap break-all max-h-48 overflow-y-auto bg-gray-900/60 rounded px-2 py-2 text-gray-300 custom-scrollbar"
+                      x-text="item.previewDiff"></pre>
+                  </div>
+                </template>
               </div>
             </template>
           </div>
@@ -3421,7 +3439,7 @@
                         @click="openTaskDrillIn(b.task_id)">
                         <span x-text="b.title"></span>
                         <span class="text-gray-500" x-text="'· ' + (b.assignee || '')"></span>
-                        <div class="text-[11px] text-gray-400" x-text="b.blocker_note"></div>
+                        <div class="text-[11px] text-gray-400" x-text="_humanizeBlocker(b.blocker_note).label || b.blocker_note"></div>
                       </div>
                     </template>
                   </div>
@@ -3432,12 +3450,25 @@
         </template>
 
         <!-- Task board (kanban) sub-tab -->
+        <!-- Responsive grid: 1 col on phones (<sm), 2 cols on tablets
+             (sm-lg), 5 cols on desktop (lg+). On the smallest phones the
+             grid still hits 1 column, which is fine for stacked reading;
+             at the awkward 600-1023 px width range we previously crammed
+             5 columns into <=1023 px and produced 153 px cards. The
+             outer ``overflow-x-auto`` + inner ``min-w-[640px]`` give
+             phone users a horizontal-scroll fallback so each column
+             keeps a usable width when they prefer the kanban layout. -->
         <template x-if="workplaceEnabled && workplaceTab === 'task-board'">
-          <div>
-            <div class="grid grid-cols-1 md:grid-cols-5 gap-3">
+          <div class="overflow-x-auto custom-scrollbar -mx-3 px-3 sm:mx-0 sm:px-0">
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 min-w-[640px] sm:min-w-0">
               <template x-for="status in workplaceTaskColumns" :key="status">
                 <div class="bg-gray-800/40 border border-gray-700/50 rounded-lg p-3">
-                  <div class="text-xs font-medium text-gray-300 uppercase tracking-wide mb-2 flex items-center justify-between">
+                  <!-- Sticky column header so cards keep their context
+                       when the column scrolls. ``z-10`` keeps it above
+                       the cards but below the global Needs-you panel
+                       (which sits at z-10 on a different stacking
+                       context — they don't overlap visually). -->
+                  <div class="text-xs font-medium text-gray-300 uppercase tracking-wide mb-2 flex items-center justify-between sticky top-0 z-10 bg-gray-800/80 backdrop-blur-sm -mx-3 px-3 py-1.5 border-b border-gray-700/40">
                     <span x-text="status"></span>
                     <span class="text-gray-500 font-mono" x-text="workplaceTasksByStatus(status).length"></span>
                   </div>
