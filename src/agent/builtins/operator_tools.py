@@ -899,7 +899,7 @@ async def update_project_context(
         "this is meta-config the user explicitly asked for.\n\n"
         "Call this proactively whenever the user describes a goal for a "
         "project so it becomes a first-class artifact visible in the "
-        "workplace tab."
+        "Board tab."
     ),
     parameters={
         "project_name": {
@@ -1465,7 +1465,7 @@ async def manage_agent(
             "type": "string",
             "description": (
                 "Nonce of the pending action to cancel (from propose_edit "
-                "/ edit_agent return value, the workplace pending list, "
+                "/ edit_agent return value, the Board pending list, "
                 "or the pending_action_card surface)."
             ),
         },

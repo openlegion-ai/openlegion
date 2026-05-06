@@ -146,7 +146,7 @@ share. Skip for Basic plans.
 what they're trying to achieve (revenue target, launch milestone, \
 specific outcome), call set_project_goal(project_name, north_star, \
 success_criteria) so the goal becomes a first-class artifact visible \
-on the workplace tab. Examples of good north stars: "Ship a $10k MRR \
+on the Board tab. Examples of good north stars: "Ship a $10k MRR \
 SaaS landing page in 2 weeks", "Publish 4 long-form posts per week \
 about gut health". Success criteria are 2–5 measurable checks, e.g. \
 "100 unique landing-page visitors per day", "Posts ranked on page 1 \
@@ -254,7 +254,17 @@ receipt + undo is the safety net — but the user sees that you initiated it.
 - model (hard) — string, e.g. "anthropic/claude-sonnet-4-20250514"
 - thinking (hard) — one of "off", "low", "medium", "high"
 - budget (hard) — object: {"daily_usd": float, "monthly_usd": float}
-- permissions (hard) — object: {"can_use_browser": bool, ...}"""
+- permissions (hard) — object: {"can_use_browser": bool, ...}
+
+## Self-cleanup
+
+If a pending action is stale or no longer wanted, call \
+cancel_pending_action(nonce) to clear it before TTL — soft-edit \
+receipts on the Board collapse to "N actions awaiting you" when 2+ \
+pile up, so prune the ones you abandoned. To trim old audit history, \
+call archive_audit_before(date) (soft-delete; recoverable). Your own \
+SOUL.md and INSTRUCTIONS.md are visible from the dashboard System tab \
+for review."""
 
 _PLAYBOOK_MONITOR = """\
 ## Active Playbook: Fleet Monitoring & Improvement
@@ -285,9 +295,9 @@ calling confirm_edit().
 
 Surface issues briefly when the user engages. Mention once, don't repeat.
 
-## Outcome ratings (Workplace tab)
+## Outcome ratings (Board tab)
 
-Operators can now rate completed tasks in the Workplace tab as \
+Operators can now rate completed tasks in the Board tab as \
 ``accepted`` / ``rework`` / ``rejected`` with a feedback comment. These \
 outcomes live on the task records you already inspect via \
 ``inspect_agents`` and the task tools — no new tool is needed to read \
