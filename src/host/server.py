@@ -5210,7 +5210,12 @@ def create_mesh_app(
         Operator-or-internal only. Soft-archive: rows are flipped to
         ``archived=1`` and dropped from the default audit-log view.
         Use ``GET /api/operator-audit?include_archived=true`` to see
-        archived rows. Returns ``{archived_count: N}``.
+        archived rows. Returns ``{archived_count: N, truncated: bool}``
+        — ``truncated`` is ``True`` when the per-call hard cap (100k
+        rows) was hit and additional matching rows remain. The caller
+        identity is recorded as the actor on an audit-of-audit row so
+        archive operations remain traceable even after the original
+        rows are hidden.
         """
         caller = _extract_verified_agent_id(request)
         if caller != "operator" and not _is_internal_caller(request):
@@ -5222,14 +5227,36 @@ def create_mesh_app(
         before_date = (body or {}).get("before_date") if isinstance(body, dict) else None
         if not before_date or not isinstance(before_date, str):
             raise HTTPException(400, "before_date is required (ISO 8601 string)")
+        # Normalise the cutoff to the SQLite ``datetime('now')`` shape
+        # (``YYYY-MM-DD HH:MM:SS``) so date-string comparison against
+        # the audit_log.timestamp column behaves predictably across
+        # bare-date / Z-suffixed / offset-suffixed inputs.
         try:
-            count = blackboard.archive_audit_before(before_date)
+            dt = datetime.fromisoformat(before_date.replace("Z", "+00:00"))
+            if dt.tzinfo is not None:
+                dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+            normalised = dt.strftime("%Y-%m-%d %H:%M:%S")
+        except (ValueError, TypeError):
+            raise HTTPException(
+                400,
+                f"Invalid before_date: {before_date}. Expected ISO 8601"
+                " (e.g., '2026-04-01' or '2026-04-01T00:00:00Z')",
+            )
+        # Best-effort actor: real operator/internal caller, else "operator".
+        actor = caller or "operator"
+        try:
+            result = blackboard.archive_audit_before(normalised, actor=actor)
         except ValueError as e:
             raise HTTPException(400, str(e))
         except Exception as e:
             logger.warning("audit archive failed: %s", e)
             raise HTTPException(500, "Failed to archive audit entries")
-        return {"ok": True, "archived_count": int(count), "before_date": before_date}
+        return {
+            "ok": True,
+            "archived_count": int(result.get("archived_count", 0)),
+            "truncated": bool(result.get("truncated", False)),
+            "before_date": before_date,
+        }
 
     # === Browser Service Proxy ===
 

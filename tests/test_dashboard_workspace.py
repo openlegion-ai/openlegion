@@ -175,6 +175,152 @@ class TestWorkspaceProxy:
             assert "cleanvaluehere" in forwarded_content
 
 
+class TestOperatorWorkspaceAudit:
+    """PR C: identity edits on the operator land in the audit_log.
+
+    Direct workspace PUTs through the dashboard previously bypassed
+    blackboard.log_audit, so the Archive control had no record of
+    user-driven edits to the operator's SOUL.md / INSTRUCTIONS.md.
+    """
+
+    def _make_app_with_real_bb(self, tmp_path: Path, transport):
+        """Build dashboard app with a real Blackboard (so log_audit persists)."""
+        from fastapi import FastAPI
+
+        from src.host.mesh import Blackboard
+        bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+        agent_registry = {
+            "operator": "http://localhost:8400",
+            "alpha": "http://localhost:8401",
+        }
+        health_monitor = MagicMock()
+        health_monitor.get_status = MagicMock(return_value=[])
+        cost_tracker = MagicMock()
+        cost_tracker.get_all_agents_spend = MagicMock(return_value=[])
+        cost_tracker.get_spend = MagicMock(return_value={})
+        cost_tracker.check_budget = MagicMock(return_value={})
+        router = create_dashboard_router(
+            blackboard=bb,
+            health_monitor=health_monitor,
+            cost_tracker=cost_tracker,
+            trace_store=None,
+            event_bus=None,
+            agent_registry=agent_registry,
+            transport=transport,
+        )
+        app = FastAPI()
+        app.include_router(router)
+        return app, bb
+
+    @pytest.fixture
+    def tmpdir(self):
+        d = tempfile.mkdtemp()
+        yield Path(d)
+        shutil.rmtree(d, ignore_errors=True)
+
+    @pytest.mark.asyncio
+    async def test_operator_soul_edit_writes_audit_row(self, tmpdir):
+        """Editing operator/SOUL.md records an audit row with before/after."""
+        transport = AsyncMock()
+        # First call (pre-fetch GET) returns the prior content; second
+        # call (PUT) returns the agent's success response.
+        transport.request = AsyncMock(side_effect=[
+            {"filename": "SOUL.md", "content": "# Old soul"},
+            {"filename": "SOUL.md", "size": 12},
+        ])
+        app, bb = self._make_app_with_real_bb(tmpdir, transport)
+        try:
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test",
+            ) as client:
+                resp = await client.put(
+                    "/dashboard/api/agents/operator/workspace/SOUL.md",
+                    json={"content": "# New soul"},
+                    headers=_CSRF_HEADERS,
+                )
+                assert resp.status_code == 200
+
+            entries = bb.get_audit_log()["entries"]
+            ws_entries = [e for e in entries if e["action"] == "edit_workspace"]
+            assert len(ws_entries) == 1
+            ent = ws_entries[0]
+            assert ent["target"] == "operator"
+            assert ent["field"] == "SOUL.md"
+            assert ent["before_value"] == "# Old soul"
+            assert ent["after_value"] == "# New soul"
+            assert ent["actor"] == "user"
+            assert ent["provenance"] == "dashboard"
+        finally:
+            bb.close()
+
+    @pytest.mark.asyncio
+    async def test_operator_instructions_edit_writes_audit_row(self, tmpdir):
+        """INSTRUCTIONS.md edits also write an audit row."""
+        transport = AsyncMock()
+        transport.request = AsyncMock(side_effect=[
+            {"filename": "INSTRUCTIONS.md", "content": "be helpful"},
+            {"filename": "INSTRUCTIONS.md", "size": 10},
+        ])
+        app, bb = self._make_app_with_real_bb(tmpdir, transport)
+        try:
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test",
+            ) as client:
+                resp = await client.put(
+                    "/dashboard/api/agents/operator/workspace/INSTRUCTIONS.md",
+                    json={"content": "be excellent"},
+                    headers=_CSRF_HEADERS,
+                )
+                assert resp.status_code == 200
+            ws = [
+                e for e in bb.get_audit_log()["entries"]
+                if e["action"] == "edit_workspace" and e["field"] == "INSTRUCTIONS.md"
+            ]
+            assert len(ws) == 1
+        finally:
+            bb.close()
+
+    @pytest.mark.asyncio
+    async def test_non_operator_workspace_edit_skips_audit(self, tmpdir):
+        """Non-operator workspace edits do NOT write an audit row."""
+        transport = AsyncMock()
+        transport.request = AsyncMock(return_value={"filename": "SOUL.md", "size": 5})
+        app, bb = self._make_app_with_real_bb(tmpdir, transport)
+        try:
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test",
+            ) as client:
+                resp = await client.put(
+                    "/dashboard/api/agents/alpha/workspace/SOUL.md",
+                    json={"content": "# Alpha soul"},
+                    headers=_CSRF_HEADERS,
+                )
+                assert resp.status_code == 200
+            assert bb.get_audit_log()["total"] == 0
+        finally:
+            bb.close()
+
+    @pytest.mark.asyncio
+    async def test_operator_non_identity_file_skips_audit(self, tmpdir):
+        """Even on the operator, non-identity files don't trigger audit."""
+        transport = AsyncMock()
+        transport.request = AsyncMock(return_value={"filename": "USER.md", "size": 5})
+        app, bb = self._make_app_with_real_bb(tmpdir, transport)
+        try:
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test",
+            ) as client:
+                resp = await client.put(
+                    "/dashboard/api/agents/operator/workspace/USER.md",
+                    json={"content": "# Notes"},
+                    headers=_CSRF_HEADERS,
+                )
+                assert resp.status_code == 200
+            assert bb.get_audit_log()["total"] == 0
+        finally:
+            bb.close()
+
+
 class TestLogsProxy:
     @pytest.mark.asyncio
     async def test_logs_proxy(self):

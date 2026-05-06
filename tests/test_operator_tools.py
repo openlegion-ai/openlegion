@@ -1212,3 +1212,20 @@ async def test_archive_audit_before_propagates_mesh_error():
     result = await archive_audit_before("2026-04-01", mesh_client=mc)
     assert "error" in result
     assert "boom" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_archive_audit_before_surfaces_truncated_flag():
+    """When the mesh hits the per-call cap, the tool surfaces a follow-up hint."""
+    from src.agent.builtins.operator_tools import archive_audit_before
+
+    mc = MagicMock()
+    mc.archive_audit_before = AsyncMock(return_value={
+        "ok": True,
+        "archived_count": 100_000,
+        "truncated": True,
+        "before_date": "2026-04-01",
+    })
+    result = await archive_audit_before("2026-04-01", mesh_client=mc)
+    assert result["truncated"] is True
+    assert "rerun" in result["message"].lower()

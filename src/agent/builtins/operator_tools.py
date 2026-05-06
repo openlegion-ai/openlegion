@@ -1546,13 +1546,19 @@ async def archive_audit_before(
     except Exception as e:
         return {"error": f"Failed to archive audit entries: {e}"}
     archived = int(result.get("archived_count", 0))
+    truncated = bool(result.get("truncated", False))
+    msg = (
+        f"Archived {archived} audit "
+        f"{'entry' if archived == 1 else 'entries'} older than "
+        f"{before_date}."
+    )
+    if truncated:
+        # Hard cap was hit — operator can re-run to keep sweeping.
+        msg += " Hit per-call hard cap; rerun to continue archiving."
     return {
         "success": True,
         "archived_count": archived,
+        "truncated": truncated,
         "before_date": result.get("before_date", before_date),
-        "message": (
-            f"Archived {archived} audit "
-            f"{'entry' if archived == 1 else 'entries'} older than "
-            f"{before_date}."
-        ),
+        "message": msg,
     }

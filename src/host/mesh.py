@@ -102,11 +102,12 @@ class Blackboard:
             );
             CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log(timestamp);
             CREATE INDEX IF NOT EXISTS idx_audit_log_target ON audit_log(target);
-            CREATE INDEX IF NOT EXISTS idx_audit_log_archived ON audit_log(archived);
         """)
         # Migrate legacy DBs that pre-date the ``undoable`` and ``archived``
         # columns. Default 0 means "not undoable" / "not archived" so
-        # historic rows fail closed.
+        # historic rows fail closed. Run BEFORE creating the composite
+        # ``idx_audit_log_active`` below, since the index references the
+        # ``archived`` column which legacy DBs lack until ALTER runs.
         existing_audit_cols = {
             row[1]
             for row in self.db.execute("PRAGMA table_info(audit_log)").fetchall()
@@ -120,6 +121,21 @@ class Blackboard:
                 except sqlite3.OperationalError as e:
                     if "duplicate column" not in str(e).lower():
                         raise
+        # Drop the legacy low-cardinality archived-only index if it was
+        # left over from a prior schema. The composite
+        # ``idx_audit_log_active`` below replaces it.
+        try:
+            self.db.execute("DROP INDEX IF EXISTS idx_audit_log_archived")
+        except sqlite3.OperationalError:
+            pass
+        # Composite index covers BOTH the default
+        # ``WHERE archived=0 ORDER BY id DESC LIMIT 20`` audit-log view
+        # AND the archive UPDATE's ``WHERE archived=0 AND timestamp<?``
+        # predicate. Created here (post-migration) so legacy DBs have the
+        # ``archived`` column by the time SQLite resolves the reference.
+        self.db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_audit_log_active ON audit_log(archived, id DESC)"
+        )
         self.db.commit()
         self._load_watchers()
 
@@ -416,27 +432,77 @@ class Blackboard:
 
         return {"entries": entries, "total": count, "page": page, "per_page": per_page}
 
-    def archive_audit_before(self, before_iso: str) -> int:
+    # Chunked-archive bookkeeping. We sweep in 1000-row batches and bail
+    # out once we have flipped this many rows in a single call so the
+    # write lock is never held for a runaway amount of time on a large
+    # audit_log.  ``truncated=True`` is reported back so the caller (and
+    # the audit-of-audit row) record that more matching rows remain.
+    _ARCHIVE_BATCH_SIZE = 1000
+    _ARCHIVE_HARD_CAP = 100_000
+
+    def archive_audit_before(self, before_iso: str, actor: str = "operator") -> dict:
         """Soft-archive audit entries with ``timestamp < before_iso``.
 
-        Returns the number of rows newly flipped to ``archived=1``. Rows
-        already archived are not recounted. ``before_iso`` is compared
-        as a SQLite TEXT (YYYY-MM-DD[ HH:MM:SS]) so callers should pass
-        an ISO 8601 date or timestamp; ``T`` is normalised to space so
+        Returns ``{"archived_count": N, "truncated": bool}`` — ``truncated``
+        is ``True`` when the per-call hard cap (``_ARCHIVE_HARD_CAP``) was
+        hit and additional matching rows remain. Rows already archived
+        are not recounted.
+
+        ``before_iso`` is compared as a SQLite TEXT
+        (``YYYY-MM-DD[ HH:MM:SS]``) so callers should pass an ISO 8601
+        date or timestamp; ``T`` is normalised to space so
         ``2026-04-01T00:00:00`` and ``2026-04-01 00:00:00`` behave the
         same.
+
+        The archive sweep runs in chunks of ``_ARCHIVE_BATCH_SIZE`` rows
+        with the write lock released between chunks so concurrent
+        blackboard writes are not stalled on a multi-hundred-thousand
+        row table. An audit-of-audit row is recorded after the sweep
+        with ``actor`` as the caller identity (passed through from the
+        endpoint) and ``archived=False`` so it persists even when the
+        operator subsequently archives older windows again.
         """
         normalised = (before_iso or "").strip().replace("T", " ").rstrip("Z")
         if not normalised:
             raise ValueError("before_iso is required")
-        with self._write_lock:
-            cursor = self.db.execute(
-                "UPDATE audit_log SET archived = 1"
-                " WHERE archived = 0 AND timestamp < ?",
-                (normalised,),
+        total = 0
+        truncated = False
+        while True:
+            with self._write_lock:
+                cursor = self.db.execute(
+                    "UPDATE audit_log SET archived = 1"
+                    " WHERE id IN ("
+                    "   SELECT id FROM audit_log"
+                    "    WHERE archived = 0 AND timestamp < ?"
+                    "    LIMIT ?"
+                    " )",
+                    (normalised, self._ARCHIVE_BATCH_SIZE),
+                )
+                rows = cursor.rowcount or 0
+                self.db.commit()
+            if rows == 0:
+                break
+            total += rows
+            if total >= self._ARCHIVE_HARD_CAP:
+                truncated = True
+                break
+        # Audit-of-audit: record who flipped the rows so subsequent
+        # forensic review can see archive operations even after the
+        # original rows are hidden. ``archived=False`` (default) so this
+        # row is not itself swept by future archive runs unless an
+        # operator explicitly targets a window that includes it.
+        try:
+            self.log_audit(
+                action="audit_archive",
+                target="audit_log",
+                actor=actor or "operator",
+                after_value=normalised,
             )
-            self.db.commit()
-            return cursor.rowcount or 0
+        except Exception:
+            # Audit logging must not mask the success of the archive
+            # itself — log to logger via the caller path instead.
+            pass
+        return {"archived_count": total, "truncated": truncated}
 
     def close(self) -> None:
         self.db.close()
