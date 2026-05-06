@@ -809,7 +809,13 @@ class RuntimeContext:
             "heartbeat_schedule", CronScheduler.DEFAULT_HEARTBEAT_SCHEDULE,
         )
         for agent_id in agents_cfg:
-            agent_schedule = "every 1h" if agent_id == _OPERATOR_AGENT_ID else schedule
+            # Operator heartbeat is faster than the fleet default so
+            # fleet-health regressions surface within minutes rather
+            # than hours. The previous 1h cadence was set when the
+            # heartbeat path was new; with the inspect/observation
+            # surface stable, 15m is the right tradeoff between
+            # responsiveness and LLM cost.
+            agent_schedule = "every 15m" if agent_id == _OPERATOR_AGENT_ID else schedule
             self.cron_scheduler.ensure_heartbeat(agent_id, agent_schedule)
 
     def _start_background(self) -> None:

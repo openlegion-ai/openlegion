@@ -247,7 +247,8 @@ class TestOperatorConstants:
         # PR 0 consolidated to 24, PR 5 added set_project_goal (=25),
         # PR 1 swaps propose_edit (-1) for edit_agent + undo_change (+2) → 26.
         # Self-cleanup PR adds cancel_pending_action + archive_audit_before (+2) → 28.
-        assert len(_OPERATOR_ALLOWED_TOOLS) == 28
+        # PR F adds list_pending + vault_list (+2) → 30.
+        assert len(_OPERATOR_ALLOWED_TOOLS) == 30
         assert len(_OPERATOR_HEARTBEAT_TOOLS) == 4
         # Heartbeat tools should be a subset of allowed tools
         assert set(_OPERATOR_HEARTBEAT_TOOLS).issubset(set(_OPERATOR_ALLOWED_TOOLS))
@@ -261,12 +262,15 @@ class TestOperatorConstants:
             "set_project_goal",
             # Self-cleanup — operator can clear stale pending actions
             # and prune the audit log itself.
-            "cancel_pending_action", "archive_audit_before",
+            "list_pending", "cancel_pending_action", "archive_audit_before",
+            # PR F — vault visibility (names-only, no secret leak) so
+            # the operator can check before calling request_credential.
+            "vault_list",
         ):
             assert tool in _OPERATOR_ALLOWED_TOOLS
         # Dropped dead-weight + replaced tools must be gone.
         for tool in (
-            "update_status", "vault_list",
+            "update_status",
             "list_projects", "get_project", "list_project_status",
             "list_agents", "get_agent_profile", "read_agent_history",
             "archive_project", "delete_project",

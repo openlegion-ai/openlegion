@@ -378,7 +378,13 @@ _TOOL_PLAYBOOK_MAP: dict[str, str] = {
     "set_project_goal": "team_build",
     "edit_agent": "edit",
     "undo_change": "edit",
-    "propose_edit": "edit",
+    # ``propose_edit`` intentionally omitted — the legacy two-step flow
+    # was retired in PR #839 in favor of ``edit_agent`` (act-and-undo
+    # for soft fields, preview-then-confirm for hard fields). The skill
+    # is still registered in operator_tools.py for back-compat with any
+    # caller invoking it via mesh, but the operator's allowed-tools
+    # list and playbook map both advertise only the new flow so the LLM
+    # picks one path.
     "confirm_edit": "edit",
     "save_observations": "monitor",
     "request_credential": "credentials",

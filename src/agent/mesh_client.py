@@ -803,6 +803,22 @@ class MeshClient:
         response.raise_for_status()
         return response.json()
 
+    async def list_pending_actions(self) -> dict:
+        """List every non-expired pending action.
+
+        Backs the operator's ``list_pending`` tool. Returns
+        ``{pending: [{nonce, action_kind, target_kind, target_id,
+        expires_at, actor, summary}, ...]}``. Operator-or-internal only —
+        non-operator agents will see HTTP 403.
+        """
+        client = await self._get_client()
+        response = await client.get(
+            f"{self.mesh_url}/mesh/pending",
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
     async def archive_audit_before(self, before_date: str) -> dict:
         """Bulk-archive operator audit entries older than ``before_date``.
 

@@ -1063,6 +1063,57 @@ async def test_undo_change_no_mesh_client():
     assert "mesh_client" in result["error"].lower()
 
 
+# ── list_pending ─────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_list_pending_returns_rows():
+    from src.agent.builtins.operator_tools import list_pending
+
+    mc = MagicMock()
+    mc.list_pending_actions = AsyncMock(return_value={
+        "pending": [
+            {"nonce": "n1", "action_kind": "edit", "target_kind": "agent",
+             "target_id": "writer", "expires_at": 0, "actor": "operator",
+             "summary": "model swap"},
+        ],
+    })
+    result = await list_pending(mesh_client=mc)
+    assert result["count"] == 1
+    assert result["pending"][0]["nonce"] == "n1"
+    mc.list_pending_actions.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_list_pending_empty():
+    from src.agent.builtins.operator_tools import list_pending
+
+    mc = MagicMock()
+    mc.list_pending_actions = AsyncMock(return_value={"pending": []})
+    result = await list_pending(mesh_client=mc)
+    assert result["count"] == 0
+    assert result["pending"] == []
+
+
+@pytest.mark.asyncio
+async def test_list_pending_no_mesh_client():
+    from src.agent.builtins.operator_tools import list_pending
+
+    result = await list_pending()
+    assert "error" in result
+    assert "mesh_client" in result["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_list_pending_blocked_for_non_operator(monkeypatch):
+    from src.agent.builtins.operator_tools import list_pending
+
+    monkeypatch.delenv("ALLOWED_TOOLS", raising=False)
+    result = await list_pending(mesh_client=MagicMock())
+    assert "error" in result
+    assert "operator" in result["error"].lower()
+
+
 # ── cancel_pending_action ────────────────────────────────────
 
 
