@@ -346,13 +346,17 @@ function dashboard() {
     // OPENLEGION_ORCHESTRATION_TASKS_V2 so the empty state can hint how
     // to enable the surface without rendering an error.
     // PR 5: feed becomes the default workplace landing — kanban demoted
-    // to a non-default Board sub-tab; standalone blockers tab removed
+    // to a non-default sub-tab; standalone blockers tab removed
     // (pinned at the top of the feed instead).
+    // PR G: kanban sub-tab is labelled "Tasks" so it doesn't collide
+    // with the parent tab "Board" (Board > Board was confusing).
+    // The route id ``task-board`` stays internal so URL hashes /
+    // server state don't change.
     workplaceTab: 'feed',
     workplaceTabs: [
       { id: 'feed', label: 'Activity' },
       { id: 'project-status', label: 'Projects' },
-      { id: 'task-board', label: 'Board' },
+      { id: 'task-board', label: 'Tasks' },
       { id: 'team-outputs', label: 'Outputs' },
     ],
     workplaceEnabled: true,
@@ -1883,17 +1887,38 @@ function dashboard() {
       const opChat = (this.chatHistories && this.chatHistories['operator']) || [];
 
       for (const p of (this.workplacePending || [])) {
+        // Build a "Review →" / "Confirm" two-step flow when the row
+        // carries a preview_diff so non-technical users can see the
+        // change before approving. Without a diff we keep the
+        // immediate Confirm to preserve the old behaviour for rows
+        // the server didn't enrich.
+        const hasDiff = !!(p.preview_diff && String(p.preview_diff).trim());
+        const itemId = 'pending-' + p.nonce;
+        const expanded = !!this._needsYouPreviewExpanded[itemId];
+        const previewAriaId = 'needs-you-preview-' + p.nonce;
+        const primary = hasDiff && !expanded
+          ? {
+              label: 'Review',
+              style: 'indigo',
+              handler: () => { this._needsYouPreviewExpanded = { ...this._needsYouPreviewExpanded, [itemId]: true }; },
+              ariaExpanded: 'false',
+              ariaControls: previewAriaId,
+            }
+          : { label: 'Confirm', style: 'emerald', handler: () => this.confirmPendingAction(p.nonce) };
         items.push({
-          id: 'pending-' + p.nonce,
+          id: itemId,
           kind: 'pending',
           icon: '!',
-          title: p.summary || `${p.action_kind || 'Action'} on ${p.target_kind || ''} ${p.target_id || ''}`.trim(),
+          title: this._humanizeAction(p.action_kind, p.target_kind, p.target_id, p.summary),
           subtitle: this._needsYouSubtitle({
             actor: p.actor,
             expiresAt: p.expires_at,
           }),
+          previewDiff: hasDiff ? p.preview_diff : null,
+          previewExpanded: expanded,
+          previewToggleAriaId: previewAriaId,
           actions: [
-            { label: 'Confirm', style: 'emerald', handler: () => this.confirmPendingAction(p.nonce) },
+            primary,
             { label: 'Cancel', style: 'gray', handler: () => this.cancelPendingAction(p.nonce) },
           ],
         });
@@ -1947,6 +1972,25 @@ function dashboard() {
       }
 
       for (const b of (this.workplaceBlockers || [])) {
+        // Decode machine-style blocker codes into plain English so
+        // Sarah doesn't have to guess what ``no_credentials`` means.
+        // ``classification.kind`` drives the primary CTA: a credential
+        // blocker gets a "Fix" button that jumps to the credential
+        // card in operator chat (the existing flow already renders a
+        // request_credential entry there); a browser-login blocker
+        // does the same for the browser-login flow; everything else
+        // falls back to the legacy "Drill in" task drawer.
+        const classification = this._humanizeBlocker(b.blocker_note || '');
+        const primary = (classification.kind === 'credential' || classification.kind === 'browser_login')
+          ? {
+              label: 'Fix',
+              style: 'indigo',
+              handler: () => {
+                this.activeTab = 'chat';
+                if (this.openChat) this.openChat('operator');
+              },
+            }
+          : { label: 'Drill in', style: 'amber', handler: () => this.openTaskDrillIn(b.id) };
         items.push({
           id: 'blocker-' + b.id,
           kind: 'blocker',
@@ -1955,16 +1999,99 @@ function dashboard() {
           subtitle: this._needsYouSubtitle({
             actor: b.assignee || '',
             project: b.project_id || '',
-            text: b.blocker_note || '',
+            text: classification.label,
           }),
-          actions: [
-            { label: 'Drill in', style: 'amber', handler: () => this.openTaskDrillIn(b.id) },
-          ],
+          actions: [primary],
         });
       }
 
       return items;
     },
+
+    // Plain-English label for a pending action card. The server
+    // already supplies ``summary`` for rich propose-edit rows; for
+    // those we just use it. Otherwise we map known machine kinds
+    // (``hard_edit``, ``delete_agent``, ...) into a sentence the
+    // operator's user can act on without learning the codebase.
+    // Returns a non-empty string (falls back to "{kind} on {target_kind}
+    // {target_id}" with underscores replaced by spaces).
+    _humanizeAction(kind, targetKind, targetId, summary) {
+      if (summary && String(summary).trim()) return String(summary);
+      const k = String(kind || '').toLowerCase();
+      const tid = String(targetId || '').trim();
+      const tkind = String(targetKind || '').trim();
+      switch (k) {
+        case 'hard_edit':
+          return tid ? `Change settings on ${tid}` : 'Change settings';
+        case 'soft_edit':
+          return tid ? `Tune ${tid}` : 'Tune agent';
+        case 'delete_agent':
+          return tid ? `Remove agent ${tid}` : 'Remove agent';
+        case 'delete_project':
+          return tid ? `Remove project ${tid}` : 'Remove project';
+        case 'archive_agent':
+          return tid ? `Archive agent ${tid}` : 'Archive agent';
+        case 'archive_project':
+          return tid ? `Archive project ${tid}` : 'Archive project';
+        default: {
+          const verb = (k || 'action').replace(/_/g, ' ').trim();
+          const tail = [tkind, tid].filter(Boolean).join(' ').trim();
+          return tail ? `${verb} on ${tail}` : verb;
+        }
+      }
+    },
+
+    // Plain-English mapping for blocker_note codes. Returns
+    // ``{ kind, label, service }`` so callers can both render the
+    // sentence and pick a CTA (credential vs. browser-login vs.
+    // drill-in). ``service`` is best-effort — extracted from a
+    // ``cred:<name>`` shorthand or the trailing word of a sentence;
+    // callers should treat empty as "unknown".
+    _humanizeBlocker(rawNote) {
+      const note = String(rawNote || '').trim();
+      if (!note) return { kind: 'unknown', label: '', service: '' };
+      const lower = note.toLowerCase();
+      // Credential-style: ``no_credentials``, ``missing_credentials``,
+      // or ``cred:<name>`` shorthand. Best-effort service extraction
+      // from the colon-prefixed form.
+      if (lower === 'no_credentials' || lower === 'missing_credentials') {
+        return { kind: 'credential', label: 'Needs a credential', service: '' };
+      }
+      if (lower.startsWith('cred:')) {
+        const service = note.slice(5).trim();
+        return {
+          kind: 'credential',
+          label: service ? `Needs a credential: ${service}` : 'Needs a credential',
+          service,
+        };
+      }
+      // Browser-login codes. URL/service hint may follow with a colon
+      // (``needs_browser_login:example.com``) — surface it if present.
+      if (lower === 'needs_browser_login' || lower === 'browser_login_required'
+          || lower.startsWith('needs_browser_login:') || lower.startsWith('browser_login_required:')) {
+        const idx = note.indexOf(':');
+        const hint = idx >= 0 ? note.slice(idx + 1).trim() : '';
+        return {
+          kind: 'browser_login',
+          label: hint ? `Needs a browser login: ${hint}` : 'Needs a browser login',
+          service: hint,
+        };
+      }
+      if (lower === 'awaiting_feedback' || lower === 'awaiting_user') {
+        return { kind: 'feedback', label: 'Waiting for your feedback', service: '' };
+      }
+      if (lower === 'quota_exceeded' || lower === 'budget_exceeded') {
+        return { kind: 'budget', label: 'Hit cost limit', service: '' };
+      }
+      // Already a sentence — render verbatim.
+      return { kind: 'other', label: note, service: '' };
+    },
+
+    // Per-card preview disclosure state for the Needs-you panel.
+    // Keyed by item id (``pending-<nonce>``). Rebuilt on every
+    // needsYouItems read; we keep it on the component instance so
+    // toggling stays sticky as the list re-renders.
+    _needsYouPreviewExpanded: {},
 
     // Build the small grey sub-line shared by every Needs-you card.
     // Joins the populated bits with " · " so blank fields don't leave
