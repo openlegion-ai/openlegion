@@ -218,6 +218,25 @@
         </button>
       </div>
       <div class="flex items-center gap-4 shrink-0">
+        <!-- Fleet pulse attention badge — surfaces operator's flagged agents -->
+        <button
+          x-show="fleetDigest?.agents_attention?.length > 0"
+          x-cloak
+          @click="switchTab('system'); systemTab = 'activity'; scrollToFleetPulse()"
+          class="flex items-center gap-1.5 px-2 sm:px-2.5 py-1 rounded-md text-xs font-medium bg-amber-900/30 text-amber-300 border border-amber-700/40 hover:bg-amber-900/50 hover:border-amber-600/60 transition-colors cursor-pointer"
+          aria-live="polite"
+          :aria-label="(fleetDigest?.agents_attention?.length || 0) + ' agents need attention. Click to view fleet pulse.'"
+          :title="'View fleet pulse — ' + (fleetDigest?.agents_attention?.length || 0) + ' need attention'"
+        >
+          <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          <!-- Mobile: number-only -->
+          <span class="sm:hidden font-mono" x-text="fleetDigest?.agents_attention?.length || 0"></span>
+          <!-- Tablet+: full text -->
+          <span class="hidden sm:inline">
+            <span class="font-mono" x-text="fleetDigest?.agents_attention?.length || 0"></span>
+            <span x-text="(fleetDigest?.agents_attention?.length === 1 ? ' agent needs' : ' agents need') + ' attention'"></span>
+          </span>
+        </button>
         <div class="text-xs text-gray-500 hidden sm:block cursor-pointer hover:text-gray-300 transition-colors" x-show="fleetTotalCost > 0" @click="systemTab = 'costs'; switchTab('system')">
           Today: <span class="text-gray-300 font-medium" x-text="formatCost(fleetTotalCost)"></span>
         </div>
@@ -3719,6 +3738,100 @@
 
       <!-- System (Activity + Costs + Automation + Integrations + API Keys + Wallet + Storage + Audit + Settings) -->
       <div x-show="activeTab === 'system'" x-cloak>
+        <!-- Fleet pulse card — operator's autonomous fleet-health observations.
+             Sits above the sub-tab bar so it's always visible regardless of sub-tab. -->
+        <div
+          id="fleet-pulse-card"
+          role="region"
+          aria-label="Fleet pulse"
+          class="bg-gray-800/40 border border-gray-700/50 rounded-xl p-4 mb-4"
+        >
+          <div class="flex items-center justify-between gap-2 mb-2">
+            <div class="flex items-center gap-2 min-w-0">
+              <h2 class="text-sm font-semibold text-white">Fleet pulse</h2>
+              <span
+                x-show="fleetDigest?.timestamp"
+                class="text-[11px] text-gray-500 truncate"
+                x-text="(() => { const t = Date.parse(fleetDigest.timestamp); if (!t) return ''; const rel = formatRelativeTime(t); return rel ? 'as of ' + rel : 'just now'; })()"
+              ></span>
+              <!-- Staleness badge — only operator-stopped signal users get -->
+              <span
+                x-show="isFleetDigestStale()"
+                class="text-[10px] font-semibold uppercase tracking-wide text-red-400 px-1.5 py-0.5 rounded bg-red-900/20 border border-red-800/40 shrink-0"
+                title="Operator hasn't run a check in 24h+"
+                aria-label="Fleet pulse is stale — operator hasn't run a check in 24h or more"
+              >stale</span>
+            </div>
+            <button
+              @click="refreshFleetDigest()"
+              :disabled="fleetDigestRefreshing"
+              :aria-label="fleetDigestRefreshing ? 'Refreshing fleet pulse' : 'Refresh fleet pulse'"
+              class="text-gray-500 hover:text-gray-200 disabled:opacity-50 disabled:cursor-not-allowed transition-colors p-1 rounded hover:bg-gray-800/60"
+              title="Refresh"
+            >
+              <svg class="w-3.5 h-3.5" :class="fleetDigestRefreshing ? 'animate-spin' : ''" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+            </button>
+          </div>
+
+          <!-- State A: never run -->
+          <template x-if="!fleetDigest">
+            <div class="text-sm text-gray-400">
+              Operator hasn't run a fleet check yet.
+            </div>
+          </template>
+
+          <!-- State B: ran, all quiet -->
+          <template x-if="fleetDigest && !(fleetDigest.agents_attention?.length)">
+            <div>
+              <div class="text-sm text-gray-200" x-text="fleetDigest.fleet_summary || 'All quiet across the fleet.'"></div>
+              <div x-show="!fleetDigest.fleet_summary" class="text-sm text-gray-300">All quiet across the fleet. &check;</div>
+            </div>
+          </template>
+
+          <!-- State C: ran, has attention items -->
+          <template x-if="fleetDigest && fleetDigest.agents_attention?.length">
+            <div>
+              <div x-show="fleetDigest.fleet_summary" class="text-sm text-gray-200 mb-3" x-text="fleetDigest.fleet_summary"></div>
+              <ul class="space-y-1.5" role="list">
+                <template x-for="entry in fleetDigest.agents_attention" :key="(entry.agent_id || '') + '|' + (entry.issue || '')">
+                  <li class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1 sm:gap-3 px-2.5 py-1.5 rounded-md bg-gray-900/40 border border-gray-800/60">
+                    <div class="flex items-start sm:items-center gap-2 min-w-0">
+                      <span
+                        class="text-sm shrink-0 leading-5"
+                        :title="entry.severity || 'unknown'"
+                        :aria-label="(entry.severity === 'high' || entry.severity === 'critical' || entry.severity === 'medium' || entry.severity === 'low' || entry.severity === 'info') ? ('severity ' + entry.severity) : 'severity unknown'"
+                        x-text="(entry.severity === 'high' || entry.severity === 'critical') ? '🔴' : entry.severity === 'medium' ? '🟡' : entry.severity === 'low' ? '🔵' : entry.severity === 'info' ? '🔵' : '⚠️'"
+                      ></span>
+                      <span class="text-sm text-gray-200 min-w-0">
+                        <span class="font-mono text-gray-100" x-text="entry.agent_id || 'unknown'"></span>
+                        <template x-if="entry.issue">
+                          <span class="text-gray-400"> &mdash; <span x-text="entry.issue"></span></span>
+                        </template>
+                      </span>
+                    </div>
+                    <button
+                      @click="drillIntoAttentionEntry(entry)"
+                      x-show="entry.agent_id"
+                      class="text-xs text-amber-300 hover:text-amber-200 self-start sm:self-auto shrink-0 px-2 py-0.5 rounded hover:bg-amber-900/20 transition-colors"
+                      :aria-label="'Drill in to ' + (entry.agent_id || 'agent')"
+                    >Drill in &rarr;</button>
+                  </li>
+                </template>
+              </ul>
+              <template x-if="fleetDigest.cost_trend">
+                <div class="text-[11px] text-gray-500 mt-3">
+                  Cost trend: <span class="text-gray-400" x-text="fleetDigest.cost_trend"></span>
+                </div>
+              </template>
+            </div>
+          </template>
+
+          <!-- Footer: last-check timestamp + author -->
+          <div x-show="fleetDigest?.timestamp" class="text-[11px] text-gray-500 mt-3 pt-2 border-t border-gray-800/60">
+            Last check: <span x-text="(() => { const t = Date.parse(fleetDigest.timestamp); if (!t) return '—'; return formatRelativeTime(t) || 'just now'; })()"></span> &middot; by Operator
+          </div>
+        </div>
+
         <!-- System sub-tab bar -->
         <div class="flex flex-wrap gap-0.5 bg-gray-800/50 rounded-lg p-0.5 mb-4">
           <template x-for="st in systemTabs" :key="st.id">
