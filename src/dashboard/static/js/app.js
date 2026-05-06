@@ -62,6 +62,7 @@ function dashboard() {
 
     // Fleet Digest (parsed from operator's OBSERVATIONS.md)
     fleetDigest: null,
+    fleetDigestRefreshing: false,
     _fleetDigestTimer: null,
 
     // Fleet
@@ -1248,27 +1249,66 @@ function dashboard() {
     // ── Fleet Digest ─────────────────────────────────────
 
     async fetchFleetDigest() {
+      // Lenient parser — never throws. On any error (network, missing file, bad JSON)
+      // we leave fleetDigest as-is on first call (null) so the empty-state placeholder
+      // renders. We deliberately do not clear a previously-loaded digest on a transient
+      // network blip.
       try {
         const resp = await fetch(`${window.__config.apiBase}/agents/operator/workspace/OBSERVATIONS.md`);
-        if (!resp.ok) { this.fleetDigest = null; return; }
+        if (!resp.ok) {
+          // 404 → operator hasn't run a check yet. Clear so the "never run" state shows.
+          if (resp.status === 404) this.fleetDigest = null;
+          return;
+        }
         const text = await resp.text();
         // Parse JSON block from markdown format
         const match = text.match(/```json\n([\s\S]*?)\n```/);
-        if (match) {
-          this.fleetDigest = JSON.parse(match[1]);
-        } else {
+        if (!match) { this.fleetDigest = null; return; }
+        try {
+          const parsed = JSON.parse(match[1]);
+          // Only accept object-shaped payloads
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            this.fleetDigest = parsed;
+          } else {
+            this.fleetDigest = null;
+          }
+        } catch (_e) {
           this.fleetDigest = null;
         }
-      } catch (e) {
-        this.fleetDigest = null;
+      } catch (_e) {
+        // Network error — keep previous value if any.
       }
+    },
+
+    async refreshFleetDigest() {
+      // User-initiated refresh — toggles the spinner, ensures a minimum visible
+      // duration so the spin isn't a single frame on cached responses.
+      if (this.fleetDigestRefreshing) return;
+      this.fleetDigestRefreshing = true;
+      const minDelay = new Promise(r => setTimeout(r, 350));
+      try {
+        await Promise.all([this.fetchFleetDigest(), minDelay]);
+      } finally {
+        this.fleetDigestRefreshing = false;
+      }
+    },
+
+    scrollToFleetPulse() {
+      // Defer a tick so the System tab content is in the DOM before we scroll.
+      this.$nextTick(() => {
+        const el = document.getElementById('fleet-pulse-card');
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
     },
 
     _startFleetDigestRefresh() {
       this.fetchFleetDigest();
       if (!this._fleetDigestTimer) {
         this._fleetDigestTimer = setInterval(() => {
-          if (this.activeTab === 'chat') this.fetchFleetDigest();
+          // Keep the digest fresh anywhere it is rendered (chat sidebar + system tab card).
+          if (this.activeTab === 'chat' || this.activeTab === 'system') {
+            this.fetchFleetDigest();
+          }
         }, 300000); // 5 minutes
       }
     },
