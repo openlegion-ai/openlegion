@@ -5825,32 +5825,84 @@ def create_dashboard_router(
 
     @api_router.get("/api/workplace/pending")
     async def api_workplace_pending() -> dict:
-        """List open pending actions for inline + System>Operator review."""
-        if pending_actions is None:
-            return {"pending": []}
+        """List open pending actions for inline + System>Operator review.
+
+        Proxies to the mesh's ``GET /mesh/pending`` over loopback with
+        the ``x-mesh-internal`` + ``X-Agent-ID: operator`` headers so the
+        operator-or-internal permission tier is enforced. Reading
+        ``pending_actions`` directly here would bypass that gate and let
+        any session with an ``ol_session`` cookie enumerate pending
+        actions even when the underlying mesh route is restricted. The
+        dashboard's CSRF guard runs ahead of this on state-changing
+        verbs; this is a GET so CSRF is not relevant.
+        """
+        import httpx
+        url = f"http://127.0.0.1:{mesh_port}/mesh/pending"
         try:
-            pending_actions.reap_expired()
-            rows = pending_actions.list_pending()
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    url,
+                    headers={
+                        "x-mesh-internal": "1",
+                        "X-Agent-ID": "operator",
+                    },
+                )
         except Exception as e:
-            logger.warning("workplace pending listing failed: %s", e)
-            rows = []
-        return {"pending": rows}
+            logger.warning("workplace pending listing proxy failed: %s", e)
+            return {"pending": []}
+        if resp.status_code >= 400:
+            try:
+                detail = resp.json().get("detail", resp.text)
+            except Exception:
+                detail = resp.text
+            raise HTTPException(resp.status_code, detail)
+        try:
+            return resp.json()
+        except Exception:
+            return {"pending": []}
 
     @api_router.post("/api/workplace/pending/{nonce}/cancel")
     async def api_workplace_pending_cancel(nonce: str) -> dict:
-        """Cancel a pending action — backs the dashboard "Cancel" button."""
-        if pending_actions is None:
-            raise HTTPException(404, "Pending action store not available")
-        record = pending_actions.cancel(nonce, actor="operator")
-        if record is None:
+        """Cancel a pending action — backs the dashboard "Cancel" button.
+
+        Proxies to the mesh's ``POST /mesh/pending/{nonce}/cancel``
+        endpoint over loopback with the ``x-mesh-internal`` +
+        ``X-Agent-ID: operator`` headers. The mesh route enforces the
+        operator-or-internal permission tier and emits the
+        ``pending_action_resolved`` event with ``status="cancelled"``.
+        Calling ``pending_actions.cancel`` directly here would bypass
+        that gate. The dashboard's CSRF guard (``X-Requested-With``)
+        is still enforced by the global middleware.
+        """
+        import httpx
+        url = f"http://127.0.0.1:{mesh_port}/mesh/pending/{nonce}/cancel"
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.post(
+                    url,
+                    json={},
+                    headers={
+                        "X-Requested-With": "XMLHttpRequest",
+                        "x-mesh-internal": "1",
+                        "X-Agent-ID": "operator",
+                        "Content-Type": "application/json",
+                    },
+                )
+        except Exception as e:
+            logger.warning("workplace pending cancel proxy failed: %s", e)
+            raise HTTPException(502, f"Mesh unreachable: {e}")
+        if resp.status_code == 404:
             raise HTTPException(404, "Pending action not found or already expired")
-        return {
-            "ok": True,
-            "nonce": nonce,
-            "target_kind": record["target_kind"],
-            "target_id": record["target_id"],
-            "action_kind": record["action_kind"],
-        }
+        if resp.status_code >= 400:
+            try:
+                detail = resp.json().get("detail", resp.text)
+            except Exception:
+                detail = resp.text
+            raise HTTPException(resp.status_code, detail)
+        try:
+            return resp.json()
+        except Exception:
+            return {"ok": True, "nonce": nonce}
 
     @api_router.post("/api/changes/undo/{undo_token}")
     async def api_changes_undo(undo_token: str, request: Request) -> dict:

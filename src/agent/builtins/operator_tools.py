@@ -1452,20 +1452,45 @@ async def manage_agent(
 
 
 @skill(
+    name="list_pending",
+    description=(
+        "List every non-expired pending action awaiting user "
+        "confirmation. Returns the nonce, action_kind, target_kind, "
+        "target_id, expires_at, actor and summary for each row. Use "
+        "this to find the nonce for cancel_pending_action() or to "
+        "show the user what is currently waiting on them."
+    ),
+    parameters={},
+)
+async def list_pending(*, mesh_client=None, **_kw) -> dict:
+    """Return open pending actions (operator-only)."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    try:
+        result = await mesh_client.list_pending_actions()
+    except Exception as e:
+        return {"error": f"Failed to list pending actions: {e}"}
+    pending = result.get("pending", []) if isinstance(result, dict) else []
+    return {"pending": pending, "count": len(pending)}
+
+
+@skill(
     name="cancel_pending_action",
     description=(
         "Cancel a pending action by nonce. Use this to clean up stale or "
         "incorrect proposals that the user no longer wants. The action "
         "will no longer be available for confirmation. Pair with "
-        "list_pending() / inspect the pending-actions card if you need "
-        "to find the nonce."
+        "list_pending() to find the nonce, or inspect the pending-actions "
+        "card on the Board."
     ),
     parameters={
         "nonce": {
             "type": "string",
             "description": (
-                "Nonce of the pending action to cancel (from propose_edit "
-                "/ edit_agent return value, the Board pending list, "
+                "Nonce of the pending action to cancel (from list_pending() "
+                "or the edit_agent return value, the Board pending list, "
                 "or the pending_action_card surface)."
             ),
         },

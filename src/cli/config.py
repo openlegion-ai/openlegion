@@ -1520,10 +1520,13 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     # Lifecycle (consolidated archive/delete)
     "manage_project", "manage_agent", "manage_task",
     # Self-cleanup — operator can clear stale pending actions and prune
-    # the audit log without waiting for TTL.
-    "cancel_pending_action", "archive_audit_before",
-    # Credential + browser handoff
-    "request_credential", "request_browser_login",
+    # the audit log without waiting for TTL. ``list_pending`` lets the
+    # operator find the nonce before calling cancel_pending_action.
+    "list_pending", "cancel_pending_action", "archive_audit_before",
+    # Credential + browser handoff. ``vault_list`` returns names only
+    # (never values) so the operator can check what credentials already
+    # exist before calling request_credential.
+    "vault_list", "request_credential", "request_browser_login",
 ]
 
 _OPERATOR_HEARTBEAT_TOOLS: list[str] = [
@@ -1560,8 +1563,8 @@ Your previous observations are included above in OBSERVATIONS.md.
 3. Call inspect_agents() for per-agent status overview.
 
 4. For agents flagged in agents_needing_attention or with new concerning signals
-   (unhealthy, failure_rate > 0.30, cost_vs_yesterday_ratio > 2.0),
-   call inspect_agents(agent_id, depth="profile") for details.
+   (unhealthy, cost_vs_yesterday_ratio > 2.0), call
+   inspect_agents(agent_id, depth="profile") for details.
 
 5. Call save_observations() with:
    - fleet_summary: one-line health (e.g. "5/6 healthy, cost stable")
@@ -1569,7 +1572,7 @@ Your previous observations are included above in OBSERVATIONS.md.
    - cost_trend: up/down/stable with percentage
    - notes: anything unusual not captured above
 
-6. If any agent is CRITICAL (failed state, failure_rate > 0.50, budget exceeded),
+6. If any agent is CRITICAL (failed state, budget exceeded),
    call notify_user() with a brief alert. Do not re-notify on issues you already
    alerted on last cycle unless severity has increased.
 

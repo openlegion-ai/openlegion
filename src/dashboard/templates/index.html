@@ -949,12 +949,28 @@
                   </div>
                 </div>
 
-                <!-- First-run: no agents yet -->
+                <!-- First-run: no agents yet.
+                     TODO: seed an actual assistant message in the
+                     operator's chat history on first container boot
+                     so the chat opens with a warm greeting from the
+                     operator instead of a passive empty-state. The
+                     deeper version requires cross-container coordination
+                     (boot detection in src/cli/runtime.py + a one-shot
+                     assistant message persisted via the agent's
+                     transcript, with idempotent detection so restarts
+                     don't re-greet). For now we keep the welcoming
+                     empty-state UI below — it's the silent-operator
+                     mitigation per the PR-F audit. -->
                 <div x-show="!(chatHistories['operator'] || []).length && !chatLoadingAgents['operator'] && agents.filter(a => a.id !== 'operator').length === 0"
                   class="flex-1 flex flex-col items-center justify-center px-4">
                   <img src="/dashboard/static/avatars/operator.png" alt="Operator" class="w-10 h-10 rounded-full mb-3 opacity-80">
-                  <div class="text-sm font-semibold text-white mb-1">What are you building?</div>
-                  <div class="text-[11px] text-gray-500 mb-5">Tell me about your business and I'll set up the right team.</div>
+                  <div class="text-sm font-semibold text-white mb-1">Hi — I'm your Operator.</div>
+                  <div class="text-[11px] text-gray-400 mb-1 max-w-md text-center leading-relaxed">
+                    I help you build and run AI agent teams. Tell me what you'd like your team to handle, in plain English.
+                  </div>
+                  <div class="text-[11px] text-gray-500 mb-5 max-w-md text-center leading-relaxed">
+                    Pick a starting point below or describe your own — I'll handle the setup.
+                  </div>
                   <!-- Curated intent-based options — uniform size -->
                   <div class="flex flex-col gap-1.5 w-full max-w-sm">
                     <button @click="let el = document.getElementById('operator-chat-input'); if (el) { let s = Alpine.$data(el.closest('[x-data]')); if (s) s.opMsg = (maxAgents > 0 && maxAgents <= 1) ? 'I need a content agent for writing, editing, and research' : 'I need a content team — writing, editing, and research'; el.focus(); }"

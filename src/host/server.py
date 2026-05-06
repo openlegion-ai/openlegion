@@ -3136,6 +3136,13 @@ def create_mesh_app(
         cost_ratio = round(cost_today / cost_yesterday, 2) if cost_yesterday > 0 else 0
 
         # -- Per-agent failure rates (placeholder — needs task tracking) --
+        # TODO: compute per-agent failure rates from recent task outcomes.
+        # The shape ``{agent_id: float in [0,1]}`` is reserved on the
+        # contract; consumers must continue to handle the empty-dict
+        # case as "data unavailable, not zero-failure". Until this is
+        # wired, the operator heartbeat instructions intentionally do
+        # NOT reference ``failure_rate`` thresholds (see _OPERATOR_HEARTBEAT
+        # in src/cli/config.py).
         failure_rates: dict[str, float] = {}
 
         # -- Agents needing attention (exclude operator) --

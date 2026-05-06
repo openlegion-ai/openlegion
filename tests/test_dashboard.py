@@ -4727,6 +4727,59 @@ class TestWorkplaceTabRoutes:
         self._set_v2(enabled)
         return _make_client(self.components)
 
+    def _patch_pending_proxy(self):
+        """Patch httpx so the dashboard pending proxies hit the in-test
+        ``PendingActions`` store directly.
+
+        The dashboard's ``/api/workplace/pending`` and
+        ``/api/workplace/pending/{nonce}/cancel`` endpoints fan out to
+        ``GET /mesh/pending`` and ``POST /mesh/pending/{nonce}/cancel``
+        over loopback so the operator-or-internal permission tier is
+        enforced. There is no real mesh in unit-test process — we
+        substitute an ``AsyncClient`` whose ``get`` / ``post`` proxy
+        directly to ``self.pending_actions``.
+        """
+
+        store = self.pending_actions
+
+        class _StubResp:
+            def __init__(self, code: int, body: dict):
+                self.status_code = code
+                self._body = body
+                self.text = "" if not body else str(body)
+            def json(self):
+                return self._body
+
+        class _StubClient:
+            def __init__(self_inner, *a, **kw):
+                pass
+            async def __aenter__(self_inner):
+                return self_inner
+            async def __aexit__(self_inner, *a):
+                return False
+            async def get(self_inner, url, headers=None):
+                store.reap_expired()
+                rows = store.list_pending()
+                return _StubResp(200, {"pending": rows})
+            async def post(self_inner, url, json=None, headers=None):
+                # URL pattern: .../mesh/pending/{nonce}/cancel
+                nonce = url.rstrip("/").split("/")[-2]
+                record = store.cancel(nonce, actor="operator")
+                if record is None:
+                    return _StubResp(404, {
+                        "detail": "Pending action not found or already expired",
+                    })
+                return _StubResp(200, {
+                    "ok": True,
+                    "nonce": nonce,
+                    "target_kind": record["target_kind"],
+                    "target_id": record["target_id"],
+                    "action_kind": record["action_kind"],
+                })
+
+        from unittest.mock import patch
+        return patch("httpx.AsyncClient", _StubClient)
+
     def test_workplace_tasks_empty_state_when_v2_off(self):
         client = self._client_with_v2(False)
         resp = client.get("/dashboard/api/workplace/tasks")
@@ -4809,7 +4862,8 @@ class TestWorkplaceTabRoutes:
             nonce="n1", actor="operator", target_kind="agent",
             target_id="alpha", action_kind="model", payload={"x": 1},
         )
-        resp = client.get("/dashboard/api/workplace/pending")
+        with self._patch_pending_proxy():
+            resp = client.get("/dashboard/api/workplace/pending")
         assert resp.status_code == 200
         rows = resp.json()["pending"]
         assert any(r["nonce"] == "n1" for r in rows)
@@ -4820,16 +4874,18 @@ class TestWorkplaceTabRoutes:
             nonce="n1", actor="operator", target_kind="agent",
             target_id="alpha", action_kind="model", payload={"x": 1},
         )
-        resp = client.post("/dashboard/api/workplace/pending/n1/cancel")
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["ok"] is True
-        assert body["nonce"] == "n1"
-        # Row gone — second cancel returns 404.
-        resp2 = client.post("/dashboard/api/workplace/pending/n1/cancel")
-        assert resp2.status_code == 404
+        with self._patch_pending_proxy():
+            resp = client.post("/dashboard/api/workplace/pending/n1/cancel")
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["ok"] is True
+            assert body["nonce"] == "n1"
+            # Row gone — second cancel returns 404.
+            resp2 = client.post("/dashboard/api/workplace/pending/n1/cancel")
+            assert resp2.status_code == 404
 
     def test_workplace_pending_cancel_unknown_returns_404(self):
         client = self._client_with_v2(False)
-        resp = client.post("/dashboard/api/workplace/pending/missing/cancel")
+        with self._patch_pending_proxy():
+            resp = client.post("/dashboard/api/workplace/pending/missing/cancel")
         assert resp.status_code == 404
