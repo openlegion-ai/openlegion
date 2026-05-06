@@ -54,7 +54,7 @@ class TestExtractTriggeredPlaybooks:
             ]},
             {"role": "tool", "content": "{}", "tool_call_id": "tc1"},
             {"role": "assistant", "tool_calls": [
-                {"function": {"name": "propose_edit"}, "id": "tc2", "type": "function"},
+                {"function": {"name": "edit_agent"}, "id": "tc2", "type": "function"},
             ]},
         ]
         assert extract_triggered_playbooks(msgs) == {"team_build", "edit"}
@@ -132,18 +132,18 @@ class TestPlaybookConstants:
             assert "1." in content, f"{name} should have numbered steps"
 
     def test_tool_map_covers_all_action_tools(self):
-        # PR 0 consolidation dropped vault_list/read_agent_history from the
-        # operator surface. PR 5 added set_project_goal. PR 1 added
-        # edit_agent + undo_change to the edit playbook; propose_edit and
-        # confirm_edit remain mapped because they're still defined as
-        # helpers (the operator may emit a tool_call for confirm_edit on
-        # hard fields).
+        # PR 0 consolidation dropped read_agent_history. PR 5 added
+        # set_project_goal. PR 1 added edit_agent + undo_change to the
+        # edit playbook. The PR-F production-safety pass dropped
+        # propose_edit (legacy two-step retired in PR #839) so the
+        # operator's playbook map advertises only the new edit_agent
+        # flow; confirm_edit remains mapped as the hard-field follow-up.
         expected_tools = {
             "create_agent", "apply_template", "create_project",
             "add_agents_to_project", "remove_agents_from_project",
             "update_project_context", "set_project_goal",
             "edit_agent", "undo_change",
-            "propose_edit", "confirm_edit",
+            "confirm_edit",
             "save_observations",
             "request_credential", "request_browser_login",
         }
