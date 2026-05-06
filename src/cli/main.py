@@ -596,7 +596,7 @@ def status(port: int, wide: bool, watch_interval: int | None, as_json: bool):
     _print_status(agents_data, mesh_online, configured)
 
 
-# ── Task 9 — Workplace / orchestration CLI commands ──────────
+# ── Task 9 — Board / orchestration CLI commands ──────────────
 
 
 def _mesh_get(port: int, path: str) -> dict | list:
@@ -730,7 +730,7 @@ def tasks_cmd(agent, project, status, port, as_json):
         if as_json:
             click.echo(_json.dumps(data, default=str))
         else:
-            click.echo("Workplace disabled. Set OPENLEGION_ORCHESTRATION_TASKS_V2=1 and restart.")
+            click.echo("Board disabled. Set OPENLEGION_ORCHESTRATION_TASKS_V2=1 and restart.")
         return
     tasks = data.get("tasks", [])
     if as_json:

@@ -660,7 +660,7 @@ class RuntimeContext:
 
         # Task 9 — pass the mesh's pending-action and tasks stores into
         # the dashboard so the new ``/api/workplace/*`` endpoints can
-        # render the Workplace tab without a second HTTP hop.
+        # render the Board tab without a second HTTP hop.
         dashboard_router = create_dashboard_router(
             blackboard=self.blackboard,
             health_monitor=self.health_monitor,
