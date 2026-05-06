@@ -6,6 +6,7 @@ import os
 from datetime import datetime, timezone
 
 from src.agent.skills import skill
+from src.shared.types import SOFT_EDIT_FIELDS as _SOFT_EDIT_FIELDS
 from src.shared.utils import setup_logging
 
 logger = setup_logging("agent.builtins.operator_tools")
@@ -36,11 +37,9 @@ _VALID_FIELDS = frozenset({
 
 # PR 1 — soft edits apply immediately + emit a receipt with 5min Undo;
 # hard edits keep the propose+confirm dance (model swap, budget change,
-# and permissions are too consequential to undo via a button).
-_SOFT_EDIT_FIELDS = frozenset({
-    "instructions", "soul", "heartbeat", "interface", "role",
-})
-_HARD_EDIT_FIELDS = frozenset({"model", "budget", "permissions", "thinking"})
+# and permissions are too consequential to undo via a button). The
+# canonical sets are imported from :mod:`src.shared.types` (single
+# source of truth across host + agent modules).
 
 # Audited reasons the operator can declare. ``user_asked`` is the common
 # path (the user said "do X"); ``operator_proactive`` is the "I noticed"

@@ -1239,6 +1239,10 @@ function dashboard() {
       if (this._cookieRenewalInterval) clearInterval(this._cookieRenewalInterval);
       if (this._visibilityHandler) document.removeEventListener('visibilitychange', this._visibilityHandler);
       if (this._costDebounce) clearTimeout(this._costDebounce);
+      if (this._pendingPulseTimer) {
+        clearTimeout(this._pendingPulseTimer);
+        this._pendingPulseTimer = null;
+      }
       if (this.modelChart) { this.modelChart.destroy(); this.modelChart = null; }
       if (this._fleetDebounce) clearTimeout(this._fleetDebounce);
       if (this._activityRefresh) clearInterval(this._activityRefresh);
@@ -1836,10 +1840,27 @@ function dashboard() {
 
     // Toggle the collapsed bar. Used by the click handler and the
     // Enter/Space keyboard handler. Reset the pulse when the user
-    // expands so the badge stops drawing attention.
+    // expands so the badge stops drawing attention. When expanding,
+    // move keyboard focus to the first revealed card so screen-reader
+    // and keyboard users land on the new content (matches the typical
+    // disclosure-widget contract).
     togglePendingExpanded() {
       this.pendingExpanded = !this.pendingExpanded;
-      if (this.pendingExpanded) this.pendingPulse = false;
+      if (this.pendingExpanded) {
+        this.pendingPulse = false;
+        // Defer until Alpine has re-rendered the now-visible cards.
+        this.$nextTick(() => {
+          // Both render sites tag their cards container with
+          // ``data-pending-cards``; we focus the first card under the
+          // first matching container in DOM order. If neither
+          // container is mounted (e.g. operator chat collapsed),
+          // there's nothing to focus and we silently no-op.
+          const container = document.querySelector('[data-pending-cards]');
+          if (!container) return;
+          const card = container.querySelector('[data-pending-card]');
+          if (card && typeof card.focus === 'function') card.focus();
+        });
+      }
     },
 
     // Flash the count badge for ~2s so a fresh pending while

@@ -39,7 +39,9 @@ from src.host.pending_actions import PendingActions
 from src.shared.redaction import redact_url
 from src.shared.types import (
     AGENT_ID_RE_PATTERN,
+    HARD_EDIT_FIELDS,
     RESERVED_AGENT_IDS,
+    SOFT_EDIT_FIELDS,
     AgentMessage,
     APIProxyRequest,
     APIProxyResponse,
@@ -118,10 +120,6 @@ _CHANGE_TTL_SECONDS = 300
 # the user typically wants to read the diff and think before
 # confirming. 30 minutes mirrors the worktree code-review reflex.
 _HARD_CHANGE_TTL_SECONDS = 1800
-# Fields that earn the longer review window. Mirrors
-# ``_HARD_EDIT_FIELDS`` defined later inside ``create_mesh_app`` (kept
-# in sync manually — both lists have to agree, and they're tiny).
-_HARD_TTL_FIELDS = frozenset({"model", "permissions", "budget", "thinking"})
 
 
 def _ttl_for_field(field: str | None) -> int:
@@ -131,10 +129,17 @@ def _ttl_for_field(field: str | None) -> int:
     longer ``_HARD_CHANGE_TTL_SECONDS`` window so the user has time to
     read the diff. Everything else (soft fields, non-config actions
     like project/agent deletes, unknown action kinds) falls back to
-    ``_CHANGE_TTL_SECONDS``.
+    ``_CHANGE_TTL_SECONDS``. The hard set is defined once in
+    :data:`src.shared.types.HARD_EDIT_FIELDS` and imported here.
     """
-    if field and field in _HARD_TTL_FIELDS:
+    if field and field in HARD_EDIT_FIELDS:
         return _HARD_CHANGE_TTL_SECONDS
+    if field and field not in SOFT_EDIT_FIELDS:
+        # Unknown field — log so future debugging surfaces typos /
+        # newly-added fields that forgot to declare a TTL bucket.
+        # Soft TTL is the safer fallback (shorter window favours
+        # iteration over delay).
+        logger.debug("unknown TTL field %r, defaulting to soft", field)
     return _CHANGE_TTL_SECONDS
 
 
@@ -4745,11 +4750,11 @@ def create_mesh_app(
     # Soft fields apply directly with no propose+confirm round-trip.
     # Hard fields keep the existing propose/confirm path. The split
     # is a UX pattern — both still pass through the agent's
-    # provenance gate at the operator-tool layer.
-    _SOFT_EDIT_FIELDS = {
-        "instructions", "soul", "heartbeat", "interface", "role",
-    }
-    _HARD_EDIT_FIELDS = {"model", "budget", "permissions", "thinking"}
+    # provenance gate at the operator-tool layer. Canonical
+    # definitions live in :mod:`src.shared.types`; aliased here for
+    # readability inside this app factory.
+    _SOFT_EDIT_FIELDS = SOFT_EDIT_FIELDS
+    _HARD_EDIT_FIELDS = HARD_EDIT_FIELDS
 
     def _humanize_field(field: str) -> str:
         """Display name for a field — used in receipt summaries."""

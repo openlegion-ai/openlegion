@@ -34,6 +34,30 @@ its profile silently stomped the next time an operator ran the canary.
 AGENT_ID_RE_PATTERN = r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
 """Canonical agent ID regex — 1-64 chars, alphanumeric start, then alphanumeric/hyphen/underscore."""
 
+HARD_EDIT_FIELDS = frozenset({"model", "permissions", "budget", "thinking"})
+"""Agent-config fields that require explicit propose+confirm (the "hard"
+review path). Mirrors :data:`SOFT_EDIT_FIELDS` — the union is the full
+set of editable fields surfaced through the operator-tool layer.
+
+These are the consequential edits — model swaps, permission grants,
+budget tweaks, thinking-level changes — that:
+
+* Take the longer 30-min review TTL on the pending-action store
+  (vs 5-min for soft edits) so the user has time to read the diff.
+* Refuse the soft `/edit-soft` shortcut and force the operator tool to
+  fall through to the propose+confirm path.
+
+Single source of truth — imported by :mod:`src.host.server` and
+:mod:`src.agent.builtins.operator_tools`.
+"""
+
+SOFT_EDIT_FIELDS = frozenset({
+    "instructions", "soul", "heartbeat", "interface", "role",
+})
+"""Agent-config fields that apply immediately with a 5-min Undo receipt
+(the "soft" review path). See :data:`HARD_EDIT_FIELDS` for the inverse.
+"""
+
 # === Inter-Component Messages ===
 
 
