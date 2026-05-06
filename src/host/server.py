@@ -5203,6 +5203,34 @@ def create_mesh_app(
             "action_kind": record["action_kind"],
         }
 
+    @app.post("/mesh/audit/archive")
+    async def audit_archive(request: Request) -> dict:
+        """Bulk-archive operator audit entries older than ``before_date``.
+
+        Operator-or-internal only. Soft-archive: rows are flipped to
+        ``archived=1`` and dropped from the default audit-log view.
+        Use ``GET /api/operator-audit?include_archived=true`` to see
+        archived rows. Returns ``{archived_count: N}``.
+        """
+        caller = _extract_verified_agent_id(request)
+        if caller != "operator" and not _is_internal_caller(request):
+            raise HTTPException(403, "Only the operator can archive audit entries")
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        before_date = (body or {}).get("before_date") if isinstance(body, dict) else None
+        if not before_date or not isinstance(before_date, str):
+            raise HTTPException(400, "before_date is required (ISO 8601 string)")
+        try:
+            count = blackboard.archive_audit_before(before_date)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except Exception as e:
+            logger.warning("audit archive failed: %s", e)
+            raise HTTPException(500, "Failed to archive audit entries")
+        return {"ok": True, "archived_count": int(count), "before_date": before_date}
+
     # === Browser Service Proxy ===
 
     import httpx as _httpx

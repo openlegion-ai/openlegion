@@ -1061,3 +1061,154 @@ async def test_undo_change_no_mesh_client():
     result = await undo_change("tok-1")
     assert "error" in result
     assert "mesh_client" in result["error"].lower()
+
+
+# ── cancel_pending_action ────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_cancel_pending_action_success():
+    from src.agent.builtins.operator_tools import cancel_pending_action
+
+    mc = MagicMock()
+    mc.cancel_pending_action = AsyncMock(return_value={
+        "ok": True,
+        "nonce": "nonce-1",
+        "target_kind": "agent",
+        "target_id": "writer",
+        "action_kind": "edit",
+    })
+    result = await cancel_pending_action("nonce-1", mesh_client=mc)
+    assert result["success"] is True
+    assert result["nonce"] == "nonce-1"
+    assert result["target_kind"] == "agent"
+    mc.cancel_pending_action.assert_awaited_once_with("nonce-1")
+
+
+@pytest.mark.asyncio
+async def test_cancel_pending_action_404_friendly():
+    from src.agent.builtins.operator_tools import cancel_pending_action
+
+    mc = MagicMock()
+    mc.cancel_pending_action = AsyncMock(side_effect=RuntimeError("404 Not Found"))
+    result = await cancel_pending_action("missing", mesh_client=mc)
+    assert result["error"] == "pending_unknown_or_expired"
+    assert "expired" in result["detail"].lower() or "not found" in result["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_cancel_pending_action_no_nonce():
+    from src.agent.builtins.operator_tools import cancel_pending_action
+
+    result = await cancel_pending_action("", mesh_client=MagicMock())
+    assert "error" in result
+    assert "nonce" in result["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_cancel_pending_action_no_mesh_client():
+    from src.agent.builtins.operator_tools import cancel_pending_action
+
+    result = await cancel_pending_action("nonce-1")
+    assert "error" in result
+    assert "mesh_client" in result["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_cancel_pending_action_blocked_for_non_operator(monkeypatch):
+    """Non-operator agents must not be able to cancel pending actions."""
+    from src.agent.builtins.operator_tools import cancel_pending_action
+
+    monkeypatch.delenv("ALLOWED_TOOLS", raising=False)
+    result = await cancel_pending_action("nonce-1", mesh_client=MagicMock())
+    assert "error" in result
+    assert "operator" in result["error"].lower()
+
+
+# ── archive_audit_before ─────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_archive_audit_before_success():
+    from src.agent.builtins.operator_tools import archive_audit_before
+
+    mc = MagicMock()
+    mc.archive_audit_before = AsyncMock(return_value={
+        "ok": True,
+        "archived_count": 12,
+        "before_date": "2026-04-01",
+    })
+    result = await archive_audit_before("2026-04-01", mesh_client=mc)
+    assert result["success"] is True
+    assert result["archived_count"] == 12
+    assert result["before_date"] == "2026-04-01"
+    assert "12" in result["message"]
+    mc.archive_audit_before.assert_awaited_once_with("2026-04-01")
+
+
+@pytest.mark.asyncio
+async def test_archive_audit_before_zero_count_pluralization():
+    from src.agent.builtins.operator_tools import archive_audit_before
+
+    mc = MagicMock()
+    mc.archive_audit_before = AsyncMock(return_value={
+        "ok": True,
+        "archived_count": 0,
+        "before_date": "2099-01-01",
+    })
+    result = await archive_audit_before("2099-01-01", mesh_client=mc)
+    assert result["archived_count"] == 0
+    assert "0 audit entries" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_archive_audit_before_singular_pluralization():
+    from src.agent.builtins.operator_tools import archive_audit_before
+
+    mc = MagicMock()
+    mc.archive_audit_before = AsyncMock(return_value={
+        "ok": True,
+        "archived_count": 1,
+        "before_date": "2026-04-01",
+    })
+    result = await archive_audit_before("2026-04-01", mesh_client=mc)
+    assert "1 audit entry" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_archive_audit_before_no_date():
+    from src.agent.builtins.operator_tools import archive_audit_before
+
+    result = await archive_audit_before("", mesh_client=MagicMock())
+    assert "error" in result
+    assert "before_date" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_archive_audit_before_no_mesh_client():
+    from src.agent.builtins.operator_tools import archive_audit_before
+
+    result = await archive_audit_before("2026-04-01")
+    assert "error" in result
+    assert "mesh_client" in result["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_archive_audit_before_blocked_for_non_operator(monkeypatch):
+    from src.agent.builtins.operator_tools import archive_audit_before
+
+    monkeypatch.delenv("ALLOWED_TOOLS", raising=False)
+    result = await archive_audit_before("2026-04-01", mesh_client=MagicMock())
+    assert "error" in result
+    assert "operator" in result["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_archive_audit_before_propagates_mesh_error():
+    from src.agent.builtins.operator_tools import archive_audit_before
+
+    mc = MagicMock()
+    mc.archive_audit_before = AsyncMock(side_effect=RuntimeError("boom"))
+    result = await archive_audit_before("2026-04-01", mesh_client=mc)
+    assert "error" in result
+    assert "boom" in result["error"]

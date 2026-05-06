@@ -289,6 +289,10 @@ function dashboard() {
     identityEditBuffer: '',
     identitySaving: false,
     identityEditingFile: null,  // Which specific file is being edited
+    // Re-entrance flag for the operator SOUL/INSTRUCTIONS confirm gate.
+    // Set true inside the confirm modal's action so the recursive
+    // saveIdentityFile() call skips the gate.
+    _operatorIdentityConfirmed: false,
     configEditing: false,
     configSaving: false,
     identityLogs: null,
@@ -415,6 +419,10 @@ function dashboard() {
     auditTotal: 0,
     auditPage: 1,
     auditLoading: false,
+    auditIncludeArchived: false,
+    // "Archive entries older than" control: 7 / 30 / 90 days; default 30.
+    auditArchiveDays: 30,
+    auditArchiving: false,
 
     // Unified Project Hub (replaces separate PROJECT.md + Comms + Broadcast panels)
     projectHubExpanded: false,
@@ -1400,7 +1408,12 @@ function dashboard() {
     async fetchAuditLog() {
       this.auditLoading = true;
       try {
-        const resp = await fetch(`${window.__config.apiBase}/operator-audit?per_page=20&page=${this.auditPage}`);
+        const params = new URLSearchParams({
+          per_page: '20',
+          page: String(this.auditPage),
+        });
+        if (this.auditIncludeArchived) params.set('include_archived', 'true');
+        const resp = await fetch(`${window.__config.apiBase}/operator-audit?${params.toString()}`);
         if (resp.ok) {
           const data = await resp.json();
           this.auditLog = data.entries || [];
@@ -1411,6 +1424,58 @@ function dashboard() {
       } finally {
         this.auditLoading = false;
       }
+    },
+
+    // Compute an ISO date string for "now - N days" so the archive
+    // request matches the SQLite TEXT timestamps the audit_log table
+    // stores. We use the date-only form (YYYY-MM-DD) so users get a
+    // predictable cutoff rather than a moving wall-clock window.
+    _archiveCutoffIso(days) {
+      const d = new Date();
+      d.setUTCDate(d.getUTCDate() - Math.max(1, Math.floor(days || 1)));
+      return d.toISOString().slice(0, 10);  // YYYY-MM-DD
+    },
+
+    async archiveOldAuditEntries() {
+      if (this.auditArchiving) return;
+      const days = Number(this.auditArchiveDays) || 30;
+      const cutoff = this._archiveCutoffIso(days);
+      this.auditArchiving = true;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/operator-audit/archive`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Requested-With': 'XMLHttpRequest',
+          },
+          body: JSON.stringify({ before_date: cutoff }),
+        });
+        if (!resp.ok) {
+          const data = await resp.json().catch(() => ({}));
+          this.showToast(`Archive failed: ${data.detail || resp.status}`);
+          return;
+        }
+        const data = await resp.json();
+        const n = data.archived_count || 0;
+        this.showToast(
+          n === 0
+            ? `No audit entries older than ${cutoff}.`
+            : `Archived ${n} ${n === 1 ? 'entry' : 'entries'} older than ${cutoff}.`,
+        );
+        // Reload audit list so the UI reflects the change immediately.
+        this.auditPage = 1;
+        await this.fetchAuditLog();
+      } catch (e) {
+        this.showToast(`Archive failed: ${e.message || e}`);
+      } finally {
+        this.auditArchiving = false;
+      }
+    },
+
+    toggleIncludeArchived() {
+      this.auditIncludeArchived = !this.auditIncludeArchived;
+      this.auditPage = 1;
+      this.fetchAuditLog();
     },
 
     // ── Task 9 — Workplace tab loaders / event handlers ────────
@@ -3434,6 +3499,30 @@ function dashboard() {
       if (this.identitySaving) return;
       if (!file) file = this.identityEditingFile;
       if (!file) return;
+      // For the operator agent, SOUL.md / INSTRUCTIONS.md edits literally
+      // rewrite how the operator behaves on its next turn. Route through
+      // the shared confirm modal so the user sees a clear "are you sure"
+      // gate; everything else (other agents, MEMORY.md/USER.md/HEARTBEAT.md
+      // on the operator) saves immediately as before.
+      const isOperatorIdentity = agentId === 'operator'
+        && (file === 'SOUL.md' || file === 'INSTRUCTIONS.md');
+      if (isOperatorIdentity && !this._operatorIdentityConfirmed) {
+        this.showConfirm(
+          'This changes how your Operator behaves',
+          `Saving ${file} on the operator agent will reshape its next response. `
+            + 'Are you sure you want to apply this change?',
+          async () => {
+            this._operatorIdentityConfirmed = true;
+            try {
+              await this.saveIdentityFile(agentId, file);
+            } finally {
+              this._operatorIdentityConfirmed = false;
+            }
+          },
+          false,  // not destructive — indigo button, "Confirm"
+        );
+        return;
+      }
       this.identitySaving = true;
       try {
         const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/workspace/${file}`, {

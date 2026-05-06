@@ -753,6 +753,98 @@ class TestDashboardTraces:
         assert resp.status_code == 404
 
 
+class TestDashboardOperatorAudit:
+    """Operator audit log: read filter (include_archived) + archive POST."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir)
+        self.client = _make_client(self.components)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _seed(self):
+        bb = self.components["blackboard"]
+        bb.log_audit(action="edit", target="alpha", field="model")
+        bb.log_audit(action="edit", target="beta", field="soul")
+        # Backdate alpha's row so the cutoff catches it.
+        bb.db.execute(
+            "UPDATE audit_log SET timestamp='2025-01-01 00:00:00' WHERE target='alpha'"
+        )
+        bb.db.commit()
+
+    def test_operator_audit_default_hides_archived(self):
+        self._seed()
+        bb = self.components["blackboard"]
+        bb.archive_audit_before("2026-01-01")
+        resp = self.client.get("/dashboard/api/operator-audit")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["entries"][0]["target"] == "beta"
+
+    def test_operator_audit_include_archived_true(self):
+        self._seed()
+        bb = self.components["blackboard"]
+        bb.archive_audit_before("2026-01-01")
+        resp = self.client.get(
+            "/dashboard/api/operator-audit?include_archived=true",
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 2
+        archived = [e for e in data["entries"] if e["archived"]]
+        assert len(archived) == 1
+
+    def test_operator_audit_archive_post_archives_old_rows(self):
+        self._seed()
+        resp = self.client.post(
+            "/dashboard/api/operator-audit/archive",
+            json={"before_date": "2026-01-01"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["archived_count"] == 1
+        assert data["before_date"] == "2026-01-01"
+
+        # The default audit list should now be down to one row.
+        resp2 = self.client.get("/dashboard/api/operator-audit")
+        assert resp2.json()["total"] == 1
+
+    def test_operator_audit_archive_rejects_missing_date(self):
+        resp = self.client.post(
+            "/dashboard/api/operator-audit/archive",
+            json={},
+        )
+        assert resp.status_code == 400
+
+    def test_operator_audit_archive_idempotent(self):
+        self._seed()
+        r1 = self.client.post(
+            "/dashboard/api/operator-audit/archive",
+            json={"before_date": "2026-01-01"},
+        )
+        r2 = self.client.post(
+            "/dashboard/api/operator-audit/archive",
+            json={"before_date": "2026-01-01"},
+        )
+        assert r1.json()["archived_count"] == 1
+        assert r2.json()["archived_count"] == 0
+
+    def test_operator_audit_archive_requires_csrf(self):
+        """POST without X-Requested-With must be rejected (CSRF guard)."""
+        from fastapi.testclient import TestClient
+        plain = TestClient(self.client.app)
+        resp = plain.post(
+            "/dashboard/api/operator-audit/archive",
+            json={"before_date": "2026-01-01"},
+        )
+        assert resp.status_code == 403
+
+
 # ── V2 Tests: Agent Config ──────────────────────────────────
 
 

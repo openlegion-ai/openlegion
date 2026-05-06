@@ -4162,18 +4162,54 @@ def create_dashboard_router(
 
     @api_router.get("/api/operator-audit")
     async def api_operator_audit(request: Request) -> dict:
-        """Operator audit log backed by blackboard."""
+        """Operator audit log backed by blackboard.
+
+        ``include_archived=true`` (any truthy value) surfaces archived
+        rows alongside active ones — used by the "Show archived" toggle
+        in the System > Operator change-log card.
+        """
         page = int(request.query_params.get("page", "1"))
         per_page = int(request.query_params.get("per_page", "20"))
         agent_id = request.query_params.get("agent_id", "")
         action_filter = request.query_params.get("action", "")
         since = request.query_params.get("since", "")
+        include_archived = request.query_params.get(
+            "include_archived", "",
+        ).lower() in ("1", "true", "yes", "on")
         if blackboard is None:
             return {"entries": [], "total": 0, "page": page, "per_page": per_page}
         return blackboard.get_audit_log(
             page=page, per_page=per_page, agent_id=agent_id,
             action=action_filter, since=since,
+            include_archived=include_archived,
         )
+
+    @api_router.post("/api/operator-audit/archive")
+    async def api_operator_audit_archive(request: Request) -> dict:
+        """Archive operator audit entries older than ``before_date``.
+
+        Backs the "Archive entries older than ..." control on the
+        operator System tab. Body: ``{"before_date": "<ISO 8601>"}``.
+        Soft-archive: rows are flipped to ``archived=1`` and dropped
+        from the default audit-log view. Returns ``{archived_count: N}``.
+        """
+        if blackboard is None:
+            raise HTTPException(503, "Blackboard not available")
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        before_date = (body or {}).get("before_date") if isinstance(body, dict) else None
+        if not before_date or not isinstance(before_date, str):
+            raise HTTPException(400, "before_date is required (ISO 8601 string)")
+        try:
+            count = blackboard.archive_audit_before(before_date)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except Exception as e:
+            logger.warning("operator-audit archive failed: %s", e)
+            raise HTTPException(500, "Failed to archive audit entries")
+        return {"ok": True, "archived_count": int(count), "before_date": before_date}
 
     # ── Queue status ─────────────────────────────────────────
 

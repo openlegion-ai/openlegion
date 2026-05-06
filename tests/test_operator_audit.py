@@ -435,3 +435,132 @@ async def test_mesh_client_confirm_config_change():
         assert "/mesh/config/confirm" in call_args[0][0]
         assert call_args[1]["json"]["change_id"] == "abc-123"
     await client.close()
+
+
+# === Audit archive tests (PR C) ===
+
+
+def test_audit_log_archived_column_exists(blackboard):
+    """The audit_log table should expose the archived column."""
+    cols = [
+        row[1]
+        for row in blackboard.db.execute("PRAGMA table_info(audit_log)").fetchall()
+    ]
+    assert "archived" in cols
+
+
+def test_archive_audit_before_filters_old_rows(blackboard):
+    """archive_audit_before flips matching rows to archived=1."""
+    blackboard.log_audit(action="old_action", target="alpha")
+    # Backdate the inserted row by hand so we can test the cutoff.
+    blackboard.db.execute(
+        "UPDATE audit_log SET timestamp='2025-01-01 00:00:00' WHERE target='alpha'"
+    )
+    blackboard.db.commit()
+    blackboard.log_audit(action="recent_action", target="beta")
+
+    n = blackboard.archive_audit_before("2026-01-01")
+    assert n == 1
+
+    # Default view hides archived rows
+    result = blackboard.get_audit_log()
+    assert result["total"] == 1
+    assert result["entries"][0]["target"] == "beta"
+
+    # include_archived surfaces both
+    result = blackboard.get_audit_log(include_archived=True)
+    assert result["total"] == 2
+    archived = [e for e in result["entries"] if e["archived"]]
+    assert len(archived) == 1
+    assert archived[0]["target"] == "alpha"
+
+
+def test_archive_audit_before_idempotent(blackboard):
+    """Running archive twice doesn't double-count."""
+    blackboard.log_audit(action="old_action", target="alpha")
+    blackboard.db.execute(
+        "UPDATE audit_log SET timestamp='2025-01-01 00:00:00' WHERE target='alpha'"
+    )
+    blackboard.db.commit()
+    n1 = blackboard.archive_audit_before("2026-01-01")
+    n2 = blackboard.archive_audit_before("2026-01-01")
+    assert n1 == 1
+    assert n2 == 0
+
+
+def test_archive_audit_before_normalises_t_separator(blackboard):
+    """ISO 8601 with T separator should match the SQLite TEXT format."""
+    blackboard.log_audit(action="old_action", target="alpha")
+    blackboard.db.execute(
+        "UPDATE audit_log SET timestamp='2025-01-01 00:00:00' WHERE target='alpha'"
+    )
+    blackboard.db.commit()
+    n = blackboard.archive_audit_before("2026-01-01T00:00:00Z")
+    assert n == 1
+
+
+def test_archive_audit_before_rejects_empty(blackboard):
+    """Empty before_iso raises so the endpoint can map to HTTP 400."""
+    with pytest.raises(ValueError):
+        blackboard.archive_audit_before("")
+
+
+def test_get_audit_log_default_hides_archived(blackboard):
+    """get_audit_log() should drop archived rows by default."""
+    blackboard.log_audit(action="a", target="alpha")
+    blackboard.log_audit(action="b", target="beta")
+    blackboard.db.execute("UPDATE audit_log SET archived=1 WHERE target='alpha'")
+    blackboard.db.commit()
+
+    result = blackboard.get_audit_log()
+    assert result["total"] == 1
+    assert result["entries"][0]["target"] == "beta"
+    assert result["entries"][0]["archived"] is False
+
+
+@pytest.mark.asyncio
+async def test_mesh_client_cancel_pending_action():
+    """MeshClient.cancel_pending_action POSTs to the right endpoint."""
+    from src.agent.mesh_client import MeshClient
+
+    client = MeshClient("http://localhost:8420", "operator")
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.raise_for_status = MagicMock()
+    mock_response.json.return_value = {
+        "ok": True, "nonce": "nonce-1",
+        "target_kind": "agent", "target_id": "writer", "action_kind": "edit",
+    }
+
+    mock_http = AsyncMock(return_value=mock_response)
+    with patch.object(client, "_get_client", return_value=AsyncMock(post=mock_http)):
+        result = await client.cancel_pending_action("nonce-1")
+        assert result["ok"] is True
+        mock_http.assert_called_once()
+        call_args = mock_http.call_args
+        assert "/mesh/pending/nonce-1/cancel" in call_args[0][0]
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_mesh_client_archive_audit_before():
+    """MeshClient.archive_audit_before POSTs to /mesh/audit/archive."""
+    from src.agent.mesh_client import MeshClient
+
+    client = MeshClient("http://localhost:8420", "operator")
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.raise_for_status = MagicMock()
+    mock_response.json.return_value = {
+        "ok": True, "archived_count": 5, "before_date": "2026-04-01",
+    }
+
+    mock_http = AsyncMock(return_value=mock_response)
+    with patch.object(client, "_get_client", return_value=AsyncMock(post=mock_http)):
+        result = await client.archive_audit_before("2026-04-01")
+        assert result["archived_count"] == 5
+        mock_http.assert_called_once()
+        call_args = mock_http.call_args
+        assert "/mesh/audit/archive" in call_args[0][0]
+        assert call_args[1]["json"]["before_date"] == "2026-04-01"
+    await client.close()
