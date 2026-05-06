@@ -317,7 +317,47 @@
               <div x-show="operatorReady" id="chat-messages-operator"
                    x-init="loadWorkplacePending()"
                    class="flex-1 overflow-y-auto overflow-x-hidden px-4 py-3 space-y-3">
-                <!-- Render messages from chatHistories['operator'] -->
+                <!-- Collapse bar for ≥2 pending actions. When the
+                     operator generates several pending requests in a
+                     row, the chat would otherwise stack three full
+                     amber cards. The bar replaces them with a single
+                     "N actions awaiting you" line that the user can
+                     expand. With exactly one pending card visible we
+                     stay out of the way and let the card render
+                     full-size.
+
+                     DUPLICATED at index.html:~6694 (chat-side bar) —
+                     keep both in sync. Alpine v3 has no x-component, so
+                     extracting to a partial would need template-cloning
+                     boilerplate; we keep the comment instead. -->
+                <div x-show="_countPendingActionCards() >= 2"
+                     :aria-expanded="pendingExpanded ? 'true' : 'false'"
+                     aria-controls="pending-cards-operator"
+                     role="button" tabindex="0"
+                     @click="togglePendingExpanded()"
+                     @keydown.enter.prevent="togglePendingExpanded()"
+                     @keydown.space.prevent="togglePendingExpanded()"
+                     class="w-full bg-amber-900/20 border border-amber-700/30 rounded-2xl px-3 py-2 cursor-pointer flex items-center gap-2 hover:bg-amber-900/30 transition-colors select-none">
+                  <svg class="w-3.5 h-3.5 text-amber-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z"/>
+                  </svg>
+                  <span class="text-xs font-medium text-amber-300 shrink-0"
+                        :class="pendingPulse ? 'animate-pulse' : ''"
+                        x-text="_countPendingActionCards() + ' action' + (_countPendingActionCards() === 1 ? '' : 's') + ' awaiting you'"></span>
+                  <svg class="w-3 h-3 text-amber-400/70 ml-auto transition-transform shrink-0"
+                       :class="pendingExpanded && 'rotate-90'"
+                       fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/>
+                  </svg>
+                </div>
+                <!-- Render messages from chatHistories['operator'].
+                     ``aria-live="polite"`` lets screen readers announce
+                     newly-arriving pending cards without stealing focus.
+                     ``data-pending-cards`` is the focus-target hook used
+                     by ``togglePendingExpanded()``. -->
+                <div id="pending-cards-operator"
+                     data-pending-cards
+                     aria-live="polite">
                 <template x-for="(msg, i) in (chatHistories['operator'] || [])" :key="i">
                   <div>
                     <!-- System event: compaction / session divider -->
@@ -672,7 +712,18 @@
                          ``pending_action_resolved`` / ``..._expired``
                          event lands. -->
                     <template x-if="msg.role === 'pending_action_card'">
-                      <div class="flex justify-start gap-2.5">
+                      <!-- Hidden when the collapse bar is up and the
+                           card hasn't resolved yet. Resolved cards
+                           always render (so the user sees the
+                           confirmed/cancelled/expired stamp).
+
+                           ``data-pending-card`` + ``tabindex="-1"`` make
+                           this the focus target after a user expands
+                           the collapse bar (a11y disclosure pattern). -->
+                      <div class="flex justify-start gap-2.5"
+                           data-pending-card
+                           tabindex="-1"
+                           x-show="msg.resolved_status || pendingExpanded || _countPendingActionCards() < 2">
                         <div class="shrink-0 mt-1">
                           <img src="/dashboard/static/avatars/operator.png" alt="Operator" class="w-6 h-6 rounded-full">
                         </div>
@@ -869,6 +920,7 @@
                     </template>
                   </div>
                 </template>
+                </div><!-- /#pending-cards-operator -->
 
                 <!-- Loading indicator -->
                 <div x-show="chatLoadingAgents['operator']" class="flex justify-start">
@@ -6751,6 +6803,39 @@
         </div>
         <!-- Messages area -->
         <div role="log" aria-live="polite" class="flex-1 overflow-y-auto overflow-x-hidden px-4 py-3 space-y-2" :id="'chat-messages-' + activeChatId">
+          <!-- Collapse bar mirrors the operator-panel behaviour: when
+               the active chat is the operator and there are ≥2
+               unresolved pending actions, hide the cards behind a
+               single "N actions awaiting you" line.
+
+               DUPLICATED at index.html:~316 (operator-panel bar) —
+               keep both in sync. Alpine v3 has no x-component, so
+               extracting to a partial would need template-cloning
+               boilerplate; we keep the comment instead. -->
+          <div x-show="activeChatId === 'operator' && _countPendingActionCards() >= 2"
+               :aria-expanded="pendingExpanded ? 'true' : 'false'"
+               aria-controls="pending-cards-chat"
+               role="button" tabindex="0"
+               @click="togglePendingExpanded()"
+               @keydown.enter.prevent="togglePendingExpanded()"
+               @keydown.space.prevent="togglePendingExpanded()"
+               class="w-full bg-amber-900/20 border border-amber-700/30 rounded-2xl px-3 py-2 cursor-pointer flex items-center gap-2 hover:bg-amber-900/30 transition-colors select-none">
+            <svg class="w-3.5 h-3.5 text-amber-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z"/>
+            </svg>
+            <span class="text-xs font-medium text-amber-300 shrink-0"
+                  :class="pendingPulse ? 'animate-pulse' : ''"
+                  x-text="_countPendingActionCards() + ' action' + (_countPendingActionCards() === 1 ? '' : 's') + ' awaiting you'"></span>
+            <svg class="w-3 h-3 text-amber-400/70 ml-auto transition-transform shrink-0"
+                 :class="pendingExpanded && 'rotate-90'"
+                 fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/>
+            </svg>
+          </div>
+          <!-- ``data-pending-cards`` is the focus-target hook used by
+               ``togglePendingExpanded()``. The parent already has
+               ``aria-live="polite"`` so card arrivals are announced. -->
+          <div id="pending-cards-chat" data-pending-cards>
           <template x-for="(msg, i) in (chatHistories[activeChatId] || [])" :key="i">
             <!-- Single root wrapper required by Alpine x-for. -->
             <div>
@@ -7075,7 +7160,18 @@
                    renders in the main chat when the active surface is
                    the operator. See app.js for the dispatch logic. -->
               <template x-if="msg.role === 'pending_action_card'">
-                <div class="flex justify-start">
+                <!-- Hidden when the collapse bar is up and the card
+                     hasn't resolved yet — same logic as the
+                     operator-panel template. Resolved cards always
+                     render so the user sees the terminal stamp.
+
+                     ``data-pending-card`` + ``tabindex="-1"`` make this
+                     the focus target after a user expands the collapse
+                     bar (a11y disclosure pattern). -->
+                <div class="flex justify-start"
+                     data-pending-card
+                     tabindex="-1"
+                     x-show="msg.resolved_status || pendingExpanded || _countPendingActionCards() < 2">
                   <div class="max-w-[80%] min-w-0">
                     <div class="px-4 py-3 rounded-2xl rounded-bl-md bg-gray-800"
                       :class="msg._isDestructive ? 'border border-rose-600/40' : 'border border-indigo-600/30'"
@@ -7261,6 +7357,7 @@
               </template><!-- /chat bubble -->
             </div><!-- /single root wrapper -->
           </template>
+          </div><!-- /#pending-cards-chat -->
           <div x-show="chatLoadingAgents[activeChatId]" class="flex justify-start">
             <div class="bg-gray-800 rounded-2xl rounded-bl-md px-3 py-2 text-gray-500 text-[10px] flex items-center gap-1.5">
               <svg class="animate-spin h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>

@@ -11,6 +11,7 @@ import pytest
 from src.host.mesh import Blackboard
 from src.host.server import (
     _CHANGE_TTL_SECONDS,
+    _HARD_CHANGE_TTL_SECONDS,
     _cleanup_expired_changes,
     _consume_pending_change,
     _get_pending_actions_store,
@@ -310,14 +311,62 @@ def test_get_nonexistent_change():
     assert _get_pending_change("nonexistent") is None
 
 
-def test_change_ttl():
-    """Changes have a TTL matching _CHANGE_TTL_SECONDS."""
+def test_change_ttl_hard_field_uses_long_window():
+    """Hard fields (model / permissions / budget / thinking) get the
+    longer ``_HARD_CHANGE_TTL_SECONDS`` review window so the user has
+    time to read the diff before confirming."""
     change_id = _store_pending_change("alpha", "model", "old", "new")
+    change = _get_pending_change(change_id)
+    assert change is not None
+    expected = datetime.now(timezone.utc) + timedelta(seconds=_HARD_CHANGE_TTL_SECONDS)
+    # Allow 5 seconds tolerance
+    assert abs((change["expires_at"] - expected).total_seconds()) < 5
+
+
+def test_change_ttl_soft_field_uses_default_window():
+    """Soft fields fall back to the legacy ``_CHANGE_TTL_SECONDS`` window."""
+    change_id = _store_pending_change("alpha", "instructions", "old", "new")
     change = _get_pending_change(change_id)
     assert change is not None
     expected = datetime.now(timezone.utc) + timedelta(seconds=_CHANGE_TTL_SECONDS)
     # Allow 5 seconds tolerance
     assert abs((change["expires_at"] - expected).total_seconds()) < 5
+
+
+@pytest.mark.parametrize(
+    "field,expected",
+    [
+        # Hard fields → 30-min review window.
+        ("model", 1800),
+        ("permissions", 1800),
+        ("budget", 1800),
+        ("thinking", 1800),
+        # Soft fields → 5-min undo window.
+        ("instructions", 300),
+        ("soul", 300),
+        ("heartbeat", 300),
+        ("interface", 300),
+        ("role", 300),
+        # Unknown / typo / non-config action → falls through to soft.
+        # Anything not in HARD_EDIT_FIELDS gets the shorter window so
+        # the worst-case is "user has to retry sooner", not "user
+        # waited 30 minutes for a no-op".
+        ("unknown_field", 300),
+        ("modle", 300),  # typo of "model" — must not earn the long window
+        ("", 300),
+        (None, 300),
+    ],
+)
+def test_ttl_for_field(field, expected):
+    """``_ttl_for_field`` maps a config field to the right TTL bucket.
+
+    Hard fields earn the 30-minute review window; everything else
+    (soft fields, typos, unknown action kinds, ``None``) falls through
+    to the 5-minute soft window.
+    """
+    from src.host.server import _ttl_for_field
+
+    assert _ttl_for_field(field) == expected
 
 
 # === MeshClient Config Method Tests ===

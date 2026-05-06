@@ -6,6 +6,7 @@ import os
 from datetime import datetime, timezone
 
 from src.agent.skills import skill
+from src.shared.types import SOFT_EDIT_FIELDS as _SOFT_EDIT_FIELDS
 from src.shared.utils import setup_logging
 
 logger = setup_logging("agent.builtins.operator_tools")
@@ -36,11 +37,9 @@ _VALID_FIELDS = frozenset({
 
 # PR 1 — soft edits apply immediately + emit a receipt with 5min Undo;
 # hard edits keep the propose+confirm dance (model swap, budget change,
-# and permissions are too consequential to undo via a button).
-_SOFT_EDIT_FIELDS = frozenset({
-    "instructions", "soul", "heartbeat", "interface", "role",
-})
-_HARD_EDIT_FIELDS = frozenset({"model", "budget", "permissions", "thinking"})
+# and permissions are too consequential to undo via a button). The
+# canonical sets are imported from :mod:`src.shared.types` (single
+# source of truth across host + agent modules).
 
 # Audited reasons the operator can declare. ``user_asked`` is the common
 # path (the user said "do X"); ``operator_proactive`` is the "I noticed"
@@ -285,7 +284,9 @@ async def confirm_edit(change_id: str, *, mesh_client=None, _messages=None, **_k
         "[Undo] (5-minute undo window). No confirmation step needed — "
         "act decisively on what the user asked for.\n"
         "- Hard fields (model, budget, permissions, thinking) return a "
-        "preview + change_id. Show the preview to the user; on explicit "
+        "preview + change_id (expires in 5 minutes for most actions, "
+        "30 minutes for hard-field edits so the user has time to think). "
+        "Show the preview to the user; on explicit "
         "confirmation call confirm_edit(change_id).\n\n"
         "Always pass `reason` so the audit trail captures intent.\n\n"
         "Fields & value formats:\n"
