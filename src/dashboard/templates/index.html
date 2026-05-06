@@ -192,7 +192,11 @@
                 <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
               </template>
               <template x-if="tab.id === 'workplace'">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11H7a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-6a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="8" rx="1"/></svg>
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="4" y="4" width="4" height="16" rx="1"/>
+                  <rect x="10" y="4" width="4" height="10" rx="1"/>
+                  <rect x="16" y="4" width="4" height="13" rx="1"/>
+                </svg>
               </template>
               <template x-if="tab.id === 'system'">
                 <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
@@ -3148,6 +3152,50 @@
            and the pending-action queue (Task 2d) so a human can run an
            agent team end-to-end without inspecting blackboard keys. -->
       <div x-show="activeTab === 'workplace'" x-cloak x-init="loadWorkplace()">
+        <!-- Sticky "Needs you" panel — aggregates every kind of pending
+             decision (durable propose/confirm rows, credential / browser-
+             login / captcha cards in the operator chat, blocked tasks)
+             so the user never has to hunt across sub-tabs to act. The
+             cards still render in chat too; this is an additional
+             surface, not a replacement. Rendered only when there's at
+             least one item so an idle Board has no extra chrome. -->
+        <section x-show="needsYouItems.length > 0" x-cloak
+          role="region" aria-label="Pending items that need you"
+          class="mb-4 bg-amber-900/15 border border-amber-700/30 rounded-xl p-3 sm:p-4 sticky top-0 z-10 backdrop-blur-sm">
+          <div class="flex items-center gap-2 mb-3">
+            <svg class="w-4 h-4 text-amber-300 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 9v4"/><path d="M12 17h.01"/><circle cx="12" cy="12" r="10"/>
+            </svg>
+            <h2 class="text-sm font-semibold text-white">Needs you</h2>
+            <span aria-live="polite"
+              class="text-[11px] font-medium px-2 py-0.5 rounded-full bg-amber-700/50 text-amber-100"
+              x-text="needsYouItems.length"></span>
+          </div>
+          <div class="space-y-2">
+            <template x-for="item in needsYouItems" :key="item.id">
+              <div class="bg-gray-900/50 border border-gray-700/50 rounded-lg p-2.5 sm:p-3 flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3">
+                <div class="flex items-start gap-2.5 min-w-0 flex-1">
+                  <span class="shrink-0 w-6 h-6 rounded-full bg-amber-700/30 text-amber-200 text-[11px] font-bold flex items-center justify-center"
+                    x-text="item.icon"></span>
+                  <div class="min-w-0 flex-1">
+                    <div class="text-sm text-gray-200 break-words" x-text="item.title"></div>
+                    <div x-show="item.subtitle" class="text-[11px] text-gray-400 mt-0.5 break-words" x-text="item.subtitle"></div>
+                  </div>
+                </div>
+                <div class="flex flex-wrap gap-1.5 shrink-0 sm:justify-end">
+                  <template x-for="action in item.actions" :key="action.label">
+                    <button type="button"
+                      @click="action.handler()"
+                      :class="needsYouButtonClass(action.style)"
+                      class="text-[11px] font-medium px-2.5 py-1 rounded transition-colors whitespace-nowrap"
+                      x-text="action.label"></button>
+                  </template>
+                </div>
+              </div>
+            </template>
+          </div>
+        </section>
+
         <!-- Sub-tab bar -->
         <div class="flex flex-wrap gap-0.5 bg-gray-800/50 rounded-lg p-0.5 mb-4">
           <template x-for="wt in workplaceTabs" :key="wt.id">
@@ -3162,7 +3210,7 @@
         <!-- Empty state when orchestration v2 is disabled -->
         <template x-if="!workplaceEnabled">
           <div class="bg-gray-800/40 border border-gray-700/50 rounded-xl p-6 text-center">
-            <div class="text-gray-300 text-sm font-medium mb-2">Workplace is disabled</div>
+            <div class="text-gray-300 text-sm font-medium mb-2">Board is disabled</div>
             <div class="text-xs text-gray-400 max-w-md mx-auto">
               Set <code class="text-gray-200 bg-gray-900/60 px-1 rounded">OPENLEGION_ORCHESTRATION_TASKS_V2=1</code>
               and restart the runtime to enable durable task records, project status rollups, blocker review,
@@ -3174,38 +3222,42 @@
         <!-- Activity feed sub-tab (default) -->
         <template x-if="workplaceEnabled && workplaceTab === 'feed'">
           <div class="space-y-3">
-            <!-- Pinned blockers strip — visible whenever any tasks are blocked. -->
-            <template x-if="workplaceBlockers && workplaceBlockers.length">
-              <div class="bg-yellow-900/15 border border-yellow-800/30 rounded-lg p-3">
-                <div class="text-xs font-medium text-yellow-200 mb-2">
-                  <span>&#9888;</span>
-                  <span x-text="workplaceBlockers.length + ' blocked task' + (workplaceBlockers.length === 1 ? '' : 's') + ' need attention'"></span>
+            <!-- Recently delivered — last 7 days of completed outputs.
+                 Surfaces "what's done" up front so the user gets a fast
+                 sense of velocity without having to switch to the
+                 Outputs sub-tab. Auto-hides when empty. -->
+            <template x-if="recentlyDelivered().length">
+              <div>
+                <div class="flex items-center justify-between mb-1.5">
+                  <div class="text-[11px] uppercase tracking-wide text-gray-500 font-medium">Recently delivered</div>
+                  <button type="button" @click="workplaceTab = 'team-outputs'; loadWorkplace()"
+                    class="text-[11px] text-gray-400 hover:text-gray-200">View all &rarr;</button>
                 </div>
                 <div class="space-y-1.5">
-                  <template x-for="b in workplaceBlockers" :key="b.id">
-                    <div class="flex items-start justify-between gap-2 text-xs text-gray-200 bg-yellow-900/10 rounded px-2 py-1.5">
-                      <div class="min-w-0">
-                        <span class="font-medium" x-text="b.title"></span>
-                        <span class="text-gray-400" x-text="' (' + (b.assignee || '') + (b.project_id ? ', ' + b.project_id : '') + ')'"></span>
-                        <div class="text-[11px] text-gray-400 mt-0.5" x-text="b.blocker_note || '(no note)'"></div>
-                      </div>
-                      <button class="text-[11px] px-2 py-0.5 rounded bg-yellow-800/30 hover:bg-yellow-800/50 text-yellow-100 whitespace-nowrap"
-                        @click="openTaskDrillIn(b.id)">Drill in</button>
+                  <template x-for="t in recentlyDelivered()" :key="'rd-' + t.id">
+                    <div class="flex items-center gap-2 bg-gray-800/40 border border-gray-700/50 rounded-md px-2.5 py-1.5">
+                      <span class="text-emerald-400 text-xs shrink-0">&check;</span>
+                      <div class="min-w-0 flex-1 text-xs text-gray-200 truncate" x-text="t.title || '(untitled)'"></div>
+                      <div class="text-[11px] text-gray-500 hidden sm:block shrink-0" x-text="(t.assignee || '') + (t.completed_at ? ' · ' + (formatRelativeTime((t.completed_at || 0) * 1000) || 'just now') : '')"></div>
+                      <button type="button"
+                        @click.stop="openTaskDrillIn(t.id)"
+                        class="text-[11px] px-2 py-0.5 rounded bg-gray-700 hover:bg-gray-600 text-gray-200 shrink-0">Open</button>
                     </div>
                   </template>
                 </div>
               </div>
             </template>
 
-            <!-- Empty state for the feed itself. When there are no
-                 projects yet, suggest a concrete next step instead of a
-                 plain "no activity" line; once a project exists the
-                 message reverts to the calm waiting state. -->
-            <template x-if="!workplaceFeed.length && !workplaceProjects.length">
-              <div class="text-sm text-gray-400 py-4">
-                No projects yet. Ask the operator to create one — say something like
-                <span class="italic text-gray-200">"create a project for &lt;goal&gt;"</span>
-                in the chat to get started.
+            <!-- Empty state for the feed itself. When there's nothing
+                 anywhere, the message reads as a calm prompt instead of
+                 a "missing data" warning. The hint button switches to
+                 the Chat tab so the user can start work in one click. -->
+            <template x-if="!workplaceFeed.length && !workplaceProjects.length && !needsYouItems.length">
+              <div class="text-sm text-gray-300 py-6 text-center">
+                Your team is idle.
+                <button type="button" @click="activeTab = 'chat'"
+                  class="underline decoration-dotted text-indigo-300 hover:text-indigo-200 transition-colors">Chat with your operator</button>
+                to start something.
               </div>
             </template>
             <template x-if="!workplaceFeed.length && workplaceProjects.length">
@@ -3307,7 +3359,7 @@
                     <span class="text-gray-500 font-mono" x-text="workplaceTasksByStatus(status).length"></span>
                   </div>
                   <div class="space-y-2">
-                    <template x-for="t in workplaceTasksByStatus(status)" :key="t.id">
+                    <template x-for="t in workplaceTasksByStatusFiltered(status)" :key="t.id">
                       <div class="bg-gray-900/60 border border-gray-700/40 rounded-md p-2 text-xs cursor-pointer hover:bg-gray-900/90 hover:border-gray-600 transition-colors"
                         @click="openTaskDrillIn(t.id)">
                         <div class="font-medium text-gray-200 truncate" x-text="t.title"></div>
@@ -3326,6 +3378,19 @@
                           </template>
                         </div>
                       </div>
+                    </template>
+                    <!-- Archived disclosure: only the pending and blocked
+                         columns hide rows older than 14 days, since they
+                         can grow unbounded when a project stalls. Other
+                         statuses keep showing every row. -->
+                    <template x-if="workplaceArchivedCount(status) > 0">
+                      <button type="button"
+                        @click="boardShowArchived = { ...boardShowArchived, [status]: !boardShowArchived[status] }"
+                        class="w-full text-[11px] text-gray-400 hover:text-gray-200 px-2 py-1 rounded border border-dashed border-gray-700/60 hover:border-gray-600 transition-colors text-left">
+                        <span x-show="!boardShowArchived[status]"
+                          x-text="'Show ' + workplaceArchivedCount(status) + ' archived ▸'"></span>
+                        <span x-show="boardShowArchived[status]" x-cloak>Hide archived &#9662;</span>
+                      </button>
                     </template>
                   </div>
                 </div>
@@ -5491,6 +5556,20 @@
                       <span class="text-xs text-white font-medium truncate" x-text="entry.target"></span>
                       <span x-show="entry.field" class="text-[10px] text-gray-500 truncate" x-text="'· ' + entry.field"></span>
                     </div>
+                    <!-- Revert reuses the soft-edit /changes/undo endpoint;
+                         the audit row's change_id is the same uuid as the
+                         undo_token. Hard-edit and non-soft entries return
+                         404 (token consumed/expired or never existed) and
+                         we surface that via toast — no special UI gating
+                         needed. -->
+                    <button x-show="entry.change_id"
+                      type="button"
+                      @click.stop="revertAuditEntry(entry)"
+                      :disabled="auditReverting[entry.id]"
+                      class="text-[10px] px-2 py-0.5 rounded bg-gray-700 hover:bg-gray-600 text-gray-200 disabled:opacity-50 transition-colors shrink-0">
+                      <span x-show="!auditReverting[entry.id]">Revert</span>
+                      <span x-show="auditReverting[entry.id]" x-cloak>...</span>
+                    </button>
                     <svg class="w-3 h-3 text-gray-600 transition-transform shrink-0" :class="expanded && 'rotate-90'" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
                   </div>
                   <template x-if="expanded">
