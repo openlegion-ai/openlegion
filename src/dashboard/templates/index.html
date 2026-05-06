@@ -3625,6 +3625,13 @@
                 class="text-[11px] text-gray-500 truncate"
                 x-text="(() => { const t = Date.parse(fleetDigest.timestamp); if (!t) return ''; const rel = formatRelativeTime(t); return rel ? 'as of ' + rel : 'just now'; })()"
               ></span>
+              <!-- Staleness badge — only operator-stopped signal users get -->
+              <span
+                x-show="isFleetDigestStale()"
+                class="text-[10px] font-semibold uppercase tracking-wide text-red-400 px-1.5 py-0.5 rounded bg-red-900/20 border border-red-800/40 shrink-0"
+                title="Operator hasn't run a check in 24h+"
+                aria-label="Fleet pulse is stale — operator hasn't run a check in 24h or more"
+              >stale</span>
             </div>
             <button
               @click="refreshFleetDigest()"
@@ -3663,8 +3670,8 @@
                       <span
                         class="text-sm shrink-0 leading-5"
                         :title="entry.severity || 'unknown'"
-                        :aria-label="'severity ' + (entry.severity || 'unknown')"
-                        x-text="entry.severity === 'high' ? '🔴' : entry.severity === 'medium' ? '🟡' : entry.severity === 'low' ? '🔵' : '⚪'"
+                        :aria-label="(entry.severity === 'high' || entry.severity === 'critical' || entry.severity === 'medium' || entry.severity === 'low' || entry.severity === 'info') ? ('severity ' + entry.severity) : 'severity unknown'"
+                        x-text="(entry.severity === 'high' || entry.severity === 'critical') ? '🔴' : entry.severity === 'medium' ? '🟡' : entry.severity === 'low' ? '🔵' : entry.severity === 'info' ? '🔵' : '⚠️'"
                       ></span>
                       <span class="text-sm text-gray-200 min-w-0">
                         <span class="font-mono text-gray-100" x-text="entry.agent_id || 'unknown'"></span>
@@ -3674,7 +3681,7 @@
                       </span>
                     </div>
                     <button
-                      @click="drillDown(entry.agent_id)"
+                      @click="drillIntoAttentionEntry(entry)"
                       x-show="entry.agent_id"
                       class="text-xs text-amber-300 hover:text-amber-200 self-start sm:self-auto shrink-0 px-2 py-0.5 rounded hover:bg-amber-900/20 transition-colors"
                       :aria-label="'Drill in to ' + (entry.agent_id || 'agent')"

@@ -325,7 +325,7 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
 
     _WORKSPACE_ALLOWLIST = frozenset({
         "SOUL.md", "HEARTBEAT.md", "USER.md", "INSTRUCTIONS.md", "AGENTS.md", "MEMORY.md",
-        "INTERFACE.md",
+        "INTERFACE.md", "OBSERVATIONS.md",
     })
     _DEFAULT_HEARTBEAT_HEADING = "# Heartbeat Rules"
 
