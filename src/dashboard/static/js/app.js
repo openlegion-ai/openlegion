@@ -49,7 +49,7 @@ function dashboard() {
     tabs: [
       { id: 'chat', label: 'Chat' },
       { id: 'fleet', label: 'Agents' },
-      { id: 'workplace', label: 'Workplace' },
+      { id: 'workplace', label: 'Board' },
       { id: 'system', label: 'System' },
     ],
     connected: false,
@@ -355,12 +355,23 @@ function dashboard() {
     workplaceTasks: [],
     workplaceBlockers: [],
     workplaceOutputs: [],
+    // Memoised slice for the Activity feed's "Recently delivered"
+    // header — recomputed in ``loadWorkplaceOutputs`` so the template
+    // doesn't re-run the filter on every Alpine reactive read. See
+    // ``_recomputeRecentlyDelivered`` for the coercion rules.
+    recentlyDeliveredItems: [],
     workplaceFeed: [],
     workplaceFeedCap: 200,
     workplacePending: [],
     workplaceLoading: false,
     workplaceTaskColumns: ['pending', 'accepted', 'working', 'blocked', 'done'],
     workplaceProjectFilter: '',
+    // Per-column flag: when true, the kanban column ignores the 14-day
+    // archive cutoff and shows old pending/blocked rows. Keyed by status
+    // so toggling one column doesn't expand the others.
+    boardShowArchived: {},
+    // In-flight audit-log undo so we can disable the button per-row.
+    auditReverting: {},
 
     // Workplace task drill-in modal (PR 4) — populated lazily on
     // card click. ``drillInData`` carries ``{task, events, artifacts}``
@@ -1451,6 +1462,7 @@ function dashboard() {
         const data = await resp.json();
         this.workplaceEnabled = data.enabled !== false;
         this.workplaceOutputs = data.outputs || [];
+        this._recomputeRecentlyDelivered();
       } catch (e) {
         console.error('Failed to load workplace outputs:', e);
       }
@@ -1691,6 +1703,252 @@ function dashboard() {
       if (remain < 60) return `${remain}s`;
       if (remain < 3600) return `${Math.floor(remain / 60)}m`;
       return `${Math.floor(remain / 3600)}h`;
+    },
+
+    // Aggregate every "needs human" surface into one ordered list so the
+    // sticky Board panel can render them with a single x-for. Sources:
+    //   - workplacePending (durable propose/confirm rows)
+    //   - operator-chat credential / browser-login / captcha cards
+    //     (matched on role, not on a separate fetch — these live in
+    //     chatHistories['operator'] alongside the conversation)
+    //   - workplaceBlockers (tasks the agent flagged stuck)
+    // The cards stay rendered in chat too; this just surfaces them in
+    // one place so the user doesn't have to hunt.
+    get needsYouItems() {
+      const items = [];
+      const opChat = (this.chatHistories && this.chatHistories['operator']) || [];
+
+      for (const p of (this.workplacePending || [])) {
+        items.push({
+          id: 'pending-' + p.nonce,
+          kind: 'pending',
+          icon: '!',
+          title: p.summary || `${p.action_kind || 'Action'} on ${p.target_kind || ''} ${p.target_id || ''}`.trim(),
+          subtitle: this._needsYouSubtitle({
+            actor: p.actor,
+            expiresAt: p.expires_at,
+          }),
+          actions: [
+            { label: 'Confirm', style: 'emerald', handler: () => this.confirmPendingAction(p.nonce) },
+            { label: 'Cancel', style: 'gray', handler: () => this.cancelPendingAction(p.nonce) },
+          ],
+        });
+      }
+
+      for (const m of opChat) {
+        if (m.cancelled || m.completed || m.saved) continue;
+        if (m.role === 'credential_request') {
+          items.push({
+            id: 'cred-' + (m.request_id || m.name) + '-' + (m.ts || 0),
+            kind: 'credential',
+            icon: 'K',
+            title: `Credential needed: ${m.service || m.name || 'unknown'}`,
+            subtitle: this._needsYouSubtitle({
+              actor: m._from_agent || 'agent',
+              text: m.content || '',
+            }),
+            actions: [
+              { label: 'Open chat', style: 'indigo', handler: () => { this.activeTab = 'chat'; this.openChat && this.openChat('operator'); } },
+            ],
+          });
+        } else if (m.role === 'browser_login_request') {
+          items.push({
+            id: 'login-' + (m.request_id || m.service) + '-' + (m.ts || 0),
+            kind: 'browser_login',
+            icon: 'W',
+            title: `Browser login: ${m.service || 'unknown service'}`,
+            subtitle: this._needsYouSubtitle({
+              actor: m._from_agent || 'agent',
+              text: m.content || '',
+            }),
+            actions: [
+              { label: 'Open in chat', style: 'indigo', handler: () => { this.activeTab = 'chat'; this.openChat && this.openChat('operator'); } },
+            ],
+          });
+        } else if (m.role === 'browser_captcha_help_request') {
+          items.push({
+            id: 'captcha-' + (m.request_id || m.service) + '-' + (m.ts || 0),
+            kind: 'captcha',
+            icon: 'C',
+            title: `CAPTCHA help: ${m.service || 'unknown service'}`,
+            subtitle: this._needsYouSubtitle({
+              actor: m._from_agent || 'agent',
+              text: m.content || '',
+            }),
+            actions: [
+              { label: 'Open in chat', style: 'indigo', handler: () => { this.activeTab = 'chat'; this.openChat && this.openChat('operator'); } },
+            ],
+          });
+        }
+      }
+
+      for (const b of (this.workplaceBlockers || [])) {
+        items.push({
+          id: 'blocker-' + b.id,
+          kind: 'blocker',
+          icon: 'B',
+          title: b.title || '(untitled blocked task)',
+          subtitle: this._needsYouSubtitle({
+            actor: b.assignee || '',
+            project: b.project_id || '',
+            text: b.blocker_note || '',
+          }),
+          actions: [
+            { label: 'Drill in', style: 'amber', handler: () => this.openTaskDrillIn(b.id) },
+          ],
+        });
+      }
+
+      return items;
+    },
+
+    // Build the small grey sub-line shared by every Needs-you card.
+    // Joins the populated bits with " · " so blank fields don't leave
+    // dangling separators.
+    _needsYouSubtitle({ actor, expiresAt, project, text }) {
+      const parts = [];
+      if (expiresAt) parts.push('expires in ' + this.workplaceFormatExpiry(expiresAt));
+      if (actor) parts.push('from ' + actor);
+      if (project) parts.push('project ' + project);
+      if (text) {
+        const trimmed = text.length > 80 ? text.slice(0, 77) + '...' : text;
+        parts.push(trimmed);
+      }
+      return parts.join(' · ');
+    },
+
+    // Tailwind colour map for Needs-you action buttons. Keeps the
+    // template free of conditionals while letting each item declare
+    // its own intent (emerald confirm, gray cancel, etc.).
+    needsYouButtonClass(style) {
+      switch (style) {
+        case 'emerald':
+          return 'bg-emerald-700 hover:bg-emerald-600 text-emerald-50';
+        case 'amber':
+          return 'bg-amber-700 hover:bg-amber-600 text-amber-50';
+        case 'indigo':
+          return 'bg-indigo-700 hover:bg-indigo-600 text-indigo-50';
+        case 'gray':
+        default:
+          return 'bg-gray-700 hover:bg-gray-600 text-gray-100';
+      }
+    },
+
+    // Coerce a wire-shape ``completed_at`` to a numeric epoch in seconds.
+    // The orchestration store has historically returned epoch-seconds as a
+    // float, but legacy / external feeders sometimes hand us strings or
+    // millisecond integers — and a wall-clock skew can yield future
+    // timestamps that should never count as "recent" for the user. We
+    // accept all three shapes and clamp to <= now so the filter stays
+    // monotonic even if the source clock drifts.
+    _coerceCompletedAtSeconds(value) {
+      if (value === null || value === undefined || value === '') return 0;
+      let n;
+      if (typeof value === 'number') {
+        n = value;
+      } else if (typeof value === 'string') {
+        const parsed = Date.parse(value);
+        if (Number.isFinite(parsed)) {
+          n = parsed / 1000;
+        } else {
+          // Numeric string ("1730000000" or "1730000000.5") that
+          // Date.parse refused — fall back to Number().
+          const asNum = Number(value);
+          n = Number.isFinite(asNum) ? asNum : 0;
+        }
+      } else {
+        return 0;
+      }
+      // Heuristic: anything >= 10^12 is almost certainly milliseconds
+      // (10^12 seconds = year ~33658). Drop to seconds.
+      if (n >= 1e12) n = n / 1000;
+      const nowSec = Date.now() / 1000;
+      if (n > nowSec) n = nowSec;
+      if (n < 0) n = 0;
+      return n;
+    },
+
+    // Recompute the memoised "Recently delivered" slice. Called whenever
+    // ``workplaceOutputs`` is refreshed. Coerces ``completed_at`` so the
+    // filter survives string timestamps and clock-skew-induced future
+    // values, then caps at 5 and sorts most-recent-first.
+    _recomputeRecentlyDelivered(limit = 5, days = 7) {
+      const cutoff = (Date.now() / 1000) - days * 86400;
+      const rows = [];
+      for (const t of (this.workplaceOutputs || [])) {
+        const sec = this._coerceCompletedAtSeconds(t.completed_at);
+        if (sec >= cutoff) {
+          // Spread + override so the original row isn't mutated and the
+          // template can still rely on ``completed_at`` being numeric
+          // seconds (its formatRelativeTime call multiplies by 1000).
+          rows.push({ ...t, completed_at: sec });
+        }
+      }
+      rows.sort((a, b) => (b.completed_at || 0) - (a.completed_at || 0));
+      this.recentlyDeliveredItems = rows.slice(0, limit);
+    },
+
+    // Back-compat shim — older callers and any future expressions should
+    // read ``recentlyDeliveredItems`` directly. Kept thin so the data
+    // field remains the single source of truth for the template.
+    recentlyDelivered() {
+      return this.recentlyDeliveredItems;
+    },
+
+    // Kanban filter — drop pending/blocked rows older than 14 days
+    // unless the operator opted in for this column. Other statuses
+    // (working/done/accepted) aren't archived: completed work belongs
+    // in the Outputs tab and active work shouldn't disappear.
+    workplaceTasksByStatusFiltered(status) {
+      const all = this.workplaceTasksByStatus(status);
+      if (status !== 'pending' && status !== 'blocked') return all;
+      if (this.boardShowArchived[status]) return all;
+      const cutoff = (Date.now() / 1000) - 14 * 86400;
+      return all.filter(t => {
+        const created = typeof t.created_at === 'number'
+          ? t.created_at
+          : (t.created_at ? new Date(t.created_at).getTime() / 1000 : 0);
+        return !created || created >= cutoff;
+      });
+    },
+
+    workplaceArchivedCount(status) {
+      const total = this.workplaceTasksByStatus(status).length;
+      const visible = this.workplaceTasksByStatusFiltered(status).length;
+      return Math.max(0, total - visible);
+    },
+
+    // Audit-log Revert: re-uses the soft-edit undo endpoint via the
+    // change_id stored on each audit row (which IS the undo_token).
+    // The template already gates the button on ``entry.undoable``, but
+    // we re-check here so a stale row (or a programmatic call) doesn't
+    // hit the endpoint just to receive a 404.
+    async revertAuditEntry(entry) {
+      if (!entry || !entry.change_id || !entry.undoable) {
+        this.showToast('This entry can no longer be reverted.');
+        return;
+      }
+      this.auditReverting = { ...this.auditReverting, [entry.id]: true };
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/changes/undo/${encodeURIComponent(entry.change_id)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{}',
+        });
+        if (!resp.ok) {
+          const data = await resp.json().catch(() => ({}));
+          this.showToast(`Revert failed: ${data.detail || resp.status}`);
+          return;
+        }
+        this.showToast('Reverted.');
+        await this.fetchAuditLog();
+      } catch (e) {
+        this.showToast(`Revert failed: ${e.message || e}`);
+      } finally {
+        const next = { ...this.auditReverting };
+        delete next[entry.id];
+        this.auditReverting = next;
+      }
     },
 
     async confirmPendingAction(nonce) {

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -141,6 +142,88 @@ def test_audit_log_empty(blackboard):
     assert result["total"] == 0
     assert result["entries"] == []
     assert result["page"] == 1
+
+
+def test_audit_log_undoable_default_false(blackboard):
+    """A row written without ``undoable=`` defaults to False so the
+    dashboard's Revert button stays hidden on legacy / hard-edit rows."""
+    blackboard.log_audit(
+        action="edit_agent", target="alpha", field="model",
+        change_id="some-nonce",
+    )
+    entry = blackboard.get_audit_log()["entries"][0]
+    assert entry["undoable"] is False
+
+
+def test_audit_log_undoable_true_when_set(blackboard):
+    """The soft-edit path passes ``undoable=True`` so the audit row
+    advertises that ``change_id`` is a valid undo_token."""
+    blackboard.log_audit(
+        action="edit_agent", target="alpha", field="instructions",
+        change_id="undo-uuid", undoable=True,
+    )
+    entry = blackboard.get_audit_log()["entries"][0]
+    assert entry["undoable"] is True
+
+
+def test_audit_log_undoable_column_migration(tmp_path):
+    """Legacy DBs without the ``undoable`` column get the column added
+    by Blackboard.__init__ and existing rows surface as undoable=False."""
+    db_path = tmp_path / "legacy.db"
+    # Create the table in the *old* shape — no ``undoable`` column.
+    legacy = sqlite3.connect(str(db_path))
+    legacy.executescript("""
+        CREATE TABLE audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+            action TEXT NOT NULL,
+            actor TEXT NOT NULL DEFAULT 'operator',
+            target TEXT NOT NULL,
+            field TEXT,
+            before_value TEXT,
+            after_value TEXT,
+            change_id TEXT,
+            provenance TEXT DEFAULT 'user'
+        );
+    """)
+    legacy.execute(
+        "INSERT INTO audit_log (action, target, field, change_id) "
+        "VALUES (?, ?, ?, ?)",
+        ("edit_agent", "alpha", "model", "legacy-nonce"),
+    )
+    legacy.commit()
+    legacy.close()
+
+    # Opening the Blackboard should ALTER the table and not raise.
+    bb = Blackboard(db_path=str(db_path))
+    try:
+        cols = {
+            row[1]
+            for row in bb.db.execute("PRAGMA table_info(audit_log)").fetchall()
+        }
+        assert "undoable" in cols
+
+        # Legacy row should be readable and report undoable=False.
+        result = bb.get_audit_log()
+        assert result["total"] == 1
+        legacy_entry = result["entries"][0]
+        assert legacy_entry["change_id"] == "legacy-nonce"
+        assert legacy_entry["undoable"] is False
+
+        # Re-running the migration on an already-migrated DB is a no-op.
+        bb2 = Blackboard(db_path=str(db_path))
+        try:
+            cols2 = {
+                row[1]
+                for row in bb2.db.execute(
+                    "PRAGMA table_info(audit_log)"
+                ).fetchall()
+            }
+            assert "undoable" in cols2
+        finally:
+            bb2.close()
+    finally:
+        bb.close()
 
 
 # === Pending Change Store Tests ===
