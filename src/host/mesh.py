@@ -97,31 +97,45 @@ class Blackboard:
                 after_value TEXT,
                 change_id TEXT,
                 provenance TEXT DEFAULT 'user',
-                undoable INTEGER NOT NULL DEFAULT 0
+                undoable INTEGER NOT NULL DEFAULT 0,
+                archived INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log(timestamp);
             CREATE INDEX IF NOT EXISTS idx_audit_log_target ON audit_log(target);
         """)
-        # Migrate legacy DBs that pre-date the ``undoable`` column.
-        # Without this, the dashboard's Revert button would show on every
-        # row that has a ``change_id`` — including hard-edit and delete
-        # rows whose change_id was never an undo_token, producing 404
-        # toasts on click. Default 0 means "not undoable" so historic
-        # rows fail closed; only the soft-edit endpoint sets it to 1.
+        # Migrate legacy DBs that pre-date the ``undoable`` and ``archived``
+        # columns. Default 0 means "not undoable" / "not archived" so
+        # historic rows fail closed. Run BEFORE creating the composite
+        # ``idx_audit_log_active`` below, since the index references the
+        # ``archived`` column which legacy DBs lack until ALTER runs.
         existing_audit_cols = {
             row[1]
             for row in self.db.execute("PRAGMA table_info(audit_log)").fetchall()
         }
-        if "undoable" not in existing_audit_cols:
-            try:
-                self.db.execute(
-                    "ALTER TABLE audit_log ADD COLUMN undoable INTEGER NOT NULL DEFAULT 0"
-                )
-            except sqlite3.OperationalError as e:
-                # Race: another worker added it between PRAGMA and ALTER.
-                # Anything else is a real error worth surfacing.
-                if "duplicate column" not in str(e).lower():
-                    raise
+        for col in ("undoable", "archived"):
+            if col not in existing_audit_cols:
+                try:
+                    self.db.execute(
+                        f"ALTER TABLE audit_log ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0"
+                    )
+                except sqlite3.OperationalError as e:
+                    if "duplicate column" not in str(e).lower():
+                        raise
+        # Drop the legacy low-cardinality archived-only index if it was
+        # left over from a prior schema. The composite
+        # ``idx_audit_log_active`` below replaces it.
+        try:
+            self.db.execute("DROP INDEX IF EXISTS idx_audit_log_archived")
+        except sqlite3.OperationalError:
+            pass
+        # Composite index covers BOTH the default
+        # ``WHERE archived=0 ORDER BY id DESC LIMIT 20`` audit-log view
+        # AND the archive UPDATE's ``WHERE archived=0 AND timestamp<?``
+        # predicate. Created here (post-migration) so legacy DBs have the
+        # ``archived`` column by the time SQLite resolves the reference.
+        self.db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_audit_log_active ON audit_log(archived, id DESC)"
+        )
         self.db.commit()
         self._load_watchers()
 
@@ -366,8 +380,14 @@ class Blackboard:
             self.db.commit()
 
     def get_audit_log(self, page: int = 1, per_page: int = 20,
-                      agent_id: str = "", action: str = "", since: str = "") -> dict:
-        """Query audit log with pagination and filters."""
+                      agent_id: str = "", action: str = "", since: str = "",
+                      include_archived: bool = False) -> dict:
+        """Query audit log with pagination and filters.
+
+        ``include_archived`` defaults to ``False`` so the operator's
+        change-log view stays focused on recent activity. Pass ``True``
+        for power-user / forensic views that want the full history.
+        """
         where: list[str] = []
         params: list = []
         if agent_id:
@@ -379,6 +399,8 @@ class Blackboard:
         if since:
             where.append("timestamp >= ?")
             params.append(since)
+        if not include_archived:
+            where.append("archived = 0")
 
         where_sql = f" WHERE {' AND '.join(where)}" if where else ""
 
@@ -387,27 +409,100 @@ class Blackboard:
         ).fetchone()[0]
         offset = (page - 1) * per_page
         rows = self.db.execute(
-            f"SELECT * FROM audit_log{where_sql} ORDER BY id DESC LIMIT ? OFFSET ?",
+            f"SELECT id, timestamp, action, actor, target, field,"
+            f" before_value, after_value, change_id, provenance, undoable, archived"
+            f" FROM audit_log{where_sql} ORDER BY id DESC LIMIT ? OFFSET ?",
             params + [per_page, offset],
         ).fetchall()
 
         entries = []
         for row in rows:
-            # ``undoable`` was added later via ALTER TABLE; it lands at
-            # position 10 (after the original 10 columns 0..9). Older
-            # databases that haven't been migrated yet won't have it,
-            # so fall back to False — same posture as a fresh row whose
-            # ``undoable`` flag was never set explicitly.
+            # ``undoable`` and ``archived`` were added via ALTER TABLE;
+            # legacy rows from before the migration default to 0 / False.
             undoable_raw = row[10] if len(row) > 10 else 0
+            archived_raw = row[11] if len(row) > 11 else 0
             entries.append({
                 "id": row[0], "timestamp": row[1], "action": row[2],
                 "actor": row[3], "target": row[4], "field": row[5],
                 "before_value": row[6], "after_value": row[7],
                 "change_id": row[8], "provenance": row[9],
                 "undoable": bool(undoable_raw),
+                "archived": bool(archived_raw),
             })
 
         return {"entries": entries, "total": count, "page": page, "per_page": per_page}
+
+    # Chunked-archive bookkeeping. We sweep in 1000-row batches and bail
+    # out once we have flipped this many rows in a single call so the
+    # write lock is never held for a runaway amount of time on a large
+    # audit_log.  ``truncated=True`` is reported back so the caller (and
+    # the audit-of-audit row) record that more matching rows remain.
+    _ARCHIVE_BATCH_SIZE = 1000
+    _ARCHIVE_HARD_CAP = 100_000
+
+    def archive_audit_before(self, before_iso: str, actor: str = "operator") -> dict:
+        """Soft-archive audit entries with ``timestamp < before_iso``.
+
+        Returns ``{"archived_count": N, "truncated": bool}`` — ``truncated``
+        is ``True`` when the per-call hard cap (``_ARCHIVE_HARD_CAP``) was
+        hit and additional matching rows remain. Rows already archived
+        are not recounted.
+
+        ``before_iso`` is compared as a SQLite TEXT
+        (``YYYY-MM-DD[ HH:MM:SS]``) so callers should pass an ISO 8601
+        date or timestamp; ``T`` is normalised to space so
+        ``2026-04-01T00:00:00`` and ``2026-04-01 00:00:00`` behave the
+        same.
+
+        The archive sweep runs in chunks of ``_ARCHIVE_BATCH_SIZE`` rows
+        with the write lock released between chunks so concurrent
+        blackboard writes are not stalled on a multi-hundred-thousand
+        row table. An audit-of-audit row is recorded after the sweep
+        with ``actor`` as the caller identity (passed through from the
+        endpoint) and ``archived=False`` so it persists even when the
+        operator subsequently archives older windows again.
+        """
+        normalised = (before_iso or "").strip().replace("T", " ").rstrip("Z")
+        if not normalised:
+            raise ValueError("before_iso is required")
+        total = 0
+        truncated = False
+        while True:
+            with self._write_lock:
+                cursor = self.db.execute(
+                    "UPDATE audit_log SET archived = 1"
+                    " WHERE id IN ("
+                    "   SELECT id FROM audit_log"
+                    "    WHERE archived = 0 AND timestamp < ?"
+                    "    LIMIT ?"
+                    " )",
+                    (normalised, self._ARCHIVE_BATCH_SIZE),
+                )
+                rows = cursor.rowcount or 0
+                self.db.commit()
+            if rows == 0:
+                break
+            total += rows
+            if total >= self._ARCHIVE_HARD_CAP:
+                truncated = True
+                break
+        # Audit-of-audit: record who flipped the rows so subsequent
+        # forensic review can see archive operations even after the
+        # original rows are hidden. ``archived=False`` (default) so this
+        # row is not itself swept by future archive runs unless an
+        # operator explicitly targets a window that includes it.
+        try:
+            self.log_audit(
+                action="audit_archive",
+                target="audit_log",
+                actor=actor or "operator",
+                after_value=normalised,
+            )
+        except Exception:
+            # Audit logging must not mask the success of the archive
+            # itself — log to logger via the caller path instead.
+            pass
+        return {"archived_count": total, "truncated": truncated}
 
     def close(self) -> None:
         self.db.close()

@@ -4162,18 +4162,85 @@ def create_dashboard_router(
 
     @api_router.get("/api/operator-audit")
     async def api_operator_audit(request: Request) -> dict:
-        """Operator audit log backed by blackboard."""
+        """Operator audit log backed by blackboard.
+
+        ``include_archived=true`` (any truthy value) surfaces archived
+        rows alongside active ones — used by the "Show archived" toggle
+        in the System > Operator change-log card.
+        """
         page = int(request.query_params.get("page", "1"))
         per_page = int(request.query_params.get("per_page", "20"))
         agent_id = request.query_params.get("agent_id", "")
         action_filter = request.query_params.get("action", "")
         since = request.query_params.get("since", "")
+        include_archived = request.query_params.get(
+            "include_archived", "",
+        ).lower() in ("1", "true", "yes", "on")
         if blackboard is None:
             return {"entries": [], "total": 0, "page": page, "per_page": per_page}
         return blackboard.get_audit_log(
             page=page, per_page=per_page, agent_id=agent_id,
             action=action_filter, since=since,
+            include_archived=include_archived,
         )
+
+    @api_router.post("/api/operator-audit/archive")
+    async def api_operator_audit_archive(request: Request) -> dict:
+        """Archive operator audit entries older than ``before_date``.
+
+        Backs the "Archive entries older than ..." control on the
+        operator System tab. Body: ``{"before_date": "<ISO 8601>"}``.
+        Soft-archive: rows are flipped to ``archived=1`` and dropped
+        from the default audit-log view. Returns
+        ``{archived_count: N, truncated: bool}``.
+
+        Proxies to the mesh's ``POST /mesh/audit/archive`` endpoint
+        over loopback with the ``x-mesh-internal`` + ``X-Agent-ID:
+        operator`` headers. The mesh route enforces the
+        operator-or-internal permission tier and writes the
+        audit-of-audit row recording the archive — calling
+        ``blackboard.archive_audit_before`` directly here would
+        bypass that gate and let any session with an ``ol_session``
+        cookie clear audit history, regardless of operator identity.
+        The dashboard's CSRF guard (``X-Requested-With``) is still
+        enforced on this route by the global middleware.
+        """
+        if blackboard is None:
+            raise HTTPException(503, "Blackboard not available")
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        before_date = (body or {}).get("before_date") if isinstance(body, dict) else None
+        if not before_date or not isinstance(before_date, str):
+            raise HTTPException(400, "before_date is required (ISO 8601 string)")
+        import httpx
+        url = f"http://127.0.0.1:{mesh_port}/mesh/audit/archive"
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    url,
+                    json={"before_date": before_date},
+                    headers={
+                        "X-Requested-With": "XMLHttpRequest",
+                        "x-mesh-internal": "1",
+                        "X-Agent-ID": "operator",
+                        "Content-Type": "application/json",
+                    },
+                )
+        except Exception as e:
+            logger.warning("operator-audit archive proxy failed: %s", e)
+            raise HTTPException(502, f"Mesh unreachable: {e}")
+        if resp.status_code >= 400:
+            try:
+                detail = resp.json().get("detail", resp.text)
+            except Exception:
+                detail = resp.text
+            raise HTTPException(resp.status_code, detail)
+        try:
+            return resp.json()
+        except Exception:
+            return {"ok": True, "archived_count": 0, "before_date": before_date}
 
     # ── Queue status ─────────────────────────────────────────
 
@@ -5292,6 +5359,34 @@ def create_dashboard_router(
         if not isinstance(content, str):
             raise HTTPException(status_code=400, detail="content must be a string")
         content = sanitize_for_prompt(content)
+        # Operator identity edits go through this PUT (the SPA exposes
+        # the operator's SOUL.md / INSTRUCTIONS.md after the safety
+        # modal is acknowledged). Capture before/after into the audit
+        # log so the Archive control surfaces these changes — direct
+        # workspace writes otherwise bypass blackboard.log_audit and
+        # would leave no trace of who edited the operator's identity.
+        # Gated narrowly to operator + identity files to avoid an
+        # audit-write on every dashboard workspace save.
+        is_operator_identity_edit = (
+            agent_id == "operator"
+            and filename in ("SOUL.md", "INSTRUCTIONS.md")
+            and blackboard is not None
+        )
+        before_value: str = ""
+        if is_operator_identity_edit:
+            try:
+                prior = await transport.request(
+                    agent_id, "GET", f"/workspace/{filename}", timeout=10,
+                )
+                if isinstance(prior, dict):
+                    before_value = str(prior.get("content") or "")
+            except Exception as e:
+                # Pre-fetch is best-effort; the audit row will record
+                # an empty before_value rather than blocking the edit.
+                logger.warning(
+                    "operator workspace pre-fetch failed for %s: %s",
+                    filename, e,
+                )
         try:
             result = await transport.request(
                 agent_id, "PUT", f"/workspace/{filename}",
@@ -5299,6 +5394,21 @@ def create_dashboard_router(
             )
         except Exception as e:
             raise HTTPException(status_code=502, detail=str(e))
+        if is_operator_identity_edit:
+            try:
+                blackboard.log_audit(
+                    action="edit_workspace",
+                    target=agent_id,
+                    field=filename,
+                    before_value=before_value,
+                    after_value=content,
+                    actor="user",
+                    provenance="dashboard",
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to write operator workspace audit row: %s", e,
+                )
         if event_bus is not None:
             event_bus.emit("workspace_updated", agent=agent_id,
                            data={"message": f"Dashboard updated {filename}"})

@@ -753,6 +753,174 @@ class TestDashboardTraces:
         assert resp.status_code == 404
 
 
+class TestDashboardOperatorAudit:
+    """Operator audit log: read filter (include_archived) + archive POST."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir)
+        self.client = _make_client(self.components)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _seed(self):
+        bb = self.components["blackboard"]
+        bb.log_audit(action="edit", target="alpha", field="model")
+        bb.log_audit(action="edit", target="beta", field="soul")
+        # Backdate alpha's row so the cutoff catches it.
+        bb.db.execute(
+            "UPDATE audit_log SET timestamp='2025-01-01 00:00:00' WHERE target='alpha'"
+        )
+        bb.db.commit()
+
+    def _patch_archive_proxy(self, *, status_code: int = 200, payload: dict | None = None):
+        """Patch httpx.AsyncClient so the dashboard archive proxy can run.
+
+        The dashboard proxy fans archive POSTs out to ``POST
+        /mesh/audit/archive`` over loopback. There's no real mesh
+        listening in the unit-test process, so we substitute an
+        AsyncClient whose ``post`` returns a canned response. The
+        bound blackboard fixture is exercised directly via the proxy
+        callback when the caller wants the real archive behaviour
+        (defaults to a real call against
+        ``self.components["blackboard"]``).
+        """
+
+        bb = self.components["blackboard"]
+
+        class _StubResp:
+            def __init__(self, code: int, body: dict):
+                self.status_code = code
+                self._body = body
+                self.text = "" if not body else str(body)
+            def json(self):
+                return self._body
+
+        class _StubClient:
+            def __init__(self_inner, *a, **kw):
+                pass
+            async def __aenter__(self_inner):
+                return self_inner
+            async def __aexit__(self_inner, *a):
+                return False
+            async def post(self_inner, url, json=None, headers=None):
+                if status_code != 200:
+                    return _StubResp(status_code, payload or {"detail": "stub"})
+                # Real call against the test-bound blackboard so the
+                # archive actually runs and we can verify the row count.
+                before = (json or {}).get("before_date", "")
+                # Mirror the mesh endpoint's date-normalisation so the
+                # canned shape matches what the real route would return.
+                from datetime import datetime
+                from datetime import timezone as _tz
+                try:
+                    dt = datetime.fromisoformat(before.replace("Z", "+00:00"))
+                    if dt.tzinfo is not None:
+                        dt = dt.astimezone(_tz.utc).replace(tzinfo=None)
+                    normalised = dt.strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    return _StubResp(400, {"detail": f"bad date: {before}"})
+                try:
+                    res = bb.archive_audit_before(normalised, actor="operator")
+                except ValueError as e:
+                    return _StubResp(400, {"detail": str(e)})
+                body = {
+                    "ok": True,
+                    "archived_count": int(res.get("archived_count", 0)),
+                    "truncated": bool(res.get("truncated", False)),
+                    "before_date": before,
+                }
+                return _StubResp(200, body)
+
+        return patch("httpx.AsyncClient", _StubClient)
+
+    def test_operator_audit_default_hides_archived(self):
+        self._seed()
+        bb = self.components["blackboard"]
+        bb.archive_audit_before("2026-01-01")
+        resp = self.client.get("/dashboard/api/operator-audit")
+        assert resp.status_code == 200
+        data = resp.json()
+        # 1 surviving original (beta) + 1 audit-of-audit row written by
+        # archive_audit_before itself (target=audit_log, archived=0).
+        targets = sorted(e["target"] for e in data["entries"])
+        assert "beta" in targets
+        assert "audit_log" in targets
+
+    def test_operator_audit_include_archived_true(self):
+        self._seed()
+        bb = self.components["blackboard"]
+        bb.archive_audit_before("2026-01-01")
+        resp = self.client.get(
+            "/dashboard/api/operator-audit?include_archived=true",
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        archived = [e for e in data["entries"] if e["archived"]]
+        assert len(archived) == 1
+
+    def test_operator_audit_archive_post_archives_old_rows(self):
+        self._seed()
+        with self._patch_archive_proxy():
+            resp = self.client.post(
+                "/dashboard/api/operator-audit/archive",
+                json={"before_date": "2026-01-01"},
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["archived_count"] == 1
+        assert data["truncated"] is False
+        assert data["before_date"] == "2026-01-01"
+
+    def test_operator_audit_archive_rejects_missing_date(self):
+        resp = self.client.post(
+            "/dashboard/api/operator-audit/archive",
+            json={},
+        )
+        assert resp.status_code == 400
+
+    def test_operator_audit_archive_idempotent(self):
+        self._seed()
+        with self._patch_archive_proxy():
+            r1 = self.client.post(
+                "/dashboard/api/operator-audit/archive",
+                json={"before_date": "2026-01-01"},
+            )
+            r2 = self.client.post(
+                "/dashboard/api/operator-audit/archive",
+                json={"before_date": "2026-01-01"},
+            )
+        assert r1.json()["archived_count"] == 1
+        assert r2.json()["archived_count"] == 0
+
+    def test_operator_audit_archive_proxies_403_to_caller(self):
+        """Non-operator caller (mesh-side 403) bubbles through the proxy."""
+        self._seed()
+        with self._patch_archive_proxy(
+            status_code=403,
+            payload={"detail": "Only the operator can archive audit entries"},
+        ):
+            resp = self.client.post(
+                "/dashboard/api/operator-audit/archive",
+                json={"before_date": "2026-01-01"},
+            )
+        assert resp.status_code == 403
+        assert "operator" in resp.json()["detail"].lower()
+
+    def test_operator_audit_archive_requires_csrf(self):
+        """POST without X-Requested-With must be rejected (CSRF guard)."""
+        from fastapi.testclient import TestClient
+        plain = TestClient(self.client.app)
+        resp = plain.post(
+            "/dashboard/api/operator-audit/archive",
+            json={"before_date": "2026-01-01"},
+        )
+        assert resp.status_code == 403
+
+
 # ── V2 Tests: Agent Config ──────────────────────────────────
 
 

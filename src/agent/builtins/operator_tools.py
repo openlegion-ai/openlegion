@@ -1446,3 +1446,119 @@ async def manage_agent(
             return {"error": f"Failed to propose delete: {e}"}
 
     return {"error": f"Unknown action {action!r}; use archive|delete"}
+
+
+# ── Self-cleanup tools ──────────────────────────────────────
+
+
+@skill(
+    name="cancel_pending_action",
+    description=(
+        "Cancel a pending action by nonce. Use this to clean up stale or "
+        "incorrect proposals that the user no longer wants. The action "
+        "will no longer be available for confirmation. Pair with "
+        "list_pending() / inspect the pending-actions card if you need "
+        "to find the nonce."
+    ),
+    parameters={
+        "nonce": {
+            "type": "string",
+            "description": (
+                "Nonce of the pending action to cancel (from propose_edit "
+                "/ edit_agent return value, the workplace pending list, "
+                "or the pending_action_card surface)."
+            ),
+        },
+    },
+)
+async def cancel_pending_action(
+    nonce: str,
+    *,
+    mesh_client=None,
+    **_kw,
+) -> dict:
+    """Cancel a stale pending action so the user no longer sees it."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    if not nonce or not isinstance(nonce, str):
+        return {"error": "nonce is required"}
+    try:
+        result = await mesh_client.cancel_pending_action(nonce)
+    except Exception as e:
+        msg = str(e)
+        lower = msg.lower()
+        if "404" in msg or "not found" in lower or "expired" in lower:
+            return {
+                "error": "pending_unknown_or_expired",
+                "detail": (
+                    "Pending action not found — it may have already been "
+                    "confirmed, cancelled, or expired."
+                ),
+            }
+        return {"error": f"Failed to cancel pending action: {e}"}
+    return {
+        "success": True,
+        "nonce": result.get("nonce", nonce),
+        "target_kind": result.get("target_kind"),
+        "target_id": result.get("target_id"),
+        "action_kind": result.get("action_kind"),
+        "message": "Pending action cancelled — the user no longer sees it.",
+    }
+
+
+@skill(
+    name="archive_audit_before",
+    description=(
+        "Archive operator audit entries older than the given date. Removes "
+        "them from the active audit-log view but preserves them in the "
+        "archived store (recoverable via include_archived=true). Use to "
+        "keep the audit log focused on recent activity. Returns the count "
+        "of rows archived."
+    ),
+    parameters={
+        "before_date": {
+            "type": "string",
+            "description": (
+                "ISO 8601 date or timestamp — entries strictly older than "
+                "this date will be archived. Examples: '2026-04-01', "
+                "'2026-04-01T00:00:00Z', '2026-04-01 00:00:00'."
+            ),
+        },
+    },
+)
+async def archive_audit_before(
+    before_date: str,
+    *,
+    mesh_client=None,
+    **_kw,
+) -> dict:
+    """Bulk-archive old audit entries (soft-delete; preserves history)."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    if not before_date or not isinstance(before_date, str):
+        return {"error": "before_date is required (ISO 8601 string)"}
+    try:
+        result = await mesh_client.archive_audit_before(before_date)
+    except Exception as e:
+        return {"error": f"Failed to archive audit entries: {e}"}
+    archived = int(result.get("archived_count", 0))
+    truncated = bool(result.get("truncated", False))
+    msg = (
+        f"Archived {archived} audit "
+        f"{'entry' if archived == 1 else 'entries'} older than "
+        f"{before_date}."
+    )
+    if truncated:
+        # Hard cap was hit — operator can re-run to keep sweeping.
+        msg += " Hit per-call hard cap; rerun to continue archiving."
+    return {
+        "success": True,
+        "archived_count": archived,
+        "truncated": truncated,
+        "before_date": result.get("before_date", before_date),
+        "message": msg,
+    }

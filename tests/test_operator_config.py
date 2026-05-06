@@ -245,8 +245,9 @@ class TestOperatorConstants:
     def test_allowed_tools_populated(self):
         from src.cli.config import _OPERATOR_ALLOWED_TOOLS, _OPERATOR_HEARTBEAT_TOOLS
         # PR 0 consolidated to 24, PR 5 added set_project_goal (=25),
-        # PR 1 swaps propose_edit (-1) for edit_agent + undo_change (+2) → +1.
-        assert len(_OPERATOR_ALLOWED_TOOLS) == 26
+        # PR 1 swaps propose_edit (-1) for edit_agent + undo_change (+2) → 26.
+        # Self-cleanup PR adds cancel_pending_action + archive_audit_before (+2) → 28.
+        assert len(_OPERATOR_ALLOWED_TOOLS) == 28
         assert len(_OPERATOR_HEARTBEAT_TOOLS) == 4
         # Heartbeat tools should be a subset of allowed tools
         assert set(_OPERATOR_HEARTBEAT_TOOLS).issubset(set(_OPERATOR_ALLOWED_TOOLS))
@@ -258,6 +259,9 @@ class TestOperatorConstants:
             "manage_project", "manage_agent", "manage_task",
             # PR 5 — north-star setter is no-confirmation meta-config.
             "set_project_goal",
+            # Self-cleanup — operator can clear stale pending actions
+            # and prune the audit log itself.
+            "cancel_pending_action", "archive_audit_before",
         ):
             assert tool in _OPERATOR_ALLOWED_TOOLS
         # Dropped dead-weight + replaced tools must be gone.

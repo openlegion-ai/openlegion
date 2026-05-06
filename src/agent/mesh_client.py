@@ -786,6 +786,38 @@ class MeshClient:
         response.raise_for_status()
         return response.json()
 
+    async def cancel_pending_action(self, nonce: str) -> dict:
+        """Cancel a pending action by nonce (operator self-cleanup).
+
+        Backs the operator's ``cancel_pending_action`` tool. Returns the
+        cancelled record's ``target_kind`` / ``target_id`` / ``action_kind``
+        so the operator can describe what was cancelled. 404 if unknown
+        or already expired/consumed.
+        """
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/pending/{nonce}/cancel",
+            json={},
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def archive_audit_before(self, before_date: str) -> dict:
+        """Bulk-archive operator audit entries older than ``before_date``.
+
+        Soft-archive: rows are flipped to ``archived=1`` and dropped from
+        the default audit-log view. Returns ``{archived_count: N}``.
+        """
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/audit/archive",
+            json={"before_date": before_date},
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
     # === Project management (mesh proxy endpoints) ===
 
     async def list_projects(self) -> dict:

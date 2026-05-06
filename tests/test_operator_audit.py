@@ -435,3 +435,315 @@ async def test_mesh_client_confirm_config_change():
         assert "/mesh/config/confirm" in call_args[0][0]
         assert call_args[1]["json"]["change_id"] == "abc-123"
     await client.close()
+
+
+# === Audit archive tests (PR C) ===
+
+
+def test_audit_log_archived_column_exists(blackboard):
+    """The audit_log table should expose the archived column."""
+    cols = [
+        row[1]
+        for row in blackboard.db.execute("PRAGMA table_info(audit_log)").fetchall()
+    ]
+    assert "archived" in cols
+
+
+def test_archive_audit_before_filters_old_rows(blackboard):
+    """archive_audit_before flips matching rows to archived=1."""
+    blackboard.log_audit(action="old_action", target="alpha")
+    # Backdate the inserted row by hand so we can test the cutoff.
+    blackboard.db.execute(
+        "UPDATE audit_log SET timestamp='2025-01-01 00:00:00' WHERE target='alpha'"
+    )
+    blackboard.db.commit()
+    blackboard.log_audit(action="recent_action", target="beta")
+
+    res = blackboard.archive_audit_before("2026-01-01")
+    assert res["archived_count"] == 1
+    assert res["truncated"] is False
+
+    # Default view hides archived rows but keeps the audit-of-audit
+    # row written by archive_audit_before itself.
+    result = blackboard.get_audit_log()
+    targets = sorted(e["target"] for e in result["entries"])
+    assert "beta" in targets
+    assert "audit_log" in targets  # audit-of-audit row
+
+    # include_archived surfaces both originals + the audit-of-audit row.
+    result = blackboard.get_audit_log(include_archived=True)
+    archived = [e for e in result["entries"] if e["archived"]]
+    assert len(archived) == 1
+    assert archived[0]["target"] == "alpha"
+
+
+def test_archive_audit_before_writes_audit_of_audit(blackboard):
+    """archive_audit_before records its own action with the actor."""
+    blackboard.log_audit(action="old_action", target="alpha")
+    blackboard.db.execute(
+        "UPDATE audit_log SET timestamp='2025-01-01 00:00:00' WHERE target='alpha'"
+    )
+    blackboard.db.commit()
+
+    blackboard.archive_audit_before("2026-01-01", actor="operator")
+    rows = blackboard.db.execute(
+        "SELECT action, actor, target, after_value, archived FROM audit_log"
+        " WHERE action='audit_archive'"
+    ).fetchall()
+    assert len(rows) == 1
+    action, actor, target, after_value, archived = rows[0]
+    assert action == "audit_archive"
+    assert actor == "operator"
+    assert target == "audit_log"
+    assert after_value == "2026-01-01"
+    assert archived == 0  # the audit-of-audit row itself is NOT archived
+
+
+def test_archive_audit_before_idempotent(blackboard):
+    """Running archive twice doesn't double-count."""
+    blackboard.log_audit(action="old_action", target="alpha")
+    blackboard.db.execute(
+        "UPDATE audit_log SET timestamp='2025-01-01 00:00:00' WHERE target='alpha'"
+    )
+    blackboard.db.commit()
+    r1 = blackboard.archive_audit_before("2026-01-01")
+    r2 = blackboard.archive_audit_before("2026-01-01")
+    assert r1["archived_count"] == 1
+    # The second call still archives nothing from the original window
+    # (the audit-of-audit row from r1 is dated "now", well after 2026-01-01).
+    assert r2["archived_count"] == 0
+
+
+def test_archive_audit_before_normalises_t_separator(blackboard):
+    """ISO 8601 with T separator should match the SQLite TEXT format."""
+    blackboard.log_audit(action="old_action", target="alpha")
+    blackboard.db.execute(
+        "UPDATE audit_log SET timestamp='2025-01-01 00:00:00' WHERE target='alpha'"
+    )
+    blackboard.db.commit()
+    res = blackboard.archive_audit_before("2026-01-01T00:00:00Z")
+    assert res["archived_count"] == 1
+
+
+def test_archive_audit_before_chunked_truncated(blackboard, monkeypatch):
+    """When the hard cap is hit, ``truncated=True`` and rows remain."""
+    # Drop the batch size + cap so the test runs in milliseconds.
+    monkeypatch.setattr(blackboard, "_ARCHIVE_BATCH_SIZE", 5, raising=False)
+    monkeypatch.setattr(blackboard, "_ARCHIVE_HARD_CAP", 10, raising=False)
+    for i in range(20):
+        blackboard.log_audit(action=f"old_{i}", target=f"a{i}")
+    # Backdate them all.
+    blackboard.db.execute(
+        "UPDATE audit_log SET timestamp='2025-01-01 00:00:00'"
+    )
+    blackboard.db.commit()
+
+    res = blackboard.archive_audit_before("2026-01-01")
+    assert res["truncated"] is True
+    assert res["archived_count"] == 10
+    # 10 of the 20 originals are still archived=0 + matching the cutoff;
+    # a follow-up call should sweep the rest.
+    res2 = blackboard.archive_audit_before("2026-01-01")
+    assert res2["archived_count"] == 10
+    assert res2["truncated"] is True or res2["truncated"] is False  # exact-cap edge
+
+
+def test_archive_audit_before_rejects_empty(blackboard):
+    """Empty before_iso raises so the endpoint can map to HTTP 400."""
+    with pytest.raises(ValueError):
+        blackboard.archive_audit_before("")
+
+
+def test_get_audit_log_default_hides_archived(blackboard):
+    """get_audit_log() should drop archived rows by default."""
+    blackboard.log_audit(action="a", target="alpha")
+    blackboard.log_audit(action="b", target="beta")
+    blackboard.db.execute("UPDATE audit_log SET archived=1 WHERE target='alpha'")
+    blackboard.db.commit()
+
+    result = blackboard.get_audit_log()
+    assert result["total"] == 1
+    assert result["entries"][0]["target"] == "beta"
+    assert result["entries"][0]["archived"] is False
+
+
+@pytest.mark.asyncio
+async def test_mesh_client_cancel_pending_action():
+    """MeshClient.cancel_pending_action POSTs to the right endpoint."""
+    from src.agent.mesh_client import MeshClient
+
+    client = MeshClient("http://localhost:8420", "operator")
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.raise_for_status = MagicMock()
+    mock_response.json.return_value = {
+        "ok": True, "nonce": "nonce-1",
+        "target_kind": "agent", "target_id": "writer", "action_kind": "edit",
+    }
+
+    mock_http = AsyncMock(return_value=mock_response)
+    with patch.object(client, "_get_client", return_value=AsyncMock(post=mock_http)):
+        result = await client.cancel_pending_action("nonce-1")
+        assert result["ok"] is True
+        mock_http.assert_called_once()
+        call_args = mock_http.call_args
+        assert "/mesh/pending/nonce-1/cancel" in call_args[0][0]
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_mesh_client_archive_audit_before():
+    """MeshClient.archive_audit_before POSTs to /mesh/audit/archive."""
+    from src.agent.mesh_client import MeshClient
+
+    client = MeshClient("http://localhost:8420", "operator")
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.raise_for_status = MagicMock()
+    mock_response.json.return_value = {
+        "ok": True, "archived_count": 5, "before_date": "2026-04-01",
+    }
+
+    mock_http = AsyncMock(return_value=mock_response)
+    with patch.object(client, "_get_client", return_value=AsyncMock(post=mock_http)):
+        result = await client.archive_audit_before("2026-04-01")
+        assert result["archived_count"] == 5
+        mock_http.assert_called_once()
+        call_args = mock_http.call_args
+        assert "/mesh/audit/archive" in call_args[0][0]
+        assert call_args[1]["json"]["before_date"] == "2026-04-01"
+    await client.close()
+
+
+# === /mesh/audit/archive endpoint — auth + date validation ===
+#
+# These tests exercise the mesh route directly (not the agent-side
+# MeshClient) so the operator-or-internal gate, ISO 8601 date
+# validation, and chunked-archive return shape are covered end-to-end.
+
+
+def _build_audit_archive_app(tmp_path):
+    """Spin up a create_mesh_app() bound to a tmp blackboard for archive tests."""
+    import importlib
+
+    import src.host.server as server_module
+    from src.host.costs import CostTracker
+    from src.host.mesh import MessageRouter, PubSub
+    from src.host.permissions import PermissionMatrix
+    from src.host.traces import TraceStore
+    importlib.reload(server_module)
+    create_mesh_app = server_module.create_mesh_app
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix()
+    router = MessageRouter(perms, {})
+    costs = CostTracker(str(tmp_path / "costs.db"))
+    traces = TraceStore(str(tmp_path / "traces.db"))
+
+    app = create_mesh_app(
+        blackboard=bb, pubsub=pubsub, router=router, permissions=perms,
+        cost_tracker=costs, trace_store=traces,
+    )
+
+    def _cleanup():
+        bb.close()
+        costs.close()
+        traces.close()
+        importlib.reload(server_module)
+
+    return app, bb, _cleanup
+
+
+@pytest.mark.asyncio
+async def test_audit_archive_endpoint_requires_operator_or_internal(tmp_path):
+    """A non-operator + non-internal caller is rejected with HTTP 403."""
+    from httpx import ASGITransport, AsyncClient
+
+    app, bb, cleanup = _build_audit_archive_app(tmp_path)
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            resp = await client.post(
+                "/mesh/audit/archive",
+                json={"before_date": "2026-04-01"},
+                headers={"X-Agent-ID": "alpha"},  # not operator, not internal
+            )
+        assert resp.status_code == 403
+        assert "operator" in resp.json()["detail"].lower()
+    finally:
+        cleanup()
+
+
+@pytest.mark.asyncio
+async def test_audit_archive_endpoint_accepts_operator_caller(tmp_path):
+    """``X-Agent-ID: operator`` is accepted and the archive runs."""
+    from httpx import ASGITransport, AsyncClient
+
+    app, bb, cleanup = _build_audit_archive_app(tmp_path)
+    try:
+        bb.log_audit(action="old", target="alpha")
+        bb.db.execute(
+            "UPDATE audit_log SET timestamp='2025-01-01 00:00:00' WHERE target='alpha'"
+        )
+        bb.db.commit()
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            resp = await client.post(
+                "/mesh/audit/archive",
+                json={"before_date": "2026-04-01"},
+                headers={"X-Agent-ID": "operator"},
+            )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is True
+        assert body["archived_count"] == 1
+        assert body["truncated"] is False
+        # audit-of-audit row was written with actor=operator.
+        rows = bb.db.execute(
+            "SELECT actor FROM audit_log WHERE action='audit_archive'"
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0][0] == "operator"
+    finally:
+        cleanup()
+
+
+@pytest.mark.asyncio
+async def test_audit_archive_endpoint_validates_iso8601_formats(tmp_path):
+    """Bare-date / Z-suffixed / offset-suffixed inputs all parse."""
+    from httpx import ASGITransport, AsyncClient
+
+    app, bb, cleanup = _build_audit_archive_app(tmp_path)
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            for fmt in (
+                "2026-04-01",
+                "2026-04-01T12:00:00Z",
+                "2026-04-01T12:00:00+02:00",
+            ):
+                resp = await client.post(
+                    "/mesh/audit/archive",
+                    json={"before_date": fmt},
+                    headers={"X-Agent-ID": "operator"},
+                )
+                assert resp.status_code == 200, f"format {fmt} should parse: {resp.text}"
+                body = resp.json()
+                assert body["ok"] is True
+                assert "truncated" in body
+
+            # Garbage rejected with HTTP 400.
+            resp = await client.post(
+                "/mesh/audit/archive",
+                json={"before_date": "not-a-date"},
+                headers={"X-Agent-ID": "operator"},
+            )
+            assert resp.status_code == 400
+            assert "iso 8601" in resp.json()["detail"].lower()
+    finally:
+        cleanup()

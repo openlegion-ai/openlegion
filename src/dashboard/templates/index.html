@@ -2182,8 +2182,8 @@
               <!-- Left column: Identity panel -->
               <div class="md:col-span-3">
                 <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
-                  <div x-show="selectedAgent === 'operator'" class="text-xs text-indigo-400 bg-indigo-900/20 border border-indigo-800/30 rounded-lg px-3 py-2 mb-3">System agent — use the <button @click="switchTab('system'); switchSystemTab('operator')" class="underline hover:text-indigo-300">Operator settings</button> page to configure.</div>
-                  <div x-show="selectedAgent !== 'operator'">
+                  <div x-show="selectedAgent === 'operator'" class="text-xs text-indigo-400 bg-indigo-900/20 border border-indigo-800/30 rounded-lg px-3 py-2 mb-3">System agent — these files literally change how your Operator behaves. Use with care, or jump to the <button @click="switchTab('system'); switchSystemTab('operator')" class="underline hover:text-indigo-300">Operator settings</button> page for guided controls.</div>
+                  <div>
                   <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Agent Settings</div>
                   <!-- Tab bar (4 tabs, no access badges) -->
                   <div class="flex flex-wrap gap-0.5 bg-gray-800/50 rounded-lg p-0.5 mb-3">
@@ -3051,7 +3051,7 @@
                   </div>
                   <!-- END FILES TAB -->
 
-                  </div><!-- /x-show selectedAgent !== operator -->
+                  </div><!-- /workspace tabs container (operator + non-operator) -->
                 </div>
               </div>
               <!-- Right column: Spend & Budget (combined) -->
@@ -5593,12 +5593,36 @@
 
           <!-- Audit log -->
           <div class="bg-gray-900 border border-gray-800 rounded-lg p-5">
-            <div class="flex items-center justify-between mb-4">
+            <div class="flex items-center justify-between mb-4 gap-3 flex-wrap">
               <div>
                 <h3 class="text-sm font-medium text-gray-200">Change Log</h3>
                 <p class="text-[10px] text-gray-500 mt-0.5">Configuration changes made by the operator</p>
               </div>
               <button @click="fetchAuditLog()" class="text-xs px-2.5 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors">Refresh</button>
+            </div>
+
+            <!-- Archive controls (responsive: wraps cleanly on narrow screens) -->
+            <div class="flex flex-wrap items-center gap-2 mb-3 text-[11px] sm:text-xs">
+              <span class="text-gray-500 shrink-0">Archive entries older than</span>
+              <select x-model.number="auditArchiveDays"
+                class="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-gray-200 focus:border-indigo-500 focus:outline-none">
+                <option :value="7">7 days</option>
+                <option :value="30">30 days</option>
+                <option :value="90">90 days</option>
+              </select>
+              <button @click="archiveOldAuditEntries()"
+                :disabled="auditArchiving"
+                class="px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white transition-colors inline-flex items-center gap-1.5">
+                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 8h14l-1 12H6L5 8zm0 0V5a2 2 0 012-2h10a2 2 0 012 2v3M9 12h6"/></svg>
+                <span x-text="auditArchiving ? 'Archiving...' : 'Archive'"></span>
+              </button>
+              <span class="ml-auto inline-flex items-center gap-1.5 text-gray-400">
+                <input type="checkbox" id="audit-show-archived"
+                  :checked="auditIncludeArchived"
+                  @change="toggleIncludeArchived()"
+                  class="accent-indigo-500">
+                <label for="audit-show-archived" class="cursor-pointer select-none">Show archived</label>
+              </span>
             </div>
 
             <div x-show="auditLoading" class="flex items-center gap-2 text-gray-500 text-xs py-6 justify-center">
@@ -5612,13 +5636,15 @@
 
             <div x-show="!auditLoading && auditLog.length > 0" class="space-y-1.5">
               <template x-for="entry in auditLog" :key="entry.id">
-                <div x-data="{ expanded: false }" class="rounded-lg bg-gray-800/30 border border-gray-800/50">
+                <div x-data="{ expanded: false }" class="rounded-lg border"
+                  :class="entry.archived ? 'bg-gray-800/10 border-gray-800/30 opacity-70' : 'bg-gray-800/30 border-gray-800/50'">
                   <div class="flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-gray-800/40 transition-colors" @click="expanded = !expanded">
                     <div class="text-[10px] text-gray-500 w-14 shrink-0" x-text="entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : ''"></div>
                     <div class="flex-1 min-w-0 flex items-center gap-1.5">
                       <span class="text-[10px] px-1.5 py-0.5 rounded-full bg-indigo-900/30 text-indigo-400 border border-indigo-800/30 font-medium" x-text="entry.action"></span>
                       <span class="text-xs text-white font-medium truncate" x-text="entry.target"></span>
                       <span x-show="entry.field" class="text-[10px] text-gray-500 truncate" x-text="'· ' + entry.field"></span>
+                      <span x-show="entry.archived" class="text-[10px] px-1.5 py-0.5 rounded-full bg-gray-700/40 text-gray-400 border border-gray-600/30">archived</span>
                     </div>
                     <!-- Revert reuses the soft-edit /changes/undo endpoint;
                          the audit row's change_id is the same uuid as the

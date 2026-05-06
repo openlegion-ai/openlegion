@@ -1519,6 +1519,9 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     "set_project_goal",
     # Lifecycle (consolidated archive/delete)
     "manage_project", "manage_agent", "manage_task",
+    # Self-cleanup — operator can clear stale pending actions and prune
+    # the audit log without waiting for TTL.
+    "cancel_pending_action", "archive_audit_before",
     # Credential + browser handoff
     "request_credential", "request_browser_login",
 ]
