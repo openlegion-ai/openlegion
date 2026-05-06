@@ -362,6 +362,16 @@ function dashboard() {
     workplaceTaskColumns: ['pending', 'accepted', 'working', 'blocked', 'done'],
     workplaceProjectFilter: '',
 
+    // Pending-action collapse state. When two-or-more unresolved
+    // ``pending_action_card`` messages live in the operator chat, the
+    // template renders a single "N actions awaiting you" bar instead
+    // of three full amber cards. Click / Enter / Space toggles
+    // ``pendingExpanded``; ``pendingPulse`` flashes the count badge
+    // for ~2s when a new pending arrives while collapsed.
+    pendingExpanded: false,
+    pendingPulse: false,
+    _pendingPulseTimer: null,
+
     // Workplace task drill-in modal (PR 4) — populated lazily on
     // card click. ``drillInData`` carries ``{task, events, artifacts}``
     // from /api/workplace/tasks/{id}; the comment box is reset on
@@ -1803,6 +1813,47 @@ function dashboard() {
         resolved_status: null,
         ts: Date.now() / 1000,
       });
+      // If the collapsed bar is currently up, flash the count badge
+      // for ~2s so the user notices a new pending arrived without
+      // the bar yelling at them. We don't auto-expand: the operator's
+      // view stays calm and the user opens the bar on their schedule.
+      if (!this.pendingExpanded && this._countPendingActionCards() >= 2) {
+        this._flashPendingPulse();
+      }
+    },
+
+    // Count the number of unresolved pending_action_card messages in
+    // the operator chat. Drives the "N actions awaiting you" headline
+    // and the collapse-vs-expand decision.
+    _countPendingActionCards() {
+      const arr = this.chatHistories?.['operator'] || [];
+      let n = 0;
+      for (const m of arr) {
+        if (m.role === 'pending_action_card' && !m.resolved_status) n++;
+      }
+      return n;
+    },
+
+    // Toggle the collapsed bar. Used by the click handler and the
+    // Enter/Space keyboard handler. Reset the pulse when the user
+    // expands so the badge stops drawing attention.
+    togglePendingExpanded() {
+      this.pendingExpanded = !this.pendingExpanded;
+      if (this.pendingExpanded) this.pendingPulse = false;
+    },
+
+    // Flash the count badge for ~2s so a fresh pending while
+    // collapsed catches the eye. Cancellable so back-to-back arrivals
+    // don't pile up.
+    _flashPendingPulse() {
+      this.pendingPulse = true;
+      if (this._pendingPulseTimer) {
+        clearTimeout(this._pendingPulseTimer);
+      }
+      this._pendingPulseTimer = setTimeout(() => {
+        this.pendingPulse = false;
+        this._pendingPulseTimer = null;
+      }, 2000);
     },
 
     // Find the matching card by event_id and stamp a terminal state.

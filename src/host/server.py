@@ -108,7 +108,35 @@ if TYPE_CHECKING:
 # app picks the canonical instance up via ``_get_pending_actions_store()``
 # below; the module-level helpers delegate to that singleton.
 _MAX_PENDING = 10
+# Default TTL for pending-action rows (deletes, soft-edit receipts,
+# anything we don't have a more specific budget for). 5 minutes is the
+# legacy value and still appropriate for low-stakes acts the user can
+# undo.
 _CHANGE_TTL_SECONDS = 300
+# Riskier config edits — model swaps, permission changes, budget
+# tweaks, thinking-level changes — get a longer review window because
+# the user typically wants to read the diff and think before
+# confirming. 30 minutes mirrors the worktree code-review reflex.
+_HARD_CHANGE_TTL_SECONDS = 1800
+# Fields that earn the longer review window. Mirrors
+# ``_HARD_EDIT_FIELDS`` defined later inside ``create_mesh_app`` (kept
+# in sync manually — both lists have to agree, and they're tiny).
+_HARD_TTL_FIELDS = frozenset({"model", "permissions", "budget", "thinking"})
+
+
+def _ttl_for_field(field: str | None) -> int:
+    """Pick the pending-action TTL for a config field.
+
+    Hard fields (model / permissions / budget / thinking) get the
+    longer ``_HARD_CHANGE_TTL_SECONDS`` window so the user has time to
+    read the diff. Everything else (soft fields, non-config actions
+    like project/agent deletes, unknown action kinds) falls back to
+    ``_CHANGE_TTL_SECONDS``.
+    """
+    if field and field in _HARD_TTL_FIELDS:
+        return _HARD_CHANGE_TTL_SECONDS
+    return _CHANGE_TTL_SECONDS
+
 
 # Module-level singleton used by the ``_store_pending_change`` /
 # ``_get_pending_change`` / ``_consume_pending_change`` helpers below.
@@ -165,7 +193,7 @@ def _store_pending_change(agent_id: str, field: str, old_value: object, new_valu
         target_id=agent_id,
         action_kind=field,
         payload=payload,
-        ttl=_CHANGE_TTL_SECONDS,
+        ttl=_ttl_for_field(field),
     )
     return change_id
 
@@ -4538,7 +4566,12 @@ def create_mesh_app(
             action_kind=field,
             payload=payload,
             origin_kind=origin_kind,
-            ttl=_CHANGE_TTL_SECONDS,
+            # Hard fields (model / permissions / budget / thinking) get
+            # the longer review window via ``_ttl_for_field``; soft
+            # fields fall back to the legacy 5-minute default. Keeps
+            # the act-and-undo path snappy while giving users time to
+            # think about risky edits.
+            ttl=_ttl_for_field(field),
             summary=summary,
             preview_diff=preview,
         )

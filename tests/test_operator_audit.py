@@ -10,6 +10,7 @@ import pytest
 from src.host.mesh import Blackboard
 from src.host.server import (
     _CHANGE_TTL_SECONDS,
+    _HARD_CHANGE_TTL_SECONDS,
     _cleanup_expired_changes,
     _consume_pending_change,
     _get_pending_actions_store,
@@ -227,9 +228,21 @@ def test_get_nonexistent_change():
     assert _get_pending_change("nonexistent") is None
 
 
-def test_change_ttl():
-    """Changes have a TTL matching _CHANGE_TTL_SECONDS."""
+def test_change_ttl_hard_field_uses_long_window():
+    """Hard fields (model / permissions / budget / thinking) get the
+    longer ``_HARD_CHANGE_TTL_SECONDS`` review window so the user has
+    time to read the diff before confirming."""
     change_id = _store_pending_change("alpha", "model", "old", "new")
+    change = _get_pending_change(change_id)
+    assert change is not None
+    expected = datetime.now(timezone.utc) + timedelta(seconds=_HARD_CHANGE_TTL_SECONDS)
+    # Allow 5 seconds tolerance
+    assert abs((change["expires_at"] - expected).total_seconds()) < 5
+
+
+def test_change_ttl_soft_field_uses_default_window():
+    """Soft fields fall back to the legacy ``_CHANGE_TTL_SECONDS`` window."""
+    change_id = _store_pending_change("alpha", "instructions", "old", "new")
     change = _get_pending_change(change_id)
     assert change is not None
     expected = datetime.now(timezone.utc) + timedelta(seconds=_CHANGE_TTL_SECONDS)
