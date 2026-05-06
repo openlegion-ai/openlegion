@@ -96,11 +96,32 @@ class Blackboard:
                 before_value TEXT,
                 after_value TEXT,
                 change_id TEXT,
-                provenance TEXT DEFAULT 'user'
+                provenance TEXT DEFAULT 'user',
+                undoable INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log(timestamp);
             CREATE INDEX IF NOT EXISTS idx_audit_log_target ON audit_log(target);
         """)
+        # Migrate legacy DBs that pre-date the ``undoable`` column.
+        # Without this, the dashboard's Revert button would show on every
+        # row that has a ``change_id`` — including hard-edit and delete
+        # rows whose change_id was never an undo_token, producing 404
+        # toasts on click. Default 0 means "not undoable" so historic
+        # rows fail closed; only the soft-edit endpoint sets it to 1.
+        existing_audit_cols = {
+            row[1]
+            for row in self.db.execute("PRAGMA table_info(audit_log)").fetchall()
+        }
+        if "undoable" not in existing_audit_cols:
+            try:
+                self.db.execute(
+                    "ALTER TABLE audit_log ADD COLUMN undoable INTEGER NOT NULL DEFAULT 0"
+                )
+            except sqlite3.OperationalError as e:
+                # Race: another worker added it between PRAGMA and ALTER.
+                # Anything else is a real error worth surfacing.
+                if "duplicate column" not in str(e).lower():
+                    raise
         self.db.commit()
         self._load_watchers()
 
@@ -324,14 +345,23 @@ class Blackboard:
     def log_audit(self, action: str, target: str, field: str = "",
                   before_value: str = "", after_value: str = "",
                   change_id: str = "", actor: str = "operator",
-                  provenance: str = "user") -> None:
-        """Log an operator action to the audit trail."""
+                  provenance: str = "user", undoable: bool = False) -> None:
+        """Log an operator action to the audit trail.
+
+        ``undoable`` marks rows whose ``change_id`` is a real undo_token
+        (the ``change_history`` UUID issued by the soft-edit path). Hard
+        edits and deletes also write a ``change_id`` — but it's the
+        propose/confirm pending-action nonce, not an undo_token, and the
+        ``/changes/undo`` endpoint will 404 on it. The dashboard reads
+        this flag to gate the Revert button so the user never sees a
+        button that can only fail.
+        """
         with self._write_lock:
             self.db.execute(
                 "INSERT INTO audit_log"
-                " (action, actor, target, field, before_value, after_value, change_id, provenance)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (action, actor, target, field, before_value, after_value, change_id, provenance),
+                " (action, actor, target, field, before_value, after_value, change_id, provenance, undoable)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (action, actor, target, field, before_value, after_value, change_id, provenance, 1 if undoable else 0),
             )
             self.db.commit()
 
@@ -363,11 +393,18 @@ class Blackboard:
 
         entries = []
         for row in rows:
+            # ``undoable`` was added later via ALTER TABLE; it lands at
+            # position 10 (after the original 10 columns 0..9). Older
+            # databases that haven't been migrated yet won't have it,
+            # so fall back to False — same posture as a fresh row whose
+            # ``undoable`` flag was never set explicitly.
+            undoable_raw = row[10] if len(row) > 10 else 0
             entries.append({
                 "id": row[0], "timestamp": row[1], "action": row[2],
                 "actor": row[3], "target": row[4], "field": row[5],
                 "before_value": row[6], "after_value": row[7],
                 "change_id": row[8], "provenance": row[9],
+                "undoable": bool(undoable_raw),
             })
 
         return {"entries": entries, "total": count, "page": page, "per_page": per_page}

@@ -4572,8 +4572,16 @@ def create_mesh_app(
             ),
         }
 
-    async def _apply_pending_change(change_id: str, change: dict) -> dict:
-        """Apply a consumed pending change — shared by both config endpoints."""
+    async def _apply_pending_change(change_id: str, change: dict, *, undoable: bool = False) -> dict:
+        """Apply a consumed pending change — shared by soft, confirm, and undo paths.
+
+        ``undoable`` flags the audit row as Revert-eligible. Only the
+        soft-edit caller passes True (the change_id is the
+        ``change_history`` undo_token there). Hard-edit confirms and the
+        undo apply itself pass False — their change_id is a pending-action
+        nonce or already-consumed undo token, so the dashboard's Revert
+        button must not show on those rows.
+        """
         agent_id = change["agent_id"]
         field = change["field"]
         old_value = change["old_value"]
@@ -4703,6 +4711,7 @@ def create_mesh_app(
             before_value=json.dumps(old_value) if not isinstance(old_value, str) else old_value,
             after_value=json.dumps(new_value) if not isinstance(new_value, str) else new_value,
             change_id=change_id,
+            undoable=undoable,
         )
 
         return {"success": True, "agent_id": agent_id, "field": field}
@@ -4793,6 +4802,10 @@ def create_mesh_app(
         # Apply directly via the same write helper used by the confirm
         # path. ``_apply_pending_change`` is async and handles audit
         # logging, hot-reload, and heartbeat schedule sync.
+        # ``undoable=True`` here marks the audit row as Revert-eligible
+        # — the change_id IS the undo_token for the change_history row
+        # we record below, so the dashboard can wire Revert directly to
+        # ``/changes/undo/{change_id}``.
         undo_token = str(_uuid.uuid4())
         await _apply_pending_change(
             undo_token,
@@ -4802,6 +4815,7 @@ def create_mesh_app(
                 "old_value": old_value,
                 "new_value": new_value,
             },
+            undoable=True,
         )
 
         # Detect older unconsumed receipts on the same field BEFORE we

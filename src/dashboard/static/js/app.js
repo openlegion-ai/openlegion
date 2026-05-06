@@ -355,6 +355,11 @@ function dashboard() {
     workplaceTasks: [],
     workplaceBlockers: [],
     workplaceOutputs: [],
+    // Memoised slice for the Activity feed's "Recently delivered"
+    // header — recomputed in ``loadWorkplaceOutputs`` so the template
+    // doesn't re-run the filter on every Alpine reactive read. See
+    // ``_recomputeRecentlyDelivered`` for the coercion rules.
+    recentlyDeliveredItems: [],
     workplaceFeed: [],
     workplaceFeedCap: 200,
     workplacePending: [],
@@ -1457,6 +1462,7 @@ function dashboard() {
         const data = await resp.json();
         this.workplaceEnabled = data.enabled !== false;
         this.workplaceOutputs = data.outputs || [];
+        this._recomputeRecentlyDelivered();
       } catch (e) {
         console.error('Failed to load workplace outputs:', e);
       }
@@ -1828,16 +1834,65 @@ function dashboard() {
       }
     },
 
-    // Recently-delivered list for the Activity feed header. Pulled from
-    // workplaceOutputs so we stay aligned with the Outputs sub-tab; cap
-    // at 5 with a "View all" link so the section stays scannable.
-    recentlyDelivered(limit = 5, days = 7) {
+    // Coerce a wire-shape ``completed_at`` to a numeric epoch in seconds.
+    // The orchestration store has historically returned epoch-seconds as a
+    // float, but legacy / external feeders sometimes hand us strings or
+    // millisecond integers — and a wall-clock skew can yield future
+    // timestamps that should never count as "recent" for the user. We
+    // accept all three shapes and clamp to <= now so the filter stays
+    // monotonic even if the source clock drifts.
+    _coerceCompletedAtSeconds(value) {
+      if (value === null || value === undefined || value === '') return 0;
+      let n;
+      if (typeof value === 'number') {
+        n = value;
+      } else if (typeof value === 'string') {
+        const parsed = Date.parse(value);
+        if (Number.isFinite(parsed)) {
+          n = parsed / 1000;
+        } else {
+          // Numeric string ("1730000000" or "1730000000.5") that
+          // Date.parse refused — fall back to Number().
+          const asNum = Number(value);
+          n = Number.isFinite(asNum) ? asNum : 0;
+        }
+      } else {
+        return 0;
+      }
+      // Heuristic: anything >= 10^12 is almost certainly milliseconds
+      // (10^12 seconds = year ~33658). Drop to seconds.
+      if (n >= 1e12) n = n / 1000;
+      const nowSec = Date.now() / 1000;
+      if (n > nowSec) n = nowSec;
+      if (n < 0) n = 0;
+      return n;
+    },
+
+    // Recompute the memoised "Recently delivered" slice. Called whenever
+    // ``workplaceOutputs`` is refreshed. Coerces ``completed_at`` so the
+    // filter survives string timestamps and clock-skew-induced future
+    // values, then caps at 5 and sorts most-recent-first.
+    _recomputeRecentlyDelivered(limit = 5, days = 7) {
       const cutoff = (Date.now() / 1000) - days * 86400;
-      const rows = (this.workplaceOutputs || [])
-        .filter(t => (t.completed_at || 0) >= cutoff)
-        .slice()
-        .sort((a, b) => (b.completed_at || 0) - (a.completed_at || 0));
-      return rows.slice(0, limit);
+      const rows = [];
+      for (const t of (this.workplaceOutputs || [])) {
+        const sec = this._coerceCompletedAtSeconds(t.completed_at);
+        if (sec >= cutoff) {
+          // Spread + override so the original row isn't mutated and the
+          // template can still rely on ``completed_at`` being numeric
+          // seconds (its formatRelativeTime call multiplies by 1000).
+          rows.push({ ...t, completed_at: sec });
+        }
+      }
+      rows.sort((a, b) => (b.completed_at || 0) - (a.completed_at || 0));
+      this.recentlyDeliveredItems = rows.slice(0, limit);
+    },
+
+    // Back-compat shim — older callers and any future expressions should
+    // read ``recentlyDeliveredItems`` directly. Kept thin so the data
+    // field remains the single source of truth for the template.
+    recentlyDelivered() {
+      return this.recentlyDeliveredItems;
     },
 
     // Kanban filter — drop pending/blocked rows older than 14 days
@@ -1865,11 +1920,11 @@ function dashboard() {
 
     // Audit-log Revert: re-uses the soft-edit undo endpoint via the
     // change_id stored on each audit row (which IS the undo_token).
-    // Hard-edit rows have a different change_id shape and the mesh
-    // returns 404 — we surface that as a clean error instead of a
-    // toast spam loop.
+    // The template already gates the button on ``entry.undoable``, but
+    // we re-check here so a stale row (or a programmatic call) doesn't
+    // hit the endpoint just to receive a 404.
     async revertAuditEntry(entry) {
-      if (!entry || !entry.change_id) {
+      if (!entry || !entry.change_id || !entry.undoable) {
         this.showToast('This entry can no longer be reverted.');
         return;
       }

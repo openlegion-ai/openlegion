@@ -3160,6 +3160,7 @@
              surface, not a replacement. Rendered only when there's at
              least one item so an idle Board has no extra chrome. -->
         <section x-show="needsYouItems.length > 0" x-cloak
+          x-data="{ needsYouExpanded: false, needsYouCollapsedCap: 5 }"
           role="region" aria-label="Pending items that need you"
           class="mb-4 bg-amber-900/15 border border-amber-700/30 rounded-xl p-3 sm:p-4 sticky top-0 z-10 backdrop-blur-sm">
           <div class="flex items-center gap-2 mb-3">
@@ -3171,8 +3172,14 @@
               class="text-[11px] font-medium px-2 py-0.5 rounded-full bg-amber-700/50 text-amber-100"
               x-text="needsYouItems.length"></span>
           </div>
-          <div class="space-y-2">
-            <template x-for="item in needsYouItems" :key="item.id">
+          <!-- Cap the visible items at ~40vh and scroll inside the panel
+               so a long pending queue can never push the sub-tab bar off
+               the viewport on mobile. The "Show N more" disclosure below
+               keeps the default render to 5 rows so the panel stays small
+               in the common case; once expanded it stays expanded for the
+               session (no re-collapse behavior). -->
+          <div class="space-y-2 max-h-[40vh] overflow-y-auto custom-scrollbar pr-0.5">
+            <template x-for="item in (needsYouExpanded ? needsYouItems : needsYouItems.slice(0, needsYouCollapsedCap))" :key="item.id">
               <div class="bg-gray-900/50 border border-gray-700/50 rounded-lg p-2.5 sm:p-3 flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3">
                 <div class="flex items-start gap-2.5 min-w-0 flex-1">
                   <span class="shrink-0 w-6 h-6 rounded-full bg-amber-700/30 text-amber-200 text-[11px] font-bold flex items-center justify-center"
@@ -3194,6 +3201,11 @@
               </div>
             </template>
           </div>
+          <button type="button"
+            x-show="!needsYouExpanded && needsYouItems.length > needsYouCollapsedCap"
+            @click="needsYouExpanded = true"
+            class="mt-2 text-[11px] text-amber-200 hover:text-amber-100 transition-colors"
+            x-text="'Show ' + (needsYouItems.length - needsYouCollapsedCap) + ' more'"></button>
         </section>
 
         <!-- Sub-tab bar -->
@@ -3226,7 +3238,7 @@
                  Surfaces "what's done" up front so the user gets a fast
                  sense of velocity without having to switch to the
                  Outputs sub-tab. Auto-hides when empty. -->
-            <template x-if="recentlyDelivered().length">
+            <template x-if="recentlyDeliveredItems.length">
               <div>
                 <div class="flex items-center justify-between mb-1.5">
                   <div class="text-[11px] uppercase tracking-wide text-gray-500 font-medium">Recently delivered</div>
@@ -3234,7 +3246,7 @@
                     class="text-[11px] text-gray-400 hover:text-gray-200">View all &rarr;</button>
                 </div>
                 <div class="space-y-1.5">
-                  <template x-for="t in recentlyDelivered()" :key="'rd-' + t.id">
+                  <template x-for="t in recentlyDeliveredItems" :key="'rd-' + t.id">
                     <div class="flex items-center gap-2 bg-gray-800/40 border border-gray-700/50 rounded-md px-2.5 py-1.5">
                       <span class="text-emerald-400 text-xs shrink-0">&check;</span>
                       <div class="min-w-0 flex-1 text-xs text-gray-200 truncate" x-text="t.title || '(untitled)'"></div>
@@ -5558,11 +5570,13 @@
                     </div>
                     <!-- Revert reuses the soft-edit /changes/undo endpoint;
                          the audit row's change_id is the same uuid as the
-                         undo_token. Hard-edit and non-soft entries return
-                         404 (token consumed/expired or never existed) and
-                         we surface that via toast — no special UI gating
-                         needed. -->
-                    <button x-show="entry.change_id"
+                         undo_token, but only when the row was logged with
+                         ``undoable=True`` (the soft-edit path). Hard-edit
+                         and delete rows also write a change_id (the
+                         pending-action nonce), so we gate on the explicit
+                         ``undoable`` flag instead — a button that can
+                         only fail with 404 is worse than no button. -->
+                    <button x-show="entry.undoable"
                       type="button"
                       @click.stop="revertAuditEntry(entry)"
                       :disabled="auditReverting[entry.id]"
