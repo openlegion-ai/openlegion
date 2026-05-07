@@ -2615,6 +2615,26 @@ function dashboard() {
       return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ', ' + time;
     },
 
+    // PR-L' — render "Last seen Nm ago · Last task Mm ago" on the
+    // agent card. ``last_healthy`` is epoch SECONDS (HealthMonitor),
+    // ``last_task_event_ts`` is epoch SECONDS (Tasks.task_events).
+    // Fresh-enough timestamps (<1 min) yield empty strings from
+    // formatRelativeTime — fall back to "just now" for legibility.
+    agentActivityLabel(agent) {
+      const fmt = (sec) => {
+        if (!sec) return '';
+        const ms = sec * 1000;
+        const rel = this.formatRelativeTime(ms);
+        return rel || 'just now';
+      };
+      const seen = fmt(agent.last_healthy);
+      const task = fmt(agent.last_task_event_ts);
+      const parts = [];
+      if (seen) parts.push('Seen ' + seen);
+      if (task) parts.push('Task ' + task);
+      return parts.join(' · ');
+    },
+
     healthLabel(status) {
       const map = { healthy: 'Online', unhealthy: 'Degraded', restarting: 'Degraded', failed: 'Offline', unknown: 'Starting' };
       return map[status] || 'Starting';

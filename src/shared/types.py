@@ -52,10 +52,16 @@ Single source of truth — imported by :mod:`src.host.server` and
 """
 
 SOFT_EDIT_FIELDS = frozenset({
-    "instructions", "soul", "heartbeat", "interface", "role",
+    "instructions", "soul", "heartbeat", "heartbeat_schedule",
+    "interface", "role",
 })
 """Agent-config fields that apply immediately with a 5-min Undo receipt
 (the "soft" review path). See :data:`HARD_EDIT_FIELDS` for the inverse.
+
+``heartbeat_schedule`` retargets the agent's cron job in lockstep with
+the YAML write — the operator can adjust monitoring cadence without a
+new tool surface (PR-L'). Validation lives in
+:func:`src.agent.builtins.operator_tools._validate_heartbeat_schedule`.
 """
 
 # === Inter-Component Messages ===

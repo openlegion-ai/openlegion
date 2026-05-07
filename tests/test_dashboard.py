@@ -252,6 +252,49 @@ class TestDashboardAgentsAPI:
         data = resp.json()
         assert data["agents"] == []
 
+    @patch("src.cli.config._load_config", return_value={
+        "llm": {"default_model": "openai/gpt-4o-mini"}, "agents": {},
+    })
+    def test_api_agents_includes_last_task_event_ts_field(self, _mock_load):
+        """PR-L' — agent cards expose last_task_event_ts (None when no store)."""
+        resp = self.client.get("/dashboard/api/agents")
+        data = resp.json()
+        for agent in data["agents"]:
+            # Field is always present; value is None when tasks_v2 is
+            # disabled or the agent has no events yet.
+            assert "last_task_event_ts" in agent
+
+    @patch("src.cli.config._load_config", return_value={
+        "llm": {"default_model": "openai/gpt-4o-mini"}, "agents": {},
+    })
+    def test_api_agents_last_task_event_ts_none_without_tasks_store(self, _mock_load):
+        resp = self.client.get("/dashboard/api/agents")
+        data = resp.json()
+        for agent in data["agents"]:
+            assert agent["last_task_event_ts"] is None
+
+    @patch("src.cli.config._load_config", return_value={
+        "llm": {"default_model": "openai/gpt-4o-mini"}, "agents": {},
+    })
+    def test_api_agents_last_task_event_ts_populated_when_store_has_event(self, _mock_load):
+        """PR-L' — agent-card timestamp resolves from tasks_v2 events."""
+        from src.host.orchestration import Tasks
+        store = Tasks(db_path=os.path.join(self._tmpdir, "tasks_recent.db"))
+        try:
+            store.create(creator="alpha", assignee="beta", title="x")
+            self.components["tasks_store"] = store
+            client = _make_client(self.components)
+            resp = client.get("/dashboard/api/agents")
+            data = resp.json()
+            alpha = next(a for a in data["agents"] if a["id"] == "alpha")
+            beta = next(a for a in data["agents"] if a["id"] == "beta")
+            # Both touched the task — alpha as creator, beta as assignee.
+            assert alpha["last_task_event_ts"] is not None
+            assert beta["last_task_event_ts"] is not None
+        finally:
+            store.close()
+            self.components.pop("tasks_store", None)
+
 
 class TestDashboardAgentCRUD:
     """Tests for POST /api/agents and DELETE /api/agents/{id}."""

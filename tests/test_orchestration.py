@@ -890,3 +890,49 @@ def test_list_stale_for_assignee_excludes_fresh(tmp_path):
         "alpha", threshold_seconds=24 * 3600, limit=5,
     )
     assert rows == []
+
+
+# ── PR-L' — recent activity surface ───────────────────────────────
+
+
+def test_last_event_ts_for_agent_returns_none_when_no_events(tmp_path):
+    t = _make_store(tmp_path)
+    assert t.last_event_ts_for_agent("nobody") is None
+
+
+def test_last_event_ts_for_agent_picks_up_creator_role(tmp_path):
+    t = _make_store(tmp_path)
+    rec = t.create(creator="alpha", assignee="beta", title="hi")
+    ts = t.last_event_ts_for_agent("alpha")
+    assert ts is not None
+    # Within a couple of seconds of when the row was created.
+    assert abs(ts - rec["created_at"]) < 5
+
+
+def test_last_event_ts_for_agent_picks_up_assignee_role(tmp_path):
+    t = _make_store(tmp_path)
+    t.create(creator="alpha", assignee="beta", title="hi")
+    ts = t.last_event_ts_for_agent("beta")
+    assert ts is not None
+
+
+def test_last_event_ts_for_agent_picks_up_actor_role(tmp_path):
+    """An actor who is neither creator nor assignee still counts."""
+    t = _make_store(tmp_path)
+    rec = t.create(creator="alpha", assignee="beta", title="hi")
+    # Operator-grade emits an event with actor="operator".
+    t.update_status(rec["id"], "working", actor="operator")
+    ts = t.last_event_ts_for_agent("operator")
+    assert ts is not None
+
+
+def test_last_event_ts_for_agent_returns_most_recent(tmp_path):
+    t = _make_store(tmp_path)
+    rec_a = t.create(creator="alpha", assignee="beta", title="early")
+    time.sleep(0.05)
+    rec_b = t.create(creator="alpha", assignee="beta", title="later")
+    ts = t.last_event_ts_for_agent("alpha")
+    assert ts is not None
+    # The later row's event should win.
+    assert ts >= rec_b["created_at"]
+    assert ts >= rec_a["created_at"]

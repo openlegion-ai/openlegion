@@ -938,6 +938,62 @@ class TestChatTranscript:
             WorkspaceManager._MAX_TRANSCRIPT_SIZE = original_max
 
 
+class TestSeedBootstrapGreeting:
+    """PR-L' — greeting seeding is one-shot via a sentinel file."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.ws = WorkspaceManager(workspace_dir=self._tmpdir)
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_seed_writes_assistant_message_with_origin(self):
+        ok = self.ws.seed_bootstrap_greeting("Hi — I'm your Operator.")
+        assert ok is True
+        msgs = self.ws.load_chat_transcript()
+        assert len(msgs) == 1
+        assert msgs[0]["role"] == "assistant"
+        assert msgs[0]["_origin"] == "bootstrap_greeting"
+        assert "Operator" in msgs[0]["content"]
+
+    def test_seed_creates_sentinel(self):
+        self.ws.seed_bootstrap_greeting("hi")
+        sentinel = Path(self._tmpdir) / WorkspaceManager._GREETING_SENTINEL
+        assert sentinel.exists()
+
+    def test_seed_idempotent_second_call_is_noop(self):
+        first = self.ws.seed_bootstrap_greeting("first")
+        second = self.ws.seed_bootstrap_greeting("second")
+        assert first is True
+        assert second is False
+        msgs = self.ws.load_chat_transcript()
+        assert len(msgs) == 1
+        assert msgs[0]["content"] == "first"
+
+    def test_seed_does_not_re_emit_after_chat_reset(self):
+        """Chat reset archives the transcript; sentinel survives so no re-seed."""
+        self.ws.seed_bootstrap_greeting("hello")
+        self.ws.archive_chat_transcript()
+        # Transcript file is gone but sentinel remains.
+        retried = self.ws.seed_bootstrap_greeting("hello again")
+        assert retried is False
+        msgs = self.ws.load_chat_transcript()
+        assert msgs == []
+
+    def test_seed_empty_greeting_is_noop(self):
+        ok = self.ws.seed_bootstrap_greeting("")
+        assert ok is False
+        msgs = self.ws.load_chat_transcript()
+        assert msgs == []
+        sentinel = Path(self._tmpdir) / WorkspaceManager._GREETING_SENTINEL
+        assert not sentinel.exists()
+
+    def test_seed_whitespace_only_greeting_is_noop(self):
+        ok = self.ws.seed_bootstrap_greeting("   \n\t  ")
+        assert ok is False
+
+
 class TestActivityLog:
     """Tests for activity log (JSONL) — heartbeat and autonomous work."""
 

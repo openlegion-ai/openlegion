@@ -542,6 +542,28 @@ class Tasks:
             ).fetchall()
         return {row[0]: int(row[1] or 0) for row in rows if row[0]}
 
+    def last_event_ts_for_agent(self, agent_id: str) -> float | None:
+        """Return the most recent ``task_events.created_at`` for ``agent_id``.
+
+        Joins ``task_events`` against ``tasks`` and matches against the
+        task's ``creator``, ``assignee``, OR the event's ``actor`` —
+        any of those three roles count as "this agent participated".
+        Returns ``None`` when the agent has no events at all (fresh
+        fleet, or store disabled). Used by the dashboard agent card to
+        render a "Last task" timestamp alongside the health-derived
+        "Last seen" (PR-L').
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT MAX(te.created_at) FROM task_events te "
+                "LEFT JOIN tasks t ON te.task_id = t.id "
+                "WHERE te.actor = ? OR t.creator = ? OR t.assignee = ?",
+                (agent_id, agent_id, agent_id),
+            ).fetchone()
+        if not row or row[0] is None:
+            return None
+        return float(row[0])
+
     def list_stale_for_assignee(
         self,
         assignee: str,

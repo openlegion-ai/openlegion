@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re as _re
 from datetime import datetime, timezone
 
 from src.agent.skills import skill
@@ -32,8 +33,45 @@ _OPERATOR_PERMISSION_CEILING = {
 
 _VALID_FIELDS = frozenset({
     "instructions", "soul", "model", "role", "heartbeat",
+    "heartbeat_schedule",
     "interface", "thinking", "budget", "permissions",
 })
+
+# Heartbeat schedule validator. Accepts the same forms cron.py accepts:
+#  * 5-field cron expressions ("*/15 * * * *", "0 9 * * 1-5")
+#  * "every Ns / Nm / Nh / Nd" interval shorthand
+# 6-field (seconds) cron is explicitly rejected here because cron.py
+# rejects it too — keep the error consistent at both layers.
+_HEARTBEAT_INTERVAL_RE = _re.compile(r"^every\s+\d+[smhd]$", _re.IGNORECASE)
+_HEARTBEAT_CRON_FIELD_RE = _re.compile(r"^[\d,\-\*/]+$")
+
+
+def _validate_heartbeat_schedule(value) -> str | None:
+    """Return an error string when ``value`` is not a valid schedule, else ``None``.
+
+    Keeps the surface narrow — only the two forms cron.py honours
+    (5-field cron + ``every N[smhd]``). Free-form named intervals
+    like ``hourly``/``daily`` are intentionally NOT accepted because
+    the cron scheduler's ``_is_due`` path doesn't recognise them.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return "heartbeat_schedule must be a non-empty string"
+    sched = value.strip()
+    if _HEARTBEAT_INTERVAL_RE.match(sched):
+        return None
+    parts = sched.split()
+    if len(parts) == 6:
+        return (
+            "6-field (seconds) cron is not supported. Use 5-field cron "
+            "(minute resolution) or 'every Ns'. Example: '*/15 * * * *' "
+            "or 'every 15m'."
+        )
+    if len(parts) == 5 and all(_HEARTBEAT_CRON_FIELD_RE.match(p) for p in parts):
+        return None
+    return (
+        f"Invalid schedule: {sched!r}. Use 5-field cron "
+        "('*/15 * * * *') or 'every N[smhd]' ('every 15m')."
+    )
 
 # PR 1 — soft edits apply immediately + emit a receipt with 5min Undo;
 # hard edits keep the propose+confirm dance (model swap, budget change,
@@ -111,7 +149,14 @@ def _validate_edit(agent_id: str, field: str, value) -> dict | None:
                 f"got '{value}'"
             ),
         }
+    if field == "heartbeat_schedule":
+        err = _validate_heartbeat_schedule(value)
+        if err:
+            return {"error": err}
     return None
+
+
+_PROPOSE_EDIT_FIELDS = _VALID_FIELDS - {"heartbeat_schedule"}
 
 
 @skill(
@@ -156,12 +201,14 @@ async def propose_edit(agent_id: str, field: str, value, *, mesh_client=None, **
             ),
         }
 
-    # Validate field
-    if field not in _VALID_FIELDS:
+    # Validate field. ``heartbeat_schedule`` is soft-only — the propose
+    # path is for hard fields, so reject the schedule here and route the
+    # caller to ``edit_agent`` instead.
+    if field not in _PROPOSE_EDIT_FIELDS:
         return {
             "error": (
                 f"Invalid field '{field}'. "
-                f"Must be one of: {sorted(_VALID_FIELDS)}"
+                f"Must be one of: {sorted(_PROPOSE_EDIT_FIELDS)}"
             ),
         }
 
@@ -279,10 +326,10 @@ async def confirm_edit(change_id: str, *, mesh_client=None, _messages=None, **_k
     name="edit_agent",
     description=(
         "Change an agent's configuration. Branches internally on field severity:\n"
-        "- Soft fields (instructions, soul, heartbeat, interface, role) "
-        "apply IMMEDIATELY. The user sees a receipt card with [View diff] "
-        "[Undo] (5-minute undo window). No confirmation step needed — "
-        "act decisively on what the user asked for.\n"
+        "- Soft fields (instructions, soul, heartbeat, heartbeat_schedule, "
+        "interface, role) apply IMMEDIATELY. The user sees a receipt card "
+        "with [View diff] [Undo] (5-minute undo window). No confirmation "
+        "step needed — act decisively on what the user asked for.\n"
         "- Hard fields (model, budget, permissions, thinking) return a "
         "preview + change_id (expires in 5 minutes for most actions, "
         "30 minutes for hard-field edits so the user has time to think). "
@@ -291,6 +338,8 @@ async def confirm_edit(change_id: str, *, mesh_client=None, _messages=None, **_k
         "Always pass `reason` so the audit trail captures intent.\n\n"
         "Fields & value formats:\n"
         "- instructions/soul/heartbeat/interface/role: string\n"
+        "- heartbeat_schedule: 5-field cron ('*/15 * * * *') OR "
+        "'every N[smhd]' ('every 15m', 'every 2h')\n"
         "- budget: {\"daily_usd\": float, \"monthly_usd\": float}\n"
         "- permissions: {\"can_use_browser\": bool, ...}\n"
         "- thinking: \"off\" | \"low\" | \"medium\" | \"high\"\n"
@@ -306,6 +355,7 @@ async def confirm_edit(change_id: str, *, mesh_client=None, _messages=None, **_k
             "description": "Config field to change",
             "enum": [
                 "instructions", "soul", "model", "role", "heartbeat",
+                "heartbeat_schedule",
                 "interface", "thinking", "budget", "permissions",
             ],
         },

@@ -1168,6 +1168,122 @@ async def test_undo_change_no_mesh_client():
     assert "mesh_client" in result["error"].lower()
 
 
+# ── PR-L' — heartbeat_schedule soft field ──────────────────────
+
+
+@pytest.mark.asyncio
+async def test_edit_agent_heartbeat_schedule_cron_value():
+    """5-field cron value is accepted and routed through edit_soft."""
+    from src.agent.builtins.operator_tools import edit_agent
+
+    mc = MagicMock()
+    mc.edit_soft = AsyncMock(return_value={
+        "success": True, "undo_token": "tok-hs",
+        "expires_at": "2026-05-08T00:05:00+00:00",
+        "summary": "Updated writer's heartbeat schedule",
+    })
+    result = await edit_agent(
+        "writer", "heartbeat_schedule", "*/15 * * * *",
+        reason="user_asked", mesh_client=mc,
+    )
+    assert result["success"] is True
+    assert result["applied"] is True
+    assert result["undo_token"] == "tok-hs"
+    mc.edit_soft.assert_awaited_once_with(
+        "writer", "heartbeat_schedule", "*/15 * * * *", "user_asked",
+    )
+
+
+@pytest.mark.asyncio
+async def test_edit_agent_heartbeat_schedule_interval_value():
+    """``every 15m`` shorthand is accepted and routed through edit_soft."""
+    from src.agent.builtins.operator_tools import edit_agent
+
+    mc = MagicMock()
+    mc.edit_soft = AsyncMock(return_value={
+        "success": True, "undo_token": "tok-hs2",
+        "expires_at": "x", "summary": "ok",
+    })
+    result = await edit_agent(
+        "writer", "heartbeat_schedule", "every 15m",
+        reason="user_asked", mesh_client=mc,
+    )
+    assert result["success"] is True
+    mc.edit_soft.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_edit_agent_heartbeat_schedule_rejects_garbage():
+    """Free-form values are rejected with a clear validation error.
+
+    ``hourly`` looks "named" but cron.py's ``_is_due`` doesn't honour
+    it — accepting silently here would create a soft edit that no-ops
+    against the scheduler. Reject early with a usable error message.
+    """
+    from src.agent.builtins.operator_tools import edit_agent
+
+    for bad in ("garbage", "hourly", "every 0", "* * * *"):
+        result = await edit_agent(
+            "writer", "heartbeat_schedule", bad,
+            mesh_client=MagicMock(),
+        )
+        assert "error" in result, f"value {bad!r} should have errored"
+        assert (
+            "schedule" in result["error"].lower()
+            or "string" in result["error"].lower()
+            or "field" in result["error"].lower()
+        )
+
+
+@pytest.mark.asyncio
+async def test_edit_agent_heartbeat_schedule_rejects_six_field_cron():
+    from src.agent.builtins.operator_tools import edit_agent
+
+    result = await edit_agent(
+        "writer", "heartbeat_schedule", "* * * * * *",
+        mesh_client=MagicMock(),
+    )
+    assert "error" in result
+    assert "6-field" in result["error"] or "seconds" in result["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_edit_agent_heartbeat_schedule_rejects_non_string():
+    from src.agent.builtins.operator_tools import edit_agent
+
+    result = await edit_agent(
+        "writer", "heartbeat_schedule", 900,
+        mesh_client=MagicMock(),
+    )
+    assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_edit_agent_heartbeat_schedule_blocks_self_modification():
+    from src.agent.builtins.operator_tools import edit_agent
+
+    result = await edit_agent(
+        "operator", "heartbeat_schedule", "*/15 * * * *",
+        mesh_client=MagicMock(),
+    )
+    assert "error" in result
+    assert "operator" in result["error"].lower()
+
+
+def test_propose_edit_rejects_heartbeat_schedule_field():
+    """Soft-only field; legacy propose_edit must refuse it."""
+    import asyncio
+
+    from src.agent.builtins.operator_tools import propose_edit
+
+    result = asyncio.run(propose_edit(
+        "writer", "heartbeat_schedule", "*/15 * * * *",
+        mesh_client=MagicMock(),
+    ))
+    assert "error" in result
+    assert "heartbeat_schedule" in result["error"] or "Invalid field" in result["error"]
+
+
 # ── list_pending ─────────────────────────────────────────────
 
 

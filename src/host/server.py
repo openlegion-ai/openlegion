@@ -3073,6 +3073,26 @@ def create_mesh_app(
                         h.last_healthy, tz=timezone.utc,
                     ).isoformat()
 
+        # PR-L' — most recent task_events row for this agent. Distinct
+        # from ``last_active`` (health probe response) so the dashboard
+        # card can render "Last seen 4m ago · Last task 12m ago" — the
+        # two diverge when an agent is healthy but hasn't picked up
+        # work, OR completed work but is now offline.
+        last_task_event_ts: str | None = None
+        if tasks_store is not None:
+            try:
+                ts = tasks_store.last_event_ts_for_agent(agent_id)
+                if ts is not None:
+                    from datetime import datetime, timezone
+                    last_task_event_ts = datetime.fromtimestamp(
+                        ts, tz=timezone.utc,
+                    ).isoformat()
+            except Exception as e:
+                logger.debug(
+                    "last_event_ts_for_agent failed for '%s': %s",
+                    agent_id, e,
+                )
+
         # Heartbeat schedule
         heartbeat_schedule = None
         if cron_scheduler is not None:
@@ -3151,6 +3171,7 @@ def create_mesh_app(
             "role": role,
             "status": status,
             "last_active": last_active,
+            "last_task_event_ts": last_task_event_ts,
             "heartbeat_schedule": heartbeat_schedule,
             "subscriptions": subscriptions,
             "watches": watches,
@@ -4973,6 +4994,12 @@ def create_mesh_app(
             # Hot-reload the in-memory permission matrix
             if permissions is not None:
                 permissions.reload()
+        elif field == "heartbeat_schedule":
+            # Source of truth is the cron table — not agents.yaml. The
+            # cron update happens in the heartbeat-schedule sync block
+            # below (shared with the legacy ``heartbeat`` field path so
+            # both write paths converge on the same scheduler call).
+            pass
         else:
             yaml_key = _CONFIG_FIELD_MAP.get(field, field)
             agents[agent_id][yaml_key] = new_value
@@ -5047,11 +5074,17 @@ def create_mesh_app(
                     field, agent_id, e,
                 )
 
-        # Heartbeat schedule sync: if the value looks like a cron schedule
-        # (5-field expression or "every Xm/h/d"), update the cron job too.
-        # This handles the common case where the operator edits heartbeat
-        # frequency — the cron scheduler schedule must match.
-        if field == "heartbeat" and cron_scheduler is not None and isinstance(new_value, str):
+        # Heartbeat schedule sync. Two trigger paths converge here:
+        #
+        #   * ``field == "heartbeat"`` — legacy: when the operator edits
+        #     the heartbeat-rules markdown and the new content happens to
+        #     parse as a schedule, update the cron job too. Best-effort
+        #     pattern match.
+        #
+        #   * ``field == "heartbeat_schedule"`` — PR-L': dedicated soft
+        #     field for cadence only. Always retargets the cron job;
+        #     value is pre-validated by the operator-tool layer.
+        if cron_scheduler is not None and isinstance(new_value, str) and field in ("heartbeat", "heartbeat_schedule"):
             sched = new_value.strip()
             _is_schedule = (
                 bool(re.fullmatch(r"every\s+\d+[smhd]", sched, re.IGNORECASE))
@@ -5061,7 +5094,26 @@ def create_mesh_app(
             )
             if _is_schedule:
                 hb_job = cron_scheduler.find_heartbeat_job(agent_id)
-                if hb_job:
+                if hb_job is None and field == "heartbeat_schedule":
+                    # ``heartbeat_schedule`` always implies a heartbeat
+                    # job exists or should be created — agents start
+                    # with one via ``ensure_heartbeat`` at registration.
+                    # Auto-create here too so the soft-edit doesn't
+                    # silently no-op against an agent that never
+                    # registered (test fixtures, partial bring-up).
+                    try:
+                        hb_job = cron_scheduler.ensure_heartbeat(agent_id, schedule=sched)
+                        logger.info(
+                            "Created heartbeat job for '%s': %s",
+                            agent_id, sched,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to create heartbeat job for '%s': %s",
+                            agent_id, e,
+                        )
+                        hb_job = None
+                if hb_job is not None and hb_job.schedule != sched:
                     try:
                         await cron_scheduler.update_job(hb_job.id, schedule=sched)
                         logger.info(
@@ -5101,6 +5153,7 @@ def create_mesh_app(
             "instructions": "instructions",
             "soul": "personality",
             "heartbeat": "heartbeat",
+            "heartbeat_schedule": "heartbeat schedule",
             "interface": "interface contract",
             "role": "role",
         }.get(field, field)
@@ -5164,8 +5217,19 @@ def create_mesh_app(
         if agent_id not in agents:
             raise HTTPException(404, f"Agent '{agent_id}' not found")
 
-        yaml_key = _CONFIG_FIELD_MAP.get(field, field)
-        old_value = agents[agent_id].get(yaml_key, "")
+        # ``heartbeat_schedule`` is sourced from the live cron job, not
+        # YAML — the cron table is the source of truth for an agent's
+        # actual heartbeat cadence (PR-L'). Read the current schedule
+        # so the audit/Undo flow restores the right value.
+        if field == "heartbeat_schedule":
+            old_value = ""
+            if cron_scheduler is not None:
+                hb_job = cron_scheduler.find_heartbeat_job(agent_id)
+                if hb_job is not None:
+                    old_value = hb_job.schedule
+        else:
+            yaml_key = _CONFIG_FIELD_MAP.get(field, field)
+            old_value = agents[agent_id].get(yaml_key, "")
 
         # Apply directly via the same write helper used by the confirm
         # path. ``_apply_pending_change`` is async and handles audit
