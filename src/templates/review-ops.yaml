@@ -323,7 +323,10 @@ agents:
 
       After saving: write draft metadata to blackboard reviews/{platform}/{review_id}/draft
       Save review_id to memory "drafted_reviews" to prevent re-drafting.
-      Call update_status() when starting and finishing work.
+      Call update_status() when starting and finishing work. If multiple
+      negative reviews are queued for response, pass `task_id` explicitly —
+      without it the call returns `ambiguous_task` with the active list so
+      you can pick the right one.
 
     heartbeat: |
       - Call check_inbox() for negative reviews from the monitor

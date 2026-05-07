@@ -1061,3 +1061,62 @@ def test_all_templates_save_artifact_has_permission():
                 )
 
     assert not issues, "\n".join(issues)
+
+
+def test_all_templates_parse_as_yaml():
+    """Every bundled template file must parse as valid YAML.
+
+    Cheap structural guard so doc edits to instructions don't accidentally
+    introduce indentation/quoting issues that break template loading.
+    """
+    template_dir = Path(__file__).resolve().parent.parent / "src" / "templates"
+    yaml_files = sorted(template_dir.glob("*.yaml"))
+    assert yaml_files, "expected at least one bundled template"
+    for yaml_file in yaml_files:
+        with open(yaml_file) as f:
+            data = yaml.safe_load(f)
+        assert isinstance(data, dict), f"{yaml_file.name} did not parse to a dict"
+        assert "agents" in data, f"{yaml_file.name} missing 'agents' key"
+
+
+def test_multi_handoff_templates_document_task_id():
+    """Multi-handoff templates document task_id for at least one worker agent.
+
+    PR-K' (#854) introduced ``ambiguous_task`` for ``update_status`` calls
+    when an agent has 2+ active tasks and didn't pass ``task_id``. Worker
+    agents that fan out to parallel tasks need this guidance up-front to
+    avoid the error round-trip.
+
+    Heartbeat-only sweeper agents (cron-driven, single-cycle) are excluded
+    by design — they iterate configured targets internally and don't
+    accumulate parallel inbox tasks. Adding the guidance there is noise.
+
+    New template authors: see ``src/templates/content.yaml`` for the
+    canonical task_id guidance copy on a worker agent.
+    """
+    from src.cli.config import _load_templates
+
+    templates = _load_templates()
+    multi_agent = {
+        name: tpl
+        for name, tpl in templates.items()
+        if len(tpl.get("agents", {}) or {}) > 1
+    }
+    assert multi_agent, "expected at least one multi-agent template"
+
+    missing: list[str] = []
+    for name, tpl in multi_agent.items():
+        text_blocks: list[str] = []
+        for agent_def in (tpl.get("agents") or {}).values():
+            for key in ("instructions", "system_prompt", "heartbeat"):
+                value = agent_def.get(key) or ""
+                if value:
+                    text_blocks.append(str(value))
+        combined = "\n".join(text_blocks)
+        if "task_id" not in combined:
+            missing.append(name)
+
+    assert not missing, (
+        "Multi-agent templates missing task_id disambiguation guidance: "
+        + ", ".join(missing)
+    )

@@ -41,7 +41,7 @@ agents:
       5. If something changed, write an alert to alerts/{source_slug} and
          hand_off(to="analyst", summary="alert: {source_slug}", data="alert JSON")
       6. Use notify_user for high-priority changes
-      7. Call update_status() when starting and finishing work
+      7. Call update_status() when starting and finishing work.
 
       ## What makes a good monitoring target
       - Competitor pricing pages or product changelogs
@@ -117,7 +117,10 @@ agents:
       5. Write your analysis to analysis/{alert_slug} on the blackboard
       6. Use notify_user with a clear summary: what changed, why it
          matters, and what the user should do about it
-      7. Call update_status() when starting and finishing work
+      7. Call update_status() when starting and finishing work. If multiple
+         alerts are queued for analysis, pass `task_id` explicitly — without
+         it the call returns `ambiguous_task` with the active list so you
+         can pick the right one.
     heartbeat: |
       - Call check_inbox() for alerts from the watcher
       - If alerts are pending, investigate them

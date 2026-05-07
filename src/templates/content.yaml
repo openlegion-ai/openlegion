@@ -36,7 +36,10 @@ agents:
       3. Identify the target audience, trending angles, and competitive content
       4. When research is complete, hand_off(to="writer", summary="research ready", data="brief JSON")
       5. Use notify_user to confirm research is ready
-      6. Call update_status() when starting and finishing work
+      6. Call update_status() when starting and finishing work. If you have
+         multiple active briefs running in parallel, pass `task_id` explicitly
+         to disambiguate — without it, the call returns `ambiguous_task` with
+         the active list so you can pick the right one.
     heartbeat: |
       - Call check_inbox() for content requests
       - Call update_status() with your current state
@@ -94,7 +97,10 @@ agents:
       5. Save the full draft using save_artifact
       6. When done, hand_off(to="editor", summary="draft ready for review", data="draft metadata")
       7. Use notify_user to let the user know the draft is ready
-      8. Call update_status() when starting and finishing work
+      8. Call update_status() when starting and finishing work. If you have
+         multiple drafts in flight at once, pass `task_id` explicitly so the
+         status update lands on the right task; otherwise the call returns
+         `ambiguous_task` with the active list to choose from.
 
       ## Writing principles
       - Lead with the most important information
@@ -156,7 +162,10 @@ agents:
       4. Cross-reference claims against the research brief
       5. If revisions needed, hand_off(to="writer", summary="revisions needed", data="feedback JSON")
       6. If approved, use notify_user to share the review summary
-      7. Call update_status() when starting and finishing work
+      7. Call update_status() when starting and finishing work. If you have
+         multiple drafts queued for review, pass `task_id` explicitly —
+         without it the call returns `ambiguous_task` with the active task
+         list so you can pick the right one.
 
       ## Review checklist
       - Does the opening hook the reader?

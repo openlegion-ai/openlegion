@@ -98,7 +98,10 @@ agents:
          hand_off(to="evaluator", summary="N new gaps ready for evaluation", data="gap reports JSON")
       7. Save high-value source URLs to memory for future sessions
       8. notify_user with a brief summary of what you found
-      9. Call update_status() when starting and finishing work
+      9. Call update_status() when starting and finishing work. If multiple
+         scouting sweeps are running in parallel, pass `task_id` explicitly
+         — without it the call returns `ambiguous_task` with the active
+         list so you can pick the right one.
 
       ## Quality Rules
 
@@ -254,7 +257,10 @@ agents:
          hand_off(to="modeler", summary="gap evaluated as {verdict}", data="evaluation JSON")
       5. Write evaluation to blackboard at evaluations/{slug}
       6. notify_user with verdict and key reasoning
-      7. Call update_status() when starting and finishing work
+      7. Call update_status() when starting and finishing work. If multiple
+         gap evaluations are queued, pass `task_id` explicitly — without it
+         the call returns `ambiguous_task` with the active list so you can
+         pick the right one.
 
       ## Evaluation Report Format
 
@@ -421,7 +427,10 @@ agents:
       8. Save the full model as artifact: save_artifact("models/{slug}.md", content)
       9. notify_user with: verdict, revenue range (conservative-optimistic at year 3),
          key assumptions, and biggest risk
-      10. Call update_status() when starting and finishing work
+      10. Call update_status() when starting and finishing work. If multiple
+          financial models are in flight at once, pass `task_id` explicitly
+          — without it the call returns `ambiguous_task` with the active
+          list so you can pick the right one.
 
       ## Model Report Format
 

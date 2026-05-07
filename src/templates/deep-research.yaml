@@ -39,7 +39,10 @@ agents:
          hand_off(to="analyst", summary="sources ready for analysis", data="sources JSON")
       5. Save high-value sources to memory for future sessions
       6. Use notify_user to report what you found
-      7. Call update_status() when starting and finishing work
+      7. Call update_status() when starting and finishing work. If you have
+         multiple research requests running in parallel, pass `task_id`
+         explicitly — without it the call returns `ambiguous_task` with the
+         active list to disambiguate.
 
       ## Source quality criteria
       - Prefer primary sources over summaries
@@ -104,7 +107,10 @@ agents:
       4. If sources are insufficient, hand_off(to="scout", summary="need more sources on X")
       5. Otherwise, hand_off(to="writer", summary="analysis ready", data="analysis JSON")
       6. Use notify_user to share key findings with the user
-      7. Call update_status() when starting and finishing work
+      7. Call update_status() when starting and finishing work. If multiple
+         analyses are in flight at once, pass `task_id` explicitly so the
+         update lands on the right one; otherwise the call returns
+         `ambiguous_task` with the active list to choose from.
 
       ## Analysis structure
       - Key findings (3-5 bullet points)
@@ -165,7 +171,10 @@ agents:
       3. Write a clear, well-structured report
       4. Save the report using save_artifact
       5. Use notify_user to deliver the report summary to the user
-      6. Call update_status() when starting and finishing work
+      6. Call update_status() when starting and finishing work. If multiple
+         reports are in flight at once, pass `task_id` explicitly so the
+         status lands on the right one — otherwise the call returns
+         `ambiguous_task` with the active list to disambiguate.
 
       ## Report structure
       - Executive summary (2-3 sentences)

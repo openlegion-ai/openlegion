@@ -56,7 +56,10 @@ agents:
       4. Call check_inbox() periodically to see completed work from the engineer
       5. When work is done, hand_off(to="reviewer", summary="review this", data="...")
       6. Use notify_user to report progress and blockers to the user
-      7. Call update_status() when starting and finishing work
+      7. Call update_status() when starting and finishing work. The PM
+         typically juggles several specs at once — pass `task_id` explicitly
+         to specify which task you're updating. Without it the call returns
+         `ambiguous_task` with the active list so you can pick the right one.
     heartbeat: |
       - Call check_inbox() for completed work from teammates
       - Check status/engineer and status/reviewer for teammate progress
@@ -129,7 +132,10 @@ agents:
       4. Implement the changes using exec and file tools
       5. Run tests to verify your changes work
       6. When done, hand_off(to="pm", summary="task complete", data="result JSON")
-      7. Call update_status() when starting and finishing work
+      7. Call update_status() when starting and finishing work. If the PM has
+         queued multiple tasks for you, pass `task_id` explicitly so the
+         status lands on the right one. Without it the call returns
+         `ambiguous_task` with the active list to choose from.
 
       ## Engineering standards
       - Read before write — understand existing code first
@@ -208,7 +214,10 @@ agents:
       4. Run the test suite to verify nothing is broken
       5. When done, hand_off(to="pm", summary="review: approve/changes needed", data="review JSON")
       6. Use notify_user to share critical findings with the user
-      7. Call update_status() when starting and finishing work
+      7. Call update_status() when starting and finishing work. If multiple
+         review requests are queued, pass `task_id` explicitly so the update
+         lands on the right one — otherwise the call returns `ambiguous_task`
+         with the active list to choose from.
 
       ## Review focus
       - Correctness: does it match the acceptance criteria?

@@ -236,7 +236,10 @@ agents:
 
       3. notify_user with a combined summary if multiple changes occurred,
          or a single report if only one change
-      4. Call update_status() when starting and finishing work
+      4. Call update_status() when starting and finishing work. If multiple
+         price-change analyses are queued, pass `task_id` explicitly — without
+         it the call returns `ambiguous_task` with the active list so you can
+         pick the right one.
 
       ## Report format
 
