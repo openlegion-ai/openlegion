@@ -662,6 +662,115 @@ class TestApplyTemplateAgentOverrides(_TempConfigMixin):
         assert cfg["agents"]["writer"]["model"] == "openai/gpt-4o-mini"
         assert "ghost" not in cfg["agents"]
 
+    # ── PR-N v2: soul / heartbeat / interface overrides ────────
+
+    def _multi_template_with_souls(self) -> dict:
+        """Like ``_multi_template`` but with default soul/heartbeat/interface
+        on each agent so we can verify per-slot overrides win over defaults."""
+        return {
+            "agents": {
+                "writer": {
+                    "role": "writer",
+                    "model": "{default_model}",
+                    "instructions": "Default writer instructions.",
+                    "soul": "Default writer soul.",
+                    "heartbeat": "Default writer heartbeat.",
+                    "initial_interface": "Default writer interface.",
+                },
+                "editor": {
+                    "role": "editor",
+                    "model": "{default_model}",
+                    "instructions": "Default editor instructions.",
+                    "soul": "Default editor soul.",
+                    "heartbeat": "Default editor heartbeat.",
+                    "initial_interface": "Default editor interface.",
+                },
+            },
+        }
+
+    def test_soul_override_persists_to_disk(self):
+        """Override ``soul`` for one agent — others stay on template default."""
+        tpl = self._multi_template_with_souls()
+        with self._mock_config():
+            _apply_template(
+                "multi", tpl,
+                agent_overrides={"writer": {"soul": "Custom writer soul."}},
+            )
+        with open(self._agents_path) as f:
+            cfg = yaml.safe_load(f)
+        assert cfg["agents"]["writer"]["initial_soul"] == "Custom writer soul."
+        # Editor untouched
+        assert cfg["agents"]["editor"]["initial_soul"] == "Default editor soul."
+        # Other fields untouched on writer
+        assert (
+            cfg["agents"]["writer"]["initial_instructions"]
+            == "Default writer instructions."
+        )
+
+    def test_heartbeat_override_persists_to_disk(self):
+        """Override ``heartbeat`` for one agent."""
+        tpl = self._multi_template_with_souls()
+        with self._mock_config():
+            _apply_template(
+                "multi", tpl,
+                agent_overrides={"writer": {"heartbeat": "Beat every hour."}},
+            )
+        with open(self._agents_path) as f:
+            cfg = yaml.safe_load(f)
+        assert cfg["agents"]["writer"]["initial_heartbeat"] == "Beat every hour."
+        assert (
+            cfg["agents"]["editor"]["initial_heartbeat"]
+            == "Default editor heartbeat."
+        )
+
+    def test_interface_override_persists_to_disk(self):
+        """Override ``interface`` for one agent."""
+        tpl = self._multi_template_with_souls()
+        with self._mock_config():
+            _apply_template(
+                "multi", tpl,
+                agent_overrides={"writer": {"interface": "Accepts X, produces Y."}},
+            )
+        with open(self._agents_path) as f:
+            cfg = yaml.safe_load(f)
+        assert (
+            cfg["agents"]["writer"]["initial_interface"]
+            == "Accepts X, produces Y."
+        )
+        assert (
+            cfg["agents"]["editor"]["initial_interface"]
+            == "Default editor interface."
+        )
+
+    def test_all_four_fields_combined_for_one_agent(self):
+        """Model + instructions + soul + interface all together for one slot."""
+        tpl = self._multi_template_with_souls()
+        overrides = {
+            "writer": {
+                "model": "anthropic/claude-sonnet-4-6",
+                "instructions": "Custom writer voice.",
+                "soul": "Custom writer soul.",
+                "interface": "Accepts briefs, produces drafts.",
+            },
+        }
+        with self._mock_config():
+            _apply_template("multi", tpl, agent_overrides=overrides)
+        with open(self._agents_path) as f:
+            cfg = yaml.safe_load(f)
+        writer = cfg["agents"]["writer"]
+        assert writer["model"] == "anthropic/claude-sonnet-4-6"
+        assert writer["initial_instructions"] == "Custom writer voice."
+        assert writer["initial_soul"] == "Custom writer soul."
+        assert writer["initial_interface"] == "Accepts briefs, produces drafts."
+        # Heartbeat NOT overridden — stays on template default
+        assert (
+            writer["initial_heartbeat"] == "Default writer heartbeat."
+        )
+        # Editor entirely on template defaults
+        editor = cfg["agents"]["editor"]
+        assert editor["model"] == "openai/gpt-4o-mini"
+        assert editor["initial_soul"] == "Default editor soul."
+
 
 class TestLoadTemplates:
     def test_all_templates_parse(self):

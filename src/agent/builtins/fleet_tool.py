@@ -38,11 +38,12 @@ async def list_templates(*, mesh_client=None, **_kw) -> dict:
         "Create a team of agents from a fleet template. Use list_templates first "
         "to see available templates. This creates all agents defined in the template "
         "and starts them. Returns the list of created agent IDs. Pass "
-        "`agent_overrides` to tune individual slots (model, instructions) at "
-        "creation time -- avoids 5+ follow-up edit_agent round-trips. "
-        "Note: agent creation is per-slot — a mid-loop failure leaves "
-        "earlier-created agents in place. Verify the returned `created` "
-        "list matches your intent and inspect the on-disk fleet."
+        "`agent_overrides` to tune individual slots (model, instructions, soul, "
+        "heartbeat, interface) at creation time -- avoids 5+ follow-up edit_agent "
+        "round-trips. Note: `role` is fixed by the template and cannot be overridden. "
+        "Note: agent creation is per-slot -- a mid-loop failure leaves earlier-created "
+        "agents in place. Verify the returned `created` list matches your intent and "
+        "inspect the on-disk fleet."
     ),
     parameters={
         "template": {
@@ -58,14 +59,21 @@ async def list_templates(*, mesh_client=None, **_kw) -> dict:
             "type": "object",
             "description": (
                 "Optional per-agent overrides keyed by agent name from the template. "
-                "Each value is an object with optional 'model' and/or 'instructions' "
-                "fields. Unknown agent names or fields are rejected with HTTP 400."
+                "Each value is an object with any of: 'model', 'instructions' "
+                "(<=12000 chars), 'soul' (<=4000 chars), 'heartbeat' (no cap), "
+                "'interface' (<=4000 chars). Unknown agent names or fields are "
+                "rejected with HTTP 400; oversized fields with HTTP 413. "
+                "Note: `role` is intentionally NOT overrideable; templates fix the "
+                "role per slot. Use a separate fleet template if you need different roles."
             ),
             "additionalProperties": {
                 "type": "object",
                 "properties": {
                     "model": {"type": "string"},
                     "instructions": {"type": "string"},
+                    "soul": {"type": "string"},
+                    "heartbeat": {"type": "string"},
+                    "interface": {"type": "string"},
                 },
                 "additionalProperties": False,
             },

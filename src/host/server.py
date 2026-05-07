@@ -2671,15 +2671,27 @@ def create_mesh_app(
         # Optional model override
         model_override = data.get("model", "")
 
-        # Optional per-agent overrides (PR-N): { agent_name: {"model": ..., "instructions": ...} }
+        # Optional per-agent overrides (PR-N v2): allowed fields are
+        # {model, instructions, soul, heartbeat, interface}. `role` is
+        # intentionally NOT overrideable here — templates define role per slot
+        # and changing it post-creation is a different operation (rename).
         # Validated UPFRONT — no agent is created if any override is invalid.
         agent_overrides = data.get("agent_overrides") or {}
         if agent_overrides:
             if not isinstance(agent_overrides, dict):
                 raise HTTPException(400, "agent_overrides must be an object")
-            _ALLOWED_OVERRIDE_FIELDS = {"model", "instructions"}
-            # 12000 mirrors src/agent/server.py _FILE_CAPS["INSTRUCTIONS.md"].
-            _INSTRUCTIONS_CAP = 12000
+            _ALLOWED_OVERRIDE_FIELDS = {
+                "model", "instructions", "soul", "heartbeat", "interface",
+            }
+            # Per-field length caps mirror src/agent/server.py _FILE_CAPS:
+            #   INSTRUCTIONS.md: 12000, SOUL.md: 4000, INTERFACE.md: 4000,
+            #   HEARTBEAT.md: None (uncapped).
+            _STRING_FIELD_CAPS: dict[str, int | None] = {
+                "instructions": 12000,
+                "soul": 4000,
+                "heartbeat": None,
+                "interface": 4000,
+            }
 
             # 1. Unknown agent names
             unknown_agents = [
@@ -2726,19 +2738,21 @@ def create_mesh_app(
                             f"agent_overrides['{agent_name}'].model "
                             f"'{mv}' is not a known model",
                         )
-                if "instructions" in override:
-                    iv = override["instructions"]
-                    if not isinstance(iv, str):
+                for _field, _cap in _STRING_FIELD_CAPS.items():
+                    if _field not in override:
+                        continue
+                    val = override[_field]
+                    if not isinstance(val, str):
                         raise HTTPException(
                             400,
-                            f"agent_overrides['{agent_name}'].instructions "
+                            f"agent_overrides['{agent_name}'].{_field} "
                             "must be a string",
                         )
-                    if len(iv) > _INSTRUCTIONS_CAP:
+                    if _cap is not None and len(val) > _cap:
                         raise HTTPException(
                             413,
-                            f"agent_overrides['{agent_name}'].instructions "
-                            f"exceeds cap ({len(iv)} > {_INSTRUCTIONS_CAP} chars)",
+                            f"agent_overrides['{agent_name}'].{_field} "
+                            f"exceeds cap ({len(val)} > {_cap} chars)",
                         )
 
         # Apply template to create config entries
