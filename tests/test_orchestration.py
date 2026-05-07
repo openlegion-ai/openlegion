@@ -750,3 +750,143 @@ def test_create_rework_task_records_creation_event(tmp_path):
         and e["payload"].get("kind") == "rework"
         for e in events
     )
+
+
+# ── PR-J' per-agent aggregates for the operator heartbeat ──────────
+
+
+def _seed_done_with_outcome(store, *, assignee, outcome):
+    """Helper — create a task, complete it, set the outcome rating."""
+    rec = store.create(creator="op", assignee=assignee, title="t")
+    store.update_status(rec["id"], "working", actor=assignee)
+    store.update_status(rec["id"], "done", actor=assignee)
+    store.set_outcome(rec["id"], outcome, actor="op")
+    return rec
+
+
+def test_count_outcomes_since_groups_by_assignee(tmp_path):
+    t = _make_store(tmp_path)
+    _seed_done_with_outcome(t, assignee="alpha", outcome="rejected")
+    _seed_done_with_outcome(t, assignee="alpha", outcome="rejected")
+    _seed_done_with_outcome(t, assignee="beta", outcome="rejected")
+    _seed_done_with_outcome(t, assignee="beta", outcome="accepted")  # filtered
+    counts = t.count_outcomes_since("rejected", since_seconds=24 * 3600)
+    assert counts == {"alpha": 2, "beta": 1}
+
+
+def test_count_outcomes_since_excludes_old(tmp_path):
+    t = _make_store(tmp_path)
+    rec = _seed_done_with_outcome(t, assignee="alpha", outcome="rejected")
+    # Manually rewind completed_at to 2 days ago.
+    with t._conn() as conn:
+        conn.execute(
+            "UPDATE tasks SET completed_at=? WHERE id=?",
+            (time.time() - 2 * 24 * 3600, rec["id"]),
+        )
+    counts = t.count_outcomes_since("rejected", since_seconds=24 * 3600)
+    assert counts == {}
+
+
+def test_count_failed_status_since_excludes_done(tmp_path):
+    t = _make_store(tmp_path)
+    failed = t.create(creator="op", assignee="alpha", title="x")
+    t.update_status(failed["id"], "failed", actor="alpha")
+    done = t.create(creator="op", assignee="alpha", title="y")
+    t.update_status(done["id"], "working", actor="alpha")
+    t.update_status(done["id"], "done", actor="alpha")
+    counts = t.count_failed_status_since(since_seconds=24 * 3600)
+    assert counts == {"alpha": 1}
+
+
+def test_count_failed_status_since_excludes_old(tmp_path):
+    t = _make_store(tmp_path)
+    rec = t.create(creator="op", assignee="alpha", title="x")
+    t.update_status(rec["id"], "failed", actor="alpha")
+    with t._conn() as conn:
+        conn.execute(
+            "UPDATE tasks SET completed_at=? WHERE id=?",
+            (time.time() - 2 * 24 * 3600, rec["id"]),
+        )
+    counts = t.count_failed_status_since(since_seconds=24 * 3600)
+    assert counts == {}
+
+
+def test_count_stale_since_excludes_terminal(tmp_path):
+    t = _make_store(tmp_path)
+    # alpha: pending task created 2 days ago — stale.
+    stale = t.create(creator="op", assignee="alpha", title="stale")
+    with t._conn() as conn:
+        conn.execute(
+            "UPDATE tasks SET created_at=? WHERE id=?",
+            (time.time() - 2 * 24 * 3600, stale["id"]),
+        )
+    # alpha: done task created 2 days ago — NOT stale (terminal).
+    done = t.create(creator="op", assignee="alpha", title="done")
+    with t._conn() as conn:
+        conn.execute(
+            "UPDATE tasks SET created_at=? WHERE id=?",
+            (time.time() - 2 * 24 * 3600, done["id"]),
+        )
+    t.update_status(done["id"], "working", actor="alpha")
+    t.update_status(done["id"], "done", actor="alpha")
+    # alpha: fresh pending task — NOT stale (created within window).
+    t.create(creator="op", assignee="alpha", title="fresh")
+    counts = t.count_stale_since(threshold_seconds=24 * 3600)
+    assert counts == {"alpha": 1}
+
+
+def test_count_stale_since_groups_by_assignee(tmp_path):
+    t = _make_store(tmp_path)
+    for assignee, n in [("alpha", 2), ("beta", 1)]:
+        for _ in range(n):
+            rec = t.create(creator="op", assignee=assignee, title="x")
+            with t._conn() as conn:
+                conn.execute(
+                    "UPDATE tasks SET created_at=? WHERE id=?",
+                    (time.time() - 2 * 24 * 3600, rec["id"]),
+                )
+    counts = t.count_stale_since(threshold_seconds=24 * 3600)
+    assert counts == {"alpha": 2, "beta": 1}
+
+
+def test_list_stale_for_assignee_returns_oldest_first_capped(tmp_path):
+    t = _make_store(tmp_path)
+    ids = []
+    base = time.time() - 2 * 24 * 3600
+    for i in range(7):
+        rec = t.create(creator="op", assignee="alpha", title=f"t{i}")
+        with t._conn() as conn:
+            conn.execute(
+                "UPDATE tasks SET created_at=? WHERE id=?",
+                (base + i, rec["id"]),
+            )
+        ids.append(rec["id"])
+    rows = t.list_stale_for_assignee(
+        "alpha", threshold_seconds=24 * 3600, limit=5,
+    )
+    # Oldest 5 — created in insertion order, so first 5 ids.
+    assert rows == ids[:5]
+
+
+def test_list_stale_for_assignee_excludes_terminal(tmp_path):
+    t = _make_store(tmp_path)
+    rec = t.create(creator="op", assignee="alpha", title="cancelled")
+    with t._conn() as conn:
+        conn.execute(
+            "UPDATE tasks SET created_at=? WHERE id=?",
+            (time.time() - 2 * 24 * 3600, rec["id"]),
+        )
+    t.cancel(rec["id"], actor="op")
+    rows = t.list_stale_for_assignee(
+        "alpha", threshold_seconds=24 * 3600, limit=5,
+    )
+    assert rows == []
+
+
+def test_list_stale_for_assignee_excludes_fresh(tmp_path):
+    t = _make_store(tmp_path)
+    t.create(creator="op", assignee="alpha", title="fresh")
+    rows = t.list_stale_for_assignee(
+        "alpha", threshold_seconds=24 * 3600, limit=5,
+    )
+    assert rows == []

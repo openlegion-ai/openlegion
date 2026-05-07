@@ -316,6 +316,36 @@ class TestOperatorConstants:
         assert "save_observations" in _OPERATOR_HEARTBEAT
         assert "notify_user" in _OPERATOR_HEARTBEAT
 
+    def test_heartbeat_references_prj_metric_keys(self):
+        """PR-J' — heartbeat keys on the new metric fields, not failure_rate."""
+        from src.cli.config import _OPERATOR_HEARTBEAT
+        # New keys must appear so the LLM knows to look at them.
+        assert "outcome_rejected_24h_count" in _OPERATOR_HEARTBEAT
+        assert "stale_tasks_24h_count" in _OPERATOR_HEARTBEAT
+        assert "execution_failures_24h_count" in _OPERATOR_HEARTBEAT
+        assert "per_agent_cost_vs_yesterday_ratio" in _OPERATOR_HEARTBEAT
+        # The dead failure_rate threshold rule must NOT be back.
+        assert "failure_rate > 0.30" not in _OPERATOR_HEARTBEAT
+        # Stale-task drill-in references the new inspect_agents parameter.
+        assert "stale_threshold_hours=24" in _OPERATOR_HEARTBEAT
+
+    def test_heartbeat_step_count_within_budget(self):
+        """Total numbered steps stay within the HEARTBEAT_MAX_ITERATIONS=10 budget.
+
+        Counting numbered top-level steps (``1.`` through ``N.``) — each
+        step that calls a tool burns one iteration. 8 leaves headroom
+        for the final assistant turn that emits the heartbeat summary.
+        """
+        import re
+
+        from src.cli.config import _OPERATOR_HEARTBEAT
+        steps = re.findall(r"^\s*(\d+)\.\s", _OPERATOR_HEARTBEAT, re.MULTILINE)
+        max_step = max(int(s) for s in steps)
+        assert max_step <= 9, (
+            f"heartbeat has {max_step} numbered steps; budget is 9 "
+            f"(HEARTBEAT_MAX_ITERATIONS=10 minus the final assistant turn)"
+        )
+
     def test_core_has_key_sections(self):
         from src.shared.operator_playbooks import _OPERATOR_CORE
         assert "Routing Work" in _OPERATOR_CORE

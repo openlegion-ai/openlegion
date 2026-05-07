@@ -538,6 +538,111 @@ async def test_inspect_agents_error_surfaces():
     assert "connection refused" in result["error"]
 
 
+# PR-J' — stale_threshold_hours parameter on inspect_agents
+
+
+@pytest.mark.asyncio
+async def test_inspect_agents_no_threshold_unchanged_shape():
+    """Roster summary without ``stale_threshold_hours`` looks unchanged."""
+    from src.agent.builtins.operator_tools import inspect_agents
+
+    mc = MagicMock()
+    mc.list_agents = AsyncMock(return_value={
+        "writer": {"role": "writer", "capabilities": []},
+    })
+    # get_agent_stale_tasks should NOT be called when threshold is omitted.
+    mc.get_agent_stale_tasks = AsyncMock()
+
+    result = await inspect_agents(mesh_client=mc)
+    assert result["count"] == 1
+    assert "stale_threshold_hours" not in result
+    assert "stale_task_count" not in result["agents"][0]
+    mc.get_agent_stale_tasks.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_inspect_agents_with_threshold_annotates_roster():
+    """Setting stale_threshold_hours adds count + ids to each roster entry."""
+    from src.agent.builtins.operator_tools import inspect_agents
+
+    mc = MagicMock()
+    mc.list_agents = AsyncMock(return_value={
+        "writer": {"role": "writer", "capabilities": []},
+        "scout":  {"role": "researcher", "capabilities": []},
+    })
+
+    async def _fake_stale(agent_id, threshold_hours=24):
+        if agent_id == "writer":
+            return {
+                "agent_id": "writer",
+                "threshold_hours": threshold_hours,
+                "count": 2,
+                "task_ids": ["task_a", "task_b"],
+            }
+        return {
+            "agent_id": agent_id,
+            "threshold_hours": threshold_hours,
+            "count": 0,
+            "task_ids": [],
+        }
+
+    mc.get_agent_stale_tasks = AsyncMock(side_effect=_fake_stale)
+
+    result = await inspect_agents(stale_threshold_hours=24, mesh_client=mc)
+    assert result["stale_threshold_hours"] == 24
+    by_name = {a["name"]: a for a in result["agents"]}
+    assert by_name["writer"]["stale_task_count"] == 2
+    assert by_name["writer"]["stale_task_ids"] == ["task_a", "task_b"]
+    assert by_name["scout"]["stale_task_count"] == 0
+    assert by_name["scout"]["stale_task_ids"] == []
+
+
+@pytest.mark.asyncio
+async def test_inspect_agents_threshold_zero_treated_as_omitted():
+    """``stale_threshold_hours=0`` (JSON-schema default) means 'not supplied'."""
+    from src.agent.builtins.operator_tools import inspect_agents
+
+    mc = MagicMock()
+    mc.list_agents = AsyncMock(return_value={
+        "writer": {"role": "writer", "capabilities": []},
+    })
+    mc.get_agent_stale_tasks = AsyncMock()
+
+    result = await inspect_agents(stale_threshold_hours=0, mesh_client=mc)
+    assert "stale_threshold_hours" not in result
+    mc.get_agent_stale_tasks.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_inspect_agents_threshold_out_of_range_rejected():
+    from src.agent.builtins.operator_tools import inspect_agents
+
+    mc = MagicMock()
+    mc.list_agents = AsyncMock(return_value={})
+
+    result = await inspect_agents(stale_threshold_hours=200, mesh_client=mc)
+    assert "error" in result
+    assert "168" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_inspect_agents_stale_lookup_failure_degrades_to_zero():
+    """Per-agent stale lookup failure should NOT poison the whole roster."""
+    from src.agent.builtins.operator_tools import inspect_agents
+
+    mc = MagicMock()
+    mc.list_agents = AsyncMock(return_value={
+        "writer": {"role": "writer", "capabilities": []},
+    })
+    mc.get_agent_stale_tasks = AsyncMock(side_effect=RuntimeError("boom"))
+
+    result = await inspect_agents(stale_threshold_hours=24, mesh_client=mc)
+    assert result["stale_threshold_hours"] == 24
+    entry = result["agents"][0]
+    assert entry["stale_task_count"] == 0
+    assert entry["stale_task_ids"] == []
+
+
 # ── create_agent tests ──────────────────────────��───────────
 
 

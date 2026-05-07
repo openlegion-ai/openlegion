@@ -3337,14 +3337,71 @@ def create_mesh_app(
 
         cost_ratio = round(cost_today / cost_yesterday, 2) if cost_yesterday > 0 else 0
 
-        # -- Per-agent failure rates (placeholder — needs task tracking) --
-        # TODO: compute per-agent failure rates from recent task outcomes.
-        # The shape ``{agent_id: float in [0,1]}`` is reserved on the
-        # contract; consumers must continue to handle the empty-dict
-        # case as "data unavailable, not zero-failure". Until this is
-        # wired, the operator heartbeat instructions intentionally do
-        # NOT reference ``failure_rate`` thresholds (see _OPERATOR_HEARTBEAT
-        # in src/cli/config.py).
+        # -- Per-agent cost (PR-J') --
+        # Mirrors the ``agent_metrics`` per-agent cost / ratio pattern but
+        # rolled up across the fleet so the operator heartbeat can spot
+        # outliers in a single call. Operator excluded — it's a system
+        # agent whose spend is bookkeeping, not user work.
+        agent_ids_user = [aid for aid in agents if aid != "operator"]
+        per_agent_cost_today: dict[str, float] = {}
+        per_agent_cost_ratio: dict[str, float] = {}
+        if cost_tracker:
+            for aid in agent_ids_user:
+                today_a = cost_tracker.get_spend(aid, "today").get(
+                    "total_cost", 0.0,
+                )
+                # ``yesterday`` is "since yesterday midnight" (includes
+                # today). Subtract today to isolate yesterday-only spend.
+                since_yest_a = cost_tracker.get_spend(aid, "yesterday").get(
+                    "total_cost", 0.0,
+                )
+                yest_a = max(since_yest_a - today_a, 0.0)
+                per_agent_cost_today[aid] = round(today_a, 4)
+                per_agent_cost_ratio[aid] = (
+                    round(today_a / yest_a, 2) if yest_a > 0 else 0.0
+                )
+
+        # -- Per-agent task outcome / failure / stale counts (PR-J') --
+        # The two count fields supersede the legacy ``failure_rate_by_agent``
+        # placeholder for the operator heartbeat: counts on small fleets
+        # are stable, rates on small denominators are noise. The
+        # placeholder stays (empty dict) so contract consumers don't need
+        # an immediate update; treat ``{}`` as "data unavailable" still.
+        outcome_rejected_24h: dict[str, int] = {}
+        execution_failures_24h: dict[str, int] = {}
+        stale_tasks_24h: dict[str, int] = {}
+        if tasks_store is not None:
+            try:
+                _day_seconds = 24 * 60 * 60
+                outcome_rejected_24h = {
+                    aid: count
+                    for aid, count in tasks_store.count_outcomes_since(
+                        "rejected", since_seconds=_day_seconds,
+                    ).items()
+                    if aid != "operator"
+                }
+                execution_failures_24h = {
+                    aid: count
+                    for aid, count in tasks_store.count_failed_status_since(
+                        since_seconds=_day_seconds,
+                    ).items()
+                    if aid != "operator"
+                }
+                stale_tasks_24h = {
+                    aid: count
+                    for aid, count in tasks_store.count_stale_since(
+                        threshold_seconds=_day_seconds,
+                    ).items()
+                    if aid != "operator"
+                }
+            except Exception as e:
+                # Telemetry is best-effort; never block the heartbeat
+                # endpoint on a tasks_v2 hiccup.
+                logger.debug("system_metrics task aggregates failed: %s", e)
+
+        # Legacy placeholder — kept on the contract so consumers
+        # treating ``{}`` as "data unavailable" don't break. The two
+        # count dicts above are what the heartbeat playbook keys on now.
         failure_rates: dict[str, float] = {}
 
         # -- Agents needing attention (exclude operator) --
@@ -3375,6 +3432,17 @@ def create_mesh_app(
             "busy": busy,
             "total_cost_today_usd": round(cost_today, 4),
             "cost_vs_yesterday_ratio": cost_ratio,
+            # Per-agent cost surface (PR-J'). Empty dicts when no spend
+            # has been recorded — that case is meaningfully different
+            # from "data unavailable", which would require the cost
+            # tracker to be ``None``.
+            "per_agent_cost_today_usd": per_agent_cost_today,
+            "per_agent_cost_vs_yesterday_ratio": per_agent_cost_ratio,
+            # Per-agent task outcome / failure / stale counts (PR-J').
+            # Empty dicts when tasks_v2 is disabled OR no rows match.
+            "outcome_rejected_24h_count": outcome_rejected_24h,
+            "execution_failures_24h_count": execution_failures_24h,
+            "stale_tasks_24h_count": stale_tasks_24h,
             "failure_rate_by_agent": failure_rates,
             "agents_needing_attention": agents_attention,
             "plan_limits": {
@@ -3469,6 +3537,45 @@ def create_mesh_app(
             "tasks_failed_24h": 0,
             "failure_rate": 0.0,
             "avg_task_duration_s": 0,
+        }
+
+    @app.get("/mesh/agents/{agent_id}/stale-tasks")
+    async def agent_stale_tasks(
+        agent_id: str, request: Request, threshold_hours: int = 24,
+    ) -> dict:
+        """List up to 5 oldest stale (non-terminal, created >threshold ago) tasks.
+
+        Operator-only. Powers ``inspect_agents(stale_threshold_hours=N)``
+        in the operator heartbeat. Returns ``{"agent_id", "threshold_hours",
+        "count", "task_ids"}``. When tasks_v2 is disabled or the agent has
+        no stale tasks, ``count`` is 0 and ``task_ids`` is empty.
+        """
+        _require_operator_or_internal(request)
+        _validate_agent_id(agent_id)
+        if not (1 <= threshold_hours <= 168):
+            raise HTTPException(
+                400, "threshold_hours must be between 1 and 168 (1 hour to 7 days)",
+            )
+        if tasks_store is None:
+            return {
+                "agent_id": agent_id,
+                "threshold_hours": threshold_hours,
+                "count": 0,
+                "task_ids": [],
+            }
+        threshold_seconds = float(threshold_hours) * 3600.0
+        try:
+            ids = tasks_store.list_stale_for_assignee(
+                agent_id, threshold_seconds=threshold_seconds, limit=5,
+            )
+        except Exception as e:
+            logger.debug("stale-tasks lookup failed for %s: %s", agent_id, e)
+            ids = []
+        return {
+            "agent_id": agent_id,
+            "threshold_hours": threshold_hours,
+            "count": len(ids),
+            "task_ids": ids,
         }
 
     # === Mesh Project Proxy Endpoints ===
