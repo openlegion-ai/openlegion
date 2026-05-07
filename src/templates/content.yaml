@@ -1,5 +1,5 @@
 name: content
-description: Content creation team -- research, write, and edit
+description: Drafts blog posts, social copy, and email sequences from your brief; returns ready-to-edit drafts.
 agents:
   researcher:
     role: Content researcher — finds data, sources, and trends

@@ -1,5 +1,5 @@
 name: competitive-intel
-description: Competitive intelligence scout — researches competitors and maintains up-to-date markdown reports as blackboard artifacts
+description: Tracks competitor pricing, product changes, and announcements; sends weekly summaries you can act on.
 
 agents:
   scout:
