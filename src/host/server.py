@@ -448,6 +448,23 @@ def _record_scope_warn() -> None:
     _scope_warn_count += 1
 
 
+# Counter for cross-project blackboard access (read or write where the
+# caller's project differs from the existing key's writer-project). Pure
+# observability for Phase 3 enforcement design — NOT a denial. Surfaced on
+# ``/mesh/system/metrics`` as ``blackboard_cross_project_total``. Counter
+# is process-lifetime (resets on restart), naming follows ``scope_warn_total``
+# rather than the ``_24h`` mental model — restarts are roughly daily-ish in
+# practice and a true 24h window would need a separate ledger.
+_blackboard_xproject_count: dict[str, int] = {"read": 0, "write": 0}
+
+
+def _record_blackboard_xproject(kind: str) -> None:
+    """Bump the cross-project blackboard counter."""
+    if kind not in _blackboard_xproject_count:
+        return
+    _blackboard_xproject_count[kind] += 1
+
+
 def _caller_projects(agent_id: str) -> set[str]:
     """Return the project memberships visible to ``agent_id``.
 
@@ -472,6 +489,35 @@ def _caller_projects(agent_id: str) -> set[str]:
         for name, meta in projects.items()
         if agent_id in meta.get("members", [])
     }
+
+
+def _is_blackboard_cross_project(
+    caller: str, writer: str | None
+) -> bool:
+    """Return True when caller and writer are workers in disjoint project sets.
+
+    Best-effort detection used purely for telemetry — never gates access.
+    Returns False (so the counter is NOT incremented) when:
+
+    - ``writer`` is missing (e.g. unknown / deleted agent or no prior entry)
+    - either party is operator / ``mesh`` (fleet-global by design)
+    - caller and writer share at least one project membership
+    - either party has an empty membership set (standalone agent — not
+      meaningfully "cross-project" without two project anchors)
+
+    The intent is to count the case where two distinct *project-bound*
+    workers touch the same key, since that is what Phase 3 enforcement
+    will gate.
+    """
+    if not writer or writer == caller:
+        return False
+    if caller in {"operator", "mesh"} or writer in {"operator", "mesh"}:
+        return False
+    caller_set = _caller_projects(caller)
+    writer_set = _caller_projects(writer)
+    if not caller_set or not writer_set:
+        return False
+    return caller_set.isdisjoint(writer_set)
 
 
 def create_mesh_app(
@@ -992,6 +1038,13 @@ def create_mesh_app(
         entry = blackboard.read(key)
         if not entry:
             raise HTTPException(404, f"Key not found: {key}")
+        # Phase 3 Slice 1 telemetry: count cross-project reads. Skip
+        # internal/operator callers (fleet-global by design). No
+        # enforcement — pure observability informing the design doc.
+        if not _is_internal_caller(request) and _is_blackboard_cross_project(
+            agent_id, entry.written_by
+        ):
+            _record_blackboard_xproject("read")
         return entry.model_dump(mode="json")
 
     @app.put("/mesh/blackboard/{key:path}")
@@ -1011,6 +1064,15 @@ def create_mesh_app(
             raise HTTPException(400, "TTL must be positive")
         if not permissions.can_write_blackboard(agent_id, key):
             raise HTTPException(403, f"Agent {agent_id} cannot write {key}")
+        # Phase 3 Slice 1 telemetry: count cross-project writes against an
+        # EXISTING entry (new keys are by definition not cross-project).
+        # Skip internal/operator callers (fleet-global by design).
+        if not _is_internal_caller(request):
+            existing = blackboard.read(key)
+            if existing is not None and _is_blackboard_cross_project(
+                agent_id, existing.written_by
+            ):
+                _record_blackboard_xproject("write")
         entry = blackboard.write(key, value, written_by=agent_id, ttl=ttl)
         if trace_store:
             req_trace_id = request.headers.get("x-trace-id")
@@ -1039,6 +1101,14 @@ def create_mesh_app(
         bare = key.split("/", 2)[2] if key.startswith("projects/") and key.count("/") >= 2 else key
         if bare.startswith("history/"):
             raise HTTPException(400, "Cannot delete from history namespace")
+        # Phase 3 Slice 1 telemetry: count cross-project deletes (a delete
+        # is a write that mutates the key). Skip internal/operator callers.
+        if not _is_internal_caller(request):
+            existing = blackboard.read(key)
+            if existing is not None and _is_blackboard_cross_project(
+                agent_id, existing.written_by
+            ):
+                _record_blackboard_xproject("write")
         try:
             blackboard.delete(key, deleted_by=agent_id)
         except ValueError as e:
@@ -1068,6 +1138,14 @@ def create_mesh_app(
             raise HTTPException(413, f"Value too large ({value_size} bytes, max {_MAX_BB_VALUE_BYTES})")
         if not permissions.can_write_blackboard(agent_id, key):
             raise HTTPException(403, f"Agent {agent_id} cannot write {key}")
+        # Phase 3 Slice 1 telemetry: count cross-project CAS writes against
+        # an EXISTING entry. Skip internal/operator callers.
+        if not _is_internal_caller(request):
+            existing = blackboard.read(key)
+            if existing is not None and _is_blackboard_cross_project(
+                agent_id, existing.written_by
+            ):
+                _record_blackboard_xproject("write")
         expected_version = body.expected_version
         value = body.value
         entry = blackboard.write_if_version(
@@ -3188,6 +3266,13 @@ def create_mesh_app(
             # operator dashboard can render the right state.
             "scope_warn_total": _scope_warn_count,
             "project_scope_mode": _PROJECT_SCOPE_MODE,
+            # Phase 3 Slice 1 (PR-O'.1) telemetry: process-lifetime count
+            # of cross-project blackboard accesses (caller's project set
+            # is disjoint from the existing entry's writer-project set).
+            # Pure observability — informs the design doc for PR-O'.2;
+            # NO enforcement effect today. Counts kinds separately so the
+            # design can branch on read vs write volume.
+            "blackboard_cross_project_total": dict(_blackboard_xproject_count),
         }
 
     @app.get("/mesh/agents/{agent_id}/metrics")
