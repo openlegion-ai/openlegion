@@ -1250,6 +1250,26 @@ async def inspect_agents(
             registry = await mesh_client.list_agents()
         except Exception as e:
             return {"error": f"Failed to list agents: {e}"}
+
+        # Pre-filter: when ``threshold_h`` is set, fetch ``system_metrics``
+        # once and use ``stale_tasks_24h_count`` to identify which agents
+        # actually have non-zero stale work. Skip per-agent fanout for
+        # agents whose count is known-zero. If the system_metrics fetch
+        # fails for any reason, fall through to the full fanout
+        # (defensive — preserves prior behavior).
+        stale_counts: dict[str, int] = {}
+        have_counts = False
+        if threshold_h is not None:
+            try:
+                _metrics = await mesh_client.get_system_metrics()
+                stale_counts = _metrics.get("stale_tasks_24h_count", {}) or {}
+                have_counts = True
+            except Exception as e:
+                logger.debug(
+                    "inspect_agents stale prefilter failed: %s — "
+                    "falling back to full fanout", e,
+                )
+
         agents = []
         for name, info in registry.items():
             entry: dict = {"name": name}
@@ -1257,6 +1277,23 @@ async def inspect_agents(
                 entry["role"] = info.get("role", "")
                 entry["capabilities"] = info.get("capabilities", [])
             if threshold_h is not None:
+                # Operator is excluded from stale-task fanout: it's a
+                # system agent with no user-facing inbox, so its stale
+                # count is always zero. Still attach the empty fields
+                # so the response shape is consistent across agents.
+                if name == "operator":
+                    entry["stale_task_count"] = 0
+                    entry["stale_task_ids"] = []
+                    agents.append(entry)
+                    continue
+                # Skip per-agent fanout when the prefilter says this
+                # agent has zero stale tasks. Still attach the empty
+                # fields so the response shape is consistent.
+                if have_counts and int(stale_counts.get(name, 0) or 0) == 0:
+                    entry["stale_task_count"] = 0
+                    entry["stale_task_ids"] = []
+                    agents.append(entry)
+                    continue
                 # Per-agent stale lookup. Failures degrade to count=0
                 # so a single agent's mesh hiccup doesn't poison the
                 # whole roster response.

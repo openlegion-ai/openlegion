@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
+from src.shared.trace import origin_header
 from src.shared.types import MeshEvent
 from src.shared.utils import setup_logging
 
@@ -263,8 +264,6 @@ class MeshClient:
         origin: "MessageOrigin | None" = None,
     ) -> dict:
         """Wake a target agent so it processes work immediately."""
-        from src.shared.trace import origin_header
-
         client = await self._get_client()
         headers = self._trace_headers()
         headers.update(origin_header(origin))
@@ -1098,8 +1097,6 @@ class MeshClient:
         to the originating channel/user. Without this, ``hand_off`` v2
         loses the origin a sibling ``wake_agent`` call still carries.
         """
-        from src.shared.trace import origin_header
-
         client = await self._get_client()
         body: dict = {
             "assignee": assignee,

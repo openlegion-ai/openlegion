@@ -234,6 +234,76 @@ class TestDenialCounterAuthAndRole:
             cost_tracker.close()
             bb.close()
 
+    def test_require_any_auth_missing_bearer_increments_auth(
+        self, tmp_path,
+    ):
+        """PR-Q: ``_require_any_auth`` missing-bearer 401 must bump ``auth``."""
+        from src.host import server as host_server
+
+        bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+        pubsub = PubSub()
+        perms = _make_perms_with_blackboard("alpha")
+        router = MessageRouter(permissions=perms, agent_registry={})
+        router.register_agent("alpha", "http://localhost:8401")
+
+        cost_tracker = CostTracker(db_path=str(tmp_path / "costs.db"))
+        lane_manager = MagicMock()
+        lane_manager.get_status.return_value = {}
+
+        app = create_mesh_app(
+            bb, pubsub, router, perms,
+            cost_tracker=cost_tracker,
+            lane_manager=lane_manager,
+            auth_tokens={"alpha": "tok_alpha", "operator": "tok_op"},
+        )
+        client = TestClient(app)
+
+        try:
+            # ``/mesh/traces`` is gated by ``_require_any_auth`` (not
+            # ``_extract_verified_agent_id``). Hit it with no Authorization
+            # header — expect 401 + counter bump.
+            resp = client.get("/mesh/traces")
+            assert resp.status_code == 401
+            assert host_server._denial_counter["auth"] == 1
+        finally:
+            cost_tracker.close()
+            bb.close()
+
+    def test_require_any_auth_invalid_bearer_increments_auth(
+        self, tmp_path,
+    ):
+        """PR-Q: ``_require_any_auth`` invalid-bearer 401 must bump ``auth``."""
+        from src.host import server as host_server
+
+        bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+        pubsub = PubSub()
+        perms = _make_perms_with_blackboard("alpha")
+        router = MessageRouter(permissions=perms, agent_registry={})
+        router.register_agent("alpha", "http://localhost:8401")
+
+        cost_tracker = CostTracker(db_path=str(tmp_path / "costs.db"))
+        lane_manager = MagicMock()
+        lane_manager.get_status.return_value = {}
+
+        app = create_mesh_app(
+            bb, pubsub, router, perms,
+            cost_tracker=cost_tracker,
+            lane_manager=lane_manager,
+            auth_tokens={"alpha": "tok_alpha", "operator": "tok_op"},
+        )
+        client = TestClient(app)
+
+        try:
+            resp = client.get(
+                "/mesh/traces",
+                headers={"Authorization": "Bearer wrong-token"},
+            )
+            assert resp.status_code == 401
+            assert host_server._denial_counter["auth"] == 1
+        finally:
+            cost_tracker.close()
+            bb.close()
+
     def test_non_operator_token_on_operator_endpoint_increments_role(
         self, tmp_path,
     ):

@@ -242,7 +242,7 @@ Provisioner manages engine instances via Docker/systemd on Hetzner VPS:
 - **Runtime**: Python 3.10+, FastAPI, asyncio
 - **Isolation**: Docker containers per agent, bridge network (`openlegion_agents`). `Dockerfile.agent` and `Dockerfile.browser` in repo root.
 - **Browser**: Shared container running one Camoufox + Xvnc + Openbox + unclutter stack per agent (display 100..163, paired KasmVNC ports 6100..6163). Per-agent X11 WID targeting for focus.
-- **Dashboard**: Alpine.js SPA — no React, no build step
+- **Dashboard**: Alpine.js SPA — no React, no build step (Tailwind via CDN at index.html)
 - **CI**: GitHub Actions — lint (ruff) + tests (pytest) on Python 3.11 and 3.12
 - **Dependencies**: `pyproject.toml` uses minimum version bounds (`>=`), no lock file
 

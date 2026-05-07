@@ -1193,26 +1193,47 @@ class TestCoordinationV2:
 
     @pytest.mark.asyncio
     async def test_update_status_v2_ambiguous_with_multiple_active(self):
-        """2+ active tasks + no task_id → ambiguous_task with active list + hint."""
+        """2+ active tasks + no task_id → ambiguous_task with active list + hint.
+
+        The active list carries ``{id, title, state}`` entries so the LLM
+        can pick a ``task_id`` directly without a follow-up
+        ``check_inbox`` call (PR-Q richer-shape augment).
+        """
         from src.agent.builtins.coordination_tool import update_status
 
         mc = _make_mesh_client(agent_id="analyst", v2_enabled=True)
         mc.list_task_inbox.return_value = [
-            {"id": "task_a", "status": "pending"},
-            {"id": "task_b", "status": "working"},
+            {"id": "task_a", "title": "Draft report", "status": "pending"},
+            {"id": "task_b", "title": "Review pricing", "status": "working"},
         ]
 
         result = await update_status("working", mesh_client=mc)
 
         assert result.get("error") == "ambiguous_task"
-        assert set(result["active"]) == {"task_a", "task_b"}
+        active = result["active"]
+        # Augmented shape: list of {id, title, state} dicts (not bare ids).
+        assert isinstance(active, list)
+        assert {a["id"] for a in active} == {"task_a", "task_b"}
+        for a in active:
+            assert "id" in a and "title" in a and "state" in a
+        by_id = {a["id"]: a for a in active}
+        assert by_id["task_a"]["title"] == "Draft report"
+        assert by_id["task_a"]["state"] == "pending"
+        assert by_id["task_b"]["title"] == "Review pricing"
+        assert by_id["task_b"]["state"] == "working"
         assert "task_id" in result["hint"]
         # Critical: no silent set_task_status call against the wrong task.
         mc.set_task_status.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_update_status_v2_no_active_returns_no_active_task(self):
-        """Empty inbox → ``no_active_task`` error rather than a silent no-op."""
+    async def test_update_status_v2_empty_inbox_returns_legacy_noop(self):
+        """Empty inbox → legacy ``{updated: False, ...}`` no-op shape.
+
+        Standalone agents and just-joined agents on a fresh fleet hit
+        the empty-inbox case constantly. PR-Q removed the regressed
+        ``{"error": "no_active_task"}`` shape so the LLM doesn't see an
+        error for the common "no work yet" case.
+        """
         from src.agent.builtins.coordination_tool import update_status
 
         mc = _make_mesh_client(agent_id="analyst", v2_enabled=True)
@@ -1220,11 +1241,11 @@ class TestCoordinationV2:
 
         result = await update_status("working", mesh_client=mc)
 
-        # Existing legacy contract: ``updated=False`` when there are no
-        # rows at all. The new ``error=no_active_task`` path is reserved
-        # for the inbox-empty case AFTER filtering away terminal rows.
-        # Either is acceptable — assert the call did NOT mutate state.
-        assert result.get("updated") is False or result.get("error") == "no_active_task"
+        # Legacy success-shape no-op — no error key, updated=False.
+        assert "error" not in result
+        assert result.get("updated") is False
+        assert result.get("state") == "working"
+        assert "no active tasks" in result.get("reason", "")
         mc.set_task_status.assert_not_called()
 
     @pytest.mark.asyncio

@@ -918,11 +918,13 @@ def create_mesh_app(
                 pass  # Not a valid IP — fall through to Bearer token check
         auth_header = request.headers.get("authorization", "")
         if not auth_header.startswith("Bearer "):
+            _record_denial("auth")
             raise HTTPException(401, "Missing authentication token")
         token = auth_header[7:]
         for expected in _auth_tokens.values():
             if hmac.compare_digest(token, expected):
                 return
+        _record_denial("auth")
         raise HTTPException(401, "Invalid authentication token")
 
     def _require_operator_or_internal(request: Request) -> None:
@@ -2614,6 +2616,11 @@ def create_mesh_app(
         """Create a team of agents from a fleet template.
 
         Body: {template: str, model?: str}
+
+        Note: agent creation is per-slot — a mid-loop failure leaves
+        earlier-created agents in place. Callers should verify the
+        returned ``created`` list matches their intent and inspect the
+        on-disk fleet.
         """
         if container_manager is None:
             raise HTTPException(503, "Container manager not available")
@@ -3365,7 +3372,7 @@ def create_mesh_app(
         # agent whose spend is bookkeeping, not user work.
         agent_ids_user = [aid for aid in agents if aid != "operator"]
         per_agent_cost_today: dict[str, float] = {}
-        per_agent_cost_ratio: dict[str, float] = {}
+        per_agent_cost_ratio: dict[str, float | None] = {}
         if cost_tracker:
             for aid in agent_ids_user:
                 today_a = cost_tracker.get_spend(aid, "today").get(
@@ -3378,8 +3385,13 @@ def create_mesh_app(
                 )
                 yest_a = max(since_yest_a - today_a, 0.0)
                 per_agent_cost_today[aid] = round(today_a, 4)
+                # ``None`` when no yesterday baseline; otherwise
+                # today/yesterday ratio rounded to 2 decimals. Returning
+                # ``None`` (rather than ``0.0``) lets the heartbeat
+                # playbook distinguish "agent stopped spending today"
+                # (ratio == 0.0) from "no yesterday baseline" (None).
                 per_agent_cost_ratio[aid] = (
-                    round(today_a / yest_a, 2) if yest_a > 0 else 0.0
+                    round(today_a / yest_a, 2) if yest_a > 0 else None
                 )
 
         # -- Per-agent task outcome / failure / stale counts (PR-J') --
@@ -3456,7 +3468,9 @@ def create_mesh_app(
             # Per-agent cost surface (PR-J'). Empty dicts when no spend
             # has been recorded — that case is meaningfully different
             # from "data unavailable", which would require the cost
-            # tracker to be ``None``.
+            # tracker to be ``None``. ``per_agent_cost_vs_yesterday_ratio``
+            # is ``None`` when no yesterday baseline; otherwise
+            # today/yesterday rounded to 2 decimals.
             "per_agent_cost_today_usd": per_agent_cost_today,
             "per_agent_cost_vs_yesterday_ratio": per_agent_cost_ratio,
             # Per-agent task outcome / failure / stale counts (PR-J').

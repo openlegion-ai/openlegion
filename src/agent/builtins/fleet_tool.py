@@ -39,7 +39,10 @@ async def list_templates(*, mesh_client=None, **_kw) -> dict:
         "to see available templates. This creates all agents defined in the template "
         "and starts them. Returns the list of created agent IDs. Pass "
         "`agent_overrides` to tune individual slots (model, instructions) at "
-        "creation time -- avoids 5+ follow-up edit_agent round-trips."
+        "creation time -- avoids 5+ follow-up edit_agent round-trips. "
+        "Note: agent creation is per-slot — a mid-loop failure leaves "
+        "earlier-created agents in place. Verify the returned `created` "
+        "list matches your intent and inspect the on-disk fleet."
     ),
     parameters={
         "template": {
