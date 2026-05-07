@@ -1567,8 +1567,8 @@ _OPERATOR_HEARTBEAT = """\
 You are running an autonomous fleet health check. You have access ONLY to monitoring tools.
 Your previous observations are included above in OBSERVATIONS.md.
 
-Step budget: stay at or under 8 tool calls per cycle (HEARTBEAT_MAX_ITERATIONS=10
-in the loop; 8 leaves headroom for the final assistant turn).
+Step budget: stay at or under 10 tool calls per cycle (HEARTBEAT_MAX_ITERATIONS=12
+in the loop; 10 leaves headroom for the final assistant turn).
 
 1. Review your previous observations (above) to check what you flagged last cycle.
    Do not re-alert on known issues unless they have escalated in severity.
@@ -1583,13 +1583,17 @@ in the loop; 8 leaves headroom for the final assistant turn).
 
 3. Call inspect_agents() for the roster summary.
 
-4. Drill in for agents that show concerning signals. PREFER one targeted call
+4. Drill into at most THREE most-concerning agents. PREFER one targeted call
    per drill — don't fan out across the whole fleet:
-   - If any agent appears in agents_needing_attention OR has
+   - Candidates are agents that appear in agents_needing_attention OR have
      per_agent_cost_vs_yesterday_ratio is not None AND > 2.0 OR
      outcome_rejected_24h_count[agent] > 5 OR
-     execution_failures_24h_count[agent] > 3:
-     call inspect_agents(agent_id, depth="profile") for that agent.
+     execution_failures_24h_count[agent] > 3.
+   - If more than 3 agents trigger any of the above thresholds, focus on
+     the top-3 worst (highest cost outlier, highest rejected count, longest
+     stale duration) and note in OBSERVATIONS.md that additional agents
+     need follow-up next cycle.
+   - For each selected agent, call inspect_agents(agent_id, depth="profile").
    - If stale_tasks_24h_count has any non-zero entry, call
      inspect_agents(stale_threshold_hours=24) ONCE to pull the offending
      task IDs (the result annotates every roster entry — don't loop).

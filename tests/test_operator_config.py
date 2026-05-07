@@ -330,21 +330,50 @@ class TestOperatorConstants:
         assert "stale_threshold_hours=24" in _OPERATOR_HEARTBEAT
 
     def test_heartbeat_step_count_within_budget(self):
-        """Total numbered steps stay within the HEARTBEAT_MAX_ITERATIONS=10 budget.
+        """Total numbered steps stay within the HEARTBEAT_MAX_ITERATIONS=12 budget.
 
         Counting numbered top-level steps (``1.`` through ``N.``) — each
-        step that calls a tool burns one iteration. 8 leaves headroom
-        for the final assistant turn that emits the heartbeat summary.
+        step that calls a tool burns one iteration. PR-V capped per-cycle
+        drill-ins at 3, and bumped the loop ceiling from 10 to 12 to give
+        headroom. The worst-case fan-out is now:
+        1 status + 1 roster + 3 drill-ins + 1 stale fanout + 1 save_observations
+        + 1 notify_user = 8 tool calls, plus the final assistant turn that
+        emits the heartbeat summary.
         """
         import re
 
         from src.cli.config import _OPERATOR_HEARTBEAT
         steps = re.findall(r"^\s*(\d+)\.\s", _OPERATOR_HEARTBEAT, re.MULTILINE)
         max_step = max(int(s) for s in steps)
-        assert max_step <= 9, (
-            f"heartbeat has {max_step} numbered steps; budget is 9 "
-            f"(HEARTBEAT_MAX_ITERATIONS=10 minus the final assistant turn)"
+        assert max_step <= 11, (
+            f"heartbeat has {max_step} numbered steps; budget is 11 "
+            f"(HEARTBEAT_MAX_ITERATIONS=12 minus the final assistant turn)"
         )
+
+    def test_heartbeat_caps_drill_ins_at_three(self):
+        """PR-V — drill-ins capped at 3 per cycle to stay under the budget.
+
+        Without a cap, N concerning agents → N drill calls + 4 fixed steps,
+        which blows past HEARTBEAT_MAX_ITERATIONS at N>=6. The playbook now
+        instructs the operator to focus on the top-3 worst offenders and
+        defer the rest to the next cycle via OBSERVATIONS.md.
+        """
+        from src.cli.config import _OPERATOR_HEARTBEAT
+        # Cap-3 wording must be unambiguous.
+        assert "at most THREE" in _OPERATOR_HEARTBEAT or "at most 3" in _OPERATOR_HEARTBEAT
+        # Overflow guidance must reference AGENTS, not THRESHOLDS, so the LLM
+        # cannot misread the subject of the count (audit follow-up).
+        assert "more than 3 agents trigger" in _OPERATOR_HEARTBEAT
+        assert "top-3 worst" in _OPERATOR_HEARTBEAT
+        # Overflow agents must be queued for the next cycle in OBSERVATIONS.md.
+        assert "OBSERVATIONS.md" in _OPERATOR_HEARTBEAT
+        assert "next cycle" in _OPERATOR_HEARTBEAT
+
+    def test_heartbeat_budget_header_matches_loop_constant(self):
+        """PR-V — the playbook's stated budget tracks HEARTBEAT_MAX_ITERATIONS."""
+        from src.agent.loop import HEARTBEAT_MAX_ITERATIONS
+        from src.cli.config import _OPERATOR_HEARTBEAT
+        assert f"HEARTBEAT_MAX_ITERATIONS={HEARTBEAT_MAX_ITERATIONS}" in _OPERATOR_HEARTBEAT
 
     def test_core_has_key_sections(self):
         from src.shared.operator_playbooks import _OPERATOR_CORE
