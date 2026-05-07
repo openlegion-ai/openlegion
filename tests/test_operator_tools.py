@@ -587,6 +587,11 @@ async def test_inspect_agents_with_threshold_annotates_roster():
         }
 
     mc.get_agent_stale_tasks = AsyncMock(side_effect=_fake_stale)
+    # PR-Q prefilter: report non-zero counts for both agents so the
+    # fanout still happens for each (preserves the original assertion).
+    mc.get_system_metrics = AsyncMock(return_value={
+        "stale_tasks_24h_count": {"writer": 2, "scout": 1},
+    })
 
     result = await inspect_agents(stale_threshold_hours=24, mesh_client=mc)
     assert result["stale_threshold_hours"] == 24
@@ -635,12 +640,130 @@ async def test_inspect_agents_stale_lookup_failure_degrades_to_zero():
         "writer": {"role": "writer", "capabilities": []},
     })
     mc.get_agent_stale_tasks = AsyncMock(side_effect=RuntimeError("boom"))
+    # PR-Q prefilter: report a non-zero count so the fanout still
+    # happens (and we exercise the per-agent failure-handling path).
+    mc.get_system_metrics = AsyncMock(return_value={
+        "stale_tasks_24h_count": {"writer": 5},
+    })
 
     result = await inspect_agents(stale_threshold_hours=24, mesh_client=mc)
     assert result["stale_threshold_hours"] == 24
     entry = result["agents"][0]
     assert entry["stale_task_count"] == 0
     assert entry["stale_task_ids"] == []
+
+
+# PR-Q — stale-task fanout prefilter + operator exclusion
+
+
+@pytest.mark.asyncio
+async def test_inspect_agents_prefilter_skips_zero_count_agents():
+    """3-agent fleet with counts {a:1, b:0, c:2} → only 2 fanout calls."""
+    from src.agent.builtins.operator_tools import inspect_agents
+
+    mc = MagicMock()
+    mc.list_agents = AsyncMock(return_value={
+        "a": {"role": "writer", "capabilities": []},
+        "b": {"role": "writer", "capabilities": []},
+        "c": {"role": "writer", "capabilities": []},
+    })
+
+    async def _fake_stale(agent_id, threshold_hours=24):
+        return {
+            "agent_id": agent_id,
+            "threshold_hours": threshold_hours,
+            "count": 1 if agent_id == "a" else 2,
+            "task_ids": [f"{agent_id}_task"],
+        }
+
+    mc.get_agent_stale_tasks = AsyncMock(side_effect=_fake_stale)
+    mc.get_system_metrics = AsyncMock(return_value={
+        "stale_tasks_24h_count": {"a": 1, "b": 0, "c": 2},
+    })
+
+    result = await inspect_agents(stale_threshold_hours=24, mesh_client=mc)
+    by_name = {a["name"]: a for a in result["agents"]}
+    # b had count 0 → prefilter skipped the fanout, attached zero values.
+    assert by_name["b"]["stale_task_count"] == 0
+    assert by_name["b"]["stale_task_ids"] == []
+    # a and c got real fanout calls.
+    assert by_name["a"]["stale_task_count"] == 1
+    assert by_name["c"]["stale_task_count"] == 2
+    # Exactly two fanout calls — b was skipped.
+    assert mc.get_agent_stale_tasks.await_count == 2
+    awaited_targets = {
+        call.args[0] for call in mc.get_agent_stale_tasks.await_args_list
+    }
+    assert awaited_targets == {"a", "c"}
+
+
+@pytest.mark.asyncio
+async def test_inspect_agents_skips_operator_in_stale_fanout():
+    """Operator must never be the target of a stale-task fanout call."""
+    from src.agent.builtins.operator_tools import inspect_agents
+
+    mc = MagicMock()
+    mc.list_agents = AsyncMock(return_value={
+        "operator": {"role": "operator", "capabilities": []},
+        "writer": {"role": "writer", "capabilities": []},
+    })
+
+    async def _fake_stale(agent_id, threshold_hours=24):
+        return {
+            "agent_id": agent_id,
+            "threshold_hours": threshold_hours,
+            "count": 1,
+            "task_ids": ["t1"],
+        }
+
+    mc.get_agent_stale_tasks = AsyncMock(side_effect=_fake_stale)
+    # Operator sits in the metrics dict with non-zero — verify exclusion
+    # is by name rather than just by count.
+    mc.get_system_metrics = AsyncMock(return_value={
+        "stale_tasks_24h_count": {"operator": 99, "writer": 1},
+    })
+
+    result = await inspect_agents(stale_threshold_hours=24, mesh_client=mc)
+    by_name = {a["name"]: a for a in result["agents"]}
+    # Operator still surfaces in the roster but with empty fields.
+    assert by_name["operator"]["stale_task_count"] == 0
+    assert by_name["operator"]["stale_task_ids"] == []
+    # writer fanout happened.
+    assert by_name["writer"]["stale_task_count"] == 1
+    # Exactly one fanout call — operator was excluded.
+    assert mc.get_agent_stale_tasks.await_count == 1
+    awaited_targets = {
+        call.args[0] for call in mc.get_agent_stale_tasks.await_args_list
+    }
+    assert awaited_targets == {"writer"}
+
+
+@pytest.mark.asyncio
+async def test_inspect_agents_metrics_failure_falls_back_to_full_fanout():
+    """If get_system_metrics fails, fall through to full fanout (defensive)."""
+    from src.agent.builtins.operator_tools import inspect_agents
+
+    mc = MagicMock()
+    mc.list_agents = AsyncMock(return_value={
+        "writer": {"role": "writer", "capabilities": []},
+        "scout":  {"role": "researcher", "capabilities": []},
+    })
+
+    async def _fake_stale(agent_id, threshold_hours=24):
+        return {
+            "agent_id": agent_id,
+            "threshold_hours": threshold_hours,
+            "count": 0,
+            "task_ids": [],
+        }
+
+    mc.get_agent_stale_tasks = AsyncMock(side_effect=_fake_stale)
+    mc.get_system_metrics = AsyncMock(side_effect=RuntimeError("mesh down"))
+
+    result = await inspect_agents(stale_threshold_hours=24, mesh_client=mc)
+    assert result["count"] == 2
+    # Both agents got fanned out because we couldn't pre-filter.
+    assert mc.get_agent_stale_tasks.await_count == 2
 
 
 # ── create_agent tests ──────────────────────────��───────────

@@ -1586,7 +1586,7 @@ in the loop; 8 leaves headroom for the final assistant turn).
 4. Drill in for agents that show concerning signals. PREFER one targeted call
    per drill — don't fan out across the whole fleet:
    - If any agent appears in agents_needing_attention OR has
-     per_agent_cost_vs_yesterday_ratio > 2.0 OR
+     per_agent_cost_vs_yesterday_ratio is not None AND > 2.0 OR
      outcome_rejected_24h_count[agent] > 5 OR
      execution_failures_24h_count[agent] > 3:
      call inspect_agents(agent_id, depth="profile") for that agent.

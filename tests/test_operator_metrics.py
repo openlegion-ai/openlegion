@@ -203,8 +203,11 @@ class TestSystemMetricsPRJ:
         # alpha got tracked spend; beta did not.
         assert data["per_agent_cost_today_usd"]["alpha"] > 0
         assert data["per_agent_cost_today_usd"]["beta"] == 0
-        # Yesterday baseline is 0 → ratio is 0.0 (not divide-by-zero).
-        assert data["per_agent_cost_vs_yesterday_ratio"]["alpha"] == 0.0
+        # PR-Q: when no yesterday baseline exists the ratio is ``None``
+        # (not ``0.0``) so the heartbeat playbook can distinguish "agent
+        # stopped spending today" (ratio == 0.0) from "no baseline".
+        assert data["per_agent_cost_vs_yesterday_ratio"]["alpha"] is None
+        assert data["per_agent_cost_vs_yesterday_ratio"]["beta"] is None
 
     def test_per_agent_cost_excludes_operator(self, metrics_app):
         # Register operator on the router so it shows up in agents.

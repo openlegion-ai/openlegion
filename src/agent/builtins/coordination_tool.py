@@ -639,9 +639,20 @@ async def _update_status_v2(
             if str(r.get("status", "")) not in _TERMINAL_STATES
         ]
         if len(active) > 1:
+            # Augment the active list with title + state so the LLM can
+            # pick a ``task_id`` directly without a follow-up
+            # ``check_inbox`` call.
+            active_summaries = [
+                {
+                    "id": r.get("id"),
+                    "title": str(r.get("title", ""))[:80],
+                    "state": str(r.get("status", "")),
+                }
+                for r in active
+            ]
             return {
                 "error": "ambiguous_task",
-                "active": [r.get("id") for r in active],
+                "active": active_summaries,
                 "hint": (
                     "You have multiple active tasks. Pass task_id "
                     "explicitly to update a specific task."
@@ -662,7 +673,13 @@ async def _update_status_v2(
                 "updated": False, "state": state, "reason": "no active tasks",
             }
         else:
-            return {"error": "no_active_task"}
+            # Empty inbox — standalone agents and just-joined agents on a
+            # fresh fleet hit this constantly. Return the legacy
+            # ``{updated: False, ...}`` no-op shape so callers don't see
+            # an LLM-visible error for the common "no work yet" case.
+            return {
+                "updated": False, "state": state, "reason": "no active tasks",
+            }
     else:
         target = next(
             (r for r in rows if r.get("id") == task_id), None,
