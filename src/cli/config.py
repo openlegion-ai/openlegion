@@ -1156,11 +1156,22 @@ def _load_templates() -> dict[str, dict]:
     return available
 
 
-def _apply_template(template_name: str, tpl: dict) -> list[str]:
-    """Apply a team template, creating all agents. Returns list of agent names."""
+def _apply_template(
+    template_name: str,
+    tpl: dict,
+    agent_overrides: dict[str, dict] | None = None,
+) -> list[str]:
+    """Apply a team template, creating all agents. Returns list of agent names.
+
+    ``agent_overrides`` (PR-N) is an optional ``{agent_name: {field: value}}``
+    map. v1 supports per-agent ``model`` and ``instructions`` overrides applied
+    on top of the template's defaults. The mesh route validates the shape and
+    contents UPFRONT — by the time we get here, the input is trusted.
+    """
     cfg = _load_config()
     default_model = cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
     tpl_agents = tpl.get("agents", {})
+    overrides = agent_overrides or {}
     created: list[str] = []
 
     # Load existing agents to avoid silent overwrites
@@ -1175,8 +1186,13 @@ def _apply_template(template_name: str, tpl: dict) -> list[str]:
         if agent_name in existing_agents:
             click.echo(f"  Skipping '{agent_name}' — agent already exists")
             continue
+        per_agent_override = overrides.get(agent_name) or {}
         model = agent_def.get("model", default_model).replace("{default_model}", default_model)
+        if "model" in per_agent_override:
+            model = per_agent_override["model"]
         instructions = agent_def.get("instructions", "") or agent_def.get("system_prompt", "")
+        if "instructions" in per_agent_override:
+            instructions = per_agent_override["instructions"]
         soul = agent_def.get("soul", "")
         heartbeat = agent_def.get("heartbeat", "")
         interface = agent_def.get("initial_interface", "") or agent_def.get("interface", "")

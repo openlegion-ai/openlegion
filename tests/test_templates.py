@@ -546,6 +546,123 @@ class TestApplyTemplate(_TempConfigMixin):
         assert len(perms["permissions"]) == 3
 
 
+class TestApplyTemplateAgentOverrides(_TempConfigMixin):
+    """PR-N: per-agent overrides applied at template apply time."""
+
+    def _multi_template(self) -> dict:
+        return {
+            "agents": {
+                "writer": {
+                    "role": "writer",
+                    "model": "{default_model}",
+                    "instructions": "Default writer instructions.",
+                },
+                "editor": {
+                    "role": "editor",
+                    "model": "{default_model}",
+                    "instructions": "Default editor instructions.",
+                },
+                "researcher": {
+                    "role": "researcher",
+                    "model": "{default_model}",
+                    "instructions": "Default researcher instructions.",
+                },
+            },
+        }
+
+    def test_no_overrides_is_noop(self):
+        """``agent_overrides=None`` produces template defaults."""
+        tpl = self._multi_template()
+        with self._mock_config():
+            created = _apply_template("multi", tpl, agent_overrides=None)
+        assert created == ["writer", "editor", "researcher"]
+        with open(self._agents_path) as f:
+            cfg = yaml.safe_load(f)
+        assert cfg["agents"]["writer"]["model"] == "openai/gpt-4o-mini"
+        assert cfg["agents"]["writer"]["initial_instructions"] == "Default writer instructions."
+
+    def test_empty_overrides_is_noop(self):
+        """``agent_overrides={}`` is also a no-op (back-compat sanity)."""
+        tpl = self._multi_template()
+        with self._mock_config():
+            _apply_template("multi", tpl, agent_overrides={})
+        with open(self._agents_path) as f:
+            cfg = yaml.safe_load(f)
+        assert cfg["agents"]["writer"]["model"] == "openai/gpt-4o-mini"
+
+    def test_single_model_override_only_affects_target(self):
+        """Override one agent's model — others stay on template default."""
+        tpl = self._multi_template()
+        with self._mock_config():
+            _apply_template(
+                "multi", tpl,
+                agent_overrides={"writer": {"model": "anthropic/claude-sonnet-4-6"}},
+            )
+        with open(self._agents_path) as f:
+            cfg = yaml.safe_load(f)
+        assert cfg["agents"]["writer"]["model"] == "anthropic/claude-sonnet-4-6"
+        # Others untouched
+        assert cfg["agents"]["editor"]["model"] == "openai/gpt-4o-mini"
+        assert cfg["agents"]["researcher"]["model"] == "openai/gpt-4o-mini"
+        # Instructions for writer remain the template default (not overridden)
+        assert cfg["agents"]["writer"]["initial_instructions"] == "Default writer instructions."
+
+    def test_two_independent_instructions_overrides(self):
+        """Override two agents' instructions independently."""
+        tpl = self._multi_template()
+        overrides = {
+            "writer": {"instructions": "Be terse."},
+            "editor": {"instructions": "Use AP style."},
+        }
+        with self._mock_config():
+            _apply_template("multi", tpl, agent_overrides=overrides)
+        with open(self._agents_path) as f:
+            cfg = yaml.safe_load(f)
+        assert cfg["agents"]["writer"]["initial_instructions"] == "Be terse."
+        assert cfg["agents"]["editor"]["initial_instructions"] == "Use AP style."
+        # Researcher remains template default
+        assert cfg["agents"]["researcher"]["initial_instructions"] == "Default researcher instructions."
+        # Models all remain default
+        assert cfg["agents"]["writer"]["model"] == "openai/gpt-4o-mini"
+        assert cfg["agents"]["editor"]["model"] == "openai/gpt-4o-mini"
+
+    def test_combined_model_and_instructions_for_same_agent(self):
+        """Both model AND instructions for the same agent."""
+        tpl = self._multi_template()
+        overrides = {
+            "writer": {
+                "model": "anthropic/claude-sonnet-4-6",
+                "instructions": "Custom writer voice.",
+            },
+        }
+        with self._mock_config():
+            _apply_template("multi", tpl, agent_overrides=overrides)
+        with open(self._agents_path) as f:
+            cfg = yaml.safe_load(f)
+        assert cfg["agents"]["writer"]["model"] == "anthropic/claude-sonnet-4-6"
+        assert cfg["agents"]["writer"]["initial_instructions"] == "Custom writer voice."
+        # Editor still on template default for both
+        assert cfg["agents"]["editor"]["model"] == "openai/gpt-4o-mini"
+        assert cfg["agents"]["editor"]["initial_instructions"] == "Default editor instructions."
+
+    def test_unknown_agent_in_overrides_silently_ignored_at_cli_layer(self):
+        """``_apply_template`` itself trusts validated input (mesh route is the
+        gate). An unknown agent key here is a no-op — the override never
+        matches a real agent — but the apply loop must not crash."""
+        tpl = self._multi_template()
+        with self._mock_config():
+            created = _apply_template(
+                "multi", tpl,
+                agent_overrides={"ghost": {"model": "openai/gpt-4o"}},
+            )
+        # All real agents created with template defaults
+        assert created == ["writer", "editor", "researcher"]
+        with open(self._agents_path) as f:
+            cfg = yaml.safe_load(f)
+        assert cfg["agents"]["writer"]["model"] == "openai/gpt-4o-mini"
+        assert "ghost" not in cfg["agents"]
+
+
 class TestLoadTemplates:
     def test_all_templates_parse(self):
         """All template YAML files in src/templates/ parse without error."""

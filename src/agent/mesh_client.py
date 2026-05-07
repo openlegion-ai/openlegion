@@ -698,12 +698,25 @@ class MeshClient:
         response.raise_for_status()
         return response.json()
 
-    async def apply_fleet_template(self, template: str, model: str = "") -> dict:
-        """Apply a fleet template to create a team of agents."""
+    async def apply_fleet_template(
+        self,
+        template: str,
+        model: str = "",
+        agent_overrides: dict[str, dict] | None = None,
+    ) -> dict:
+        """Apply a fleet template to create a team of agents.
+
+        ``agent_overrides`` is an optional mapping of ``agent_name`` →
+        ``{"model": str, "instructions": str}``. Validated upfront on
+        the mesh side; unknown names / fields / models / oversized
+        instructions return HTTP 400 (or 413) with the offender named.
+        """
         client = await self._get_client()
         body: dict = {"template": template}
         if model:
             body["model"] = model
+        if agent_overrides:
+            body["agent_overrides"] = agent_overrides
         response = await client.post(
             f"{self.mesh_url}/mesh/fleet/apply",
             json=body,
