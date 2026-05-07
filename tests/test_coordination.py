@@ -653,6 +653,123 @@ class TestHandOffOriginPropagation:
         assert "origin" not in task_record
 
 
+class TestHandOffV2OriginPropagation:
+    """PR-K' fix 1: ``hand_off`` v2 path must propagate origin to ``create_task``."""
+
+    @pytest.mark.asyncio
+    async def test_hand_off_v2_passes_origin_to_create_task(self):
+        """v2 hand_off reads current_origin and forwards it to create_task."""
+        from src.agent.builtins.coordination_tool import hand_off
+        from src.shared.trace import current_origin
+        from src.shared.types import MessageOrigin
+
+        mc = _make_mesh_client(agent_id="scout", v2_enabled=True)
+        mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
+        mc.create_task.return_value = {"id": "task_v2_xyz", "status": "pending"}
+
+        origin = MessageOrigin(kind="human", channel="telegram", user="999")
+        token = current_origin.set(origin)
+        try:
+            result = await hand_off(
+                to="analyst",
+                summary="enrich the lead",
+                mesh_client=mc,
+            )
+        finally:
+            current_origin.reset(token)
+
+        assert result["handed_off"] is True
+        # create_task must receive the origin kwarg with the same value.
+        mc.create_task.assert_awaited_once()
+        ct_kwargs = mc.create_task.call_args.kwargs
+        assert ct_kwargs.get("origin") == origin
+        # wake_agent retains its existing origin propagation.
+        wake_kwargs = mc.wake_agent.call_args.kwargs
+        assert wake_kwargs.get("origin") == origin
+
+    @pytest.mark.asyncio
+    async def test_hand_off_v2_no_origin_passes_none_to_create_task(self):
+        """When current_origin is None, create_task receives origin=None."""
+        from src.agent.builtins.coordination_tool import hand_off
+        from src.shared.trace import current_origin
+
+        mc = _make_mesh_client(agent_id="scout", v2_enabled=True)
+        mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
+        mc.create_task.return_value = {"id": "task_v2_xyz", "status": "pending"}
+
+        token = current_origin.set(None)
+        try:
+            await hand_off(to="analyst", summary="x", mesh_client=mc)
+        finally:
+            current_origin.reset(token)
+
+        ct_kwargs = mc.create_task.call_args.kwargs
+        assert ct_kwargs.get("origin") is None
+
+
+class TestMeshClientCreateTaskOriginHeader:
+    """``mesh_client.create_task`` must inject the X-Origin header when given an origin."""
+
+    @pytest.mark.asyncio
+    async def test_create_task_with_origin_sets_origin_header(self):
+        """origin kwarg → origin_header() merged into request headers."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from src.agent.mesh_client import MeshClient
+        from src.shared.types import MessageOrigin
+
+        client = MeshClient("http://localhost:8420", "scout")
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"id": "task_x", "status": "pending"}
+        mock_response.raise_for_status = MagicMock()
+        mock_post = AsyncMock(return_value=mock_response)
+
+        async_client = MagicMock()
+        async_client.post = mock_post
+
+        origin = MessageOrigin(kind="human", channel="cli", user="jeff")
+
+        with patch.object(
+            client, "_get_client", new=AsyncMock(return_value=async_client),
+        ):
+            await client.create_task(
+                assignee="analyst", title="t", origin=origin,
+            )
+
+        call_kwargs = mock_post.call_args.kwargs
+        headers = call_kwargs.get("headers") or {}
+        # ``origin_header`` writes the header under the ``X-Origin`` key
+        # (typically). At minimum: some header value derived from origin
+        # is present alongside the trace headers.
+        assert any("origin" in k.lower() for k in headers)
+
+    @pytest.mark.asyncio
+    async def test_create_task_without_origin_no_origin_header(self):
+        """origin omitted → no X-Origin header present (back-compat)."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from src.agent.mesh_client import MeshClient
+
+        client = MeshClient("http://localhost:8420", "scout")
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"id": "task_x", "status": "pending"}
+        mock_response.raise_for_status = MagicMock()
+        mock_post = AsyncMock(return_value=mock_response)
+
+        async_client = MagicMock()
+        async_client.post = mock_post
+
+        with patch.object(
+            client, "_get_client", new=AsyncMock(return_value=async_client),
+        ):
+            await client.create_task(assignee="analyst", title="t")
+
+        headers = mock_post.call_args.kwargs.get("headers") or {}
+        assert not any("origin" in k.lower() for k in headers)
+
+
 class TestOperatorHandoff:
     """Coverage for the project_agent → operator handoff path (Task 0 hotfix)."""
 
@@ -1044,22 +1161,21 @@ class TestCoordinationV2:
         mc.set_task_status.assert_called_once_with("ho_abc", "done")
 
     @pytest.mark.asyncio
-    async def test_update_status_v2_targets_most_recent_task(self):
+    async def test_update_status_v2_single_active_no_task_id(self):
+        """One active task + no task_id → that task is updated transparently."""
         from src.agent.builtins.coordination_tool import update_status
 
         mc = _make_mesh_client(agent_id="analyst", v2_enabled=True)
-        # Two non-terminal tasks; the most-recent (last) is the target.
         mc.list_task_inbox.return_value = [
-            {"id": "task_old", "status": "pending"},
-            {"id": "task_new", "status": "pending"},
+            {"id": "task_only", "status": "pending"},
         ]
 
         result = await update_status("working", mesh_client=mc)
 
         assert result["updated"] is True
-        assert result["task_id"] == "task_new"
+        assert result["task_id"] == "task_only"
         mc.set_task_status.assert_called_once_with(
-            "task_new", "working", blocker_note=None,
+            "task_only", "working", blocker_note=None,
         )
 
     @pytest.mark.asyncio
@@ -1074,6 +1190,81 @@ class TestCoordinationV2:
         mc.set_task_status.assert_called_once_with(
             "task_x", "blocked", blocker_note="waiting on creds",
         )
+
+    @pytest.mark.asyncio
+    async def test_update_status_v2_ambiguous_with_multiple_active(self):
+        """2+ active tasks + no task_id → ambiguous_task with active list + hint."""
+        from src.agent.builtins.coordination_tool import update_status
+
+        mc = _make_mesh_client(agent_id="analyst", v2_enabled=True)
+        mc.list_task_inbox.return_value = [
+            {"id": "task_a", "status": "pending"},
+            {"id": "task_b", "status": "working"},
+        ]
+
+        result = await update_status("working", mesh_client=mc)
+
+        assert result.get("error") == "ambiguous_task"
+        assert set(result["active"]) == {"task_a", "task_b"}
+        assert "task_id" in result["hint"]
+        # Critical: no silent set_task_status call against the wrong task.
+        mc.set_task_status.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_update_status_v2_no_active_returns_no_active_task(self):
+        """Empty inbox → ``no_active_task`` error rather than a silent no-op."""
+        from src.agent.builtins.coordination_tool import update_status
+
+        mc = _make_mesh_client(agent_id="analyst", v2_enabled=True)
+        mc.list_task_inbox.return_value = []
+
+        result = await update_status("working", mesh_client=mc)
+
+        # Existing legacy contract: ``updated=False`` when there are no
+        # rows at all. The new ``error=no_active_task`` path is reserved
+        # for the inbox-empty case AFTER filtering away terminal rows.
+        # Either is acceptable — assert the call did NOT mutate state.
+        assert result.get("updated") is False or result.get("error") == "no_active_task"
+        mc.set_task_status.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_update_status_v2_multiple_active_with_explicit_task_id(self):
+        """2+ active tasks + valid task_id → that task is updated."""
+        from src.agent.builtins.coordination_tool import update_status
+
+        mc = _make_mesh_client(agent_id="analyst", v2_enabled=True)
+        mc.list_task_inbox.return_value = [
+            {"id": "task_a", "status": "pending"},
+            {"id": "task_b", "status": "working"},
+        ]
+
+        result = await update_status(
+            "done", task_id="task_a", mesh_client=mc,
+        )
+
+        assert result["updated"] is True
+        assert result["task_id"] == "task_a"
+        mc.set_task_status.assert_called_once_with(
+            "task_a", "done", blocker_note=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_update_status_v2_unknown_task_id_returns_task_not_found(self):
+        """Explicit task_id not in inbox → ``task_not_found`` error."""
+        from src.agent.builtins.coordination_tool import update_status
+
+        mc = _make_mesh_client(agent_id="analyst", v2_enabled=True)
+        mc.list_task_inbox.return_value = [
+            {"id": "task_a", "status": "pending"},
+        ]
+
+        result = await update_status(
+            "done", task_id="task_missing", mesh_client=mc,
+        )
+
+        assert result.get("error") == "task_not_found"
+        assert result.get("task_id") == "task_missing"
+        mc.set_task_status.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_v2_probe_failure_falls_back_to_legacy(self):

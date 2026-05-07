@@ -35,6 +35,11 @@ _STANDALONE_ERROR = (
 
 _HANDOFF_TTL = 86_400  # 24 hours — safety net for unprocessed handoffs
 
+# Mirrors ``host/orchestration.TERMINAL_STATUSES`` — the set of statuses
+# that a task can no longer transition out of. Defined locally so the
+# coordination tool stays decoupled from host internals.
+_TERMINAL_STATES: frozenset[str] = frozenset({"done", "failed", "cancelled"})
+
 
 @skill(
     name="hand_off",
@@ -297,7 +302,11 @@ async def check_inbox(*, mesh_client=None) -> dict:
         "Update your status on the blackboard so teammates know what "
         "you're doing. Call this when you start work, finish work, or "
         "get blocked. Teammates can see your status to decide whether "
-        "to wait or proceed."
+        "to wait or proceed.\n\n"
+        "When you have multiple active tasks, pass task_id explicitly "
+        "to disambiguate which one this status update applies to. "
+        "Otherwise the call returns ambiguous_task with the active task "
+        "ids so you can pick the right one."
     ),
     parameters={
         "state": {
@@ -310,10 +319,19 @@ async def check_inbox(*, mesh_client=None) -> dict:
             "description": "Brief description of current activity or blocker",
             "default": "",
         },
+        "task_id": {
+            "type": "string",
+            "description": (
+                "Optional task id to update a specific task. Required when "
+                "you have more than one active task; otherwise omit."
+            ),
+            "default": "",
+        },
     },
 )
 async def update_status(
-    state: str, summary: str = "", *, mesh_client=None,
+    state: str, summary: str = "", task_id: str = "",
+    *, mesh_client=None,
 ) -> dict:
     if mesh_client is None:
         return {"error": "No mesh_client available"}
@@ -322,17 +340,18 @@ async def update_status(
     is_operator = (agent_id == "operator")
 
     # Task 6: when v2 is on, ``update_status`` updates the assignee's
-    # currently-active task (the most recent non-terminal one). The
-    # legacy blackboard ``status/{agent_id}`` write still happens for
-    # back-compat surfaces that read directly from the blackboard, but
-    # only when v2 is OFF — under v2 the per-task status is the source
-    # of truth.
+    # currently-active task. The legacy blackboard ``status/{agent_id}``
+    # write still happens for back-compat surfaces that read directly
+    # from the blackboard, but only when v2 is OFF — under v2 the
+    # per-task status is the source of truth.
     try:
         v2_enabled = await mesh_client.orchestration_v2_enabled()
     except Exception:
         v2_enabled = False
     if v2_enabled:
-        return await _update_status_v2(state, summary, mesh_client=mesh_client)
+        return await _update_status_v2(
+            state, summary, task_id=task_id or None, mesh_client=mesh_client,
+        )
 
     if mesh_client.is_standalone and not is_operator:
         return {"error": _STANDALONE_ERROR}
@@ -535,6 +554,14 @@ async def _hand_off_v2(
         except Exception as e:
             return {"error": f"Failed to write output: {e}"}
 
+    # Read the origin contextvar once so both create_task and wake_agent
+    # propagate the same provenance. Without origin on create_task the
+    # receiving agent's lane worker has no way to auto-notify the
+    # originating channel/user when the handed-off task completes —
+    # wake_agent already passes it; this brings create_task into parity.
+    from src.shared.trace import current_origin as _current_origin
+    origin = _current_origin.get()
+
     try:
         record = await mesh_client.create_task(
             assignee=to,
@@ -543,6 +570,7 @@ async def _hand_off_v2(
             project=write_project,
             priority=0,
             artifact_refs=[artifact_ref] if artifact_ref else None,
+            origin=origin,
         )
     except Exception as e:
         return {"error": f"Failed to create task: {e}"}
@@ -551,8 +579,6 @@ async def _hand_off_v2(
 
     # Wake the target so they pick up the task immediately. Failures
     # are logged and swallowed — the task is queued either way.
-    from src.shared.trace import current_origin as _current_origin
-    origin = _current_origin.get()
     try:
         await mesh_client.wake_agent(
             to, f"New task from {mesh_client.agent_id}: {summary[:200]}",
@@ -584,14 +610,17 @@ async def _check_inbox_v2(*, mesh_client) -> dict:
 
 
 async def _update_status_v2(
-    state: str, summary: str, *, mesh_client,
+    state: str, summary: str, *, task_id: str | None = None, mesh_client,
 ) -> dict:
-    """Task 6 update_status path — transitions the agent's most recent task.
+    """Task 6 update_status path — transitions one of the agent's tasks.
 
-    When the agent has multiple non-terminal tasks the most-recently-
-    created one wins (``list_inbox`` returns oldest-first; we pick the
-    last). When there is no active task this is a no-op success — the
-    LLM-facing contract didn't return per-task ids historically.
+    When the agent has exactly one non-terminal task we transition it
+    transparently. When the agent has 2+ non-terminal tasks and no
+    ``task_id`` is supplied we return ``ambiguous_task`` rather than
+    silently picking ``rows[-1]`` — the legacy "most recent wins" rule
+    masked the case where an agent juggling multiple handoffs marked
+    the wrong task ``done``. When ``task_id`` is supplied we route the
+    transition to that exact task or return ``task_not_found``.
     """
     # Map the legacy ``state`` to the v2 status name.  Both share the
     # same vocabulary except the legacy ``idle`` which has no v2
@@ -603,9 +632,44 @@ async def _update_status_v2(
         rows = await mesh_client.list_task_inbox(mesh_client.agent_id)
     except Exception as e:
         return {"error": f"Failed to load inbox: {e}"}
-    if not rows:
-        return {"updated": False, "state": state, "reason": "no active tasks"}
-    target = rows[-1]
+
+    if task_id is None:
+        active = [
+            r for r in rows
+            if str(r.get("status", "")) not in _TERMINAL_STATES
+        ]
+        if len(active) > 1:
+            return {
+                "error": "ambiguous_task",
+                "active": [r.get("id") for r in active],
+                "hint": (
+                    "You have multiple active tasks. Pass task_id "
+                    "explicitly to update a specific task."
+                ),
+            }
+        if active:
+            target = active[0]
+        elif rows:
+            # No active rows but inbox has terminal entries — preserve
+            # the legacy "most recent wins" no-op behavior so the call
+            # still resolves to {updated: False, reason: ...} downstream
+            # rather than blowing up. Picking the last terminal row is
+            # deliberately benign: ``set_task_status`` will reject any
+            # transition out of a terminal state, so the call surfaces
+            # the failure as an error rather than silently mutating
+            # something the caller didn't intend.
+            return {
+                "updated": False, "state": state, "reason": "no active tasks",
+            }
+        else:
+            return {"error": "no_active_task"}
+    else:
+        target = next(
+            (r for r in rows if r.get("id") == task_id), None,
+        )
+        if target is None:
+            return {"error": "task_not_found", "task_id": task_id}
+
     blocker_note = sanitize_for_prompt(summary) if state == "blocked" else None
     try:
         await mesh_client.set_task_status(

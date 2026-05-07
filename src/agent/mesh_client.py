@@ -1089,8 +1089,17 @@ class MeshClient:
         priority: int = 0,
         dependencies: list[str] | None = None,
         artifact_refs: list[str] | None = None,
+        origin: "MessageOrigin | None" = None,
     ) -> dict:
-        """Create a durable task. Returns the new task record."""
+        """Create a durable task. Returns the new task record.
+
+        ``origin`` propagates the cross-agent provenance header so the
+        receiving agent's lane worker can attribute task completion back
+        to the originating channel/user. Without this, ``hand_off`` v2
+        loses the origin a sibling ``wake_agent`` call still carries.
+        """
+        from src.shared.trace import origin_header
+
         client = await self._get_client()
         body: dict = {
             "assignee": assignee,
@@ -1107,10 +1116,13 @@ class MeshClient:
             body["dependencies"] = dependencies
         if artifact_refs is not None:
             body["artifact_refs"] = artifact_refs
+        headers = self._trace_headers()
+        if origin is not None:
+            headers.update(origin_header(origin))
         response = await client.post(
             f"{self.mesh_url}/mesh/tasks",
             json=body,
-            headers=self._trace_headers(),
+            headers=headers,
         )
         response.raise_for_status()
         return response.json()
