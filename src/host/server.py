@@ -3400,6 +3400,10 @@ def create_mesh_app(
         # are stable, rates on small denominators are noise. The
         # placeholder stays (empty dict) so contract consumers don't need
         # an immediate update; treat ``{}`` as "data unavailable" still.
+        # PR-U: ``outcome_rejected_24h_count`` filters on
+        # ``outcome_set_at`` (when the operator rated the task), not
+        # ``completed_at`` (when the agent finished) — review delay no
+        # longer drops lagged rejections off the heartbeat.
         outcome_rejected_24h: dict[str, int] = {}
         execution_failures_24h: dict[str, int] = {}
         stale_tasks_24h: dict[str, int] = {}
