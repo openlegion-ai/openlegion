@@ -465,6 +465,45 @@ def _record_blackboard_xproject(kind: str) -> None:
     _blackboard_xproject_count[kind] += 1
 
 
+# Per-category denial counter surfaced on ``/mesh/system/metrics`` as
+# ``tool_denials_24h``. Operators previously had no way to see when
+# auth/permission denials were happening — silent 401/403/429s only show
+# up in HTTP access logs, which the dashboard doesn't render. The counter
+# auto-resets at the day boundary so the value answers "how many denials
+# fired today". Categories are FROZEN (lower-cardinality, operator-readable):
+#
+#   * ``auth``       — missing/invalid bearer token
+#   * ``scope``      — caller out of project / fleet-roster scope
+#   * ``role``       — operator-only or operator-or-internal denied to a worker
+#   * ``permission`` — ``permissions.can_*()`` returned False
+#   * ``rate``       — rate limiter rejected
+_DENIAL_CATEGORIES: frozenset[str] = frozenset(
+    {"auth", "scope", "role", "permission", "rate"}
+)
+_denial_counter: dict[str, int] = defaultdict(int)
+# Mutable single-element wrapper so ``_record_denial`` can rotate the
+# day-key without juggling a ``global`` declaration on each call. Stored
+# as a list to match the established pattern (mutate in place).
+_denial_counter_reset_day: list[int] = [int(time.time() // 86400)]
+
+
+def _record_denial(category: str) -> None:
+    """Bump the per-category 24h denial counter.
+
+    Day rollover is detected lazily by comparing the current epoch-day
+    against the last reset day — when they differ the counter clears
+    before the increment so the ``tool_denials_24h`` field on
+    ``/mesh/system/metrics`` reflects the current-day window.
+    """
+    if category not in _DENIAL_CATEGORIES:
+        return
+    today = int(time.time() // 86400)
+    if today != _denial_counter_reset_day[0]:
+        _denial_counter.clear()
+        _denial_counter_reset_day[0] = today
+    _denial_counter[category] += 1
+
+
 def _caller_projects(agent_id: str) -> set[str]:
     """Return the project memberships visible to ``agent_id``.
 
@@ -708,6 +747,7 @@ def create_mesh_app(
             ts_list = _rate_ts[bucket_key]
             ts_list[:] = [t for t in ts_list if now - t < window]
             if len(ts_list) >= limit:
+                _record_denial("rate")
                 raise HTTPException(429, f"Rate limit exceeded for {endpoint}")
             ts_list.append(now)
 
@@ -800,11 +840,13 @@ def create_mesh_app(
             return request.headers.get("X-Agent-ID", "unknown")
         auth_header = request.headers.get("authorization", "")
         if not auth_header.startswith("Bearer "):
+            _record_denial("auth")
             raise HTTPException(401, "Missing authentication token")
         token = auth_header[7:]
         for aid, expected in _auth_tokens.items():
             if hmac.compare_digest(token, expected):
                 return aid
+        _record_denial("auth")
         raise HTTPException(401, "Invalid authentication token")
 
     def _resolve_agent_id(agent_id: str, request: Request) -> str:
@@ -914,7 +956,9 @@ def create_mesh_app(
         # "my credential is bad".
         for expected in _auth_tokens.values():
             if hmac.compare_digest(token, expected):
+                _record_denial("role")
                 raise HTTPException(403, "Operator-only endpoint")
+        _record_denial("auth")
         raise HTTPException(401, "Invalid authentication token")
 
     # === System Messaging (mesh → agent) ===
@@ -1024,6 +1068,7 @@ def create_mesh_app(
         agent_id = _resolve_agent_id(agent_id, request)
         await _check_rate_limit("blackboard_read", agent_id)
         if not permissions.can_read_blackboard(agent_id, prefix):
+            _record_denial("permission")
             raise HTTPException(403, f"Agent {agent_id} cannot read {prefix}")
         entries = blackboard.list_by_prefix(prefix)
         return [e.model_dump(mode="json") for e in entries]
@@ -1034,6 +1079,7 @@ def create_mesh_app(
         agent_id = _resolve_agent_id(agent_id, request)
         await _check_rate_limit("blackboard_read", agent_id)
         if not permissions.can_read_blackboard(agent_id, key):
+            _record_denial("permission")
             raise HTTPException(403, f"Agent {agent_id} cannot read {key}")
         entry = blackboard.read(key)
         if not entry:
@@ -1063,6 +1109,7 @@ def create_mesh_app(
         if ttl is not None and ttl <= 0:
             raise HTTPException(400, "TTL must be positive")
         if not permissions.can_write_blackboard(agent_id, key):
+            _record_denial("permission")
             raise HTTPException(403, f"Agent {agent_id} cannot write {key}")
         # Phase 3 Slice 1 telemetry: count cross-project writes against an
         # EXISTING entry (new keys are by definition not cross-project).
@@ -1096,6 +1143,7 @@ def create_mesh_app(
         agent_id = _resolve_agent_id(agent_id, request)
         await _check_rate_limit("blackboard_write", agent_id)
         if not permissions.can_write_blackboard(agent_id, key):
+            _record_denial("permission")
             raise HTTPException(403, f"Agent {agent_id} cannot write {key}")
         # Protect history namespace (including project-scoped keys)
         bare = key.split("/", 2)[2] if key.startswith("projects/") and key.count("/") >= 2 else key
@@ -1121,6 +1169,7 @@ def create_mesh_app(
         agent_id = _resolve_agent_id(data.agent_id, request)
         pattern = data.pattern
         if not permissions.can_read_blackboard(agent_id, pattern):
+            _record_denial("permission")
             raise HTTPException(403, f"Agent {agent_id} cannot read pattern '{pattern}'")
         blackboard.add_watch(agent_id, pattern)
         return {"watching": True, "pattern": pattern}
@@ -1137,6 +1186,7 @@ def create_mesh_app(
         if value_size > _MAX_BB_VALUE_BYTES:
             raise HTTPException(413, f"Value too large ({value_size} bytes, max {_MAX_BB_VALUE_BYTES})")
         if not permissions.can_write_blackboard(agent_id, key):
+            _record_denial("permission")
             raise HTTPException(403, f"Agent {agent_id} cannot write {key}")
         # Phase 3 Slice 1 telemetry: count cross-project CAS writes against
         # an EXISTING entry. Skip internal/operator callers.
@@ -1182,6 +1232,7 @@ def create_mesh_app(
         if source_project:
             expected_prefix = f"projects/{source_project}/"
             if not event.topic.startswith(expected_prefix):
+                _record_denial("scope")
                 raise HTTPException(
                     403,
                     f"Agent {event.source} (project={source_project}) cannot publish to topic '{event.topic}'"
@@ -1227,6 +1278,7 @@ def create_mesh_app(
         if sub_project:
             expected_prefix = f"projects/{sub_project}/"
             if not topic.startswith(expected_prefix):
+                _record_denial("scope")
                 raise HTTPException(
                     403,
                     f"Agent {agent_id} (project={sub_project}) cannot subscribe to topic '{topic}'"
@@ -3345,6 +3397,13 @@ def create_mesh_app(
             # NO enforcement effect today. Counts kinds separately so the
             # design can branch on read vs write volume.
             "blackboard_cross_project_total": dict(_blackboard_xproject_count),
+            # PR-K' minimal denial observability. 24h window, auto-reset
+            # at the day boundary. Operator-readable categories:
+            # ``auth`` / ``scope`` / ``role`` / ``permission`` / ``rate``.
+            # Categories that have not fired today are absent from the
+            # dict — defaultdict semantics; readers should treat missing
+            # keys as zero.
+            "tool_denials_24h": dict(_denial_counter),
         }
 
     @app.get("/mesh/agents/{agent_id}/metrics")
