@@ -138,7 +138,9 @@ class TestApplyTemplate:
         messages = [{"role": "user", "content": "apply sales template", "_origin": "user"}]
         result = await apply_template(template="sales", mesh_client=mock_client, _messages=messages)
         assert "created" in result
-        mock_client.apply_fleet_template.assert_awaited_once_with("sales", model="")
+        mock_client.apply_fleet_template.assert_awaited_once_with(
+            "sales", model="", agent_overrides=None,
+        )
 
     @pytest.mark.asyncio
     async def test_provenance_fails_closed_when_no_messages(self):
@@ -163,7 +165,9 @@ class TestApplyTemplate:
         }
         messages = [{"role": "user", "content": "go"}]
         await apply_template(template="sales", model="openai/gpt-4o", mesh_client=mock_client, _messages=messages)
-        mock_client.apply_fleet_template.assert_awaited_once_with("sales", model="openai/gpt-4o")
+        mock_client.apply_fleet_template.assert_awaited_once_with(
+            "sales", model="openai/gpt-4o", agent_overrides=None,
+        )
 
     @pytest.mark.asyncio
     async def test_exception_handling(self):
@@ -233,6 +237,94 @@ class TestMeshClientFleetMethods:
             call_kwargs = mock_http.post.call_args
             # model not included when empty
             assert call_kwargs.kwargs["json"] == {"template": "starter"}
+
+    @pytest.mark.asyncio
+    async def test_apply_fleet_template_with_agent_overrides(self):
+        """PR-N: ``agent_overrides`` is forwarded as part of the JSON body."""
+        from src.agent.mesh_client import MeshClient
+
+        client = MeshClient(mesh_url="http://localhost:8420", agent_id="test")
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"template": "sales", "created": []}
+        mock_response.raise_for_status = MagicMock()
+
+        mock_http = AsyncMock()
+        mock_http.post.return_value = mock_response
+
+        overrides = {"writer": {"model": "openai/gpt-4o", "instructions": "Be terse."}}
+        with patch.object(client, "_get_client", new_callable=AsyncMock, return_value=mock_http):
+            await client.apply_fleet_template("sales", agent_overrides=overrides)
+            call_kwargs = mock_http.post.call_args
+            assert call_kwargs.kwargs["json"] == {
+                "template": "sales",
+                "agent_overrides": overrides,
+            }
+
+    @pytest.mark.asyncio
+    async def test_apply_fleet_template_omits_empty_overrides(self):
+        """Empty / None overrides are NOT included in the body (back-compat)."""
+        from src.agent.mesh_client import MeshClient
+
+        client = MeshClient(mesh_url="http://localhost:8420", agent_id="test")
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"template": "starter", "created": []}
+        mock_response.raise_for_status = MagicMock()
+
+        mock_http = AsyncMock()
+        mock_http.post.return_value = mock_response
+
+        with patch.object(client, "_get_client", new_callable=AsyncMock, return_value=mock_http):
+            # None
+            await client.apply_fleet_template("starter", agent_overrides=None)
+            assert mock_http.post.call_args.kwargs["json"] == {"template": "starter"}
+            # Empty dict
+            await client.apply_fleet_template("starter", agent_overrides={})
+            assert mock_http.post.call_args.kwargs["json"] == {"template": "starter"}
+
+
+class TestApplyTemplateAgentOverridesSkill:
+    """PR-N: ``apply_template`` skill forwards ``agent_overrides`` and back-compat."""
+
+    @pytest.mark.asyncio
+    async def test_overrides_forwarded(self):
+        from src.agent.builtins.fleet_tool import apply_template
+
+        mock_client = AsyncMock()
+        mock_client.apply_fleet_template.return_value = {
+            "template": "sales", "created": [], "failed": [], "skipped": [],
+        }
+        messages = [{"role": "user", "content": "go"}]
+        overrides = {"writer": {"model": "openai/gpt-4o"}}
+        await apply_template(
+            template="sales",
+            agent_overrides=overrides,
+            mesh_client=mock_client,
+            _messages=messages,
+        )
+        mock_client.apply_fleet_template.assert_awaited_once_with(
+            "sales", model="", agent_overrides=overrides,
+        )
+
+    @pytest.mark.asyncio
+    async def test_omitted_overrides_pass_none(self):
+        """Back-compat: callers passing only template + model still work."""
+        from src.agent.builtins.fleet_tool import apply_template
+
+        mock_client = AsyncMock()
+        mock_client.apply_fleet_template.return_value = {
+            "template": "starter", "created": [], "failed": [], "skipped": [],
+        }
+        messages = [{"role": "user", "content": "go"}]
+        await apply_template(
+            template="starter",
+            mesh_client=mock_client,
+            _messages=messages,
+        )
+        mock_client.apply_fleet_template.assert_awaited_once_with(
+            "starter", model="", agent_overrides=None,
+        )
 
 
 # ── Mesh endpoint: GET /mesh/fleet/templates ───────────────────
@@ -424,6 +516,117 @@ class TestMeshFleetApplyEndpoint:
         resp = client.post("/mesh/fleet/apply", json={"template": "starter"})
         assert resp.status_code == 200
         perms.reload.assert_called()
+
+    # ── PR-N: agent_overrides validation ─────────────────────
+
+    @patch.dict("os.environ", {"OPENLEGION_MAX_AGENTS": "10"})
+    def test_apply_unknown_agent_in_overrides_returns_400(self):
+        """Override key referencing an agent not in the template → 400, no creation."""
+        from fastapi.testclient import TestClient
+
+        app, cm, _ = self._make_app(existing_agents={"operator": "http://localhost:8400"})
+        client = TestClient(app)
+        resp = client.post(
+            "/mesh/fleet/apply",
+            json={
+                "template": "starter",
+                "agent_overrides": {"nonexistent_xyz": {"model": "openai/gpt-4o"}},
+            },
+        )
+        assert resp.status_code == 400
+        detail = resp.json()["detail"].lower()
+        assert "unknown" in detail
+        assert "nonexistent_xyz" in detail
+        # Validation happens BEFORE template application
+        cm.start_agent.assert_not_called()
+
+    @patch.dict("os.environ", {"OPENLEGION_MAX_AGENTS": "10"})
+    def test_apply_unknown_override_field_returns_400(self):
+        """Override field outside {'model','instructions'} → 400."""
+        from fastapi.testclient import TestClient
+
+        app, cm, _ = self._make_app(existing_agents={"operator": "http://localhost:8400"})
+        client = TestClient(app)
+        resp = client.post(
+            "/mesh/fleet/apply",
+            json={
+                "template": "starter",
+                "agent_overrides": {"assistant": {"foo": "bar"}},
+            },
+        )
+        assert resp.status_code == 400
+        detail = resp.json()["detail"]
+        assert "foo" in detail
+        cm.start_agent.assert_not_called()
+
+    @patch.dict("os.environ", {"OPENLEGION_MAX_AGENTS": "10"})
+    def test_apply_invalid_model_in_override_returns_400(self):
+        """Unknown model id → 400 from upfront validation, no agents created."""
+        from fastapi.testclient import TestClient
+
+        app, cm, _ = self._make_app(existing_agents={"operator": "http://localhost:8400"})
+        client = TestClient(app)
+        resp = client.post(
+            "/mesh/fleet/apply",
+            json={
+                "template": "starter",
+                "agent_overrides": {
+                    "assistant": {"model": "fakeprovider/totally-not-real-model-xyz"},
+                },
+            },
+        )
+        assert resp.status_code == 400
+        detail = resp.json()["detail"]
+        assert "fakeprovider/totally-not-real-model-xyz" in detail
+        cm.start_agent.assert_not_called()
+
+    @patch.dict("os.environ", {"OPENLEGION_MAX_AGENTS": "10"})
+    def test_apply_oversized_instructions_returns_413(self):
+        """Instructions > 12000 chars → 413, no agents created."""
+        from fastapi.testclient import TestClient
+
+        app, cm, _ = self._make_app(existing_agents={"operator": "http://localhost:8400"})
+        client = TestClient(app)
+        oversized = "x" * 12001
+        resp = client.post(
+            "/mesh/fleet/apply",
+            json={
+                "template": "starter",
+                "agent_overrides": {"assistant": {"instructions": oversized}},
+            },
+        )
+        assert resp.status_code == 413
+        detail = resp.json()["detail"]
+        assert "assistant" in detail
+        assert "12000" in detail
+        cm.start_agent.assert_not_called()
+
+    @patch.dict("os.environ", {"OPENLEGION_MAX_AGENTS": "10"})
+    def test_apply_empty_overrides_is_noop(self):
+        """Empty agent_overrides={} behaves identically to no overrides."""
+        from fastapi.testclient import TestClient
+
+        app, _, _ = self._make_app(existing_agents={"operator": "http://localhost:8400"})
+        client = TestClient(app)
+        resp = client.post(
+            "/mesh/fleet/apply",
+            json={"template": "starter", "agent_overrides": {}},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["template"] == "starter"
+
+    @patch.dict("os.environ", {"OPENLEGION_MAX_AGENTS": "10"})
+    def test_apply_non_dict_overrides_returns_400(self):
+        """agent_overrides must be an object."""
+        from fastapi.testclient import TestClient
+
+        app, _, _ = self._make_app(existing_agents={"operator": "http://localhost:8400"})
+        client = TestClient(app)
+        resp = client.post(
+            "/mesh/fleet/apply",
+            json={"template": "starter", "agent_overrides": ["not", "a", "dict"]},
+        )
+        assert resp.status_code == 400
 
     def test_apply_no_container_manager(self):
         """Without container manager, apply returns 503."""

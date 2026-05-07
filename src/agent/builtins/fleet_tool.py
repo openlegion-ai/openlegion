@@ -37,7 +37,9 @@ async def list_templates(*, mesh_client=None, **_kw) -> dict:
     description=(
         "Create a team of agents from a fleet template. Use list_templates first "
         "to see available templates. This creates all agents defined in the template "
-        "and starts them. Returns the list of created agent IDs."
+        "and starts them. Returns the list of created agent IDs. Pass "
+        "`agent_overrides` to tune individual slots (model, instructions) at "
+        "creation time -- avoids 5+ follow-up edit_agent round-trips."
     ),
     parameters={
         "template": {
@@ -46,13 +48,35 @@ async def list_templates(*, mesh_client=None, **_kw) -> dict:
         },
         "model": {
             "type": "string",
-            "description": "Optional model override for all agents. Defaults to system default.",
+            "description": "Optional model override for ALL agents. Defaults to system default.",
             "default": "",
+        },
+        "agent_overrides": {
+            "type": "object",
+            "description": (
+                "Optional per-agent overrides keyed by agent name from the template. "
+                "Each value is an object with optional 'model' and/or 'instructions' "
+                "fields. Unknown agent names or fields are rejected with HTTP 400."
+            ),
+            "additionalProperties": {
+                "type": "object",
+                "properties": {
+                    "model": {"type": "string"},
+                    "instructions": {"type": "string"},
+                },
+                "additionalProperties": False,
+            },
         },
     },
 )
 async def apply_template(
-    template: str, model: str = "", *, mesh_client=None, _messages=None, **_kw,
+    template: str,
+    model: str = "",
+    agent_overrides: dict[str, dict] | None = None,
+    *,
+    mesh_client=None,
+    _messages=None,
+    **_kw,
 ) -> dict:
     """Apply a fleet template to create a team of agents."""
     if not _is_operator():
@@ -68,6 +92,8 @@ async def apply_template(
             "detail": "User confirmation required to create agents.",
         }
     try:
-        return await mesh_client.apply_fleet_template(template, model=model)
+        return await mesh_client.apply_fleet_template(
+            template, model=model, agent_overrides=agent_overrides,
+        )
     except Exception as e:
         return {"error": f"Failed to apply template '{template}': {e}"}
