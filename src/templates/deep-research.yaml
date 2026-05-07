@@ -1,5 +1,5 @@
 name: deep-research
-description: Research team -- scout finds sources, analyst synthesizes, writer produces reports
+description: Investigates a topic deeply across multiple sources and returns a synthesized report with citations.
 agents:
   scout:
     role: Research scout — discovers sources and raw information

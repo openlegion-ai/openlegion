@@ -373,6 +373,38 @@ function dashboard() {
     workplaceFeedCap: 200,
     workplacePending: [],
     workplaceLoading: false,
+    // Per-section loading + error state. Failures used to be swallowed
+    // silently (console.error) which left the user staring at an empty
+    // panel with no way to retry. Each loadWorkplace* function now flips
+    // its own bucket here so the template can render skeletons during
+    // the in-flight window and a "Couldn't load — Retry" banner on
+    // failure. Banner click handlers clear the error and re-run the
+    // load, keeping the recovery path one click away.
+    workplaceSectionLoading: {
+      projects: false,
+      tasks: false,
+      blockers: false,
+      outputs: false,
+      pending: false,
+      feed: false,
+    },
+    workplaceErrors: {
+      projects: '',
+      tasks: '',
+      blockers: '',
+      outputs: '',
+      pending: '',
+      feed: '',
+    },
+    // Per-task artifact preview cache for the "Recently delivered"
+    // section. Keyed by task_id so each row's preview is fetched once
+    // and reused; the value is the full /api/workplace/tasks/{id}
+    // response so the "Read full" toggle can show the inlined content
+    // without a second round-trip. ``recentlyDeliveredExpanded`` tracks
+    // which rows the user has expanded.
+    recentlyDeliveredArtifacts: {},
+    recentlyDeliveredExpanded: {},
+    _recentlyDeliveredFetching: {},
     workplaceTaskColumns: ['pending', 'accepted', 'working', 'blocked', 'done'],
     workplaceProjectFilter: '',
     // Per-column flag: when true, the kanban column ignores the 14-day
@@ -1585,61 +1617,112 @@ function dashboard() {
       }
     },
 
+    // Per-section retry helper. Banners call ``retryWorkplaceSection``
+    // with the section key — we clear the error first so the banner
+    // hides immediately, then re-run the section's loader. Keeping the
+    // dispatch in one place means the banner handlers in the template
+    // stay short ("@click=\"retryWorkplaceSection('feed')\"").
+    retryWorkplaceSection(section) {
+      this.workplaceErrors[section] = '';
+      const fn = {
+        projects: this.loadWorkplaceProjects,
+        tasks: this.loadWorkplaceTasks,
+        blockers: this.loadWorkplaceBlockers,
+        outputs: this.loadWorkplaceOutputs,
+        pending: this.loadWorkplacePending,
+        feed: this.loadWorkplaceFeed,
+      }[section];
+      if (fn) fn.call(this);
+    },
+
     async loadWorkplaceProjects() {
+      this.workplaceSectionLoading.projects = true;
+      this.workplaceErrors.projects = '';
       try {
         const resp = await fetch(`${window.__config.apiBase}/workplace/projects`);
-        if (!resp.ok) return;
+        if (!resp.ok) {
+          this.workplaceErrors.projects = `Couldn't load projects (HTTP ${resp.status})`;
+          return;
+        }
         const data = await resp.json();
         this.workplaceEnabled = data.enabled !== false;
         this.workplaceProjects = data.projects || [];
       } catch (e) {
-        console.error('Failed to load workplace projects:', e);
+        this.workplaceErrors.projects = (e && e.message) ? `Couldn't load projects: ${e.message}` : "Couldn't load projects";
+      } finally {
+        this.workplaceSectionLoading.projects = false;
       }
     },
 
     async loadWorkplaceTasks() {
+      this.workplaceSectionLoading.tasks = true;
+      this.workplaceErrors.tasks = '';
       try {
         const params = this.workplaceProjectFilter ? `?project_id=${encodeURIComponent(this.workplaceProjectFilter)}` : '';
         const resp = await fetch(`${window.__config.apiBase}/workplace/tasks${params}`);
-        if (!resp.ok) return;
+        if (!resp.ok) {
+          this.workplaceErrors.tasks = `Couldn't load tasks (HTTP ${resp.status})`;
+          return;
+        }
         const data = await resp.json();
         this.workplaceEnabled = data.enabled !== false;
         this.workplaceTasks = data.tasks || [];
       } catch (e) {
-        console.error('Failed to load workplace tasks:', e);
+        this.workplaceErrors.tasks = (e && e.message) ? `Couldn't load tasks: ${e.message}` : "Couldn't load tasks";
+      } finally {
+        this.workplaceSectionLoading.tasks = false;
       }
     },
 
     async loadWorkplaceBlockers() {
+      this.workplaceSectionLoading.blockers = true;
+      this.workplaceErrors.blockers = '';
       try {
         const resp = await fetch(`${window.__config.apiBase}/workplace/blockers`);
-        if (!resp.ok) return;
+        if (!resp.ok) {
+          this.workplaceErrors.blockers = `Couldn't load blockers (HTTP ${resp.status})`;
+          return;
+        }
         const data = await resp.json();
         this.workplaceEnabled = data.enabled !== false;
         this.workplaceBlockers = data.blockers || [];
       } catch (e) {
-        console.error('Failed to load workplace blockers:', e);
+        this.workplaceErrors.blockers = (e && e.message) ? `Couldn't load blockers: ${e.message}` : "Couldn't load blockers";
+      } finally {
+        this.workplaceSectionLoading.blockers = false;
       }
     },
 
     async loadWorkplaceOutputs() {
+      this.workplaceSectionLoading.outputs = true;
+      this.workplaceErrors.outputs = '';
       try {
         const params = this.workplaceProjectFilter ? `?project_id=${encodeURIComponent(this.workplaceProjectFilter)}` : '';
         const resp = await fetch(`${window.__config.apiBase}/workplace/outputs${params}`);
-        if (!resp.ok) return;
+        if (!resp.ok) {
+          this.workplaceErrors.outputs = `Couldn't load outputs (HTTP ${resp.status})`;
+          return;
+        }
         const data = await resp.json();
         this.workplaceEnabled = data.enabled !== false;
         this.workplaceOutputs = data.outputs || [];
         this._recomputeRecentlyDelivered();
       } catch (e) {
-        console.error('Failed to load workplace outputs:', e);
+        this.workplaceErrors.outputs = (e && e.message) ? `Couldn't load outputs: ${e.message}` : "Couldn't load outputs";
+      } finally {
+        this.workplaceSectionLoading.outputs = false;
       }
     },
 
     async loadWorkplacePending() {
+      this.workplaceSectionLoading.pending = true;
+      this.workplaceErrors.pending = '';
       try {
         const resp = await fetch(`${window.__config.apiBase}/workplace/pending`);
-        if (!resp.ok) return;
+        if (!resp.ok) {
+          this.workplaceErrors.pending = `Couldn't load pending actions (HTTP ${resp.status})`;
+          return;
+        }
         const data = await resp.json();
         this.workplacePending = data.pending || [];
         // Backfill the inline chat-card surface so a page reload still
@@ -1659,20 +1742,29 @@ function dashboard() {
           });
         }
       } catch (e) {
-        console.error('Failed to load workplace pending actions:', e);
+        this.workplaceErrors.pending = (e && e.message) ? `Couldn't load pending actions: ${e.message}` : "Couldn't load pending actions";
+      } finally {
+        this.workplaceSectionLoading.pending = false;
       }
     },
 
     async loadWorkplaceFeed() {
+      this.workplaceSectionLoading.feed = true;
+      this.workplaceErrors.feed = '';
       try {
         const params = this.workplaceProjectFilter ? `?project_id=${encodeURIComponent(this.workplaceProjectFilter)}` : '';
         const resp = await fetch(`${window.__config.apiBase}/workplace/feed${params}`);
-        if (!resp.ok) return;
+        if (!resp.ok) {
+          this.workplaceErrors.feed = `Couldn't load activity (HTTP ${resp.status})`;
+          return;
+        }
         const data = await resp.json();
         this.workplaceEnabled = data.enabled !== false;
         this.workplaceFeed = data.feed || [];
       } catch (e) {
-        console.error('Failed to load workplace feed:', e);
+        this.workplaceErrors.feed = (e && e.message) ? `Couldn't load activity: ${e.message}` : "Couldn't load activity";
+      } finally {
+        this.workplaceSectionLoading.feed = false;
       }
     },
 
@@ -2184,6 +2276,119 @@ function dashboard() {
     // field remains the single source of truth for the template.
     recentlyDelivered() {
       return this.recentlyDeliveredItems;
+    },
+
+    // Lazy-fetch the artifact bundle for a "Recently delivered" row so
+    // the user can read the actual output without opening the modal.
+    // The /api/workplace/tasks/{id} endpoint already returns each
+    // artifact_ref resolved to ``{kind, content, content_truncated}``
+    // (see _resolve_artifact in dashboard/server.py); we cache the
+    // first text artifact per task_id. Errors are stored on the same
+    // cache entry so a failed fetch surfaces inline rather than the
+    // row going blank.
+    async _ensureRecentlyDeliveredArtifact(taskId) {
+      if (!taskId) return;
+      if (this.recentlyDeliveredArtifacts[taskId] !== undefined) return;
+      if (this._recentlyDeliveredFetching[taskId]) return;
+      this._recentlyDeliveredFetching[taskId] = true;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/workplace/tasks/${encodeURIComponent(taskId)}`);
+        if (!resp.ok) {
+          this.recentlyDeliveredArtifacts[taskId] = { error: `HTTP ${resp.status}` };
+          return;
+        }
+        const data = await resp.json();
+        const arts = (data && data.artifacts) || [];
+        // Pick the first text artifact for the inline preview; non-text
+        // (image / pdf / missing / error) keeps the prior link-out
+        // behavior because we can't render bytes inline here.
+        const text = arts.find(a => a && a.kind === 'text' && typeof a.content === 'string');
+        if (text) {
+          this.recentlyDeliveredArtifacts[taskId] = {
+            ref: text.ref,
+            content: text.content,
+            content_truncated: !!text.content_truncated,
+            kind: 'text',
+          };
+        } else if (arts.length) {
+          // Surface the first non-text artifact's kind so the row can
+          // hint at what's there (image/pdf/missing) without crashing.
+          this.recentlyDeliveredArtifacts[taskId] = {
+            ref: arts[0].ref,
+            kind: arts[0].kind || 'unknown',
+            error: arts[0].error || null,
+          };
+        } else {
+          this.recentlyDeliveredArtifacts[taskId] = { kind: 'none' };
+        }
+      } catch (e) {
+        this.recentlyDeliveredArtifacts[taskId] = { error: (e && e.message) || 'fetch failed' };
+      } finally {
+        delete this._recentlyDeliveredFetching[taskId];
+      }
+    },
+
+    // Template helper: short preview (~300 chars) shown by default.
+    // Returns '' when the artifact isn't text or hasn't loaded yet so
+    // the template can hide the preview block until content arrives.
+    recentlyDeliveredPreview(taskId) {
+      const a = this.recentlyDeliveredArtifacts[taskId];
+      if (!a || a.kind !== 'text' || !a.content) return '';
+      const PREVIEW_CAP = 300;
+      if (a.content.length <= PREVIEW_CAP) return a.content;
+      return a.content.slice(0, PREVIEW_CAP) + '…';
+    },
+
+    // Template helper: full content for the expanded view. Falls back
+    // to '' when the artifact isn't text so the toggle can hide
+    // gracefully on non-text artifacts.
+    recentlyDeliveredFull(taskId) {
+      const a = this.recentlyDeliveredArtifacts[taskId];
+      if (!a || a.kind !== 'text') return '';
+      return a.content || '';
+    },
+
+    // True when the artifact has more than the preview cap so the
+    // "Read full" toggle should be shown. Hidden when the content fits
+    // entirely in the preview, when the artifact isn't text, or while
+    // it's still loading.
+    recentlyDeliveredHasMore(taskId) {
+      const a = this.recentlyDeliveredArtifacts[taskId];
+      if (!a || a.kind !== 'text' || !a.content) return false;
+      return a.content.length > 300;
+    },
+
+    toggleRecentlyDeliveredExpanded(taskId) {
+      this.recentlyDeliveredExpanded[taskId] = !this.recentlyDeliveredExpanded[taskId];
+    },
+
+    // Copy the artifact's full text to the clipboard. Uses the modern
+    // clipboard API when available (HTTPS / localhost) and falls back
+    // to a hidden textarea + execCommand for older browsers and the
+    // insecure-context case (file://). The toast feedback comes from
+    // the existing showToast helper so the user sees confirmation
+    // without us inventing a new banner.
+    async copyRecentlyDeliveredText(taskId) {
+      const text = this.recentlyDeliveredFull(taskId);
+      if (!text) return;
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(text);
+        } else {
+          const ta = document.createElement('textarea');
+          ta.value = text;
+          ta.setAttribute('readonly', '');
+          ta.style.position = 'absolute';
+          ta.style.left = '-9999px';
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand('copy');
+          document.body.removeChild(ta);
+        }
+        if (typeof this.showToast === 'function') this.showToast('Copied to clipboard', 2000);
+      } catch (e) {
+        if (typeof this.showToast === 'function') this.showToast('Copy failed', 3000);
+      }
     },
 
     // Kanban filter — drop pending/blocked rows older than 14 days

@@ -2483,6 +2483,154 @@ class TestDashboardCaptchaHelpSpaWiring:
         assert "msg.role !== 'browser_captcha_help_request'" in body
 
 
+class TestBoardLoadingAndErrorStates:
+    """PR-M — Board loading/error states + inline artifact preview.
+
+    Each loadWorkplace* function used to swallow errors silently
+    (``console.error``) which left the user staring at an empty
+    panel with no way to retry. These assertions guard the wiring
+    so a regression (someone removing the per-section state or the
+    retry helper) trips a unit test.
+    """
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir)
+        self.client = _make_client(self.components)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_app_js_declares_per_section_loading_and_error_state(self):
+        resp = self.client.get("/dashboard/static/js/app.js")
+        assert resp.status_code == 200
+        body = resp.text
+        # Per-section state buckets so the template can render
+        # skeletons + error banners independently per section.
+        assert "workplaceSectionLoading" in body
+        assert "workplaceErrors" in body
+        # Sections covered (matches the loadWorkplace* surface).
+        for key in ("projects", "tasks", "blockers", "outputs", "pending", "feed"):
+            assert f"{key}: false" in body or f"'{key}'" in body or f'"{key}"' in body, \
+                f"app.js missing per-section bucket for {key}"
+
+    def test_app_js_load_functions_set_error_on_failure(self):
+        resp = self.client.get("/dashboard/static/js/app.js")
+        body = resp.text
+        # Error path replaces silent console.error: each loader sets
+        # its bucket so the banner renders.
+        assert "workplaceErrors.feed" in body
+        assert "workplaceErrors.projects" in body
+        assert "workplaceErrors.tasks" in body
+        assert "workplaceErrors.outputs" in body
+
+    def test_app_js_exposes_retry_helper(self):
+        resp = self.client.get("/dashboard/static/js/app.js")
+        body = resp.text
+        # Banners call retryWorkplaceSection(section) which clears
+        # the error and re-runs the section loader.
+        assert "retryWorkplaceSection" in body
+
+    def test_index_html_renders_skeleton_loaders(self):
+        resp = self.client.get("/dashboard/")
+        body = resp.text
+        # Skeleton testid hooks per sub-tab. The pulsing rectangles
+        # use the existing animate-pulse + bg-gray-800 classes for
+        # visual consistency with the drill-in modal skeleton.
+        assert 'data-testid="workplace-feed-skeleton"' in body
+        assert 'data-testid="workplace-projects-skeleton"' in body
+        assert 'data-testid="workplace-tasks-skeleton"' in body
+        assert 'data-testid="workplace-outputs-skeleton"' in body
+        # Each skeleton is gated on workplaceSectionLoading.<section>
+        # so it disappears when the load resolves.
+        assert "workplaceSectionLoading.feed" in body
+        assert "workplaceSectionLoading.projects" in body
+        assert "workplaceSectionLoading.tasks" in body
+        assert "workplaceSectionLoading.outputs" in body
+
+    def test_index_html_renders_error_banners_with_retry(self):
+        resp = self.client.get("/dashboard/")
+        body = resp.text
+        # Error banner testid hooks per sub-tab.
+        assert 'data-testid="workplace-feed-error"' in body
+        assert 'data-testid="workplace-projects-error"' in body
+        assert 'data-testid="workplace-tasks-error"' in body
+        assert 'data-testid="workplace-outputs-error"' in body
+        # Each banner has a "Retry" button bound to
+        # retryWorkplaceSection so the user can recover with one
+        # click without reloading.
+        assert "retryWorkplaceSection('feed')" in body
+        assert "retryWorkplaceSection('projects')" in body
+        assert "retryWorkplaceSection('tasks')" in body
+        assert "retryWorkplaceSection('outputs')" in body
+
+    def test_app_js_recently_delivered_inline_preview_helpers(self):
+        resp = self.client.get("/dashboard/static/js/app.js")
+        body = resp.text
+        # Helpers that back the "Recently delivered" inline preview.
+        assert "_ensureRecentlyDeliveredArtifact" in body
+        assert "recentlyDeliveredPreview" in body
+        assert "recentlyDeliveredFull" in body
+        assert "toggleRecentlyDeliveredExpanded" in body
+        assert "copyRecentlyDeliveredText" in body
+        # Copy uses the modern clipboard API with a fallback so it
+        # works on file:// and older browsers too.
+        assert "navigator.clipboard" in body
+
+    def test_index_html_recently_delivered_inline_preview_wired(self):
+        resp = self.client.get("/dashboard/")
+        body = resp.text
+        # Lazy-fetch on first render of each row.
+        assert "_ensureRecentlyDeliveredArtifact(t.id)" in body
+        # Toggle + copy buttons present on the row.
+        assert "toggleRecentlyDeliveredExpanded(t.id)" in body
+        assert "copyRecentlyDeliveredText(t.id)" in body
+        # Preview vs full content selection happens in the template.
+        assert "recentlyDeliveredFull(t.id)" in body
+        assert "recentlyDeliveredPreview(t.id)" in body
+
+    def test_index_html_chip_prefix_does_not_overwrite(self):
+        resp = self.client.get("/dashboard/")
+        body = resp.text
+        # The four onboarding chips now prepend their suggestion to
+        # whatever the user has already typed (chip + ' ' + opMsg)
+        # rather than clobbering it. Caret moves to the end via
+        # setSelectionRange so typing continues naturally.
+        assert "s.opMsg = chip + (s.opMsg ? ' ' + s.opMsg : '')" in body
+        assert "el.setSelectionRange(el.value.length, el.value.length)" in body
+
+
+class TestBoardTemplateDescriptions:
+    """PR-M — fleet-template descriptions rewritten as user outcomes.
+
+    Sarah-the-founder shouldn't need to know what a "blackboard
+    artifact" is to pick a template. Each description now tells her
+    what the team produces, in plain English.
+    """
+
+    def test_template_descriptions_are_plain_language(self):
+        import yaml
+
+        paths = {
+            "competitive-intel": "src/templates/competitive-intel.yaml",
+            "lead-enrichment": "src/templates/lead-enrichment.yaml",
+            "deep-research": "src/templates/deep-research.yaml",
+            "content": "src/templates/content.yaml",
+        }
+        descs = {}
+        for name, path in paths.items():
+            with open(path) as f:
+                data = yaml.safe_load(f)
+            descs[name] = data.get("description") or ""
+        # Jargon terms that previously leaked into user-facing copy.
+        for name, desc in descs.items():
+            assert "blackboard" not in desc.lower(), f"{name}: still mentions blackboard"
+            assert "artifact" not in desc.lower(), f"{name}: still mentions artifact"
+            # Each rewrite should describe a user-visible outcome.
+            assert len(desc) > 20, f"{name}: description too short"
+
+
 # ── V2 Tests: Messages ──────────────────────────────────────
 
 

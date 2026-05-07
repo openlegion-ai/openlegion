@@ -1,5 +1,5 @@
 name: lead-enrichment
-description: Lead enrichment team -- enricher builds company profiles from LinkedIn, Crunchbase, and job boards; formatter exports CRM-ready CSV and JSON artifacts
+description: Researches your lead list and adds company size, recent news, and decision-makers; returns CRM-ready CSV.
 
 agents:
   enricher:
