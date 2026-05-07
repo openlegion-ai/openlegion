@@ -888,6 +888,16 @@ def create_dashboard_router(
             h = health_map.get(agent_id, {})
             c = cost_map.get(agent_id, {})
             acfg = agents_cfg.get(agent_id, {})
+            # PR-L' — surface the most recent task event timestamp so
+            # the agent card can render "Last task Nm ago" alongside
+            # "Last seen" (health probe). Best-effort: ``None`` when
+            # tasks_v2 is disabled or the agent has no events yet.
+            last_task_ts: float | None = None
+            if tasks_store is not None:
+                try:
+                    last_task_ts = tasks_store.last_event_ts_for_agent(agent_id)
+                except Exception:
+                    last_task_ts = None
             entry = {
                 "id": agent_id,
                 "url": url,
@@ -898,6 +908,7 @@ def create_dashboard_router(
                 "restarts": h.get("restarts", 0),
                 "last_check": h.get("last_check", 0),
                 "last_healthy": h.get("last_healthy", 0),
+                "last_task_event_ts": last_task_ts,
                 "daily_cost": c.get("cost", 0),
                 "daily_tokens": c.get("tokens", 0),
                 "role": acfg.get("role", ""),
@@ -932,6 +943,7 @@ def create_dashboard_router(
                     "restarts": 0,
                     "last_check": 0,
                     "last_healthy": 0,
+                    "last_task_event_ts": None,
                     "daily_cost": 0,
                     "daily_tokens": 0,
                     "role": acfg.get("role", ""),

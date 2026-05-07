@@ -110,6 +110,28 @@ Wait for the user to respond or for the issue to resolve.
 
 <!-- playbook_v2 -->"""
 
+# ── Boot greeting (seeded once on first operator creation) ────
+
+_OPERATOR_GREETING = """\
+Hi — I'm your Operator. I'm here to help you build and run AI agent \
+teams without you having to drive every step.
+
+Tell me what you're trying to accomplish — like:
+- "I want to monitor my competitors' pricing weekly"
+- "I need a content team to ship 3 blog posts a week"
+- "I want to enrich my lead list with company info"
+
+I'll suggest a team, set them up, and check on their work for you. You \
+can always ask me what's happening, change a teammate, or pause anything \
+that's not working.
+"""
+"""First-message greeting seeded into the operator's chat transcript on
+fresh creation. Rendered as an ``assistant``-role message tagged with
+``_origin == "bootstrap_greeting"`` so the dashboard / context layer can
+distinguish it from real LLM-authored output. NOT re-emitted on chat
+reset (see Decision #3 in the Post-Board roadmap).
+"""
+
 # ── Playbooks (loaded on demand) ──────────────────────────────
 
 _PLAYBOOK_TEAM_BUILD = """\

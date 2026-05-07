@@ -88,6 +88,19 @@ def main() -> None:
         initial_interface=initial_interface,
     )
 
+    # PR-L' — first-message greeting seeded into the chat transcript.
+    # Fires only on the very first boot of a fresh agent (gated on a
+    # sentinel file that lives in the persistent /data volume so it
+    # survives container restarts AND chat resets). The greeting is
+    # tagged with ``_origin == "bootstrap_greeting"`` so the LLM
+    # context layer can distinguish it from genuine assistant output.
+    initial_greeting = os.environ.get("INITIAL_GREETING", "")
+    if initial_greeting:
+        try:
+            workspace.seed_bootstrap_greeting(initial_greeting)
+        except Exception as e:
+            logger.debug("Greeting seed skipped: %s", e)
+
     # Copy host-mounted PROJECT.md into workspace (mounted at /app to avoid
     # Docker creating /data/workspace as root and breaking permissions)
     host_project = Path("/app/PROJECT.md")

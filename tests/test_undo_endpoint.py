@@ -171,6 +171,108 @@ async def test_undo_403_for_non_operator(mesh_app):
 
 
 @pytest.mark.asyncio
+async def test_heartbeat_schedule_soft_edit_updates_cron(mesh_app):
+    """PR-L' — heartbeat_schedule edits must retarget the agent's cron job."""
+    app, server_module, tmp_path = mesh_app
+
+    blackboard = Blackboard(str(tmp_path / "bb_hs.db"))
+    pubsub = PubSub()
+    permissions = PermissionMatrix()
+    permissions.permissions["operator"] = AgentPermissions(
+        agent_id="operator", can_route_tasks=True,
+    )
+    permissions.permissions["writer"] = AgentPermissions(agent_id="writer")
+    router = MessageRouter(permissions, {})
+
+    from src.host.cron import CronScheduler
+    cron = CronScheduler(config_path=str(tmp_path / "cron.json"))
+    cron.ensure_heartbeat("writer", schedule="every 1h")
+
+    app2 = server_module.create_mesh_app(
+        blackboard=blackboard,
+        pubsub=pubsub,
+        router=router,
+        permissions=permissions,
+        cron_scheduler=cron,
+    )
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app2), base_url="http://t") as c:
+            r = await c.post(
+                "/mesh/agents/writer/edit-soft",
+                json={
+                    "field": "heartbeat_schedule",
+                    "value": "*/15 * * * *",
+                    "reason": "user_asked",
+                },
+                headers=_human_origin_headers(),
+            )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["success"] is True
+        assert body["field"] == "heartbeat_schedule"
+        # Cron job updated.
+        hb = cron.find_heartbeat_job("writer")
+        assert hb is not None
+        assert hb.schedule == "*/15 * * * *"
+    finally:
+        blackboard.close()
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_schedule_undo_restores_prior_cron(mesh_app):
+    """Undoing a heartbeat_schedule edit must restore the prior schedule."""
+    app, server_module, tmp_path = mesh_app
+
+    blackboard = Blackboard(str(tmp_path / "bb_hs2.db"))
+    pubsub = PubSub()
+    permissions = PermissionMatrix()
+    permissions.permissions["operator"] = AgentPermissions(
+        agent_id="operator", can_route_tasks=True,
+    )
+    permissions.permissions["writer"] = AgentPermissions(agent_id="writer")
+    router = MessageRouter(permissions, {})
+
+    from src.host.cron import CronScheduler
+    cron = CronScheduler(config_path=str(tmp_path / "cron2.json"))
+    cron.ensure_heartbeat("writer", schedule="every 1h")
+
+    app2 = server_module.create_mesh_app(
+        blackboard=blackboard,
+        pubsub=pubsub,
+        router=router,
+        permissions=permissions,
+        cron_scheduler=cron,
+    )
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app2), base_url="http://t") as c:
+            edit = await c.post(
+                "/mesh/agents/writer/edit-soft",
+                json={
+                    "field": "heartbeat_schedule",
+                    "value": "*/15 * * * *",
+                    "reason": "user_asked",
+                },
+                headers=_human_origin_headers(),
+            )
+            assert edit.status_code == 200, edit.text
+            token = edit.json()["undo_token"]
+            r = await c.post(
+                f"/mesh/changes/undo/{token}",
+                json={},
+                headers=_human_origin_headers(),
+            )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["success"] is True
+        # Cron schedule reverted to the original.
+        hb = cron.find_heartbeat_job("writer")
+        assert hb is not None
+        assert hb.schedule == "every 1h"
+    finally:
+        blackboard.close()
+
+
+@pytest.mark.asyncio
 async def test_undo_emits_undone_event(mesh_app):
     """After a successful undo the bus must see operator_action_receipt_undone."""
     app, server_module, tmp_path = mesh_app

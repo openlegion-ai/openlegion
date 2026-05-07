@@ -394,6 +394,12 @@ class RuntimeContext:
                 agent_env["INITIAL_INTERFACE"] = initial_interface
             if agent_id == _OPERATOR_AGENT_ID:
                 agent_env["ALLOWED_TOOLS"] = ",".join(_OPERATOR_ALLOWED_TOOLS)
+                # PR-L' — pass the boot greeting so the agent can seed
+                # its chat transcript on first start. Idempotency is
+                # gated agent-side on a sentinel file in /data/workspace,
+                # so subsequent restarts and chat-resets do NOT re-emit.
+                from src.shared.operator_playbooks import _OPERATOR_GREETING
+                agent_env["INITIAL_GREETING"] = _OPERATOR_GREETING
 
             # Project env vars
             project_name = agent_projects.get(agent_id)
@@ -459,6 +465,7 @@ class RuntimeContext:
                 self.runtime.extra_env.pop("INITIAL_SOUL", None)
                 self.runtime.extra_env.pop("INITIAL_HEARTBEAT", None)
                 self.runtime.extra_env.pop("INITIAL_INTERFACE", None)
+                self.runtime.extra_env.pop("INITIAL_GREETING", None)
                 self.runtime.extra_env.pop("PROJECT_MD_PATH", None)
                 self.runtime.extra_env.pop("PROJECT_NAME", None)
                 self.runtime.extra_env.pop("HTTP_PROXY", None)

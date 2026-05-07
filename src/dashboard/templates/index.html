@@ -1847,6 +1847,13 @@
                   </span>
                   <span class="stat-value" x-text="formatCost(agent.daily_cost)"></span>
                 </div>
+                <div class="stat-row" x-show="agent.last_healthy || agent.last_task_event_ts">
+                  <span class="stat-label">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                    Last activity<span class="setting-hint setting-hint-sm ml-0.5" tabindex="0">?<span class="setting-hint-text">"Last seen" is the most recent successful health probe; "Last task" is the most recent task event (status change, comment, completion). The two diverge when an agent is healthy but idle, or has finished work but is now offline.</span></span>
+                  </span>
+                  <span class="stat-value text-[11px]" x-text="agentActivityLabel(agent)"></span>
+                </div>
               </div>
 
               <!-- Agent actions: Chat + heartbeat Pause/Resume (hidden when locked) -->

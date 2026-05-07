@@ -640,6 +640,43 @@ class WorkspaceManager:
     # ── Chat transcript ───────────────────────────────────────
 
     _MAX_TRANSCRIPT_SIZE = 2_000_000  # 2 MB — rotate if larger
+    _GREETING_SENTINEL = ".greeting_seeded"
+
+    def seed_bootstrap_greeting(self, greeting: str) -> bool:
+        """Seed a one-shot greeting into the chat transcript (idempotent).
+
+        Writes a single ``role=assistant`` entry tagged with
+        ``_origin == "bootstrap_greeting"`` so the LLM context layer
+        can distinguish it from a real model-authored message and
+        skip provenance gates that would otherwise reject it.
+
+        Idempotency is enforced via a sentinel file under the
+        workspace root — once written, subsequent calls are no-ops
+        even after a chat reset (which archives the transcript but
+        leaves the sentinel intact). Returns ``True`` when the
+        greeting was actually written, ``False`` when skipped.
+        """
+        if not greeting or not greeting.strip():
+            return False
+        sentinel = self.root / self._GREETING_SENTINEL
+        if sentinel.exists():
+            return False
+        path = self.root / self.CHAT_TRANSCRIPT
+        entry: dict = {
+            "role": "assistant",
+            "content": greeting,
+            "ts": time.time(),
+            "_origin": "bootstrap_greeting",
+        }
+        try:
+            self.root.mkdir(parents=True, exist_ok=True)
+            with path.open("a") as f:
+                f.write(json.dumps(entry, default=str) + "\n")
+            sentinel.touch()
+            return True
+        except OSError as e:
+            logger.debug("Failed to seed bootstrap greeting: %s", e)
+            return False
 
     def append_chat_message(
         self, role: str, content: str, *,
