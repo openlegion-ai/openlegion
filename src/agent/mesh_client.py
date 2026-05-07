@@ -1320,4 +1320,20 @@ class MeshClient:
         response.raise_for_status()
         return response.json()
 
+    async def get_agent_stale_tasks(
+        self, agent_id: str, threshold_hours: int = 24,
+    ) -> dict:
+        """Get up to 5 oldest stale task IDs for ``agent_id``.
+
+        Powers ``inspect_agents(stale_threshold_hours=N)`` in the
+        operator heartbeat. Returns ``{"agent_id", "threshold_hours",
+        "count", "task_ids"}``. Operator-only on the mesh side.
+        """
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/agents/{agent_id}/stale-tasks"
+            f"?threshold_hours={int(threshold_hours)}",
+        )
+        response.raise_for_status()
+        return response.json()
+
 

@@ -1139,7 +1139,9 @@ async def summarize_project_progress(
     description=(
         "Read agents. Without agent_id: roster summary. With agent_id: "
         "depth='profile' returns role/capabilities/INTERFACE; "
-        "depth='history' adds recent activity log. depth defaults to summary."
+        "depth='history' adds recent activity log. depth defaults to summary. "
+        "Pass stale_threshold_hours=N to also annotate each agent in the "
+        "roster with its stale-task count and up-to-5 oldest stale task IDs."
     ),
     parameters={
         "agent_id": {
@@ -1153,11 +1155,21 @@ async def summarize_project_progress(
             "enum": ["summary", "profile", "history"],
             "default": "summary",
         },
+        "stale_threshold_hours": {
+            "type": "integer",
+            "description": (
+                "When set, roster entries gain stale_task_count + "
+                "stale_task_ids (top 5 oldest). Counts non-terminal "
+                "tasks created more than N hours ago. Range 1-168."
+            ),
+            "default": 0,
+        },
     },
 )
 async def inspect_agents(
     agent_id: str = "",
     depth: str = "summary",
+    stale_threshold_hours: int | None = None,
     *,
     mesh_client=None,
     **_kw,
@@ -1169,6 +1181,18 @@ async def inspect_agents(
         return {"error": "This tool is only available to the operator agent."}
     if mesh_client is None:
         return {"error": "No mesh_client available"}
+
+    # ``0`` is the JSON-schema default for the optional integer param;
+    # treat 0 the same as None (param not supplied) so the LLM can omit
+    # it without triggering a stale-task lookup.
+    threshold_h = stale_threshold_hours or None
+    if threshold_h is not None and not (1 <= threshold_h <= 168):
+        return {
+            "error": (
+                "stale_threshold_hours must be between 1 and 168 "
+                "(1 hour to 7 days)"
+            ),
+        }
 
     # No agent_id → roster (always summary regardless of depth).
     if not agent_id:
@@ -1182,8 +1206,27 @@ async def inspect_agents(
             if isinstance(info, dict):
                 entry["role"] = info.get("role", "")
                 entry["capabilities"] = info.get("capabilities", [])
+            if threshold_h is not None:
+                # Per-agent stale lookup. Failures degrade to count=0
+                # so a single agent's mesh hiccup doesn't poison the
+                # whole roster response.
+                try:
+                    stale = await mesh_client.get_agent_stale_tasks(
+                        name, threshold_hours=threshold_h,
+                    )
+                    entry["stale_task_count"] = int(stale.get("count", 0) or 0)
+                    entry["stale_task_ids"] = list(stale.get("task_ids", []))
+                except Exception as e:
+                    logger.debug(
+                        "inspect_agents stale lookup failed for %s: %s", name, e,
+                    )
+                    entry["stale_task_count"] = 0
+                    entry["stale_task_ids"] = []
             agents.append(entry)
-        return {"agents": agents, "count": len(agents)}
+        result: dict = {"agents": agents, "count": len(agents)}
+        if threshold_h is not None:
+            result["stale_threshold_hours"] = threshold_h
+        return result
 
     if depth == "history":
         try:

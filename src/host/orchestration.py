@@ -464,6 +464,114 @@ class Tasks:
             rows = conn.execute(sql, params).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
+    # ── Per-agent aggregates for the operator heartbeat (PR-J') ─────
+    #
+    # The system_metrics endpoint surfaces per-agent counts so the
+    # operator's heartbeat playbook can drill in only when something
+    # actually broke. Counts (not rates) so single-task agents don't
+    # produce noisy 100% denominators. Operator exclusion is handled
+    # by the caller — these helpers run unfiltered and the caller
+    # drops ``operator`` from the dict before serialising.
+
+    def count_outcomes_since(
+        self,
+        outcome: str,
+        *,
+        since_seconds: float,
+    ) -> dict[str, int]:
+        """Count tasks per assignee whose latest ``outcome`` was set within ``since_seconds``.
+
+        Mirrors ``SELECT assignee, COUNT(*) FROM tasks WHERE outcome=?
+        AND completed_at >= ? GROUP BY assignee``. Operator is included;
+        callers drop it. Tasks with NULL ``completed_at`` (still running)
+        are excluded by the >= filter.
+        """
+        cutoff = time.time() - since_seconds
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT assignee, COUNT(*) FROM tasks "
+                "WHERE outcome = ? AND completed_at IS NOT NULL "
+                "AND completed_at >= ? GROUP BY assignee",
+                (outcome, cutoff),
+            ).fetchall()
+        return {row[0]: int(row[1] or 0) for row in rows if row[0]}
+
+    def count_failed_status_since(
+        self,
+        *,
+        since_seconds: float,
+    ) -> dict[str, int]:
+        """Count tasks per assignee that landed in ``failed`` within ``since_seconds``.
+
+        ``status='failed'`` always sets ``completed_at`` (terminal
+        transitions stamp both), so we filter on ``completed_at`` rather
+        than ``updated_at`` — keeps the metric stable even if an
+        operator no-op-edits a failed task later.
+        """
+        cutoff = time.time() - since_seconds
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT assignee, COUNT(*) FROM tasks "
+                "WHERE status = 'failed' AND completed_at IS NOT NULL "
+                "AND completed_at >= ? GROUP BY assignee",
+                (cutoff,),
+            ).fetchall()
+        return {row[0]: int(row[1] or 0) for row in rows if row[0]}
+
+    def count_stale_since(
+        self,
+        *,
+        threshold_seconds: float,
+    ) -> dict[str, int]:
+        """Count non-terminal tasks per assignee created more than ``threshold_seconds`` ago.
+
+        Stale = open work that's been sitting around longer than the
+        operator's patience window. Done / failed / cancelled rows are
+        excluded so the count means "still owed".
+        """
+        cutoff = time.time() - threshold_seconds
+        placeholders = ",".join("?" * len(TERMINAL_STATUSES))
+        params: list[Any] = sorted(TERMINAL_STATUSES)
+        params.append(cutoff)
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT assignee, COUNT(*) FROM tasks "
+                f"WHERE status NOT IN ({placeholders}) "
+                "AND created_at < ? GROUP BY assignee",
+                params,
+            ).fetchall()
+        return {row[0]: int(row[1] or 0) for row in rows if row[0]}
+
+    def list_stale_for_assignee(
+        self,
+        assignee: str,
+        *,
+        threshold_seconds: float,
+        limit: int = 5,
+    ) -> list[str]:
+        """Return up to ``limit`` stale task IDs for ``assignee``, oldest first.
+
+        Used by ``inspect_agents(stale_threshold_hours=N)`` so the
+        operator drills into a small set of representative IDs without
+        fetching the full row payloads.
+        """
+        cutoff = time.time() - threshold_seconds
+        placeholders = ",".join("?" * len(TERMINAL_STATUSES))
+        params: list[Any] = [assignee]
+        params.extend(sorted(TERMINAL_STATUSES))
+        params.append(cutoff)
+        params.append(int(limit))
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT id FROM tasks "
+                "WHERE assignee = ? "
+                f"AND status NOT IN ({placeholders}) "
+                "AND created_at < ? "
+                "ORDER BY created_at ASC LIMIT ?",
+                params,
+            ).fetchall()
+        return [row[0] for row in rows]
+
     def update_status(
         self,
         task_id: str,

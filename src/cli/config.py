@@ -1567,30 +1567,43 @@ _OPERATOR_HEARTBEAT = """\
 You are running an autonomous fleet health check. You have access ONLY to monitoring tools.
 Your previous observations are included above in OBSERVATIONS.md.
 
+Step budget: stay at or under 8 tool calls per cycle (HEARTBEAT_MAX_ITERATIONS=10
+in the loop; 8 leaves headroom for the final assistant turn).
+
 1. Review your previous observations (above) to check what you flagged last cycle.
    Do not re-alert on known issues unless they have escalated in severity.
 
 2. Call get_system_status() for fleet-wide metrics:
    - Total cost, cost trend vs yesterday
-   - Agent health counts
-   - Pre-computed agents_needing_attention list
+   - Per-agent cost (per_agent_cost_today_usd, per_agent_cost_vs_yesterday_ratio)
+   - Per-agent task health: outcome_rejected_24h_count, execution_failures_24h_count,
+     stale_tasks_24h_count
+   - Agent health counts and pre-computed agents_needing_attention list
    - Plan limits and current usage
 
-3. Call inspect_agents() for per-agent status overview.
+3. Call inspect_agents() for the roster summary.
 
-4. For agents flagged in agents_needing_attention or with new concerning signals
-   (unhealthy, cost_vs_yesterday_ratio > 2.0), call
-   inspect_agents(agent_id, depth="profile") for details.
+4. Drill in for agents that show concerning signals. PREFER one targeted call
+   per drill — don't fan out across the whole fleet:
+   - If any agent appears in agents_needing_attention OR has
+     per_agent_cost_vs_yesterday_ratio > 2.0 OR
+     outcome_rejected_24h_count[agent] > 5 OR
+     execution_failures_24h_count[agent] > 3:
+     call inspect_agents(agent_id, depth="profile") for that agent.
+   - If stale_tasks_24h_count has any non-zero entry, call
+     inspect_agents(stale_threshold_hours=24) ONCE to pull the offending
+     task IDs (the result annotates every roster entry — don't loop).
 
 5. Call save_observations() with:
    - fleet_summary: one-line health (e.g. "5/6 healthy, cost stable")
    - agents_attention: list of agents needing attention with issue and severity
    - cost_trend: up/down/stable with percentage
-   - notes: anything unusual not captured above
+   - notes: stale task IDs, rejected outcomes, anything unusual not captured above
 
-6. If any agent is CRITICAL (failed state, budget exceeded),
-   call notify_user() with a brief alert. Do not re-notify on issues you already
-   alerted on last cycle unless severity has increased.
+6. If any agent is CRITICAL (failed state, budget exceeded, >5 rejected outcomes,
+   or stale work blocking a project), call notify_user() with a brief alert.
+   Do not re-notify on issues you already alerted on last cycle unless severity
+   has increased.
 
 If any tool call fails, record the failure in save_observations and continue.
 Do not hallucinate data you could not retrieve.
