@@ -6,9 +6,14 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -28,6 +33,9 @@ jobs:
         run: uv pip install --system -e ".[dev]" Pillow
       - name: Run tests
         run: |
+          # --dist=loadfile keeps tests from one file on a single xdist worker
+          # so fixture caches are reused (matters for big files like
+          # tests/test_browser_service.py — 493 tests with shared setup).
           pytest \
             tests/ \
             --ignore=tests/test_e2e.py \
@@ -44,6 +52,7 @@ jobs:
   coverage:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python
@@ -71,6 +80,7 @@ jobs:
 
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python
