@@ -1,6 +1,6 @@
 """UI-level tests for the dashboard SPA.
 
-This file aggregates two layers of UI-contract tests:
+This file aggregates three layers of UI-contract tests:
 
 1. Phase -1 onboarding wizard — verifies the wizard markup is present,
    the chip buttons reference the locked labels, the Alpine state
@@ -12,13 +12,19 @@ This file aggregates two layers of UI-contract tests:
    in the SPA template and JS-source-level checks for the activity
    translation helper.
 
+3. Phase 3 Home single-scroll layout + Operator action chips — verifies
+   ACTION-line parsing strips the trailing chip block, default Quick
+   actions render, the Home single-scroll section testids are wired,
+   and the kanban sub-page is gated on ``homeTab === 'tasks'``.
+
 We can't run a real headless browser in CI, so all assertions are
 string-level over the rendered template + static JS — enough to catch
 regressions like "someone deleted the chip", "the state machine forgot
 a transition", "a vocab string drifted", or "the chat empty state isn't
 gated on wizard.step".
 
-Phase 2 of the Board UX overhaul (`docs/plans/2026-05-08-board-ux-overhaul.md`).
+Phase 2 / Phase 3 of the Board UX overhaul
+(`docs/plans/2026-05-08-board-ux-overhaul.md`).
 """
 
 from __future__ import annotations
@@ -29,6 +35,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -46,6 +53,23 @@ _APP_JS = _REPO_ROOT / "src/dashboard/static/js/app.js"
 # the wizard tests.
 _INDEX_HTML = _TEMPLATE.read_text(encoding="utf-8")
 _APP_JS_TEXT = _APP_JS.read_text(encoding="utf-8")
+
+
+# Phase 3 fixture aliases — pytest fixtures so chip-parsing tests can
+# request the source as plain strings.
+ROOT = _REPO_ROOT
+APP_JS = _APP_JS
+INDEX_HTML = _TEMPLATE
+
+
+@pytest.fixture(scope="module")
+def app_js() -> str:
+    return APP_JS.read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def index_html() -> str:
+    return INDEX_HTML.read_text(encoding="utf-8")
 
 
 # ── Static markup contract ───────────────────────────────────────
@@ -468,3 +492,255 @@ class TestActivityVerbs:
     def test_verb_for_status_includes_terminal_states(self):
         for status in ("done", "blocked", "failed", "cancelled", "delivered"):
             assert f"{status}:" in _APP_JS_TEXT, f"verbForStatus missing {status}"
+
+
+# ── Pure-Python reimplementation of the JS chip parser ──────────
+#
+# Mirrors ``_parseOperatorActions`` in ``app.js``. We mirror the contract
+# rather than spinning up a JS runtime so the test can run in CI without
+# Node. Keep this in sync if the JS implementation evolves; the tests
+# below assert on the JS source string for the regex itself so a divergent
+# regex still trips the test suite.
+_ACTION_LINE = re.compile(r"^(?:[-*]\s+)?ACTION\s*:\s*(.+)$", re.IGNORECASE)
+
+
+def parse_operator_actions(text: str) -> tuple[str, list[str]]:
+    """Strip trailing ACTION lines off ``text``; return (body, labels)."""
+    if not text:
+        return text or "", []
+    lines = text.split("\n")
+    actions: list[str] = []
+    trailing = len(lines)
+    for i in range(len(lines) - 1, -1, -1):
+        stripped = lines[i].strip()
+        if not stripped:
+            trailing = i
+            continue
+        if stripped == "```" or stripped.startswith("```"):
+            trailing = i
+            continue
+        m = _ACTION_LINE.match(stripped)
+        if m:
+            label = m.group(1).strip().strip("\"'`").strip()
+            if label and len(label) <= 80:
+                actions.insert(0, label[:60])
+            trailing = i
+            continue
+        break
+    if not actions:
+        return text, []
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for label in actions:
+        key = label.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(label)
+        if len(deduped) >= 6:
+            break
+    body = "\n".join(lines[:trailing]).rstrip()
+    return body, deduped
+
+
+class TestParseOperatorActions:
+    """Phase 3 — chip parsing extracts labels and strips them off the body."""
+
+    def test_extracts_two_chips(self):
+        text = (
+            "Got it — I'll get @writer on that.\n"
+            "\n"
+            "ACTION: Show me what we delivered\n"
+            "ACTION: Add another teammate\n"
+        )
+        body, actions = parse_operator_actions(text)
+        assert body == "Got it — I'll get @writer on that."
+        assert actions == ["Show me what we delivered", "Add another teammate"]
+
+    def test_no_chips_returns_text_untouched(self):
+        text = "No chips here, just a normal message."
+        body, actions = parse_operator_actions(text)
+        assert body == text
+        assert actions == []
+
+    def test_dash_prefix_tolerated(self):
+        text = "ok\n\n- ACTION: First\n- ACTION: Second\n"
+        _, actions = parse_operator_actions(text)
+        assert actions == ["First", "Second"]
+
+    def test_fenced_block_tolerated(self):
+        text = "ok\n\n```\nACTION: Run a check\nACTION: Pause everything\n```\n"
+        body, actions = parse_operator_actions(text)
+        assert "ok" in body
+        assert actions == ["Run a check", "Pause everything"]
+
+    def test_dedupes_case_insensitive(self):
+        text = "x\n\nACTION: Do it\nACTION: do it\nACTION: Other\n"
+        _, actions = parse_operator_actions(text)
+        assert actions == ["Do it", "Other"]
+
+    def test_caps_at_six(self):
+        text = "x\n\n" + "\n".join(f"ACTION: Label {i}" for i in range(20))
+        _, actions = parse_operator_actions(text)
+        assert len(actions) == 6
+
+    def test_action_in_middle_stays_inline(self):
+        # Spec contract — ACTION block must be at the very end. An ACTION
+        # token mid-message stays as plain text.
+        text = "I noted ACTION: foo earlier in the message\n\nOK."
+        body, actions = parse_operator_actions(text)
+        assert actions == []
+        assert "ACTION: foo" in body
+
+    def test_empty_body_when_only_chips(self):
+        text = "ACTION: Only thing\nACTION: Other thing\n"
+        body, actions = parse_operator_actions(text)
+        assert body == ""
+        assert actions == ["Only thing", "Other thing"]
+
+    def test_strips_quotes_around_label(self):
+        text = "x\n\nACTION: \"Quoted thing\"\nACTION: 'Other'\n"
+        _, actions = parse_operator_actions(text)
+        assert actions == ["Quoted thing", "Other"]
+
+
+class TestChipParserInJsSource:
+    """The JS implementation in app.js must match the Python mirror."""
+
+    def test_parser_function_present(self, app_js: str):
+        assert "_parseOperatorActions" in app_js
+        assert "_applyOperatorActions" in app_js
+        assert "sendOperatorChip" in app_js
+
+    def test_regex_matches_python_mirror(self, app_js: str):
+        # The regex literal is embedded as a JS RegExp; assert that the
+        # core anchor + ACTION token + capture pattern is present so
+        # the dash/star bullet variants stay tolerated.
+        assert "[-*]" in app_js or "[-\\*]" in app_js, \
+            "ACTION-line regex in app.js must accept optional dash/star prefix"
+        assert "ACTION" in app_js
+        # Spot-check the regex literal as written in app.js. We look for
+        # the ``ACTION\s*:\s*(.+)$`` body which is the load-bearing part
+        # of the parser.
+        assert re.search(r"ACTION\\s\*:\\s\*\(\.\+\)\$", app_js)
+
+    def test_done_handler_invokes_parser_for_operator(self, app_js: str):
+        # The streaming ``done`` event must trigger chip parsing only for
+        # the operator agent — worker chats render free-text bodies.
+        assert "if (agentId === 'operator') this._applyOperatorActions(entry)" in app_js
+
+    def test_history_loader_invokes_parser_for_operator(self, app_js: str):
+        # Loading history from the server should re-derive chips so a
+        # page reload doesn't lose them.
+        assert "for (const sm of serverMsgs) this._applyOperatorActions(sm)" in app_js
+
+
+class TestQuickActionsMenu:
+    """Phase 3 — pre-chip "Quick actions" menu defaults."""
+
+    def test_default_chips_present(self, app_js: str):
+        # All four labels from the plan must be present verbatim so a
+        # vocabulary sweep can find them in one place.
+        for label in (
+            "What's happening?",
+            "Show me what we delivered",
+            "Add someone to my team",
+            "Pause everything",
+        ):
+            assert label in app_js, f"Missing default Quick action chip: {label!r}"
+
+    def test_show_chips_helper_gates_on_pause(self, app_js: str):
+        # 5-min pause threshold per the plan. Use a permissive regex so
+        # whitespace / comment layout can change without breaking the test.
+        assert re.search(r"5\s*\*\s*60\s*\*\s*1000", app_js), \
+            "showOperatorDefaultChips should gate on a 5-min pause"
+
+    def test_quick_actions_markup_present(self, index_html: str):
+        assert 'data-testid="operator-quick-actions"' in index_html
+        assert "showOperatorDefaultChips()" in index_html
+
+
+class TestOperatorActionChipsMarkup:
+    """Operator response chips render below the bubble."""
+
+    def test_chips_block_present(self, index_html: str):
+        assert 'data-testid="operator-action-chips"' in index_html
+
+    def test_chips_only_render_for_operator_agent(self, index_html: str):
+        # The block must be gated on ``msg.role === 'agent'`` plus
+        # ``suggested_actions`` populated; we look for both substrings
+        # near each other.
+        idx = index_html.find('data-testid="operator-action-chips"')
+        assert idx > 0
+        # Walk back to the enclosing template open tag and check the gate.
+        slice_ = index_html[max(0, idx - 600):idx]
+        assert "suggested_actions" in slice_
+        assert "msg.role === 'agent'" in slice_
+
+    def test_chip_click_uses_send_operator_chip(self, index_html: str):
+        idx = index_html.find('data-testid="operator-action-chips"')
+        assert idx > 0
+        nearby = index_html[idx:idx + 800]
+        assert "sendOperatorChip" in nearby
+
+
+class TestHomeSingleScrollLayout:
+    """Phase 3 — Workplace tab restructured into a single scroll page."""
+
+    def test_main_layout_gated_on_home_tab(self, index_html: str):
+        # The main scroll renders only when ``homeTab === 'main'``.
+        assert "workplaceEnabled && homeTab === 'main'" in index_html
+
+    def test_kanban_subpage_gated_on_home_tab_tasks(self, index_html: str):
+        # The kanban moves to its own sub-page (homeTab === 'tasks').
+        assert "workplaceEnabled && homeTab === 'tasks'" in index_html
+
+    def test_section_testids_present(self, index_html: str):
+        # Every section in the new layout has a testid so a future
+        # refactor can't accidentally hide one without tripping a test.
+        for testid in (
+            "home-main",
+            "home-just-delivered",
+            "home-happening-now",
+            "home-in-progress",
+            "home-see-task-board",
+        ):
+            assert f'data-testid="{testid}"' in index_html, \
+                f"Missing testid: {testid}"
+
+    def test_subtab_bar_removed(self, index_html: str):
+        # The legacy sub-tab bar must be gone — searching for the unique
+        # ``workplaceTab = wt.id`` click handler (sub-tab buttons) should
+        # no longer find it.
+        assert "workplaceTab = wt.id; loadWorkplace()" not in index_html
+
+    def test_back_to_home_link_in_tasks_subpage(self, index_html: str):
+        # Tasks sub-page exposes a back link that returns to ``main``.
+        assert 'data-testid="home-back-to-main"' in index_html
+        assert "switchHomeTab('main')" in index_html
+
+    def test_legacy_subtabs_hidden_with_back_compat_gate(self, index_html: str):
+        # The old project-status / team-outputs renders are kept in
+        # markup behind a ``false &&`` short-circuit so nothing visible
+        # depends on ``workplaceTab`` while deep-link callers still
+        # don't NPE on the missing template.
+        assert "false && workplaceEnabled && workplaceTab === 'project-status'" in index_html
+        assert "false && workplaceEnabled && workplaceTab === 'team-outputs'" in index_html
+
+
+class TestHomeRouting:
+    """Phase 3 — ``/home`` and ``/home/tasks`` URL routes."""
+
+    def test_build_path_emits_home_route(self, app_js: str):
+        # ``_buildPath`` returns ``/home`` and ``/home/tasks`` for the
+        # workplace tab depending on ``homeTab``.
+        assert "this.homeTab === 'tasks' ? '/home/tasks' : '/home'" in app_js
+
+    def test_parse_path_recognizes_home_routes(self, app_js: str):
+        # ``_parsePath`` accepts the new routes and maps them to the
+        # workplace tab + correct sub-page.
+        assert "clean === 'home'" in app_js
+        assert "clean === 'home/tasks'" in app_js or "home/tasks" in app_js
+
+    def test_switch_home_tab_helper_present(self, app_js: str):
+        assert "switchHomeTab(tabId)" in app_js
