@@ -779,9 +779,9 @@ function dashboard() {
         return (st ? st.label : 'System') + ' \u2014 OpenLegion';
       }
       if (this.activeTab === 'workplace') {
-        return this.homeTab === 'activity' ? 'Activity \u2014 OpenLegion' : 'Board \u2014 OpenLegion';
+        return this.homeTab === 'activity' ? 'Activity \u2014 OpenLegion' : 'Work \u2014 OpenLegion';
       }
-      return 'Agents \u2014 OpenLegion';
+      return 'Team \u2014 OpenLegion';
     },
 
     _parsePath(path) {
@@ -7942,8 +7942,10 @@ function dashboard() {
       }
       // Match tabs with keywords
       const tabKeywords = {
-        fleet: ['agents', 'fleet', 'cards', 'project'],
-        system: ['system', 'costs', 'cron', 'schedules', 'automation', 'credentials', 'api keys', 'connections', 'integrations', 'infrastructure', 'pricing', 'browsers', 'pubsub', 'blackboard', 'comms', 'communication', 'workflows', 'storage', 'uploads', 'disk', 'network', 'proxy', 'socks'],
+        chat: ['chat', 'operator', 'message', 'talk', 'ask'],
+        workplace: ['work', 'home', 'board', 'kanban', 'tasks', 'activity', 'delivered', 'in progress', 'stuck'],
+        fleet: ['team', 'agents', 'fleet', 'cards', 'project'],
+        system: ['settings', 'system', 'costs', 'cron', 'schedules', 'automation', 'credentials', 'api keys', 'connections', 'integrations', 'infrastructure', 'pricing', 'browsers', 'pubsub', 'blackboard', 'comms', 'communication', 'workflows', 'storage', 'uploads', 'disk', 'network', 'proxy', 'socks'],
       };
       for (const [tabId, keywords] of Object.entries(tabKeywords)) {
         const tab = this.tabs.find(t => t.id === tabId);
