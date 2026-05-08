@@ -76,6 +76,20 @@ function dashboard() {
     // Operator readiness
     operatorReady: false,
 
+    // Phase 3 — Operator default "Quick actions" chips. Rendered before
+    // the user has typed anything in this conversation OR after a long
+    // pause (>5 min since last user message). Hidden once the user types
+    // or sends. ``_operatorLastUserMessageTs`` tracks the last user-sent
+    // timestamp so the menu can re-appear after pauses without storing
+    // anything server-side.
+    operatorDefaultChips: [
+      "What's happening?",
+      'Show me what we delivered',
+      'Add someone to my team',
+      'Pause everything',
+    ],
+    _operatorLastUserMessageTs: 0,
+
     // Fleet Digest (parsed from operator's OBSERVATIONS.md)
     fleetDigest: null,
     fleetDigestRefreshing: false,
@@ -383,6 +397,17 @@ function dashboard() {
       { id: 'task-board', label: 'Tasks' },
       { id: 'team-outputs', label: 'Outputs' },
     ],
+    // Phase 3 — Home single-scroll layout.
+    // ``homeTab`` is the sub-route within the Home (workplace) tab.
+    //   ``main`` (default) → single-scroll layout: Needs You + Just
+    //     delivered + Happening now + In progress.
+    //   ``tasks`` → full kanban sub-page (lifted from the legacy
+    //     ``task-board`` sub-tab content). Reachable via the
+    //     "See full task board →" link or the URL ``/home/tasks``.
+    // Sub-tabs (Activity/Projects/Tasks/Outputs) collapsed; the legacy
+    // ``workplaceTab`` state stays for backward compat with deep links
+    // and any test that still toggles it.
+    homeTab: 'main',
     workplaceEnabled: true,
     workplaceProjects: [],
     workplaceTasks: [],
@@ -689,6 +714,13 @@ function dashboard() {
         return '/system/' + (this.systemTab || 'activity');
       }
       if (this.activeTab === 'fleet') return '/agents';
+      // Phase 3 — Home (workplace) sub-routing. Default lands on the
+      // single-scroll layout (``/home``); the kanban sub-page is at
+      // ``/home/tasks``. Bookmarks for ``/home`` keep working when the
+      // user switches between Home and other tabs.
+      if (this.activeTab === 'workplace') {
+        return this.homeTab === 'tasks' ? '/home/tasks' : '/home';
+      }
       return '/';
     },
 
@@ -707,16 +739,26 @@ function dashboard() {
         const st = this.systemTabs.find(t => t.id === this.systemTab);
         return (st ? st.label : 'System') + ' \u2014 OpenLegion';
       }
+      if (this.activeTab === 'workplace') {
+        return this.homeTab === 'tasks' ? 'Tasks \u2014 OpenLegion' : 'Board \u2014 OpenLegion';
+      }
       return 'Agents \u2014 OpenLegion';
     },
 
     _parsePath(path) {
       const clean = path.replace(/^\/+/, '').replace(/\/+$/, '');
-      const route = { tab: 'chat', activityView: 'traces', systemTab: 'activity', agentId: null, identityTab: 'config' };
+      const route = { tab: 'chat', activityView: 'traces', systemTab: 'activity', agentId: null, identityTab: 'config', homeTab: 'main' };
       if (!clean) return route;
 
       if (clean === 'chat') { route.tab = 'chat'; return route; }
       if (clean === 'agents' || clean.startsWith('agents/')) { route.tab = 'fleet'; }
+      // Phase 3 — Home sub-routing. ``/home`` → single-scroll layout;
+      // ``/home/tasks`` → kanban sub-page. Anything deeper falls back
+      // to the main layout.
+      if (clean === 'home') { route.tab = 'workplace'; route.homeTab = 'main'; return route; }
+      if (clean === 'home/tasks' || clean.startsWith('home/tasks')) {
+        route.tab = 'workplace'; route.homeTab = 'tasks'; return route;
+      }
 
       const agentMatch = clean.match(/^agents\/([^/]+)(?:\/([^/]+))?$/);
       if (agentMatch) {
@@ -782,7 +824,16 @@ function dashboard() {
               this.systemTab = route.systemTab;
               if (route.systemTab === 'activity') this.activityView = route.activityView;
             }
+            if (route.tab === 'workplace') {
+              this.homeTab = route.homeTab || 'main';
+            }
             this.switchTab(route.tab);
+          } else if (route.tab === 'workplace') {
+            // Phase 3 — already on Home; just sync sub-page state
+            // without re-running loadWorkplace (no new fetch needed).
+            if (this.homeTab !== (route.homeTab || 'main')) {
+              this.homeTab = route.homeTab || 'main';
+            }
           } else if (route.tab === 'system') {
             if (this.systemTab !== route.systemTab) {
               if (this.systemTab === 'activity') this._stopActivityRefresh();
@@ -2176,6 +2227,17 @@ function dashboard() {
       if (!this._skipPush) this._pushUrl(false);
     },
 
+    // Phase 3 — Home sub-page switcher. ``main`` is the default
+    // single-scroll layout; ``tasks`` opens the kanban sub-page. Pushes
+    // a new history entry so the back button returns to the previous
+    // sub-page (or out of Home entirely if the user navigated in).
+    switchHomeTab(tabId) {
+      const target = tabId === 'tasks' ? 'tasks' : 'main';
+      if (this.homeTab === target) return;
+      this.homeTab = target;
+      this._pushUrl(false);
+    },
+
     switchSystemTab(tabId) {
       if (this.systemTab === 'activity' && tabId !== 'activity') this._stopActivityRefresh();
       this.systemTab = tabId;
@@ -3439,6 +3501,110 @@ function dashboard() {
       if (this.workplaceFeed.length > this.workplaceFeedCap) {
         this.workplaceFeed.length = this.workplaceFeedCap;
       }
+    },
+
+    // ── Operator action chips (Phase 3) ──────────────────
+    //
+    // Server-side, the operator's prompt instructs every response to end
+    // with 2-4 ``ACTION: <label>`` lines. ``_parseOperatorActions`` strips
+    // those lines from the message body and returns ``{body, actions}``
+    // so the chat renderer can show the prose untouched and render the
+    // labels as clickable chips below the bubble. Click → sends the
+    // label as the user's next message.
+    //
+    // The format is intentionally tolerant — the LLM occasionally emits
+    // bullet variants ("- ACTION:" / "* ACTION:") or wraps the block in
+    // a fenced code fence. We strip those wrappers, accept dash-prefixed
+    // lines, and bail out cleanly if no ACTION lines are present.
+    //
+    // Returns ``{body, actions}`` where ``actions`` is an array of label
+    // strings (≤40 chars, deduped, max 6). When no chips parsed,
+    // ``actions`` is empty and ``body`` is the original text untouched —
+    // the renderer falls back to free-text only (Decision #16).
+    _parseOperatorActions(text) {
+      if (!text || typeof text !== 'string') return { body: text || '', actions: [] };
+      const lines = text.split(/\r?\n/);
+      const actions = [];
+      let trailing = lines.length;
+      // Walk from the end, peeling off trailing blank / fence / ACTION
+      // lines until we hit a real content line. We stop at the first
+      // non-matching line so an ACTION block that ends in the middle of
+      // a longer message stays embedded as plain text (the format
+      // contract says they go at the very end).
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const raw = lines[i];
+        const stripped = raw.trim();
+        if (!stripped) { trailing = i; continue; }
+        if (stripped === '```' || stripped.startsWith('```')) { trailing = i; continue; }
+        const m = stripped.match(/^(?:[-*]\s+)?ACTION\s*:\s*(.+)$/i);
+        if (m) {
+          const label = m[1].trim().replace(/^["'`]+|["'`]+$/g, '').trim();
+          if (label && label.length <= 80) actions.unshift(label.slice(0, 60));
+          trailing = i;
+          continue;
+        }
+        break;
+      }
+      if (actions.length === 0) return { body: text, actions: [] };
+      // Dedupe (case-insensitive) and cap at 6 chips so a runaway model
+      // can't paint a wall of buttons.
+      const seen = new Set();
+      const deduped = [];
+      for (const label of actions) {
+        const key = label.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        deduped.push(label);
+        if (deduped.length >= 6) break;
+      }
+      const body = lines.slice(0, trailing).join('\n').replace(/\s+$/g, '');
+      return { body, actions: deduped };
+    },
+
+    // Apply ACTION-line parsing to a message entry in place. Idempotent:
+    // safe to call multiple times on the same entry (e.g. mid-stream and
+    // again on stream done) since ``content`` is overwritten with the
+    // body and ``suggested_actions`` with the latest parsed list.
+    _applyOperatorActions(entry) {
+      if (!entry || entry.role !== 'agent') return;
+      const { body, actions } = this._parseOperatorActions(entry.content || '');
+      entry.content = body;
+      entry.suggested_actions = actions;
+    },
+
+    // Click handler for operator action chips. Sends the label as the
+    // user's next message via the existing send infrastructure (steer
+    // if operator busy, sendChatTo otherwise).
+    sendOperatorChip(label) {
+      const msg = (label || '').trim();
+      if (!msg) return;
+      this._operatorLastUserMessageTs = Date.now();
+      if (this.isAgentBusy('operator')) {
+        this.steerAgent('operator', msg);
+      } else {
+        this.sendChatTo('operator', msg);
+      }
+    },
+
+    // Whether the default "Quick actions" menu should render in the
+    // operator chat. Shown when there are no user messages in the
+    // history OR the last user message was >5 min ago. Hidden while a
+    // stream is in flight so chips don't appear above an in-progress
+    // response.
+    showOperatorDefaultChips() {
+      if (this.chatStreamingAgents && this.chatStreamingAgents['operator']) return false;
+      if (this.chatLoadingAgents && this.chatLoadingAgents['operator']) return false;
+      const hist = (this.chatHistories && this.chatHistories['operator']) || [];
+      // No chat history yet — show defaults so first-visit user has a
+      // clear starting point.
+      if (!hist.some(m => m && m.role === 'user')) return true;
+      // Find the most recent user message timestamp and gate on 5 min.
+      let lastTs = this._operatorLastUserMessageTs || 0;
+      for (let i = hist.length - 1; i >= 0; i--) {
+        if (hist[i] && hist[i].role === 'user') { lastTs = Math.max(lastTs, hist[i].ts || 0); break; }
+      }
+      if (!lastTs) return false;
+      return (Date.now() - lastTs) > 5 * 60 * 1000;
     },
 
     // ── Markdown rendering for chat messages ─────────────
@@ -6444,6 +6610,12 @@ function dashboard() {
             typeof t === 'string' ? { name: t, status: 'done', inputPreview: '', outputPreview: '' } : t
           ) : [],
         }));
+        // Phase 3 — strip ACTION: lines off the trailing edge of every
+        // operator agent message so the historical transcript renders
+        // chips without re-running the LLM. Idempotent.
+        if (agentId === 'operator') {
+          for (const sm of serverMsgs) this._applyOperatorActions(sm);
+        }
         // Preserve local user messages not yet on the server (e.g., sent
         // right before tab-out, before the server could persist them).
         const lastServerTs = Math.max(...data.messages.map(m => {
@@ -6786,6 +6958,7 @@ function dashboard() {
       if (!msg) return;
       if (!this.chatHistories[agentId]) this.chatHistories[agentId] = [];
       this.chatHistories[agentId].push({ role: 'user', content: msg, ts: Date.now() });
+      if (agentId === 'operator') this._operatorLastUserMessageTs = Date.now();
       this.chatLoadingAgents[agentId] = true;
       this.chatStreamingAgents[agentId] = true;
 
@@ -6919,6 +7092,11 @@ function dashboard() {
               entry.streaming = false;
               entry.phase = 'done';
               entry.tool_limit_reached = data.tool_limit_reached || false;
+              // Phase 3 — operator response chips. Strip ACTION: lines
+              // off the trailing edge of the message and store them on
+              // ``entry.suggested_actions`` so the renderer can paint
+              // chips. Operator-only: worker chats render free-text.
+              if (agentId === 'operator') this._applyOperatorActions(entry);
             } else if (data.type === 'error') {
               const errContent = data.message || 'Stream error';
               const isCreditErr = /insufficient.*(fund|credit)|credit.*deplet|budget.*exceed/i.test(errContent);
@@ -7026,6 +7204,7 @@ function dashboard() {
       }
 
       this.chatHistories[agentId].push({ role: 'user', content: `[steer] ${msg}`, ts: Date.now() });
+      if (agentId === 'operator') this._operatorLastUserMessageTs = Date.now();
 
       // Create a new agent response bubble after the steer message
       if (this.chatStreamingAgents[agentId]) {

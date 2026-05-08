@@ -481,12 +481,17 @@ class TestPhase0FrontendWiring:
 
     def test_workplace_subtab_buttons_emit_subtab_usage(self):
         html = _TEMPLATE.read_text(encoding="utf-8")
-        # The Board sub-tab loop wires trackSubtabUsage BEFORE updating
-        # workplaceTab so we capture the from→to transition.
-        assert (
-            "trackSubtabUsage(workplaceTab, wt.id); workplaceTab = wt.id;"
-            in html
-        )
+        # Phase 3 collapsed the four-sub-tab bar into a single-scroll
+        # Home layout (`homeTab === 'main'`) plus a kanban sub-page
+        # (`homeTab === 'tasks'`). The legacy
+        # ``trackSubtabUsage(workplaceTab, wt.id)`` wiring is gone with
+        # the bar; the equivalent transition handler is now
+        # ``switchHomeTab('main' | 'tasks')`` invoked from the back-link
+        # and "See full task board" CTA. trackSubtabUsage itself is kept
+        # in app.js for the hidden legacy renders + for empty-state CTA
+        # telemetry — see test_empty_state_cta_buttons_emit_telemetry.
+        assert "switchHomeTab('main')" in html
+        assert "switchHomeTab('tasks')" in html
 
     def test_needs_you_action_button_uses_telemetry_wrapper(self):
         html = _TEMPLATE.read_text(encoding="utf-8")
@@ -502,13 +507,15 @@ class TestPhase0FrontendWiring:
         html = _TEMPLATE.read_text(encoding="utf-8")
         # Each empty-state intent chip on the operator empty state has a
         # stable section_id so we can compare CTA traction across them.
+        # ``recently_delivered_view_all`` was retired in Phase 3 when the
+        # Workplace sub-tab bar collapsed into the single-scroll Home
+        # layout — there's no "View all →" button to instrument anymore.
         for section_id in (
             "operator_intent_content",
             "operator_intent_research",
             "operator_intent_sales",
             "operator_intent_devteam",
             "operator_intent_other",
-            "recently_delivered_view_all",
         ):
             assert f"trackEmptyStateCta('{section_id}')" in html, (
                 f"missing trackEmptyStateCta call for: {section_id}"

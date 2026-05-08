@@ -6,6 +6,7 @@ import pytest  # noqa: F401
 
 from src.shared.operator_playbooks import (
     _OPERATOR_CORE,
+    _OPERATOR_GREETING,
     _PLAYBOOK_CREDENTIALS,
     _PLAYBOOK_EDIT,
     _PLAYBOOK_MONITOR,
@@ -195,3 +196,50 @@ class TestPlaybookConstants:
             "## Tool Errors",
         ]:
             assert section in _OPERATOR_CORE, f"Missing section: {section}"
+
+
+class TestActionChipsInstruction:
+    """Phase 3 — operator response chips contract.
+
+    The operator's prompt must instruct the LLM to end every response
+    with 2-4 ``ACTION: <label>`` lines so the dashboard can render them
+    as clickable suggestion chips below the bubble. The greeting also
+    seeds an example block so the very first conversation doesn't ship
+    without chips.
+    """
+
+    def test_core_mentions_action_format(self):
+        """``_OPERATOR_CORE`` documents the ACTION line contract."""
+        assert "ACTION:" in _OPERATOR_CORE
+        # Reference both the format and what the dashboard does with it,
+        # so a future edit doesn't accidentally drop the rendering hint.
+        assert "Suggested next steps" in _OPERATOR_CORE
+        assert "chips" in _OPERATOR_CORE.lower()
+
+    def test_core_specifies_label_constraints(self):
+        """Length cap and "user might want to do next" framing present."""
+        assert "≤40" in _OPERATOR_CORE or "<=40" in _OPERATOR_CORE or "40 char" in _OPERATOR_CORE
+        # Encourage user-facing labels; otherwise the LLM emits engineer
+        # phrases like "call inspect_agents".
+        assert "user-facing" in _OPERATOR_CORE.lower() or "user might want" in _OPERATOR_CORE.lower()
+
+    def test_core_specifies_at_end(self):
+        """ACTION block must appear at the very end of the response."""
+        assert "end" in _OPERATOR_CORE.lower()
+
+    def test_greeting_includes_action_example(self):
+        """Bootstrap greeting seeds a working example block of chips so
+        the first-visit user sees them on the very first message."""
+        assert "ACTION:" in _OPERATOR_GREETING
+        # At least 3 sample chips so the rendering path actually exercises
+        # the multi-chip layout on first load.
+        assert _OPERATOR_GREETING.count("ACTION:") >= 3
+
+    def test_greeting_examples_are_short(self):
+        """Sample chips in the greeting respect the ≤40 char constraint."""
+        for line in _OPERATOR_GREETING.splitlines():
+            stripped = line.strip()
+            if not stripped.upper().startswith("ACTION:"):
+                continue
+            label = stripped.split(":", 1)[1].strip()
+            assert len(label) <= 40, f"Greeting chip too long ({len(label)} chars): {label!r}"

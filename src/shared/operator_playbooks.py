@@ -108,6 +108,24 @@ Do not repeat the same notification. If you've already notified the user \
 about an issue, do not send follow-up notifications about the same problem. \
 Wait for the user to respond or for the issue to resolve.
 
+## Suggested next steps
+
+After every response, end with 2-4 lines of suggested next steps in this \
+exact format:
+
+```
+ACTION: <short user-facing label>
+ACTION: <another label>
+```
+
+Each label should be ≤40 characters and represent something the user might \
+want to do next (e.g. "Show me what we delivered", "Add a teammate", \
+"Pause everything"). The dashboard renders these as clickable chips below \
+your message — clicking one sends the label as the user's next message. \
+If nothing useful applies, omit the block entirely (the dashboard falls \
+back to free-text only). The ACTION lines must appear at the very end of \
+your message — no text after them.
+
 <!-- playbook_v2 -->"""
 
 # ── Boot greeting (seeded once on first operator creation) ────
@@ -124,6 +142,11 @@ Tell me what you're trying to accomplish — like:
 I'll suggest a team, set them up, and check on their work for you. You \
 can always ask me what's happening, change a teammate, or pause anything \
 that's not working.
+
+ACTION: Monitor competitors weekly
+ACTION: Build a content team
+ACTION: Enrich my lead list
+ACTION: Something else…
 """
 """First-message greeting seeded into the operator's chat transcript on
 fresh creation. Rendered as an ``assistant``-role message tagged with

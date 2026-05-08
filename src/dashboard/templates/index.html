@@ -1241,6 +1241,28 @@
                             <div x-show="formatRelativeTime(msg.ts)"
                               class="text-[11px] mt-0.5 opacity-40 text-gray-500"
                               x-text="formatRelativeTime(msg.ts)"></div>
+                            <!-- Phase 3 — Operator action chips. Rendered
+                                 below the bubble when the response has
+                                 ``suggested_actions`` parsed from
+                                 trailing ``ACTION:`` lines. Click sends
+                                 the label as the user's next message via
+                                 the existing send infrastructure (chat
+                                 stream or steer). Hidden while still
+                                 streaming so chips don't flash mid-render. -->
+                            <template x-if="msg.role === 'agent' && !msg.streaming && Array.isArray(msg.suggested_actions) && msg.suggested_actions.length">
+                              <div class="mt-2 flex flex-wrap gap-1.5"
+                                   data-testid="operator-action-chips"
+                                   role="group"
+                                   aria-label="Suggested next steps">
+                                <template x-for="(label, ci) in msg.suggested_actions" :key="'oa-' + i + '-' + ci">
+                                  <button type="button"
+                                    @click.stop="sendOperatorChip(label)"
+                                    class="text-[11px] font-medium px-2.5 py-1 rounded-full bg-indigo-600/15 hover:bg-indigo-600/30 text-indigo-200 hover:text-indigo-100 border border-indigo-500/30 transition-colors max-w-full truncate"
+                                    :title="label"
+                                    x-text="label"></button>
+                                </template>
+                              </div>
+                            </template>
                             <!-- Tool limit reached -->
                             <template x-if="msg.tool_limit_reached">
                               <div class="mt-2 flex items-center gap-1.5 border-t border-gray-700/50 pt-1.5">
@@ -1328,6 +1350,31 @@
                   <div class="empty-state-desc">Ask about team status, optimize teammates, or build new teams.</div>
                 </div>
               </div>
+
+            <!-- Phase 3 — Quick actions menu. Default chips shown when
+                 the user hasn't typed anything yet OR after a long pause
+                 (>5 min since last user message). Hidden once the user
+                 types or sends. Lives outside the chat scroll so chips
+                 don't push messages off-screen. The first-run empty
+                 state above already provides intent-based starting
+                 points; this menu fills in for returning users between
+                 sessions where the curated chips would be redundant. -->
+            <div x-show="operatorReady && (chatHistories['operator'] || []).length > 0 && showOperatorDefaultChips()"
+                 x-cloak
+                 class="px-3 pt-2 pb-1 shrink-0 border-t border-gray-800/40"
+                 data-testid="operator-quick-actions">
+              <div class="text-[10px] uppercase tracking-wide text-gray-600 mb-1.5">Quick actions</div>
+              <div class="flex flex-wrap gap-1.5"
+                   role="group"
+                   aria-label="Quick actions for the Operator">
+                <template x-for="(label, qi) in operatorDefaultChips" :key="'qa-' + qi">
+                  <button type="button"
+                    @click.stop="sendOperatorChip(label)"
+                    class="text-[11px] font-medium px-2.5 py-1 rounded-full bg-gray-800/60 hover:bg-indigo-600/30 text-gray-300 hover:text-indigo-100 border border-gray-700/40 hover:border-indigo-500/30 transition-colors"
+                    x-text="label"></button>
+                </template>
+              </div>
+            </div>
 
             <!-- Input area -->
             <div x-show="operatorReady" class="px-3 py-3 border-t border-gray-800/80 shrink-0"
@@ -3639,15 +3686,20 @@
             x-text="'Show ' + (needsYouItems.length - needsYouCollapsedCap) + ' more'"></button>
         </section>
 
-        <!-- Sub-tab bar -->
-        <div class="flex flex-wrap gap-0.5 bg-gray-800/50 rounded-lg p-0.5 mb-4">
-          <template x-for="wt in workplaceTabs" :key="wt.id">
-            <button @click="trackSubtabUsage(workplaceTab, wt.id); workplaceTab = wt.id; loadWorkplace()"
-              class="px-3 py-1.5 rounded-md text-sm font-medium transition-all relative whitespace-nowrap"
-              :class="workplaceTab === wt.id ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'">
-              <span x-text="wt.label"></span>
-            </button>
-          </template>
+        <!-- Phase 3 — sub-tab bar collapsed into a single-scroll layout.
+             ``homeTab === 'main'`` renders Just delivered + Happening now
+             + In progress in one column. ``homeTab === 'tasks'`` lifts
+             the kanban into its own sub-page reachable via the "See full
+             task board →" link below. The legacy ``workplaceTab`` state
+             stays in place for backward compat (in-place outputs/projects
+             links keep working) but no sub-tab bar is rendered. -->
+        <div x-show="homeTab === 'tasks'" x-cloak class="mb-3">
+          <button type="button" @click="switchHomeTab('main')"
+            class="text-[12px] text-gray-400 hover:text-gray-200 inline-flex items-center gap-1 transition-colors"
+            data-testid="home-back-to-main">
+            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+            Back to Home
+          </button>
         </div>
 
         <!-- Empty state when orchestration v2 is disabled -->
@@ -3662,19 +3714,22 @@
           </div>
         </template>
 
-        <!-- Activity feed sub-tab (default) -->
-        <template x-if="workplaceEnabled && workplaceTab === 'feed'">
-          <div class="space-y-3">
-            <!-- Recently delivered — last 7 days of completed outputs.
-                 Surfaces "what's done" up front so the user gets a fast
-                 sense of velocity without having to switch to the
-                 Outputs sub-tab. Auto-hides when empty. -->
+        <!-- Phase 3 — Home single-scroll layout (homeTab === 'main').
+             All four legacy sub-tabs collapse into one vertical column:
+             Just delivered (recentlyDeliveredItems), Happening now
+             (workplaceFeed, capped at 5 with disclosure), and In
+             progress (a 4-card slice of workplaceTasks with a "See full
+             task board →" link to /home/tasks). Empty sections hide
+             entirely so an idle Board has no extra chrome. -->
+        <template x-if="workplaceEnabled && homeTab === 'main'">
+          <div class="space-y-4" data-testid="home-main">
+            <!-- Just delivered — last 7 days of completed outputs.
+                 Replaces the legacy ``team-outputs`` sub-tab; kept inline
+                 with a drill-in for the full artifact preview. -->
             <template x-if="recentlyDeliveredItems.length">
-              <div>
+              <div data-testid="home-just-delivered">
                 <div class="flex items-center justify-between mb-1.5">
-                  <div class="text-[11px] uppercase tracking-wide text-gray-500 font-medium">Recently delivered</div>
-                  <button type="button" @click="trackEmptyStateCta('recently_delivered_view_all'); trackSubtabUsage(workplaceTab, 'team-outputs'); workplaceTab = 'team-outputs'; loadWorkplace()"
-                    class="text-[11px] text-gray-400 hover:text-gray-200">View all &rarr;</button>
+                  <div class="text-[11px] uppercase tracking-wide text-gray-500 font-medium">Just delivered</div>
                 </div>
                 <div class="space-y-1.5">
                   <template x-for="t in recentlyDeliveredItems" :key="'rd-' + t.id">
@@ -3718,80 +3773,137 @@
               </div>
             </template>
 
-            <!-- Skeleton loader for the activity feed itself while the
-                 first /workplace/feed fetch is in flight. Three pulsing
-                 rows match the visual rhythm of the real cards so the
-                 layout doesn't jump when content arrives. Hidden once
-                 the load resolves (success or error — the error banner
-                 below takes over in the failure case). -->
-            <template x-if="workplaceSectionLoading.feed && !workplaceFeed.length && !workplaceErrors.feed">
-              <div class="space-y-2" data-testid="workplace-feed-skeleton">
-                <div class="bg-gray-800/40 border border-gray-700/50 rounded-lg p-3">
-                  <div class="h-3 w-2/3 bg-gray-800 rounded animate-pulse"></div>
-                  <div class="h-2.5 w-1/3 bg-gray-800 rounded animate-pulse mt-2"></div>
+            <!-- Happening now — capped at 5 events on the main scroll;
+                 "See all" disclosure expands inline. Empty section hides
+                 entirely (no header, no chrome). -->
+            <div x-data="{ feedExpanded: false }"
+                 x-show="workplaceFeed.length || workplaceSectionLoading.feed || workplaceErrors.feed"
+                 data-testid="home-happening-now">
+              <div class="flex items-center justify-between mb-1.5">
+                <div class="text-[11px] uppercase tracking-wide text-gray-500 font-medium">Happening now</div>
+                <button type="button"
+                  x-show="!feedExpanded && workplaceFeed.length > 5"
+                  @click="feedExpanded = true"
+                  class="text-[11px] text-gray-400 hover:text-gray-200">See all &rarr;</button>
+                <button type="button"
+                  x-show="feedExpanded && workplaceFeed.length > 5"
+                  @click="feedExpanded = false"
+                  class="text-[11px] text-gray-400 hover:text-gray-200">Show less</button>
+              </div>
+
+              <!-- Skeleton loader for the activity feed itself while the
+                   first /workplace/feed fetch is in flight. Three pulsing
+                   rows match the visual rhythm of the real cards so the
+                   layout doesn't jump when content arrives. Hidden once
+                   the load resolves (success or error — the error banner
+                   below takes over in the failure case). -->
+              <template x-if="workplaceSectionLoading.feed && !workplaceFeed.length && !workplaceErrors.feed">
+                <div class="space-y-2" data-testid="workplace-feed-skeleton">
+                  <div class="bg-gray-800/40 border border-gray-700/50 rounded-lg p-3">
+                    <div class="h-3 w-2/3 bg-gray-800 rounded animate-pulse"></div>
+                    <div class="h-2.5 w-1/3 bg-gray-800 rounded animate-pulse mt-2"></div>
+                  </div>
+                  <div class="bg-gray-800/40 border border-gray-700/50 rounded-lg p-3">
+                    <div class="h-3 w-3/4 bg-gray-800 rounded animate-pulse"></div>
+                    <div class="h-2.5 w-1/4 bg-gray-800 rounded animate-pulse mt-2"></div>
+                  </div>
+                  <div class="bg-gray-800/40 border border-gray-700/50 rounded-lg p-3">
+                    <div class="h-3 w-1/2 bg-gray-800 rounded animate-pulse"></div>
+                    <div class="h-2.5 w-1/3 bg-gray-800 rounded animate-pulse mt-2"></div>
+                  </div>
                 </div>
-                <div class="bg-gray-800/40 border border-gray-700/50 rounded-lg p-3">
-                  <div class="h-3 w-3/4 bg-gray-800 rounded animate-pulse"></div>
-                  <div class="h-2.5 w-1/4 bg-gray-800 rounded animate-pulse mt-2"></div>
+              </template>
+
+              <!-- Error banner for the activity feed. Rendered when the
+                   /workplace/feed fetch fails. -->
+              <template x-if="workplaceErrors.feed">
+                <div class="bg-red-900/20 border border-red-800/40 rounded-lg p-3 flex flex-wrap items-center gap-2"
+                     role="alert" data-testid="workplace-feed-error">
+                  <span class="text-xs text-red-200 flex-1" x-text="workplaceErrors.feed"></span>
+                  <button type="button" @click="retryWorkplaceSection('feed')"
+                    class="text-[11px] font-medium px-2.5 py-1 rounded bg-red-800/40 hover:bg-red-700/50 text-red-100 transition-colls">Retry</button>
                 </div>
-                <div class="bg-gray-800/40 border border-gray-700/50 rounded-lg p-3">
-                  <div class="h-3 w-1/2 bg-gray-800 rounded animate-pulse"></div>
-                  <div class="h-2.5 w-1/3 bg-gray-800 rounded animate-pulse mt-2"></div>
+              </template>
+
+              <!-- Chronological activity list, capped at 5 unless
+                   ``feedExpanded`` is true. -->
+              <div class="space-y-2">
+                <template x-for="ev in (feedExpanded ? workplaceFeed : workplaceFeed.slice(0, 5))" :key="ev.event_id">
+                  <button type="button"
+                    class="w-full text-left bg-gray-800/40 border border-gray-700/50 rounded-lg p-3 hover:bg-gray-800/70 transition-colors"
+                    @click="openTaskDrillIn(ev.task_id)">
+                    <div class="flex items-start gap-2">
+                      <span class="text-base leading-none mt-0.5" x-text="workplaceFeedIcon(ev.event_type, ev.task_status)"></span>
+                      <div class="min-w-0 flex-1">
+                        <div class="text-sm text-gray-100" x-text="ev.summary"></div>
+                        <div class="text-[11px] text-gray-500 mt-0.5">
+                          <span x-text="formatRelativeTime((ev.timestamp || 0) * 1000) || 'just now'"></span>
+                          <span x-show="ev.project_id" class="ml-2" x-text="'· ' + ev.project_id"></span>
+                        </div>
+                      </div>
+                    </div>
+                  </button>
+                </template>
+              </div>
+            </div>
+
+            <!-- In progress — 4-card slice of workplaceTasks filtered to
+                 working / pending / accepted statuses (most-recent
+                 first). "See full task board →" lifts to the kanban
+                 sub-page (/home/tasks). Empty section hides entirely. -->
+            <template x-if="(workplaceTasks || []).filter(t => ['working','pending','accepted'].includes(t.status)).length">
+              <div data-testid="home-in-progress">
+                <div class="flex items-center justify-between mb-1.5">
+                  <div class="text-[11px] uppercase tracking-wide text-gray-500 font-medium">In progress</div>
+                  <button type="button" @click="switchHomeTab('tasks')"
+                    class="text-[11px] text-indigo-300 hover:text-indigo-200"
+                    data-testid="home-see-task-board">See full task board &rarr;</button>
+                </div>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <template x-for="t in (workplaceTasks || []).filter(t => ['working','pending','accepted'].includes(t.status)).slice(0, 4)" :key="'ip-' + t.id">
+                    <div class="bg-gray-800/40 border border-gray-700/50 rounded-md px-3 py-2 cursor-pointer hover:bg-gray-800/70 hover:border-gray-600/60 transition-colors"
+                      @click="openTaskDrillIn(t.id)">
+                      <div class="text-xs font-medium text-gray-200 truncate" x-text="t.title || '(untitled)'"></div>
+                      <div class="text-[11px] text-gray-500 mt-0.5 flex items-center gap-1.5">
+                        <span class="px-1.5 py-0.5 rounded bg-gray-900/60 text-gray-400 text-[10px]" x-text="t.status"></span>
+                        <span class="truncate" x-text="t.assignee || ''"></span>
+                        <span x-show="t.project_id" class="text-gray-600 truncate" x-text="'· ' + (t.project_id || '')"></span>
+                      </div>
+                    </div>
+                  </template>
                 </div>
               </div>
             </template>
 
-            <!-- Error banner for the activity feed. Rendered when the
-                 /workplace/feed fetch fails. Click "Retry" to clear
-                 the error and re-run the load — the spinner reappears
-                 via the skeleton template above. -->
-            <template x-if="workplaceErrors.feed">
-              <div class="bg-red-900/20 border border-red-800/40 rounded-lg p-3 flex flex-wrap items-center gap-2"
-                   role="alert" data-testid="workplace-feed-error">
-                <span class="text-xs text-red-200 flex-1" x-text="workplaceErrors.feed"></span>
-                <button type="button" @click="retryWorkplaceSection('feed')"
-                  class="text-[11px] font-medium px-2.5 py-1 rounded bg-red-800/40 hover:bg-red-700/50 text-red-100 transition-colors">Retry</button>
-              </div>
-            </template>
-
-            <!-- Empty state for the feed itself. When there's nothing
-                 anywhere, the message reads as a calm prompt instead of
-                 a "missing data" warning. The hint button switches to
-                 the Chat tab so the user can start work in one click. -->
-            <template x-if="!workplaceSectionLoading.feed && !workplaceErrors.feed && !workplaceFeed.length && !workplaceProjects.length && !needsYouItems.length">
-              <div class="text-sm text-gray-300 py-6 text-center">
+            <!-- Idle empty state — shown only when EVERY section above
+                 is empty AND there's nothing pending. Calm prompt,
+                 verb-driven CTA. -->
+            <template x-if="!workplaceSectionLoading.feed && !workplaceErrors.feed && !workplaceFeed.length && !recentlyDeliveredItems.length && !needsYouItems.length && !(workplaceTasks || []).filter(t => ['working','pending','accepted'].includes(t.status)).length">
+              <div class="text-sm text-gray-300 py-6 text-center" data-testid="home-idle-empty">
                 Your team is idle.
                 <button type="button" @click="activeTab = 'chat'"
                   class="underline decoration-dotted text-indigo-300 hover:text-indigo-200 transition-colors">Chat with your operator</button>
                 to start something.
               </div>
             </template>
+            <!-- Phase 2 vocab: explicit "team starts working" empty
+                 state is preserved here for the workplaceProjects-but-no-
+                 feed case. Phase 3's idle empty state above only fires
+                 when every section is empty; this one stays so users with
+                 active projects but no fresh activity still see the
+                 reassurance copy that Phase 2 promised. -->
             <template x-if="!workplaceSectionLoading.feed && !workplaceErrors.feed && !workplaceFeed.length && workplaceProjects.length">
               <div class="text-sm text-gray-500 py-4">Once your team starts working, you'll see updates here.</div>
-            </template>
-
-            <!-- Chronological activity list, latest first. -->
-            <template x-for="ev in workplaceFeed" :key="ev.event_id">
-              <button type="button"
-                class="w-full text-left bg-gray-800/40 border border-gray-700/50 rounded-lg p-3 hover:bg-gray-800/70 transition-colors"
-                @click="openTaskDrillIn(ev.task_id)">
-                <div class="flex items-start gap-2">
-                  <span class="text-base leading-none mt-0.5" x-text="workplaceFeedIcon(ev.event_type, ev.task_status)"></span>
-                  <div class="min-w-0 flex-1">
-                    <div class="text-sm text-gray-100" x-text="ev.summary"></div>
-                    <div class="text-[11px] text-gray-500 mt-0.5">
-                      <span x-text="formatRelativeTime((ev.timestamp || 0) * 1000) || 'just now'"></span>
-                      <span x-show="ev.project_id" class="ml-2" x-text="'· ' + ev.project_id"></span>
-                    </div>
-                  </div>
-                </div>
-              </button>
             </template>
           </div>
         </template>
 
-        <!-- Project status sub-tab -->
-        <template x-if="workplaceEnabled && workplaceTab === 'project-status'">
+        <!-- Project status — hidden in the Phase 3 layout. The legacy
+             render is kept in markup for back-compat with deep-links
+             that set ``workplaceTab === 'project-status'`` directly via
+             URL hash, but the new Home single-scroll surface routes
+             project detail through the task drill-in modal instead. -->
+        <template x-if="false && workplaceEnabled && workplaceTab === 'project-status'">
           <div class="space-y-3">
             <!-- Skeleton while /workplace/projects is in flight -->
             <template x-if="workplaceSectionLoading.projects && !workplaceProjects.length && !workplaceErrors.projects">
@@ -3886,7 +3998,7 @@
              outer ``overflow-x-auto`` + inner ``min-w-[640px]`` give
              phone users a horizontal-scroll fallback so each column
              keeps a usable width when they prefer the kanban layout. -->
-        <template x-if="workplaceEnabled && workplaceTab === 'task-board'">
+        <template x-if="workplaceEnabled && homeTab === 'tasks'">
           <div>
             <!-- Error banner for /workplace/tasks. Tasks lives outside
                  the kanban grid because errored loads should still let
@@ -3969,8 +4081,13 @@
         <!-- (Blockers no longer have their own sub-tab — pinned at the top
              of the activity feed instead.) -->
 
-        <!-- Team outputs sub-tab -->
-        <template x-if="workplaceEnabled && workplaceTab === 'team-outputs'">
+        <!-- Team outputs — hidden in the Phase 3 layout. "Just delivered"
+             on the Home main scroll handles the common case (last 7 days
+             with inline artifact preview); deeper history is reachable
+             via the task drill-in modal. The legacy render below is
+             retained for back-compat with deep-links that still set
+             ``workplaceTab === 'team-outputs'``. -->
+        <template x-if="false && workplaceEnabled && workplaceTab === 'team-outputs'">
           <div class="space-y-2">
             <!-- Skeleton while /workplace/outputs is in flight -->
             <template x-if="workplaceSectionLoading.outputs && !workplaceOutputs.length && !workplaceErrors.outputs">
