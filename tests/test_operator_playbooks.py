@@ -119,8 +119,9 @@ class TestPlaybookConstants:
         assert "<!-- playbook_v2 -->" in _OPERATOR_CORE
 
     def test_core_size_reasonable(self):
-        # Core should be significantly smaller than old monolithic instructions (7800 chars)
-        assert len(_OPERATOR_CORE) < 5000
+        # Core should be significantly smaller than old monolithic instructions (7800 chars).
+        # Bumped 5000 → 5200 to accommodate hand_off title-quality guidance.
+        assert len(_OPERATOR_CORE) < 5200
         assert len(_OPERATOR_CORE) > 1000
 
     def test_playbooks_have_numbered_steps(self):
@@ -241,3 +242,33 @@ class TestActionChipsInstruction:
                 f"Greeting must not contain ACTION lines (chips owned "
                 f"by wizard): {line!r}"
             )
+
+
+class TestTaskTitleQualityGuidance:
+    """The Routing Work playbook section must steer the operator toward
+    SHORT hand_off summaries.
+
+    Symptom that drove this: the Operator agent was emitting hand_off
+    calls where the ``summary`` carried a full instruction (250+ chars)
+    — that string became both the task title and description, so the
+    dashboard kanban rendered as wall-of-text. The prompt fix here is
+    paired with server-side defensive splitting in ``Tasks.create``.
+    """
+
+    def test_core_mentions_short_titles(self):
+        """``_OPERATOR_CORE`` instructs the operator to keep summaries short."""
+        # The guidance must reference both the cap and the alternative
+        # location for long content (the ``data`` field), otherwise the
+        # LLM may just truncate aggressively and lose context.
+        core_lower = _OPERATOR_CORE.lower()
+        assert "short" in core_lower
+        assert "summary" in core_lower
+        # Either the explicit char cap OR the "title" framing must be
+        # there — both means the LLM has redundant signal.
+        assert "80" in _OPERATOR_CORE or "title" in core_lower
+        assert "data" in core_lower or "description" in core_lower
+
+    def test_core_has_concrete_handoff_example(self):
+        """A bad-vs-good example anchors the rule in pattern-matching."""
+        assert "Draft" in _OPERATOR_CORE  # the good example
+        assert "TEST RUN" in _OPERATOR_CORE  # the bad example

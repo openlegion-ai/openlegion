@@ -48,6 +48,14 @@ _TERMINAL_STATES: frozenset[str] = frozenset({"done", "failed", "cancelled"})
         "wakes them up automatically. This is your PRIMARY coordination "
         "tool — use it whenever you've completed work that another agent "
         "should act on.\n\n"
+        "Keep the 'summary' SHORT — it becomes the task title in the "
+        "recipient's inbox and on the dashboard. Aim for ≤80 characters, "
+        "like a Git commit subject line. Examples: 'Draft Q3 launch brief' "
+        "or 'Review pricing change for SKU-123'. If you need to send a "
+        "full instruction or spec, put it in 'data' (JSON) — that's where "
+        "long context belongs. A long summary will still work (the system "
+        "auto-splits it into a short title + description) but a hand-"
+        "written short summary reads better.\n\n"
         "If you have output data to share, pass it as 'data' (JSON string). "
         "It will be written to the blackboard and the task will include a "
         "pointer so the recipient can read it. For lightweight handoffs "
@@ -63,16 +71,18 @@ _TERMINAL_STATES: frozenset[str] = frozenset({"done", "failed", "cancelled"})
         "summary": {
             "type": "string",
             "description": (
-                "What you did and what they should do next. Be specific — "
-                "this is the main context the recipient sees."
+                "Short title for the task — what you handed off. "
+                "Aim for ≤80 characters, like a commit subject. "
+                "Put long instructions in 'data', not here."
             ),
         },
         "data": {
             "type": "string",
             "description": (
-                "Optional JSON string of output data to share. Written to "
-                "the blackboard so the recipient can read the full details. "
-                "Omit for lightweight handoffs where the summary is enough."
+                "Optional JSON string of output data or a full instruction "
+                "for the recipient. Written to the blackboard so the "
+                "recipient can read the full details. This is where long "
+                "context belongs — keep 'summary' to a short title."
             ),
             "default": "",
         },
@@ -502,7 +512,27 @@ async def _hand_off_v2(
     a flag-aware result handler.
     """
     summary = sanitize_for_prompt(summary)
-    description = summary
+    # The handoff ``summary`` carries both the headline (becomes the
+    # task title) and the full instruction (becomes the description).
+    # Agents historically dumped multi-sentence instructions into
+    # ``summary`` — that produced wall-of-text titles in the dashboard.
+    # The orchestration store applies the same policy as a backstop, but
+    # we mirror it here so the title we surface in result envelopes,
+    # wake messages, and downstream logs is already short. Server-side
+    # truncation in ``Tasks.create`` (see ``_normalize_title_and_description``)
+    # handles any long titles that slip through, so this is defense in
+    # depth rather than the only check.
+    from src.host.orchestration import (
+        LONG_TITLE_THRESHOLD,
+        _normalize_title_and_description,
+    )
+    if len(summary) > LONG_TITLE_THRESHOLD:
+        title, description = _normalize_title_and_description(summary, None)
+        # ``description`` is the full original ``summary`` here — keep
+        # it intact so the recipient still sees the complete instruction.
+    else:
+        title = summary
+        description = summary
     artifact_ref: str | None = None
 
     # Validate target exists in the registry — same fail-closed behavior
@@ -565,7 +595,7 @@ async def _hand_off_v2(
     try:
         record = await mesh_client.create_task(
             assignee=to,
-            title=summary[:200] or "(handoff)",
+            title=title or "(handoff)",
             description=description,
             project=write_project,
             priority=0,
