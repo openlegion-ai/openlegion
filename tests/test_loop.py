@@ -1768,6 +1768,17 @@ async def test_trim_context_handles_multimodal_tool_content():
 # ── Heartbeat mode ─────────────────────────────────────────────
 
 
+def test_heartbeat_max_iterations_constant():
+    """PR-V — bumped from 10 to 12 for defensive headroom.
+
+    Worst-case operator heartbeat (cap-3 drill-ins): 1 status + 1 roster +
+    3 drill-ins + 1 stale fanout + 1 save_observations + 1 notify_user =
+    8 tool calls plus the final assistant turn — well inside the 12-iter
+    ceiling, with budget for future playbook additions.
+    """
+    assert HEARTBEAT_MAX_ITERATIONS == 12
+
+
 @pytest.mark.asyncio
 async def test_heartbeat_simple_completion():
     """Heartbeat returns structured result when LLM gives final answer."""
@@ -1973,14 +1984,19 @@ async def test_heartbeat_windup_nudge_messages():
     """Nudge messages are injected at _remaining==2 and _remaining==1."""
     tool_defs = [{"type": "function", "function": {"name": "search"}}]
     captured_messages: list[list[dict]] = []
+    # Vary arguments per call so the tool-loop detector's terminate
+    # threshold (9 identical params) doesn't trip before the iteration
+    # cap — the cap is what this test exercises.
+    call_idx = {"n": 0}
 
     async def _capture_llm(*, system, messages, tools=None, **kw):
         # Snapshot the message list the LLM receives on each call
         captured_messages.append([m.copy() for m in messages])
         if tools:
+            call_idx["n"] += 1
             return LLMResponse(
                 content="",
-                tool_calls=[ToolCallInfo(name="search", arguments={"q": "x"})],
+                tool_calls=[ToolCallInfo(name="search", arguments={"q": f"x{call_idx['n']}"})],
                 tokens_used=10,
             )
         return LLMResponse(content="Done.", tool_calls=[], tokens_used=10)
@@ -2011,12 +2027,16 @@ async def test_heartbeat_forced_wrapup_on_unexpected_tool_calls():
     """If the LLM returns tool_calls on the last iteration (tools withheld),
     they are ignored and the text content is used as the final answer."""
     tool_defs = [{"type": "function", "function": {"name": "search"}}]
+    # Vary arguments per call so the tool-loop detector's terminate
+    # threshold doesn't trip before the iteration cap.
+    call_idx = {"n": 0}
 
     async def _stubborn_llm(*, system, messages, tools=None, **kw):
         # Always returns tool_calls, even when tools=None
+        call_idx["n"] += 1
         return LLMResponse(
             content="Almost done",
-            tool_calls=[ToolCallInfo(name="search", arguments={"q": "x"})],
+            tool_calls=[ToolCallInfo(name="search", arguments={"q": f"x{call_idx['n']}"})],
             tokens_used=10,
         )
 
@@ -2039,11 +2059,15 @@ async def test_heartbeat_forced_wrapup_empty_content():
     """When forced wrap-up discards tool_calls and content is empty,
     a fallback message is used."""
     tool_defs = [{"type": "function", "function": {"name": "search"}}]
+    # Vary arguments per call so the tool-loop detector's terminate
+    # threshold doesn't trip before the iteration cap.
+    call_idx = {"n": 0}
 
     async def _empty_llm(*, system, messages, tools=None, **kw):
+        call_idx["n"] += 1
         return LLMResponse(
             content="",
-            tool_calls=[ToolCallInfo(name="search", arguments={"q": "x"})],
+            tool_calls=[ToolCallInfo(name="search", arguments={"q": f"x{call_idx['n']}"})],
             tokens_used=10,
         )
 

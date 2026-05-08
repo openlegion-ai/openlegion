@@ -43,7 +43,7 @@ _FLEET_ROSTER_TTL = 600  # seconds — cache TTL for fleet roster
 _GOALS_TTL = 300  # seconds — cache TTL for goals fetch
 _FALLBACK_MAX_TOKENS = 100_000  # context trim fallback when no context manager
 _TOOL_HISTORY_LIMIT = 10  # recent tool outcomes in system prompt
-HEARTBEAT_MAX_ITERATIONS = 10  # tighter bound for heartbeat (cheaper than task/chat)
+HEARTBEAT_MAX_ITERATIONS = 12  # tighter bound for heartbeat (cheaper than task/chat)
 
 # Markdown heading pattern for detecting effectively-empty heartbeat files
 _HEADING_OR_EMPTY_RE = re.compile(r"^(#+\s.*|\s*)$")
