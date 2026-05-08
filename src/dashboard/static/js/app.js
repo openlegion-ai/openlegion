@@ -3023,6 +3023,40 @@ function dashboard() {
         }
       }
 
+      // Worker DM unread → Needs-You. Workers can DM the user via
+      // ``notify_user``; before this the only surface was an amber dot
+      // on the side-panel toggle plus the worker list inside the panel,
+      // which is hidden on the Chat tab. Lifting unread workers into
+      // Needs-You makes the signal a first-class citizen alongside
+      // pending actions / credentials / browser-login / blockers.
+      // Operator is excluded — it has its own pending-action entries
+      // sourced from the operator chat above.
+      for (const [agentId, count] of Object.entries(this.chatUnread || {})) {
+        if (!agentId || agentId === 'operator') continue;
+        const n = Number(count) || 0;
+        if (n <= 0) continue;
+        items.push({
+          id: 'worker_dm:' + agentId,
+          kind: 'worker_dm',
+          icon: 'M',
+          title: `${this.agentDisplayName(agentId)} has a message for you`,
+          subtitle: this._needsYouSubtitle({
+            actor: agentId,
+            text: n === 1 ? '1 unread' : `${n} unread`,
+          }),
+          actions: [
+            {
+              label: 'Read',
+              style: 'indigo',
+              handler: () => {
+                this.activeTab = 'chat';
+                if (this.openChat) this.openChat(agentId);
+              },
+            },
+          ],
+        });
+      }
+
       for (const b of (this.workplaceBlockers || [])) {
         // Decode machine-style blocker codes into plain English so
         // Sarah doesn't have to guess what ``no_credentials`` means.
@@ -9461,6 +9495,30 @@ function dashboard() {
       const agent = this.agents.find(a => a.id === agentId);
       if (agent && agent.role) return agent.role;
       return agentId.replace(/[_-]/g, ' ');
+    },
+
+    // ── Undo countdown helpers (operator_action_receipt) ───────
+    // The receipt card embeds a per-message ``_tick`` counter that
+    // increments every second; both helpers accept it as a reactive
+    // dependency so Alpine re-renders the countdown each tick. Without
+    // ``_tick`` the helper would be pure Date.now() and Alpine would
+    // never observe a state change. The receipt template is duplicated
+    // in two messenger surfaces (operator chat tab + side panel) — both
+    // use these helpers so the countdown logic lives in one place.
+    undoSecondsLeft(msg, _tick) {
+      // Touch ``_tick`` so Alpine treats it as a reactive dep. A void
+      // expression keeps lint quiet without changing semantics.
+      void _tick;
+      if (!msg || !msg.expires_at) return 0;
+      const left = Math.floor((Number(msg.expires_at) * 1000 - Date.now()) / 1000);
+      return left > 0 ? left : 0;
+    },
+
+    formatUndoCountdown(seconds) {
+      const s = Math.max(0, Math.floor(Number(seconds) || 0));
+      const m = Math.floor(s / 60);
+      const r = s % 60;
+      return `(${m}:${String(r).padStart(2, '0')})`;
     },
 
     // Whether an activity event should be visible on the user-facing

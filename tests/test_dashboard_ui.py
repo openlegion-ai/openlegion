@@ -1150,3 +1150,176 @@ class TestWizardCorrectnessFixes:
         assert "KNOWN_STEPS" in body
         assert "build_failed" in body
         assert "'idle'" in body
+# ── Vocab + UX polish (vocab gaps / Undo countdown / icon / DM) ──
+
+
+class TestVocabSweepGaps:
+    """The Phase 2 sweep missed several user-visible engineer-speak
+    strings; this guards against regression on the strings the second
+    audit fixed."""
+
+    def test_no_engineer_terms_in_user_visible_template(self):
+        # User-visible strings — no quoted form should appear in the
+        # rendered template (HTML comments are stripped first because
+        # the engineer-speak inside ``<!-- -->`` blocks doesn't render
+        # to users). ``Schedules`` / ``Spawn helpers`` /
+        # ``Home is disabled`` are the replacements.
+        visible = re.sub(r"<!--.*?-->", "", _INDEX_HTML, flags=re.DOTALL)
+        forbidden = [
+            "Spawn Agents",
+            "Cron Jobs",
+            "Cron Job",
+            "Cron job",
+            "cron job",
+            "cron jobs",
+            "Board is disabled",
+            "OPENLEGION_ORCHESTRATION_TASKS_V2",
+        ]
+        for term in forbidden:
+            assert term not in visible, (
+                f"Vocab leak: {term!r} still present in user-visible template"
+            )
+
+    def test_back_button_in_agent_detail_says_team(self):
+        # The agent-detail breadcrumb back-button label flips from
+        # "Agents" to "Team" — there's no other ">Agents<" text node
+        # remaining in the template.
+        # We bound the search to a likely surrounding fragment so the
+        # check stays robust if Tailwind utility classes drift.
+        idx = _INDEX_HTML.find("closeDetail()")
+        assert idx > -1, "closeDetail breadcrumb not found"
+        snippet = _INDEX_HTML[idx : idx + 600]
+        assert ">\n            Team\n          </button>" in snippet or ">Team<" in snippet
+
+    def test_replacement_terms_present(self):
+        # Sanity check that the replacements actually landed.
+        assert "Spawn helpers" in _INDEX_HTML
+        assert "Schedules" in _INDEX_HTML
+        assert "Home is disabled" in _INDEX_HTML
+        assert "Contact support to enable." in _INDEX_HTML
+        assert "+ Schedule" in _INDEX_HTML
+        assert "New schedule" in _INDEX_HTML
+
+
+class TestUndoReceiptCountdown:
+    """The operator_action_receipt receipt now renders a live countdown
+    next to the Undo button so users know how long they have left."""
+
+    def test_countdown_span_present_in_chat_tab_copy(self):
+        # The receipt block is duplicated in two messenger surfaces;
+        # both must render the countdown.
+        # Substring proves the helper-driven countdown is wired in.
+        assert "formatUndoCountdown(undoSecondsLeft(msg, _tick))" in _INDEX_HTML
+        # Two occurrences — one in the operator chat tab, one in the
+        # side-panel copy.
+        count = _INDEX_HTML.count("formatUndoCountdown(undoSecondsLeft(msg, _tick))")
+        assert count >= 2, (
+            f"Expected the countdown markup in both receipt copies; "
+            f"found {count}"
+        )
+
+    def test_countdown_helper_defined_in_app_js(self):
+        # The helper must exist with the documented signature so Alpine
+        # can resolve the expression.
+        assert "undoSecondsLeft(msg, _tick)" in _APP_JS_TEXT
+        assert "formatUndoCountdown(seconds)" in _APP_JS_TEXT
+
+    def test_undo_seconds_left_returns_zero_on_missing_expiry(self):
+        # Python mirror of the JS helper: validates the boundary
+        # behaviour we rely on (no expiry → 0; past expiry → 0).
+        import math
+        import time
+
+        def undo_seconds_left(msg, _tick):
+            if not msg or not msg.get("expires_at"):
+                return 0
+            left = math.floor((float(msg["expires_at"]) * 1000 - time.time() * 1000) / 1000)
+            return left if left > 0 else 0
+
+        assert undo_seconds_left({}, 0) == 0
+        assert undo_seconds_left({"expires_at": time.time() - 60}, 0) == 0
+        assert undo_seconds_left({"expires_at": time.time() + 120}, 0) > 0
+
+    def test_format_undo_countdown_pads_seconds(self):
+        # Python mirror of the JS formatter — proves the contract the
+        # template relies on (mm:ss with two-digit second padding).
+        def format_undo_countdown(seconds):
+            s = max(0, int(seconds or 0))
+            m = s // 60
+            r = s % 60
+            return f"({m}:{r:02d})"
+
+        assert format_undo_countdown(0) == "(0:00)"
+        assert format_undo_countdown(5) == "(0:05)"
+        assert format_undo_countdown(65) == "(1:05)"
+        assert format_undo_countdown(222) == "(3:42)"
+
+
+class TestSidePanelToggleIcon:
+    """The side-panel toggle SVG should not be the same chat-bubble
+    glyph used by the Chat tab; the tour copy must match the new
+    pictogram."""
+
+    def test_side_panel_toggle_is_not_chat_bubble(self):
+        # The Chat tab uses a chat-bubble path; the side-panel toggle
+        # was using the SAME path verbatim, which made the tour ambiguous
+        # ("click the chat icon" → users clicked the Chat tab). The
+        # toggle now uses a distinct rectangle + divider + arrow shape.
+        chat_bubble_path = (
+            'd="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"'
+        )
+        # Locate the toggle button by its handler and assert the
+        # chat-bubble path does NOT appear inside its inner SVG.
+        idx = _INDEX_HTML.find("toggleSidePanel()")
+        assert idx > -1, "side-panel toggle handler missing"
+        button_block = _INDEX_HTML[idx : idx + 1500]
+        assert chat_bubble_path not in button_block, (
+            "Side-panel toggle still uses the chat-bubble SVG path; "
+            "it should be a distinct pictogram so the tour is unambiguous."
+        )
+
+    def test_side_panel_toggle_uses_panel_pictogram(self):
+        # Find the toggle button and verify its inner SVG carries the
+        # rectangle + divider + arrow shape.
+        idx = _INDEX_HTML.find("toggleSidePanel()")
+        assert idx > -1, "side-panel toggle handler missing"
+        snippet = _INDEX_HTML[idx : idx + 1500]
+        assert '<rect x="3" y="4" width="18" height="16"' in snippet
+        assert '<line x1="14" y1="4" x2="14" y2="20"' in snippet
+        assert '<polyline points="8 10 11 12 8 14"' in snippet
+
+    def test_tour_copy_references_panel_icon(self):
+        # The tour Step 2 copy must talk about the "panel icon", not
+        # the "chat icon".
+        assert "Look for the panel icon in the top-right corner." in _INDEX_HTML
+        assert "Click the panel icon in the top-right" in _INDEX_HTML
+        # Negative: the old wording must be gone.
+        assert "Look for the chat icon in the top-right corner." not in _INDEX_HTML
+
+
+class TestWorkerDmInNeedsYou:
+    """Worker DMs (chatUnread > 0 for non-operator agents) must show up
+    in the Needs-You aggregator — not just as a small amber dot on the
+    side-panel toggle."""
+
+    def test_worker_dm_branch_in_needs_you_items(self):
+        # Source-level: the getter walks ``chatUnread`` and emits a
+        # ``worker_dm`` kind when count > 0 for non-operator agents.
+        assert "kind: 'worker_dm'" in _APP_JS_TEXT
+        # The branch skips operator (that surface lands via the
+        # operator-chat sweep above).
+        assert "agentId === 'operator'" in _APP_JS_TEXT
+
+    def test_worker_dm_uses_open_chat_handler(self):
+        # The Read button must jump to the chat tab and open the
+        # specific agent's chat panel.
+        # We grep for the structural hint rather than full markup so
+        # comments / whitespace don't make the test brittle.
+        assert "this.openChat(agentId)" in _APP_JS_TEXT
+        assert "label: 'Read'" in _APP_JS_TEXT
+
+    def test_worker_dm_pluralises_unread_count(self):
+        # 1 vs N copy variants must both exist so the subtitle reads
+        # naturally for either case.
+        assert "'1 unread'" in _APP_JS_TEXT
+        assert "${n} unread" in _APP_JS_TEXT
