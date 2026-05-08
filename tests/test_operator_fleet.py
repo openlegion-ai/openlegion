@@ -601,6 +601,120 @@ class TestMeshFleetApplyEndpoint:
         assert "12000" in detail
         cm.start_agent.assert_not_called()
 
+    # ── PR-N v2: soul/heartbeat/interface validation ─────────
+
+    @patch.dict("os.environ", {"OPENLEGION_MAX_AGENTS": "10"})
+    def test_apply_oversized_soul_returns_413(self):
+        """Soul > 4000 chars → 413, names offending agent, no creation."""
+        from fastapi.testclient import TestClient
+
+        app, cm, _ = self._make_app(existing_agents={"operator": "http://localhost:8400"})
+        client = TestClient(app)
+        oversized = "s" * 4001
+        resp = client.post(
+            "/mesh/fleet/apply",
+            json={
+                "template": "starter",
+                "agent_overrides": {"assistant": {"soul": oversized}},
+            },
+        )
+        assert resp.status_code == 413
+        detail = resp.json()["detail"]
+        assert "assistant" in detail
+        assert "soul" in detail
+        assert "4000" in detail
+        cm.start_agent.assert_not_called()
+
+    @patch.dict("os.environ", {"OPENLEGION_MAX_AGENTS": "10"})
+    def test_apply_oversized_interface_returns_413(self):
+        """Interface > 4000 chars → 413, names offending agent."""
+        from fastapi.testclient import TestClient
+
+        app, cm, _ = self._make_app(existing_agents={"operator": "http://localhost:8400"})
+        client = TestClient(app)
+        oversized = "i" * 4001
+        resp = client.post(
+            "/mesh/fleet/apply",
+            json={
+                "template": "starter",
+                "agent_overrides": {"assistant": {"interface": oversized}},
+            },
+        )
+        assert resp.status_code == 413
+        detail = resp.json()["detail"]
+        assert "assistant" in detail
+        assert "interface" in detail
+        assert "4000" in detail
+        cm.start_agent.assert_not_called()
+
+    @patch.dict("os.environ", {"OPENLEGION_MAX_AGENTS": "10"})
+    def test_apply_role_override_field_rejected(self):
+        """`role` is intentionally NOT in the allowed fields → 400."""
+        from fastapi.testclient import TestClient
+
+        app, cm, _ = self._make_app(existing_agents={"operator": "http://localhost:8400"})
+        client = TestClient(app)
+        resp = client.post(
+            "/mesh/fleet/apply",
+            json={
+                "template": "starter",
+                "agent_overrides": {"assistant": {"role": "renamed-role"}},
+            },
+        )
+        assert resp.status_code == 400
+        detail = resp.json()["detail"]
+        assert "role" in detail
+        # Allowed list should be present in the error
+        assert "soul" in detail or "instructions" in detail
+        cm.start_agent.assert_not_called()
+
+    @patch.dict("os.environ", {"OPENLEGION_MAX_AGENTS": "10"})
+    def test_apply_non_string_soul_returns_400(self):
+        """soul must be a string."""
+        from fastapi.testclient import TestClient
+
+        app, cm, _ = self._make_app(existing_agents={"operator": "http://localhost:8400"})
+        client = TestClient(app)
+        resp = client.post(
+            "/mesh/fleet/apply",
+            json={
+                "template": "starter",
+                "agent_overrides": {"assistant": {"soul": 123}},
+            },
+        )
+        assert resp.status_code == 400
+        detail = resp.json()["detail"]
+        assert "soul" in detail
+        assert "string" in detail
+        cm.start_agent.assert_not_called()
+
+    @patch.dict("os.environ", {"OPENLEGION_MAX_AGENTS": "10"})
+    def test_apply_large_heartbeat_accepted(self):
+        """heartbeat has no length cap — validation lets large strings through."""
+        from fastapi.testclient import TestClient
+
+        app, _, _ = self._make_app(existing_agents={"operator": "http://localhost:8400"})
+        client = TestClient(app)
+        # 8000 chars -- well above SOUL/INTERFACE 4000 cap. Reflects
+        # HEARTBEAT.md _FILE_CAPS = None (uncapped).
+        big_heartbeat = "h" * 8000
+        # Patch _apply_template so we don't pollute real config/agents.yaml;
+        # we only care that validation passes.
+        with patch(
+            "src.cli.config._apply_template", return_value=["assistant"],
+        ) as mock_apply:
+            resp = client.post(
+                "/mesh/fleet/apply",
+                json={
+                    "template": "starter",
+                    "agent_overrides": {"assistant": {"heartbeat": big_heartbeat}},
+                },
+            )
+        assert resp.status_code == 200, resp.text
+        # Confirm the override was forwarded intact
+        _, kwargs = mock_apply.call_args
+        assert kwargs["agent_overrides"]["assistant"]["heartbeat"] == big_heartbeat
+
     @patch.dict("os.environ", {"OPENLEGION_MAX_AGENTS": "10"})
     def test_apply_empty_overrides_is_noop(self):
         """Empty agent_overrides={} behaves identically to no overrides."""

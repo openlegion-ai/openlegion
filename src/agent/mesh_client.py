@@ -706,9 +706,13 @@ class MeshClient:
         """Apply a fleet template to create a team of agents.
 
         ``agent_overrides`` is an optional mapping of ``agent_name`` →
-        ``{"model": str, "instructions": str}``. Validated upfront on
-        the mesh side; unknown names / fields / models / oversized
-        instructions return HTTP 400 (or 413) with the offender named.
+        per-slot dict with any of: ``model``, ``instructions``, ``soul``,
+        ``heartbeat``, ``interface`` (PR-N v2). Validated upfront on the
+        mesh side; unknown names / fields / models return HTTP 400, oversized
+        string fields return HTTP 413, with the offender named.
+
+        Per-slot creation is non-atomic: a mid-loop failure leaves
+        earlier-created agents in place; check the returned ``created`` list.
         """
         client = await self._get_client()
         body: dict = {"template": template}

@@ -1164,9 +1164,10 @@ def _apply_template(
     """Apply a team template, creating all agents. Returns list of agent names.
 
     ``agent_overrides`` (PR-N) is an optional ``{agent_name: {field: value}}``
-    map. v1 supports per-agent ``model`` and ``instructions`` overrides applied
-    on top of the template's defaults. The mesh route validates the shape and
-    contents UPFRONT — by the time we get here, the input is trusted.
+    map. v2 supports per-agent ``model``, ``instructions``, ``soul``,
+    ``heartbeat`` and ``interface`` overrides applied on top of the template's
+    defaults. The mesh route validates the shape and contents UPFRONT — by the
+    time we get here, the input is trusted.
     """
     cfg = _load_config()
     default_model = cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
@@ -1194,8 +1195,14 @@ def _apply_template(
         if "instructions" in per_agent_override:
             instructions = per_agent_override["instructions"]
         soul = agent_def.get("soul", "")
+        if "soul" in per_agent_override:
+            soul = per_agent_override["soul"]
         heartbeat = agent_def.get("heartbeat", "")
+        if "heartbeat" in per_agent_override:
+            heartbeat = per_agent_override["heartbeat"]
         interface = agent_def.get("initial_interface", "") or agent_def.get("interface", "")
+        if "interface" in per_agent_override:
+            interface = per_agent_override["interface"]
         thinking = agent_def.get("thinking", "")
         budget = agent_def.get("budget")
         agent_permissions = agent_def.get("permissions")
