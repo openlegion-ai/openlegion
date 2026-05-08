@@ -52,17 +52,6 @@ function dashboard() {
       { id: 'workplace', label: 'Board' },
       { id: 'system', label: 'System' },
     ],
-    // Phase 1 — feature-flagged Board UX overhaul. ``newNavEnabled`` is
-    // populated from /api/dashboard-config on boot. When ``true``, top-tab
-    // labels rewrite (Agents→Team, Board→Home, System→Settings), the
-    // Needs-You / notifications / side-panel-toggle indicators render in
-    // the top nav, the System "settings" sub-tab label becomes "General",
-    // and the Chat tab gets a delivery banner pointing at fresh Home
-    // items. Tab IDs (``chat``, ``fleet``, ``workplace``, ``system``)
-    // stay frozen — the rename is cosmetic so URLs / routes / tests
-    // don't break. When ``false`` (default), the SPA renders the legacy
-    // labels unchanged. See docs/plans/2026-05-08-board-ux-overhaul.md.
-    newNavEnabled: false,
     // Side panel toggle for non-Chat tabs (Phase 1 Decision 5). Persists
     // across navigation via Alpine root scope; localStorage carries it
     // through reloads so users keep their messenger open as they wander.
@@ -1064,14 +1053,6 @@ function dashboard() {
       this._initTs = Date.now();  // track page load time to skip replayed events
       const cfg = window.__config || {};
 
-      // Phase 1 — Board UX overhaul. Pull the feature flag once at boot;
-      // every new surface (rename, badge, banner, side-panel toggle)
-      // hides itself when the server returns ``new_nav_enabled: false``,
-      // so the legacy SPA layout keeps rendering for everyone except
-      // explicit opt-ins. The flag is read from the OPENLEGION_NEW_NAV
-      // env var server-side; failure is fail-safe (assume off).
-      this.loadDashboardConfig();
-
       // Restore Phase 1 state from localStorage (side panel + last-Home
       // visit timestamp). These are cosmetic — losing them is harmless,
       // so we wrap each in its own try/catch and never block init.
@@ -1210,7 +1191,7 @@ function dashboard() {
         // Phase 1 — ESC also closes the messenger side panel (a11y).
         // Order matters: cmd palette ESC handler runs first above and
         // returns; we only get here if the palette wasn't open.
-        if (e.key === 'Escape' && this.newNavEnabled && this.messengerSidePanelOpen && this.activeTab !== 'chat') {
+        if (e.key === 'Escape' && this.messengerSidePanelOpen && this.activeTab !== 'chat') {
           this.closeSidePanel();
         }
       };
@@ -1531,46 +1512,27 @@ function dashboard() {
     // ── Phase 1 — Board UX overhaul helpers ──────────────────
 
     /**
-     * Fetch the dashboard feature-flag bundle. Today the only flag is
-     * ``new_nav_enabled`` (Phase 1). Fail-safe: if the call errors out
-     * (older server, network blip, etc.) we keep the legacy layout.
-     */
-    async loadDashboardConfig() {
-      try {
-        const r = await fetch(`${window.__config.apiBase}/dashboard-config`, { credentials: 'same-origin' });
-        if (!r.ok) return;
-        const data = await r.json();
-        this.newNavEnabled = !!data.new_nav_enabled;
-      } catch (e) {
-        // Silently fall back to the legacy layout.
-      }
-    },
-
-    /**
-     * Display label for a top-nav tab. Phase 1 renames Agents/Board/
-     * System to Team/Home/Settings without touching the tab IDs (URLs,
-     * routes, and JS state vars all stay on the legacy IDs). When the
-     * feature flag is off, returns the original label unchanged.
+     * Display label for a top-nav tab. Renames Agents/Board/System to
+     * Team/Home/Settings without touching the tab IDs (URLs, routes,
+     * and JS state vars all stay on the legacy IDs).
      */
     tabLabelFor(tab) {
-      if (!this.newNavEnabled) return tab.label;
       const map = { fleet: 'Team', workplace: 'Home', system: 'Settings' };
       return map[tab.id] || tab.label;
     },
 
     /**
-     * Return the System sub-tab label. Renamed ``settings``→``General``
-     * when ``newNavEnabled`` so the parent "Settings" doesn't collide
-     * with a sub-tab of the same name.
+     * Return the System sub-tab label. ``settings`` is renamed to
+     * ``General`` so the parent "Settings" doesn't collide with a
+     * sub-tab of the same name.
      */
     systemTabLabelFor(tab) {
-      if (this.newNavEnabled && tab.id === 'settings') return 'General';
+      if (tab.id === 'settings') return 'General';
       return tab.label;
     },
 
     /** True when there's a delivered item the user hasn't seen on Home. */
     get deliveryBannerVisible() {
-      if (!this.newNavEnabled) return false;
       if (this.activeTab !== 'chat') return false;
       const items = this.recentlyDeliveredItems || [];
       if (items.length === 0) return false;
@@ -1652,7 +1614,6 @@ function dashboard() {
      */
     visibleChatHistory(agentId) {
       const all = this.chatHistories[agentId] || [];
-      if (!this.newNavEnabled) return all;
       const limit = this._chatVisibleLimit[agentId] || 50;
       if (all.length <= limit) return all;
       return all.slice(all.length - limit);
@@ -6563,7 +6524,7 @@ function dashboard() {
       });
       // Phase 1 — mirror to the server-side opened-conversations set.
       // Best-effort: a network failure shouldn't block the UI.
-      if (this.newNavEnabled && agentId !== 'operator') {
+      if (agentId !== 'operator') {
         this.openConversation(agentId);
       }
     },
@@ -6584,7 +6545,7 @@ function dashboard() {
       // Phase 1 — mirror to the server-side opened-conversations set so
       // ``/api/conversations`` reflects what's currently in the user's
       // messenger. Best-effort: we don't block on the network call.
-      if (this.newNavEnabled && agentId !== 'operator') {
+      if (agentId !== 'operator') {
         this.closeConversation(agentId);
       }
     },

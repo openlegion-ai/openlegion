@@ -1505,12 +1505,9 @@ textarea.dash-input {
   .context-panel { display: none; }
 }
 
-/* ── Phase 1: Board UX overhaul (feature-flagged via newNavEnabled) ─
-   These styles only have visual effect when the Alpine flag is on:
-   the surfaces using them (Operator-pinned row, Needs-You badge,
-   delivery banner, side-panel toggle) all gate their render with
-   ``x-show="newNavEnabled && ..."``. When the flag is off the
-   classes never appear in the DOM, so legacy rendering is unaffected. */
+/* ── Phase 1: Board UX overhaul ─────────────────────────────────────
+   Styles for the unified messenger surfaces — Operator-pinned row,
+   Needs-You badge, delivery banner, side-panel toggle. */
 
 /* Operator-pinned conversation row — distinct cobalt accent (Decision 6). */
 .messenger-operator-pinned .agent-avatar {

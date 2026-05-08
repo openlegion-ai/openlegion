@@ -201,13 +201,12 @@
               <template x-if="tab.id === 'system'">
                 <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
               </template>
-              <!-- Phase 1: when newNavEnabled, ``Agents`` becomes
-                   ``Team`` (and the (N) running counter rides along);
-                   ``Board``→``Home``, ``System``→``Settings``. Tab IDs
-                   stay frozen so URLs / routes don't break. When the
-                   flag is off, the legacy label renders as before. -->
+              <!-- Phase 1: ``Agents`` becomes ``Team`` (and the (N)
+                   running counter rides along); ``Board``→``Home``,
+                   ``System``→``Settings``. Tab IDs stay frozen so URLs
+                   / routes don't break. -->
               <span x-text="(tab.id === 'fleet' && agents.length)
-                  ? (newNavEnabled ? 'Team (' : 'Agents (') + runningAgents.length + ')'
+                  ? 'Team (' + runningAgents.length + ')'
                   : tabLabelFor(tab)"></span>
               <!-- unread event badge removed -->
             </button>
@@ -225,14 +224,14 @@
         </button>
       </div>
       <div class="flex items-center gap-4 shrink-0">
-        <!-- Phase 1 — Needs-You badge (red, prominent). Only renders
-             when ``newNavEnabled`` and the user has at least one
-             pending action awaiting them. Click jumps to the existing
-             pending-action surface inside the operator chat (it
-             already aggregates pending / credential / browser-login /
-             captcha / blockers — so we reuse the source of truth). -->
+        <!-- Phase 1 — Needs-You badge (red, prominent). Renders when
+             the user has at least one pending action awaiting them.
+             Click jumps to the existing pending-action surface inside
+             the operator chat (it already aggregates pending /
+             credential / browser-login / captcha / blockers — so we
+             reuse the source of truth). -->
         <button
-          x-show="newNavEnabled && needsYouItems.length > 0"
+          x-show="needsYouItems.length > 0"
           x-cloak
           @click="switchTab('chat'); $nextTick(() => { const el = document.querySelector('[data-pending-cards]'); if (el) el.scrollIntoView({behavior: 'smooth', block: 'start'}); })"
           class="needs-you-badge flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold bg-red-900/40 text-red-300 border border-red-700/60 hover:bg-red-900/60 hover:border-red-600/80 transition-colors cursor-pointer"
@@ -254,7 +253,7 @@
              persistent /api/notifications endpoint lands in Phase 2;
              until then the bell mirrors ``events`` so the surface is
              reserved without doubling backend complexity. -->
-        <div x-show="newNavEnabled" x-cloak class="relative">
+        <div class="relative">
           <button
             @click="notificationsOpen = !notificationsOpen"
             class="relative text-gray-500 hover:text-gray-200 transition-colors p-1.5 rounded"
@@ -286,7 +285,7 @@
              command palette so we use a visible button with a tooltip;
              keyboard users hit it via Tab. -->
         <button
-          x-show="newNavEnabled && activeTab !== 'chat'"
+          x-show="activeTab !== 'chat'"
           x-cloak
           @click="toggleSidePanel()"
           class="text-gray-500 hover:text-gray-200 transition-colors p-1.5 rounded relative"
@@ -350,12 +349,12 @@
     </nav>
 
     <!-- Main content -->
-    <!-- Phase 1: when newNavEnabled and the side-panel toggle is on
-         (non-Chat tab), main content is offset to make room for the
-         messenger. We pre-OR ``messengerSidePanelOpen`` into the same
-         class so the legacy side-panel rendering path keeps working
-         alongside the new toggle. -->
-    <main class="flex-1 overflow-auto p-2 sm:p-4 lg:p-6 transition-[margin] duration-200" :class="activeTab !== 'chat' && (openChats.length > 0 || (newNavEnabled && messengerSidePanelOpen)) && !chatPanelMinimized && (chatFullScreen ? 'hidden' : 'messenger-margin chat-side-open')">
+    <!-- Phase 1: when the side-panel toggle is on (non-Chat tab),
+         main content is offset to make room for the messenger. We
+         pre-OR ``messengerSidePanelOpen`` into the same class so the
+         legacy side-panel rendering path keeps working alongside the
+         new toggle. -->
+    <main class="flex-1 overflow-auto p-2 sm:p-4 lg:p-6 transition-[margin] duration-200" :class="activeTab !== 'chat' && (openChats.length > 0 || messengerSidePanelOpen) && !chatPanelMinimized && (chatFullScreen ? 'hidden' : 'messenger-margin chat-side-open')">
 
       <!-- Connection error banner -->
       <div x-show="connectionError" x-cloak class="mb-4 bg-red-900/30 border border-red-800 rounded-lg px-4 py-3 flex items-center gap-3">
@@ -413,10 +412,10 @@
 
               <!-- Phase 1 — delivery banner. Slim slip above the message
                    list when there's a delivery on Home the user hasn't
-                   seen. ``deliveryBannerVisible`` already gates on
-                   ``newNavEnabled`` + ``activeTab === 'chat'``, so we
-                   stay invisible when the flag is off or the user is
-                   already on Home. Click → switch to Home and ack. -->
+                   seen. ``deliveryBannerVisible`` gates on
+                   ``activeTab === 'chat'``, so we stay invisible when
+                   the user is already on Home. Click → switch to Home
+                   and ack. -->
               <div x-show="deliveryBannerVisible" x-cloak data-delivery-banner
                 @click="openHomeFromBanner()"
                 role="button" tabindex="0"
@@ -632,16 +631,16 @@
                 <div id="pending-cards-operator"
                      data-pending-cards
                      aria-live="polite">
-                <!-- Phase 1 — "Load older →" pagination. Renders only
-                     when newNavEnabled and the operator chat has more
-                     than the current visible window (Decision 12). -->
-                <div x-show="newNavEnabled && hasOlderMessages('operator')" x-cloak class="text-center py-2">
+                <!-- Phase 1 — "Load older →" pagination. Renders when
+                     the operator chat has more than the current
+                     visible window (Decision 12). -->
+                <div x-show="hasOlderMessages('operator')" x-cloak class="text-center py-2">
                   <button @click="loadOlderMessages('operator')"
                     class="text-[11px] text-gray-500 hover:text-gray-300 px-3 py-1 rounded border border-gray-800 hover:border-gray-700 transition-colors">
                     Load older &rarr;
                   </button>
                 </div>
-                <template x-for="(msg, i) in (newNavEnabled ? visibleChatHistory('operator') : (chatHistories['operator'] || []))" :key="i">
+                <template x-for="(msg, i) in visibleChatHistory('operator')" :key="i">
                   <div>
                     <!-- System event: compaction / session divider -->
                     <template x-if="msg.role === 'system'">
@@ -4289,12 +4288,12 @@
             <button @click="switchSystemTab(st.id)"
               class="px-3 py-1.5 rounded-md text-sm font-medium transition-all relative whitespace-nowrap"
               :class="systemTab === st.id ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'">
-              <!-- Phase 1 — when newNavEnabled, the parent ``System`` tab
-                   becomes ``Settings``. The catchall ``settings`` sub-tab
-                   inside it would then read "Settings > Settings"; we
-                   rename it to "General" via systemTabLabelFor() so the
-                   collision is gone. Internal id stays ``settings`` so
-                   routes / state / tests don't break. -->
+              <!-- Phase 1 — the parent ``System`` tab is now ``Settings``.
+                   The catchall ``settings`` sub-tab inside it would
+                   otherwise read "Settings > Settings"; we rename it to
+                   "General" via systemTabLabelFor() so the collision is
+                   gone. Internal id stays ``settings`` so routes /
+                   state / tests don't break. -->
               <span x-text="systemTabLabelFor(st)"></span>
             </button>
           </template>
@@ -7277,12 +7276,12 @@
     </main>
 
     <!-- Messenger-style chat panel (outside main so fullscreen toggle works; hidden on Chat tab).
-         Phase 1: also opens via ``messengerSidePanelOpen`` when the new-nav
-         flag is on — the side-panel toggle button in the top nav drives
-         this. Same DOM, same Alpine wires; the ``role="complementary"``
-         hint helps screen readers understand this is supplementary
-         content, not the main pane. -->
-    <div x-show="activeTab !== 'chat' && (openChats.length > 0 || (newNavEnabled && messengerSidePanelOpen)) && !chatPanelMinimized" x-cloak
+         Phase 1: also opens via ``messengerSidePanelOpen`` — the
+         side-panel toggle button in the top nav drives this. Same DOM,
+         same Alpine wires; the ``role="complementary"`` hint helps
+         screen readers understand this is supplementary content, not
+         the main pane. -->
+    <div x-show="activeTab !== 'chat' && (openChats.length > 0 || messengerSidePanelOpen) && !chatPanelMinimized" x-cloak
       role="complementary"
       aria-label="Messenger panel"
       x-transition:enter="transition ease-out duration-200"
@@ -7304,9 +7303,8 @@
         <!-- Agent list -->
         <div class="flex-1 overflow-y-auto">
           <!-- Phase 1 — Operator pinned at the top with cobalt accent +
-               MANAGER caption (Decision 6). When newNavEnabled is off,
-               we render the legacy uniform list below. -->
-          <template x-if="newNavEnabled && openChats.includes('operator')">
+               MANAGER caption (Decision 6). -->
+          <template x-if="openChats.includes('operator')">
             <div>
               <div @click="activeChatId = 'operator'; chatUnread = { ...chatUnread, operator: 0 }; $nextTick(() => _scrollChat('operator', true))"
                 @keydown.enter.prevent="activeChatId = 'operator'; chatUnread = { ...chatUnread, operator: 0 }; $nextTick(() => _scrollChat('operator', true))"
@@ -7339,7 +7337,7 @@
               </div>
             </div>
           </template>
-          <template x-for="chatId in (newNavEnabled ? openChats.filter(c => c !== 'operator') : openChats)" :key="chatId">
+          <template x-for="chatId in openChats.filter(c => c !== 'operator')" :key="chatId">
             <!-- div+role=button avoids the HTML spec violation of <button> inside <button> -->
             <div @click="activeChatId = chatId; chatUnread = { ...chatUnread, [chatId]: 0 }; $nextTick(() => _scrollChat(chatId, true))"
               @keydown.enter.prevent="activeChatId = chatId; chatUnread = { ...chatUnread, [chatId]: 0 }; $nextTick(() => _scrollChat(chatId, true))"
@@ -7478,13 +7476,13 @@
           <!-- Phase 1 — "Load older →" pagination on the side-panel
                viewport. Same paging window as the full-screen Chat
                tab, keyed by the active chat id. -->
-          <div x-show="newNavEnabled && hasOlderMessages(activeChatId)" x-cloak class="text-center py-2">
+          <div x-show="hasOlderMessages(activeChatId)" x-cloak class="text-center py-2">
             <button @click="loadOlderMessages(activeChatId)"
               class="text-[11px] text-gray-500 hover:text-gray-300 px-3 py-1 rounded border border-gray-800 hover:border-gray-700 transition-colors">
               Load older &rarr;
             </button>
           </div>
-          <template x-for="(msg, i) in (newNavEnabled ? visibleChatHistory(activeChatId) : (chatHistories[activeChatId] || []))" :key="i">
+          <template x-for="(msg, i) in visibleChatHistory(activeChatId)" :key="i">
             <!-- Single root wrapper required by Alpine x-for. -->
             <div>
               <!-- System event: compaction / session divider — rendered as a separator, not a bubble -->

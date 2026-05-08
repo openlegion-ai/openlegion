@@ -5083,52 +5083,8 @@ class TestWorkplaceTabRoutes:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Phase 1 — Board UX overhaul (feature flag + conversations contract)
+# Phase 1 — Board UX overhaul (conversations contract)
 # ─────────────────────────────────────────────────────────────────────
-
-
-class TestPhase1DashboardConfig:
-    """Feature-flag plumbing for the unified messenger overhaul.
-
-    Verifies ``/api/dashboard-config`` reads ``OPENLEGION_NEW_NAV`` from
-    the environment and exposes a single boolean to the SPA. The flag
-    is default-off so the legacy layout keeps rendering for everyone
-    until an operator explicitly opts in.
-    """
-
-    def setup_method(self):
-        self._tmpdir = tempfile.mkdtemp()
-        self.components = _make_components(self._tmpdir)
-        self.client = _make_client(self.components)
-
-    def teardown_method(self):
-        _teardown(self.components)
-        shutil.rmtree(self._tmpdir, ignore_errors=True)
-
-    def test_dashboard_config_default_off(self):
-        # Ensure env var is unset for this assertion.
-        prev = os.environ.pop("OPENLEGION_NEW_NAV", None)
-        try:
-            resp = self.client.get("/dashboard/api/dashboard-config")
-            assert resp.status_code == 200
-            assert resp.json() == {"new_nav_enabled": False}
-        finally:
-            if prev is not None:
-                os.environ["OPENLEGION_NEW_NAV"] = prev
-
-    def test_dashboard_config_truthy_values(self):
-        for v in ("1", "true", "True", "yes", "on"):
-            with patch.dict(os.environ, {"OPENLEGION_NEW_NAV": v}):
-                resp = self.client.get("/dashboard/api/dashboard-config")
-                assert resp.status_code == 200
-                assert resp.json()["new_nav_enabled"] is True, f"value {v!r} should enable flag"
-
-    def test_dashboard_config_falsy_values(self):
-        for v in ("0", "false", "no", "", "off"):
-            with patch.dict(os.environ, {"OPENLEGION_NEW_NAV": v}):
-                resp = self.client.get("/dashboard/api/dashboard-config")
-                assert resp.status_code == 200
-                assert resp.json()["new_nav_enabled"] is False, f"value {v!r} should keep flag off"
 
 
 class TestPhase1ConversationsContract:

@@ -1679,21 +1679,6 @@ def create_dashboard_router(
     # as the cross-tab source of truth within a session).
     _opened_conversations: set[str] = set()
 
-    @api_router.get("/api/dashboard-config")
-    async def api_dashboard_config() -> dict:
-        """Return dashboard feature flags read once at startup.
-
-        Phase 1 of the Board UX overhaul gates the structural messenger
-        rewrite behind ``OPENLEGION_NEW_NAV``. The client reads this on
-        boot and wraps all new behavior in ``x-show="newNavEnabled"``;
-        when the flag is unset (default) the SPA renders the legacy
-        Chat / Agents / Board / System layout unchanged.
-        """
-        new_nav = os.environ.get("OPENLEGION_NEW_NAV", "").strip().lower()
-        return {
-            "new_nav_enabled": new_nav in ("1", "true", "yes", "on"),
-        }
-
     @api_router.get("/api/conversations")
     async def api_conversations() -> dict:
         """Return the messenger conversation list — operator + opened workers.
