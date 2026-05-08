@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from src.channels import AT_MENTION_RE
-from src.host.credentials import SYSTEM_CREDENTIAL_PROVIDERS, is_system_credential
+from src.host.credentials import is_system_credential
 from src.shared.utils import sanitize_for_prompt, setup_logging
 
 if TYPE_CHECKING:
@@ -349,7 +349,12 @@ class Channel(abc.ABC):
             if len(args) < 2:
                 return "Usage: /addkey <service> <key>"
             service = args[1]
-            # Normalize bare provider names to include _api_key suffix
+            # Normalize bare provider names to include _api_key suffix.
+            # Local import: importing SYSTEM_CREDENTIAL_PROVIDERS at module
+            # scope would trigger src.host.credentials' lazy __getattr__
+            # at channel-import time, which transitively pulls litellm
+            # (~2.25s).  Defer until the user actually runs /addkey.
+            from src.host.credentials import SYSTEM_CREDENTIAL_PROVIDERS
             if service.lower() in SYSTEM_CREDENTIAL_PROVIDERS and not service.lower().endswith("_api_key"):
                 service = f"{service}_api_key"
             key = args[2] if len(args) > 2 else ""

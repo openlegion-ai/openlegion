@@ -195,7 +195,12 @@ AGENT_PREFIX = "OPENLEGION_CRED_"
 # auto-detecting LLM provider keys.  Derived dynamically from the
 # model registry (src/shared/models.py) so adding a provider in one
 # place propagates everywhere.
-SYSTEM_CREDENTIAL_PROVIDERS = get_known_provider_names()
+#
+# ``SYSTEM_CREDENTIAL_PROVIDERS`` is exposed as a lazy module attribute
+# via PEP 562 ``__getattr__`` below — populating it eagerly imports
+# litellm transitively (~2.25s wall clock), which every test that
+# touches the host paid during collection.  Deferring the call lets
+# importing this module stay cheap.
 # Providers where LiteLLM handles routing natively (built-in support).
 # Custom providers like 'openlegion' are NOT in this set — they use
 # api_base with OpenAI-compatible rewrite in _rewrite_model_for_litellm().
@@ -205,6 +210,14 @@ _LITELLM_NATIVE_PROVIDERS = frozenset({
     "minimax", "moonshot", "xai", "zai", "ollama",
 })
 SYSTEM_CREDENTIAL_SUFFIXES = ("_api_key", "_api_base")
+
+
+def __getattr__(name: str):  # PEP 562 — lazy module attributes
+    if name == "SYSTEM_CREDENTIAL_PROVIDERS":
+        value = get_known_provider_names()
+        globals()[name] = value  # cache after first access
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def is_oauth_token(token: str) -> bool:
@@ -222,7 +235,7 @@ def is_system_credential(name: str) -> bool:
     for suffix in SYSTEM_CREDENTIAL_SUFFIXES:
         if lower.endswith(suffix):
             prefix = lower[: -len(suffix)]
-            if prefix in SYSTEM_CREDENTIAL_PROVIDERS:
+            if prefix in get_known_provider_names():
                 return True
     return False
 
@@ -663,7 +676,7 @@ class CredentialVault:
         for runtime availability.
         """
         providers: set[str] = set()
-        for provider in SYSTEM_CREDENTIAL_PROVIDERS:
+        for provider in get_known_provider_names():
             if provider in KEYLESS_PROVIDERS:
                 if f"{provider}_api_base" in self.api_bases:
                     providers.add(provider)

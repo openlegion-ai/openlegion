@@ -3931,3 +3931,97 @@ async def test_auto_fallback_when_default_model_also_missing(monkeypatch):
     assert "gemini" in used_model
     assert len(call_log) == 1
     assert "gemini" in call_log[0]
+
+
+# ---------------------------------------------------------------------------
+# Lazy-litellm regression tests — guard the optimization where
+# importing src.host.credentials no longer transitively loads litellm.
+#
+# These run in a fresh subprocess because pytest collection has already
+# imported litellm transitively from other modules in the test process,
+# making `'litellm' in sys.modules` checks unreliable here.
+# ---------------------------------------------------------------------------
+
+
+def test_credentials_import_does_not_eagerly_load_litellm():
+    """Importing src.host.credentials must not transitively load litellm.
+
+    Litellm is heavy (~2.25s wall clock cold-import); the credentials module
+    defers the call to get_known_provider_names() behind a PEP 562
+    ``__getattr__`` so importing the module stays cheap. A future
+    contributor could re-introduce a module-scope call (e.g., to
+    get_all_providers, get_known_provider_names, get_all_model_costs,
+    _resolve_litellm_key, etc.) that silently regresses this. This test
+    spawns a fresh interpreter and asserts litellm is NOT in sys.modules
+    after `import src.host.credentials`.
+    """
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[1]
+    code = (
+        "import sys\n"
+        "import src.host.credentials\n"
+        "print('LITELLM_LOADED' if 'litellm' in sys.modules else 'CLEAN')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=repo_root,
+        env={**os.environ, "PYTHONPATH": str(repo_root)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, (
+        f"Subprocess failed (rc={result.returncode}).\n"
+        f"stdout: {result.stdout!r}\n"
+        f"stderr: {result.stderr!r}"
+    )
+    output = result.stdout.strip()
+    assert output == "CLEAN", (
+        "Importing src.host.credentials eagerly loaded litellm — check for "
+        "new module-scope calls into src/shared/models.py functions "
+        "(get_all_providers, get_known_provider_names, get_all_model_costs, "
+        "_resolve_litellm_key, etc.) that transitively import litellm. "
+        f"Subprocess output: {output!r}"
+    )
+
+
+def test_lazy_system_credential_providers_still_resolves():
+    """The PEP 562 ``__getattr__`` lazy access path must still work.
+
+    Proves that ``from src.host.credentials import SYSTEM_CREDENTIAL_PROVIDERS``
+    returns a non-empty frozenset, i.e. the lazy attribute trip-wire is wired
+    correctly and the deferral hasn't broken downstream consumers.
+    """
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[1]
+    code = (
+        "from src.host.credentials import SYSTEM_CREDENTIAL_PROVIDERS\n"
+        "assert isinstance(SYSTEM_CREDENTIAL_PROVIDERS, frozenset), "
+        "    f'expected frozenset, got {type(SYSTEM_CREDENTIAL_PROVIDERS).__name__}'\n"
+        "assert len(SYSTEM_CREDENTIAL_PROVIDERS) > 0, 'frozenset is empty'\n"
+        "print('OK', len(SYSTEM_CREDENTIAL_PROVIDERS))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=repo_root,
+        env={**os.environ, "PYTHONPATH": str(repo_root)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, (
+        f"Lazy access of SYSTEM_CREDENTIAL_PROVIDERS failed (rc={result.returncode}).\n"
+        f"stdout: {result.stdout!r}\n"
+        f"stderr: {result.stderr!r}"
+    )
+    assert result.stdout.startswith("OK "), (
+        f"Unexpected subprocess output: {result.stdout!r}"
+    )
