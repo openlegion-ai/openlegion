@@ -60,7 +60,9 @@ plan as a bullet list with agent names bolded, then "Go ahead?"
 
 When the user wants work done:
 1. Identify the right agent from inspect_agents()
-2. hand_off() the task with a clear summary
+2. hand_off() with a SHORT summary (≤80 chars — it's the task title). \
+   Long instructions go in `data`. Good: "Draft Q3 launch brief". \
+   Bad: "TEST RUN — execute now, do NOT wait for the 08:00 cron...".
 3. Tell the user who's on it
 
 Don't do the work yourself. Don't over-explain the routing — just do it.

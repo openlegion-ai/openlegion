@@ -1304,3 +1304,72 @@ class TestCoordinationV2:
         # Legacy blackboard write happened (no v2 path taken).
         mc.write_blackboard.assert_called_once()
         mc.create_task.assert_not_called()
+
+
+class TestHandOffTitleQuality:
+    """Title-length policy on hand_off (Task 6 v2 path).
+
+    Wall-of-text titles in the dashboard came from agents stuffing the
+    full instruction into ``summary`` — both the title AND description
+    of the resulting task ended up as the same long string. The fix
+    splits a long ``summary`` into a derived short title + the original
+    long string as description.
+    """
+
+    @pytest.mark.asyncio
+    async def test_hand_off_short_summary_passes_through(self):
+        """Summary ≤ 100 chars: title and description both equal it."""
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="scout", v2_enabled=True)
+        mc.list_agents.return_value = {"writer": {"role": "writer"}}
+        mc.create_task.return_value = {
+            "id": "task_abc", "creator": "scout", "assignee": "writer",
+            "title": "Draft Q3 launch brief", "status": "pending",
+        }
+
+        await hand_off(
+            to="writer",
+            summary="Draft Q3 launch brief",
+            mesh_client=mc,
+        )
+
+        kwargs = mc.create_task.call_args.kwargs
+        assert kwargs["title"] == "Draft Q3 launch brief"
+        # For short summaries, description mirrors the summary by design
+        # (preserves legacy contract — recipients still see the same
+        # context they used to).
+        assert kwargs["description"] == "Draft Q3 launch brief"
+
+    @pytest.mark.asyncio
+    async def test_hand_off_long_summary_splits_into_title_and_description(self):
+        """Summary > 100 chars: title is short, description is full text."""
+        from src.agent.builtins.coordination_tool import hand_off
+        from src.host.orchestration import SHORT_TITLE_TARGET
+
+        mc = _make_mesh_client(agent_id="scout", v2_enabled=True)
+        mc.list_agents.return_value = {"writer": {"role": "writer"}}
+        mc.create_task.return_value = {
+            "id": "task_abc", "creator": "scout", "assignee": "writer",
+            "title": "ok", "status": "pending",
+        }
+
+        long_summary = (
+            "TEST RUN — execute now, do NOT wait for the 08:00 cron. "
+            "The brief is ready at briefs/crewai. Topic: CrewAI vs "
+            "OpenLegion comparison. Slug: crewai. Path: src/content/"
+            "comparison/crewai.md. Please draft the introduction first."
+        )
+        await hand_off(
+            to="writer", summary=long_summary, mesh_client=mc,
+        )
+
+        kwargs = mc.create_task.call_args.kwargs
+        # Title got compressed.
+        assert len(kwargs["title"]) <= SHORT_TITLE_TARGET + 1
+        # Description preserves the full original text.
+        assert kwargs["description"] == long_summary
+        # Title isn't empty / placeholder — it carries some leading
+        # signal from the summary so the recipient can tell tasks apart.
+        assert kwargs["title"]
+        assert kwargs["title"] != "(handoff)"

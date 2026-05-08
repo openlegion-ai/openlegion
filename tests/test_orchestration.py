@@ -23,11 +23,15 @@ import pytest
 
 from src.host.orchestration import (
     DEFAULT_RETENTION_SECONDS,
+    MAX_TITLE_CHARS,
+    SHORT_TITLE_TARGET,
     TERMINAL_STATUSES,
     VALID_STATUSES,
     InvalidStatusTransition,
     TaskNotFound,
     Tasks,
+    _derive_short_title,
+    _normalize_title_and_description,
 )
 
 
@@ -69,6 +73,161 @@ def test_create_requires_title(tmp_path):
     t = _make_store(tmp_path)
     with pytest.raises(ValueError, match="title"):
         t.create(creator="scout", assignee="analyst", title="")
+
+
+# ── Title-length policy (defensive truncation) ───────────────────
+
+
+def test_create_task_preserves_short_title(tmp_path):
+    """Titles ≤ LONG_TITLE_THRESHOLD pass through unchanged."""
+    t = _make_store(tmp_path)
+    rec = t.create(
+        creator="op", assignee="writer",
+        title="Draft Q3 launch brief",
+        description="Topic: CrewAI vs OpenLegion. Slug: crewai.",
+    )
+    assert rec["title"] == "Draft Q3 launch brief"
+    assert rec["description"] == "Topic: CrewAI vs OpenLegion. Slug: crewai."
+
+
+def test_create_task_truncates_long_title_with_description(tmp_path):
+    """Long title + caller-supplied description → cap title, keep description."""
+    t = _make_store(tmp_path)
+    long_title = "A" * 300
+    rec = t.create(
+        creator="op", assignee="writer",
+        title=long_title,
+        description="Original description from caller.",
+    )
+    # Title hard-capped at MAX_TITLE_CHARS, description preserved.
+    assert len(rec["title"]) <= MAX_TITLE_CHARS
+    assert rec["description"] == "Original description from caller."
+
+
+def test_create_task_split_when_only_long_summary(tmp_path):
+    """Long title + no description → split into short title + description."""
+    t = _make_store(tmp_path)
+    long_summary = (
+        "TEST RUN — execute now, do NOT wait for the 08:00 cron. "
+        "The brief is ready at briefs/crewai. Topic: CrewAI vs "
+        "OpenLegion comparison. Slug: crewai. Path: src/content/"
+        "comparison/crewai.md. Please draft the introduction first "
+        "and then move on to the body sections."
+    )
+    rec = t.create(
+        creator="op", assignee="writer",
+        title=long_summary,
+    )
+    assert len(rec["title"]) <= SHORT_TITLE_TARGET + 1  # +1 for ellipsis
+    # Full content preserved as description.
+    assert rec["description"] == long_summary
+    # Title is non-empty and reasonable.
+    assert rec["title"]
+    assert "TEST RUN" in rec["title"]
+
+
+def test_normalize_title_short_passthrough():
+    title, desc = _normalize_title_and_description("Short title", None)
+    assert title == "Short title"
+    assert desc is None
+
+
+def test_normalize_title_short_with_description():
+    title, desc = _normalize_title_and_description("Short", "details")
+    assert title == "Short"
+    assert desc == "details"
+
+
+def test_normalize_title_long_with_description():
+    """Long title + caller description → trust caller, cap title."""
+    long = "X" * 500
+    title, desc = _normalize_title_and_description(long, "caller-desc")
+    assert len(title) <= MAX_TITLE_CHARS
+    assert desc == "caller-desc"
+
+
+def test_normalize_title_long_no_description_splits():
+    """Long title + no description → derive short, full goes to desc."""
+    long_summary = (
+        "Draft the Q3 launch brief for CrewAI vs OpenLegion. "
+        "Use the existing template at templates/launch-brief.md. "
+        "Target audience: engineering managers evaluating agent platforms."
+    )
+    title, desc = _normalize_title_and_description(long_summary, None)
+    assert len(title) <= SHORT_TITLE_TARGET + 1
+    assert desc == long_summary
+    # The short title should carry the leading clause meaningfully.
+    assert "Draft" in title
+
+
+def test_derive_short_title_first_sentence():
+    text = "Draft Q3 launch brief. Use the existing template at X."
+    assert _derive_short_title(text) == "Draft Q3 launch brief"
+
+
+def test_derive_short_title_first_line():
+    text = "Subject line\n\nBody paragraph that is much longer..."
+    assert _derive_short_title(text) == "Subject line"
+
+
+def test_derive_short_title_dash_split():
+    text = "TEST RUN — execute now, do NOT wait for the 08:00 cron"
+    out = _derive_short_title(text)
+    assert out == "TEST RUN"
+
+
+def test_derive_short_title_word_boundary_cut():
+    text = "A" + " B" * 60  # one short word + many short tokens, no sentence break
+    out = _derive_short_title(text)
+    assert len(out) <= SHORT_TITLE_TARGET + 1
+    assert out.endswith("…")
+
+
+def test_derive_short_title_collapses_whitespace():
+    text = "Multi   line\t\t\twith   weird     spacing all on one"
+    out = _derive_short_title(text)
+    assert "  " not in out  # collapsed
+
+
+def test_derive_short_title_returns_empty_for_whitespace():
+    """Whitespace-only input must return ``""`` so the caller falls back.
+
+    Audit edge case: a 200-char string of whitespace previously survived
+    the early-return (truthy non-empty string) and the normalizer's
+    fallback path produced a degenerate ``"…"`` title. The strip-aware
+    early-return makes the helper tell its caller "I have nothing"
+    rather than fabricating a title.
+    """
+    assert _derive_short_title("") == ""
+    assert _derive_short_title("   ") == ""
+    assert _derive_short_title("\t\n  \n\t") == ""
+    # The audit case — 200 chars of spaces.
+    assert _derive_short_title(" " * 200) == ""
+
+
+def test_create_task_rejects_whitespace_only_title(tmp_path):
+    """Whitespace-only titles must raise the same ValueError as ``""``.
+
+    Audit edge case: ``Tasks.create`` previously accepted a 200-char
+    string of whitespace as a "long" title and the normalizer's fallback
+    produced ``"…"`` as the visible title in the dashboard kanban. The
+    ``.strip()`` + non-empty check rejects it up front so no degenerate
+    rows reach the database.
+    """
+    t = _make_store(tmp_path)
+    # Pure whitespace, varying lengths.
+    for bogus in ("   ", "\t\n", " " * 200, " \t " * 80):
+        with pytest.raises(ValueError, match="title"):
+            t.create(creator="op", assignee="writer", title=bogus)
+
+
+def test_create_task_strips_title_whitespace(tmp_path):
+    """Surrounding whitespace on a real title should be trimmed silently."""
+    t = _make_store(tmp_path)
+    rec = t.create(
+        creator="op", assignee="writer", title="   Draft brief   ",
+    )
+    assert rec["title"] == "Draft brief"
 
 
 def test_create_with_origin_persists_kind_channel_user(tmp_path):
