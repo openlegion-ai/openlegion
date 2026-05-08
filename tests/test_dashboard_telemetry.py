@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -25,6 +26,10 @@ from src.host.costs import CostTracker
 from src.host.health import HealthMonitor
 from src.host.mesh import Blackboard
 from src.host.traces import TraceStore
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_APP_JS = _REPO_ROOT / "src/dashboard/static/js/app.js"
+_TEMPLATE = _REPO_ROOT / "src/dashboard/templates/index.html"
 
 
 def _make_components(tmp_path: str) -> dict:
@@ -289,3 +294,222 @@ class TestDashboardTelemetryEndpoint:
         finally:
             os.chdir(prev_cwd)
             shutil.rmtree(sandbox, ignore_errors=True)
+
+
+# ── Phase 0 baseline events — endpoint contract ─────────────────
+
+
+class TestPhase0EndpointEvents:
+    """The Phase 0 telemetry baseline emits seven event names against the
+    same generic endpoint. The store has no schema-per-event constraint,
+    so the contract is: each event records, persists props verbatim, and
+    survives a ``recent()`` round-trip with the right shape.
+    """
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir)
+        self.telemetry = DashboardTelemetry(
+            db_path=os.path.join(self._tmpdir, "telemetry.db"),
+        )
+        self.client = _make_client(self.components, self.telemetry)
+
+    def teardown_method(self):
+        self.telemetry.close()
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_tab_view_event_persists_with_props(self):
+        resp = self.client.post(
+            "/dashboard/api/telemetry",
+            json={
+                "event_name": "tab_view",
+                "props": {"tab_id": "fleet", "from_tab_id": "chat"},
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        rows = self.telemetry.recent(event_name="tab_view")
+        assert len(rows) == 1
+        assert rows[0]["props"]["tab_id"] == "fleet"
+        assert rows[0]["props"]["from_tab_id"] == "chat"
+
+    def test_time_to_first_action_event_persists(self):
+        resp = self.client.post(
+            "/dashboard/api/telemetry",
+            json={
+                "event_name": "time_to_first_action",
+                "props": {
+                    "action_type": "tab_view",
+                    "seconds_since_load": 4.21,
+                },
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        rows = self.telemetry.recent(event_name="time_to_first_action")
+        assert len(rows) == 1
+        assert rows[0]["props"]["action_type"] == "tab_view"
+        assert rows[0]["props"]["seconds_since_load"] == 4.21
+
+    def test_needs_you_click_event_persists(self):
+        resp = self.client.post(
+            "/dashboard/api/telemetry",
+            json={
+                "event_name": "needs_you_click",
+                "props": {
+                    "item_count": 3,
+                    "item_kind": "pending",
+                    "action_label": "Confirm",
+                },
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        rows = self.telemetry.recent(event_name="needs_you_click")
+        assert rows[0]["props"]["item_count"] == 3
+        assert rows[0]["props"]["item_kind"] == "pending"
+
+    def test_subtab_usage_event_persists(self):
+        resp = self.client.post(
+            "/dashboard/api/telemetry",
+            json={
+                "event_name": "subtab_usage",
+                "props": {"from_subtab": "feed", "to_subtab": "task-board"},
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        rows = self.telemetry.recent(event_name="subtab_usage")
+        assert rows[0]["props"]["from_subtab"] == "feed"
+        assert rows[0]["props"]["to_subtab"] == "task-board"
+
+    def test_empty_state_cta_click_event_persists(self):
+        resp = self.client.post(
+            "/dashboard/api/telemetry",
+            json={
+                "event_name": "empty_state_cta_click",
+                "props": {"section_id": "operator_intent_content"},
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        rows = self.telemetry.recent(event_name="empty_state_cta_click")
+        assert rows[0]["props"]["section_id"] == "operator_intent_content"
+
+    def test_dock_open_and_close_events_persist(self):
+        # Dock helpers have no UI in Phase 0 but are wireable. Confirm
+        # the endpoint accepts both event names so Phase 1 can ship the
+        # surface without a backend change.
+        for name, props in (
+            ("dock_open", {"from_tab_id": "fleet"}),
+            ("dock_close", {"from_tab_id": "fleet"}),
+        ):
+            resp = self.client.post(
+                "/dashboard/api/telemetry",
+                json={"event_name": name, "props": props},
+            )
+            assert resp.status_code == 200, resp.text
+        opens = self.telemetry.recent(event_name="dock_open")
+        closes = self.telemetry.recent(event_name="dock_close")
+        assert len(opens) == 1
+        assert len(closes) == 1
+        assert opens[0]["props"]["from_tab_id"] == "fleet"
+
+
+# ── Phase 0 baseline events — JS / template wiring ──────────────
+
+
+class TestPhase0FrontendWiring:
+    """The track() helper landed in Phase -1; Phase 0 adds named helpers
+    and wires them to existing UI. Without these wiring tests, a future
+    refactor could quietly delete a hook and the events would silently
+    stop flowing — exactly the bug a baseline is supposed to catch.
+    """
+
+    def test_app_js_defines_phase0_helpers(self):
+        js = _APP_JS.read_text(encoding="utf-8")
+        for helper in (
+            "_trackFirstAction",
+            "_handleNeedsYouAction",
+            "trackEmptyStateCta",
+            "trackSubtabUsage",
+            "dockOpen",
+            "dockClose",
+        ):
+            assert helper in js, f"missing helper in app.js: {helper}"
+
+    def test_first_action_tracker_fires_at_most_once(self):
+        # The flag-guard pattern is load-bearing: every interactive
+        # wrapper calls this helper, but only the first call should
+        # actually emit the event. Assert the flag-set lives in the
+        # helper itself rather than in each call site.
+        js = _APP_JS.read_text(encoding="utf-8")
+        assert "_firstActionTracked: false" in js
+        # The early-return on the flag must precede the track() call.
+        block_start = js.find("_trackFirstAction(actionType)")
+        assert block_start >= 0
+        block = js[block_start : block_start + 600]
+        assert "if (this._firstActionTracked) return;" in block
+        assert "this._firstActionTracked = true;" in block
+        assert "this.track('time_to_first_action'" in block
+
+    def test_switch_tab_emits_tab_view_with_from_id(self):
+        js = _APP_JS.read_text(encoding="utf-8")
+        # The body of switchTab() should record fromTab BEFORE mutating
+        # activeTab, then call track('tab_view', {tab_id, from_tab_id}).
+        idx = js.find("switchTab(tab) {")
+        assert idx >= 0
+        body = js[idx : idx + 1200]
+        assert "const fromTab = this.activeTab;" in body
+        assert "this.track('tab_view'" in body
+        assert "from_tab_id: fromTab" in body
+        # Self-switches must be filtered so refresh doesn't double-fire.
+        assert "if (fromTab !== tab)" in body
+
+    def test_dock_helpers_are_idempotent(self):
+        js = _APP_JS.read_text(encoding="utf-8")
+        # Both helpers must short-circuit on the shadowed _dockOpen flag
+        # before emitting telemetry, so accidental double-fires (ESC +
+        # click-outside) don't double-count.
+        assert "_dockOpen: false" in js
+        open_idx = js.find("dockOpen(opts)")
+        assert open_idx >= 0
+        open_body = js[open_idx : open_idx + 500]
+        assert "if (this._dockOpen) return;" in open_body
+        assert "this._dockOpen = true;" in open_body
+        close_idx = js.find("dockClose(opts)")
+        assert close_idx >= 0
+        close_body = js[close_idx : close_idx + 500]
+        assert "if (!this._dockOpen) return;" in close_body
+        assert "this._dockOpen = false;" in close_body
+
+    def test_workplace_subtab_buttons_emit_subtab_usage(self):
+        html = _TEMPLATE.read_text(encoding="utf-8")
+        # The Board sub-tab loop wires trackSubtabUsage BEFORE updating
+        # workplaceTab so we capture the from→to transition.
+        assert (
+            "trackSubtabUsage(workplaceTab, wt.id); workplaceTab = wt.id;"
+            in html
+        )
+
+    def test_needs_you_action_button_uses_telemetry_wrapper(self):
+        html = _TEMPLATE.read_text(encoding="utf-8")
+        # The action-row click handler should funnel through the wrapper
+        # (which both records the click AND invokes the original handler)
+        # rather than calling action.handler() directly.
+        assert "_handleNeedsYouAction(item, action)" in html
+        # Defensively guard against a regression that re-introduces the
+        # raw call path.
+        assert '@click="action.handler()"' not in html
+
+    def test_empty_state_cta_buttons_emit_telemetry(self):
+        html = _TEMPLATE.read_text(encoding="utf-8")
+        # Each empty-state intent chip on the operator empty state has a
+        # stable section_id so we can compare CTA traction across them.
+        for section_id in (
+            "operator_intent_content",
+            "operator_intent_research",
+            "operator_intent_sales",
+            "operator_intent_devteam",
+            "operator_intent_other",
+            "recently_delivered_view_all",
+        ):
+            assert f"trackEmptyStateCta('{section_id}')" in html, (
+                f"missing trackEmptyStateCta call for: {section_id}"
+            )
