@@ -32,7 +32,7 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 | Path | Responsibility |
 |---|---|
 | **`src/shared/`** | |
-| `types.py` | Pydantic models — THE cross-component contract (369 lines, 24 models). `_generate_id()` helper. `AGENT_ID_RE_PATTERN` unified regex. `RESERVED_AGENT_IDS = {"mesh", "operator", "canary-probe"}`. `DashboardEvent.type` Literal enumerates 33 WebSocket event names. `HARD_EDIT_FIELDS = {"model","permissions","budget","thinking"}` / `SOFT_EDIT_FIELDS = {"instructions","soul","heartbeat","heartbeat_schedule","interface","role"}` — single source of truth for the pending-action TTL split (5 min soft / 30 min hard). `heartbeat_schedule` retargets the agent's cron job in lockstep with the YAML write via the existing edit-soft path. |
+| `types.py` | Pydantic models — THE cross-component contract (369 lines, 24 models). `_generate_id()` helper. `AGENT_ID_RE_PATTERN` unified regex. `RESERVED_AGENT_IDS = {"mesh", "operator", "canary-probe"}`. `DashboardEvent.type` Literal enumerates 50 WebSocket event names; `tests/test_types.py::test_every_emit_string_in_src_matches_a_dashboard_event_literal` is the regex-sweep guard against silent EventBus drops (Pydantic ValidationError on unknown literals is swallowed by the emit-site `try/except`). `HARD_EDIT_FIELDS = {"model","permissions","budget","thinking"}` / `SOFT_EDIT_FIELDS = {"instructions","soul","heartbeat","heartbeat_schedule","interface","role"}` — single source of truth for the pending-action TTL split (5 min soft / 30 min hard). `heartbeat_schedule` retargets the agent's cron job in lockstep with the YAML write via the existing edit-soft path. |
 | `utils.py` | `sanitize_for_prompt()`, `setup_logging()`, misc helpers |
 | `trace.py` | Distributed trace-ID generation and propagation |
 | `models.py` | Model cost/context window registry backed by LiteLLM, `estimate_cost()` |
@@ -258,7 +258,7 @@ Provisioner manages engine instances via Docker/systemd on Hetzner VPS:
 3. **Module-level globals.** `_skill_staging` in skills.py (threading lock protected), `_client` in http_tool.py (connection pooling). Avoid adding more.
 4. **Subagent browser concurrency.** Module-level state means subagents shouldn't use browser concurrently.
 5. **VNC proxy creates httpx client per request** — acceptable at current usage levels.
-6. **`src/shared/types.py` is the contract.** Every cross-component message is a Pydantic model here (369 lines, 24 models). Distinct from `DashboardEvent.type` (33 WebSocket event-name literals) — the two are easy to conflate.
+6. **`src/shared/types.py` is the contract.** Every cross-component message is a Pydantic model here (369 lines, 24 models). Distinct from `DashboardEvent.type` (50 WebSocket event-name literals) — the two are easy to conflate.
 7. **LLM tool-calling message roles must alternate.** `user → assistant(tool_calls) → tool(result) → assistant`. `_trim_context` merges summary into first user message to preserve this invariant.
 8. **busy_timeout variance.** Traces uses 5000ms while other SQLite connections use 30000ms.
 9. **Monolithic server files.** `dashboard/server.py` (~6255 lines, 135 endpoints) and `host/server.py` (~7103 lines, 96 endpoints) are single function-scoped definitions.

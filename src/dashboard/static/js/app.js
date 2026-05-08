@@ -703,6 +703,12 @@ function dashboard() {
     notificationsLoading: false,
     _notificationsRefreshTimer: null,
 
+    // Per-agent "restarting" pulse — populated by ``agent_restarting``
+    // events and cleared by ``agent_restarted`` / ``agent_state``
+    // ``restart_failed``. Bound by templates as
+    // ``agentRestartingMap[agent_id]`` for the spinner indicator.
+    agentRestartingMap: {},
+
     // Browser Notification API integration. ``browserNotifyEnabled`` is
     // the user's local opt-in (persisted to ``olBrowserNotifyEnabled``);
     // ``browserNotifyPermission`` mirrors ``Notification.permission``
@@ -4426,6 +4432,130 @@ function dashboard() {
         }
       }
 
+      // Live notification bell — emitted right after the
+      // ``_notifications_producer`` writes a row to the persistent
+      // notifications store. We optimistically prepend the row to
+      // the in-memory ``notifications`` list so the bell badge ticks
+      // up live; the existing 60s poll still acts as a safety net
+      // for any in-flight events that landed before the WS
+      // subscription resumed after a reconnect.
+      if (evt.type === 'notification_added') {
+        const data = evt.data || {};
+        const nid = typeof data.id === 'number' ? data.id : 0;
+        // Skip dupes (the 60s poll may race with the live event).
+        const exists = nid > 0 && (this.notifications || []).some(n => n.id === nid);
+        if (!exists) {
+          const row = {
+            id: nid,
+            kind: data.kind || 'info',
+            title: data.title || '',
+            body: data.body || '',
+            agent_id: data.agent_id || null,
+            read_at: null,
+            ts: evt.timestamp || (Date.now() / 1000),
+            payload: data.payload || {},
+          };
+          this.notifications = [row, ...(this.notifications || [])];
+          this.notificationsUnreadCount = (this.notificationsUnreadCount || 0) + 1;
+          // Keep ``_lastNotifiedId`` in sync so the next poll skips
+          // browser-notification replay for this row.
+          if (nid > (this._lastNotifiedId || 0)) {
+            this._lastNotifiedId = nid;
+          }
+          // Best-effort browser notification hook (gated by user opt-in).
+          try { this._maybeFireBrowserNotification && this._maybeFireBrowserNotification(row); } catch (_) {}
+        }
+      }
+
+      // Live agent archive / unarchive — refresh the relevant list
+      // so the SPA reflects the new state without a full reload.
+      if (evt.type === 'agent_archived' || evt.type === 'agent_unarchived') {
+        if (this._fleetRefreshDebounce) clearTimeout(this._fleetRefreshDebounce);
+        this._fleetRefreshDebounce = setTimeout(() => {
+          if (typeof this.fetchAgents === 'function') this.fetchAgents();
+        }, 250);
+      }
+
+      // Live agent restart — pulse while the container is bouncing
+      // and clear once the new container reports ready. Failures
+      // surface via the ``agent_state`` ``restart_failed`` payload
+      // which clears the pulse and exposes ``error`` for the toast.
+      if (evt.type === 'agent_restarting' && evt.agent) {
+        if (!this.agentRestartingMap) this.agentRestartingMap = {};
+        this.agentRestartingMap = { ...this.agentRestartingMap, [evt.agent]: true };
+      }
+      if (evt.type === 'agent_restarted' && evt.agent) {
+        if (!this.agentRestartingMap) this.agentRestartingMap = {};
+        const next = { ...this.agentRestartingMap };
+        delete next[evt.agent];
+        this.agentRestartingMap = next;
+        // Re-fetch the agent's runtime details when the user is
+        // currently viewing it.
+        const viewing = this.selectedAgent || this.detailAgent;
+        if (viewing === evt.agent && typeof this.fetchAgentDetail === 'function') {
+          this.fetchAgentDetail(viewing);
+        }
+      }
+      if (evt.type === 'agent_state' && evt.data?.state === 'restart_failed' && evt.agent) {
+        if (this.agentRestartingMap) {
+          const next = { ...this.agentRestartingMap };
+          delete next[evt.agent];
+          this.agentRestartingMap = next;
+        }
+      }
+
+      // Live agent config update — flip the agent config card to the
+      // new value without a manual refresh. Soft fields layer their
+      // own ``operator_action_receipt`` cards on top; hard fields
+      // depend solely on this event because they don't get a
+      // revertible receipt.
+      if (evt.type === 'agent_config_updated' && evt.agent) {
+        const viewing = this.selectedAgent || this.detailAgent;
+        if (viewing === evt.agent && typeof this.fetchAgentDetail === 'function') {
+          if (this._agentDetailsDebounce) clearTimeout(this._agentDetailsDebounce);
+          this._agentDetailsDebounce = setTimeout(
+            () => this.fetchAgentDetail(viewing), 250,
+          );
+        }
+      }
+
+      // Live project CRUD — refresh the projects list. We use the
+      // existing ``fetchProjects`` rather than mutating in place so
+      // the projects view picks up the latest server-side ordering
+      // / member counts in one round-trip.
+      if (evt.type === 'project_created' || evt.type === 'project_deleted' ||
+          evt.type === 'project_updated' || evt.type === 'project_archived' ||
+          evt.type === 'project_unarchived') {
+        if (typeof this.fetchProjects === 'function') {
+          if (this._projectsRefreshDebounce) clearTimeout(this._projectsRefreshDebounce);
+          this._projectsRefreshDebounce = setTimeout(() => this.fetchProjects(), 250);
+        }
+      }
+
+      // Credential stored — flip the matching credential_request
+      // card (in either the agent's chat or the operator chat) to
+      // ``saved=true`` so the user can dismiss it. Match by
+      // ``request_id`` when present (new flow), fall back to name.
+      if (evt.type === 'credential_stored') {
+        const data = evt.data || {};
+        const reqId = data.request_id || '';
+        const name = data.name || data.service || '';
+        const fromAgent = data.agent_id || evt.agent || '';
+        for (const chatId of Object.keys(this.chatHistories || {})) {
+          const hist = this.chatHistories[chatId] || [];
+          for (const m of hist) {
+            if (m.role !== 'credential_request') continue;
+            if (chatId !== fromAgent && fromAgent && m._from_agent !== fromAgent) continue;
+            const matchById = reqId && m.request_id === reqId;
+            const matchByName = !reqId && name && m.name === name;
+            if (matchById || matchByName) {
+              m.saved = true;
+              m.cancelled = false;
+            }
+          }
+        }
+      }
+
       // Refresh model health on health_change events
       if (evt.type === 'health_change') {
         this.fetchModelHealth();
@@ -4574,6 +4704,18 @@ function dashboard() {
         if (evt.data.key.startsWith('status/') || evt.data.key.startsWith('tasks/')) {
           if (this._coordDebounce) clearTimeout(this._coordDebounce);
           this._coordDebounce = setTimeout(() => this._fetchCoordination(), 1000);
+        }
+      }
+
+      // Mirror of blackboard_write for the delete endpoint so the
+      // SPA can drop the entry from the viewer / refresh comms.
+      if (evt.type === 'blackboard_delete' && evt.data && evt.data.key) {
+        if (this.activeProject && this.activeTab === 'fleet' && !this.detailAgent) {
+          if (this._commsDebounce) clearTimeout(this._commsDebounce);
+          this._commsDebounce = setTimeout(() => {
+            this.fetchBlackboard();
+            this.fetchCommsActivity();
+          }, 1000);
         }
       }
 

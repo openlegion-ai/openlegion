@@ -407,6 +407,100 @@ def test_add_artifact_appends_unique_refs(tmp_path):
     assert fetched["artifact_refs"] == ["/data/output.json", "/data/notes.md"]
 
 
+def test_add_artifact_emits_task_artifact_added(tmp_path):
+    """``add_artifact`` fires a ``task_artifact_added`` EventBus event so
+    the dashboard can refresh the open task drawer without a full reload.
+    The audit row already records ``artifact_added`` separately — this
+    is the dashboard wire layer on top."""
+    from src.dashboard.events import EventBus
+    bus = EventBus()
+    captured: list[dict] = []
+    bus.add_listener(lambda e: captured.append(e))
+
+    t = _make_store(tmp_path)
+    t.set_event_bus(bus)
+    rec = t.create(
+        creator="c", assignee="a", title="t", project_id="proj-x",
+    )
+    t.add_artifact(rec["id"], "/data/output.json", actor="a")
+
+    artifact_events = [e for e in captured if e["type"] == "task_artifact_added"]
+    assert len(artifact_events) == 1
+    payload = artifact_events[0]["data"]
+    assert payload["task_id"] == rec["id"]
+    assert payload["ref"] == "/data/output.json"
+    assert payload["actor"] == "a"
+    assert payload["project_id"] == "proj-x"
+
+
+def test_cancel_includes_reason_in_status_changed_payload(tmp_path):
+    """``cancel`` forwards the cancel ``reason`` onto the
+    ``task_status_changed`` event payload so the dashboard activity
+    feed renders the reason inline. The legacy audit-row fallback is
+    still preserved (covered by the test above)."""
+    from src.dashboard.events import EventBus
+    bus = EventBus()
+    captured: list[dict] = []
+    bus.add_listener(lambda e: captured.append(e))
+
+    t = _make_store(tmp_path)
+    t.set_event_bus(bus)
+    rec = t.create(creator="c", assignee="a", title="t")
+    t.cancel(rec["id"], actor="operator", reason="user changed mind")
+
+    status_events = [
+        e for e in captured if e["type"] == "task_status_changed"
+    ]
+    assert len(status_events) == 1
+    assert status_events[0]["data"]["reason"] == "user changed mind"
+    assert status_events[0]["data"]["new_status"] == "cancelled"
+
+
+def test_cancel_without_reason_omits_reason_key(tmp_path):
+    """When the operator cancels without supplying a reason, the
+    ``task_status_changed`` payload doesn't carry a stale empty key
+    — keeps the bubble copy clean."""
+    from src.dashboard.events import EventBus
+    bus = EventBus()
+    captured: list[dict] = []
+    bus.add_listener(lambda e: captured.append(e))
+
+    t = _make_store(tmp_path)
+    t.set_event_bus(bus)
+    rec = t.create(creator="c", assignee="a", title="t")
+    t.cancel(rec["id"], actor="operator")  # no reason
+
+    status_events = [
+        e for e in captured if e["type"] == "task_status_changed"
+    ]
+    assert len(status_events) == 1
+    assert "reason" not in status_events[0]["data"]
+
+
+def test_update_status_extra_payload_merges_into_event(tmp_path):
+    """The ``extra_payload`` kwarg on ``update_status`` lets callers
+    enrich the dashboard event without forking the method. ``cancel``
+    is the first caller to use it for the cancel reason."""
+    from src.dashboard.events import EventBus
+    bus = EventBus()
+    captured: list[dict] = []
+    bus.add_listener(lambda e: captured.append(e))
+
+    t = _make_store(tmp_path)
+    t.set_event_bus(bus)
+    rec = t.create(creator="c", assignee="a", title="t")
+    t.update_status(
+        rec["id"], "working", actor="a",
+        extra_payload={"trigger": "auto-resume"},
+    )
+
+    status_events = [
+        e for e in captured if e["type"] == "task_status_changed"
+    ]
+    assert len(status_events) == 1
+    assert status_events[0]["data"]["trigger"] == "auto-resume"
+
+
 # ── Listing ─────────────────────────────────────────────────────────
 
 

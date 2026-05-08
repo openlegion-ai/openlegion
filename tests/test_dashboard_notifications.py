@@ -458,3 +458,109 @@ class TestNotificationsProducerWiring:
         self.bus.emit("tool_start", agent="writer", data={"tool": "browser_navigate"})
         self.bus.emit("blackboard_write", agent="writer", data={"key": "shared/note"})
         assert self.store.list_recent() == []
+
+
+# ── Live "notification_added" emit ────────────────────────────────────
+
+
+class TestNotificationsProducerEmitsLiveEvent:
+    """After the producer writes a notification row, it should also
+    emit a ``notification_added`` event so the dashboard bell badge
+    can update live (not wait for the 60s poll). Each branch of the
+    producer that adds a row gets its own emit assertion."""
+
+    def setup_method(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir)
+        self.store: NotificationStore = self.components["notification_store"]
+        from src.dashboard.server import create_dashboard_router
+        create_dashboard_router(**self.components, mesh_port=8420)
+        self.bus = self.components["event_bus"]
+        self.captured: list[dict] = []
+        # The producer registers the in-process listener that writes
+        # rows; we register a second listener AFTER it so we observe
+        # both the source event AND the follow-on
+        # ``notification_added`` emit it kicks off.
+        self.bus.add_listener(lambda e: self.captured.append(e))
+
+    def teardown_method(self) -> None:
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _added_events(self) -> list[dict]:
+        return [e for e in self.captured if e["type"] == "notification_added"]
+
+    def test_task_outcome_delivered_emits_notification_added(self):
+        self.bus.emit("task_outcome", agent="operator", data={
+            "task_id": "t-1",
+            "assignee": "writer",
+            "outcome": "delivered",
+            "feedback": "Great work",
+        })
+        added = self._added_events()
+        assert len(added) == 1
+        assert added[0]["data"]["kind"] == "delivered"
+        assert "writer" in added[0]["data"]["title"]
+        # The ``id`` from ``notification_store.add`` rides along so the
+        # SPA can dedupe against the 60s poll.
+        assert added[0]["data"]["id"] > 0
+
+    def test_pending_action_created_emits_notification_added(self):
+        self.bus.emit("pending_action_created", agent="operator", data={
+            "nonce": "abc123",
+            "summary": "Switch model",
+            "action_kind": "edit_agent",
+            "target_kind": "agent",
+            "target_id": "writer",
+        })
+        added = self._added_events()
+        assert len(added) == 1
+        assert added[0]["data"]["kind"] == "approval"
+
+    def test_credential_request_emits_notification_added(self):
+        self.bus.emit("credential_request", agent="researcher", data={
+            "name": "google_api_key",
+            "service": "Google API",
+            "request_id": "req-1",
+        })
+        added = self._added_events()
+        assert len(added) == 1
+        assert added[0]["data"]["kind"] == "credential"
+        assert added[0]["agent"] == "researcher"
+
+    def test_browser_login_request_emits_notification_added(self):
+        self.bus.emit("browser_login_request", agent="researcher", data={
+            "service": "LinkedIn",
+            "url": "https://www.linkedin.com/login",
+            "request_id": "br-1",
+        })
+        added = self._added_events()
+        assert len(added) == 1
+        assert added[0]["data"]["kind"] == "credential"
+
+    def test_health_change_to_unhealthy_emits_notification_added(self):
+        self.bus.emit("health_change", agent="researcher", data={
+            "previous": "healthy", "current": "unhealthy", "failures": 3,
+        })
+        added = self._added_events()
+        assert len(added) == 1
+        assert added[0]["data"]["kind"] == "alert"
+
+    def test_credit_exhausted_emits_notification_added(self):
+        self.bus.emit("credit_exhausted", agent="writer", data={
+            "error": "Insufficient credits",
+        })
+        added = self._added_events()
+        assert len(added) == 1
+        assert added[0]["data"]["kind"] == "alert"
+
+    def test_unrelated_event_emits_no_notification_added(self):
+        self.bus.emit("tool_start", agent="writer", data={"tool": "x"})
+        assert self._added_events() == []
+
+    def test_health_recovery_emits_no_notification_added(self):
+        # Recovery doesn't create a row, so no follow-on emit either.
+        self.bus.emit("health_change", agent="researcher", data={
+            "previous": "unhealthy", "current": "healthy", "failures": 0,
+        })
+        assert self._added_events() == []

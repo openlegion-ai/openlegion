@@ -799,6 +799,35 @@ def create_dashboard_router(
     # SQLite write — the store's WAL connection is process-shared and
     # ``add()`` is O(1) — so this stays well under the "cheap and
     # non-blocking" bar set by ``EventBus.add_listener``.
+    def _emit_notification_added(
+        nid: int,
+        kind: str,
+        title: str,
+        body: str | None,
+        agent_id: str | None,
+    ) -> None:
+        """Push a ``notification_added`` event so the bell updates live.
+
+        Best-effort — any failure is logged at debug; the persistent
+        store row is the source of truth and the 60s poll catches up.
+        """
+        if event_bus is None:
+            return
+        try:
+            event_bus.emit(
+                "notification_added",
+                agent=agent_id or "",
+                data={
+                    "id": nid,
+                    "kind": kind,
+                    "title": title,
+                    "body": body or "",
+                    "agent_id": agent_id,
+                },
+            )
+        except Exception as e:
+            logger.debug("notification_added emit failed: %s", e)
+
     def _notifications_producer(evt: dict) -> None:
         if notification_store is None:
             return
@@ -818,7 +847,7 @@ def create_dashboard_router(
                 actor = data.get("assignee") or agent_id or "Someone"
                 title = f"{actor} delivered draft"
                 body = (data.get("feedback") or "").strip()[:200] or None
-                notification_store.add(
+                nid = notification_store.add(
                     kind="delivered",
                     title=title,
                     body=body,
@@ -829,6 +858,7 @@ def create_dashboard_router(
                         "outcome": outcome,
                     },
                 )
+                _emit_notification_added(nid, "delivered", title, body, actor)
                 return
 
             if event_type == "pending_action_created":
@@ -836,10 +866,11 @@ def create_dashboard_router(
                 action_kind = data.get("action_kind") or "action"
                 label = summary or action_kind
                 title = f"Approval needed: {label}"[:200]
-                notification_store.add(
+                body = summary[:200] or None
+                nid = notification_store.add(
                     kind="approval",
                     title=title,
-                    body=summary[:200] or None,
+                    body=body,
                     agent_id=agent_id,
                     payload={
                         "nonce": data.get("nonce"),
@@ -848,6 +879,7 @@ def create_dashboard_router(
                         "action_kind": action_kind,
                     },
                 )
+                _emit_notification_added(nid, "approval", title, body, agent_id)
                 return
 
             if event_type == "credential_request":
@@ -855,7 +887,7 @@ def create_dashboard_router(
                 service = (data.get("service") or data.get("name") or "a credential")
                 title = f"{actor} needs {service}"[:200]
                 description = (data.get("description") or "").strip()[:200] or None
-                notification_store.add(
+                nid = notification_store.add(
                     kind="credential",
                     title=title,
                     body=description,
@@ -866,6 +898,7 @@ def create_dashboard_router(
                         "service": data.get("service"),
                     },
                 )
+                _emit_notification_added(nid, "credential", title, description, agent_id)
                 return
 
             if event_type == "browser_login_request":
@@ -873,7 +906,7 @@ def create_dashboard_router(
                 service = (data.get("service") or "a site")
                 title = f"{actor} needs sign-in to {service}"[:200]
                 description = (data.get("description") or "").strip()[:200] or None
-                notification_store.add(
+                nid = notification_store.add(
                     kind="credential",
                     title=title,
                     body=description,
@@ -884,6 +917,7 @@ def create_dashboard_router(
                         "url": data.get("url"),
                     },
                 )
+                _emit_notification_added(nid, "credential", title, description, agent_id)
                 return
 
             if event_type == "health_change":
@@ -894,7 +928,7 @@ def create_dashboard_router(
                     return
                 actor = agent_id or "An agent"
                 title = f"{actor} is {current}"[:200]
-                notification_store.add(
+                nid = notification_store.add(
                     kind="alert",
                     title=title,
                     body=None,
@@ -905,19 +939,21 @@ def create_dashboard_router(
                         "failures": data.get("failures"),
                     },
                 )
+                _emit_notification_added(nid, "alert", title, None, agent_id)
                 return
 
             if event_type == "credit_exhausted":
                 actor = agent_id or "An agent"
                 title = f"{actor} is out of credit"[:200]
                 body = (data.get("error") or "").strip()[:200] or None
-                notification_store.add(
+                nid = notification_store.add(
                     kind="alert",
                     title=title,
                     body=body,
                     agent_id=agent_id,
                     payload={"error": data.get("error")},
                 )
+                _emit_notification_added(nid, "alert", title, body, agent_id)
                 return
         except Exception as e:
             # Notifications are a polish surface — never let a write
@@ -2554,6 +2590,18 @@ def create_dashboard_router(
             raise HTTPException(status_code=404, detail="Agent not found")
         if runtime is None:
             raise HTTPException(status_code=503, detail="Runtime not available")
+        # Emit BEFORE stop so the SPA can paint the pulsing "Restarting"
+        # state immediately. Best-effort — if the bus is offline the
+        # pulse just doesn't show; the final ``agent_restarted`` event
+        # carries the same agent_id so the UI can resolve regardless.
+        if event_bus is not None:
+            try:
+                event_bus.emit(
+                    "agent_restarting", agent=agent_id,
+                    data={"agent_id": agent_id},
+                )
+            except Exception as e:
+                logger.debug("agent_restarting emit failed: %s", e)
         try:
             from src.cli.config import _load_config
             cfg = _load_config()
@@ -2597,9 +2645,32 @@ def create_dashboard_router(
             ready = await runtime.wait_for_agent(agent_id, timeout=60)
             # Push proxy config to browser service
             await _push_browser_proxy_for_agent(agent_id)
+            # Emit AFTER successful start so the SPA clears the pulse
+            # and re-fetches details.
+            if event_bus is not None:
+                try:
+                    event_bus.emit(
+                        "agent_restarted", agent=agent_id,
+                        data={"agent_id": agent_id, "ready": ready},
+                    )
+                except Exception as e:
+                    logger.debug("agent_restarted emit failed: %s", e)
             return {"restarted": True, "ready": ready}
         except Exception as e:
             logger.error(f"Failed to restart agent {agent_id}: {e}")
+            # Emit a failure signal via the existing ``agent_state``
+            # literal so the SPA can clear the pulse and surface the
+            # error without needing a bespoke event type.
+            if event_bus is not None:
+                try:
+                    event_bus.emit(
+                        "agent_state", agent=agent_id,
+                        data={"state": "restart_failed", "error": str(e)},
+                    )
+                except Exception as emit_e:
+                    logger.debug(
+                        "agent_state restart_failed emit failed: %s", emit_e,
+                    )
             raise HTTPException(status_code=500, detail=str(e))
 
     @api_router.put("/api/agents/{agent_id}/budget")
@@ -3496,7 +3567,17 @@ def create_dashboard_router(
             except Exception:
                 pass  # Best effort — credential is already stored
         if event_bus:
-            event_bus.emit("credential_stored", data={"name": service})
+            request_id = body.get("request_id", "") or ""
+            event_bus.emit(
+                "credential_stored",
+                agent=agent_id or "",
+                data={
+                    "name": service,
+                    "service": service,
+                    "request_id": request_id,
+                    "agent_id": agent_id or None,
+                },
+            )
         return {"stored": True, "service": service, "tier": "agent"}
 
     @api_router.post("/api/browser-login/complete")
@@ -4241,6 +4322,19 @@ def create_dashboard_router(
             _create_project(name, description=description, members=members)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
+        if event_bus is not None:
+            try:
+                event_bus.emit(
+                    "project_created", agent="operator",
+                    data={
+                        "project_id": name,
+                        "name": name,
+                        "description": description,
+                        "members": list(members),
+                    },
+                )
+            except Exception as e:
+                logger.debug("project_created emit failed: %s", e)
         return {"created": True, "name": name}
 
     @api_router.delete("/api/projects/{name}")
@@ -4251,6 +4345,14 @@ def create_dashboard_router(
             _delete_project(name)
         except ValueError as e:
             raise HTTPException(status_code=404, detail=str(e))
+        if event_bus is not None:
+            try:
+                event_bus.emit(
+                    "project_deleted", agent="operator",
+                    data={"project_id": name, "name": name},
+                )
+            except Exception as e:
+                logger.debug("project_deleted emit failed: %s", e)
         return {"deleted": True, "name": name}
 
     @api_router.post("/api/projects/{name}/members")
@@ -4273,6 +4375,19 @@ def create_dashboard_router(
                 restarted = True
             except Exception as e:
                 logger.warning("Failed to restart agent %s after project change: %s", agent, e)
+        if event_bus is not None:
+            try:
+                event_bus.emit(
+                    "project_updated", agent="operator",
+                    data={
+                        "project_id": name,
+                        "name": name,
+                        "field": "members",
+                        "added": agent,
+                    },
+                )
+            except Exception as e:
+                logger.debug("project_updated emit failed: %s", e)
         return {"added": True, "project": name, "agent": agent, "restarted": restarted}
 
     @api_router.delete("/api/projects/{name}/members/{agent}")
@@ -4291,6 +4406,19 @@ def create_dashboard_router(
                 restarted = True
             except Exception as e:
                 logger.warning("Failed to restart agent %s after project change: %s", agent, e)
+        if event_bus is not None:
+            try:
+                event_bus.emit(
+                    "project_updated", agent="operator",
+                    data={
+                        "project_id": name,
+                        "name": name,
+                        "field": "members",
+                        "removed": agent,
+                    },
+                )
+            except Exception as e:
+                logger.debug("project_updated emit failed: %s", e)
         return {"removed": True, "project": name, "agent": agent, "restarted": restarted}
 
     # ── Project PROJECT.md ─────────────────────────────────
@@ -4362,6 +4490,19 @@ def create_dashboard_router(
             for coro in _asyncio.as_completed(tasks):
                 aid, ok = await coro
                 push_results[aid] = ok
+
+        if event_bus is not None:
+            try:
+                event_bus.emit(
+                    "project_updated", agent="operator",
+                    data={
+                        "project_id": project,
+                        "name": project,
+                        "field": "project_md",
+                    },
+                )
+            except Exception as e:
+                logger.debug("project_updated emit failed: %s", e)
 
         return {
             "saved": True,
