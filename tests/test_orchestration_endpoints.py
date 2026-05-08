@@ -458,3 +458,146 @@ async def test_pending_cancel_unknown_returns_404(v2_app):
             headers={"X-Agent-ID": "operator", "X-Mesh-Internal": "1"},
         )
         assert r.status_code == 404
+
+
+# ── Hotfix: _extract_verified_agent_id honors internal callers ──────
+#
+# In production (auth tokens configured), the dashboard cancel proxy
+# hits ``/mesh/tasks/{id}/cancel`` over loopback with
+# ``x-mesh-internal: 1`` + ``X-Agent-ID: operator`` but NO Bearer token
+# (Bearer tokens are server-side secrets the dashboard doesn't have).
+# The previous ``_extract_verified_agent_id`` rejected those callers
+# with 401 "Missing authentication token". Trust the loopback boundary
+# instead.
+
+
+@pytest.fixture
+def v2_app_with_auth(tmp_path, monkeypatch):
+    """v2 mesh app with auth tokens configured (production-like)."""
+    server_module = _reload_server(
+        monkeypatch, v2=True, tasks_db=str(tmp_path / "tasks.db"),
+    )
+    perms_map = {
+        "operator": {"can_route_tasks": True},
+        "scout":    {"can_route_tasks": True, "can_message": ["analyst", "operator"]},
+        "analyst":  {"can_route_tasks": False, "can_message": ["scout"]},
+    }
+    blackboard = Blackboard(str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    permissions = PermissionMatrix()
+    for aid, perms in perms_map.items():
+        permissions.permissions[aid] = AgentPermissions(agent_id=aid, **perms)
+    router = MessageRouter(permissions, {
+        "scout": "http://scout:8400",
+        "analyst": "http://analyst:8400",
+        "operator": "http://operator:8400",
+    })
+    app = server_module.create_mesh_app(
+        blackboard=blackboard,
+        pubsub=pubsub,
+        router=router,
+        permissions=permissions,
+        # Auth tokens configured — public callers must Bearer-auth.
+        auth_tokens={
+            "operator": "tok_operator",
+            "scout":    "tok_scout",
+            "analyst":  "tok_analyst",
+        },
+    )
+    yield app, server_module
+    blackboard.close()
+    monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_V2", raising=False)
+    monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)
+    importlib.reload(server_module)
+
+
+@pytest.mark.asyncio
+async def test_internal_caller_skips_bearer_requirement(v2_app_with_auth):
+    """Loopback + ``x-mesh-internal: 1`` + ``X-Agent-ID`` succeeds
+    without a Bearer token. This is the dashboard cancel proxy path.
+    """
+    app, _ = v2_app_with_auth
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        # Internal caller creates a task on behalf of operator…
+        r = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "analyst", "title": "internal-create"},
+            headers={"x-mesh-internal": "1", "X-Agent-ID": "operator"},
+        )
+        assert r.status_code == 200, r.text
+        tid = r.json()["id"]
+        # …and then cancels it the same way (no Bearer token).
+        r = await c.post(
+            f"/mesh/tasks/{tid}/cancel",
+            json={"reason": "ops decided no"},
+            headers={"x-mesh-internal": "1", "X-Agent-ID": "operator"},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_cancel_task_via_dashboard_proxy_succeeds_in_production_auth_mode(
+    v2_app_with_auth,
+):
+    """Regression for the kanban Cancel button. With auth tokens
+    configured, a loopback + ``x-mesh-internal`` POST to
+    ``/mesh/tasks/{id}/cancel`` (no Bearer) must NOT 401.
+    """
+    app, _ = v2_app_with_auth
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        # Seed via a Bearer-authed worker so the task exists with a
+        # creator we can verify the cancel against.
+        r = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "analyst", "title": "kanban-cancel-target"},
+            headers={
+                "X-Agent-ID": "scout",
+                "Authorization": "Bearer tok_scout",
+            },
+        )
+        assert r.status_code == 200, r.text
+        tid = r.json()["id"]
+        # Dashboard proxies the cancel: loopback + x-mesh-internal,
+        # NO Authorization header.
+        r = await c.post(
+            f"/mesh/tasks/{tid}/cancel",
+            json={"reason": "user clicked Cancel"},
+            headers={"x-mesh-internal": "1", "X-Agent-ID": "operator"},
+        )
+        assert r.status_code != 401, (
+            "Dashboard cancel proxy must not require Bearer when caller "
+            "is loopback + x-mesh-internal"
+        )
+        assert r.status_code == 200, r.text
+
+
+@pytest.mark.asyncio
+async def test_public_caller_without_bearer_still_rejected(v2_app_with_auth):
+    """The fix only exempts internal callers — a public caller
+    without a Bearer token still gets 401.
+    """
+    app, _ = v2_app_with_auth
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "analyst", "title": "public-no-bearer"},
+            headers={"X-Agent-ID": "scout"},
+        )
+        assert r.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_public_caller_with_valid_bearer_succeeds(v2_app_with_auth):
+    """Sanity check: existing Bearer auth path still works."""
+    app, _ = v2_app_with_auth
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "analyst", "title": "with-bearer"},
+            headers={
+                "X-Agent-ID": "scout",
+                "Authorization": "Bearer tok_scout",
+            },
+        )
+        assert r.status_code == 200, r.text

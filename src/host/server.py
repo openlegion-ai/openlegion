@@ -828,13 +828,25 @@ def create_mesh_app(
         return token if token else None
 
     def _extract_verified_agent_id(request: Request) -> str:
-        """Extract and verify agent identity from a Bearer token.
+        """Extract and verify agent identity.
 
-        Derives the agent_id from the token itself, preventing
-        identity spoofing via headers or query parameters.
+        Internal callers (loopback + ``x-mesh-internal`` header) are
+        trusted based on the network boundary — they don't need a Bearer
+        token. Dashboard proxies, the mesh dispatcher, the CLI manager,
+        and health checks all reach the mesh this way and don't have
+        access to per-agent Bearer tokens (which are server-side
+        secrets). For these callers we trust the ``X-Agent-ID`` header
+        and default to ``"operator"`` (the dashboard's persona for
+        cross-cutting actions).
+
+        Public callers must present a valid Bearer token. The agent_id
+        is derived from the token itself, preventing identity spoofing
+        via headers or query parameters.
 
         Returns 'unknown' when auth is not configured (dev/test mode).
         """
+        if _is_internal_caller(request):
+            return request.headers.get("X-Agent-ID", "operator")
         if not _auth_tokens:
             # Auth not configured (dev/test mode) — fall back to header hint
             return request.headers.get("X-Agent-ID", "unknown")
