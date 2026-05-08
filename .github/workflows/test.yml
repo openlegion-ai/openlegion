@@ -10,8 +10,10 @@ jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.11", "3.12"]
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python ${{ matrix.python-version }}
@@ -26,19 +28,46 @@ jobs:
         run: uv pip install --system -e ".[dev]" Pillow
       - name: Run tests
         run: |
-          ARGS=(
-            tests/
-            --ignore=tests/test_e2e.py
-            --ignore=tests/test_e2e_chat.py
-            --ignore=tests/test_e2e_memory.py
-            --ignore=tests/test_e2e_triggering.py
-            -n auto
-          )
-          if [ "${{ github.event_name }}" = "push" ]; then
-            pytest "${ARGS[@]}" --cov=src --cov-report=term-missing --cov-report=xml
-          else
-            pytest "${ARGS[@]}"
-          fi
+          pytest \
+            tests/ \
+            --ignore=tests/test_e2e.py \
+            --ignore=tests/test_e2e_chat.py \
+            --ignore=tests/test_e2e_memory.py \
+            --ignore=tests/test_e2e_triggering.py \
+            -n auto \
+            --dist=loadfile \
+            --splits 3 \
+            --group ${{ matrix.shard }} \
+            --durations=50 \
+            --durations-min=1.0
+
+  coverage:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
+      - name: Install dependencies
+        run: uv pip install --system -e ".[dev]" Pillow
+      - name: Run tests with coverage
+        run: |
+          pytest \
+            tests/ \
+            --ignore=tests/test_e2e.py \
+            --ignore=tests/test_e2e_chat.py \
+            --ignore=tests/test_e2e_memory.py \
+            --ignore=tests/test_e2e_triggering.py \
+            -n auto \
+            --cov=src \
+            --cov-report=term-missing \
+            --cov-report=xml
 
   lint:
     runs-on: ubuntu-latest
