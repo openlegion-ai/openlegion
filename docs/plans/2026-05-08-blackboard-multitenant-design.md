@@ -145,6 +145,48 @@ If either gate produces a non-zero count, do NOT advance. Investigate the source
 - 14 days is too short to cover monthly cron jobs. We'd ship false-positive confidence and discover a quarterly batch job at the worst possible moment (post-`enforce` flip).
 - The two-stage gate decouples "is the design correct" (pre-warn) from "is the migration correct" (warn-mode). Collapsing them confuses the rollback signal.
 
+#### Escalation when the gate doesn't close
+
+If 60 days elapse without 7 consecutive zero-crossing days:
+
+1. **Engineering reviews the cross-project trace.** Use the existing
+   `blackboard_cross_project_total` per-day deltas (from operator
+   `OBSERVATIONS.md` snapshots) to identify which fleets are crossing.
+2. **Categorize the crossings.** Are they:
+   - **Legitimate.** The fleet template inherently shares state across
+     projects (operator handoffs, fleet-global configs). → Restructure
+     templates to use the operator-global path; or accept fleet as
+     non-multi-tenant-eligible.
+   - **Bug.** An agent is reading where it shouldn't. → Fix the agent
+     prompt; verify the crossing stops.
+   - **Acceptable noise.** Cron-driven probes, canary-probe traffic.
+     → Whitelist the agent IDs from the counter (carve out a
+     `_record_blackboard_xproject` skip for known-good actors).
+3. **If still no closing window after intervention,** an engineering-
+   approved manual override flag (`OPENLEGION_BLACKBOARD_SKIP_GATE=1`)
+   may flip to `warn` mode without the 7-day requirement. The override
+   is single-use, audited in commit logs, and requires a written
+   justification on the deployment.
+
+#### Automated streak tracking
+
+To avoid manual operator counting and misalignment risk, ship the
+streak counter as a system_metrics field in PR-O'.3:
+
+- **`blackboard_xproject_clean_streak_days: int`** — number of
+  consecutive 24h windows with `_blackboard_xproject_count == {read: 0,
+  write: 0}` since last reset.
+- Reset to 0 on any cross-project access in the current 24h window.
+- Surfaced on `/mesh/system/metrics` and rendered on the dashboard
+  Board's "Needs you" panel as a Phase 2 readiness banner: "Multi-tenant
+  enforcement gate: 4 / 7 clean days." Operator no longer counts.
+
+**Implementation:** the streak counter lives alongside
+`_blackboard_xproject_count` in `src/host/server.py`. On each
+day-rollover (existing pattern from `_record_denial`), if the
+day's reads + writes were both 0, increment the streak; otherwise
+reset to 0.
+
 ### Decision 4: Migration path — LAZY (not bulk re-tag)
 
 **Recommendation.** We will NOT bulk-tag existing entries. Instead, on every write to an existing key after Phase 1 of the rollout (Decision 5):
@@ -172,6 +214,38 @@ Reads of `NULL`-stamped keys are PERMITTED unconditionally during the back-compa
 - Forces a decision the migration cannot correctly make for the ambiguous cases (multi-project writer, deleted writer, churned membership).
 - Adds operational risk: the migration must run before the column is enforced anywhere, which means a downtime window or careful interleaving with live writes. SQLite ALTER TABLE is fast; bulk UPDATE with per-row lookups is not.
 - Provides no advantage over lazy: under `enforce`, `NULL` is treated as fleet-global (read-allowed), so the bulk-tagged-or-not distinction is invisible to readers until they try to mutate the key, at which point lazy stamps it correctly.
+
+#### Risk: Cold-NULL leakage
+
+A project-private key written before migration (e.g. `briefs/q3-launch` 
+written by an agent in project A) stays at `written_by_project IS NULL`
+indefinitely if nobody re-writes it. Under `enforce` mode, the design
+treats `NULL` as fleet-global → **the key is readable cross-project until
+re-written**. For long-lived briefs / configs that nobody ever touches
+again, this is a silent privacy hole.
+
+**Mitigations** (pick one or stack):
+
+1. **Optional partial bulk-tag at Phase 1 for unambiguous keys.**
+   For each existing key whose `written_by` agent is currently in
+   exactly one project, stamp `written_by_project` at migration time.
+   Multi-project writers and deleted writers stay NULL. This is
+   defensible — we're only making the inference where it's safe.
+
+2. **Promote the 90-day sweeper from Phase 5 to Phase 4 (mandatory).**
+   After enforce flips, all NULL-stamped keys are deleted (or marked
+   for re-write) within 90 days. Operators have to keep what matters
+   alive by writing to it.
+
+3. **Accept the leakage as a feature of the back-compat window.**
+   Document that legacy entries are fleet-global by design and
+   require explicit re-write to scope. Suitable for tenants where
+   pre-migration data is non-sensitive.
+
+**Recommendation:** Mitigation 1 (partial bulk-tag for unambiguous keys)
+combined with Mitigation 2 (mandatory sweeper). The combination
+captures most pre-migration intent at Phase 1, and forces explicit
+action for ambiguous cases.
 
 ### Decision 5: Flag name — `OPENLEGION_BLACKBOARD_SCOPE_MODE` with values `off | warn | enforce`, default `off`
 
