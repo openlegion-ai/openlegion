@@ -516,6 +516,17 @@
                   <div role="dialog" aria-labelledby="wizard-title"
                        class="ol-wizard-card max-w-md mx-auto mt-4 mb-2 rounded-2xl bg-gradient-to-b from-indigo-900/20 to-gray-900/40 border border-indigo-700/40 shadow-lg overflow-hidden"
                        data-testid="onboarding-wizard">
+                    <!-- Phase 4 progress dots — 4 steps (ask, confirming,
+                         building, first-output). Current step is filled
+                         indigo; past steps are emerald (done); future
+                         steps are gray. -->
+                    <div class="flex items-center justify-center gap-1.5 pt-3 pb-1"
+                         data-testid="wizard-progress" aria-hidden="true">
+                      <template x-for="i in [0,1,2,3]" :key="i">
+                        <span class="block w-1.5 h-1.5 rounded-full transition-colors"
+                              :class="i === wizardStepIndex() ? 'bg-indigo-400 w-3' : (i < wizardStepIndex() ? 'bg-emerald-500/70' : 'bg-gray-700')"></span>
+                      </template>
+                    </div>
                     <!-- Step: ask -->
                     <template x-if="wizard.step === 'ask'">
                       <div class="px-5 pt-5 pb-4">
@@ -605,14 +616,22 @@
 
                     <!-- Step: building -->
                     <template x-if="wizard.step === 'building'">
-                      <div class="px-5 pt-5 pb-5 flex items-center gap-3">
-                        <svg class="animate-spin h-5 w-5 text-indigo-400 shrink-0" fill="none" viewBox="0 0 24 24">
-                          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
-                        </svg>
-                        <div class="flex-1 min-w-0">
-                          <div id="wizard-title" class="text-sm font-semibold text-white">Setting up your team&hellip;</div>
-                          <div class="text-[11px] text-gray-400 mt-0.5">This takes about 30 seconds.</div>
+                      <div class="px-5 pt-5 pb-5">
+                        <div class="flex items-center gap-3">
+                          <svg class="animate-spin h-5 w-5 text-indigo-400 shrink-0" fill="none" viewBox="0 0 24 24">
+                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+                          </svg>
+                          <div class="flex-1 min-w-0">
+                            <div id="wizard-title" class="text-sm font-semibold text-white">Setting up your team&hellip;</div>
+                            <div class="text-[11px] text-gray-400 mt-0.5">This takes about 30 seconds.</div>
+                          </div>
+                          <button @click="wizardSkip()"
+                                  data-testid="wizard-skip-building"
+                                  aria-label="Skip wizard"
+                                  class="text-gray-500 hover:text-gray-300 transition-colors p-1 -mr-1 rounded shrink-0">
+                            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+                          </button>
                         </div>
                       </div>
                     </template>
@@ -621,26 +640,42 @@
                     <template x-if="wizard.step === 'first-output'">
                       <div class="px-5 pt-5 pb-5">
                         <div class="flex items-start gap-3 mb-3">
-                          <div class="w-8 h-8 rounded-full bg-emerald-600/20 border border-emerald-500/40 flex items-center justify-center shrink-0">
-                            <svg class="w-4 h-4 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                          <div class="w-10 h-10 rounded-full bg-emerald-600/20 border border-emerald-500/40 flex items-center justify-center shrink-0">
+                            <svg class="w-5 h-5 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
                           </div>
                           <div class="flex-1 min-w-0">
-                            <div id="wizard-title" class="text-sm font-semibold text-white">Your team is ready</div>
-                            <div class="text-[11px] text-emerald-300/80 mt-0.5">Step 3 of 3 &middot; we'll take it from here</div>
+                            <div id="wizard-title" class="text-base font-semibold text-white">Your team is ready</div>
+                            <div class="text-[11px] text-emerald-300/80 mt-0.5">Step 3 of 3 &middot; we&rsquo;ll take it from here</div>
                           </div>
                         </div>
                         <p class="text-xs text-gray-300 leading-relaxed mb-1">
-                          Your researcher is starting now. First output expected in about 10 minutes.
+                          Your team is starting now. First output expected in about 10 minutes.
                         </p>
-                        <p class="text-xs text-gray-400 leading-relaxed mb-4">
-                          I'll ping you when something needs your attention. You can close this window.
+                        <p class="text-xs text-gray-400 leading-relaxed mb-3">
+                          I&rsquo;ll ping you when something needs your attention.
                         </p>
-                        <button @click="wizardComplete()"
-                                data-testid="wizard-continue"
-                                aria-label="Continue to chat"
-                                class="text-xs font-medium px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">
-                          Continue
-                        </button>
+                        <!-- Phase 4 quick-link chips. Each switches a tab
+                             and completes the wizard so the user lands
+                             on the section they care about most. -->
+                        <div class="flex flex-wrap gap-1.5 mb-1"
+                             data-testid="wizard-quick-links">
+                          <button @click="switchTab('fleet'); wizardComplete()"
+                                  data-testid="wizard-link-team"
+                                  class="text-xs px-3 py-1.5 rounded-full bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/40 text-indigo-200 transition-colors">
+                            View team &rarr;
+                          </button>
+                          <button @click="switchTab('workplace'); wizardComplete()"
+                                  data-testid="wizard-link-workplace"
+                                  class="text-xs px-3 py-1.5 rounded-full bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/40 text-indigo-200 transition-colors">
+                            See what they&rsquo;re working on &rarr;
+                          </button>
+                          <button @click="wizardComplete()"
+                                  data-testid="wizard-continue"
+                                  aria-label="Continue to chat"
+                                  class="text-xs px-3 py-1.5 rounded-full bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 transition-colors">
+                            Got it, close
+                          </button>
+                        </div>
                       </div>
                     </template>
                   </div>
@@ -8354,6 +8389,126 @@
         </div>
       </div>
     </div>
+
+    <!-- Phase 4 — "What's new" tour for existing-fleet users. Three
+         skippable modal steps; persists ``localStorage.olSeenWhatsNew``
+         on completion or dismiss. ``role="dialog"`` + focus trap +
+         ESC handler are wired in app.js. Mobile: full-screen at
+         <640px via ``sm:max-w-md`` cap. -->
+    <template x-if="whatsNewTour.step !== 0">
+      <div class="fixed inset-0 z-[150] flex items-center justify-center bg-black/70 backdrop-blur-sm p-0 sm:p-4"
+           data-testid="whats-new-overlay"
+           @click.self="dismissWhatsNewTour('overlay')">
+        <div role="dialog" aria-modal="true" aria-labelledby="whats-new-title"
+             data-testid="whats-new-modal"
+             class="relative w-full h-full sm:h-auto sm:max-w-md sm:rounded-2xl bg-gradient-to-b from-indigo-900/40 to-gray-900/95 sm:border sm:border-indigo-700/40 shadow-2xl overflow-y-auto sm:overflow-visible flex flex-col sm:block">
+          <!-- Step 1 -->
+          <template x-if="whatsNewTour.step === 1">
+            <div class="px-6 pt-8 pb-6 sm:pt-7 sm:pb-6 flex-1 flex flex-col">
+              <div class="flex items-start justify-between mb-3">
+                <div class="text-[11px] uppercase tracking-wide text-indigo-300/80">Step 1 of 3</div>
+                <button @click="dismissWhatsNewTour('skip_button')"
+                        data-testid="whats-new-skip"
+                        aria-label="Skip tour"
+                        class="text-gray-500 hover:text-gray-300 transition-colors p-1 -mr-1 -mt-1 rounded text-xs">
+                  Skip
+                </button>
+              </div>
+              <h2 id="whats-new-title" class="text-lg font-semibold text-white mb-2">
+                We&rsquo;ve simplified your dashboard
+              </h2>
+              <p class="text-sm text-gray-300 leading-relaxed mb-6 flex-1">
+                Your team&rsquo;s work and your conversation with the Operator are now
+                easier to find. Take a quick tour?
+              </p>
+              <div class="flex items-center justify-end gap-2">
+                <button @click="dismissWhatsNewTour('skip_button')"
+                        class="text-xs font-medium px-4 py-2 rounded-lg bg-transparent hover:bg-gray-800/60 text-gray-400 transition-colors">
+                  Skip
+                </button>
+                <button @click="whatsNewTourNext()"
+                        data-testid="whats-new-primary"
+                        class="text-xs font-medium px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">
+                  Show me
+                </button>
+              </div>
+            </div>
+          </template>
+
+          <!-- Step 2 -->
+          <template x-if="whatsNewTour.step === 2">
+            <div class="px-6 pt-8 pb-6 sm:pt-7 sm:pb-6 flex-1 flex flex-col">
+              <div class="flex items-start justify-between mb-3">
+                <div class="text-[11px] uppercase tracking-wide text-indigo-300/80">Step 2 of 3</div>
+                <button @click="dismissWhatsNewTour('skip_button')"
+                        aria-label="Skip tour"
+                        class="text-gray-500 hover:text-gray-300 transition-colors p-1 -mr-1 -mt-1 rounded text-xs">
+                  Skip
+                </button>
+              </div>
+              <h2 id="whats-new-title" class="text-lg font-semibold text-white mb-3">
+                Operator is one click away
+              </h2>
+              <div class="rounded-xl bg-gray-900/60 border border-indigo-500/30 p-4 mb-4 flex items-center gap-3">
+                <div class="w-10 h-10 rounded-full bg-indigo-600/30 border border-indigo-400/50 flex items-center justify-center shrink-0">
+                  <svg class="w-5 h-5 text-indigo-300" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                </div>
+                <div class="text-xs text-gray-300 leading-relaxed">Look for the chat icon in the top-right corner.</div>
+              </div>
+              <p class="text-sm text-gray-300 leading-relaxed mb-6 flex-1">
+                Click the chat icon in the top-right from any page to talk to the Operator
+                without losing your place.
+              </p>
+              <div class="flex items-center justify-between gap-2">
+                <button @click="whatsNewTourBack()"
+                        class="text-xs font-medium px-4 py-2 rounded-lg bg-transparent hover:bg-gray-800/60 text-gray-400 transition-colors">
+                  Back
+                </button>
+                <button @click="whatsNewTourNext()"
+                        data-testid="whats-new-primary"
+                        class="text-xs font-medium px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">
+                  Next
+                </button>
+              </div>
+            </div>
+          </template>
+
+          <!-- Step 3 -->
+          <template x-if="whatsNewTour.step === 3">
+            <div class="px-6 pt-8 pb-6 sm:pt-7 sm:pb-6 flex-1 flex flex-col">
+              <div class="flex items-start justify-between mb-3">
+                <div class="text-[11px] uppercase tracking-wide text-indigo-300/80">Step 3 of 3</div>
+              </div>
+              <h2 id="whats-new-title" class="text-lg font-semibold text-white mb-3">
+                Approvals and notifications are in the top nav
+              </h2>
+              <div class="rounded-xl bg-gray-900/60 border border-indigo-500/30 p-4 mb-4 flex items-center gap-3">
+                <span class="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-[10px] font-bold text-white">3</span>
+                <span class="text-gray-500">+</span>
+                <svg class="w-4 h-4 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"/></svg>
+                <div class="text-xs text-gray-300 leading-relaxed flex-1">Look top-right.</div>
+              </div>
+              <p class="text-sm text-gray-300 leading-relaxed mb-6 flex-1">
+                Anything that needs your attention shows as a red badge. Past events show
+                in the bell icon. You&rsquo;ll always see what needs you, no matter what
+                tab you&rsquo;re on.
+              </p>
+              <div class="flex items-center justify-between gap-2">
+                <button @click="whatsNewTourBack()"
+                        class="text-xs font-medium px-4 py-2 rounded-lg bg-transparent hover:bg-gray-800/60 text-gray-400 transition-colors">
+                  Back
+                </button>
+                <button @click="whatsNewTourNext()"
+                        data-testid="whats-new-primary"
+                        class="text-xs font-medium px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">
+                  Got it
+                </button>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+    </template>
 
     <!-- Minimized chat pill -->
     <div x-show="activeTab !== 'chat' && openChats.length > 0 && chatPanelMinimized" x-cloak

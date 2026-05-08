@@ -650,6 +650,16 @@ function dashboard() {
     _wizardBuildPoll: null,
     _wizardCompleteTimer: null,
 
+    // Phase 4 — "What's new" tour for existing-fleet users seeing the
+    // redesigned dashboard for the first time. Three modal steps,
+    // skippable, persists to ``localStorage.olSeenWhatsNew = 'true'``
+    // on completion or skip. Distinct from the empty-fleet wizard
+    // above — those are mutually exclusive (empty fleet = wizard,
+    // existing fleet = tour).
+    whatsNewTour: { step: 0 },  // 0 = closed; 1..3 = visible
+    _whatsNewTourPrevFocus: null,
+    _whatsNewTourKeyHandler: null,
+
     // WebSocket reconnect countdown (Alpine-reactive mirror)
     wsReconnectIn: 0,
 
@@ -2124,6 +2134,32 @@ function dashboard() {
       this._wizardLastTrack = '';
     },
 
+    // Phase 4 — the wizard "x" / "skip wizard" handler. Same effect
+    // as wizardAbandon (sets step=idle, persists, tears down pollers)
+    // but with a different telemetry reason so we can tell deliberate
+    // skips apart from page-unload abandons.
+    wizardSkip() {
+      const lastStep = this.wizard.step;
+      this.track('wizard_abandoned', {
+        lastStep: lastStep,
+        totalSeconds: this._wizardSecondsSinceStart(),
+        reason: 'skip_link',
+      });
+      this._wizardTeardown();
+      this.wizard = { step: 'idle', plan: null, startedAt: 0, lastChip: '' };
+      this._wizardSave();
+      this._wizardLastTrack = '';
+    },
+
+    // Phase 4 — return progress-dot index for a given step. Used by
+    // the wizard card progress indicator (4 dots: ask, confirming,
+    // building, first-output).
+    wizardStepIndex() {
+      const order = ['ask', 'confirming', 'building', 'first-output'];
+      const idx = order.indexOf(this.wizard.step);
+      return idx < 0 ? 0 : idx;
+    },
+
     _wizardTeardown() {
       if (this._wizardBuildPoll) {
         clearInterval(this._wizardBuildPoll);
@@ -2148,6 +2184,105 @@ function dashboard() {
       if (this.wizard.step !== 'idle') return;
       if (!this._isFirstVisit()) return;
       this.startWizard();
+    },
+
+    // ── Phase 4 "What's new" tour ────────────────────────────
+    //
+    // 3-step modal for existing-fleet users seeing the redesigned
+    // dashboard for the first time. Detection: agents.length > 0
+    // (excluding operator) AND ``localStorage.olSeenWhatsNew !== 'true'``
+    // AND no active wizard (mutual exclusion). On any exit path —
+    // skip, dismiss, or reaching step 3 — we set the seen flag so the
+    // tour never re-shows for that browser.
+
+    _maybeStartWhatsNewTour() {
+      if (this.whatsNewTour.step !== 0) return;
+      if (this.wizard && this.wizard.step !== 'idle') return;
+      try {
+        if (localStorage.getItem('olSeenWhatsNew') === 'true') return;
+      } catch (_) { /* private mode — show once per session */ }
+      const fleetAgents = (this.agents || []).filter(a => a && a.id !== 'operator');
+      if (fleetAgents.length === 0) return;
+      this.startWhatsNewTour();
+    },
+
+    startWhatsNewTour() {
+      this.whatsNewTour = { step: 1 };
+      this.track('whats_new_tour_started', {});
+      // Capture focus + install ESC handler. Focus the modal on next
+      // tick so screen-readers announce the dialog.
+      try { this._whatsNewTourPrevFocus = document.activeElement; } catch (_) {}
+      this._whatsNewTourKeyHandler = (e) => {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          this.dismissWhatsNewTour('escape');
+        } else if (e.key === 'Tab') {
+          // Lightweight focus trap — keep tab cycling inside the modal.
+          const root = document.querySelector('[data-testid="whats-new-modal"]');
+          if (!root) return;
+          const focusable = root.querySelectorAll(
+            'button:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'
+          );
+          if (focusable.length === 0) return;
+          const first = focusable[0];
+          const last = focusable[focusable.length - 1];
+          if (e.shiftKey && document.activeElement === first) {
+            e.preventDefault();
+            last.focus();
+          } else if (!e.shiftKey && document.activeElement === last) {
+            e.preventDefault();
+            first.focus();
+          }
+        }
+      };
+      window.addEventListener('keydown', this._whatsNewTourKeyHandler);
+      this.$nextTick(() => {
+        const root = document.querySelector('[data-testid="whats-new-modal"]');
+        const target = root && root.querySelector('[data-testid="whats-new-primary"]');
+        if (target && typeof target.focus === 'function') target.focus();
+      });
+    },
+
+    whatsNewTourNext() {
+      if (this.whatsNewTour.step >= 3) {
+        this._completeWhatsNewTour('completed');
+        return;
+      }
+      this.whatsNewTour.step += 1;
+      this.track('whats_new_tour_step', { step: this.whatsNewTour.step });
+      this.$nextTick(() => {
+        const root = document.querySelector('[data-testid="whats-new-modal"]');
+        const target = root && root.querySelector('[data-testid="whats-new-primary"]');
+        if (target && typeof target.focus === 'function') target.focus();
+      });
+    },
+
+    whatsNewTourBack() {
+      if (this.whatsNewTour.step > 1) {
+        this.whatsNewTour.step -= 1;
+        this.track('whats_new_tour_step', { step: this.whatsNewTour.step, direction: 'back' });
+      }
+    },
+
+    dismissWhatsNewTour(reason) {
+      this._completeWhatsNewTour(reason || 'dismissed');
+    },
+
+    _completeWhatsNewTour(reason) {
+      const lastStep = this.whatsNewTour.step;
+      try { localStorage.setItem('olSeenWhatsNew', 'true'); } catch (_) {}
+      this.whatsNewTour = { step: 0 };
+      this.track('whats_new_tour_finished', { reason: reason, lastStep: lastStep });
+      if (this._whatsNewTourKeyHandler) {
+        window.removeEventListener('keydown', this._whatsNewTourKeyHandler);
+        this._whatsNewTourKeyHandler = null;
+      }
+      try {
+        if (this._whatsNewTourPrevFocus && this._whatsNewTourPrevFocus.focus) {
+          this._whatsNewTourPrevFocus.focus();
+        }
+      } catch (_) {}
+      this._whatsNewTourPrevFocus = null;
     },
 
     // ── Tab switching ─────────────────────────────────────
@@ -4464,6 +4599,9 @@ function dashboard() {
           // loading at init time) doesn't pop the wizard. Re-entrant
           // calls during the same visit are no-ops.
           this._maybeStartWizard();
+          // Phase 4 — "What's new" tour for existing-fleet users.
+          // Mutually exclusive with the empty-fleet wizard.
+          this._maybeStartWhatsNewTour();
         }
       } catch (e) {
         console.warn('fetchAgents failed:', e);

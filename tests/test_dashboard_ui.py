@@ -744,3 +744,150 @@ class TestHomeRouting:
 
     def test_switch_home_tab_helper_present(self, app_js: str):
         assert "switchHomeTab(tabId)" in app_js
+
+
+# ── Phase 4: "What's new" tour for existing-fleet users ──────────
+
+
+class TestWhatsNewTourMarkup:
+    """The 3-step modal tour is hard-coded into the SPA template."""
+
+    def test_modal_block_is_present(self):
+        html = _read(_TEMPLATE)
+        assert 'data-testid="whats-new-modal"' in html
+
+    def test_modal_renders_only_when_step_not_zero(self):
+        html = _read(_TEMPLATE)
+        assert "whatsNewTour.step !== 0" in html
+
+    def test_modal_has_three_steps(self):
+        html = _read(_TEMPLATE)
+        for step in (1, 2, 3):
+            assert f"whatsNewTour.step === {step}" in html, (
+                f"missing whats-new step: {step}"
+            )
+
+    def test_modal_has_dialog_role_and_modal_aria(self):
+        html = _read(_TEMPLATE)
+        # role=dialog + aria-modal=true on the same element as the
+        # data-testid hook — required for screen readers.
+        assert re.search(
+            r'role="dialog"[^>]*?aria-modal="true"[^>]*?data-testid="whats-new-modal"'
+            r'|data-testid="whats-new-modal"[^>]*?role="dialog"',
+            html,
+        ), "whats-new modal missing role=dialog/aria-modal"
+
+    def test_step1_copy_present(self):
+        html = _read(_TEMPLATE)
+        assert "We&rsquo;ve simplified your dashboard" in html
+        assert "Skip" in html
+        assert "Show me" in html
+
+    def test_step2_copy_present(self):
+        html = _read(_TEMPLATE)
+        assert "Operator is one click away" in html
+        assert "talk to the Operator" in html
+
+    def test_step3_copy_present(self):
+        html = _read(_TEMPLATE)
+        assert "Approvals and notifications are in the top nav" in html
+        assert "Got it" in html
+
+    def test_skip_button_dismisses_tour(self):
+        html = _read(_TEMPLATE)
+        assert 'data-testid="whats-new-skip"' in html
+        assert "dismissWhatsNewTour(" in html
+
+    def test_primary_button_has_focus_target(self):
+        # Focus management: each step's primary advance button is
+        # auto-focused on entry (via querySelector in app.js).
+        html = _read(_TEMPLATE)
+        assert 'data-testid="whats-new-primary"' in html
+
+
+class TestWhatsNewTourJsState:
+    """Alpine handlers for the tour state machine."""
+
+    def test_tour_state_object_declared(self):
+        js = _read(_APP_JS)
+        assert "whatsNewTour: { step: 0 }" in js
+
+    def test_tour_handlers_declared(self):
+        js = _read(_APP_JS)
+        for handler in (
+            "_maybeStartWhatsNewTour()",
+            "startWhatsNewTour()",
+            "whatsNewTourNext()",
+            "whatsNewTourBack()",
+            "dismissWhatsNewTour(reason)",
+            "_completeWhatsNewTour(reason)",
+        ):
+            assert handler in js, f"missing tour handler: {handler}"
+
+    def test_tour_persists_seen_flag(self):
+        js = _read(_APP_JS)
+        # Seen flag freezes the tour after first completion / dismiss.
+        assert "olSeenWhatsNew" in js
+        assert "localStorage.setItem('olSeenWhatsNew', 'true')" in js
+
+    def test_tour_is_gated_on_existing_fleet(self):
+        js = _read(_APP_JS)
+        # Detection: agents.length > 0 (excluding operator).
+        # The detector reuses the same operator-exclusion pattern as
+        # the empty-fleet wizard.
+        assert "_maybeStartWhatsNewTour" in js
+        assert "fleetAgents.length === 0" in js
+
+    def test_tour_emits_locked_telemetry_events(self):
+        js = _read(_APP_JS)
+        for evt in (
+            "whats_new_tour_started",
+            "whats_new_tour_step",
+            "whats_new_tour_finished",
+        ):
+            assert f"'{evt}'" in js, f"missing tour telemetry event: {evt}"
+
+    def test_tour_handles_escape_key(self):
+        js = _read(_APP_JS)
+        # ESC dismisses the modal. Tab-trap is also wired here.
+        assert "e.key === 'Escape'" in js
+
+
+# ── Phase 4: wizard polish ───────────────────────────────────────
+
+
+class TestWizardPolish:
+    """Phase 4 refinements to the empty-fleet wizard."""
+
+    def test_progress_dots_present(self):
+        html = _read(_TEMPLATE)
+        assert 'data-testid="wizard-progress"' in html
+        # Four-dot indicator iterates over the four step ordinals.
+        assert "[0,1,2,3]" in html
+
+    def test_step_index_helper_declared(self):
+        js = _read(_APP_JS)
+        assert "wizardStepIndex()" in js
+
+    def test_wizard_skip_handler_tracks_reason(self):
+        js = _read(_APP_JS)
+        # The new skip path emits wizard_abandoned with reason='skip_link'
+        # so we can split deliberate skips from page-unload abandons.
+        assert "wizardSkip()" in js
+        assert "reason: 'skip_link'" in js
+
+    def test_building_step_has_skip_button(self):
+        html = _read(_TEMPLATE)
+        # Phase 4 added the skip-X to the building step (it was already
+        # on ask/confirming via wizardAbandon).
+        assert 'data-testid="wizard-skip-building"' in html
+        assert "wizardSkip()" in html
+
+    def test_first_output_has_quick_links(self):
+        html = _read(_TEMPLATE)
+        assert 'data-testid="wizard-quick-links"' in html
+        assert 'data-testid="wizard-link-team"' in html
+        assert 'data-testid="wizard-link-workplace"' in html
+        # The quick-links section keeps a "Got it, close" affordance
+        # that completes the wizard without changing tabs.
+        assert 'data-testid="wizard-continue"' in html
