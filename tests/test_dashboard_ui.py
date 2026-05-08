@@ -1323,3 +1323,235 @@ class TestWorkerDmInNeedsYou:
         # naturally for either case.
         assert "'1 unread'" in _APP_JS_TEXT
         assert "${n} unread" in _APP_JS_TEXT
+# ── Browser notification + activity rollup + connect-channel ────
+
+
+class TestBrowserNotifyOptIn:
+    """Browser Notification API integration in the wizard first-output."""
+
+    def test_browser_notify_button_in_wizard_first_output(self):
+        html = _read(_TEMPLATE)
+        # The opt-in button lives inside the first-output card. Assert
+        # both the testid and that it actually wires to the JS handler.
+        assert 'data-testid="wizard-browser-notify"' in html
+        assert 'data-testid="wizard-browser-notify-enable"' in html
+        assert "requestBrowserNotificationPermission()" in html
+        # The "granted + enabled" affordance and "denied" advisory are
+        # both rendered so the user always knows the current state.
+        assert 'data-testid="wizard-browser-notify-on"' in html
+        assert 'data-testid="wizard-browser-notify-denied"' in html
+
+    def test_browser_notify_persists_to_localstorage(self):
+        js = _read(_APP_JS)
+        # The opt-in is persisted under the locked key so we can assert
+        # against a string literal, not a regex.
+        assert "olBrowserNotifyEnabled" in js
+        # Permission grant flips the in-app opt-in on AND writes through
+        # to localStorage in the same code path.
+        assert "localStorage.setItem('olBrowserNotifyEnabled', 'true')" in js
+        # State variables are declared on the Alpine root so the
+        # template bindings work.
+        assert "browserNotifyEnabled: false" in js
+        assert "browserNotifyPermission: 'default'" in js
+
+    def test_browser_notify_fire_is_triple_gated(self):
+        """Defence in depth — opt-in flag, OS permission, and tab visibility."""
+        js = _read(_APP_JS)
+        fire_fn = _extract_function_body(js, "_maybeFireBrowserNotification")
+        assert fire_fn is not None, "missing _maybeFireBrowserNotification"
+        # Gate 1: in-app opt-in.
+        assert "this.browserNotifyEnabled" in fire_fn
+        # Gate 2: OS-level permission. Match either ' === ' or "===" form
+        # so refactors that flip quote style still pass.
+        assert "Notification.permission" in fire_fn
+        assert "'granted'" in fire_fn or '"granted"' in fire_fn
+        # Gate 3: tab visibility — only fire when not visible.
+        assert "document.visibilityState" in fire_fn
+        assert "'visible'" in fire_fn or '"visible"' in fire_fn
+
+    def test_browser_notify_kinds_allowlist(self):
+        js = _read(_APP_JS)
+        # Only fire for high-signal kinds. The list lives in a single
+        # place so future additions don't drift across files.
+        assert "_browserNotifyKinds: ['approval', 'credential', 'alert', 'blocker']" in js
+
+
+class TestActivityRollup:
+    """Long-task progress rollup in the activity feed.
+
+    The rollup is presentation-only — the underlying ``events`` array
+    is unchanged so the "Show technical detail" toggle still surfaces
+    the raw stream.
+    """
+
+    def test_rollup_helper_declared(self):
+        js = _read(_APP_JS)
+        assert "_rollupActivityEvents(events)" in js
+        assert "formatRolledActivityLine(entry)" in js
+        # The feed-renderer uses the ``rolledFilteredEvents`` getter
+        # rather than calling the helper inline.
+        assert "rolledFilteredEvents" in js
+
+    def test_rollup_groups_consecutive_same_tool(self):
+        result = _run_rollup_js([
+            {"type": "tool_start", "agent": "researcher",
+             "data": {"tool": "web_search"}, "timestamp": 1000},
+            {"type": "tool_start", "agent": "researcher",
+             "data": {"tool": "web_search"}, "timestamp": 1060},
+            {"type": "tool_start", "agent": "researcher",
+             "data": {"tool": "web_search"}, "timestamp": 1120},
+        ])
+        assert len(result) == 1
+        assert result[0]["kind"] == "rollup"
+        assert result[0]["count"] == 3
+        assert result[0]["tool"] == "web_search"
+
+    def test_rollup_resets_on_tool_change(self):
+        result = _run_rollup_js([
+            {"type": "tool_start", "agent": "researcher",
+             "data": {"tool": "web_search"}, "timestamp": 1000},
+            {"type": "tool_start", "agent": "researcher",
+             "data": {"tool": "web_search"}, "timestamp": 1060},
+            {"type": "tool_start", "agent": "researcher",
+             "data": {"tool": "browser_navigate"}, "timestamp": 1120},
+        ])
+        assert len(result) == 2
+        # First group: 2x web_search collapsed.
+        assert result[0]["kind"] == "rollup"
+        assert result[0]["count"] == 2
+        assert result[0]["tool"] == "web_search"
+        # Second group: a single browser_navigate, NOT decorated.
+        assert result[1]["kind"] == "single"
+
+    def test_rollup_resets_on_agent_change(self):
+        result = _run_rollup_js([
+            {"type": "tool_start", "agent": "researcher",
+             "data": {"tool": "web_search"}, "timestamp": 1000},
+            {"type": "tool_start", "agent": "writer",
+             "data": {"tool": "web_search"}, "timestamp": 1060},
+        ])
+        # Different agents must NEVER fold into the same rollup, even
+        # for the same tool name.
+        assert len(result) == 2
+        assert all(e["kind"] == "single" for e in result)
+
+    def test_rollup_resets_on_status_change(self):
+        result = _run_rollup_js([
+            {"type": "tool_start", "agent": "researcher",
+             "data": {"tool": "web_search"}, "timestamp": 1000},
+            {"type": "tool_start", "agent": "researcher",
+             "data": {"tool": "web_search"}, "timestamp": 1060},
+            {"type": "task_status_changed", "agent": "researcher",
+             "data": {"new_status": "blocked"}, "timestamp": 1080},
+            {"type": "tool_start", "agent": "researcher",
+             "data": {"tool": "web_search"}, "timestamp": 1100},
+        ])
+        # Group A (2x web_search) → status divider → fresh single
+        # web_search. Status events are always emitted as singles.
+        assert len(result) == 3
+        assert result[0]["kind"] == "rollup"
+        assert result[0]["count"] == 2
+        assert result[1]["kind"] == "single"
+        assert result[1]["event"]["type"] == "task_status_changed"
+        assert result[2]["kind"] == "single"
+
+    def test_rollup_singleton_unchanged(self):
+        result = _run_rollup_js([
+            {"type": "tool_start", "agent": "researcher",
+             "data": {"tool": "web_search"}, "timestamp": 1000},
+        ])
+        assert len(result) == 1
+        # Single events are NOT decorated; the renderer falls back to
+        # formatActivityForUser as before.
+        assert result[0]["kind"] == "single"
+
+    def test_rollup_preserves_raw_events_for_tech_detail(self):
+        """The raw stream renderer is gated on ``showTechDetail`` and
+        iterates over ``filteredEvents``, not the rolled-up list. So
+        flipping the toggle still surfaces every event."""
+        html = _read(_TEMPLATE)
+        # Tech-detail branch iterates over the unaltered filteredEvents.
+        assert 'x-if="showTechDetail"' in html
+        # Roll-up branch iterates over the new getter.
+        assert 'x-if="!showTechDetail"' in html
+        assert 'in rolledFilteredEvents' in html
+
+
+class TestConnectChannelPrompt:
+    """Soft 'Connect a channel' nudge in the wizard first-output."""
+
+    def test_first_output_card_has_connect_channel_link(self):
+        html = _read(_TEMPLATE)
+        assert 'data-testid="wizard-connect-channel"' in html
+        assert 'data-testid="wizard-connect-channel-link"' in html
+        # Click handler hops to Settings → Integrations and completes
+        # the wizard so we don't strand the user on a dismissed card.
+        assert "systemTab = 'integrations'" in html
+        assert "switchTab('system')" in html
+        # The copy is locked — keep the nudge soft.
+        assert "Want updates when you" in html
+        assert "Connect Telegram" in html
+
+
+# ── Helpers — JS-source extraction + node subprocess ────────────
+
+
+def _extract_function_body(js: str, name: str) -> str | None:
+    """Return the body of a top-level method definition.
+
+    Handles the Alpine-component shape ``name(args) { ... }`` by
+    counting brace depth. Returns ``None`` when the method doesn't
+    appear in the source.
+    """
+    needle = re.search(rf"\b{re.escape(name)}\s*\([^)]*\)\s*\{{", js)
+    if not needle:
+        return None
+    start = needle.end()
+    depth = 1
+    i = start
+    while i < len(js) and depth > 0:
+        ch = js[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        i += 1
+    if depth != 0:
+        return None
+    return js[start:i - 1]
+
+
+def _run_rollup_js(events: list[dict]) -> list[dict]:
+    """Run ``_rollupActivityEvents`` against a fixed event list under
+    Node.js. Skips when node isn't available so contributors without a
+    Node toolchain still pass the rest of the suite. CI runners
+    (``ubuntu-latest``) have Node preinstalled.
+    """
+    import json as _json
+    import shutil as _shutil
+    import subprocess as _sp
+
+    node_bin = _shutil.which("node")
+    if node_bin is None:
+        pytest.skip("node not available — skipping rollup behaviour test")
+    js = _read(_APP_JS)
+    rollup_body = _extract_function_body(js, "_rollupActivityEvents")
+    if rollup_body is None:
+        pytest.fail("could not locate _rollupActivityEvents in app.js")
+    # Reconstruct a minimal harness that exposes the helper as a
+    # standalone function. ``this`` isn't referenced inside the
+    # rollup body so we don't need Alpine wiring.
+    harness = (
+        "const events = " + _json.dumps(events) + ";\n"
+        "function rollup(events) {" + rollup_body + "}\n"
+        "process.stdout.write(JSON.stringify(rollup(events)));\n"
+    )
+    proc = _sp.run(
+        [node_bin, "-e", harness],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    if proc.returncode != 0:
+        pytest.fail(f"node harness failed: {proc.stderr}")
+    return _json.loads(proc.stdout)
