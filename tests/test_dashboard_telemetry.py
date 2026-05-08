@@ -481,17 +481,17 @@ class TestPhase0FrontendWiring:
 
     def test_workplace_subtab_buttons_emit_subtab_usage(self):
         html = _TEMPLATE.read_text(encoding="utf-8")
-        # Phase 3 collapsed the four-sub-tab bar into a single-scroll
-        # Home layout (`homeTab === 'main'`) plus a kanban sub-page
-        # (`homeTab === 'tasks'`). The legacy
-        # ``trackSubtabUsage(workplaceTab, wt.id)`` wiring is gone with
-        # the bar; the equivalent transition handler is now
-        # ``switchHomeTab('main' | 'tasks')`` invoked from the back-link
-        # and "See full task board" CTA. trackSubtabUsage itself is kept
-        # in app.js for the hidden legacy renders + for empty-state CTA
-        # telemetry — see test_empty_state_cta_buttons_emit_telemetry.
-        assert "switchHomeTab('main')" in html
-        assert "switchHomeTab('tasks')" in html
+        # PR #879 made the kanban the default Work view and moved the
+        # single-scroll layout to ``homeTab === 'activity'``. Sub-tab IDs
+        # are now ``'kanban'`` (default) and ``'activity'`` (the legacy
+        # single-scroll). The transition handler is
+        # ``switchHomeTab('kanban' | 'activity')`` invoked from the
+        # back-link and "View activity feed →" CTA. trackSubtabUsage
+        # itself is kept in app.js for the hidden legacy renders + for
+        # empty-state CTA telemetry — see
+        # test_empty_state_cta_buttons_emit_telemetry.
+        assert "switchHomeTab('kanban')" in html
+        assert "switchHomeTab('activity')" in html
 
     def test_needs_you_action_button_uses_telemetry_wrapper(self):
         html = _TEMPLATE.read_text(encoding="utf-8")
