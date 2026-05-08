@@ -778,25 +778,25 @@ class TestHomeRouting:
         assert "switchHomeTab(tabId)" in app_js
 
 
-# ── Phase 4: "What's new" tour for existing-fleet users ──────────
+# ── New-user onboarding tutorial ─────────────────────────────────
 
 
-class TestWhatsNewTourMarkup:
-    """The 3-step modal tour is hard-coded into the SPA template."""
+class TestNewUserTutorialMarkup:
+    """The 3-step tutorial modal is hard-coded into the SPA template."""
 
     def test_modal_block_is_present(self):
         html = _read(_TEMPLATE)
-        assert 'data-testid="whats-new-modal"' in html
+        assert 'data-testid="tutorial-modal"' in html
 
     def test_modal_renders_only_when_step_not_zero(self):
         html = _read(_TEMPLATE)
-        assert "whatsNewTour.step !== 0" in html
+        assert "newUserTutorial.step !== 0" in html
 
     def test_modal_has_three_steps(self):
         html = _read(_TEMPLATE)
         for step in (1, 2, 3):
-            assert f"whatsNewTour.step === {step}" in html, (
-                f"missing whats-new step: {step}"
+            assert f"newUserTutorial.step === {step}" in html, (
+                f"missing tutorial step: {step}"
             )
 
     def test_modal_has_dialog_role_and_modal_aria(self):
@@ -804,85 +804,225 @@ class TestWhatsNewTourMarkup:
         # role=dialog + aria-modal=true on the same element as the
         # data-testid hook — required for screen readers.
         assert re.search(
-            r'role="dialog"[^>]*?aria-modal="true"[^>]*?data-testid="whats-new-modal"'
-            r'|data-testid="whats-new-modal"[^>]*?role="dialog"',
+            r'role="dialog"[^>]*?aria-modal="true"[^>]*?data-testid="tutorial-modal"'
+            r'|data-testid="tutorial-modal"[^>]*?role="dialog"',
             html,
-        ), "whats-new modal missing role=dialog/aria-modal"
+        ), "tutorial modal missing role=dialog/aria-modal"
 
     def test_step1_copy_present(self):
         html = _read(_TEMPLATE)
-        assert "We&rsquo;ve simplified your dashboard" in html
-        assert "Skip" in html
-        assert "Show me" in html
+        assert "Welcome to OpenLegion" in html
+        assert "AI team manager" in html
+        assert "Show me how" in html
 
     def test_step2_copy_present(self):
         html = _read(_TEMPLATE)
-        assert "Operator is one click away" in html
-        assert "talk to the Operator" in html
+        assert "Meet your Operator" in html
+        assert "team lead" in html
 
     def test_step3_copy_present(self):
         html = _read(_TEMPLATE)
-        assert "Approvals and notifications are in the top nav" in html
-        assert "Got it" in html
+        assert "See what your team is doing" in html
+        assert "Got it, let&rsquo;s build a team" in html
 
-    def test_skip_button_dismisses_tour(self):
+    def test_skip_button_dismisses_tutorial(self):
         html = _read(_TEMPLATE)
-        assert 'data-testid="whats-new-skip"' in html
-        assert "dismissWhatsNewTour(" in html
+        assert 'data-testid="tutorial-skip"' in html
+        assert "dismissTutorial(" in html
 
     def test_primary_button_has_focus_target(self):
         # Focus management: each step's primary advance button is
         # auto-focused on entry (via querySelector in app.js).
         html = _read(_TEMPLATE)
-        assert 'data-testid="whats-new-primary"' in html
+        assert 'data-testid="tutorial-primary"' in html
 
 
-class TestWhatsNewTourJsState:
-    """Alpine handlers for the tour state machine."""
+class TestNewUserTutorialJsState:
+    """Alpine handlers for the tutorial state machine."""
 
-    def test_tour_state_object_declared(self):
+    def test_tutorial_state_object_declared(self):
         js = _read(_APP_JS)
-        assert "whatsNewTour: { step: 0 }" in js
+        assert "newUserTutorial: { step: 0 }" in js
 
-    def test_tour_handlers_declared(self):
+    def test_tutorial_handlers_declared(self):
         js = _read(_APP_JS)
         for handler in (
-            "_maybeStartWhatsNewTour()",
-            "startWhatsNewTour()",
-            "whatsNewTourNext()",
-            "whatsNewTourBack()",
-            "dismissWhatsNewTour(reason)",
-            "_completeWhatsNewTour(reason)",
+            "_maybeStartTutorial()",
+            "startTutorial()",
+            "tutorialNext()",
+            "tutorialBack()",
+            "dismissTutorial(reason)",
+            "_completeTutorial(reason)",
         ):
-            assert handler in js, f"missing tour handler: {handler}"
+            assert handler in js, f"missing tutorial handler: {handler}"
 
-    def test_tour_persists_seen_flag(self):
+    def test_tutorial_persists_seen_flag(self):
         js = _read(_APP_JS)
-        # Seen flag freezes the tour after first completion / dismiss.
-        assert "olSeenWhatsNew" in js
-        assert "localStorage.setItem('olSeenWhatsNew', 'true')" in js
+        # Seen flag freezes the tutorial after first completion/dismiss.
+        assert "olSeenTutorial" in js
+        assert "localStorage.setItem('olSeenTutorial', 'true')" in js
 
-    def test_tour_is_gated_on_existing_fleet(self):
+    def test_tutorial_fires_for_new_users_only(self):
         js = _read(_APP_JS)
-        # Detection: agents.length > 0 (excluding operator).
-        # The detector reuses the same operator-exclusion pattern as
-        # the empty-fleet wizard.
-        assert "_maybeStartWhatsNewTour" in js
-        assert "fleetAgents.length === 0" in js
+        # Detection delegates to ``_isFirstVisit()`` — empty fleet AND
+        # no real user message in the operator transcript. The wizard
+        # uses the same detector so the two stay in lockstep.
+        assert "_maybeStartTutorial" in js
+        m = re.search(
+            r"_maybeStartTutorial\(\)\s*\{(.*?)\n    \},",
+            _APP_JS_TEXT,
+            re.DOTALL,
+        )
+        assert m, "_maybeStartTutorial body missing"
+        body = m.group(1)
+        assert "_isFirstVisit()" in body, (
+            "tutorial gate should delegate to _isFirstVisit"
+        )
 
-    def test_tour_emits_locked_telemetry_events(self):
+    def test_tutorial_does_not_fire_for_existing_users(self):
+        # The detector early-returns when ``_isFirstVisit()`` is false —
+        # any non-empty fleet OR any prior user message in the operator
+        # transcript skips the tutorial.
+        m = re.search(
+            r"_maybeStartTutorial\(\)\s*\{(.*?)\n    \},",
+            _APP_JS_TEXT,
+            re.DOTALL,
+        )
+        assert m, "_maybeStartTutorial body missing"
+        body = m.group(1)
+        assert "if (!this._isFirstVisit()) return" in body, (
+            "tutorial should bail when _isFirstVisit() is false"
+        )
+
+    def test_tutorial_does_not_fire_for_returning_user_with_chat_history(self):
+        # Audit fix: the legacy gate checked only ``fleetAgents.length``
+        # which mis-classified a returning user who deleted their fleet
+        # but already chatted with the operator as "new". Delegating to
+        # ``_isFirstVisit()`` adds the "no user message in
+        # chatHistories.operator" check, so a returning chat-only user
+        # is correctly excluded.
+        m_first_visit = re.search(
+            r"_isFirstVisit\(\)\s*\{(.*?)\n    \},",
+            _APP_JS_TEXT,
+            re.DOTALL,
+        )
+        assert m_first_visit, "_isFirstVisit body missing"
+        first_visit_body = m_first_visit.group(1)
+        # Confirm _isFirstVisit covers BOTH conditions: empty fleet AND
+        # no prior user message in operator chatHistories.
+        assert "this.agents.some" in first_visit_body, (
+            "_isFirstVisit must check the agents list"
+        )
+        assert "chatHistories['operator']" in first_visit_body, (
+            "_isFirstVisit must check operator chat history"
+        )
+        assert "m.role === 'user'" in first_visit_body, (
+            "_isFirstVisit must filter on user-role messages"
+        )
+        # And confirm the tutorial actually delegates to it (not an
+        # inline fleetAgents-only check).
+        m_tut = re.search(
+            r"_maybeStartTutorial\(\)\s*\{(.*?)\n    \},",
+            _APP_JS_TEXT,
+            re.DOTALL,
+        )
+        assert m_tut, "_maybeStartTutorial body missing"
+        tut_body = m_tut.group(1)
+        assert "_isFirstVisit()" in tut_body
+        # The legacy fleetAgents.length-only inline check should be
+        # gone — _isFirstVisit replaces it.
+        assert "fleetAgents.length !== 0" not in tut_body, (
+            "legacy fleet-only check should be removed in favor of _isFirstVisit"
+        )
+
+    def test_tutorial_emits_locked_telemetry_events(self):
         js = _read(_APP_JS)
         for evt in (
-            "whats_new_tour_started",
-            "whats_new_tour_step",
-            "whats_new_tour_finished",
+            "tutorial_started",
+            "tutorial_step",
+            "tutorial_finished",
+            "tutorial_to_wizard_transition",
         ):
-            assert f"'{evt}'" in js, f"missing tour telemetry event: {evt}"
+            assert f"'{evt}'" in js, f"missing tutorial telemetry event: {evt}"
 
-    def test_tour_handles_escape_key(self):
+    def test_tutorial_handles_escape_key(self):
         js = _read(_APP_JS)
         # ESC dismisses the modal. Tab-trap is also wired here.
         assert "e.key === 'Escape'" in js
+
+
+class TestTutorialWizardSequencing:
+    """The tutorial must run BEFORE the empty-fleet wizard."""
+
+    def test_tutorial_fires_before_wizard_when_both_eligible(self):
+        # ``fetchAgents`` invokes _maybeStartTutorial BEFORE
+        # _maybeStartWizard so a brand-new user sees the tutorial first.
+        js = _APP_JS_TEXT
+        idx_tutorial = js.find("this._maybeStartTutorial()")
+        idx_wizard = js.find("this._maybeStartWizard()")
+        assert idx_tutorial != -1, "fetchAgents should call _maybeStartTutorial"
+        assert idx_wizard != -1, "fetchAgents should call _maybeStartWizard"
+        assert idx_tutorial < idx_wizard, (
+            "tutorial must be invoked before wizard so it gets first dibs"
+        )
+
+    def test_wizard_does_not_fire_while_tutorial_active(self):
+        # _maybeStartWizard early-returns when newUserTutorial.step !== 0.
+        m = re.search(
+            r"_maybeStartWizard\(\)\s*\{(.*?)\n    \},",
+            _APP_JS_TEXT,
+            re.DOTALL,
+        )
+        assert m, "_maybeStartWizard body missing"
+        body = m.group(1)
+        assert "newUserTutorial" in body, (
+            "wizard should gate on tutorial state to avoid double-mount"
+        )
+        assert re.search(
+            r"newUserTutorial\.step\s*!==\s*0", body
+        ), "wizard guard should bail when tutorial is open"
+
+    def test_wizard_fires_after_tutorial_completes(self):
+        # _completeTutorial calls _maybeStartWizard on natural
+        # completion (reason === 'completed') so the user lands in
+        # the team-building flow without an extra click.
+        m = re.search(
+            r"_completeTutorial\(reason\)\s*\{(.*?)\n    \},",
+            _APP_JS_TEXT,
+            re.DOTALL,
+        )
+        assert m, "_completeTutorial body missing"
+        body = m.group(1)
+        assert "tutorial_to_wizard_transition" in body, (
+            "completion handler should emit transition telemetry"
+        )
+        assert "_maybeStartWizard" in body, (
+            "completion handler should invoke the wizard"
+        )
+        assert "reason === 'completed'" in body, (
+            "wizard should only auto-fire on natural completion, not skip/escape"
+        )
+
+
+class TestTutorialBackCompatMigration:
+    """Users who saw the legacy whats-new tour should not see the
+    tutorial — they're not new users."""
+
+    def test_old_olSeenWhatsNew_users_do_not_see_tutorial_again(self):
+        # init() should migrate olSeenWhatsNew='true' → olSeenTutorial='true'.
+        js = _APP_JS_TEXT
+        # The migration check looks at olSeenWhatsNew and, if set,
+        # writes olSeenTutorial. We grep for the combined fragment.
+        assert "olSeenWhatsNew" in js, "migration must reference legacy flag"
+        m = re.search(
+            r"localStorage\.getItem\('olSeenWhatsNew'\)\s*===\s*'true'\s*&&\s*"
+            r"!localStorage\.getItem\('olSeenTutorial'\)",
+            js,
+        )
+        assert m, "migration check missing — old whats-new users would see tutorial"
+        assert (
+            "localStorage.setItem('olSeenTutorial', 'true')" in js
+        ), "migration must write olSeenTutorial flag"
 
 
 # ── Phase 4: wizard polish ───────────────────────────────────────
@@ -1257,8 +1397,8 @@ class TestUndoReceiptCountdown:
 
 class TestSidePanelToggleIcon:
     """The side-panel toggle SVG should not be the same chat-bubble
-    glyph used by the Chat tab; the tour copy must match the new
-    pictogram."""
+    glyph used by the Chat tab — keeps the side-panel pictogram
+    distinct from the Chat tab so users don't confuse the two."""
 
     def test_side_panel_toggle_is_not_chat_bubble(self):
         # The Chat tab uses a chat-bubble path; the side-panel toggle
@@ -1275,7 +1415,7 @@ class TestSidePanelToggleIcon:
         button_block = _INDEX_HTML[idx : idx + 1500]
         assert chat_bubble_path not in button_block, (
             "Side-panel toggle still uses the chat-bubble SVG path; "
-            "it should be a distinct pictogram so the tour is unambiguous."
+            "it should be a distinct pictogram."
         )
 
     def test_side_panel_toggle_uses_panel_pictogram(self):
@@ -1287,14 +1427,6 @@ class TestSidePanelToggleIcon:
         assert '<rect x="3" y="4" width="18" height="16"' in snippet
         assert '<line x1="14" y1="4" x2="14" y2="20"' in snippet
         assert '<polyline points="8 10 11 12 8 14"' in snippet
-
-    def test_tour_copy_references_panel_icon(self):
-        # The tour Step 2 copy must talk about the "panel icon", not
-        # the "chat icon".
-        assert "Look for the panel icon in the top-right corner." in _INDEX_HTML
-        assert "Click the panel icon in the top-right" in _INDEX_HTML
-        # Negative: the old wording must be gone.
-        assert "Look for the chat icon in the top-right corner." not in _INDEX_HTML
 
 
 class TestWorkerDmInNeedsYou:
@@ -2099,39 +2231,71 @@ class TestActionChipDuringStream:
         )
 
 
-# ── What's-new tour gating edge cases ────────────────────────────
+# ── Tutorial gating edge cases ───────────────────────────────────
 
 
-class TestWhatsNewTourGatingEdgeCases:
-    """The tour's gating logic must be defensive about edge conditions."""
+class TestTutorialGatingEdgeCases:
+    """The tutorial's gating logic must be defensive about edge conditions."""
 
-    def test_empty_fleet_does_not_fire_tour(self):
-        """Fleet size 0 (operator-only) suppresses the tour."""
-        # _maybeStartWhatsNewTour bails when fleetAgents.length === 0.
-        m = re.search(
-            r"_maybeStartWhatsNewTour\(\)\s*\{(.*?)\n    \},",
+    def test_existing_fleet_does_not_fire_tutorial(self):
+        """Fleet size > 0 (non-operator) suppresses the tutorial."""
+        # The empty-fleet check now lives in _isFirstVisit() and
+        # _maybeStartTutorial delegates to it. Confirm both halves of
+        # the contract are wired.
+        m_first_visit = re.search(
+            r"_isFirstVisit\(\)\s*\{(.*?)\n    \},",
             _APP_JS_TEXT,
             re.DOTALL,
         )
-        assert m, "_maybeStartWhatsNewTour body missing"
-        body = m.group(1)
-        assert "fleetAgents.length === 0" in body, (
-            "empty-fleet guard missing — tour would fire on fresh installs"
+        assert m_first_visit, "_isFirstVisit body missing"
+        first_visit_body = m_first_visit.group(1)
+        # The fleet check happens inside _isFirstVisit (returns false
+        # when any non-operator agent exists).
+        assert "a.id !== 'operator'" in first_visit_body, (
+            "_isFirstVisit should exclude the operator from the fleet check"
+        )
+        assert "if (hasFleetAgents) return false" in first_visit_body, (
+            "_isFirstVisit must return false when fleet is non-empty"
         )
 
+        m = re.search(
+            r"_maybeStartTutorial\(\)\s*\{(.*?)\n    \},",
+            _APP_JS_TEXT,
+            re.DOTALL,
+        )
+        assert m, "_maybeStartTutorial body missing"
+        body = m.group(1)
+        assert "if (!this._isFirstVisit()) return" in body, (
+            "non-empty-fleet guard missing — tutorial would fire on existing fleets"
+        )
+
+    def test_skip_persists_seen_flag(self):
+        """Skip path writes olSeenTutorial just like completion."""
+        # Skip → dismissTutorial('skip_button') → _completeTutorial →
+        # localStorage.setItem('olSeenTutorial', 'true'). The shared
+        # _completeTutorial path is the single write site.
+        m = re.search(
+            r"_completeTutorial\(reason\)\s*\{(.*?)\n    \},",
+            _APP_JS_TEXT,
+            re.DOTALL,
+        )
+        assert m, "_completeTutorial body missing"
+        body = m.group(1)
+        assert "localStorage.setItem('olSeenTutorial', 'true')" in body
+
     def test_localstorage_unavailable_falls_through_to_show_once(self):
-        """When localStorage throws (private mode) the tour still fires.
+        """When localStorage throws (private mode) the tutorial still fires.
 
         The seen-flag check is wrapped in try/catch. The ``catch`` arm
         is a no-op so the function continues to the agent check — i.e.
-        the tour shows once per session in private mode.
+        the tutorial shows once per session in private mode.
         """
         m = re.search(
-            r"_maybeStartWhatsNewTour\(\)\s*\{(.*?)\n    \},",
+            r"_maybeStartTutorial\(\)\s*\{(.*?)\n    \},",
             _APP_JS_TEXT,
             re.DOTALL,
         )
-        assert m, "_maybeStartWhatsNewTour body missing"
+        assert m, "_maybeStartTutorial body missing"
         body = m.group(1)
         # The catch must not return — only the try return early-exits.
         # The simplest contract check: the comment marks the private-
@@ -2141,28 +2305,28 @@ class TestWhatsNewTourGatingEdgeCases:
             body,
         ), "private-mode catch arm should be a documented no-op"
 
-    def test_tour_state_does_not_persist_across_reload(self):
-        """Tour state lives in memory only — reload aborts mid-flight."""
-        # The wizard persists to localStorage.ol_wizard; the tour
-        # explicitly does NOT. _maybeStartWhatsNewTour gates only on
-        # the seen flag, not on a stored step. We assert the tour
+    def test_tutorial_state_does_not_persist_across_reload(self):
+        """Tutorial state lives in memory only — reload aborts mid-flight."""
+        # The wizard persists to localStorage.ol_wizard; the tutorial
+        # explicitly does NOT. _maybeStartTutorial gates only on the
+        # seen flag, not on a stored step. We assert the tutorial
         # bootstrap reads neither a stored step nor calls a persist
         # helper from the seen-flag branch.
         m = re.search(
-            r"_maybeStartWhatsNewTour\(\)\s*\{(.*?)\n    \},",
+            r"_maybeStartTutorial\(\)\s*\{(.*?)\n    \},",
             _APP_JS_TEXT,
             re.DOTALL,
         )
-        assert m, "_maybeStartWhatsNewTour body missing"
+        assert m, "_maybeStartTutorial body missing"
         body = m.group(1)
-        # Tour state object must not be hydrated from localStorage.
+        # Tutorial state object must not be hydrated from localStorage.
         # (The seen flag is the only persisted bit.)
-        assert "ol_whats_new_tour_step" not in _APP_JS_TEXT, (
-            "tour step should not be persisted — reload must abort the tour"
+        assert "ol_tutorial_step" not in _APP_JS_TEXT, (
+            "tutorial step should not be persisted — reload must abort the tutorial"
         )
-        # The function reads only ``olSeenWhatsNew``, not a stored step.
-        assert "getItem('olSeenWhatsNew')" in body
-        assert "getItem('ol_whats_new_step'" not in body
+        # The function reads only ``olSeenTutorial``, not a stored step.
+        assert "getItem('olSeenTutorial')" in body
+        assert "getItem('ol_tutorial_step'" not in body
 
 
 # ── Polish fix tests (verify the audit fixes landed) ─────────────
@@ -2171,26 +2335,30 @@ class TestWhatsNewTourGatingEdgeCases:
 class TestPolishFixesApplied:
     """Verify each polish fix from the user-journey audit is in place."""
 
-    def test_tour_modal_uses_unique_title_ids(self):
+    def test_tutorial_modal_uses_unique_title_ids(self):
         """Each step's <h2> has a unique id; aria-labelledby is dynamic.
 
-        The audit caught all three steps using the same id="whats-new-title"
-        which is invalid HTML and breaks screen readers when multiple
-        steps render in sequence.
+        Inherited from the original whats-new audit fix — each step
+        carries a distinct ``tutorial-title-N`` so screen readers
+        announce the correct dialog title when steps render in sequence.
         """
         for n in (1, 2, 3):
-            assert f'id="whats-new-title-{n}"' in _INDEX_HTML, (
+            assert f'id="tutorial-title-{n}"' in _INDEX_HTML, (
                 f"missing unique title id for step {n}"
             )
         # The aria-labelledby binding must reference the dynamic id.
         assert (
-            ":aria-labelledby=\"'whats-new-title-' + whatsNewTour.step\""
+            ":aria-labelledby=\"'tutorial-title-' + newUserTutorial.step\""
             in _INDEX_HTML
         ), "aria-labelledby should bind dynamically to the active step"
-        # The legacy duplicated id should be gone.
+        # The legacy whats-new ids should be gone.
         assert 'id="whats-new-title"' not in _INDEX_HTML, (
-            "legacy duplicate id still present"
+            "legacy whats-new title id still present"
         )
+        for n in (1, 2, 3):
+            assert f'id="whats-new-title-{n}"' not in _INDEX_HTML, (
+                f"legacy whats-new title id (step {n}) still present"
+            )
 
     def test_credential_notification_icon_is_plain_text(self):
         """The 'credential' kind icon is 'K' — markup is emoji-free."""
@@ -2230,7 +2398,7 @@ class TestPolishFixesApplied:
 
     def test_side_panel_esc_restores_focus(self):
         """closeSidePanel restores focus captured on toggleSidePanel open."""
-        # Mirrors the _whatsNewTourPrevFocus pattern.
+        # Mirrors the _newUserTutorialPrevFocus pattern.
         assert "_messengerSidePanelPrevFocus" in _APP_JS_TEXT, (
             "side-panel previous-focus tracker missing"
         )

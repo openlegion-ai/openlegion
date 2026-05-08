@@ -8498,89 +8498,89 @@
       </div>
     </div>
 
-    <!-- Phase 4 — "What's new" tour for existing-fleet users. Three
-         skippable modal steps; persists ``localStorage.olSeenWhatsNew``
-         on completion or dismiss. ``role="dialog"`` + focus trap +
-         ESC handler are wired in app.js. Mobile: full-screen at
-         <640px via ``sm:max-w-md`` cap. -->
-    <template x-if="whatsNewTour.step !== 0">
+    <!-- New-user onboarding tutorial. Three skippable modal steps;
+         persists ``localStorage.olSeenTutorial`` on completion or
+         dismiss. Repurposed from the Phase-4 "What's new" tour
+         infrastructure — same modal chrome, focus trap, ESC handler
+         (wired in app.js), and mobile full-screen via ``sm:max-w-md``.
+         The audience is inverted: this fires for EMPTY fleets and runs
+         BEFORE the empty-fleet wizard. On natural completion, the
+         wizard auto-fires so the user lands directly in team-building. -->
+    <template x-if="newUserTutorial.step !== 0">
       <div class="fixed inset-0 z-[150] flex items-center justify-center bg-black/70 backdrop-blur-sm p-0 sm:p-4"
-           data-testid="whats-new-overlay"
-           @click.self="dismissWhatsNewTour('overlay')">
-        <div role="dialog" aria-modal="true" :aria-labelledby="'whats-new-title-' + whatsNewTour.step"
-             data-testid="whats-new-modal"
+           data-testid="tutorial-overlay"
+           @click.self="dismissTutorial('overlay')">
+        <div role="dialog" aria-modal="true" :aria-labelledby="'tutorial-title-' + newUserTutorial.step"
+             data-testid="tutorial-modal"
              class="relative w-full h-full sm:h-auto sm:max-w-md sm:rounded-2xl bg-gradient-to-b from-indigo-900/40 to-gray-900/95 sm:border sm:border-indigo-700/40 shadow-2xl overflow-y-auto sm:overflow-visible flex flex-col sm:block">
-          <!-- Step 1 -->
-          <template x-if="whatsNewTour.step === 1">
+          <!-- Step 1 — Welcome / what is OpenLegion -->
+          <template x-if="newUserTutorial.step === 1">
             <div class="px-6 pt-8 pb-6 sm:pt-7 sm:pb-6 flex-1 flex flex-col">
               <div class="flex items-start justify-between mb-3">
                 <div class="text-[11px] uppercase tracking-wide text-indigo-300/80">Step 1 of 3</div>
-                <button @click="dismissWhatsNewTour('skip_button')"
-                        data-testid="whats-new-skip"
-                        aria-label="Skip tour"
+                <button @click="dismissTutorial('skip_button')"
+                        data-testid="tutorial-skip"
+                        aria-label="Skip tutorial"
                         class="text-gray-500 hover:text-gray-300 transition-colors p-1 -mr-1 -mt-1 rounded text-xs">
                   Skip
                 </button>
               </div>
-              <h2 id="whats-new-title-1" class="text-lg font-semibold text-white mb-2">
-                We&rsquo;ve simplified your dashboard
+              <h2 id="tutorial-title-1" class="text-lg font-semibold text-white mb-2">
+                Welcome to OpenLegion
               </h2>
               <p class="text-sm text-gray-300 leading-relaxed mb-6 flex-1">
-                Your team&rsquo;s work and your conversation with the Operator are now
-                easier to find. Take a quick tour?
+                OpenLegion is your AI team manager. You hire AI workers, give them tasks,
+                and watch them deliver &mdash; like a small remote team.
               </p>
               <div class="flex items-center justify-end gap-2">
-                <button @click="dismissWhatsNewTour('skip_button')"
+                <button @click="dismissTutorial('skip_button')"
                         class="text-xs font-medium px-4 py-2 rounded-lg bg-transparent hover:bg-gray-800/60 text-gray-400 transition-colors">
                   Skip
                 </button>
-                <button @click="whatsNewTourNext()"
-                        data-testid="whats-new-primary"
+                <button @click="tutorialNext()"
+                        data-testid="tutorial-primary"
                         class="text-xs font-medium px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">
-                  Show me
+                  Show me how
                 </button>
               </div>
             </div>
           </template>
 
-          <!-- Step 2 -->
-          <template x-if="whatsNewTour.step === 2">
+          <!-- Step 2 — Meet your Operator -->
+          <template x-if="newUserTutorial.step === 2">
             <div class="px-6 pt-8 pb-6 sm:pt-7 sm:pb-6 flex-1 flex flex-col">
               <div class="flex items-start justify-between mb-3">
                 <div class="text-[11px] uppercase tracking-wide text-indigo-300/80">Step 2 of 3</div>
-                <button @click="dismissWhatsNewTour('skip_button')"
-                        aria-label="Skip tour"
+                <button @click="dismissTutorial('skip_button')"
+                        aria-label="Skip tutorial"
                         class="text-gray-500 hover:text-gray-300 transition-colors p-1 -mr-1 -mt-1 rounded text-xs">
                   Skip
                 </button>
               </div>
-              <h2 id="whats-new-title-2" class="text-lg font-semibold text-white mb-3">
-                Operator is one click away
+              <h2 id="tutorial-title-2" class="text-lg font-semibold text-white mb-3">
+                Meet your Operator
               </h2>
               <div class="rounded-xl bg-gray-900/60 border border-indigo-500/30 p-4 mb-4 flex items-center gap-3">
                 <div class="w-10 h-10 rounded-full bg-indigo-600/30 border border-indigo-400/50 flex items-center justify-center shrink-0">
-                  <!-- Mirrors the side-panel toggle pictogram (rectangle
-                       + divider + arrow) so the tour points at the right
-                       control instead of the Chat tab's chat-bubble. -->
+                  <!-- Chat-bubble pictogram pointing at the Chat tab. -->
                   <svg class="w-5 h-5 text-indigo-300" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <rect x="3" y="4" width="18" height="16" rx="2"/>
-                    <line x1="14" y1="4" x2="14" y2="20"/>
-                    <polyline points="8 10 11 12 8 14"/>
+                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
                   </svg>
                 </div>
-                <div class="text-xs text-gray-300 leading-relaxed">Look for the panel icon in the top-right corner.</div>
+                <div class="text-xs text-gray-300 leading-relaxed">You&rsquo;re in <span class="font-semibold text-indigo-200">Chat</span> &mdash; talk to your Operator here.</div>
               </div>
               <p class="text-sm text-gray-300 leading-relaxed mb-6 flex-1">
-                Click the panel icon in the top-right from any page to talk to the Operator
-                without losing your place.
+                The Operator is your team lead. You talk to them in Chat (you&rsquo;re here
+                now). They route work, manage your team, and ping you when you&rsquo;re
+                needed.
               </p>
               <div class="flex items-center justify-between gap-2">
-                <button @click="whatsNewTourBack()"
+                <button @click="tutorialBack()"
                         class="text-xs font-medium px-4 py-2 rounded-lg bg-transparent hover:bg-gray-800/60 text-gray-400 transition-colors">
                   Back
                 </button>
-                <button @click="whatsNewTourNext()"
-                        data-testid="whats-new-primary"
+                <button @click="tutorialNext()"
+                        data-testid="tutorial-primary"
                         class="text-xs font-medium px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">
                   Next
                 </button>
@@ -8588,35 +8588,35 @@
             </div>
           </template>
 
-          <!-- Step 3 -->
-          <template x-if="whatsNewTour.step === 3">
+          <!-- Step 3 — See what your team is doing -->
+          <template x-if="newUserTutorial.step === 3">
             <div class="px-6 pt-8 pb-6 sm:pt-7 sm:pb-6 flex-1 flex flex-col">
               <div class="flex items-start justify-between mb-3">
                 <div class="text-[11px] uppercase tracking-wide text-indigo-300/80">Step 3 of 3</div>
               </div>
-              <h2 id="whats-new-title-3" class="text-lg font-semibold text-white mb-3">
-                Approvals and notifications are in the top nav
+              <h2 id="tutorial-title-3" class="text-lg font-semibold text-white mb-3">
+                See what your team is doing
               </h2>
               <div class="rounded-xl bg-gray-900/60 border border-indigo-500/30 p-4 mb-4 flex items-center gap-3">
                 <span class="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-[10px] font-bold text-white">3</span>
                 <span class="text-gray-500">+</span>
                 <svg class="w-4 h-4 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"/></svg>
-                <div class="text-xs text-gray-300 leading-relaxed flex-1">Look top-right.</div>
+                <div class="text-xs text-gray-300 leading-relaxed flex-1">A red badge means something needs you.</div>
               </div>
               <p class="text-sm text-gray-300 leading-relaxed mb-6 flex-1">
-                Anything that needs your attention shows as a red badge. Past events show
-                in the bell icon. You&rsquo;ll always see what needs you, no matter what
-                tab you&rsquo;re on.
+                <span class="font-semibold text-indigo-200">Work</span> shows what your team
+                has delivered and what&rsquo;s in progress. Anything that needs you shows
+                as a red badge in the top-right &mdash; across every tab.
               </p>
               <div class="flex items-center justify-between gap-2">
-                <button @click="whatsNewTourBack()"
+                <button @click="tutorialBack()"
                         class="text-xs font-medium px-4 py-2 rounded-lg bg-transparent hover:bg-gray-800/60 text-gray-400 transition-colors">
                   Back
                 </button>
-                <button @click="whatsNewTourNext()"
-                        data-testid="whats-new-primary"
+                <button @click="tutorialNext()"
+                        data-testid="tutorial-primary"
                         class="text-xs font-medium px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">
-                  Got it
+                  Got it, let&rsquo;s build a team
                 </button>
               </div>
             </div>

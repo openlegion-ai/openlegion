@@ -650,15 +650,16 @@ function dashboard() {
     _wizardBuildPoll: null,
     _wizardCompleteTimer: null,
 
-    // Phase 4 — "What's new" tour for existing-fleet users seeing the
-    // redesigned dashboard for the first time. Three modal steps,
-    // skippable, persists to ``localStorage.olSeenWhatsNew = 'true'``
-    // on completion or skip. Distinct from the empty-fleet wizard
-    // above — those are mutually exclusive (empty fleet = wizard,
-    // existing fleet = tour).
-    whatsNewTour: { step: 0 },  // 0 = closed; 1..3 = visible
-    _whatsNewTourPrevFocus: null,
-    _whatsNewTourKeyHandler: null,
+    // New-user onboarding tutorial. Three modal steps that orient a
+    // brand-new user on the layout + Operator concept. Skippable;
+    // persists to ``localStorage.olSeenTutorial = 'true'`` on completion
+    // or skip. Repurposed from the Phase-4 "What's new" tour
+    // infrastructure, but the audience is inverted: tutorial fires for
+    // EMPTY fleets (new users) and runs BEFORE the empty-fleet wizard.
+    // Once tutorial completes, ``_maybeStartWizard`` takes over.
+    newUserTutorial: { step: 0 },  // 0 = closed; 1..3 = visible
+    _newUserTutorialPrevFocus: null,
+    _newUserTutorialKeyHandler: null,
 
     // Track the element focused before the side panel opened so ESC
     // restores focus to the original trigger on close.
@@ -1175,6 +1176,21 @@ function dashboard() {
         const v = localStorage.getItem('ol_messenger_side_panel_open');
         if (v === '1') this.messengerSidePanelOpen = true;
       } catch (e) { /* ignore */ }
+
+      // Migration: users who saw the legacy "What's new" tour (Phase 4)
+      // had the ``olSeenWhatsNew`` flag set. Those users had non-empty
+      // fleets — they're not new — and shouldn't see the new-user
+      // tutorial either. Carry the flag forward so the tutorial stays
+      // suppressed for everyone who already passed through the legacy
+      // tour. Idempotent — only writes when ``olSeenTutorial`` is unset.
+      try {
+        if (
+          localStorage.getItem('olSeenWhatsNew') === 'true' &&
+          !localStorage.getItem('olSeenTutorial')
+        ) {
+          localStorage.setItem('olSeenTutorial', 'true');
+        }
+      } catch (_) { /* private mode — ignore */ }
 
       // Build credential service options from server-injected providers
       const allProviders = cfg.allProviders || [];
@@ -1728,7 +1744,7 @@ function dashboard() {
       try {
         if (this.messengerSidePanelOpen) {
           // Capture the previously focused element so ESC can restore
-          // focus on close (mirrors _whatsNewTourPrevFocus pattern).
+          // focus on close (mirrors _newUserTutorialPrevFocus pattern).
           try { this._messengerSidePanelPrevFocus = document.activeElement; } catch (_) {}
           localStorage.setItem('ol_messenger_side_panel_open', '1');
           // Open Operator by default if no chat is active.
@@ -1850,6 +1866,7 @@ function dashboard() {
       // wizard. Without this, an operator that boots slowly (e.g.
       // first start) would have skipped wizard kickoff at fetchAgents.
       if (!wasReady && this.operatorReady) {
+        try { this._maybeStartTutorial(); } catch (_) { /* ignore */ }
         try { this._maybeStartWizard(); } catch (_) { /* ignore */ }
       }
     },
@@ -2341,42 +2358,55 @@ function dashboard() {
       if (this.wizard.step !== 'idle') return;
       if (!this.operatorReady) return;
       if (!this._isFirstVisit()) return;
+      // Tutorial takes precedence — wizard fires only after the
+      // tutorial completes (or was already seen). The completion
+      // handler in ``_completeTutorial`` re-invokes ``_maybeStartWizard``
+      // when the user reaches the final step naturally.
+      if (this.newUserTutorial && this.newUserTutorial.step !== 0) return;
       this.startWizard();
     },
 
-    // ── Phase 4 "What's new" tour ────────────────────────────
+    // ── New-user onboarding tutorial ──────────────────────────
     //
-    // 3-step modal for existing-fleet users seeing the redesigned
-    // dashboard for the first time. Detection: agents.length > 0
-    // (excluding operator) AND ``localStorage.olSeenWhatsNew !== 'true'``
-    // AND no active wizard (mutual exclusion). On any exit path —
-    // skip, dismiss, or reaching step 3 — we set the seen flag so the
-    // tour never re-shows for that browser.
+    // 3-step modal that orients a brand-new user on the layout +
+    // Operator concept. Detection: agents.length === 0 (excluding
+    // operator) AND ``localStorage.olSeenTutorial !== 'true'`` AND no
+    // active wizard. Runs BEFORE the empty-fleet wizard — the wizard
+    // is gated on ``newUserTutorial.step === 0`` so the two never
+    // overlap. On completion of step 3, we dismiss the tutorial and
+    // immediately fire the wizard so the user lands directly in the
+    // team-building flow. On any exit path — skip, dismiss, or
+    // reaching step 3 — we set the seen flag so the tutorial never
+    // re-shows for that browser.
 
-    _maybeStartWhatsNewTour() {
-      if (this.whatsNewTour.step !== 0) return;
+    _maybeStartTutorial() {
+      if (this.newUserTutorial.step !== 0) return;
       if (this.wizard && this.wizard.step !== 'idle') return;
       try {
-        if (localStorage.getItem('olSeenWhatsNew') === 'true') return;
+        if (localStorage.getItem('olSeenTutorial') === 'true') return;
       } catch (_) { /* private mode — show once per session */ }
-      const fleetAgents = (this.agents || []).filter(a => a && a.id !== 'operator');
-      if (fleetAgents.length === 0) return;
-      this.startWhatsNewTour();
+      // Use the canonical first-visit detector — covers empty fleet AND
+      // "no real user message in operator history". A returning user
+      // who deleted their fleet but already chatted with the operator
+      // is NOT a new user; suppressing the tutorial in that case
+      // matches the wizard's gating semantics.
+      if (!this._isFirstVisit()) return;
+      this.startTutorial();
     },
 
-    startWhatsNewTour() {
-      this.whatsNewTour = { step: 1 };
-      this.track('whats_new_tour_started', {});
+    startTutorial() {
+      this.newUserTutorial = { step: 1 };
+      this.track('tutorial_started', {});
       // Capture focus + install ESC handler. Focus the modal on next
       // tick so screen-readers announce the dialog.
-      try { this._whatsNewTourPrevFocus = document.activeElement; } catch (_) {}
-      this._whatsNewTourKeyHandler = (e) => {
+      try { this._newUserTutorialPrevFocus = document.activeElement; } catch (_) {}
+      this._newUserTutorialKeyHandler = (e) => {
         if (e.key === 'Escape') {
           e.preventDefault();
-          this.dismissWhatsNewTour('escape');
+          this.dismissTutorial('escape');
         } else if (e.key === 'Tab') {
           // Lightweight focus trap — keep tab cycling inside the modal.
-          const root = document.querySelector('[data-testid="whats-new-modal"]');
+          const root = document.querySelector('[data-testid="tutorial-modal"]');
           if (!root) return;
           const focusable = root.querySelectorAll(
             'button:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'
@@ -2393,54 +2423,62 @@ function dashboard() {
           }
         }
       };
-      window.addEventListener('keydown', this._whatsNewTourKeyHandler);
+      window.addEventListener('keydown', this._newUserTutorialKeyHandler);
       this.$nextTick(() => {
-        const root = document.querySelector('[data-testid="whats-new-modal"]');
-        const target = root && root.querySelector('[data-testid="whats-new-primary"]');
+        const root = document.querySelector('[data-testid="tutorial-modal"]');
+        const target = root && root.querySelector('[data-testid="tutorial-primary"]');
         if (target && typeof target.focus === 'function') target.focus();
       });
     },
 
-    whatsNewTourNext() {
-      if (this.whatsNewTour.step >= 3) {
-        this._completeWhatsNewTour('completed');
+    tutorialNext() {
+      if (this.newUserTutorial.step >= 3) {
+        this._completeTutorial('completed');
         return;
       }
-      this.whatsNewTour.step += 1;
-      this.track('whats_new_tour_step', { step: this.whatsNewTour.step });
+      this.newUserTutorial.step += 1;
+      this.track('tutorial_step', { step: this.newUserTutorial.step });
       this.$nextTick(() => {
-        const root = document.querySelector('[data-testid="whats-new-modal"]');
-        const target = root && root.querySelector('[data-testid="whats-new-primary"]');
+        const root = document.querySelector('[data-testid="tutorial-modal"]');
+        const target = root && root.querySelector('[data-testid="tutorial-primary"]');
         if (target && typeof target.focus === 'function') target.focus();
       });
     },
 
-    whatsNewTourBack() {
-      if (this.whatsNewTour.step > 1) {
-        this.whatsNewTour.step -= 1;
-        this.track('whats_new_tour_step', { step: this.whatsNewTour.step, direction: 'back' });
+    tutorialBack() {
+      if (this.newUserTutorial.step > 1) {
+        this.newUserTutorial.step -= 1;
+        this.track('tutorial_step', { step: this.newUserTutorial.step, direction: 'back' });
       }
     },
 
-    dismissWhatsNewTour(reason) {
-      this._completeWhatsNewTour(reason || 'dismissed');
+    dismissTutorial(reason) {
+      this._completeTutorial(reason || 'dismissed');
     },
 
-    _completeWhatsNewTour(reason) {
-      const lastStep = this.whatsNewTour.step;
-      try { localStorage.setItem('olSeenWhatsNew', 'true'); } catch (_) {}
-      this.whatsNewTour = { step: 0 };
-      this.track('whats_new_tour_finished', { reason: reason, lastStep: lastStep });
-      if (this._whatsNewTourKeyHandler) {
-        window.removeEventListener('keydown', this._whatsNewTourKeyHandler);
-        this._whatsNewTourKeyHandler = null;
+    _completeTutorial(reason) {
+      const lastStep = this.newUserTutorial.step;
+      try { localStorage.setItem('olSeenTutorial', 'true'); } catch (_) {}
+      this.newUserTutorial = { step: 0 };
+      this.track('tutorial_finished', { reason: reason, lastStep: lastStep });
+      if (this._newUserTutorialKeyHandler) {
+        window.removeEventListener('keydown', this._newUserTutorialKeyHandler);
+        this._newUserTutorialKeyHandler = null;
       }
       try {
-        if (this._whatsNewTourPrevFocus && this._whatsNewTourPrevFocus.focus) {
-          this._whatsNewTourPrevFocus.focus();
+        if (this._newUserTutorialPrevFocus && this._newUserTutorialPrevFocus.focus) {
+          this._newUserTutorialPrevFocus.focus();
         }
       } catch (_) {}
-      this._whatsNewTourPrevFocus = null;
+      this._newUserTutorialPrevFocus = null;
+      // On natural completion (Got it on step 3), hand off to the
+      // empty-fleet wizard so the user lands directly in team-building.
+      // Skip / ESC / overlay-click do NOT auto-fire the wizard — the
+      // user signaled they want out, respect that.
+      if (reason === 'completed') {
+        this.track('tutorial_to_wizard_transition', {});
+        try { this._maybeStartWizard(); } catch (_) { /* ignore */ }
+      }
     },
 
     // ── Tab switching ─────────────────────────────────────
@@ -4802,14 +4840,17 @@ function dashboard() {
           this._fetchCoordination();
           // Update operator readiness for the Chat tab
           this.checkOperatorReady();
+          // New-user onboarding tutorial — runs FIRST when both are
+          // eligible. ``_maybeStartWizard`` gates on
+          // ``newUserTutorial.step === 0`` so the wizard never fires
+          // while the tutorial is open. On natural completion of the
+          // tutorial, ``_completeTutorial`` re-invokes the wizard.
+          this._maybeStartTutorial();
           // Phase -1 wizard — first-visit detection runs after every
           // ``fetchAgents`` resolve so a freshly-spawned agent (still
           // loading at init time) doesn't pop the wizard. Re-entrant
           // calls during the same visit are no-ops.
           this._maybeStartWizard();
-          // Phase 4 — "What's new" tour for existing-fleet users.
-          // Mutually exclusive with the empty-fleet wizard.
-          this._maybeStartWhatsNewTour();
         }
       } catch (e) {
         console.warn('fetchAgents failed:', e);
