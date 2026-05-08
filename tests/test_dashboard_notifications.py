@@ -312,3 +312,149 @@ def test_default_db_path_directory_created(tmp_path: Path):
         assert store.unread_count() == 1
     finally:
         store.close()
+
+
+# ── Producer wiring (EventBus → NotificationStore) ───────────────────
+
+
+class TestNotificationsProducerWiring:
+    """When the dashboard router is built with an EventBus, it registers
+    a listener that translates relevant events into notification rows.
+
+    These tests exercise the listener directly via ``event_bus.emit``
+    (which calls listeners synchronously on the caller's stack) and
+    then read the store back through the public API. We never assert on
+    private state — the contract is "fire event → row appears in
+    ``list_recent``".
+    """
+
+    def setup_method(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir)
+        self.store: NotificationStore = self.components["notification_store"]
+        # Building the router registers the producer listener as a side
+        # effect; we don't need to keep the client/router around.
+        from src.dashboard.server import create_dashboard_router
+        create_dashboard_router(**self.components, mesh_port=8420)
+        self.bus = self.components["event_bus"]
+
+    def teardown_method(self) -> None:
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_task_outcome_delivered_creates_notification(self):
+        self.bus.emit("task_outcome", agent="operator", data={
+            "task_id": "t-1",
+            "project_id": "proj-a",
+            "assignee": "writer",
+            "status": "done",
+            "outcome": "delivered",
+            "feedback": "Looks good",
+        })
+        rows = self.store.list_recent()
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["kind"] == "delivered"
+        assert "writer" in row["title"]
+        assert "delivered" in row["title"].lower()
+        assert row["payload"]["task_id"] == "t-1"
+
+    def test_task_outcome_rejected_does_not_create_delivery_notification(self):
+        # Only "delivered" outcomes surface — rejection / rework / re-rate
+        # are operator-initiated and surface elsewhere (task drawer).
+        self.bus.emit("task_outcome", agent="operator", data={
+            "task_id": "t-2",
+            "outcome": "rejected",
+            "assignee": "writer",
+        })
+        self.bus.emit("task_outcome", agent="operator", data={
+            "task_id": "t-3",
+            "outcome": "needs_rework",
+            "assignee": "writer",
+        })
+        assert self.store.list_recent() == []
+
+    def test_pending_action_created_creates_notification(self):
+        self.bus.emit("pending_action_created", agent="operator", data={
+            "nonce": "abc123",
+            "actor": "operator",
+            "target_kind": "agent",
+            "target_id": "writer",
+            "action_kind": "edit_agent",
+            "summary": "Switch writer's model from gpt-4o to claude-opus",
+            "preview_diff": "- model: gpt-4o\n+ model: claude-opus",
+        })
+        rows = self.store.list_recent()
+        assert len(rows) == 1
+        assert rows[0]["kind"] == "approval"
+        assert "Approval needed" in rows[0]["title"]
+        assert rows[0]["payload"]["nonce"] == "abc123"
+
+    def test_credential_request_creates_notification(self):
+        self.bus.emit("credential_request", agent="researcher", data={
+            "name": "google_api_key",
+            "service": "Google API",
+            "description": "Needed for Custom Search.",
+            "request_id": "req-1",
+        })
+        rows = self.store.list_recent()
+        assert len(rows) == 1
+        assert rows[0]["kind"] == "credential"
+        assert "researcher" in rows[0]["title"]
+        assert "Google API" in rows[0]["title"]
+        assert rows[0]["payload"]["request_id"] == "req-1"
+
+    def test_browser_login_request_creates_notification(self):
+        self.bus.emit("browser_login_request", agent="researcher", data={
+            "url": "https://www.linkedin.com/login",
+            "service": "LinkedIn",
+            "description": "Needed for outreach research.",
+            "request_id": "br-1",
+        })
+        rows = self.store.list_recent()
+        assert len(rows) == 1
+        assert rows[0]["kind"] == "credential"
+        assert "researcher" in rows[0]["title"]
+        assert "sign-in" in rows[0]["title"]
+        assert "LinkedIn" in rows[0]["title"]
+        assert rows[0]["payload"]["request_id"] == "br-1"
+
+    def test_health_change_to_degraded_creates_notification(self):
+        self.bus.emit("health_change", agent="researcher", data={
+            "previous": "healthy",
+            "current": "unhealthy",
+            "failures": 3,
+        })
+        rows = self.store.list_recent()
+        assert len(rows) == 1
+        assert rows[0]["kind"] == "alert"
+        assert "researcher" in rows[0]["title"]
+        assert "unhealthy" in rows[0]["title"]
+
+    def test_health_change_to_healthy_does_not_create_notification(self):
+        # Recovery flips ARE an event but they don't need user
+        # attention — the bell only surfaces degradations.
+        self.bus.emit("health_change", agent="researcher", data={
+            "previous": "unhealthy",
+            "current": "healthy",
+            "failures": 0,
+        })
+        assert self.store.list_recent() == []
+
+    def test_credit_exhausted_creates_notification(self):
+        self.bus.emit("credit_exhausted", agent="writer", data={
+            "error": "Insufficient credits",
+        })
+        rows = self.store.list_recent()
+        assert len(rows) == 1
+        assert rows[0]["kind"] == "alert"
+        assert "writer" in rows[0]["title"]
+        assert "out of credit" in rows[0]["title"]
+
+    def test_unrelated_event_does_not_create_notification(self):
+        # Sanity check — events outside the frozen mapping table never
+        # create rows. Without this we'd be tempted to grow the mapping
+        # ad-hoc.
+        self.bus.emit("tool_start", agent="writer", data={"tool": "browser_navigate"})
+        self.bus.emit("blackboard_write", agent="writer", data={"key": "shared/note"})
+        assert self.store.list_recent() == []
