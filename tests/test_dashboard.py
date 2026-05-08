@@ -44,6 +44,13 @@ def _make_components(tmp_path: str, *, include_v2: bool = False) -> dict:
     health_monitor.agents["alpha"].status = "healthy"
     health_monitor.agents["beta"].status = "unknown"
 
+    # Per-session opened-conversations store — tmp-dir backed so tests
+    # don't pollute (or share) the prod ``data/`` location.
+    from src.dashboard.conversations import OpenedConversationsStore
+    opened_conversations_store = OpenedConversationsStore(
+        db_path=os.path.join(tmp_path, "dashboard_conversations.db"),
+    )
+
     result = {
         "blackboard": bb,
         "health_monitor": health_monitor,
@@ -51,6 +58,7 @@ def _make_components(tmp_path: str, *, include_v2: bool = False) -> dict:
         "trace_store": trace_store,
         "event_bus": event_bus,
         "agent_registry": agent_registry,
+        "opened_conversations_store": opened_conversations_store,
     }
 
     if include_v2:
@@ -130,6 +138,8 @@ def _teardown(components: dict) -> None:
     components["blackboard"].close()
     if "pubsub" in components and hasattr(components["pubsub"], "close"):
         components["pubsub"].close()
+    if components.get("opened_conversations_store") is not None:
+        components["opened_conversations_store"].close()
 
 
 class TestDashboardIndex:
@@ -5184,3 +5194,24 @@ class TestPhase1ConversationsContract:
         bare = TestClient(app)
         resp = bare.post("/dashboard/api/conversations/alpha/open")
         assert resp.status_code == 403
+
+    def test_conversations_isolated_per_session_cookie(self):
+        # Two distinct ``ol_session`` cookies must hash to different
+        # session ids so opened workers do not leak across users in
+        # multi-tenant SSO deployments. The auth verifier accepts any
+        # cookie in dev mode (no access token configured), so the only
+        # thing that varies between the clients is the cookie value.
+        from src.dashboard.server import create_dashboard_router
+        router = create_dashboard_router(**self.components, mesh_port=8420)
+        app = FastAPI()
+        app.include_router(router)
+        client_a = _CSRFTestClient(app, cookies={"ol_session": "session-a"})
+        client_b = _CSRFTestClient(app, cookies={"ol_session": "session-b"})
+
+        resp = client_a.post("/dashboard/api/conversations/alpha/open")
+        assert resp.status_code == 200
+
+        a_workers = [w["agent_id"] for w in client_a.get("/dashboard/api/conversations").json()["workers"]]
+        b_workers = [w["agent_id"] for w in client_b.get("/dashboard/api/conversations").json()["workers"]]
+        assert a_workers == ["alpha"]
+        assert b_workers == []  # Critical: no leakage from session A to B.

@@ -669,6 +669,11 @@ def create_dashboard_router(
     # Auto-instantiated below when not provided so existing test
     # constructions keep working without scaffolding the store.
     notification_store: Any = None,
+    # Per-session "opened conversations" store (Phase 1 unified messenger).
+    # Replaces the previous module-level ``set[str]`` which leaked between
+    # concurrent users in multi-tenant SSO deployments. Auto-instantiated
+    # when omitted so existing test setups keep working.
+    opened_conversations_store: Any = None,
 ) -> APIRouter:
     """Create the dashboard FastAPI router."""
     # Lazy-init telemetry sink so callers (mesh CLI, tests) can opt out by
@@ -691,6 +696,17 @@ def create_dashboard_router(
         except Exception as e:
             logger.warning("Failed to instantiate NotificationStore: %s", e)
             notification_store = None
+    # Auto-instantiate the opened-conversations store when the caller
+    # hasn't supplied one. Replaces the prior module-level ``set[str]``
+    # so opened workers are scoped to the operator's ``ol_session``
+    # cookie hash and survive process restarts.
+    if opened_conversations_store is None:
+        try:
+            from src.dashboard.conversations import OpenedConversationsStore
+            opened_conversations_store = OpenedConversationsStore()
+        except Exception as e:
+            logger.warning("Failed to instantiate OpenedConversationsStore: %s", e)
+            opened_conversations_store = None
     # Plan limits — read once at startup; provisioner restarts engine after updating .env
     # 0 = unlimited (self-hosted / open-source) unless env var is explicitly set to 0
     _max_agents = int(os.environ.get("OPENLEGION_MAX_AGENTS", "0"))
@@ -1683,17 +1699,31 @@ def create_dashboard_router(
                 },
             }
 
-    # Phase 1 — unified messenger: per-process set of worker conversations
-    # the user has explicitly "opened". Operator is always implicit (pinned),
-    # so it doesn't belong here. In-memory only — survives the process
-    # but not a restart, which matches the doc's Decision 7 progressive-
-    # disclosure intent (opened workers reappear after a reload only if
-    # the client also persists them via localStorage; the server set acts
-    # as the cross-tab source of truth within a session).
-    _opened_conversations: set[str] = set()
+    # Phase 1 — unified messenger: SQLite-backed, per-session set of
+    # worker conversations the user has explicitly "opened". Operator is
+    # always implicit (pinned), so it doesn't live here. Replaces the
+    # previous module-level ``set[str]`` which leaked between concurrent
+    # users in multi-tenant SSO deployments and was wiped on every
+    # process restart. The store is keyed on a hash of the operator's
+    # ``ol_session`` cookie (see :func:`_conversations_session_id`).
+    def _conversations_session_id(request: Request) -> str:
+        """Derive a stable per-session identifier for opened-conversations.
+
+        Mirrors :func:`_operator_session_id` (defined later in this
+        module) — hashes the ``ol_session`` cookie value so the SQLite
+        rows tie to a session without echoing the raw cookie. Falls
+        back to a constant in dev mode where the cookie is empty (the
+        single-operator self-hosted case naturally collapses to one
+        bucket, which is the behavior we want).
+        """
+        raw = request.cookies.get("ol_session", "")
+        if not raw:
+            return "dev:operator"
+        digest = hashlib.sha256(raw.encode()).hexdigest()[:12]
+        return f"operator:{digest}"
 
     @api_router.get("/api/conversations")
-    async def api_conversations() -> dict:
+    async def api_conversations(request: Request) -> dict:
         """Return the messenger conversation list — operator + opened workers.
 
         Phase 1 messenger contract. Operator is always pinned with a
@@ -1702,6 +1732,10 @@ def create_dashboard_router(
         {agent_id}/open`` (Decision 7 — progressive disclosure). The
         ``unread_count`` field is reserved for future cross-device unread
         sync; today the client tracks unread locally in ``chatUnread``.
+
+        The opened-workers list is scoped to the requester's session
+        (hash of the ``ol_session`` cookie) so concurrent operators in
+        multi-user deployments do not see each other's open chats.
         """
         # Operator is always present; pull last health-check ts as a cheap
         # proxy for "last activity" until the chat store grows a real
@@ -1721,7 +1755,16 @@ def create_dashboard_router(
         }
 
         workers = []
-        for agent_id in sorted(_opened_conversations):
+        opened_ids: list[str] = []
+        if opened_conversations_store is not None:
+            try:
+                opened_ids = opened_conversations_store.list_for_session(
+                    _conversations_session_id(request),
+                )
+            except Exception as e:
+                logger.warning("OpenedConversationsStore.list_for_session failed: %s", e)
+                opened_ids = []
+        for agent_id in opened_ids:
             # Skip workers that no longer exist in the registry (e.g.
             # after a delete) so the messenger doesn't show ghosts.
             if agent_id not in agent_registry and agent_id != "operator":
@@ -1745,29 +1788,43 @@ def create_dashboard_router(
         return {"operator": operator_entry, "workers": workers}
 
     @api_router.post("/api/conversations/{agent_id}/open")
-    async def api_conversations_open(agent_id: str) -> dict:
+    async def api_conversations_open(agent_id: str, request: Request) -> dict:
         """Mark a worker conversation as opened (visible in messenger).
 
         Operator is always pinned and cannot be opened/closed; we accept
         the call and return success for symmetry but don't mutate state.
+        Opened-state is scoped to the requester's session.
         """
         if agent_id == "operator":
             return {"ok": True, "agent_id": agent_id, "noop": True}
         if agent_id not in agent_registry:
             raise HTTPException(404, "Agent not found")
-        _opened_conversations.add(agent_id)
+        if opened_conversations_store is not None:
+            try:
+                opened_conversations_store.open(
+                    _conversations_session_id(request), agent_id,
+                )
+            except Exception as e:
+                logger.warning("OpenedConversationsStore.open failed: %s", e)
         return {"ok": True, "agent_id": agent_id}
 
     @api_router.post("/api/conversations/{agent_id}/close")
-    async def api_conversations_close(agent_id: str) -> dict:
+    async def api_conversations_close(agent_id: str, request: Request) -> dict:
         """Hide a worker conversation from the messenger (history preserved).
 
         Operator is always pinned and cannot be closed; we accept the
         call and return success for symmetry but don't mutate state.
+        Opened-state is scoped to the requester's session.
         """
         if agent_id == "operator":
             return {"ok": True, "agent_id": agent_id, "noop": True}
-        _opened_conversations.discard(agent_id)
+        if opened_conversations_store is not None:
+            try:
+                opened_conversations_store.close_conversation(
+                    _conversations_session_id(request), agent_id,
+                )
+            except Exception as e:
+                logger.warning("OpenedConversationsStore.close failed: %s", e)
         return {"ok": True, "agent_id": agent_id}
 
     @api_router.get("/api/agent-templates")
