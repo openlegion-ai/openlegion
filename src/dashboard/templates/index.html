@@ -336,6 +336,149 @@
               <div x-show="operatorReady" id="chat-messages-operator"
                    x-init="loadWorkplacePending()"
                    class="flex-1 overflow-y-auto overflow-x-hidden px-4 py-3 space-y-3">
+
+                <!-- Phase -1 onboarding wizard cards. Renders only when
+                     ``wizard.step !== 'idle'`` and suppresses the
+                     existing empty-state below. Card-styled (different
+                     from chat bubbles) so the user reads it as a
+                     guided flow, not free conversation. role="dialog"
+                     gives screen readers the modal-y semantics; we
+                     don't trap focus because the chat input below is
+                     intentionally still reachable. -->
+                <template x-if="wizard.step !== 'idle'">
+                  <div role="dialog" aria-labelledby="wizard-title"
+                       class="ol-wizard-card max-w-md mx-auto mt-4 mb-2 rounded-2xl bg-gradient-to-b from-indigo-900/20 to-gray-900/40 border border-indigo-700/40 shadow-lg overflow-hidden"
+                       data-testid="onboarding-wizard">
+                    <!-- Step: ask -->
+                    <template x-if="wizard.step === 'ask'">
+                      <div class="px-5 pt-5 pb-4">
+                        <div class="flex items-start gap-3 mb-3">
+                          <img src="/dashboard/static/avatars/operator.png" alt="Operator"
+                               class="w-8 h-8 rounded-full shrink-0">
+                          <div class="flex-1 min-w-0">
+                            <div id="wizard-title" class="text-sm font-semibold text-white">Welcome</div>
+                            <div class="text-[11px] text-indigo-300/80 mt-0.5">Step 1 of 3 &middot; about a minute</div>
+                          </div>
+                          <button @click="wizardAbandon()"
+                                  aria-label="Dismiss wizard"
+                                  class="text-gray-500 hover:text-gray-300 transition-colors p-1 -mr-1 rounded shrink-0">
+                            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+                          </button>
+                        </div>
+                        <p class="text-xs text-gray-300 leading-relaxed mb-1">
+                          I'm your Operator. Let me help you build your first AI team.
+                        </p>
+                        <p class="text-xs text-gray-400 leading-relaxed mb-3">
+                          What would you like to accomplish?
+                        </p>
+                        <div class="flex flex-col gap-1.5">
+                          <button @click="wizardChipClicked('Monitor competitors weekly')"
+                                  data-testid="wizard-chip-monitor"
+                                  aria-label="Monitor competitors weekly"
+                                  class="text-left text-xs text-gray-100 px-3.5 py-2.5 rounded-lg bg-gray-800/60 border border-gray-700/60 hover:border-indigo-500/60 hover:bg-indigo-600/10 transition-colors">
+                            Monitor competitors weekly
+                          </button>
+                          <button @click="wizardChipClicked('Build a content team')"
+                                  data-testid="wizard-chip-content"
+                                  aria-label="Build a content team"
+                                  class="text-left text-xs text-gray-100 px-3.5 py-2.5 rounded-lg bg-gray-800/60 border border-gray-700/60 hover:border-indigo-500/60 hover:bg-indigo-600/10 transition-colors">
+                            Build a content team
+                          </button>
+                          <button @click="wizardChipClicked('Enrich my lead list')"
+                                  data-testid="wizard-chip-leads"
+                                  aria-label="Enrich my lead list"
+                                  class="text-left text-xs text-gray-100 px-3.5 py-2.5 rounded-lg bg-gray-800/60 border border-gray-700/60 hover:border-indigo-500/60 hover:bg-indigo-600/10 transition-colors">
+                            Enrich my lead list
+                          </button>
+                          <button @click="wizardChipClicked('Something else…')"
+                                  data-testid="wizard-chip-else"
+                                  aria-label="Describe something else"
+                                  class="text-left text-xs text-gray-400 px-3.5 py-2.5 rounded-lg bg-transparent border border-gray-800/60 hover:border-gray-600/60 hover:bg-gray-800/30 transition-colors">
+                            Something else&hellip;
+                          </button>
+                        </div>
+                      </div>
+                    </template>
+
+                    <!-- Step: confirming -->
+                    <template x-if="wizard.step === 'confirming'">
+                      <div class="px-5 pt-5 pb-4">
+                        <div class="flex items-start gap-3 mb-2">
+                          <img src="/dashboard/static/avatars/operator.png" alt="Operator"
+                               class="w-8 h-8 rounded-full shrink-0">
+                          <div class="flex-1 min-w-0">
+                            <div id="wizard-title" class="text-sm font-semibold text-white">Here's the plan</div>
+                            <div class="text-[11px] text-indigo-300/80 mt-0.5">Step 2 of 3 &middot; review &amp; confirm</div>
+                          </div>
+                          <button @click="wizardAbandon()"
+                                  aria-label="Dismiss wizard"
+                                  class="text-gray-500 hover:text-gray-300 transition-colors p-1 -mr-1 rounded shrink-0">
+                            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+                          </button>
+                        </div>
+                        <p class="text-xs text-gray-300 leading-relaxed mb-3">
+                          Read the proposed team in the chat above. When you're ready, I'll build it.
+                        </p>
+                        <div class="flex items-center gap-2">
+                          <button @click="wizardConfirm()"
+                                  data-testid="wizard-confirm-go"
+                                  aria-label="Build the proposed team"
+                                  class="text-xs font-medium px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">
+                            Let's go
+                          </button>
+                          <button @click="wizardCustomize()"
+                                  data-testid="wizard-confirm-customize"
+                                  aria-label="Customize the proposed team"
+                                  class="text-xs font-medium px-4 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-300 transition-colors">
+                            Customize&hellip;
+                          </button>
+                        </div>
+                      </div>
+                    </template>
+
+                    <!-- Step: building -->
+                    <template x-if="wizard.step === 'building'">
+                      <div class="px-5 pt-5 pb-5 flex items-center gap-3">
+                        <svg class="animate-spin h-5 w-5 text-indigo-400 shrink-0" fill="none" viewBox="0 0 24 24">
+                          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+                        </svg>
+                        <div class="flex-1 min-w-0">
+                          <div id="wizard-title" class="text-sm font-semibold text-white">Setting up your team&hellip;</div>
+                          <div class="text-[11px] text-gray-400 mt-0.5">This takes about 30 seconds.</div>
+                        </div>
+                      </div>
+                    </template>
+
+                    <!-- Step: first-output -->
+                    <template x-if="wizard.step === 'first-output'">
+                      <div class="px-5 pt-5 pb-5">
+                        <div class="flex items-start gap-3 mb-3">
+                          <div class="w-8 h-8 rounded-full bg-emerald-600/20 border border-emerald-500/40 flex items-center justify-center shrink-0">
+                            <svg class="w-4 h-4 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                          </div>
+                          <div class="flex-1 min-w-0">
+                            <div id="wizard-title" class="text-sm font-semibold text-white">Your team is ready</div>
+                            <div class="text-[11px] text-emerald-300/80 mt-0.5">Step 3 of 3 &middot; we'll take it from here</div>
+                          </div>
+                        </div>
+                        <p class="text-xs text-gray-300 leading-relaxed mb-1">
+                          Your researcher is starting now. First output expected in about 10 minutes.
+                        </p>
+                        <p class="text-xs text-gray-400 leading-relaxed mb-4">
+                          I'll ping you when something needs your attention. You can close this window.
+                        </p>
+                        <button @click="wizardComplete()"
+                                data-testid="wizard-continue"
+                                aria-label="Continue to chat"
+                                class="text-xs font-medium px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">
+                          Continue
+                        </button>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+
                 <!-- Collapse bar for ≥2 pending actions. When the
                      operator generates several pending requests in a
                      row, the chat would otherwise stack three full
@@ -961,7 +1104,7 @@
                      don't re-greet). For now we keep the welcoming
                      empty-state UI below — it's the silent-operator
                      mitigation per the PR-F audit. -->
-                <div x-show="!(chatHistories['operator'] || []).length && !chatLoadingAgents['operator'] && agents.filter(a => a.id !== 'operator').length === 0"
+                <div x-show="wizard.step === 'idle' && !(chatHistories['operator'] || []).length && !chatLoadingAgents['operator'] && agents.filter(a => a.id !== 'operator').length === 0"
                   class="flex-1 flex flex-col items-center justify-center px-4">
                   <img src="/dashboard/static/avatars/operator.png" alt="Operator" class="w-10 h-10 rounded-full mb-3 opacity-80">
                   <div class="text-sm font-semibold text-white mb-1">Hi — I'm your Operator.</div>

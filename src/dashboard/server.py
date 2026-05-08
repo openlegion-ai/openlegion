@@ -660,8 +660,24 @@ def create_dashboard_router(
     # the relevant store is absent.
     pending_actions: Any = None,
     tasks_store: Any = None,
+    # Phase -1 onboarding wizard — tracks first-visit activation. Optional
+    # so existing tests that don't pass it keep working; we lazy-init a
+    # default :class:`DashboardTelemetry` against ``data/telemetry.db``
+    # if the caller didn't supply one.
+    telemetry: Any = None,
 ) -> APIRouter:
     """Create the dashboard FastAPI router."""
+    # Lazy-init telemetry sink so callers (mesh CLI, tests) can opt out by
+    # passing ``telemetry=None`` after explicitly setting it. We keep the
+    # explicit-None contract by only auto-creating when the kwarg is
+    # missing entirely. Tests that need an in-memory DB pass their own.
+    if telemetry is None:
+        from src.dashboard.telemetry import DashboardTelemetry as _DashboardTelemetry
+        try:
+            telemetry = _DashboardTelemetry()
+        except Exception as _e:
+            logger.warning("Failed to init dashboard telemetry: %s", _e)
+            telemetry = None
     # Plan limits — read once at startup; provisioner restarts engine after updating .env
     # 0 = unlimited (self-hosted / open-source) unless env var is explicitly set to 0
     _max_agents = int(os.environ.get("OPENLEGION_MAX_AGENTS", "0"))
@@ -3442,6 +3458,66 @@ def create_dashboard_router(
         if not api_key_manager.revoke_key(key_id):
             raise HTTPException(status_code=404, detail=f"API key not found: {key_id}")
         return {"revoked": True, "id": key_id}
+
+    # ── Dashboard telemetry (Phase -1 onboarding wizard) ────────
+
+    @api_router.post("/api/telemetry")
+    async def api_telemetry_record(request: Request) -> dict:
+        """Persist one frontend telemetry event.
+
+        Hypothesis-test surface for the Phase -1 empty-fleet onboarding
+        wizard. Each session gets a sliding 60-event/min budget; over
+        budget returns HTTP 429. Events with unknown names are accepted
+        (no allowlist) but capped in length so a malicious / runaway
+        client cannot fill the table with arbitrary garbage. ``ts`` from
+        the client is honored only as advisory; the server records its
+        own wall clock so we cannot be back-dated.
+        """
+        if telemetry is None:
+            # Telemetry sink failed to init at startup. Don't crash the
+            # frontend on every event — return 204 so the JS keeps
+            # firing without affecting wizard UX.
+            return {"recorded": False, "reason": "telemetry_disabled"}
+        body: dict[str, Any]
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="invalid JSON body")
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="body must be an object")
+        event_name = (body.get("event_name") or body.get("event") or "").strip()
+        if not event_name:
+            raise HTTPException(status_code=400, detail="event_name is required")
+        props = body.get("props") or {}
+        if not isinstance(props, dict):
+            raise HTTPException(status_code=400, detail="props must be an object")
+
+        session_id = _operator_session_id(request)
+        allowed, retry_ms = telemetry.check_rate_limit(session_id)
+        if not allowed:
+            from starlette.responses import JSONResponse
+            return JSONResponse(
+                status_code=429,
+                content={
+                    "recorded": False,
+                    "error": {
+                        "code": "rate_limited",
+                        "message": "telemetry rate limit exceeded",
+                        "retry_after_ms": retry_ms,
+                    },
+                },
+                headers={"Retry-After": str(max(1, retry_ms // 1000))},
+            )
+
+        try:
+            row_id = telemetry.record(
+                event_name=event_name,
+                session_id=session_id,
+                props=props,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return {"recorded": True, "id": row_id}
 
     # ── Wallet management ────────────────────────────────────
 

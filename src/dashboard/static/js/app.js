@@ -590,6 +590,17 @@ function dashboard() {
     onboardCustomModels: '',
     onboardCustomLabel: '',
 
+    // Phase -1 — Empty-fleet onboarding wizard (hypothesis test).
+    // States: 'idle' (off) | 'ask' (chip card) | 'confirming' (operator
+    // proposed a team) | 'building' (apply_template running) |
+    // 'first-output' (success card). Persisted to localStorage so a
+    // page reload mid-wizard doesn't lose progress. Only renders inside
+    // the Chat tab; non-empty fleets force step='idle'.
+    wizard: { step: 'idle', plan: null, startedAt: 0, lastChip: '' },
+    _wizardLastTrack: '',  // dedupe key for step_advanced events
+    _wizardBuildPoll: null,
+    _wizardCompleteTimer: null,
+
     // WebSocket reconnect countdown (Alpine-reactive mirror)
     wsReconnectIn: 0,
 
@@ -1087,6 +1098,37 @@ function dashboard() {
         console.debug('localStorage restore skipped:', e.message || e);
       }
 
+      // Phase -1 wizard — restore step state across reloads. If the user
+      // was mid-build when they hit refresh, we want the building card
+      // back, not the chip selector. After restore we still let
+      // ``_maybeStartWizard`` evaluate first-visit detection in case
+      // ``ol_wizard`` is missing entirely.
+      this._wizardLoad();
+      // Resume polling if we restored into ``building`` — the build
+      // poller is interval-based and was destroyed on unload.
+      if (this.wizard.step === 'building') {
+        this._wizardStartBuildPolling();
+      }
+      // Emit abandon telemetry when the page unloads mid-wizard. This
+      // is best-effort — sendBeacon survives navigation; setInterval
+      // ticks may not. We only fire if we're not already in 'idle'.
+      window.addEventListener('beforeunload', () => {
+        if (this.wizard && this.wizard.step !== 'idle' && this.wizard.step !== 'first-output') {
+          try {
+            const payload = JSON.stringify({
+              event_name: 'wizard_abandoned',
+              props: {
+                lastStep: this.wizard.step,
+                totalSeconds: this._wizardSecondsSinceStart(),
+              },
+              ts: Date.now() / 1000,
+            });
+            const blob = new Blob([payload], { type: 'application/json' });
+            navigator.sendBeacon(`${window.__config.apiBase}/telemetry`, blob);
+          } catch (_) { /* best-effort */ }
+        }
+      });
+
       // Sync restored open chats from server so cross-device history is fresh
       for (const agentId of this.openChats) {
         this._loadChatHistory(agentId);
@@ -1439,6 +1481,301 @@ function dashboard() {
     checkOperatorReady() {
       const op = this.agents.find(a => a.id === 'operator');
       this.operatorReady = op && op.health_status === 'healthy';
+    },
+
+    // ── Phase -1 onboarding wizard ───────────────────────
+    //
+    // Card-styled empty-fleet flow inside the Chat tab. Renders only when
+    // ``wizard.step !== 'idle'``; the existing operator empty-state is
+    // suppressed while active. State persists to localStorage so a page
+    // reload mid-wizard restores progress. All transitions emit
+    // telemetry events (``wizard_started`` / ``wizard_chip_clicked`` /
+    // ``wizard_step_advanced`` / ``wizard_completed`` /
+    // ``wizard_abandoned``) so we can answer the activation hypothesis.
+
+    _wizardLoad() {
+      try {
+        const raw = localStorage.getItem('ol_wizard');
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object' && typeof parsed.step === 'string') {
+          this.wizard = {
+            step: parsed.step || 'idle',
+            plan: parsed.plan || null,
+            startedAt: Number(parsed.startedAt) || 0,
+            lastChip: parsed.lastChip || '',
+          };
+        }
+      } catch (_) { /* ignore */ }
+    },
+
+    _wizardSave() {
+      try {
+        localStorage.setItem('ol_wizard', JSON.stringify(this.wizard));
+      } catch (_) { /* quota / private mode — ignore */ }
+    },
+
+    _wizardClear() {
+      try { localStorage.removeItem('ol_wizard'); } catch (_) { /* ignore */ }
+    },
+
+    _isFirstVisit() {
+      // Empty-fleet detection: no user-fleet agents AND the operator has
+      // no real user messages yet. The bootstrap_greeting we seed in the
+      // operator's transcript is an assistant role — it doesn't count.
+      const hasFleetAgents = this.agents.some(a => a && a.id !== 'operator');
+      if (hasFleetAgents) return false;
+      const hist = this.chatHistories['operator'] || [];
+      const hasUserMsg = hist.some(m => m && m.role === 'user');
+      return !hasUserMsg;
+    },
+
+    _operatorHasReplyAfter(ts) {
+      const hist = this.chatHistories['operator'] || [];
+      for (let i = hist.length - 1; i >= 0; i--) {
+        const m = hist[i];
+        if (!m) continue;
+        if ((m.role === 'agent' || m.role === 'assistant') && (m.ts || 0) >= ts) {
+          // We treat any non-streaming assistant reply after the chip
+          // send as the trigger to advance to ``confirming``. We don't
+          // attempt to parse the reply for a structured team — that's
+          // for a future phase. Today the operator's natural reply IS
+          // the proposed team, and we trust the user to read it.
+          if (!m.streaming) return true;
+        }
+      }
+      return false;
+    },
+
+    track(eventName, props) {
+      try {
+        fetch(`${window.__config.apiBase}/telemetry`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Requested-With': 'XMLHttpRequest',
+          },
+          body: JSON.stringify({
+            event_name: eventName,
+            props: props || {},
+            ts: Date.now() / 1000,
+          }),
+          credentials: 'same-origin',
+        }).catch(() => { /* fire-and-forget */ });
+      } catch (_) { /* ignore */ }
+    },
+
+    _wizardSecondsSinceStart() {
+      if (!this.wizard.startedAt) return 0;
+      return Math.max(0, Math.round((Date.now() - this.wizard.startedAt) / 1000));
+    },
+
+    _wizardAdvance(toStep, extraProps) {
+      const fromStep = this.wizard.step;
+      if (fromStep === toStep) return;
+      this.wizard.step = toStep;
+      this._wizardSave();
+      const props = Object.assign({
+        from: fromStep,
+        to: toStep,
+        secondsSinceStart: this._wizardSecondsSinceStart(),
+      }, extraProps || {});
+      const dedupe = `${fromStep}->${toStep}`;
+      if (this._wizardLastTrack !== dedupe) {
+        this._wizardLastTrack = dedupe;
+        this.track('wizard_step_advanced', props);
+      }
+    },
+
+    startWizard() {
+      // Idempotent — only kick off once per visit. If the user already
+      // dismissed (idle) but the fleet is still empty, we DO restart on
+      // a hard reload (the user came back). Use _wizardLoad guard.
+      if (this.wizard.step !== 'idle') return;
+      this.wizard = {
+        step: 'ask',
+        plan: null,
+        startedAt: Date.now(),
+        lastChip: '',
+      };
+      this._wizardLastTrack = '';
+      this._wizardSave();
+      this.track('wizard_started', { startedAt: this.wizard.startedAt });
+    },
+
+    wizardStartAsk() {
+      // External trigger — same as startWizard but never collapses an
+      // active wizard. Useful when a "show wizard again" button is
+      // wired up later. For now ``loadAgents`` calls ``_maybeStartWizard``.
+      this.startWizard();
+    },
+
+    wizardChipClicked(label) {
+      if (!label) return;
+      this.wizard.lastChip = label;
+      this._wizardSave();
+      this.track('wizard_chip_clicked', {
+        label: label,
+        step: this.wizard.step,
+      });
+      // "Something else…" seeds the input with a stem instead of
+      // sending a chip — the user types freely. Wizard goes idle so
+      // normal Operator chat resumes.
+      const ELSE_LABEL = 'Something else…';
+      if (label === ELSE_LABEL) {
+        const el = document.getElementById('operator-chat-input');
+        if (el) {
+          // Seed the textarea via the embedded x-data ``opMsg`` model.
+          try {
+            const s = window.Alpine && Alpine.$data(el.closest('[x-data]'));
+            if (s) s.opMsg = (s.opMsg ? s.opMsg + ' ' : '') + 'I want to ';
+          } catch (_) { /* ignore */ }
+          this.$nextTick(() => {
+            el.focus();
+            try { el.setSelectionRange(el.value.length, el.value.length); } catch (_) {}
+          });
+        }
+        this._wizardComplete({ reason: 'something_else' });
+        return;
+      }
+      // Send the chip label as a user message to the Operator. Use the
+      // existing chat-send pipeline so transcript persistence + SSE
+      // streaming work the same as a typed message.
+      const sentAt = Date.now();
+      this._wizardChipSentAt = sentAt;
+      this.sendChatTo('operator', label);
+      // Watch for an Operator reply to advance to confirming. Polls the
+      // local chatHistories; the SSE handler updates that array as
+      // tokens stream in.
+      this._wizardWatchForReply(sentAt);
+    },
+
+    _wizardWatchForReply(sentAt) {
+      if (this._wizardReplyPoll) clearInterval(this._wizardReplyPoll);
+      const start = Date.now();
+      this._wizardReplyPoll = setInterval(() => {
+        // Bail out if the user dismissed mid-wait.
+        if (this.wizard.step === 'idle') {
+          clearInterval(this._wizardReplyPoll);
+          this._wizardReplyPoll = null;
+          return;
+        }
+        if (this._operatorHasReplyAfter(sentAt)) {
+          clearInterval(this._wizardReplyPoll);
+          this._wizardReplyPoll = null;
+          this._wizardAdvance('confirming', { trigger: 'operator_reply' });
+        } else if (Date.now() - start > 120000) {
+          // Operator never replied within 2 minutes — give up the
+          // automatic transition. The user can still advance manually
+          // or abandon. Silent timeout — no telemetry to keep the
+          // schema lean.
+          clearInterval(this._wizardReplyPoll);
+          this._wizardReplyPoll = null;
+        }
+      }, 750);
+    },
+
+    wizardConfirm() {
+      // "Let's go" — operator already proposed a team in the previous
+      // message. We move into the building card and start polling the
+      // fleet for the first non-operator agent. The Operator's own
+      // tool calls (apply_template / create_agent) are what actually
+      // create agents — we don't call mesh APIs from here. We rely on
+      // the operator having staged the build during the chat exchange.
+      this._wizardAdvance('building', { trigger: 'confirm_button' });
+      // Send a confirm message to the Operator so it actually executes
+      // the proposed plan (the previous turn was a proposal).
+      this.sendChatTo('operator', "Let's go — please build the team you proposed.");
+      this._wizardStartBuildPolling();
+    },
+
+    wizardCustomize() {
+      // "Customize…" exits the wizard without abandoning telemetry —
+      // the user is engaged, just wants to type freely.
+      this.track('wizard_chip_clicked', {
+        label: 'customize',
+        step: this.wizard.step,
+      });
+      this._wizardComplete({ reason: 'customize' });
+    },
+
+    _wizardStartBuildPolling() {
+      if (this._wizardBuildPoll) clearInterval(this._wizardBuildPoll);
+      const start = Date.now();
+      this._wizardBuildPoll = setInterval(() => {
+        const fleetAgents = this.agents.filter(a => a && a.id !== 'operator');
+        if (fleetAgents.length >= 1) {
+          clearInterval(this._wizardBuildPoll);
+          this._wizardBuildPoll = null;
+          this._wizardAdvance('first-output', {
+            trigger: 'fleet_populated',
+            agents: fleetAgents.map(a => a.id).slice(0, 8),
+          });
+        } else if (Date.now() - start > 5 * 60 * 1000) {
+          // 5 minute hard cap — if the Operator never created agents
+          // we give up and let the user fall back to typing.
+          clearInterval(this._wizardBuildPoll);
+          this._wizardBuildPoll = null;
+        }
+        // Each poll triggers a fetchAgents to keep the local cache fresh.
+        if (typeof this.fetchAgents === 'function') this.fetchAgents();
+      }, 2000);
+    },
+
+    wizardComplete() {
+      // Public — bound to the "Continue" button on the first-output card.
+      this._wizardComplete({ reason: 'continue_button' });
+    },
+
+    _wizardComplete(extra) {
+      const totalSeconds = this._wizardSecondsSinceStart();
+      const plan = this.wizard.plan;
+      this.track('wizard_completed', Object.assign({
+        totalSeconds: totalSeconds,
+        plan: plan,
+      }, extra || {}));
+      this._wizardTeardown();
+      this.wizard = { step: 'idle', plan: null, startedAt: 0, lastChip: '' };
+      this._wizardSave();
+      this._wizardLastTrack = '';
+    },
+
+    wizardAbandon() {
+      const lastStep = this.wizard.step;
+      this.track('wizard_abandoned', {
+        lastStep: lastStep,
+        totalSeconds: this._wizardSecondsSinceStart(),
+      });
+      this._wizardTeardown();
+      this.wizard = { step: 'idle', plan: null, startedAt: 0, lastChip: '' };
+      this._wizardSave();
+      this._wizardLastTrack = '';
+    },
+
+    _wizardTeardown() {
+      if (this._wizardBuildPoll) {
+        clearInterval(this._wizardBuildPoll);
+        this._wizardBuildPoll = null;
+      }
+      if (this._wizardReplyPoll) {
+        clearInterval(this._wizardReplyPoll);
+        this._wizardReplyPoll = null;
+      }
+      if (this._wizardCompleteTimer) {
+        clearTimeout(this._wizardCompleteTimer);
+        this._wizardCompleteTimer = null;
+      }
+    },
+
+    _maybeStartWizard() {
+      // Called after fetchAgents resolves AND chat history is loaded.
+      // Idempotent — re-entrant calls during the same visit are no-ops
+      // because startWizard guards on step !== 'idle'. We also bail out
+      // if the user already advanced past 'ask' (restored from
+      // localStorage), so a hot reload mid-build keeps the building UI.
+      if (this.wizard.step !== 'idle') return;
+      if (!this._isFirstVisit()) return;
+      this.startWizard();
     },
 
     // ── Tab switching ─────────────────────────────────────
@@ -3621,6 +3958,11 @@ function dashboard() {
           this._fetchCoordination();
           // Update operator readiness for the Chat tab
           this.checkOperatorReady();
+          // Phase -1 wizard — first-visit detection runs after every
+          // ``fetchAgents`` resolve so a freshly-spawned agent (still
+          // loading at init time) doesn't pop the wizard. Re-entrant
+          // calls during the same visit are no-ops.
+          this._maybeStartWizard();
         }
       } catch (e) {
         console.warn('fetchAgents failed:', e);
