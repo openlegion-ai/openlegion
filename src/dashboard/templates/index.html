@@ -337,6 +337,62 @@
             </template>
           </div>
         </div>
+        <!-- Phase 2 Board UX — notifications bell. Subtle gray by
+             default; small indigo dot when unread items exist. Click
+             toggles the dropdown with the last 10 notifications. -->
+        <div class="relative" @click.away="notificationsOpen = false">
+          <button
+            @click="toggleNotifications()"
+            class="relative flex items-center justify-center w-8 h-8 rounded-md text-gray-500 hover:text-gray-200 hover:bg-gray-800/60 transition-colors cursor-pointer"
+            :title="notificationsUnreadCount > 0 ? notificationsUnreadCount + ' new notifications' : 'Notifications'"
+            :aria-label="notificationsUnreadCount > 0 ? notificationsUnreadCount + ' unread notifications' : 'Notifications'"
+            aria-haspopup="true"
+            :aria-expanded="notificationsOpen"
+          >
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+              <path d="M13.73 21a2 2 0 01-3.46 0"/>
+            </svg>
+            <span x-show="notificationsUnreadCount > 0" x-cloak
+              class="absolute top-1 right-1 w-2 h-2 rounded-full bg-indigo-400 ring-2 ring-gray-900"
+              aria-hidden="true"></span>
+          </button>
+          <!-- Dropdown — last 10 notifications. Hidden entirely
+               when empty (per Phase 2 §4 empty-state CTA: notifications
+               dropdown shows nothing rather than "no notifications"). -->
+          <div x-show="notificationsOpen && notifications.length > 0" x-cloak
+            class="absolute right-0 mt-2 w-80 max-w-[calc(100vw-2rem)] bg-gray-900 border border-gray-700 rounded-lg shadow-2xl z-50"
+            role="menu">
+            <div class="flex items-center justify-between px-4 py-2 border-b border-gray-800">
+              <span class="text-xs text-gray-400 font-medium">Notifications</span>
+              <button x-show="notificationsUnreadCount > 0"
+                @click="markAllNotificationsRead()"
+                class="text-xs text-indigo-400 hover:text-indigo-300 transition-colors">
+                Mark all as read
+              </button>
+            </div>
+            <div class="max-h-96 overflow-y-auto custom-scrollbar">
+              <template x-for="notification in notifications" :key="notification.id">
+                <button @click="onNotificationClick(notification)" type="button"
+                  class="w-full text-left px-4 py-2.5 flex items-start gap-3 border-b border-gray-800/40 last:border-b-0 hover:bg-gray-800/40 transition-colors"
+                  :class="!notification.read_at && 'bg-indigo-900/10'">
+                  <span class="shrink-0 mt-0.5 text-sm w-5 text-center text-gray-500"
+                    x-text="notificationKindIcon(notification.kind)"></span>
+                  <div class="flex-1 min-w-0">
+                    <div class="flex items-center justify-between gap-2">
+                      <span class="text-sm text-gray-100 font-medium truncate" x-text="notification.title"></span>
+                      <span class="text-[10px] text-gray-500 shrink-0" x-text="timeAgo(notification.ts)"></span>
+                    </div>
+                    <p x-show="notification.body" class="text-xs text-gray-500 mt-0.5 line-clamp-2" x-text="notification.body"></p>
+                  </div>
+                  <span x-show="!notification.read_at"
+                    class="shrink-0 mt-1.5 w-2 h-2 rounded-full bg-indigo-400"
+                    aria-label="Unread"></span>
+                </button>
+              </template>
+            </div>
+          </div>
+        </div>
         <div class="flex items-center gap-1.5 text-xs">
           <span class="relative flex h-2 w-2">
             <span :class="connected ? 'bg-green-400' : 'bg-red-400'" class="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75" x-show="connected"></span>
@@ -374,7 +430,7 @@
                 <img src="/dashboard/static/avatars/operator.png" alt="Operator" class="w-6 h-6 rounded-full">
                 <div>
                   <h2 class="text-sm font-semibold text-white">Operator</h2>
-                  <p class="text-[10px] text-gray-600 mt-0.5">Builds and manages your agent workforce</p>
+                  <p class="text-[10px] text-gray-600 mt-0.5">Builds and manages your team</p>
                 </div>
               </div>
               <div class="flex items-center gap-1">
@@ -1269,7 +1325,7 @@
                   class="empty-state h-full justify-center">
                   <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
                   <div class="empty-state-title">Chat with your operator</div>
-                  <div class="empty-state-desc">Ask about fleet status, optimize agents, or build new teams.</div>
+                  <div class="empty-state-desc">Ask about team status, optimize teammates, or build new teams.</div>
                 </div>
               </div>
 
@@ -1874,7 +1930,7 @@
                 </div>
                 <!-- Add member -->
                 <div x-show="unassignedAgents.length > 0 && !activeProjectData?.over_limit" x-cloak>
-                  <div class="text-[10px] text-gray-500 uppercase tracking-wider mb-2">Add Agent</div>
+                  <div class="text-[10px] text-gray-500 uppercase tracking-wider mb-2">Add teammate</div>
                   <div class="grid grid-cols-1 sm:grid-cols-2 gap-1.5 chat-grid">
                     <template x-for="a in unassignedAgents" :key="a.id">
                       <button @click="addMember(activeProject, a.id)"
@@ -2096,7 +2152,7 @@
                 <div class="stat-row" x-show="agent.heartbeat_schedule">
                   <span class="stat-label">
                     <svg fill="currentColor" viewBox="0 0 24 24" stroke="none" class="w-3 h-3"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
-                    <span>Heartbeat</span><span class="setting-hint setting-hint-sm ml-0.5" tabindex="0">?<span class="setting-hint-text">Periodic autonomous wakeup. The agent checks its HEARTBEAT.md rules on this schedule and acts on anything that needs attention — no user message required.</span></span>
+                    <span>Auto-checkup</span><span class="setting-hint setting-hint-sm ml-0.5" tabindex="0">?<span class="setting-hint-text">Periodic autonomous wakeup. The agent checks its HEARTBEAT.md rules on this schedule and acts on anything that needs attention — no user message required.</span></span>
                   </span>
                   <span class="text-[11px] font-medium"
                     :class="agent.heartbeat_enabled ? 'text-pink-400' : 'text-gray-600'"
@@ -2294,15 +2350,15 @@
                 <span x-show="agents.length === 0">2</span>
               </div>
               <div class="flex-1">
-                <div class="text-sm font-medium text-gray-200 mb-2">Create your first agent</div>
+                <div class="text-sm font-medium text-gray-200 mb-2">Build your first team</div>
                 <button @click="openAddAgentModal()"
                   :disabled="!settingsData?.has_llm_credentials"
                   class="text-xs px-4 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors inline-flex items-center gap-1.5"
                   x-show="agents.length === 0">
                   <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-                  Add Agent
+                  Add teammate
                 </button>
-                <div x-show="agents.length > 0" class="text-xs text-emerald-400">Agent running</div>
+                <div x-show="agents.length > 0" class="text-xs text-emerald-400">Teammate running</div>
               </div>
             </div>
           </div>
@@ -3436,7 +3492,7 @@
                       <div class="text-[10px] text-gray-600 uppercase tracking-wider mb-2">Health</div>
                       <div class="space-y-1 text-sm">
                         <div x-show="(agentDetail.health?.failures || 0) > 0" class="flex justify-between">
-                          <span class="text-red-400/80">Failures</span>
+                          <span class="text-red-400/80">Errors</span>
                           <span class="font-mono text-red-400" x-text="agentDetail.health?.failures || 0"></span>
                         </div>
                         <div x-show="(agentDetail.health?.restarts || 0) > 0" class="flex justify-between">
@@ -3711,7 +3767,7 @@
               </div>
             </template>
             <template x-if="!workplaceSectionLoading.feed && !workplaceErrors.feed && !workplaceFeed.length && workplaceProjects.length">
-              <div class="text-sm text-gray-500 py-4">No recent activity. Once agents start working, you'll see it here.</div>
+              <div class="text-sm text-gray-500 py-4">Once your team starts working, you'll see updates here.</div>
             </template>
 
             <!-- Chronological activity list, latest first. -->
@@ -3939,7 +3995,11 @@
               </div>
             </template>
             <template x-if="!workplaceSectionLoading.outputs && !workplaceErrors.outputs && !workplaceOutputs.length">
-              <div class="text-sm text-gray-500 py-4">No completed tasks yet.</div>
+              <div class="text-sm text-gray-300 py-6 text-center">
+                Nothing delivered yet.
+                <button type="button" @click="activeTab = 'chat'"
+                  class="underline decoration-dotted text-indigo-300 hover:text-indigo-200 transition-colors">Tell the Operator what you want delivered</button>.
+              </div>
             </template>
             <template x-for="t in workplaceOutputs" :key="t.id">
               <div class="bg-gray-800/40 border border-gray-700/50 rounded-lg p-3 cursor-pointer hover:bg-gray-800/70 hover:border-gray-600/60 transition-colors"
@@ -5900,7 +5960,7 @@
 
         <!-- Events view -->
         <div x-show="activityView === 'events'">
-          <div class="flex items-center justify-between mb-3">
+          <div class="flex items-center justify-between mb-3 gap-3 flex-wrap">
             <div class="flex gap-1.5 flex-wrap">
               <template x-for="etype in eventTypes" :key="etype">
                 <button
@@ -5918,15 +5978,28 @@
                 class="text-xs px-2 py-1 rounded-md text-gray-600 hover:text-gray-400"
               >Clear</button>
             </div>
+            <!-- Phase 2 Board UX overhaul — "Show technical detail"
+                 toggle. When off (default), events run through
+                 formatActivityForUser and engineer-noise events are
+                 hidden. -->
+            <label class="flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-300 cursor-pointer">
+              <input type="checkbox"
+                :checked="showTechDetail"
+                @change="setShowTechDetail($event.target.checked)"
+                class="accent-indigo-500">
+              Show technical detail
+            </label>
           </div>
           <div class="space-y-1 max-h-[calc(100vh-16rem)] overflow-y-auto custom-scrollbar">
             <template x-for="(evt, i) in filteredEvents" :key="i">
               <div x-data="{ open: false }">
                 <div @click="open = !open" class="bg-gray-900/70 border border-gray-800/60 px-3 py-2 flex items-start gap-3 text-sm hover:bg-gray-900 transition-colors cursor-pointer select-none" :class="open ? 'rounded-t-md' : 'rounded-md'">
                   <svg class="w-3 h-3 shrink-0 mt-1 text-gray-600 transition-transform duration-200" :class="open && 'rotate-90'" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
-                  <span class="event-badge shrink-0 mt-0.5" :class="eventColor(evt.type)" x-text="evt.type"></span>
-                  <span class="text-gray-500 shrink-0 w-20 truncate" :title="evt.agent" x-text="evt.agent || '-'"></span>
-                  <span class="text-gray-300 truncate flex-1" :title="eventSummary(evt)" x-text="eventSummary(evt)"></span>
+                  <span x-show="showTechDetail" class="event-badge shrink-0 mt-0.5" :class="eventColor(evt.type)" x-text="evt.type"></span>
+                  <span x-show="showTechDetail" class="text-gray-500 shrink-0 w-20 truncate" :title="evt.agent" x-text="evt.agent || '-'"></span>
+                  <span class="text-gray-300 truncate flex-1"
+                    :title="showTechDetail ? eventSummary(evt) : (formatActivityForUser(evt) || eventSummary(evt))"
+                    x-text="showTechDetail ? eventSummary(evt) : (formatActivityForUser(evt) || eventSummary(evt))"></span>
                   <span class="text-gray-600 text-xs shrink-0 font-mono" x-text="timeAgo(evt.timestamp)"></span>
                 </div>
                 <template x-if="open">
@@ -6150,10 +6223,10 @@
               <svg class="w-4 h-4 text-gray-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
               </svg>
-              <h3 class="text-sm font-medium text-gray-200">Pending actions</h3>
+              <h3 class="text-sm font-medium text-gray-200">Approvals needed</h3>
             </div>
             <p class="text-xs text-gray-500">
-              Pending confirmations now appear inline in the operator chat — look for the
+              Approvals now appear inline in the operator chat — look for the
               <span class="text-indigo-300">Confirm change</span> /
               <span class="text-rose-300">Confirm destructive action</span>
               cards there.
@@ -6164,8 +6237,8 @@
           <div class="bg-gray-900 border border-gray-800 rounded-lg p-5">
             <div class="flex items-center justify-between mb-4 gap-3 flex-wrap">
               <div>
-                <h3 class="text-sm font-medium text-gray-200">Change Log</h3>
-                <p class="text-[10px] text-gray-500 mt-0.5">Configuration changes made by the operator</p>
+                <h3 class="text-sm font-medium text-gray-200">Change history</h3>
+                <p class="text-[10px] text-gray-500 mt-0.5">Updates the operator made to your team</p>
               </div>
               <button @click="fetchAuditLog()" class="text-xs px-2.5 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors">Refresh</button>
             </div>
@@ -7050,7 +7123,7 @@
         <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" @click="closeAddAgentModal()"></div>
         <div class="relative w-full max-w-3xl bg-gray-900 border border-gray-700 rounded-xl shadow-2xl p-5">
           <div class="flex items-center justify-between mb-4">
-            <h3 class="text-sm font-medium text-gray-200">Add Agent</h3>
+            <h3 class="text-sm font-medium text-gray-200">Add teammate</h3>
             <button @click="closeAddAgentModal()" class="text-gray-500 hover:text-gray-300 text-lg leading-none">&times;</button>
           </div>
           <div x-show="agentTemplates.length > 0" class="mb-3">
@@ -7264,7 +7337,7 @@
             <button @click="addAgent()" :disabled="addAgentLoading || (addAgentForm.name && !addAgentNameValid)"
               class="text-xs px-4 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors inline-flex items-center gap-1.5">
               <svg x-show="addAgentLoading" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-              <span x-show="!addAgentLoading">Add Agent</span>
+              <span x-show="!addAgentLoading">Add teammate</span>
               <span x-show="addAgentLoading">Adding...</span>
             </button>
             <button @click="closeAddAgentModal()" :disabled="addAgentLoading"

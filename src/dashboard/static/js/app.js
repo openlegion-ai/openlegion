@@ -38,7 +38,7 @@ const _IDENTITY_FILE_MAP = {
   memory: [
     { file: 'MEMORY.md', label: 'Memory', cap: 16000, access: 'auto', desc: 'Facts and context the agent remembers across sessions. Auto-updated during conversations — you can also edit directly.' },
     { file: 'USER.md', label: 'Preferences', cap: 4000, access: 'both', desc: 'Your preferences, communication style, and project context. Helps the agent serve you better over time.' },
-    { file: 'HEARTBEAT.md', label: 'Heartbeat', cap: null, access: 'both', desc: 'Rules for what the agent does during periodic autonomous wakeups — what to check, what to work on, when to notify you.' },
+    { file: 'HEARTBEAT.md', label: 'Auto-checkup', cap: null, access: 'both', desc: 'Rules for what the agent does during periodic autonomous wakeups — what to check, what to work on, when to notify you.' },
   ],
 };
 
@@ -48,9 +48,11 @@ function dashboard() {
     activeTab: 'chat',
     tabs: [
       { id: 'chat', label: 'Chat' },
-      { id: 'fleet', label: 'Agents' },
-      { id: 'workplace', label: 'Board' },
-      { id: 'system', label: 'System' },
+      // Phase 2 Board UX overhaul — engineer-speak → user-speak
+      // (Agents → Team, Board → Home, System → Settings).
+      { id: 'fleet', label: 'Team' },
+      { id: 'workplace', label: 'Home' },
+      { id: 'system', label: 'Settings' },
     ],
     // Side panel toggle for non-Chat tabs (Phase 1 Decision 5). Persists
     // across navigation via Alpine root scope; localStorage carries it
@@ -640,6 +642,21 @@ function dashboard() {
     activityAgentFilter: '',
     activityTimeRange: 'all',
 
+    // Phase 2 Board UX overhaul — activity translation toggle.
+    // Persisted to localStorage so the user's choice survives reloads.
+    // When false (default), implementation events (blackboard_write,
+    // llm_call, message_received) are hidden from the Activity feed
+    // and engineer event types are run through formatActivityForUser
+    // for plain-English summaries.
+    showTechDetail: false,
+
+    // Phase 2 Board UX overhaul — notifications bell.
+    notifications: [],
+    notificationsUnreadCount: 0,
+    notificationsOpen: false,
+    notificationsLoading: false,
+    _notificationsRefreshTimer: null,
+
     // WebSocket
     _ws: null,
     _refreshInterval: null,
@@ -880,11 +897,23 @@ function dashboard() {
     },
 
     get filteredEvents() {
+      // Phase 2 Board UX overhaul — when "Show technical detail" is
+      // off (default), hide implementation-noise events
+      // (blackboard_write, llm_call, message_received, message_sent,
+      // text_delta, agent_state) so the activity feed reads as
+      // plain-English status updates. The eventFilters array still
+      // takes precedence when the user has explicitly chosen filters
+      // — power users opting in to specific types should always see
+      // them.
+      let base;
       if (this.eventFilters.length === 0) {
-        return this.events.filter(e =>
+        base = this.events.filter(e =>
           !(e.type === 'agent_state' && e.data?.state === 'registered'));
+      } else {
+        base = this.events.filter(e => this.eventFilters.includes(e.type));
       }
-      return this.events.filter(e => this.eventFilters.includes(e.type));
+      if (this.showTechDetail || this.eventFilters.length > 0) return base;
+      return base.filter(e => this.isActivityEventVisible(e));
     },
 
     get fleetTotalCost() {
@@ -1167,6 +1196,23 @@ function dashboard() {
       for (const agentId of this.openChats) {
         this._loadChatHistory(agentId);
       }
+
+      // Phase 2 Board UX — restore "Show technical detail" preference.
+      try {
+        const saved = localStorage.getItem('olShowTechDetail');
+        if (saved === '1') this.showTechDetail = true;
+      } catch (_) {
+        // ignore — localStorage unavailable.
+      }
+
+      // Phase 2 Board UX — initial notifications fetch + 60s poll.
+      // Fetched lazily on bell open as well; the poll keeps the
+      // unread badge fresh without forcing the dropdown to open.
+      this.fetchNotifications();
+      this._notificationsRefreshTimer = setInterval(
+        () => this.fetchNotifications(),
+        60_000,
+      );
 
       // Command palette: Cmd+K / Ctrl+K + tab shortcuts 1/2/3
       this._cmdPaletteHandler = (e) => {
@@ -2346,7 +2392,7 @@ function dashboard() {
       try {
         const resp = await fetch(`${window.__config.apiBase}/workplace/pending`);
         if (!resp.ok) {
-          this.workplaceErrors.pending = `Couldn't load pending actions (HTTP ${resp.status})`;
+          this.workplaceErrors.pending = `Couldn't load approvals (HTTP ${resp.status})`;
           return;
         }
         const data = await resp.json();
@@ -2368,7 +2414,7 @@ function dashboard() {
           });
         }
       } catch (e) {
-        this.workplaceErrors.pending = (e && e.message) ? `Couldn't load pending actions: ${e.message}` : "Couldn't load pending actions";
+        this.workplaceErrors.pending = (e && e.message) ? `Couldn't load approvals: ${e.message}` : "Couldn't load approvals";
       } finally {
         this.workplaceSectionLoading.pending = false;
       }
@@ -3086,7 +3132,7 @@ function dashboard() {
           return;
         }
         this.workplacePending = this.workplacePending.filter(p => p.nonce !== nonce);
-        this.showToast('Pending action confirmed.');
+        this.showToast('Approval confirmed.');
       } catch (e) {
         this.showToast(`Confirm failed: ${e.message || e}`);
       }
@@ -3105,7 +3151,7 @@ function dashboard() {
           return;
         }
         this.workplacePending = this.workplacePending.filter(p => p.nonce !== nonce);
-        this.showToast('Pending action cancelled.');
+        this.showToast('Approval cancelled.');
       } catch (e) {
         this.showToast(`Cancel failed: ${e.message || e}`);
       }
@@ -8860,6 +8906,278 @@ function dashboard() {
         }
         default:
           return JSON.stringify(d).substring(0, 80);
+      }
+    },
+
+    // ── Phase 2 Board UX — Activity translation ─────────────
+    //
+    // Maps engineer-style event types to plain-English summaries
+    // for the Activity feed. Returns null when the event is an
+    // implementation detail that should be hidden from non-power
+    // users (toggleable via showTechDetail). Returns a string
+    // when the event has a user-friendly summary; falls back to
+    // the existing eventSummary() output otherwise.
+    formatActivityForUser(event) {
+      if (!event || !event.type) return null;
+      const d = event.data || {};
+      const agent = event.agent ? this.agentDisplayName(event.agent) : 'Someone';
+      switch (event.type) {
+        case 'tool_start': {
+          const toolName = d.tool || d.name || event.tool_name || '';
+          return `${agent} is ${this.verbForTool(toolName)}`;
+        }
+        case 'tool_result': {
+          const toolName = d.tool || d.name || event.tool_name || '';
+          return `${agent} finished ${this.verbForTool(toolName)}`;
+        }
+        case 'task_status_changed': {
+          const newStatus = d.new_status || d.status || event.new_status || '';
+          return `${agent} ${this.verbForStatus(newStatus)}`;
+        }
+        case 'task_outcome': {
+          const outcome = d.outcome || event.outcome || 'reviewed';
+          return `${agent}'s work was ${outcome}`;
+        }
+        case 'credential_request': {
+          const label = d.credential_label || d.label || event.credential_label || 'credential';
+          return `${agent} needs a ${label} — your call`;
+        }
+        case 'pending_action_created': {
+          const actionLabel = d.action_label || event.action_label || d.action || 'make a change';
+          return `${agent} wants to ${actionLabel}`;
+        }
+        case 'task_created': {
+          const title = (d.title || '').substring(0, 60);
+          return title ? `${agent} picked up "${title}"` : `${agent} picked up a new task`;
+        }
+        case 'health_change':
+          return `${agent} is now ${d.current || 'unknown'}`;
+        case 'heartbeat_complete': {
+          const out = d.outcome ? ` (${d.outcome})` : '';
+          return `${agent} finished a checkup${out}`;
+        }
+        case 'notification':
+          return (d.message || '').substring(0, 100) || null;
+        case 'browser_login_request':
+          return `${agent} needs a sign-in — your call`;
+        case 'browser_captcha_help_request':
+          return `${agent} hit a CAPTCHA — your call`;
+        case 'credit_exhausted':
+          return `${agent} is out of credit for now`;
+        // Hidden by default — implementation noise. Power users see
+        // them via the "Show technical detail" toggle (which falls
+        // back to eventSummary()).
+        case 'blackboard_write':
+        case 'llm_call':
+        case 'message_received':
+        case 'message_sent':
+        case 'text_delta':
+        case 'agent_state':
+          return null;
+        default:
+          return event.summary || null;
+      }
+    },
+
+    // Human verb for a tool name. Default returns the tool name
+    // unchanged so unknown tools still surface (better than dropping
+    // the event entirely).
+    verbForTool(toolName) {
+      if (!toolName) return 'working';
+      const map = {
+        web_search: 'searching the web',
+        web_fetch: 'reading a web page',
+        browser_navigate: 'opening a website',
+        browser_click: 'clicking a link',
+        browser_type: 'typing in a form',
+        browser_screenshot: 'taking a screenshot',
+        browser_get_elements: 'reading the page',
+        browser_find_text: 'searching the page',
+        browser_fill_form: 'filling out a form',
+        browser_solve_captcha: 'solving a CAPTCHA',
+        http_request: 'making an HTTP request',
+        exec: 'running a command',
+        file_read: 'reading a file',
+        file_write: 'writing a file',
+        file_list: 'listing files',
+        memory_search: 'checking memory',
+        memory_save: 'saving to memory',
+        hand_off: 'handing off to a teammate',
+        check_inbox: 'checking the inbox',
+        update_status: 'updating status',
+        complete_task: 'wrapping up a task',
+        notify_user: 'pinging you',
+        spawn: 'spinning up a helper',
+        write_blackboard: 'writing to the shared workspace',
+        read_blackboard: 'reading the shared workspace',
+        image_gen: 'generating an image',
+        wallet_get_address: 'looking up a wallet address',
+        wallet_get_balance: 'checking a wallet balance',
+        wallet_transfer: 'sending a wallet transfer',
+        save_observations: 'taking notes',
+        edit_agent: 'updating a teammate',
+        create_agent: 'adding a teammate',
+        apply_template: 'building a team from a template',
+        inspect_agents: 'reviewing the team',
+      };
+      if (map[toolName]) return map[toolName];
+      // Fallback: humanise the snake_case tool name.
+      return `using ${toolName.replace(/_/g, ' ')}`;
+    },
+
+    verbForStatus(status) {
+      if (!status) return 'updated a task';
+      const map = {
+        new: 'picked up a new task',
+        working: 'started working',
+        in_progress: 'started working',
+        blocked: 'is blocked',
+        done: 'finished a task',
+        completed: 'finished a task',
+        failed: 'hit an error',
+        cancelled: 'cancelled a task',
+        delivered: 'delivered work',
+        accepted: 'got the green light',
+        rework: 'is reworking a task',
+        rejected: 'had work marked rejected',
+      };
+      return map[status] || `moved a task to ${status.replace(/_/g, ' ')}`;
+    },
+
+    // Pretty-print an agent id for the activity feed. Operator gets
+    // its brand label; all others get the agent.role label when
+    // available, falling back to the id with underscores spaced.
+    agentDisplayName(agentId) {
+      if (!agentId) return 'Someone';
+      if (agentId === 'operator') return 'Operator';
+      const agent = this.agents.find(a => a.id === agentId);
+      if (agent && agent.role) return agent.role;
+      return agentId.replace(/[_-]/g, ' ');
+    },
+
+    // Whether an activity event should be visible on the user-facing
+    // feed. Implementation noise (blackboard_write, llm_call,
+    // message_received, text_delta, agent_state) is hidden unless
+    // the user has flipped the "Show technical detail" toggle.
+    isActivityEventVisible(event) {
+      if (this.showTechDetail) return true;
+      const summary = this.formatActivityForUser(event);
+      return summary !== null;
+    },
+
+    // Toggle the persistent "Show technical detail" preference.
+    setShowTechDetail(value) {
+      this.showTechDetail = !!value;
+      try {
+        localStorage.setItem('olShowTechDetail', this.showTechDetail ? '1' : '0');
+      } catch (_) {
+        // localStorage may be unavailable (private mode); ignore.
+      }
+    },
+
+    // ── Phase 2 Board UX — Notifications bell ───────────────
+    async fetchNotifications() {
+      this.notificationsLoading = true;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/notifications`);
+        if (!resp.ok) {
+          this.notifications = [];
+          this.notificationsUnreadCount = 0;
+          return;
+        }
+        const data = await resp.json();
+        this.notifications = data.notifications || [];
+        this.notificationsUnreadCount = data.unread_count || 0;
+      } catch (e) {
+        // Silent failure; the bell is a polish surface.
+        this.notifications = [];
+        this.notificationsUnreadCount = 0;
+      } finally {
+        this.notificationsLoading = false;
+      }
+    },
+
+    toggleNotifications() {
+      this.notificationsOpen = !this.notificationsOpen;
+      if (this.notificationsOpen) this.fetchNotifications();
+    },
+
+    async markNotificationRead(notification) {
+      if (!notification || !notification.id) return;
+      if (notification.read_at) return;
+      // Optimistic update — flip the row in-place so the dropdown
+      // doesn't flicker. Rollback only if the request errors.
+      const prevReadAt = notification.read_at;
+      notification.read_at = Date.now() / 1000;
+      this.notificationsUnreadCount = Math.max(0, this.notificationsUnreadCount - 1);
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/notifications/${notification.id}/read`, {
+          method: 'POST',
+        });
+        if (!resp.ok) {
+          notification.read_at = prevReadAt;
+          this.notificationsUnreadCount += 1;
+        }
+      } catch (e) {
+        notification.read_at = prevReadAt;
+        this.notificationsUnreadCount += 1;
+      }
+    },
+
+    async markAllNotificationsRead() {
+      // Optimistic update.
+      const previous = this.notifications.map(n => n.read_at);
+      const now = Date.now() / 1000;
+      for (const n of this.notifications) {
+        if (!n.read_at) n.read_at = now;
+      }
+      const previousUnread = this.notificationsUnreadCount;
+      this.notificationsUnreadCount = 0;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/notifications/read-all`, {
+          method: 'POST',
+        });
+        if (!resp.ok) {
+          this.notifications.forEach((n, i) => { n.read_at = previous[i]; });
+          this.notificationsUnreadCount = previousUnread;
+        }
+      } catch (e) {
+        this.notifications.forEach((n, i) => { n.read_at = previous[i]; });
+        this.notificationsUnreadCount = previousUnread;
+      }
+    },
+
+    // Click handler for a notification row. Marks read; if the
+    // payload includes a click-through target (agent / task id),
+    // navigates accordingly.
+    onNotificationClick(notification) {
+      this.markNotificationRead(notification);
+      const payload = notification && notification.payload;
+      if (!payload) return;
+      try {
+        if (payload.agent_id) {
+          this.notificationsOpen = false;
+          this.drillDown(payload.agent_id);
+        } else if (payload.task_id && typeof this.openTaskDrillIn === 'function') {
+          this.notificationsOpen = false;
+          this.openTaskDrillIn(payload.task_id);
+        }
+      } catch (_) {
+        // Best-effort navigation — failures shouldn't block the read.
+      }
+    },
+
+    // Icon glyph for the notification kind. Plain text glyphs keep
+    // the markup emoji-free (matches workplaceFeedIcon convention).
+    notificationKindIcon(kind) {
+      switch (kind) {
+        case 'delivered': return '★';
+        case 'approval': return '?';
+        case 'alert': return '⚠';
+        case 'blocker': return '⚠';
+        case 'credential': return '🔑';
+        case 'info':
+        default: return '•';
       }
     },
 

@@ -1,15 +1,24 @@
-"""UI-level tests for the Phase -1 onboarding wizard.
+"""UI-level tests for the dashboard SPA.
 
-We can't run a real headless browser in CI, so these tests verify the
-served HTML + JS contract: the wizard markup is present, the chip
-buttons reference the locked labels, the Alpine state machine has the
-expected handlers, and the empty-state is correctly suppressed when the
-wizard is active.
+This file aggregates two layers of UI-contract tests:
 
-These are deliberately string-level assertions over rendered template +
-static JS — enough to catch regressions like "someone deleted the
-chip", "the state machine forgot a transition", or "the chat empty
-state isn't gated on wizard.step".
+1. Phase -1 onboarding wizard — verifies the wizard markup is present,
+   the chip buttons reference the locked labels, the Alpine state
+   machine has the expected handlers, and the empty-state is correctly
+   suppressed when the wizard is active.
+
+2. Phase 2 Board UX vocabulary sweep + activity translation +
+   notifications bell + empty-state CTAs — verifies user-facing strings
+   in the SPA template and JS-source-level checks for the activity
+   translation helper.
+
+We can't run a real headless browser in CI, so all assertions are
+string-level over the rendered template + static JS — enough to catch
+regressions like "someone deleted the chip", "the state machine forgot
+a transition", "a vocab string drifted", or "the chat empty state isn't
+gated on wizard.step".
+
+Phase 2 of the Board UX overhaul (`docs/plans/2026-05-08-board-ux-overhaul.md`).
 """
 
 from __future__ import annotations
@@ -31,6 +40,12 @@ def _read(path: Path) -> str:
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _TEMPLATE = _REPO_ROOT / "src/dashboard/templates/index.html"
 _APP_JS = _REPO_ROOT / "src/dashboard/static/js/app.js"
+
+# Phase 2 tests cache the file contents at import time. We expose them
+# under distinct names so they don't shadow the Path objects used by
+# the wizard tests.
+_INDEX_HTML = _TEMPLATE.read_text(encoding="utf-8")
+_APP_JS_TEXT = _APP_JS.read_text(encoding="utf-8")
 
 
 # ── Static markup contract ───────────────────────────────────────
@@ -249,3 +264,207 @@ class TestWizardEndpointWiring:
         assert resp.status_code == 200
         assert "wizard: { step: 'idle'" in resp.text
         assert "_maybeStartWizard" in resp.text
+
+
+# ── Tab labels (engineer-speak → user-speak) ──────────────────────────
+
+
+class TestTabLabelVocabulary:
+    def test_tabs_array_uses_user_speak(self):
+        # The Alpine ``tabs`` array maps internal IDs to display labels.
+        # Phase 2 renames Agents → Team, Board → Home, System → Settings.
+        m = re.search(
+            r"tabs:\s*\[(.*?)\],",
+            _APP_JS_TEXT,
+            re.DOTALL,
+        )
+        assert m, "Could not locate the tabs array in app.js"
+        block = m.group(1)
+        assert "id: 'fleet'" in block and "label: 'Team'" in block
+        assert "id: 'workplace'" in block and "label: 'Home'" in block
+        assert "id: 'system'" in block and "label: 'Settings'" in block
+
+    def test_fleet_running_count_uses_team_word(self):
+        # The dynamic-label expression in the top-nav swaps "Agents (N)"
+        # for "Team (N)" once Phase 2 ships.
+        assert "'Team (' + runningAgents.length" in _INDEX_HTML
+        assert "'Agents (' + runningAgents.length" not in _INDEX_HTML
+
+
+class TestVocabularySweepStrings:
+    def test_pending_actions_renamed(self):
+        # The Operator sub-tab card was titled "Pending actions"; the
+        # sweep flips it to "Approvals needed".
+        assert "Approvals needed" in _INDEX_HTML
+        assert ">Pending actions<" not in _INDEX_HTML
+
+    def test_audit_log_renamed_to_change_history(self):
+        assert "Change history" in _INDEX_HTML
+        # The legacy "Change Log" wording should be gone (not "Audit log",
+        # which only ever lived in the HTML comment).
+        assert "Change Log<" not in _INDEX_HTML
+
+    def test_heartbeat_user_facing_label(self):
+        # The Identity-tab file label for HEARTBEAT.md flips to
+        # "Auto-checkup"; the field name itself stays heartbeat_*.
+        assert "label: 'Auto-checkup'" in _APP_JS_TEXT
+        assert "<span>Auto-checkup</span>" in _INDEX_HTML
+
+    def test_failure_label_renamed_to_errors(self):
+        assert ">Errors<" in _INDEX_HTML
+
+    def test_add_agent_renamed_to_add_teammate(self):
+        # All three "Add Agent" instances (sidebar header + modal title +
+        # submit button) flip to "Add teammate".
+        assert ">Add teammate<" in _INDEX_HTML
+        assert ">Add Agent<" not in _INDEX_HTML
+
+    def test_pending_action_toasts_renamed(self):
+        # The toast strings shown on confirm/cancel.
+        assert "'Approval confirmed.'" in _APP_JS_TEXT
+        assert "'Approval cancelled.'" in _APP_JS_TEXT
+
+    def test_workforce_renamed_to_team(self):
+        # The chat-tab header subtitle ("Builds and manages your agent
+        # workforce") drops the engineer-speak word.
+        assert "Builds and manages your team" in _INDEX_HTML
+        assert "agent workforce" not in _INDEX_HTML
+
+
+# ── Empty-state CTAs ──────────────────────────────────────────────────
+
+
+class TestEmptyStateCTAs:
+    def test_workplace_empty_outputs_has_cta(self):
+        # The Outputs sub-tab empty state now contains a verb-driven CTA
+        # pointing users at the operator chat.
+        assert "Tell the Operator what you want delivered" in _INDEX_HTML
+
+    def test_team_empty_state_has_cta(self):
+        # The fleet/team page first-run state.
+        assert "Build your first team" in _INDEX_HTML
+
+    def test_workplace_feed_empty_state_user_speak(self):
+        # The activity feed empty-state text avoids "agents" — uses
+        # "team" instead.
+        assert "Once your team starts working" in _INDEX_HTML
+
+
+# ── Notifications bell ────────────────────────────────────────────────
+
+
+class TestNotificationsBellMarkup:
+    def test_bell_button_in_template(self):
+        # The bell sits in the top-nav, identifiable by its toggle.
+        assert "toggleNotifications()" in _INDEX_HTML
+
+    def test_bell_unread_dot_renders_when_count_above_zero(self):
+        # The unread dot is gated on notificationsUnreadCount > 0.
+        assert 'x-show="notificationsUnreadCount > 0"' in _INDEX_HTML
+
+    def test_dropdown_hidden_when_empty(self):
+        # Per Phase 2 §4, the dropdown hides entirely when no
+        # notifications exist (empty placeholder is a no-no).
+        assert (
+            'x-show="notificationsOpen && notifications.length > 0"'
+            in _INDEX_HTML
+        )
+
+    def test_mark_all_read_link(self):
+        assert "markAllNotificationsRead()" in _INDEX_HTML
+
+
+# ── Activity translation (formatActivityForUser) ──────────────────────
+
+
+class TestFormatActivityForUserStructure:
+    """Source-level structure check on formatActivityForUser. We don't
+    spin up a JS runtime; the helper's behaviour is verified indirectly
+    via the cases dispatched in the switch."""
+
+    def test_function_defined(self):
+        assert "formatActivityForUser(event)" in _APP_JS_TEXT
+
+    def test_handles_tool_start(self):
+        assert "case 'tool_start':" in _APP_JS_TEXT
+        assert "verbForTool" in _APP_JS_TEXT
+
+    def test_handles_task_status_changed(self):
+        assert "case 'task_status_changed':" in _APP_JS_TEXT
+        assert "verbForStatus" in _APP_JS_TEXT
+
+    def test_handles_task_outcome(self):
+        assert "case 'task_outcome':" in _APP_JS_TEXT
+        assert "work was" in _APP_JS_TEXT
+
+    def test_handles_credential_request(self):
+        assert "case 'credential_request':" in _APP_JS_TEXT
+        assert "your call" in _APP_JS_TEXT
+
+    def test_handles_pending_action_created(self):
+        assert "case 'pending_action_created':" in _APP_JS_TEXT
+        assert "wants to" in _APP_JS_TEXT
+
+    def test_hides_implementation_events_by_default(self):
+        # blackboard_write / llm_call / message_received / message_sent
+        # / text_delta / agent_state should fall through to ``return null``.
+        # Source-level check: each is in the same fall-through cluster.
+        m = re.search(
+            r"// Hidden by default.*?return null;",
+            _APP_JS_TEXT,
+            re.DOTALL,
+        )
+        assert m, "Hidden-by-default cluster missing"
+        block = m.group(0)
+        for case in (
+            "blackboard_write",
+            "llm_call",
+            "message_received",
+            "message_sent",
+            "text_delta",
+            "agent_state",
+        ):
+            assert f"case '{case}'" in block, f"{case} should be hidden by default"
+
+    def test_show_tech_detail_persisted_to_localstorage(self):
+        # The toggle persists to localStorage under olShowTechDetail.
+        assert "olShowTechDetail" in _APP_JS_TEXT
+
+    def test_filtered_events_respects_show_tech_detail(self):
+        # The Activity feed's filtered view honors showTechDetail.
+        m = re.search(
+            r"get filteredEvents\(\)\s*\{(.*?)\}\s*,",
+            _APP_JS_TEXT,
+            re.DOTALL,
+        )
+        assert m, "filteredEvents getter missing"
+        body = m.group(1)
+        assert "showTechDetail" in body
+        assert "isActivityEventVisible" in body
+
+
+# ── verbForTool / verbForStatus helpers ───────────────────────────────
+
+
+class TestActivityVerbs:
+    """Spot-check that the verb maps cover the most-common cases.
+
+    The helpers themselves are JS — we assert on the source so the
+    mapping table doesn't quietly drift. When the dashboard ships its
+    own JS test runner these can move there."""
+
+    def test_verb_for_tool_includes_common_browser_actions(self):
+        for tool in (
+            "browser_navigate",
+            "browser_click",
+            "browser_type",
+            "browser_screenshot",
+            "web_search",
+            "memory_save",
+            "hand_off",
+        ):
+            assert f"{tool}:" in _APP_JS_TEXT, f"verbForTool missing {tool}"
+
+    def test_verb_for_status_includes_terminal_states(self):
+        for status in ("done", "blocked", "failed", "cancelled", "delivered"):
+            assert f"{status}:" in _APP_JS_TEXT, f"verbForStatus missing {status}"
