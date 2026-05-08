@@ -665,6 +665,10 @@ def create_dashboard_router(
     # default :class:`DashboardTelemetry` against ``data/telemetry.db``
     # if the caller didn't supply one.
     telemetry: Any = None,
+    # Phase 2 of the Board UX overhaul — persistent notifications bell.
+    # Auto-instantiated below when not provided so existing test
+    # constructions keep working without scaffolding the store.
+    notification_store: Any = None,
 ) -> APIRouter:
     """Create the dashboard FastAPI router."""
     # Lazy-init telemetry sink so callers (mesh CLI, tests) can opt out by
@@ -678,6 +682,15 @@ def create_dashboard_router(
         except Exception as _e:
             logger.warning("Failed to init dashboard telemetry: %s", _e)
             telemetry = None
+    # Auto-instantiate the notifications store when the caller hasn't
+    # supplied one. Tests can pass a custom path / in-memory instance.
+    if notification_store is None:
+        try:
+            from src.dashboard.notifications import NotificationStore
+            notification_store = NotificationStore()
+        except Exception as e:
+            logger.warning("Failed to instantiate NotificationStore: %s", e)
+            notification_store = None
     # Plan limits — read once at startup; provisioner restarts engine after updating .env
     # 0 = unlimited (self-hosted / open-source) unless env var is explicitly set to 0
     _max_agents = int(os.environ.get("OPENLEGION_MAX_AGENTS", "0"))
@@ -6115,6 +6128,51 @@ def create_dashboard_router(
                 detail = resp.text
             raise HTTPException(resp.status_code, detail)
         return resp.json()
+
+    # ── Phase 2 Board UX — persistent notifications bell ───────────
+    #
+    # Three endpoints: list (returns unread first, last 10), mark one
+    # read, mark all read. The store is auto-instantiated above. When
+    # initialisation fails the endpoints degrade to empty/no-op rather
+    # than 500'ing — the bell is a polish surface, not a critical path.
+    @api_router.get("/api/notifications")
+    async def api_notifications_list() -> dict:
+        if notification_store is None:
+            return {"notifications": [], "unread_count": 0}
+        try:
+            items = notification_store.list_recent(limit=10)
+            unread = notification_store.unread_count()
+        except Exception as e:
+            logger.warning("notifications list failed: %s", e)
+            return {"notifications": [], "unread_count": 0}
+        return {"notifications": items, "unread_count": unread}
+
+    @api_router.post("/api/notifications/{notification_id}/read")
+    async def api_notifications_mark_read(notification_id: int) -> dict:
+        if notification_store is None:
+            raise HTTPException(503, "Notifications store unavailable")
+        try:
+            changed = notification_store.mark_read(notification_id)
+        except Exception as e:
+            logger.warning("notifications mark-read failed: %s", e)
+            raise HTTPException(500, "Failed to mark notification read")
+        if not changed:
+            # Either the id doesn't exist or it was already read.
+            # Treat as idempotent success — clients race against
+            # auto-mark-on-open and shouldn't see flicker.
+            return {"ok": True, "id": notification_id, "changed": False}
+        return {"ok": True, "id": notification_id, "changed": True}
+
+    @api_router.post("/api/notifications/read-all")
+    async def api_notifications_mark_all_read() -> dict:
+        if notification_store is None:
+            raise HTTPException(503, "Notifications store unavailable")
+        try:
+            count = notification_store.mark_all_read()
+        except Exception as e:
+            logger.warning("notifications mark-all-read failed: %s", e)
+            raise HTTPException(500, "Failed to mark notifications read")
+        return {"ok": True, "marked": count}
 
     # ── Task 9 PR 4 — Workplace task drill-in + outcome capture ────
     #
