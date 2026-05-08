@@ -692,6 +692,23 @@ function dashboard() {
     notificationsLoading: false,
     _notificationsRefreshTimer: null,
 
+    // Browser Notification API integration. ``browserNotifyEnabled`` is
+    // the user's local opt-in (persisted to ``olBrowserNotifyEnabled``);
+    // ``browserNotifyPermission`` mirrors ``Notification.permission``
+    // for template gating. We only fire notifications when:
+    //   1. Permission has been granted by the OS,
+    //   2. The user explicitly toggled the in-app opt-in on,
+    //   3. The dashboard tab is not visible (foreground tabs already
+    //      have full UI signal).
+    // Triple-redundant gate keeps us from spamming the user.
+    browserNotifyEnabled: false,
+    browserNotifyPermission: 'default',
+    // Track the highest notification id we've seen so the 60s
+    // fetchNotifications poll only fires browser notifications for
+    // genuinely new arrivals.
+    _lastNotifiedId: 0,
+    _browserNotifyKinds: ['approval', 'credential', 'alert', 'blocker'],
+
     // WebSocket
     _ws: null,
     _refreshInterval: null,
@@ -1264,6 +1281,20 @@ function dashboard() {
         if (saved === '1') this.showTechDetail = true;
       } catch (_) {
         // ignore — localStorage unavailable.
+      }
+
+      // Browser Notification API — restore the user's local opt-in and
+      // sync ``Notification.permission`` so the wizard button renders
+      // the right state on reload. The opt-in toggle is independent of
+      // the OS-level permission; we require both to fire.
+      try {
+        const saved = localStorage.getItem('olBrowserNotifyEnabled');
+        if (saved === 'true') this.browserNotifyEnabled = true;
+      } catch (_) {
+        // ignore — localStorage unavailable.
+      }
+      if (typeof Notification !== 'undefined' && Notification && Notification.permission) {
+        this.browserNotifyPermission = Notification.permission;
       }
 
       // Phase 2 Board UX — initial notifications fetch + 60s poll.
@@ -9552,8 +9583,27 @@ function dashboard() {
           return;
         }
         const data = await resp.json();
-        this.notifications = data.notifications || [];
+        const fresh = data.notifications || [];
+        const previousLastId = this._lastNotifiedId;
+        // Track the high-water mark across the merged set so the next
+        // poll can identify genuinely-new entries.
+        let highestId = previousLastId;
+        for (const n of fresh) {
+          if (typeof n.id === 'number' && n.id > highestId) highestId = n.id;
+        }
+        this.notifications = fresh;
         this.notificationsUnreadCount = data.unread_count || 0;
+        // Fire browser notifications only for entries newer than the
+        // last poll. Skip on the very first fetch (previousLastId === 0)
+        // so reloading the page doesn't replay the inbox.
+        if (previousLastId > 0) {
+          for (const n of fresh) {
+            if (n.id && n.id > previousLastId && !n.read_at) {
+              this._maybeFireBrowserNotification(n);
+            }
+          }
+        }
+        this._lastNotifiedId = highestId;
       } catch (e) {
         // Silent failure; the bell is a polish surface.
         this.notifications = [];
@@ -9561,6 +9611,211 @@ function dashboard() {
       } finally {
         this.notificationsLoading = false;
       }
+    },
+
+    // ── Browser Notification API ─────────────────────────────
+    //
+    // Off-tab signal for users without a messaging channel configured.
+    // Triple-gated: requires browserNotifyEnabled === true AND
+    // Notification.permission === 'granted' AND the dashboard tab is
+    // not currently visible. We never auto-prompt; the user must click
+    // "Enable browser notifications" in the wizard first-output card
+    // (or the equivalent settings affordance).
+    //
+    // This consumes ``notifications`` produced by the existing notification
+    // bell fetch (PR-B). We don't manufacture our own queue.
+    async requestBrowserNotificationPermission() {
+      if (typeof Notification === 'undefined' || !Notification) {
+        return 'unsupported';
+      }
+      let permission = Notification.permission;
+      if (permission === 'default') {
+        try {
+          permission = await Notification.requestPermission();
+        } catch (_) {
+          // Some browsers throw on call-without-gesture; treat as denied.
+          permission = Notification.permission || 'denied';
+        }
+      }
+      this.browserNotifyPermission = permission;
+      if (permission === 'granted') {
+        this.browserNotifyEnabled = true;
+        try {
+          localStorage.setItem('olBrowserNotifyEnabled', 'true');
+        } catch (_) { /* ignore */ }
+      }
+      return permission;
+    },
+
+    // Toggle off without revoking the OS-level permission (browsers
+    // don't let JS revoke that — user must visit site settings). The
+    // localStorage flag is the in-app off-switch.
+    disableBrowserNotifications() {
+      this.browserNotifyEnabled = false;
+      try {
+        localStorage.setItem('olBrowserNotifyEnabled', 'false');
+      } catch (_) { /* ignore */ }
+    },
+
+    // Fire a Notification for a specific notification entry, but only
+    // if all three gates pass. Click handler focuses the window and
+    // routes to the relevant in-app context.
+    _maybeFireBrowserNotification(notification) {
+      if (!notification || !notification.kind) return;
+      if (!this.browserNotifyEnabled) return;
+      if (typeof Notification === 'undefined' || !Notification) return;
+      if (Notification.permission !== 'granted') return;
+      // Only fire when the tab isn't visible — the in-app UI already
+      // signals foreground users plenty.
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') return;
+      if (this._browserNotifyKinds.indexOf(notification.kind) === -1) return;
+      let title = notification.title || 'OpenLegion';
+      let body = notification.body || '';
+      try {
+        const n = new Notification(title, {
+          body: body || ' ',
+          icon: '/dashboard/static/favicon.png',
+          tag: 'ol-' + notification.id,
+        });
+        n.onclick = (ev) => {
+          try {
+            ev.preventDefault();
+            if (typeof window !== 'undefined' && window.focus) window.focus();
+            this.onNotificationClick(notification);
+          } catch (_) { /* ignore */ }
+          try { n.close(); } catch (_) { /* ignore */ }
+        };
+      } catch (_) {
+        // Notification constructors can throw on unsupported platforms
+        // (e.g. iOS Safari pre-PWA). Fail closed.
+      }
+    },
+
+    // ── Long-task progress rollup ─────────────────────────────
+    //
+    // Presentation-layer aggregation for the activity feed. When the
+    // same agent fires the same tool repeatedly (e.g. a Researcher
+    // running web_search 50 times across a 30-minute task), we collapse
+    // the run into a single row: "Researcher is searching the web (4
+    // queries · 12m elapsed)".
+    //
+    // Reset triggers (per spec):
+    //   - tool changes (different tool name)
+    //   - status changes (task_status_changed in the stream)
+    //   - different agent
+    //
+    // Underlying ``events`` array is unchanged — the "Show technical
+    // detail" toggle still surfaces the raw stream. Returns a list of
+    // entries either ``{kind: 'single', event}`` or
+    // ``{kind: 'rollup', event, count, startTs, endTs}``.
+    _rollupActivityEvents(events) {
+      if (!Array.isArray(events) || events.length === 0) return [];
+      const out = [];
+      let group = null; // {agent, tool, events: [], startTs, endTs}
+      const flush = () => {
+        if (!group) return;
+        if (group.events.length === 1) {
+          out.push({ kind: 'single', event: group.events[0] });
+        } else {
+          out.push({
+            kind: 'rollup',
+            event: group.events[group.events.length - 1],
+            count: group.events.length,
+            startTs: group.startTs,
+            endTs: group.endTs,
+            tool: group.tool,
+          });
+        }
+        group = null;
+      };
+      for (const ev of events) {
+        if (!ev || !ev.type) {
+          flush();
+          continue;
+        }
+        // Status changes always reset grouping (per spec).
+        if (ev.type === 'task_status_changed') {
+          flush();
+          out.push({ kind: 'single', event: ev });
+          continue;
+        }
+        if (ev.type !== 'tool_start') {
+          flush();
+          out.push({ kind: 'single', event: ev });
+          continue;
+        }
+        const toolName = (ev.data && (ev.data.tool || ev.data.name)) || ev.tool_name || '';
+        const agentId = ev.agent || '';
+        const ts = ev.timestamp || ev.ts || 0;
+        if (group && group.agent === agentId && group.tool === toolName) {
+          group.events.push(ev);
+          group.endTs = ts || group.endTs;
+        } else {
+          flush();
+          group = { agent: agentId, tool: toolName, events: [ev], startTs: ts, endTs: ts };
+        }
+      }
+      flush();
+      return out;
+    },
+
+    // Format a rollup entry as a single feed line. Counts use plural
+    // "queries"/"requests"/"actions" depending on the verb category.
+    formatRolledActivityLine(entry) {
+      if (!entry) return null;
+      if (entry.kind !== 'rollup') {
+        return this.formatActivityForUser(entry.event);
+      }
+      const ev = entry.event;
+      const baseLine = this.formatActivityForUser(ev);
+      if (!baseLine) return null;
+      const count = entry.count || 0;
+      const noun = this._rollupNounForTool(entry.tool);
+      const elapsed = this._formatRolledElapsed(entry.startTs, entry.endTs);
+      const elapsedSuffix = elapsed ? ` · ${elapsed} elapsed` : '';
+      return `${baseLine} (${count} ${noun}${elapsedSuffix})`;
+    },
+
+    _rollupNounForTool(toolName) {
+      const map = {
+        web_search: 'queries',
+        web_fetch: 'pages',
+        browser_navigate: 'visits',
+        browser_click: 'clicks',
+        browser_type: 'inputs',
+        browser_screenshot: 'screenshots',
+        browser_get_elements: 'reads',
+        browser_find_text: 'searches',
+        browser_fill_form: 'forms',
+        http_request: 'requests',
+        exec: 'commands',
+        file_read: 'reads',
+        file_write: 'writes',
+        file_list: 'listings',
+        memory_search: 'lookups',
+        memory_save: 'saves',
+        read_blackboard: 'reads',
+        write_blackboard: 'writes',
+      };
+      return map[toolName] || 'actions';
+    },
+
+    _formatRolledElapsed(startTs, endTs) {
+      if (!startTs || !endTs) return '';
+      const startEpoch = typeof startTs === 'string' ? new Date(startTs).getTime() / 1000 : startTs;
+      const endEpoch = typeof endTs === 'string' ? new Date(endTs).getTime() / 1000 : endTs;
+      if (isNaN(startEpoch) || isNaN(endEpoch)) return '';
+      const diff = Math.max(0, endEpoch - startEpoch);
+      if (diff < 1) return '';
+      if (diff < 60) return `${Math.round(diff)}s`;
+      if (diff < 3600) return `${Math.round(diff / 60)}m`;
+      return `${Math.round(diff / 3600)}h`;
+    },
+
+    // Convenience getter — feed-renderer-friendly rollup over the
+    // (already filtered) activity feed.
+    get rolledFilteredEvents() {
+      return this._rollupActivityEvents(this.filteredEvents);
     },
 
     toggleNotifications() {

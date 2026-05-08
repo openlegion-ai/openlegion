@@ -662,6 +662,48 @@
                         <p class="text-xs text-gray-300 leading-relaxed mb-1">
                           Your team is starting now. The Operator checks on them every 15 minutes and will alert you when something needs your attention.
                         </p>
+                        <!-- Browser Notification opt-in. Off-tab signal
+                             for users without a messaging channel
+                             configured. Triple-gated firing in
+                             _maybeFireBrowserNotification — this is just
+                             the affordance to grant permission. -->
+                        <div class="mb-3" data-testid="wizard-browser-notify">
+                          <template x-if="browserNotifyPermission !== 'granted' || !browserNotifyEnabled">
+                            <button @click="requestBrowserNotificationPermission()"
+                                    data-testid="wizard-browser-notify-enable"
+                                    class="w-full text-xs px-3 py-2 rounded-lg bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/40 text-indigo-200 transition-colors flex items-center justify-center gap-2">
+                              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M14.857 17.082a23.848 23.848 0 0 0 5.454-1.31A8.967 8.967 0 0 1 18 9.75V9A6 6 0 0 0 6 9v.75a8.967 8.967 0 0 1-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 0 1-5.714 0m5.714 0a3 3 0 1 1-5.714 0"/></svg>
+                              <span>Enable browser notifications</span>
+                            </button>
+                          </template>
+                          <template x-if="browserNotifyPermission === 'granted' && browserNotifyEnabled">
+                            <div class="text-[11px] text-emerald-300/90 flex items-center gap-1.5"
+                                 data-testid="wizard-browser-notify-on">
+                              <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                              <span>Browser notifications on</span>
+                            </div>
+                          </template>
+                          <template x-if="browserNotifyPermission === 'denied'">
+                            <div class="text-[11px] text-amber-300/90"
+                                 data-testid="wizard-browser-notify-denied">
+                              Browser notifications blocked. Enable in your browser&rsquo;s site settings.
+                            </div>
+                          </template>
+                        </div>
+                        <!-- Phase: connect-channel prompt. Soft nudge to
+                             configure off-tab notifications via Telegram /
+                             Slack / Discord / WhatsApp. Just a link — the
+                             channel UI lives under Settings →
+                             Integrations. -->
+                        <div class="text-[11px] text-gray-400 mb-3"
+                             data-testid="wizard-connect-channel">
+                          Want updates when you&rsquo;re not on the dashboard?
+                          <button @click="systemTab = 'integrations'; switchTab('system'); wizardComplete()"
+                                  data-testid="wizard-connect-channel-link"
+                                  class="text-indigo-300 hover:text-indigo-200 underline underline-offset-2 transition-colors">
+                            Connect Telegram, Slack, or another channel &rarr;
+                          </button>
+                        </div>
                         <!-- Phase 4 quick-link chips. Each switches a tab
                              and completes the wizard so the user lands
                              on the section they care about most. -->
@@ -6154,28 +6196,66 @@
               Show technical detail
             </label>
           </div>
-          <div class="space-y-1 max-h-[calc(100vh-16rem)] overflow-y-auto custom-scrollbar">
-            <template x-for="(evt, i) in filteredEvents" :key="i">
-              <div x-data="{ open: false }">
-                <div @click="open = !open" class="bg-gray-900/70 border border-gray-800/60 px-3 py-2 flex items-start gap-3 text-sm hover:bg-gray-900 transition-colors cursor-pointer select-none" :class="open ? 'rounded-t-md' : 'rounded-md'">
-                  <svg class="w-3 h-3 shrink-0 mt-1 text-gray-600 transition-transform duration-200" :class="open && 'rotate-90'" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
-                  <span x-show="showTechDetail" class="event-badge shrink-0 mt-0.5" :class="eventColor(evt.type)" x-text="evt.type"></span>
-                  <span x-show="showTechDetail" class="text-gray-500 shrink-0 w-20 truncate" :title="evt.agent" x-text="evt.agent || '-'"></span>
-                  <span class="text-gray-300 truncate flex-1"
-                    :title="showTechDetail ? eventSummary(evt) : (formatActivityForUser(evt) || eventSummary(evt))"
-                    x-text="showTechDetail ? eventSummary(evt) : (formatActivityForUser(evt) || eventSummary(evt))"></span>
-                  <span class="text-gray-600 text-xs shrink-0 font-mono" x-text="timeAgo(evt.timestamp)"></span>
-                </div>
-                <template x-if="open">
-                  <div class="bg-gray-900 border border-gray-800/80 border-t-gray-700/50 rounded-b-md px-4 py-3">
-                    <div class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-xs">
-                      <template x-for="(field, fi) in eventDetail(evt)" :key="fi">
-                        <div class="contents">
-                          <span class="text-gray-600 whitespace-nowrap" x-text="field.label"></span>
-                          <span class="text-gray-300 font-mono whitespace-pre-wrap break-all max-h-48 overflow-y-auto" x-text="field.value"></span>
-                        </div>
-                      </template>
+          <div class="space-y-1 max-h-[calc(100vh-16rem)] overflow-y-auto custom-scrollbar"
+               data-testid="system-activity-feed">
+            <!-- Tech-detail mode: raw event stream (one row per event). -->
+            <template x-if="showTechDetail">
+              <div>
+                <template x-for="(evt, i) in filteredEvents" :key="i">
+                  <div x-data="{ open: false }">
+                    <div @click="open = !open" class="bg-gray-900/70 border border-gray-800/60 px-3 py-2 flex items-start gap-3 text-sm hover:bg-gray-900 transition-colors cursor-pointer select-none" :class="open ? 'rounded-t-md' : 'rounded-md'">
+                      <svg class="w-3 h-3 shrink-0 mt-1 text-gray-600 transition-transform duration-200" :class="open && 'rotate-90'" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+                      <span class="event-badge shrink-0 mt-0.5" :class="eventColor(evt.type)" x-text="evt.type"></span>
+                      <span class="text-gray-500 shrink-0 w-20 truncate" :title="evt.agent" x-text="evt.agent || '-'"></span>
+                      <span class="text-gray-300 truncate flex-1"
+                        :title="eventSummary(evt)"
+                        x-text="eventSummary(evt)"></span>
+                      <span class="text-gray-600 text-xs shrink-0 font-mono" x-text="timeAgo(evt.timestamp)"></span>
                     </div>
+                    <template x-if="open">
+                      <div class="bg-gray-900 border border-gray-800/80 border-t-gray-700/50 rounded-b-md px-4 py-3">
+                        <div class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-xs">
+                          <template x-for="(field, fi) in eventDetail(evt)" :key="fi">
+                            <div class="contents">
+                              <span class="text-gray-600 whitespace-nowrap" x-text="field.label"></span>
+                              <span class="text-gray-300 font-mono whitespace-pre-wrap break-all max-h-48 overflow-y-auto" x-text="field.value"></span>
+                            </div>
+                          </template>
+                        </div>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+              </div>
+            </template>
+            <!-- User-friendly mode: rolled-up consecutive same-tool runs.
+                 Underlying events array is unchanged — toggling
+                 "Show technical detail" reveals the raw stream. -->
+            <template x-if="!showTechDetail">
+              <div>
+                <template x-for="(entry, i) in rolledFilteredEvents" :key="i">
+                  <div x-data="{ open: false }"
+                       :data-rollup="entry.kind"
+                       data-testid="activity-feed-row">
+                    <div @click="open = !open" class="bg-gray-900/70 border border-gray-800/60 px-3 py-2 flex items-start gap-3 text-sm hover:bg-gray-900 transition-colors cursor-pointer select-none" :class="open ? 'rounded-t-md' : 'rounded-md'">
+                      <svg class="w-3 h-3 shrink-0 mt-1 text-gray-600 transition-transform duration-200" :class="open && 'rotate-90'" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+                      <span class="text-gray-300 truncate flex-1"
+                        :title="formatRolledActivityLine(entry) || eventSummary(entry.event)"
+                        x-text="formatRolledActivityLine(entry) || eventSummary(entry.event)"></span>
+                      <span class="text-gray-600 text-xs shrink-0 font-mono" x-text="timeAgo(entry.event.timestamp)"></span>
+                    </div>
+                    <template x-if="open">
+                      <div class="bg-gray-900 border border-gray-800/80 border-t-gray-700/50 rounded-b-md px-4 py-3">
+                        <div class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-xs">
+                          <template x-for="(field, fi) in eventDetail(entry.event)" :key="fi">
+                            <div class="contents">
+                              <span class="text-gray-600 whitespace-nowrap" x-text="field.label"></span>
+                              <span class="text-gray-300 font-mono whitespace-pre-wrap break-all max-h-48 overflow-y-auto" x-text="field.value"></span>
+                            </div>
+                          </template>
+                        </div>
+                      </div>
+                    </template>
                   </div>
                 </template>
               </div>
