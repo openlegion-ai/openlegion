@@ -934,6 +934,61 @@ def test_outcome_set_at_migration_idempotent(tmp_path):
     t2.close()
 
 
+def test_outcome_set_at_migration_recovers_from_partial_init(tmp_path):
+    """PR-U: a prior run that ALTERed the column but crashed before the
+    backfill UPDATE committed must be repaired on re-init.
+
+    Simulates the failure mode: column exists, but rows where
+    ``outcome IS NOT NULL`` still have ``outcome_set_at IS NULL``. The
+    fix moves the early-return guard so the backfill UPDATE always runs;
+    the ``WHERE`` clause makes that idempotent on already-stamped rows.
+    """
+    import sqlite3
+    db_path = str(tmp_path / "tasks.db")
+    # First init creates the full schema (column + index).
+    t = Tasks(db_path=db_path)
+    t.close()
+    # Simulate the partial-migration failure: column exists, but a row
+    # was rated and the backfill UPDATE never landed (e.g. process
+    # killed mid-init on an older deploy that lacked this loop).
+    raw = sqlite3.connect(db_path)
+    completed_ts = time.time() - 3 * 24 * 3600
+    raw.execute(
+        "INSERT INTO tasks "
+        "(id, project_id, parent_task_id, title, description, "
+        "creator, assignee, status, priority, dependencies_json, "
+        "artifact_refs_json, blocker_note, origin_kind, origin_channel, "
+        "origin_user, created_at, updated_at, completed_at, "
+        "retention_until, outcome, feedback_text, previous_task_id, "
+        "outcome_set_at) "
+        "VALUES (?, NULL, NULL, ?, NULL, ?, ?, 'done', 0, NULL, NULL, "
+        "NULL, NULL, NULL, NULL, ?, ?, ?, NULL, 'rejected', NULL, NULL, "
+        "NULL)",
+        (
+            "task_partial", "old", "op", "alpha",
+            completed_ts, completed_ts, completed_ts,
+        ),
+    )
+    raw.commit()
+    # Sanity check — column present, value NULL.
+    cols = {row[1] for row in raw.execute("PRAGMA table_info(tasks)").fetchall()}
+    assert "outcome_set_at" in cols
+    pre = raw.execute(
+        "SELECT outcome, outcome_set_at FROM tasks WHERE id=?",
+        ("task_partial",),
+    ).fetchone()
+    assert pre == ("rejected", None)
+    raw.close()
+    # Re-run init: must walk the backfill UPDATE even though the column
+    # already exists, repairing the orphaned row.
+    t2 = Tasks(db_path=db_path)
+    fetched = t2.get("task_partial")
+    assert fetched is not None
+    assert fetched["outcome"] == "rejected"
+    assert fetched["outcome_set_at"] == completed_ts
+    t2.close()
+
+
 def test_outcome_set_at_backfill_skips_anomalous_rows(tmp_path):
     """PR-U: a rated row missing completed_at stays NULL (don't invent data)."""
     import sqlite3

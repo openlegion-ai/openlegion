@@ -259,22 +259,33 @@ class Tasks:
     def _ensure_outcome_set_at_column(conn: sqlite3.Connection) -> None:
         """PR-U: add outcome_set_at column if missing. Idempotent.
 
-        SQLite ALTER TABLE ADD COLUMN does not support IF NOT EXISTS, so
-        we probe column existence via PRAGMA before issuing the DDL.
-        Backfill: existing rows where ``outcome IS NOT NULL`` get
-        ``outcome_set_at = completed_at`` so the heartbeat query keeps
-        seeing them at their original timestamp. Rows with both
-        ``outcome`` and ``completed_at`` NULL are left alone (anomalous;
-        better to not invent data).
+        Both the ALTER and the backfill UPDATE are safe to run repeatedly:
+        the ALTER is gated by PRAGMA inspection (with a duplicate-column
+        catch for concurrent-init races, mirroring the pattern in
+        ``mesh.py``); the UPDATE is WHERE-guarded so already-stamped rows
+        are no-ops. This shape recovers from a mid-init crash where the
+        ALTER committed but the backfill did not — re-init still walks
+        the backfill UPDATE instead of short-circuiting on the column
+        being present. Rows with both ``outcome`` and ``completed_at``
+        NULL are left alone (anomalous; better to not invent data).
         """
         cols = {
             row[1]
             for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
         }
-        if "outcome_set_at" in cols:
-            return
-        conn.execute("ALTER TABLE tasks ADD COLUMN outcome_set_at REAL")
-        # Best-effort backfill — existing rated rows inherit completed_at.
+        if "outcome_set_at" not in cols:
+            try:
+                conn.execute(
+                    "ALTER TABLE tasks ADD COLUMN outcome_set_at REAL"
+                )
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
+                # Another process won the race; column exists — proceed
+                # to backfill.
+        # Always run backfill — WHERE clause makes it idempotent on
+        # already-stamped rows. Recovers from prior partial migrations
+        # (ALTER committed, UPDATE didn't) on a subsequent re-init.
         conn.execute(
             "UPDATE tasks SET outcome_set_at = completed_at "
             "WHERE outcome IS NOT NULL AND outcome_set_at IS NULL "
@@ -907,11 +918,12 @@ class Tasks:
                         f"(status={current_status!r})"
                     )
                 # PR-U — stamp outcome_set_at on first rating only.
-                # Re-rating (write-many) preserves the original timestamp
-                # via COALESCE so the audit trail's "when did the operator
-                # first see this?" answer is stable. The audit event row
-                # below still records every submission with its own
-                # created_at, so re-rating history isn't lost.
+                # COALESCE preserves the FIRST set_outcome call's timestamp
+                # so downstream consumers (heartbeat, audit) see a stable
+                # "first rated at" answer regardless of subsequent
+                # re-rates. The audit event row below captures every
+                # submission with its own created_at, so re-rating
+                # history isn't lost.
                 conn.execute(
                     "UPDATE tasks SET outcome=?, feedback_text=?, "
                     "outcome_set_at=COALESCE(outcome_set_at, ?), "
