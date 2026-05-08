@@ -535,7 +535,7 @@
                                class="w-8 h-8 rounded-full shrink-0">
                           <div class="flex-1 min-w-0">
                             <div id="wizard-title" class="text-sm font-semibold text-white">Welcome</div>
-                            <div class="text-[11px] text-indigo-300/80 mt-0.5">Step 1 of 3 &middot; about a minute</div>
+                            <div class="text-[11px] text-indigo-300/80 mt-0.5">Step 1 of 4 &middot; about a minute</div>
                           </div>
                           <button @click="wizardAbandon()"
                                   aria-label="Dismiss wizard"
@@ -586,7 +586,7 @@
                                class="w-8 h-8 rounded-full shrink-0">
                           <div class="flex-1 min-w-0">
                             <div id="wizard-title" class="text-sm font-semibold text-white">Here's the plan</div>
-                            <div class="text-[11px] text-indigo-300/80 mt-0.5">Step 2 of 3 &middot; review &amp; confirm</div>
+                            <div class="text-[11px] text-indigo-300/80 mt-0.5">Step 2 of 4 &middot; review &amp; confirm</div>
                           </div>
                           <button @click="wizardAbandon()"
                                   aria-label="Dismiss wizard"
@@ -624,13 +624,50 @@
                           </svg>
                           <div class="flex-1 min-w-0">
                             <div id="wizard-title" class="text-sm font-semibold text-white">Setting up your team&hellip;</div>
-                            <div class="text-[11px] text-gray-400 mt-0.5">This takes about 30 seconds.</div>
+                            <div class="text-[11px] text-indigo-300/80 mt-0.5">Step 3 of 4 &middot; this may take a minute or two</div>
                           </div>
                           <button @click="wizardSkip()"
                                   data-testid="wizard-skip-building"
                                   aria-label="Skip wizard"
                                   class="text-gray-500 hover:text-gray-300 transition-colors p-1 -mr-1 rounded shrink-0">
                             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+                          </button>
+                        </div>
+                      </div>
+                    </template>
+
+                    <!-- Step: build_failed (fix #2) — terminal sad-state
+                         alternative to first-output. Surfaces when the
+                         build poller never sees a stable fleet inside
+                         the 5-minute hard cap. Two exits: Retry resets
+                         to ``ask``; Type instead drops the user into
+                         normal Operator chat. -->
+                    <template x-if="wizard.step === 'build_failed'">
+                      <div class="px-5 pt-5 pb-5" data-testid="wizard-build-failed">
+                        <div class="flex items-start gap-3 mb-3">
+                          <div class="w-10 h-10 rounded-full bg-amber-600/20 border border-amber-500/40 flex items-center justify-center shrink-0">
+                            <svg class="w-5 h-5 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+                          </div>
+                          <div class="flex-1 min-w-0">
+                            <div id="wizard-title" class="text-base font-semibold text-white">Build didn&rsquo;t finish</div>
+                            <div class="text-[11px] text-amber-300/80 mt-0.5">The Operator might be stuck or busy</div>
+                          </div>
+                        </div>
+                        <p class="text-xs text-gray-300 leading-relaxed mb-3">
+                          I couldn&rsquo;t build the team in 5 minutes. You can try again, or type your request directly to the Operator.
+                        </p>
+                        <div class="flex items-center gap-2">
+                          <button @click="wizardRetryBuild()"
+                                  data-testid="wizard-build-failed-retry"
+                                  aria-label="Retry building the team"
+                                  class="text-xs font-medium px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">
+                            Retry
+                          </button>
+                          <button @click="wizardExitToTyping()"
+                                  data-testid="wizard-build-failed-type"
+                                  aria-label="Type instead"
+                                  class="text-xs font-medium px-4 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-300 transition-colors">
+                            Type instead
                           </button>
                         </div>
                       </div>
@@ -645,14 +682,11 @@
                           </div>
                           <div class="flex-1 min-w-0">
                             <div id="wizard-title" class="text-base font-semibold text-white">Your team is ready</div>
-                            <div class="text-[11px] text-emerald-300/80 mt-0.5">Step 3 of 3 &middot; we&rsquo;ll take it from here</div>
+                            <div class="text-[11px] text-emerald-300/80 mt-0.5">Step 4 of 4 &middot; we&rsquo;ll take it from here</div>
                           </div>
                         </div>
                         <p class="text-xs text-gray-300 leading-relaxed mb-1">
-                          Your team is starting now. First output expected in about 10 minutes.
-                        </p>
-                        <p class="text-xs text-gray-400 leading-relaxed mb-3">
-                          I&rsquo;ll ping you when something needs your attention.
+                          Your team is starting now. The Operator checks on them every 15 minutes and will alert you when something needs your attention.
                         </p>
                         <!-- Phase 4 quick-link chips. Each switches a tab
                              and completes the wizard so the user lands

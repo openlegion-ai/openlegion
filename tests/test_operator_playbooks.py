@@ -227,19 +227,17 @@ class TestActionChipsInstruction:
         """ACTION block must appear at the very end of the response."""
         assert "end" in _OPERATOR_CORE.lower()
 
-    def test_greeting_includes_action_example(self):
-        """Bootstrap greeting seeds a working example block of chips so
-        the first-visit user sees them on the very first message."""
-        assert "ACTION:" in _OPERATOR_GREETING
-        # At least 3 sample chips so the rendering path actually exercises
-        # the multi-chip layout on first load.
-        assert _OPERATOR_GREETING.count("ACTION:") >= 3
+    def test_operator_greeting_no_action_lines(self):
+        """Bootstrap greeting must NOT carry ACTION: chip lines.
 
-    def test_greeting_examples_are_short(self):
-        """Sample chips in the greeting respect the ≤40 char constraint."""
+        Before fix #3 the greeting ended with four ACTION: lines that
+        matched the wizard ``ask`` card chips, which caused TWO chip
+        rows to render on cold start (one parsed from the bootstrap
+        greeting, one from the wizard). The wizard now owns the chips;
+        the greeting is prose-only.
+        """
         for line in _OPERATOR_GREETING.splitlines():
-            stripped = line.strip()
-            if not stripped.upper().startswith("ACTION:"):
-                continue
-            label = stripped.split(":", 1)[1].strip()
-            assert len(label) <= 40, f"Greeting chip too long ({len(label)} chars): {label!r}"
+            assert not line.strip().upper().startswith("ACTION:"), (
+                f"Greeting must not contain ACTION lines (chips owned "
+                f"by wizard): {line!r}"
+            )

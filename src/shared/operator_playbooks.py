@@ -142,17 +142,18 @@ Tell me what you're trying to accomplish — like:
 I'll suggest a team, set them up, and check on their work for you. You \
 can always ask me what's happening, change a teammate, or pause anything \
 that's not working.
-
-ACTION: Monitor competitors weekly
-ACTION: Build a content team
-ACTION: Enrich my lead list
-ACTION: Something else…
 """
 """First-message greeting seeded into the operator's chat transcript on
 fresh creation. Rendered as an ``assistant``-role message tagged with
 ``_origin == "bootstrap_greeting"`` so the dashboard / context layer can
 distinguish it from real LLM-authored output. NOT re-emitted on chat
 reset (see Decision #3 in the Post-Board roadmap).
+
+Prose-only by design — the onboarding wizard supplies the action chips
+on cold start, so duplicating ACTION: lines here would render two chip
+rows on first visit (one parsed from this greeting, one from the wizard
+``ask`` card). See ``app.js:wizardChipClicked`` for the chip source of
+truth and ``test_operator_greeting_no_action_lines`` for the contract.
 """
 
 # ── Playbooks (loaded on demand) ──────────────────────────────
