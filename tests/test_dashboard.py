@@ -5333,3 +5333,133 @@ class TestPhase1ConversationsContract:
         b_workers = [w["agent_id"] for w in client_b.get("/dashboard/api/conversations").json()["workers"]]
         assert a_workers == ["alpha"]
         assert b_workers == []  # Critical: no leakage from session A to B.
+
+
+# ── EventBus coverage — restart, archive, project CRUD, credential_stored ──
+
+
+class TestDashboardEventBusCoverage:
+    """Verify the dashboard endpoints emit live WebSocket events on
+    every state change so the SPA reflects updates without a full
+    reload. Each test captures the EventBus and asserts the expected
+    event(s) fired with the right ``type`` + ``agent`` + ``data``.
+    """
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir, include_v2=True)
+        self.client = _make_client(self.components)
+        self.bus = self.components["event_bus"]
+        self.captured: list[dict] = []
+        self.bus.add_listener(lambda e: self.captured.append(e))
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _types_seen(self) -> list[str]:
+        return [e["type"] for e in self.captured]
+
+    @patch("src.cli.config._load_config")
+    def test_restart_endpoint_emits_restarting_then_restarted(self, mock_load):
+        mock_load.return_value = {
+            "llm": {"default_model": "openai/gpt-4o-mini"},
+            "agents": {
+                "alpha": {
+                    "role": "tester", "skills_dir": "",
+                    "model": "openai/gpt-4o-mini",
+                },
+            },
+            "network": {},
+        }
+        runtime = self.components["runtime"]
+        runtime.start_agent.return_value = "http://localhost:8401"
+        runtime.wait_for_agent = AsyncMock(return_value=True)
+
+        resp = self.client.post("/dashboard/api/agents/alpha/restart")
+        assert resp.status_code == 200, resp.text
+
+        types = self._types_seen()
+        # The "restarting" pulse fires before stop, the "restarted"
+        # event after wait_for_agent. Other events (agent_state etc.)
+        # may interleave; we only assert on relative ordering.
+        assert "agent_restarting" in types
+        assert "agent_restarted" in types
+        i_start = types.index("agent_restarting")
+        i_done = types.index("agent_restarted")
+        assert i_start < i_done
+
+        restart_evts = [
+            e for e in self.captured
+            if e["type"] in ("agent_restarting", "agent_restarted")
+        ]
+        for e in restart_evts:
+            assert e["agent"] == "alpha"
+            assert e["data"]["agent_id"] == "alpha"
+
+    @patch("src.cli.config._load_config")
+    def test_restart_failure_emits_state_restart_failed(self, mock_load):
+        mock_load.return_value = {
+            "llm": {"default_model": "openai/gpt-4o-mini"},
+            "agents": {"alpha": {"role": "tester", "model": "x"}},
+            "network": {},
+        }
+        runtime = self.components["runtime"]
+        runtime.start_agent.side_effect = RuntimeError("boom")
+
+        resp = self.client.post("/dashboard/api/agents/alpha/restart")
+        assert resp.status_code == 500
+
+        # The pulse fired and a ``restart_failed`` agent_state event
+        # was emitted so the SPA can clear the spinner + surface an
+        # error toast.
+        assert "agent_restarting" in self._types_seen()
+        failed = [
+            e for e in self.captured
+            if e["type"] == "agent_state"
+            and e.get("data", {}).get("state") == "restart_failed"
+        ]
+        assert len(failed) == 1
+        assert "boom" in failed[0]["data"]["error"]
+
+    @patch("src.cli.config._create_project")
+    def test_create_project_emits_project_created(self, mock_create):
+        mock_create.return_value = None
+        resp = self.client.post(
+            "/dashboard/api/projects",
+            json={"name": "alpha-proj", "description": "hi", "members": []},
+        )
+        assert resp.status_code == 200, resp.text
+        created = [e for e in self.captured if e["type"] == "project_created"]
+        assert len(created) == 1
+        assert created[0]["data"]["project_id"] == "alpha-proj"
+
+    @patch("src.cli.config._delete_project")
+    def test_delete_project_emits_project_deleted(self, mock_del):
+        mock_del.return_value = None
+        resp = self.client.delete("/dashboard/api/projects/alpha-proj")
+        assert resp.status_code == 200
+        deleted = [e for e in self.captured if e["type"] == "project_deleted"]
+        assert len(deleted) == 1
+        assert deleted[0]["data"]["project_id"] == "alpha-proj"
+
+    def test_credential_stored_emit_carries_agent_and_request_id(self):
+        # The vault is a MagicMock in include_v2 mode; the endpoint
+        # only requires that ``add_credential`` doesn't raise.
+        self.components["credential_vault"].add_credential = MagicMock(return_value=None)
+        resp = self.client.post(
+            "/dashboard/api/credentials/agent",
+            json={
+                "service": "github_token",
+                "key": "ghp_abc",
+                "agent_id": "alpha",
+                "request_id": "req-xyz",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        stored = [e for e in self.captured if e["type"] == "credential_stored"]
+        assert len(stored) == 1
+        assert stored[0]["agent"] == "alpha"
+        assert stored[0]["data"]["request_id"] == "req-xyz"
+        assert stored[0]["data"]["agent_id"] == "alpha"
+        assert stored[0]["data"]["service"] == "github_token"

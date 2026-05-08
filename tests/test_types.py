@@ -1,9 +1,16 @@
 """Unit tests for shared Pydantic types."""
 
+from __future__ import annotations
+
+import re
+from pathlib import Path
+from typing import get_args
+
 from src.shared.types import (
     AgentConfig,
     AgentMessage,
     AgentStatus,
+    DashboardEvent,
     TaskAssignment,
     TaskResult,
     TokenBudget,
@@ -108,5 +115,93 @@ def test_agent_config_extra_fields_allowed():
     dumped = cfg2.model_dump()
     assert dumped["legacy_field"] == "ignored-but-kept"
     assert dumped["capabilities"] == ["a"]
+
+
+# ── DashboardEvent.type literal coverage ───────────────────────────────
+
+
+# Strings that look like emit calls but are NOT WebSocket event names —
+# they're rate-limit category keys, audit actions, etc. These must be
+# excluded from the literal-coverage sweep below.
+_NON_WS_EMIT_STRINGS: frozenset[str] = frozenset({
+    # Rate-limit category passed to ``_check_rate_limit`` — same call
+    # shape as ``event_bus.emit`` but completely separate namespace.
+    "blackboard_write",
+    # ``cli/runtime.py`` emits ``message_sent`` / ``message_received``
+    # which are bona-fide WS event types — keep them out of the
+    # exclusion set.
+})
+
+# Pattern matches:
+#   event_bus.emit("name", ...
+#   self._event_bus.emit("name", ...
+#   self.event_bus.emit("name", ...
+#   self._safe_emit(\n    "name", ...
+# It deliberately scans only ``src/`` (not test fixtures or docs).
+_EMIT_RE = re.compile(
+    r"""(?xs)
+    (?:event_bus|_event_bus|_safe_emit)
+    \s* (?: \. \s* emit )? \s*
+    \( \s*
+    "([a-z][a-z0-9_]+)"   # the event-type literal — captured
+    """,
+)
+
+
+def _src_root() -> Path:
+    # tests/test_types.py → repo/src
+    return Path(__file__).resolve().parent.parent / "src"
+
+
+def test_dashboard_event_literal_count_pinned():
+    """The literal count is referenced in CLAUDE.md and the
+    ``_dashboard/server.py`` docstring — fail loud if it drifts so the
+    docs can be updated in lockstep with the contract change."""
+    literals = get_args(DashboardEvent.model_fields["type"].annotation)
+    # When this fails, update CLAUDE.md ("DashboardEvent.type Literal
+    # enumerates N WebSocket event names") and the comment in the
+    # ``Known Constraints & Decisions`` section in lockstep.
+    assert len(literals) >= 50, (
+        f"DashboardEvent.type has {len(literals)} literals — "
+        f"CLAUDE.md last referenced 50."
+    )
+
+
+def test_every_emit_string_in_src_matches_a_dashboard_event_literal():
+    """Regex sweep — guards against silent EventBus drops.
+
+    ``EventBus.emit("foo")`` raises ``ValidationError`` when ``"foo"``
+    isn't in the ``DashboardEvent.type`` Literal, and the emit-site
+    ``try/except`` swallows the error at debug level. This means a
+    typo or a forgotten-to-register literal silently drops the event
+    on the floor — exactly the regression that prompted this audit.
+
+    This test trips when:
+      * a new ``event_bus.emit("new_type", ...)`` lands in src/ but
+        ``DashboardEvent.type`` wasn't extended in lockstep, or
+      * a literal is removed from ``DashboardEvent.type`` while an
+        emit site still references it.
+    """
+    literals = set(get_args(DashboardEvent.model_fields["type"].annotation))
+    found: set[str] = set()
+    src = _src_root()
+    for path in src.rglob("*.py"):
+        # __pycache__ shows up as binary garbage — skip it.
+        if "__pycache__" in path.parts:
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for match in _EMIT_RE.finditer(text):
+            name = match.group(1)
+            if name in _NON_WS_EMIT_STRINGS:
+                continue
+            found.add(name)
+
+    missing = sorted(found - literals)
+    assert not missing, (
+        f"emit() strings without a matching DashboardEvent.type literal: "
+        f"{missing}. Either add the literal to src/shared/types.py or "
+        f"strip the emit call. Silent ValidationError swallowing means "
+        f"these events never reach the dashboard."
+    )
 
 

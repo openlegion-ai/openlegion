@@ -760,6 +760,7 @@ class Tasks:
         *,
         actor: str,
         blocker_note: str | None = None,
+        extra_payload: dict | None = None,
     ) -> dict:
         """Atomically transition a task to a new status.
 
@@ -837,18 +838,28 @@ class Tasks:
                 raise
         if emitted_change is not None:
             old_status, new_status, project_id, assignee = emitted_change
+            payload: dict = {
+                "task_id": task_id,
+                "project_id": project_id,
+                "assignee": assignee,
+                "old_status": old_status,
+                "new_status": new_status,
+                "actor": actor,
+                "ts": now,
+            }
+            # Merge caller-supplied context (e.g. cancel ``reason``) so
+            # the dashboard activity feed can render rich status_changed
+            # bubbles without a follow-up audit-log read. ``extra_payload``
+            # values shadow the canonical keys above only when explicitly
+            # passed — typical callers pass only new metadata.
+            if extra_payload:
+                for k, v in extra_payload.items():
+                    if v is not None:
+                        payload[k] = v
             self._safe_emit(
                 "task_status_changed",
                 agent=actor,
-                data={
-                    "task_id": task_id,
-                    "project_id": project_id,
-                    "assignee": assignee,
-                    "old_status": old_status,
-                    "new_status": new_status,
-                    "actor": actor,
-                    "ts": now,
-                },
+                data=payload,
             )
         return self.get(task_id)  # type: ignore[return-value]
 
@@ -917,10 +928,15 @@ class Tasks:
     ) -> dict:
         """Cancel a task. Convenience wrapper over ``update_status('cancelled')``.
 
-        Carries the cancel ``reason`` on the audit event payload alongside
-        the status_changed event.
+        Carries the cancel ``reason`` on the ``task_status_changed``
+        EventBus payload (so the dashboard activity feed renders the
+        reason inline) and also writes an explicit ``cancelled`` audit
+        event row so the reason is preserved in the durable history.
         """
-        result = self.update_status(task_id, "cancelled", actor=actor)
+        result = self.update_status(
+            task_id, "cancelled", actor=actor,
+            extra_payload={"reason": reason} if reason else None,
+        )
         # Also record the explicit cancel event so the reason is preserved.
         with self._conn() as conn:
             self._emit_event(
@@ -934,17 +950,23 @@ class Tasks:
         """Append an artifact ref to a task's ``artifact_refs`` list."""
         if not ref:
             raise ValueError("ref is required")
+        # Captured outside the txn so the EventBus emit (which can hop
+        # across the asyncio loop) doesn't run while we hold BEGIN
+        # IMMEDIATE — same pattern as ``update_status`` above.
+        emitted_project: str | None = None
+        emitted_committed = False
         with self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 row = conn.execute(
-                    "SELECT artifact_refs_json FROM tasks WHERE id=?",
+                    "SELECT artifact_refs_json, project_id FROM tasks WHERE id=?",
                     (task_id,),
                 ).fetchone()
                 if not row:
                     conn.execute("ROLLBACK")
                     raise TaskNotFound(task_id)
                 refs = json.loads(row[0]) if row[0] else []
+                emitted_project = row[1]
                 if ref not in refs:
                     refs.append(ref)
                 conn.execute(
@@ -956,11 +978,25 @@ class Tasks:
                     conn, task_id, "artifact_added", actor, {"ref": ref},
                 )
                 conn.execute("COMMIT")
+                emitted_committed = True
             except TaskNotFound:
                 raise
             except Exception:
                 conn.execute("ROLLBACK")
                 raise
+        if emitted_committed:
+            # Dashboard refreshes the task drawer when this lands. The
+            # bus emit is best-effort — durable state is the row above.
+            self._safe_emit(
+                "task_artifact_added",
+                agent=actor,
+                data={
+                    "task_id": task_id,
+                    "project_id": emitted_project,
+                    "ref": ref,
+                    "actor": actor,
+                },
+            )
         return self.get(task_id)  # type: ignore[return-value]
 
     # ── Outcome capture (Task 9 PR 4) ───────────────────────────

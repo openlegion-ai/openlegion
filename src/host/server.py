@@ -1175,6 +1175,14 @@ def create_mesh_app(
             blackboard.delete(key, deleted_by=agent_id)
         except ValueError as e:
             raise HTTPException(400, str(e))
+        if event_bus is not None:
+            try:
+                event_bus.emit(
+                    "blackboard_delete", agent=agent_id,
+                    data={"key": key, "deleted_by": agent_id},
+                )
+            except Exception as e:
+                logger.debug("blackboard_delete emit failed: %s", e)
         return {"deleted": True, "key": key}
 
     @app.post("/mesh/blackboard/watch")
@@ -3716,6 +3724,19 @@ def create_mesh_app(
             _create_project(name, description=description, members=members)
         except ValueError as e:
             raise HTTPException(400, str(e))
+        if event_bus is not None:
+            try:
+                event_bus.emit(
+                    "project_created", agent="operator",
+                    data={
+                        "project_id": name,
+                        "name": name,
+                        "description": description,
+                        "members": list(members),
+                    },
+                )
+            except Exception as e:
+                logger.debug("project_created emit failed: %s", e)
         return {"created": True, "name": name}
 
     @app.post("/mesh/projects/{name}/members")
@@ -3762,6 +3783,14 @@ def create_mesh_app(
             _delete_project(name)
         except ValueError as e:
             raise HTTPException(404, str(e))
+        if event_bus is not None:
+            try:
+                event_bus.emit(
+                    "project_deleted", agent="operator",
+                    data={"project_id": name, "name": name},
+                )
+            except Exception as e:
+                logger.debug("project_deleted emit failed: %s", e)
         return {"deleted": True, "name": name}
 
     @app.put("/mesh/projects/{name}/context")
@@ -3791,6 +3820,19 @@ def create_mesh_app(
         # Update project.md in place
         project_md = PROJECTS_DIR / name / "project.md"
         project_md.write_text(f"# {name}\n\n{context}\n")
+
+        if event_bus is not None:
+            try:
+                event_bus.emit(
+                    "project_updated", agent="operator",
+                    data={
+                        "project_id": name,
+                        "name": name,
+                        "field": "context",
+                    },
+                )
+            except Exception as e:
+                logger.debug("project_updated emit failed: %s", e)
 
         return {"updated": True, "project": name}
 
@@ -3863,6 +3905,19 @@ def create_mesh_app(
         meta["success_criteria"] = success_criteria
         with open(meta_file, "w") as f:
             yaml.dump(meta, f, default_flow_style=False, sort_keys=False)
+
+        if event_bus is not None:
+            try:
+                event_bus.emit(
+                    "project_updated", agent="operator",
+                    data={
+                        "project_id": name,
+                        "name": name,
+                        "field": "goal",
+                    },
+                )
+            except Exception as e:
+                logger.debug("project_updated emit failed: %s", e)
 
         return {
             "success": True,
@@ -4538,6 +4593,14 @@ def create_mesh_app(
             _archive_project(name)
         except ValueError as e:
             raise HTTPException(404, str(e))
+        if event_bus is not None:
+            try:
+                event_bus.emit(
+                    "project_archived", agent="operator",
+                    data={"project_id": name, "name": name},
+                )
+            except Exception as e:
+                logger.debug("project_archived emit failed: %s", e)
         return {"archived": True, "project": name}
 
     @app.post("/mesh/projects/{name}/unarchive")
@@ -4553,6 +4616,14 @@ def create_mesh_app(
             _unarchive_project(name)
         except ValueError as e:
             raise HTTPException(404, str(e))
+        if event_bus is not None:
+            try:
+                event_bus.emit(
+                    "project_unarchived", agent="operator",
+                    data={"project_id": name, "name": name},
+                )
+            except Exception as e:
+                logger.debug("project_unarchived emit failed: %s", e)
         return {"archived": False, "project": name}
 
     @app.post("/mesh/agents/{agent_id}/archive")
@@ -4588,6 +4659,14 @@ def create_mesh_app(
                 container_manager.stop_agent(agent_id)
             except Exception as e:
                 logger.warning("archive_agent: container stop for %s failed: %s", agent_id, e)
+        if event_bus is not None:
+            try:
+                event_bus.emit(
+                    "agent_archived", agent=agent_id,
+                    data={"agent_id": agent_id},
+                )
+            except Exception as e:
+                logger.debug("agent_archived emit failed: %s", e)
         return {"archived": True, "agent_id": agent_id}
 
     @app.post("/mesh/agents/{agent_id}/unarchive")
@@ -4604,6 +4683,14 @@ def create_mesh_app(
             _unarchive_agent(agent_id)
         except ValueError as e:
             raise HTTPException(404, str(e))
+        if event_bus is not None:
+            try:
+                event_bus.emit(
+                    "agent_unarchived", agent=agent_id,
+                    data={"agent_id": agent_id},
+                )
+            except Exception as e:
+                logger.debug("agent_unarchived emit failed: %s", e)
         return {"archived": False, "agent_id": agent_id}
 
     @app.post("/mesh/projects/{name}/propose-delete")
@@ -5177,6 +5264,34 @@ def create_mesh_app(
             change_id=change_id,
             undoable=undoable,
         )
+
+        # Emit a generic "config updated" event so the dashboard's
+        # agent config card flips to the new value live without a
+        # full reload. The soft-edit / undo paths layer their own
+        # ``operator_action_receipt[*]`` events on top of this; the
+        # confirm-edit (hard field) path relies solely on this event
+        # because hard fields don't render a Revert receipt.
+        #
+        # ``_HARD_EDIT_FIELDS`` is closed over from the enclosing app
+        # factory. Hard fields are the ones flagged above as
+        # "secrets" — none of the current hard fields contain
+        # outright secrets (model / permissions / budget / thinking),
+        # but ``permissions`` payloads can be large and structured.
+        # We pass them through verbatim; when a future hard field is
+        # added that does contain secrets, redact at the call site.
+        if event_bus is not None:
+            try:
+                event_bus.emit(
+                    "agent_config_updated", agent=agent_id,
+                    data={
+                        "agent_id": agent_id,
+                        "field": field,
+                        "new_value": new_value,
+                        "old_value": old_value,
+                    },
+                )
+            except Exception as e:
+                logger.debug("agent_config_updated emit failed: %s", e)
 
         return {"success": True, "agent_id": agent_id, "field": field}
 

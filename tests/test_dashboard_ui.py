@@ -2754,3 +2754,54 @@ class TestPolishFixesApplied:
         # Wizard states are enumerated.
         for state in ("idle", "ask", "confirming", "building", "first-output", "build_failed"):
             assert state in claude_md, f"wizard state {state} not documented"
+
+
+# ── EventBus coverage — JS handlers wired in onWsEvent ────────────────
+
+
+class TestOnWsEventHandlersForLiveCoverage:
+    """``onWsEvent`` must dispatch the new event types added to close
+    EventBus coverage gaps. Each test is a string-level assertion over
+    ``app.js`` because we can't run Alpine in pytest — but the wiring
+    is what we want to guard against silent regressions."""
+
+    def test_notification_added_handler_present(self):
+        # The handler prepends to ``notifications`` and bumps the
+        # unread count so the bell badge updates live.
+        assert "evt.type === 'notification_added'" in _APP_JS_TEXT
+        assert "this.notifications = [row, ...(this.notifications || [])]" in _APP_JS_TEXT
+        assert "this.notificationsUnreadCount" in _APP_JS_TEXT
+
+    def test_credential_stored_handler_flips_card(self):
+        # Matches by ``request_id`` (new flow) with name as fallback.
+        assert "evt.type === 'credential_stored'" in _APP_JS_TEXT
+        # And it actually flips the card.
+        # The handler iterates chatHistories and sets ``saved=true``.
+        block_start = _APP_JS_TEXT.index("evt.type === 'credential_stored'")
+        block = _APP_JS_TEXT[block_start:block_start + 1500]
+        assert "m.saved = true" in block
+        assert "m.cancelled = false" in block
+
+    def test_agent_archived_unarchived_handlers_present(self):
+        assert "evt.type === 'agent_archived'" in _APP_JS_TEXT
+        assert "evt.type === 'agent_unarchived'" in _APP_JS_TEXT
+
+    def test_agent_restart_handlers_present(self):
+        assert "evt.type === 'agent_restarting'" in _APP_JS_TEXT
+        assert "evt.type === 'agent_restarted'" in _APP_JS_TEXT
+        # Map for the spinner state must be declared on Alpine state.
+        assert "agentRestartingMap:" in _APP_JS_TEXT
+
+    def test_agent_config_updated_handler_present(self):
+        assert "evt.type === 'agent_config_updated'" in _APP_JS_TEXT
+
+    def test_project_crud_handlers_present(self):
+        # All five project events route to a single fetchProjects path.
+        for ev in (
+            "project_created", "project_updated", "project_deleted",
+            "project_archived", "project_unarchived",
+        ):
+            assert f"'{ev}'" in _APP_JS_TEXT, f"handler for {ev} missing"
+
+    def test_blackboard_delete_handler_present(self):
+        assert "evt.type === 'blackboard_delete'" in _APP_JS_TEXT

@@ -430,7 +430,7 @@ def _reload_server(monkeypatch, *, v2: bool, tasks_db: str):
 
 
 def _build_app(tmp_path, server_module, *, perms_map, agents=None,
-               cost_tracker=None, container_manager=None):
+               cost_tracker=None, container_manager=None, event_bus=None):
     blackboard = Blackboard(str(tmp_path / "bb.db"))
     pubsub = PubSub()
     permissions = PermissionMatrix()
@@ -444,6 +444,7 @@ def _build_app(tmp_path, server_module, *, perms_map, agents=None,
         permissions=permissions,
         cost_tracker=cost_tracker,
         container_manager=container_manager,
+        event_bus=event_bus,
     )
     return app, blackboard
 
@@ -855,3 +856,249 @@ async def test_endpoint_list_projects_includes_archived_when_flagged(v2_app):
     body = r.json()
     names = {p["name"] for p in body["projects"]}
     assert "research" in names
+
+
+# ── PR — close EventBus coverage gaps ─────────────────────────────────
+
+
+@pytest.fixture
+def v2_app_with_bus(tmp_path, monkeypatch):
+    """Variant of ``v2_app`` that wires a real EventBus so tests can
+    assert which events fire on archive/unarchive/project-CRUD/blackboard
+    delete endpoints. Yields ``(app, server_module, tmp_path, bus)``."""
+    from src.dashboard.events import EventBus
+
+    pdir = _projects_layout(tmp_path)
+    afile = _agents_yaml(tmp_path, names=["scout", "analyst", "tracker"])
+    monkeypatch.chdir(tmp_path)
+    import src.cli.config as cli_cfg
+    monkeypatch.setattr(cli_cfg, "PROJECTS_DIR", pdir)
+    monkeypatch.setattr(cli_cfg, "AGENTS_FILE", afile)
+    monkeypatch.setattr(cli_cfg, "PERMISSIONS_FILE", tmp_path / "config" / "permissions.json")
+
+    server_module = _reload_server(
+        monkeypatch, v2=True, tasks_db=str(tmp_path / "tasks.db"),
+    )
+
+    perms_map = {
+        "operator": {"can_route_tasks": True, "can_manage_projects": True},
+        "scout":    {"can_route_tasks": True, "can_message": ["analyst", "operator"]},
+        "analyst":  {"can_route_tasks": False, "can_message": ["scout"]},
+        "tracker":  {"can_route_tasks": False, "can_message": []},
+    }
+    cost_tracker = MagicMock()
+    cost_tracker.check_budget = MagicMock(side_effect=lambda agent: (
+        {"allowed": False, "daily_used": 20.0, "daily_limit": 10.0,
+         "monthly_used": 250.0, "monthly_limit": 200.0}
+        if agent == "scout"
+        else {"allowed": True, "daily_used": 1.0, "daily_limit": 10.0,
+              "monthly_used": 5.0, "monthly_limit": 200.0}
+    ))
+    container_manager = MagicMock()
+    container_manager.stop_agent = MagicMock(return_value=True)
+    bus = EventBus()
+    app, bb = _build_app(
+        tmp_path, server_module,
+        perms_map=perms_map,
+        agents={
+            "scout": "http://scout:8400",
+            "analyst": "http://analyst:8400",
+            "tracker": "http://tracker:8400",
+            "operator": "http://operator:8400",
+        },
+        cost_tracker=cost_tracker,
+        container_manager=container_manager,
+        event_bus=bus,
+    )
+    yield app, server_module, tmp_path, bus
+    bb.close()
+    monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_V2", raising=False)
+    monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)
+    importlib.reload(server_module)
+
+
+def _capture(bus) -> list[dict]:
+    captured: list[dict] = []
+    bus.add_listener(lambda e: captured.append(e))
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_archive_agent_emits_agent_archived(v2_app_with_bus):
+    app, _, _, bus = v2_app_with_bus
+    captured = _capture(bus)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post("/mesh/agents/scout/archive",
+                         headers={"X-Agent-ID": "operator"})
+    assert r.status_code == 200
+    archived = [e for e in captured if e["type"] == "agent_archived"]
+    assert len(archived) == 1
+    assert archived[0]["agent"] == "scout"
+    assert archived[0]["data"]["agent_id"] == "scout"
+
+
+@pytest.mark.asyncio
+async def test_unarchive_agent_emits_agent_unarchived(v2_app_with_bus):
+    app, _, _, bus = v2_app_with_bus
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        await c.post("/mesh/agents/scout/archive",
+                     headers={"X-Agent-ID": "operator"})
+        captured = _capture(bus)  # capture only post-archive events
+        r = await c.post("/mesh/agents/scout/unarchive",
+                         headers={"X-Agent-ID": "operator"})
+    assert r.status_code == 200
+    unarchived = [e for e in captured if e["type"] == "agent_unarchived"]
+    assert len(unarchived) == 1
+    assert unarchived[0]["data"]["agent_id"] == "scout"
+
+
+@pytest.mark.asyncio
+async def test_archive_project_emits_project_archived(v2_app_with_bus):
+    app, _, _, bus = v2_app_with_bus
+    captured = _capture(bus)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post("/mesh/projects/research/archive",
+                         headers={"X-Agent-ID": "operator"})
+    assert r.status_code == 200
+    arch = [e for e in captured if e["type"] == "project_archived"]
+    assert len(arch) == 1
+    assert arch[0]["data"]["project_id"] == "research"
+
+
+@pytest.mark.asyncio
+async def test_unarchive_project_emits_project_unarchived(v2_app_with_bus):
+    app, _, _, bus = v2_app_with_bus
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        await c.post("/mesh/projects/research/archive",
+                     headers={"X-Agent-ID": "operator"})
+        captured = _capture(bus)
+        r = await c.post("/mesh/projects/research/unarchive",
+                         headers={"X-Agent-ID": "operator"})
+    assert r.status_code == 200
+    unarch = [e for e in captured if e["type"] == "project_unarchived"]
+    assert len(unarch) == 1
+    assert unarch[0]["data"]["project_id"] == "research"
+
+
+# NOTE: ``mesh_create_project`` / ``mesh_delete_project`` use
+# ``_resolve_agent_id("", request)`` which only consults the bearer
+# token when ``_auth_tokens`` is configured. The v2 fixture runs
+# without auth tokens (dev/test mode) so the endpoint returns
+# ``Only the operator can manage projects`` regardless of the
+# ``X-Agent-ID`` header. The equivalent dashboard endpoint —
+# ``POST /api/projects`` / ``DELETE /api/projects/{name}`` — is
+# covered in ``test_dashboard.py::TestDashboardEventBusCoverage`` and
+# uses the same ``_create_project`` / ``_delete_project`` helpers, so
+# the emit logic is exercised there.
+
+
+@pytest.mark.asyncio
+async def test_mesh_set_project_goal_emits_project_updated(v2_app_with_bus):
+    app, _, _, bus = v2_app_with_bus
+    captured = _capture(bus)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/projects/research/goal",
+            json={"north_star": "Win this quarter", "success_criteria": ["x"]},
+            headers={"X-Agent-ID": "operator"},
+        )
+    assert r.status_code == 200, r.text
+    updated = [e for e in captured if e["type"] == "project_updated"]
+    assert len(updated) == 1
+    assert updated[0]["data"]["field"] == "goal"
+    assert updated[0]["data"]["project_id"] == "research"
+
+
+@pytest.mark.asyncio
+async def test_blackboard_delete_emits_blackboard_delete(v2_app_with_bus):
+    """The blackboard delete endpoint emits ``blackboard_delete`` so the
+    SPA can drop the entry from the viewer without a polling round-trip.
+    Mirrors the existing ``blackboard_write`` emit on the write path."""
+    app, _, _, bus = v2_app_with_bus
+    # Add a permission for "scout" to write/read its own keys, since
+    # the v2_app perms_map doesn't grant blackboard ACL by default.
+    # We seed the entry via the Blackboard directly to bypass the
+    # write endpoint's ACL gate, then exercise the delete endpoint.
+    from src.host.permissions import AgentPermissions
+    # Use the permissions matrix on the app's router. We pull it
+    # out of the closure on a registered endpoint since the v2_app
+    # fixture doesn't expose the matrix directly.
+    perms = None
+    for route in app.routes:
+        endpoint = getattr(route, "endpoint", None)
+        if endpoint is None:
+            continue
+        # The closure captures ``permissions``; expose via an
+        # attribute so we can flip the ACL for this test only.
+        closure = getattr(endpoint, "__closure__", None) or ()
+        names = getattr(getattr(endpoint, "__code__", None), "co_freevars", ())
+        for name, cell in zip(names, closure):
+            if name == "permissions":
+                perms = cell.cell_contents
+                break
+        if perms is not None:
+            break
+    assert perms is not None, "could not locate permission matrix on app"
+    perms.permissions["operator"] = AgentPermissions(
+        agent_id="operator",
+        can_route_tasks=True,
+        can_manage_projects=True,
+        blackboard_write=["*"],
+    )
+
+    # Seed the entry directly via Blackboard (bypassing the write
+    # endpoint ACL gate isn't what we're testing here — the delete
+    # emit is).
+    blackboard = None
+    for route in app.routes:
+        endpoint = getattr(route, "endpoint", None)
+        if endpoint is None:
+            continue
+        closure = getattr(endpoint, "__closure__", None) or ()
+        names = getattr(getattr(endpoint, "__code__", None), "co_freevars", ())
+        for name, cell in zip(names, closure):
+            if name == "blackboard":
+                blackboard = cell.cell_contents
+                break
+        if blackboard is not None:
+            break
+    assert blackboard is not None
+    blackboard.write("foo/bar", {"hi": 1}, written_by="operator")
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        captured = _capture(bus)
+        r = await c.request(
+            "DELETE", "/mesh/blackboard/foo/bar",
+            params={"agent_id": "operator"},
+            headers={"X-Agent-ID": "operator"},
+        )
+    assert r.status_code == 200, r.text
+    deletes = [e for e in captured if e["type"] == "blackboard_delete"]
+    assert len(deletes) == 1
+    assert deletes[0]["data"]["key"] == "foo/bar"
+    assert deletes[0]["data"]["deleted_by"] == "operator"
+
+
+@pytest.mark.asyncio
+async def test_apply_pending_change_emits_agent_config_updated(v2_app_with_bus):
+    """Soft-edit emits ``agent_config_updated`` after the YAML write
+    so the dashboard agent config card flips to the new value live.
+    The Revert receipt rides on top via ``operator_action_receipt``."""
+    app, _, _, bus = v2_app_with_bus
+    captured = _capture(bus)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/agents/scout/edit-soft",
+            json={
+                "field": "instructions",
+                "value": "Be exceedingly polite.",
+                "summary": "tighten tone",
+            },
+            headers=_human_origin_headers(),
+        )
+    assert r.status_code == 200, r.text
+    updated = [e for e in captured if e["type"] == "agent_config_updated"]
+    assert len(updated) == 1
+    assert updated[0]["agent"] == "scout"
+    assert updated[0]["data"]["field"] == "instructions"
+    assert updated[0]["data"]["new_value"] == "Be exceedingly polite."

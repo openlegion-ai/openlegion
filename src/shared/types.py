@@ -599,9 +599,47 @@ class DashboardEvent(BaseModel):
         # event silently disappears (swallowed by ``_safe_emit``), so the
         # notifications producer below never sees deliveries.
         "task_outcome",
+        "task_artifact_added",
         "pending_action_created",
         "pending_action_resolved",
         "pending_action_expired",
+        # PR — close EventBus coverage gaps. Without these literals,
+        # ``EventBus.emit`` raises a Pydantic ValidationError that the
+        # debug-level ``except Exception`` swallows and the dashboard
+        # silently misses the event. Soft-edit Undo receipts and undo
+        # confirmations were emitted but never delivered until these
+        # literals were added — the visible regression that prompted
+        # this audit.
+        "operator_action_receipt",
+        "operator_action_receipt_undone",
+        "operator_action_receipt_superseded",
+        # Live notification bell — emitted by ``_notifications_producer``
+        # immediately after each ``notification_store.add`` call so the
+        # bell badge updates without waiting for the 60s poll.
+        "notification_added",
+        # Agent / project lifecycle — archive/unarchive emit so the SPA
+        # refreshes the relevant list without a full reload.
+        "agent_archived",
+        "agent_unarchived",
+        # Agent restart — split start/finish so the SPA can render a
+        # pulsing "Restarting" indicator and clear it on completion.
+        "agent_restarting",
+        "agent_restarted",
+        # Hard-field config apply — emitted from
+        # ``_apply_pending_change`` so the agent config card flips to
+        # the new value live (secret fields are redacted in the
+        # payload).
+        "agent_config_updated",
+        # Project CRUD — create / update / delete so the projects list
+        # refreshes without polling.
+        "project_created",
+        "project_updated",
+        "project_deleted",
+        "project_archived",
+        "project_unarchived",
+        # Blackboard delete — mirror of ``blackboard_write`` for the
+        # delete endpoint so the SPA can reflect removals live.
+        "blackboard_delete",
     ]
     agent: str = ""
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
