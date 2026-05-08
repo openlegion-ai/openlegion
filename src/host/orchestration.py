@@ -239,6 +239,58 @@ class Tasks:
                 "CREATE INDEX IF NOT EXISTS idx_tasks_previous_task "
                 "ON tasks (previous_task_id)"
             )
+            # PR-U — outcome_set_at column. Tracks when set_outcome was
+            # called, separately from completed_at, so the heartbeat
+            # query (count_outcomes_since) doesn't undercount lagged
+            # operator reviews. See _ensure_outcome_set_at_column for
+            # migration / backfill semantics.
+            self._ensure_outcome_set_at_column(conn)
+            # Partial index on (outcome, outcome_set_at). Most rows have
+            # outcome IS NULL (work isn't rated yet), so the partial
+            # predicate keeps the index small and fast for the
+            # heartbeat's per-outcome scan.
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tasks_outcome_set_at "
+                "ON tasks (outcome, outcome_set_at) "
+                "WHERE outcome IS NOT NULL"
+            )
+
+    @staticmethod
+    def _ensure_outcome_set_at_column(conn: sqlite3.Connection) -> None:
+        """PR-U: add outcome_set_at column if missing. Idempotent.
+
+        Both the ALTER and the backfill UPDATE are safe to run repeatedly:
+        the ALTER is gated by PRAGMA inspection (with a duplicate-column
+        catch for concurrent-init races, mirroring the pattern in
+        ``mesh.py``); the UPDATE is WHERE-guarded so already-stamped rows
+        are no-ops. This shape recovers from a mid-init crash where the
+        ALTER committed but the backfill did not — re-init still walks
+        the backfill UPDATE instead of short-circuiting on the column
+        being present. Rows with both ``outcome`` and ``completed_at``
+        NULL are left alone (anomalous; better to not invent data).
+        """
+        cols = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
+        }
+        if "outcome_set_at" not in cols:
+            try:
+                conn.execute(
+                    "ALTER TABLE tasks ADD COLUMN outcome_set_at REAL"
+                )
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
+                # Another process won the race; column exists — proceed
+                # to backfill.
+        # Always run backfill — WHERE clause makes it idempotent on
+        # already-stamped rows. Recovers from prior partial migrations
+        # (ALTER committed, UPDATE didn't) on a subsequent re-init.
+        conn.execute(
+            "UPDATE tasks SET outcome_set_at = completed_at "
+            "WHERE outcome IS NOT NULL AND outcome_set_at IS NULL "
+            "AND completed_at IS NOT NULL"
+        )
 
     # ── Helpers ─────────────────────────────────────────────────
 
@@ -274,6 +326,7 @@ class Tasks:
             "outcome": row[19],
             "feedback_text": row[20],
             "previous_task_id": row[21],
+            "outcome_set_at": row[22],
         }
 
     _SELECT_COLS = (
@@ -281,7 +334,7 @@ class Tasks:
         "assignee, status, priority, dependencies_json, artifact_refs_json, "
         "blocker_note, origin_kind, origin_channel, origin_user, "
         "created_at, updated_at, completed_at, retention_until, "
-        "outcome, feedback_text, previous_task_id"
+        "outcome, feedback_text, previous_task_id, outcome_set_at"
     )
 
     def _emit_event(
@@ -481,17 +534,19 @@ class Tasks:
     ) -> dict[str, int]:
         """Count tasks per assignee whose latest ``outcome`` was set within ``since_seconds``.
 
-        Mirrors ``SELECT assignee, COUNT(*) FROM tasks WHERE outcome=?
-        AND completed_at >= ? GROUP BY assignee``. Operator is included;
-        callers drop it. Tasks with NULL ``completed_at`` (still running)
-        are excluded by the >= filter.
+        PR-U: filters on ``outcome_set_at`` (when the operator clicked
+        the rating button) rather than ``completed_at`` (when the agent
+        finished). The two diverge whenever review is delayed — a task
+        completed Monday and rated rejected on Wednesday must show up
+        in the Wednesday heartbeat, not Monday's. Tasks rated before
+        the cutoff (or never rated) are excluded by the >= filter.
         """
         cutoff = time.time() - since_seconds
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT assignee, COUNT(*) FROM tasks "
-                "WHERE outcome = ? AND completed_at IS NOT NULL "
-                "AND completed_at >= ? GROUP BY assignee",
+                "WHERE outcome = ? AND outcome_set_at IS NOT NULL "
+                "AND outcome_set_at >= ? GROUP BY assignee",
                 (outcome, cutoff),
             ).fetchall()
         return {row[0]: int(row[1] or 0) for row in rows if row[0]}
@@ -862,10 +917,18 @@ class Tasks:
                         f"cannot set outcome on non-terminal task {task_id} "
                         f"(status={current_status!r})"
                     )
+                # PR-U — stamp outcome_set_at on first rating only.
+                # COALESCE preserves the FIRST set_outcome call's timestamp
+                # so downstream consumers (heartbeat, audit) see a stable
+                # "first rated at" answer regardless of subsequent
+                # re-rates. The audit event row below captures every
+                # submission with its own created_at, so re-rating
+                # history isn't lost.
                 conn.execute(
                     "UPDATE tasks SET outcome=?, feedback_text=?, "
+                    "outcome_set_at=COALESCE(outcome_set_at, ?), "
                     "updated_at=? WHERE id=?",
-                    (outcome, feedback, now, task_id),
+                    (outcome, feedback, now, now, task_id),
                 )
                 self._emit_event(
                     conn, task_id, "task_outcome", actor,

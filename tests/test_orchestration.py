@@ -775,16 +775,254 @@ def test_count_outcomes_since_groups_by_assignee(tmp_path):
 
 
 def test_count_outcomes_since_excludes_old(tmp_path):
+    """PR-U: rewinding outcome_set_at past the cutoff excludes the row.
+
+    The query filters on ``outcome_set_at`` (when the operator rated)
+    rather than ``completed_at`` (when the agent finished); see the
+    lagged-rejection test below for why that distinction matters.
+    """
     t = _make_store(tmp_path)
     rec = _seed_done_with_outcome(t, assignee="alpha", outcome="rejected")
-    # Manually rewind completed_at to 2 days ago.
+    # Manually rewind outcome_set_at to 2 days ago.
     with t._conn() as conn:
         conn.execute(
-            "UPDATE tasks SET completed_at=? WHERE id=?",
+            "UPDATE tasks SET outcome_set_at=? WHERE id=?",
             (time.time() - 2 * 24 * 3600, rec["id"]),
         )
     counts = t.count_outcomes_since("rejected", since_seconds=24 * 3600)
     assert counts == {}
+
+
+def test_count_outcomes_since_filters_on_outcome_set_at_not_completed_at(tmp_path):
+    """PR-U regression: lagged operator review must still surface.
+
+    Real production scenario — an agent finishes a task on Monday but
+    the operator doesn't review and click "rejected" until Wednesday.
+    The pre-PR-U query filtered on ``completed_at`` and so dropped this
+    rejection from Wednesday's 24h heartbeat. With PR-U the filter is
+    on ``outcome_set_at``, which lands inside the window.
+    """
+    t = _make_store(tmp_path)
+    rec = _seed_done_with_outcome(t, assignee="alpha", outcome="rejected")
+    # Simulate: task completed 5 days ago, but the operator only rated
+    # it just now (helper already stamped outcome_set_at to "now").
+    with t._conn() as conn:
+        conn.execute(
+            "UPDATE tasks SET completed_at=? WHERE id=?",
+            (time.time() - 5 * 24 * 3600, rec["id"]),
+        )
+    counts = t.count_outcomes_since("rejected", since_seconds=24 * 3600)
+    assert counts == {"alpha": 1}
+
+
+def test_count_outcomes_since_excludes_outcome_set_pre_cutoff(tmp_path):
+    """PR-U: the inverse — outcome_set_at older than the window is dropped.
+
+    Sanity check the >= filter: a task whose outcome_set_at is past the
+    cutoff window must NOT be counted, even if completed_at is fresh.
+    (Impossible in practice — completed_at always precedes
+    outcome_set_at — but the filter must hold regardless.)
+    """
+    t = _make_store(tmp_path)
+    rec = _seed_done_with_outcome(t, assignee="alpha", outcome="rejected")
+    # outcome_set_at 5 days ago, completed_at fresh (just now from the helper).
+    with t._conn() as conn:
+        conn.execute(
+            "UPDATE tasks SET outcome_set_at=? WHERE id=?",
+            (time.time() - 5 * 24 * 3600, rec["id"]),
+        )
+    counts = t.count_outcomes_since("rejected", since_seconds=24 * 3600)
+    assert counts == {}
+
+
+def test_set_outcome_stamps_outcome_set_at(tmp_path):
+    """PR-U: set_outcome populates outcome_set_at on first call."""
+    t = _make_store(tmp_path)
+    rec = t.create(creator="op", assignee="alpha", title="t")
+    t.update_status(rec["id"], "working", actor="alpha")
+    t.update_status(rec["id"], "done", actor="alpha")
+    before = time.time()
+    updated = t.set_outcome(rec["id"], "accepted", "ok", actor="op")
+    after = time.time()
+    assert updated["outcome_set_at"] is not None
+    assert before <= updated["outcome_set_at"] <= after
+
+
+def test_set_outcome_idempotent_does_not_clobber_outcome_set_at(tmp_path):
+    """PR-U: re-rating preserves the original outcome_set_at timestamp.
+
+    Outcomes are write-many — operators can re-rate after a misclick.
+    The first stamp wins so the heartbeat's "when did the operator
+    first see this?" answer is stable. Each submission still appends
+    its own task_outcome audit row with its own created_at, so
+    re-rating history isn't lost.
+    """
+    t = _make_store(tmp_path)
+    rec = t.create(creator="op", assignee="alpha", title="t")
+    t.update_status(rec["id"], "working", actor="alpha")
+    t.update_status(rec["id"], "done", actor="alpha")
+    first = t.set_outcome(rec["id"], "rejected", "wrong", actor="op")
+    first_stamp = first["outcome_set_at"]
+    assert first_stamp is not None
+    # Force a measurable delta so the second call would clearly differ
+    # if the implementation overwrote.
+    time.sleep(0.01)
+    second = t.set_outcome(rec["id"], "accepted", "actually fine", actor="op")
+    assert second["outcome_set_at"] == first_stamp
+
+
+def test_outcome_set_at_migration_backfills_existing_rows(tmp_path):
+    """PR-U: pre-migration rated rows backfill outcome_set_at = completed_at.
+
+    Open a fresh DB, drop the new column to simulate a pre-PR-U
+    deployment, manually insert a rated row, then re-run init and
+    confirm the backfill ran.
+    """
+    import sqlite3
+    if sqlite3.sqlite_version_info < (3, 35, 0):
+        pytest.skip("ALTER TABLE DROP COLUMN requires SQLite >= 3.35")
+    db_path = str(tmp_path / "tasks.db")
+    # First init creates the schema (with outcome_set_at).
+    t = Tasks(db_path=db_path)
+    t.close()
+    # Simulate pre-PR-U state: drop the column. CI Pythons (3.11+)
+    # ship with SQLite >= 3.35 so this is reliable; the skip above
+    # guards older builds.
+    raw = sqlite3.connect(db_path)
+    # The index references outcome_set_at — drop it first so the
+    # column drop succeeds.
+    raw.execute("DROP INDEX IF EXISTS idx_tasks_outcome_set_at")
+    raw.execute("ALTER TABLE tasks DROP COLUMN outcome_set_at")
+    # Insert a "pre-migration" rated row — completed_at set, no
+    # outcome_set_at column existed when this row landed.
+    completed_ts = time.time() - 3 * 24 * 3600
+    raw.execute(
+        "INSERT INTO tasks "
+        "(id, project_id, parent_task_id, title, description, "
+        "creator, assignee, status, priority, dependencies_json, "
+        "artifact_refs_json, blocker_note, origin_kind, origin_channel, "
+        "origin_user, created_at, updated_at, completed_at, "
+        "retention_until, outcome, feedback_text, previous_task_id) "
+        "VALUES (?, NULL, NULL, ?, NULL, ?, ?, 'done', 0, NULL, NULL, "
+        "NULL, NULL, NULL, NULL, ?, ?, ?, NULL, 'rejected', NULL, NULL)",
+        (
+            "task_legacy", "old", "op", "alpha",
+            completed_ts, completed_ts, completed_ts,
+        ),
+    )
+    raw.commit()
+    raw.close()
+    # Re-run init: triggers the migration + backfill.
+    t2 = Tasks(db_path=db_path)
+    fetched = t2.get("task_legacy")
+    assert fetched is not None
+    assert fetched["outcome"] == "rejected"
+    assert fetched["outcome_set_at"] == completed_ts
+    t2.close()
+
+
+def test_outcome_set_at_migration_idempotent(tmp_path):
+    """PR-U: running the migration twice is safe (no double-backfill, no error)."""
+    db_path = str(tmp_path / "tasks.db")
+    t1 = Tasks(db_path=db_path)
+    t1.close()
+    # Re-instantiating must not error or duplicate work.
+    t2 = Tasks(db_path=db_path)
+    with t2._conn() as conn:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()}
+    assert "outcome_set_at" in cols
+    t2.close()
+
+
+def test_outcome_set_at_migration_recovers_from_partial_init(tmp_path):
+    """PR-U: a prior run that ALTERed the column but crashed before the
+    backfill UPDATE committed must be repaired on re-init.
+
+    Simulates the failure mode: column exists, but rows where
+    ``outcome IS NOT NULL`` still have ``outcome_set_at IS NULL``. The
+    fix moves the early-return guard so the backfill UPDATE always runs;
+    the ``WHERE`` clause makes that idempotent on already-stamped rows.
+    """
+    import sqlite3
+    db_path = str(tmp_path / "tasks.db")
+    # First init creates the full schema (column + index).
+    t = Tasks(db_path=db_path)
+    t.close()
+    # Simulate the partial-migration failure: column exists, but a row
+    # was rated and the backfill UPDATE never landed (e.g. process
+    # killed mid-init on an older deploy that lacked this loop).
+    raw = sqlite3.connect(db_path)
+    completed_ts = time.time() - 3 * 24 * 3600
+    raw.execute(
+        "INSERT INTO tasks "
+        "(id, project_id, parent_task_id, title, description, "
+        "creator, assignee, status, priority, dependencies_json, "
+        "artifact_refs_json, blocker_note, origin_kind, origin_channel, "
+        "origin_user, created_at, updated_at, completed_at, "
+        "retention_until, outcome, feedback_text, previous_task_id, "
+        "outcome_set_at) "
+        "VALUES (?, NULL, NULL, ?, NULL, ?, ?, 'done', 0, NULL, NULL, "
+        "NULL, NULL, NULL, NULL, ?, ?, ?, NULL, 'rejected', NULL, NULL, "
+        "NULL)",
+        (
+            "task_partial", "old", "op", "alpha",
+            completed_ts, completed_ts, completed_ts,
+        ),
+    )
+    raw.commit()
+    # Sanity check — column present, value NULL.
+    cols = {row[1] for row in raw.execute("PRAGMA table_info(tasks)").fetchall()}
+    assert "outcome_set_at" in cols
+    pre = raw.execute(
+        "SELECT outcome, outcome_set_at FROM tasks WHERE id=?",
+        ("task_partial",),
+    ).fetchone()
+    assert pre == ("rejected", None)
+    raw.close()
+    # Re-run init: must walk the backfill UPDATE even though the column
+    # already exists, repairing the orphaned row.
+    t2 = Tasks(db_path=db_path)
+    fetched = t2.get("task_partial")
+    assert fetched is not None
+    assert fetched["outcome"] == "rejected"
+    assert fetched["outcome_set_at"] == completed_ts
+    t2.close()
+
+
+def test_outcome_set_at_backfill_skips_anomalous_rows(tmp_path):
+    """PR-U: a rated row missing completed_at stays NULL (don't invent data)."""
+    import sqlite3
+    if sqlite3.sqlite_version_info < (3, 35, 0):
+        pytest.skip("ALTER TABLE DROP COLUMN requires SQLite >= 3.35")
+    db_path = str(tmp_path / "tasks.db")
+    t = Tasks(db_path=db_path)
+    t.close()
+    raw = sqlite3.connect(db_path)
+    # The index references outcome_set_at — drop it first so the
+    # column drop succeeds.
+    raw.execute("DROP INDEX IF EXISTS idx_tasks_outcome_set_at")
+    raw.execute("ALTER TABLE tasks DROP COLUMN outcome_set_at")
+    # Anomalous row: outcome set but completed_at NULL.
+    raw.execute(
+        "INSERT INTO tasks "
+        "(id, project_id, parent_task_id, title, description, "
+        "creator, assignee, status, priority, dependencies_json, "
+        "artifact_refs_json, blocker_note, origin_kind, origin_channel, "
+        "origin_user, created_at, updated_at, completed_at, "
+        "retention_until, outcome, feedback_text, previous_task_id) "
+        "VALUES (?, NULL, NULL, ?, NULL, ?, ?, 'done', 0, NULL, NULL, "
+        "NULL, NULL, NULL, NULL, ?, ?, NULL, NULL, 'rejected', NULL, NULL)",
+        ("task_anom", "old", "op", "alpha", time.time(), time.time()),
+    )
+    raw.commit()
+    raw.close()
+    t2 = Tasks(db_path=db_path)
+    fetched = t2.get("task_anom")
+    assert fetched is not None
+    assert fetched["outcome"] == "rejected"
+    # No completed_at to copy from → leave outcome_set_at NULL.
+    assert fetched["outcome_set_at"] is None
+    t2.close()
 
 
 def test_count_failed_status_since_excludes_done(tmp_path):
