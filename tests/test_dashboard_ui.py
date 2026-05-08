@@ -299,7 +299,8 @@ class TestWizardEndpointWiring:
 class TestTabLabelVocabulary:
     def test_tabs_array_uses_user_speak(self):
         # The Alpine ``tabs`` array maps internal IDs to display labels.
-        # Phase 2 renames Agents → Team, Board → Home, System → Settings.
+        # Phase 2 renames Agents → Team, Board → Work, System → Settings.
+        # Work sits 2nd: it's the second-most-visited tab after Chat.
         m = re.search(
             r"tabs:\s*\[(.*?)\],",
             _APP_JS_TEXT,
@@ -308,8 +309,16 @@ class TestTabLabelVocabulary:
         assert m, "Could not locate the tabs array in app.js"
         block = m.group(1)
         assert "id: 'fleet'" in block and "label: 'Team'" in block
-        assert "id: 'workplace'" in block and "label: 'Home'" in block
+        assert "id: 'workplace'" in block and "label: 'Work'" in block
         assert "id: 'system'" in block and "label: 'Settings'" in block
+        # Order: Chat | Work | Team | Settings (Work is 2nd, Team 3rd).
+        chat_idx = block.find("id: 'chat'")
+        work_idx = block.find("id: 'workplace'")
+        team_idx = block.find("id: 'fleet'")
+        system_idx = block.find("id: 'system'")
+        assert chat_idx < work_idx < team_idx < system_idx, (
+            "tabs must be ordered Chat | Work | Team | Settings"
+        )
 
     def test_fleet_running_count_uses_team_word(self):
         # The dynamic-label expression in the top-nav swaps "Agents (N)"
@@ -1335,7 +1344,7 @@ class TestVocabSweepGaps:
         # Sanity check that the replacements actually landed.
         assert "Spawn helpers" in _INDEX_HTML
         assert "Schedules" in _INDEX_HTML
-        assert "Home is disabled" in _INDEX_HTML
+        assert "Work is disabled" in _INDEX_HTML
         assert "Contact support to enable." in _INDEX_HTML
         assert "+ Schedule" in _INDEX_HTML
         assert "New schedule" in _INDEX_HTML

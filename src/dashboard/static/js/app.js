@@ -49,17 +49,18 @@ function dashboard() {
     tabs: [
       { id: 'chat', label: 'Chat' },
       // Phase 2 Board UX overhaul — engineer-speak → user-speak
-      // (Agents → Team, Board → Home, System → Settings).
+      // (Agents → Team, Board → Work, System → Settings).
+      // Work sits 2nd: it's the second-most-visited tab after Chat.
+      { id: 'workplace', label: 'Work' },
       { id: 'fleet', label: 'Team' },
-      { id: 'workplace', label: 'Home' },
       { id: 'system', label: 'Settings' },
     ],
     // Side panel toggle for non-Chat tabs (Phase 1 Decision 5). Persists
     // across navigation via Alpine root scope; localStorage carries it
     // through reloads so users keep their messenger open as they wander.
     messengerSidePanelOpen: false,
-    // Last time the user viewed the Home tab. Drives the Chat tab
-    // delivery banner ("Writer delivered draft 12m ago — see on Home →")
+    // Last time the user viewed the Work tab. Drives the Chat tab
+    // delivery banner ("Writer delivered draft 12m ago — see on Work →")
     // — banner shows when ``recentlyDeliveredItems`` has entries newer
     // than this timestamp. Persisted to localStorage.
     _lastViewedHomeTs: 0,
@@ -1671,11 +1672,11 @@ function dashboard() {
 
     /**
      * Display label for a top-nav tab. Renames Agents/Board/System to
-     * Team/Home/Settings without touching the tab IDs (URLs, routes,
+     * Team/Work/Settings without touching the tab IDs (URLs, routes,
      * and JS state vars all stay on the legacy IDs).
      */
     tabLabelFor(tab) {
-      const map = { fleet: 'Team', workplace: 'Home', system: 'Settings' };
+      const map = { fleet: 'Team', workplace: 'Work', system: 'Settings' };
       return map[tab.id] || tab.label;
     },
 
@@ -1723,7 +1724,7 @@ function dashboard() {
       const title = (pick.title || 'a task').toString().slice(0, 60);
       const ageMin = Math.max(1, Math.round((Date.now() - pickTs) / 60000));
       const ageStr = ageMin < 60 ? `${ageMin}m ago` : `${Math.round(ageMin / 60)}h ago`;
-      return `${who} delivered ${title} ${ageStr} — see on Home →`;
+      return `${who} delivered ${title} ${ageStr} — see on Work →`;
     },
 
     /** Mark Home as viewed (clears the delivery banner). */
