@@ -6477,6 +6477,65 @@ def create_dashboard_router(
             events = []
         return {"task_id": task_id, "events": events}
 
+    @api_router.post("/api/workplace/tasks/{task_id}/cancel")
+    async def api_workplace_task_cancel(
+        task_id: str, request: Request,
+    ) -> dict:
+        """Cancel a task — backs the [×] button on every kanban card.
+
+        Proxies to the mesh's ``POST /mesh/tasks/{task_id}/cancel``
+        endpoint over loopback with ``x-mesh-internal: 1`` +
+        ``X-Agent-ID: operator`` so the mesh treats the dashboard as a
+        trusted internal caller (the mesh route allows creator,
+        assignee, operator, or internal). The dashboard's CSRF guard
+        (``X-Requested-With``) runs ahead of this on the verb, and the
+        cancel itself emits ``status_changed`` + ``task_status_changed``
+        events so the kanban refreshes via the existing WebSocket
+        plumbing without a manual reload.
+
+        Body: ``{reason: str}`` (optional, sanitized by the mesh).
+        Returns: the updated task record (``status="cancelled"``) so
+        the caller can patch the UI optimistically.
+        """
+        if tasks_store is None or not _orchestration_v2_on():
+            raise HTTPException(404, "Tasks store not available")
+        try:
+            body = await request.json() if (await request.body()) else {}
+        except (json.JSONDecodeError, ValueError):
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        reason = body.get("reason") or ""
+        import httpx
+        url = f"http://127.0.0.1:{mesh_port}/mesh/tasks/{task_id}/cancel"
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.post(
+                    url,
+                    json={"reason": reason},
+                    headers={
+                        "X-Requested-With": "XMLHttpRequest",
+                        "x-mesh-internal": "1",
+                        "X-Agent-ID": "operator",
+                        "Content-Type": "application/json",
+                    },
+                )
+        except Exception as e:
+            logger.warning("workplace task cancel proxy failed: %s", e)
+            raise HTTPException(502, f"Mesh unreachable: {e}")
+        if resp.status_code == 404:
+            raise HTTPException(404, "Task not found")
+        if resp.status_code >= 400:
+            try:
+                detail = resp.json().get("detail", resp.text)
+            except Exception:
+                detail = resp.text
+            raise HTTPException(resp.status_code, detail)
+        try:
+            return resp.json()
+        except Exception:
+            return {"ok": True, "task_id": task_id}
+
     @api_router.post("/api/workplace/tasks/{task_id}/outcome")
     async def api_workplace_task_outcome(
         task_id: str, request: Request,

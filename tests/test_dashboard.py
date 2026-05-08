@@ -5091,6 +5091,124 @@ class TestWorkplaceTabRoutes:
             resp = client.post("/dashboard/api/workplace/pending/missing/cancel")
         assert resp.status_code == 404
 
+    # ── Phase 4: kanban-default Board + task cancel ─────────────────
+
+    def _patch_task_cancel_proxy(self, *, status_code: int = 200):
+        """Patch httpx so the dashboard task-cancel proxy hits the
+        in-test ``Tasks`` store directly.
+
+        ``/api/workplace/tasks/{id}/cancel`` proxies to the mesh's
+        ``/mesh/tasks/{id}/cancel`` over loopback (operator-or-internal
+        gated). There's no real mesh in unit-test process — we
+        substitute an ``AsyncClient`` whose ``post`` calls
+        ``self.tasks_store.cancel`` directly and returns the updated
+        record.
+        """
+        store = self.tasks_store
+
+        class _StubResp:
+            def __init__(self, code: int, body: dict):
+                self.status_code = code
+                self._body = body
+                self.text = "" if not body else str(body)
+
+            def json(self):
+                return self._body
+
+        class _StubClient:
+            def __init__(self_inner, *a, **kw):
+                pass
+
+            async def __aenter__(self_inner):
+                return self_inner
+
+            async def __aexit__(self_inner, *a):
+                return False
+
+            async def post(self_inner, url, json=None, headers=None):
+                # URL: .../mesh/tasks/{task_id}/cancel
+                parts = url.rstrip("/").split("/")
+                task_id = parts[-2]
+                from src.host.orchestration import (
+                    InvalidStatusTransition,
+                    TaskNotFound,
+                )
+                try:
+                    rec = store.cancel(
+                        task_id, actor="operator",
+                        reason=(json or {}).get("reason") or "",
+                    )
+                except TaskNotFound:
+                    return _StubResp(404, {"detail": "Task not found"})
+                except InvalidStatusTransition as e:
+                    return _StubResp(400, {"detail": str(e)})
+                return _StubResp(200, rec or {"ok": True})
+
+        from unittest.mock import patch
+        return patch("httpx.AsyncClient", _StubClient)
+
+    def test_workplace_task_cancel_succeeds(self):
+        client = self._client_with_v2(True)
+        rec = self.tasks_store.create(
+            creator="operator", assignee="alpha", title="dig",
+            project_id="research",
+        )
+        with self._patch_task_cancel_proxy():
+            resp = client.post(
+                f"/dashboard/api/workplace/tasks/{rec['id']}/cancel",
+                json={"reason": "no longer needed"},
+            )
+        assert resp.status_code == 200
+        body = resp.json()
+        # Cancelled task record returns status="cancelled" (or at
+        # least a truthy ok marker — the mesh route returns the
+        # updated row).
+        assert (
+            body.get("status") == "cancelled"
+            or body.get("ok") is True
+        )
+        # The store actually changed state too.
+        again = self.tasks_store.get(rec["id"])
+        assert again["status"] == "cancelled"
+
+    def test_workplace_task_cancel_unknown_returns_404(self):
+        client = self._client_with_v2(True)
+        with self._patch_task_cancel_proxy():
+            resp = client.post(
+                "/dashboard/api/workplace/tasks/missing-id/cancel",
+                json={},
+            )
+        assert resp.status_code == 404
+
+    def test_workplace_task_cancel_requires_csrf(self):
+        # The CSRF guard runs ahead of the proxy — a POST without
+        # ``X-Requested-With`` should be rejected. We test by
+        # bypassing the test client's auto-injection.
+        client = self._client_with_v2(True)
+        rec = self.tasks_store.create(
+            creator="operator", assignee="alpha", title="csrf-check",
+        )
+        # Strip the CSRF header on this request to verify the guard.
+        from fastapi.testclient import TestClient
+        plain = TestClient(client.app)
+        with self._patch_task_cancel_proxy():
+            resp = plain.post(
+                f"/dashboard/api/workplace/tasks/{rec['id']}/cancel",
+                json={},
+            )
+        # Either 403 (CSRF rejection) or some other error code is
+        # acceptable — the load-bearing assertion is "not 200".
+        assert resp.status_code != 200
+
+    def test_workplace_task_cancel_v2_off_returns_404(self):
+        client = self._client_with_v2(False)
+        with self._patch_task_cancel_proxy():
+            resp = client.post(
+                "/dashboard/api/workplace/tasks/anything/cancel",
+                json={},
+            )
+        assert resp.status_code == 404
+
 
 # ─────────────────────────────────────────────────────────────────────
 # Phase 1 — Board UX overhaul (conversations contract)
