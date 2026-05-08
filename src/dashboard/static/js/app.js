@@ -272,6 +272,14 @@ function dashboard() {
     _chatFetchedAt: {},        // { agentId: timestamp } — debounce refetches
     _chatWasStreaming: {},     // { agentId: true } — tracks streams active when tab was hidden
     _chatRecoveryPolls: {},   // { agentId: intervalId } — polls for stream recovery after tab return
+    // Phase 0 baseline telemetry guards. ``_firstActionTracked`` prevents
+    // ``time_to_first_action`` from firing more than once per page load.
+    // ``_dockOpen`` shadows the side-panel state so dockOpen/dockClose
+    // helpers are idempotent — Phase 1 wires the actual UI; for now the
+    // helpers are no-ops at the UI level but still emit telemetry so the
+    // event is wireable from any future caller.
+    _firstActionTracked: false,
+    _dockOpen: false,
     activeChatId: '',          // Currently active chat tab
     chatPanelMinimized: false, // Whether the chat panel is minimized to pill
     chatFullScreen: false,     // Whether the chat panel is expanded to full screen
@@ -1565,6 +1573,92 @@ function dashboard() {
       } catch (_) { /* ignore */ }
     },
 
+    // ── Phase 0 baseline telemetry helpers ──────────────────
+    //
+    // These instrument the existing dashboard before Phase 1's
+    // structural rewrite ships, so we have a "before" benchmark to
+    // compare against. All helpers funnel through ``track()`` and are
+    // safe to call repeatedly — internal flags guard against duplicate
+    // emissions for the once-per-load events.
+
+    _trackFirstAction(actionType) {
+      // Fire ``time_to_first_action`` exactly once per page load. Any
+      // user interaction (tab switch, sub-tab click, Needs-You item,
+      // empty-state CTA, dock toggle) counts; navigation that happens
+      // automatically during init() does not — those paths bypass this
+      // helper and only run after the user has done something.
+      if (this._firstActionTracked) return;
+      this._firstActionTracked = true;
+      const since = this._initTs ? Math.max(0, (Date.now() - this._initTs) / 1000) : 0;
+      this.track('time_to_first_action', {
+        action_type: actionType || 'unknown',
+        seconds_since_load: Math.round(since * 100) / 100,
+      });
+    },
+
+    _handleNeedsYouAction(item, action) {
+      // Wraps Needs-You item-button clicks so we can count engagement.
+      // The handler may be a no-op for items without one (defensive),
+      // and we still record the click so empty-handler bugs surface in
+      // telemetry rather than silently dropping signal.
+      try {
+        const itemCount = (this.needsYouItems || []).length;
+        this.track('needs_you_click', {
+          item_count: itemCount,
+          item_kind: item && item.kind ? item.kind : 'unknown',
+          action_label: action && action.label ? action.label : '',
+        });
+        this._trackFirstAction('needs_you_click');
+      } catch (_) { /* ignore — telemetry must not block the action */ }
+      if (action && typeof action.handler === 'function') {
+        action.handler();
+      }
+    },
+
+    trackEmptyStateCta(sectionId) {
+      // Wired from any empty-state CTA button in the template. Caller
+      // passes a stable ``section_id`` so we can compare CTA traction
+      // across the surfaces Phase 1+ may rework.
+      this.track('empty_state_cta_click', { section_id: sectionId || 'unknown' });
+      this._trackFirstAction('empty_state_cta_click');
+    },
+
+    trackSubtabUsage(fromSubtab, toSubtab) {
+      // Phase 0 tracks Board sub-tab churn so Phase 3 (single-scroll
+      // Home) can be evaluated against actual sub-tab usage instead of
+      // assumed habits.
+      if (fromSubtab === toSubtab) return;
+      this.track('subtab_usage', {
+        from_subtab: fromSubtab || '',
+        to_subtab: toSubtab || '',
+      });
+      this._trackFirstAction('subtab_usage');
+    },
+
+    dockOpen(opts) {
+      // Phase 1 will mount a side-panel messenger that calls this.
+      // Today the helper is wireable but no UI invokes it — we keep
+      // the call-site contract (``{ conversation_id? }``) so Phase 1
+      // doesn't have to refactor it. Idempotent via ``_dockOpen``.
+      if (this._dockOpen) return;
+      this._dockOpen = true;
+      const props = { from_tab_id: this.activeTab || '' };
+      if (opts && opts.conversation_id) props.conversation_id = opts.conversation_id;
+      this.track('dock_open', props);
+      this._trackFirstAction('dock_open');
+    },
+
+    dockClose(opts) {
+      // Counterpart to ``dockOpen``. Idempotent — calling close on an
+      // already-closed dock is a no-op so accidental double-fires
+      // (e.g. ESC + click-outside both firing) don't double-count.
+      if (!this._dockOpen) return;
+      this._dockOpen = false;
+      const props = { from_tab_id: this.activeTab || '' };
+      if (opts && opts.conversation_id) props.conversation_id = opts.conversation_id;
+      this.track('dock_close', props);
+    },
+
     _wizardSecondsSinceStart() {
       if (!this.wizard.startedAt) return 0;
       return Math.max(0, Math.round((Date.now() - this.wizard.startedAt) / 1000));
@@ -1781,10 +1875,18 @@ function dashboard() {
     // ── Tab switching ─────────────────────────────────────
 
     switchTab(tab) {
+      const fromTab = this.activeTab;
       this.activeTab = tab;
       this.detailAgent = null;
       // Clear tab-specific auto-refresh intervals
       this._stopActivityRefresh();
+      // Phase 0 telemetry — record tab views (skip self-switches and
+      // initial route restoration where ``fromTab === tab``). Also
+      // counts as a user action for ``time_to_first_action``.
+      if (fromTab !== tab) {
+        this.track('tab_view', { tab_id: tab, from_tab_id: fromTab || '' });
+        this._trackFirstAction('tab_view');
+      }
       if (tab === 'chat') {
         if (!this.openChats.includes('operator')) {
           this.openChats.push('operator');
