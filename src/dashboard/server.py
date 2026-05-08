@@ -1670,6 +1670,108 @@ def create_dashboard_router(
                 },
             }
 
+    # Phase 1 — unified messenger: per-process set of worker conversations
+    # the user has explicitly "opened". Operator is always implicit (pinned),
+    # so it doesn't belong here. In-memory only — survives the process
+    # but not a restart, which matches the doc's Decision 7 progressive-
+    # disclosure intent (opened workers reappear after a reload only if
+    # the client also persists them via localStorage; the server set acts
+    # as the cross-tab source of truth within a session).
+    _opened_conversations: set[str] = set()
+
+    @api_router.get("/api/dashboard-config")
+    async def api_dashboard_config() -> dict:
+        """Return dashboard feature flags read once at startup.
+
+        Phase 1 of the Board UX overhaul gates the structural messenger
+        rewrite behind ``OPENLEGION_NEW_NAV``. The client reads this on
+        boot and wraps all new behavior in ``x-show="newNavEnabled"``;
+        when the flag is unset (default) the SPA renders the legacy
+        Chat / Agents / Board / System layout unchanged.
+        """
+        new_nav = os.environ.get("OPENLEGION_NEW_NAV", "").strip().lower()
+        return {
+            "new_nav_enabled": new_nav in ("1", "true", "yes", "on"),
+        }
+
+    @api_router.get("/api/conversations")
+    async def api_conversations() -> dict:
+        """Return the messenger conversation list — operator + opened workers.
+
+        Phase 1 messenger contract. Operator is always pinned with a
+        distinct ``role: "manager"`` flag. Workers appear only when the
+        user has explicitly opened them via ``POST /api/conversations/
+        {agent_id}/open`` (Decision 7 — progressive disclosure). The
+        ``unread_count`` field is reserved for future cross-device unread
+        sync; today the client tracks unread locally in ``chatUnread``.
+        """
+        # Operator is always present; pull last health-check ts as a cheap
+        # proxy for "last activity" until the chat store grows a real
+        # ``last_message_ts`` column.
+        op_last_ts = 0.0
+        if health_monitor is not None and "operator" in getattr(health_monitor, "agents", {}):
+            try:
+                op_last_ts = float(health_monitor.agents["operator"].last_check or 0)
+            except Exception:
+                op_last_ts = 0.0
+        operator_entry = {
+            "agent_id": "operator",
+            "role": "manager",
+            "last_message_ts": op_last_ts,
+            "unread_count": 0,
+            "pinned": True,
+        }
+
+        workers = []
+        for agent_id in sorted(_opened_conversations):
+            # Skip workers that no longer exist in the registry (e.g.
+            # after a delete) so the messenger doesn't show ghosts.
+            if agent_id not in agent_registry and agent_id != "operator":
+                continue
+            if agent_id == "operator":
+                continue
+            last_ts = 0.0
+            if health_monitor is not None and agent_id in getattr(health_monitor, "agents", {}):
+                try:
+                    last_ts = float(health_monitor.agents[agent_id].last_check or 0)
+                except Exception:
+                    last_ts = 0.0
+            workers.append({
+                "agent_id": agent_id,
+                "role": "worker",
+                "last_message_ts": last_ts,
+                "unread_count": 0,
+                "pinned": False,
+            })
+
+        return {"operator": operator_entry, "workers": workers}
+
+    @api_router.post("/api/conversations/{agent_id}/open")
+    async def api_conversations_open(agent_id: str) -> dict:
+        """Mark a worker conversation as opened (visible in messenger).
+
+        Operator is always pinned and cannot be opened/closed; we accept
+        the call and return success for symmetry but don't mutate state.
+        """
+        if agent_id == "operator":
+            return {"ok": True, "agent_id": agent_id, "noop": True}
+        if agent_id not in agent_registry:
+            raise HTTPException(404, "Agent not found")
+        _opened_conversations.add(agent_id)
+        return {"ok": True, "agent_id": agent_id}
+
+    @api_router.post("/api/conversations/{agent_id}/close")
+    async def api_conversations_close(agent_id: str) -> dict:
+        """Hide a worker conversation from the messenger (history preserved).
+
+        Operator is always pinned and cannot be closed; we accept the
+        call and return success for symmetry but don't mutate state.
+        """
+        if agent_id == "operator":
+            return {"ok": True, "agent_id": agent_id, "noop": True}
+        _opened_conversations.discard(agent_id)
+        return {"ok": True, "agent_id": agent_id}
+
     @api_router.get("/api/agent-templates")
     async def api_agent_templates() -> list:
         """Return available skill templates for creating new agents."""

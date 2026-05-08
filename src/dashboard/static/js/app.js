@@ -52,6 +52,31 @@ function dashboard() {
       { id: 'workplace', label: 'Board' },
       { id: 'system', label: 'System' },
     ],
+    // Phase 1 — feature-flagged Board UX overhaul. ``newNavEnabled`` is
+    // populated from /api/dashboard-config on boot. When ``true``, top-tab
+    // labels rewrite (Agents→Team, Board→Home, System→Settings), the
+    // Needs-You / notifications / side-panel-toggle indicators render in
+    // the top nav, the System "settings" sub-tab label becomes "General",
+    // and the Chat tab gets a delivery banner pointing at fresh Home
+    // items. Tab IDs (``chat``, ``fleet``, ``workplace``, ``system``)
+    // stay frozen — the rename is cosmetic so URLs / routes / tests
+    // don't break. When ``false`` (default), the SPA renders the legacy
+    // labels unchanged. See docs/plans/2026-05-08-board-ux-overhaul.md.
+    newNavEnabled: false,
+    // Side panel toggle for non-Chat tabs (Phase 1 Decision 5). Persists
+    // across navigation via Alpine root scope; localStorage carries it
+    // through reloads so users keep their messenger open as they wander.
+    messengerSidePanelOpen: false,
+    // Last time the user viewed the Home tab. Drives the Chat tab
+    // delivery banner ("Writer delivered draft 12m ago — see on Home →")
+    // — banner shows when ``recentlyDeliveredItems`` has entries newer
+    // than this timestamp. Persisted to localStorage.
+    _lastViewedHomeTs: 0,
+    // Per-agent visible message count for "Load older →" pagination
+    // (Phase 1 Decision 12). Default 50; click appends 50 more.
+    _chatVisibleLimit: {},
+    // Notifications dropdown — top-right bell. Subtle gray indicator.
+    notificationsOpen: false,
     connected: false,
     loading: true,
     lastRefresh: 0,
@@ -1039,6 +1064,26 @@ function dashboard() {
       this._initTs = Date.now();  // track page load time to skip replayed events
       const cfg = window.__config || {};
 
+      // Phase 1 — Board UX overhaul. Pull the feature flag once at boot;
+      // every new surface (rename, badge, banner, side-panel toggle)
+      // hides itself when the server returns ``new_nav_enabled: false``,
+      // so the legacy SPA layout keeps rendering for everyone except
+      // explicit opt-ins. The flag is read from the OPENLEGION_NEW_NAV
+      // env var server-side; failure is fail-safe (assume off).
+      this.loadDashboardConfig();
+
+      // Restore Phase 1 state from localStorage (side panel + last-Home
+      // visit timestamp). These are cosmetic — losing them is harmless,
+      // so we wrap each in its own try/catch and never block init.
+      try {
+        const v = localStorage.getItem('ol_last_viewed_home');
+        if (v) this._lastViewedHomeTs = parseInt(v, 10) || 0;
+      } catch (e) { /* ignore */ }
+      try {
+        const v = localStorage.getItem('ol_messenger_side_panel_open');
+        if (v === '1') this.messengerSidePanelOpen = true;
+      } catch (e) { /* ignore */ }
+
       // Build credential service options from server-injected providers
       const allProviders = cfg.allProviders || [];
       this.credServiceOptions = [
@@ -1161,6 +1206,12 @@ function dashboard() {
           e.stopPropagation();
           e.preventDefault();
           this.cmdPaletteOpen = false;
+        }
+        // Phase 1 — ESC also closes the messenger side panel (a11y).
+        // Order matters: cmd palette ESC handler runs first above and
+        // returns; we only get here if the palette wasn't open.
+        if (e.key === 'Escape' && this.newNavEnabled && this.messengerSidePanelOpen && this.activeTab !== 'chat') {
+          this.closeSidePanel();
         }
       };
       document.addEventListener('keydown', this._cmdPaletteHandler);
@@ -1475,6 +1526,175 @@ function dashboard() {
           }
         }, 300000); // 5 minutes
       }
+    },
+
+    // ── Phase 1 — Board UX overhaul helpers ──────────────────
+
+    /**
+     * Fetch the dashboard feature-flag bundle. Today the only flag is
+     * ``new_nav_enabled`` (Phase 1). Fail-safe: if the call errors out
+     * (older server, network blip, etc.) we keep the legacy layout.
+     */
+    async loadDashboardConfig() {
+      try {
+        const r = await fetch(`${window.__config.apiBase}/dashboard-config`, { credentials: 'same-origin' });
+        if (!r.ok) return;
+        const data = await r.json();
+        this.newNavEnabled = !!data.new_nav_enabled;
+      } catch (e) {
+        // Silently fall back to the legacy layout.
+      }
+    },
+
+    /**
+     * Display label for a top-nav tab. Phase 1 renames Agents/Board/
+     * System to Team/Home/Settings without touching the tab IDs (URLs,
+     * routes, and JS state vars all stay on the legacy IDs). When the
+     * feature flag is off, returns the original label unchanged.
+     */
+    tabLabelFor(tab) {
+      if (!this.newNavEnabled) return tab.label;
+      const map = { fleet: 'Team', workplace: 'Home', system: 'Settings' };
+      return map[tab.id] || tab.label;
+    },
+
+    /**
+     * Return the System sub-tab label. Renamed ``settings``→``General``
+     * when ``newNavEnabled`` so the parent "Settings" doesn't collide
+     * with a sub-tab of the same name.
+     */
+    systemTabLabelFor(tab) {
+      if (this.newNavEnabled && tab.id === 'settings') return 'General';
+      return tab.label;
+    },
+
+    /** True when there's a delivered item the user hasn't seen on Home. */
+    get deliveryBannerVisible() {
+      if (!this.newNavEnabled) return false;
+      if (this.activeTab !== 'chat') return false;
+      const items = this.recentlyDeliveredItems || [];
+      if (items.length === 0) return false;
+      // ``recentlyDeliveredItems`` rows carry an ``updated_at`` ISO string
+      // (set by ``_recomputeRecentlyDelivered``). Anything newer than the
+      // last Home visit means the user hasn't acknowledged it yet.
+      for (const it of items) {
+        const ts = Date.parse(it.updated_at || it.completed_at || it.created_at || '');
+        if (ts && ts > this._lastViewedHomeTs) return true;
+      }
+      return false;
+    },
+
+    /** Plain-English summary for the delivery banner — newest delivery first. */
+    deliveryBannerSummary() {
+      const items = this.recentlyDeliveredItems || [];
+      if (items.length === 0) return '';
+      // Pick the newest unseen item.
+      let pick = null;
+      let pickTs = 0;
+      for (const it of items) {
+        const ts = Date.parse(it.updated_at || it.completed_at || it.created_at || '');
+        if (ts > this._lastViewedHomeTs && ts > pickTs) {
+          pickTs = ts;
+          pick = it;
+        }
+      }
+      if (!pick) return '';
+      const who = pick.assignee || pick.owner || 'A teammate';
+      const title = (pick.title || 'a task').toString().slice(0, 60);
+      const ageMin = Math.max(1, Math.round((Date.now() - pickTs) / 60000));
+      const ageStr = ageMin < 60 ? `${ageMin}m ago` : `${Math.round(ageMin / 60)}h ago`;
+      return `${who} delivered ${title} ${ageStr} — see on Home →`;
+    },
+
+    /** Mark Home as viewed (clears the delivery banner). */
+    markHomeViewed() {
+      this._lastViewedHomeTs = Date.now();
+      try { localStorage.setItem('ol_last_viewed_home', String(this._lastViewedHomeTs)); } catch (e) { /* ignore */ }
+    },
+
+    /** Banner click handler — switch to Home and ack. */
+    openHomeFromBanner() {
+      this.markHomeViewed();
+      this.switchTab('workplace');
+    },
+
+    /** Toggle the side-panel messenger (visible on non-Chat tabs). */
+    toggleSidePanel() {
+      this.messengerSidePanelOpen = !this.messengerSidePanelOpen;
+      try {
+        if (this.messengerSidePanelOpen) {
+          localStorage.setItem('ol_messenger_side_panel_open', '1');
+          // Open Operator by default if no chat is active.
+          if (!this.openChats.includes('operator')) this.openChats.push('operator');
+          if (!this.activeChatId) this.activeChatId = 'operator';
+          this.chatPanelMinimized = false;
+          this._loadChatHistory(this.activeChatId || 'operator');
+          this.$nextTick(() => {
+            const el = document.getElementById('operator-chat-input');
+            if (el) el.focus();
+          });
+        } else {
+          localStorage.removeItem('ol_messenger_side_panel_open');
+        }
+      } catch (e) { /* ignore */ }
+    },
+
+    /** Close the side panel (ESC handler). */
+    closeSidePanel() {
+      if (!this.messengerSidePanelOpen) return;
+      this.messengerSidePanelOpen = false;
+      try { localStorage.removeItem('ol_messenger_side_panel_open'); } catch (e) { /* ignore */ }
+    },
+
+    /**
+     * Phase 1 conversation pagination — render last N messages by default
+     * with "Load older →" appending more. Returns the visible slice.
+     */
+    visibleChatHistory(agentId) {
+      const all = this.chatHistories[agentId] || [];
+      if (!this.newNavEnabled) return all;
+      const limit = this._chatVisibleLimit[agentId] || 50;
+      if (all.length <= limit) return all;
+      return all.slice(all.length - limit);
+    },
+
+    /** Whether "Load older →" should render for the active chat. */
+    hasOlderMessages(agentId) {
+      const all = this.chatHistories[agentId] || [];
+      const limit = this._chatVisibleLimit[agentId] || 50;
+      return all.length > limit;
+    },
+
+    /** Append 50 more messages to the visible window for the given chat. */
+    loadOlderMessages(agentId) {
+      const cur = this._chatVisibleLimit[agentId] || 50;
+      this._chatVisibleLimit = { ...this._chatVisibleLimit, [agentId]: cur + 50 };
+    },
+
+    /** Mark a worker conversation opened on the server (Phase 1 contract). */
+    async openConversation(agentId) {
+      if (agentId === 'operator') return;
+      try {
+        await fetch(`${window.__config.apiBase}/conversations/${encodeURIComponent(agentId)}/open`, {
+          method: 'POST',
+          headers: { 'X-Requested-With': 'XMLHttpRequest', 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: '{}',
+        });
+      } catch (e) { /* best-effort; client-side ``openChats`` is the source of truth */ }
+    },
+
+    /** Mark a worker conversation closed on the server. */
+    async closeConversation(agentId) {
+      if (agentId === 'operator') return;
+      try {
+        await fetch(`${window.__config.apiBase}/conversations/${encodeURIComponent(agentId)}/close`, {
+          method: 'POST',
+          headers: { 'X-Requested-With': 'XMLHttpRequest', 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: '{}',
+        });
+      } catch (e) { /* best-effort */ }
     },
 
     _stopFleetDigestRefresh() {
@@ -1886,6 +2106,12 @@ function dashboard() {
       if (fromTab !== tab) {
         this.track('tab_view', { tab_id: tab, from_tab_id: fromTab || '' });
         this._trackFirstAction('tab_view');
+      }
+      // Phase 1 — clearing the delivery banner. The Chat banner only
+      // shows when there are deliveries newer than ``_lastViewedHomeTs``;
+      // navigating to Home is the natural "I saw it" signal.
+      if (tab === 'workplace') {
+        this.markHomeViewed();
       }
       if (tab === 'chat') {
         if (!this.openChats.includes('operator')) {
@@ -6335,6 +6561,11 @@ function dashboard() {
         this._scrollChat(agentId, true);
         if (this.chatUnread[agentId]) this.chatUnread = { ...this.chatUnread, [agentId]: 0 };
       });
+      // Phase 1 — mirror to the server-side opened-conversations set.
+      // Best-effort: a network failure shouldn't block the UI.
+      if (this.newNavEnabled && agentId !== 'operator') {
+        this.openConversation(agentId);
+      }
     },
 
     closeChat(agentId) {
@@ -6350,6 +6581,12 @@ function dashboard() {
         this.activeChatId = this.openChats.length > 0 ? this.openChats[this.openChats.length - 1] : '';
       }
       this._saveChatToSession();
+      // Phase 1 — mirror to the server-side opened-conversations set so
+      // ``/api/conversations`` reflects what's currently in the user's
+      // messenger. Best-effort: we don't block on the network call.
+      if (this.newNavEnabled && agentId !== 'operator') {
+        this.closeConversation(agentId);
+      }
     },
 
     clearChat(agentId) {

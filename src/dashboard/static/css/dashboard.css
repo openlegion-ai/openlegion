@@ -1504,3 +1504,46 @@ textarea.dash-input {
 @media (max-width: 768px) {
   .context-panel { display: none; }
 }
+
+/* ── Phase 1: Board UX overhaul (feature-flagged via newNavEnabled) ─
+   These styles only have visual effect when the Alpine flag is on:
+   the surfaces using them (Operator-pinned row, Needs-You badge,
+   delivery banner, side-panel toggle) all gate their render with
+   ``x-show="newNavEnabled && ..."``. When the flag is off the
+   classes never appear in the DOM, so legacy rendering is unaffected. */
+
+/* Operator-pinned conversation row — distinct cobalt accent (Decision 6). */
+.messenger-operator-pinned .agent-avatar {
+  /* Slightly larger avatar so the manager visually outranks workers. */
+  width: 32px;
+  height: 32px;
+}
+
+/* Needs-You badge — red accent in the top nav (Decision 11).
+   Pulse subtly so it nags without being obnoxious. */
+.needs-you-badge {
+  animation: needs-you-pulse 2.4s ease-in-out infinite;
+}
+@keyframes needs-you-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(248, 113, 113, 0.0); }
+  50%      { box-shadow: 0 0 0 4px rgba(248, 113, 113, 0.15); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .needs-you-badge { animation: none; }
+}
+
+/* Mobile takeover for the side panel at <640px. The legacy
+   .messenger-half / .messenger-full widths assume room for the
+   main pane; on phones we want the messenger to occupy the whole
+   viewport. */
+@media (max-width: 639px) {
+  .messenger-panel {
+    left: 0 !important;
+    right: 0 !important;
+    width: 100vw !important;
+  }
+  .messenger-panel.messenger-half,
+  .messenger-panel.messenger-full {
+    width: 100vw !important;
+  }
+}

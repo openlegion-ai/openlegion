@@ -5080,3 +5080,151 @@ class TestWorkplaceTabRoutes:
         with self._patch_pending_proxy():
             resp = client.post("/dashboard/api/workplace/pending/missing/cancel")
         assert resp.status_code == 404
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Phase 1 — Board UX overhaul (feature flag + conversations contract)
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestPhase1DashboardConfig:
+    """Feature-flag plumbing for the unified messenger overhaul.
+
+    Verifies ``/api/dashboard-config`` reads ``OPENLEGION_NEW_NAV`` from
+    the environment and exposes a single boolean to the SPA. The flag
+    is default-off so the legacy layout keeps rendering for everyone
+    until an operator explicitly opts in.
+    """
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir)
+        self.client = _make_client(self.components)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_dashboard_config_default_off(self):
+        # Ensure env var is unset for this assertion.
+        prev = os.environ.pop("OPENLEGION_NEW_NAV", None)
+        try:
+            resp = self.client.get("/dashboard/api/dashboard-config")
+            assert resp.status_code == 200
+            assert resp.json() == {"new_nav_enabled": False}
+        finally:
+            if prev is not None:
+                os.environ["OPENLEGION_NEW_NAV"] = prev
+
+    def test_dashboard_config_truthy_values(self):
+        for v in ("1", "true", "True", "yes", "on"):
+            with patch.dict(os.environ, {"OPENLEGION_NEW_NAV": v}):
+                resp = self.client.get("/dashboard/api/dashboard-config")
+                assert resp.status_code == 200
+                assert resp.json()["new_nav_enabled"] is True, f"value {v!r} should enable flag"
+
+    def test_dashboard_config_falsy_values(self):
+        for v in ("0", "false", "no", "", "off"):
+            with patch.dict(os.environ, {"OPENLEGION_NEW_NAV": v}):
+                resp = self.client.get("/dashboard/api/dashboard-config")
+                assert resp.status_code == 200
+                assert resp.json()["new_nav_enabled"] is False, f"value {v!r} should keep flag off"
+
+
+class TestPhase1ConversationsContract:
+    """``/api/conversations`` shape + open/close lifecycle.
+
+    The endpoint backs the unified messenger sidebar — Operator is
+    always pinned (``role == "manager"``) and worker conversations
+    only appear after the user has explicitly opened them via the
+    POST endpoint. Closing a worker removes it from the list while
+    its underlying chat history is preserved upstream (out of scope
+    for this contract).
+    """
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir)
+        # Add operator + worker to the registry so open/close paths
+        # have realistic targets.
+        self.components["agent_registry"]["operator"] = "http://localhost:8499"
+        self.client = _make_client(self.components)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_conversations_default_only_operator(self):
+        resp = self.client.get("/dashboard/api/conversations")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["operator"]["agent_id"] == "operator"
+        assert body["operator"]["role"] == "manager"
+        assert body["operator"]["pinned"] is True
+        # Workers default-empty per Decision 7 (progressive disclosure).
+        assert body["workers"] == []
+
+    def test_open_worker_makes_it_visible(self):
+        resp = self.client.post("/dashboard/api/conversations/alpha/open")
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+        listing = self.client.get("/dashboard/api/conversations").json()
+        worker_ids = [w["agent_id"] for w in listing["workers"]]
+        assert "alpha" in worker_ids
+        # Each worker carries its role + unread fields (reserved for
+        # future cross-device sync, today always 0).
+        worker = next(w for w in listing["workers"] if w["agent_id"] == "alpha")
+        assert worker["role"] == "worker"
+        assert worker["unread_count"] == 0
+        assert worker["pinned"] is False
+
+    def test_close_worker_hides_it(self):
+        self.client.post("/dashboard/api/conversations/alpha/open")
+        resp = self.client.post("/dashboard/api/conversations/alpha/close")
+        assert resp.status_code == 200
+        listing = self.client.get("/dashboard/api/conversations").json()
+        worker_ids = [w["agent_id"] for w in listing["workers"]]
+        assert "alpha" not in worker_ids
+
+    def test_open_unknown_agent_returns_404(self):
+        resp = self.client.post("/dashboard/api/conversations/ghost/open")
+        assert resp.status_code == 404
+
+    def test_open_operator_is_noop(self):
+        # Operator is always pinned; explicit open returns success but
+        # doesn't double-add it anywhere.
+        resp = self.client.post("/dashboard/api/conversations/operator/open")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is True
+        # Listing still has Operator only (no workers).
+        listing = self.client.get("/dashboard/api/conversations").json()
+        assert listing["workers"] == []
+
+    def test_close_operator_is_noop(self):
+        # Operator can't be closed.
+        resp = self.client.post("/dashboard/api/conversations/operator/close")
+        assert resp.status_code == 200
+        listing = self.client.get("/dashboard/api/conversations").json()
+        assert listing["operator"]["agent_id"] == "operator"
+
+    def test_open_then_delete_agent_filters_ghosts(self):
+        # If an agent is opened then later removed from the registry,
+        # the listing endpoint must drop it (no ghost rows).
+        self.client.post("/dashboard/api/conversations/alpha/open")
+        self.components["agent_registry"].pop("alpha", None)
+        listing = self.client.get("/dashboard/api/conversations").json()
+        worker_ids = [w["agent_id"] for w in listing["workers"]]
+        assert "alpha" not in worker_ids
+
+    def test_conversations_endpoint_requires_csrf_for_state_changes(self):
+        # The router's CSRF guard rejects POSTs without X-Requested-With.
+        # Use the bare TestClient (not _CSRFTestClient) so the header
+        # isn't auto-injected.
+        from src.dashboard.server import create_dashboard_router
+        router = create_dashboard_router(**self.components, mesh_port=8420)
+        app = FastAPI()
+        app.include_router(router)
+        bare = TestClient(app)
+        resp = bare.post("/dashboard/api/conversations/alpha/open")
+        assert resp.status_code == 403
