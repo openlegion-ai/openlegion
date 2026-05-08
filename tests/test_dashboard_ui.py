@@ -195,10 +195,13 @@ class TestWizardJsState:
 
     def test_wizard_advances_to_first_output_when_fleet_populated(self):
         js = _read(_APP_JS)
-        # Build poller advances to first-output when ≥1 non-operator
-        # agent exists.
-        assert "fleetAgents.length >= 1" in js
+        # Build poller advances to first-output when the non-operator
+        # fleet has been NON-EMPTY and COUNT-STABLE for ≥10 seconds
+        # (fix #1 — replaces the prior naive ``length >= 1`` check that
+        # fired prematurely on multi-agent templates).
         assert "_wizardAdvance('first-output'" in js
+        assert "fleet_stable" in js
+        assert "stableSeconds" in js
 
     def test_telemetry_events_have_locked_names(self):
         js = _read(_APP_JS)
@@ -891,3 +894,230 @@ class TestWizardPolish:
         # The quick-links section keeps a "Got it, close" affordance
         # that completes the wizard without changing tabs.
         assert 'data-testid="wizard-continue"' in html
+
+
+# ── Wizard correctness fixes (race / timeout / gating / labels) ───────
+
+
+class TestWizardCorrectnessFixes:
+    """Source-level checks for the wizard correctness fixes #1–#6.
+
+    A real headless browser would let us drive the JS state machine
+    directly; instead we assert on the source so the contract changes
+    don't quietly regress. The tests cover:
+
+      #1 stability-based polling (replaces ``length >= 1`` race)
+      #2 ``build_failed`` terminal state on 5-min timeout
+      #3 bootstrap greeting carries no ACTION lines
+      #4 ``_maybeStartWizard`` is operatorReady-gated, retries on
+         unhealthy → healthy transition
+      #5 step labels say "Step N of 4"
+      #6 realistic timing copy on building / first-output cards
+    """
+
+    # Fix #1 — stability-based polling -----------------------------
+
+    def test_polling_uses_stability_window_not_naive_length(self):
+        js = _read(_APP_JS)
+        # The naive ``fleetAgents.length >= 1`` immediate advance is
+        # replaced with a stability window (10 seconds of unchanged
+        # non-zero count).
+        assert "stableSince" in js
+        # Check the literal numeric tolerance — 10_000 ms.
+        assert "10_000" in js or "10000" in js
+        # Telemetry trigger renamed.
+        assert "fleet_stable" in js
+
+    def test_polling_resets_window_when_count_changes(self):
+        js = _read(_APP_JS)
+        # When a new agent appears mid-window the stability clock
+        # MUST reset — otherwise a 4-agent template that takes 12
+        # seconds to provision would fire the success card after the
+        # first agent.
+        m = re.search(
+            r"_wizardStartBuildPolling\(\)\s*\{(.*?)^\s{4}\},",
+            js,
+            re.DOTALL | re.MULTILINE,
+        )
+        assert m, "could not locate _wizardStartBuildPolling body"
+        body = m.group(1)
+        # The reset path runs in the count-changed branch.
+        assert "stableSince = now" in body
+        assert "lastCount = count" in body
+
+    def test_polling_clears_window_when_fleet_drops_to_zero(self):
+        js = _read(_APP_JS)
+        # If fleet count drops to 0 mid-build (agent crashed before
+        # next agent created) we reset the window so we don't declare
+        # success on a transient.
+        m = re.search(
+            r"_wizardStartBuildPolling\(\)\s*\{(.*?)^\s{4}\},",
+            js,
+            re.DOTALL | re.MULTILINE,
+        )
+        assert m
+        body = m.group(1)
+        assert "if (count === 0)" in body
+        assert "stableSince = 0" in body
+
+    # Fix #2 — terminal build_failed state -------------------------
+
+    def test_timeout_advances_to_build_failed(self):
+        js = _read(_APP_JS)
+        # The 5-minute hard cap now transitions to a terminal
+        # ``build_failed`` step (replaces the silent timeout that
+        # left the spinner card on screen).
+        assert "_wizardAdvance('build_failed'" in js
+        assert "trigger: 'timeout'" in js
+        # Telemetry event for the timeout path.
+        assert "'wizard_build_timeout'" in js
+
+    def test_build_failed_card_renders(self):
+        html = _read(_TEMPLATE)
+        # The card itself, plus a header, plus the Retry/Type-instead
+        # buttons that recover the user from the failed state.
+        assert "wizard.step === 'build_failed'" in html
+        assert 'data-testid="wizard-build-failed"' in html
+        assert 'data-testid="wizard-build-failed-retry"' in html
+        assert 'data-testid="wizard-build-failed-type"' in html
+
+    def test_build_failed_retry_handler(self):
+        js = _read(_APP_JS)
+        # Retry resets to the 'ask' step and re-arms startedAt so
+        # the secondsSinceStart counter reflects the new attempt.
+        assert "wizardRetryBuild()" in js
+        m = re.search(
+            r"wizardRetryBuild\(\)\s*\{(.*?)^\s{4}\},",
+            js,
+            re.DOTALL | re.MULTILINE,
+        )
+        assert m, "wizardRetryBuild body missing"
+        body = m.group(1)
+        assert "step: 'ask'" in body
+        assert "_wizardTeardown" in body
+
+    def test_build_failed_type_instead_handler(self):
+        js = _read(_APP_JS)
+        # Type-instead exits the wizard via the standard complete
+        # path so telemetry fires the locked ``wizard_completed`` event.
+        assert "wizardExitToTyping()" in js
+        m = re.search(
+            r"wizardExitToTyping\(\)\s*\{(.*?)^\s{4}\},",
+            js,
+            re.DOTALL | re.MULTILINE,
+        )
+        assert m, "wizardExitToTyping body missing"
+        body = m.group(1)
+        assert "_wizardComplete" in body
+        assert "build_failed_exit" in body
+
+    def test_build_failed_progress_dot_index(self):
+        js = _read(_APP_JS)
+        # build_failed renders the same dot index as first-output
+        # (3) so the user sees the progress reached the build phase
+        # before failing.
+        m = re.search(
+            r"wizardStepIndex\(\)\s*\{(.*?)^\s{4}\},",
+            js,
+            re.DOTALL | re.MULTILINE,
+        )
+        assert m, "wizardStepIndex body missing"
+        body = m.group(1)
+        assert "build_failed" in body
+        assert "return 3" in body
+
+    # Fix #4 — operatorReady gate ----------------------------------
+
+    def test_maybe_start_wizard_gated_on_operator_ready(self):
+        js = _read(_APP_JS)
+        m = re.search(
+            r"_maybeStartWizard\(\)\s*\{(.*?)^\s{4}\},",
+            js,
+            re.DOTALL | re.MULTILINE,
+        )
+        assert m, "_maybeStartWizard body missing"
+        body = m.group(1)
+        # The body bails out if operatorReady is falsy.
+        assert "this.operatorReady" in body
+        assert "if (!this.operatorReady) return" in body
+
+    def test_check_operator_ready_retries_wizard(self):
+        js = _read(_APP_JS)
+        m = re.search(
+            r"checkOperatorReady\(\)\s*\{(.*?)^\s{4}\},",
+            js,
+            re.DOTALL | re.MULTILINE,
+        )
+        assert m, "checkOperatorReady body missing"
+        body = m.group(1)
+        # Transition unhealthy → healthy must retry the wizard kickoff.
+        assert "wasReady" in body
+        assert "_maybeStartWizard" in body
+
+    # Fix #5 — step labels align with 4-dot indicator --------------
+
+    def test_step_labels_say_n_of_four(self):
+        html = _read(_TEMPLATE)
+        # Scope the search to the wizard region only — the What's-new
+        # tour reuses "Step N of 3" markup elsewhere in the template.
+        m = re.search(
+            r'data-testid="onboarding-wizard".*?<!-- Step: building',
+            html,
+            re.DOTALL,
+        )
+        assert m, "could not isolate wizard ask/confirming region"
+        ask_confirming = m.group(0)
+        assert "Step 1 of 4" in ask_confirming
+        assert "Step 2 of 4" in ask_confirming
+        # building + first-output captions further down.
+        m2 = re.search(
+            r"<!-- Step: building -->.*?<!-- Step: build_failed",
+            html,
+            re.DOTALL,
+        )
+        assert m2, "could not isolate building region"
+        building = m2.group(0)
+        assert "Step 3 of 4" in building
+        m3 = re.search(
+            r"<!-- Step: first-output -->.*?</template>\s*</div>\s*</template>",
+            html,
+            re.DOTALL,
+        )
+        assert m3, "could not isolate first-output region"
+        first_output = m3.group(0)
+        assert "Step 4 of 4" in first_output
+        # Legacy 3-step wording must be gone from the wizard cards.
+        assert "Step 1 of 3" not in ask_confirming
+        assert "Step 2 of 3" not in ask_confirming
+        assert "Step 3 of 3" not in first_output
+
+    # Fix #6 — realistic timing copy -------------------------------
+
+    def test_building_card_uses_realistic_timing(self):
+        html = _read(_TEMPLATE)
+        # The "30 seconds" claim is replaced with vague-but-honest copy.
+        assert "About 30 seconds" not in html
+        assert "this may take a minute or two" in html
+
+    def test_first_output_card_describes_heartbeat_behavior(self):
+        html = _read(_TEMPLATE)
+        # The fictitious "10 minutes" ETA is replaced with a heartbeat
+        # mental-model description.
+        assert "First output expected in about 10 minutes" not in html
+        assert "checks on them every 15 minutes" in html
+
+    # Backwards-compat for persisted localStorage ------------------
+
+    def test_wizard_load_resets_unknown_step_to_idle(self):
+        js = _read(_APP_JS)
+        m = re.search(
+            r"_wizardLoad\(\)\s*\{(.*?)^\s{4}\},",
+            js,
+            re.DOTALL | re.MULTILINE,
+        )
+        assert m, "_wizardLoad body missing"
+        body = m.group(1)
+        # Unknown step value from a prior version must reset to idle.
+        assert "KNOWN_STEPS" in body
+        assert "build_failed" in body
+        assert "'idle'" in body

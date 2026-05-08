@@ -1776,7 +1776,15 @@ function dashboard() {
 
     checkOperatorReady() {
       const op = this.agents.find(a => a.id === 'operator');
+      const wasReady = this.operatorReady;
       this.operatorReady = op && op.health_status === 'healthy';
+      // Fix #4 — when operator transitions unhealthy → healthy and the
+      // user is still in a first-visit state, retry starting the
+      // wizard. Without this, an operator that boots slowly (e.g.
+      // first start) would have skipped wizard kickoff at fetchAgents.
+      if (!wasReady && this.operatorReady) {
+        try { this._maybeStartWizard(); } catch (_) { /* ignore */ }
+      }
     },
 
     // ── Phase -1 onboarding wizard ───────────────────────
@@ -1790,13 +1798,20 @@ function dashboard() {
     // ``wizard_abandoned``) so we can answer the activation hypothesis.
 
     _wizardLoad() {
+      // Backwards-compatible — unknown step values from older versions
+      // (or hand-edited localStorage) reset to ``idle`` rather than
+      // wedging the UI in a state with no rendering branch.
+      const KNOWN_STEPS = new Set([
+        'idle', 'ask', 'confirming', 'building', 'first-output', 'build_failed',
+      ]);
       try {
         const raw = localStorage.getItem('ol_wizard');
         if (!raw) return;
         const parsed = JSON.parse(raw);
         if (parsed && typeof parsed === 'object' && typeof parsed.step === 'string') {
+          const step = KNOWN_STEPS.has(parsed.step) ? parsed.step : 'idle';
           this.wizard = {
-            step: parsed.step || 'idle',
+            step: step,
             plan: parsed.plan || null,
             startedAt: Number(parsed.startedAt) || 0,
             lastChip: parsed.lastChip || '',
@@ -2082,22 +2097,57 @@ function dashboard() {
     },
 
     _wizardStartBuildPolling() {
+      // Stability-based detection: a multi-agent template is created
+      // slot-by-slot, so a naive ``length >= 1`` check fires the success
+      // card prematurely while the rest of the team is still being
+      // provisioned. We require the non-operator fleet to be NON-EMPTY
+      // and COUNT-STABLE for at least 10 seconds before declaring the
+      // build done. Each new agent resets the stability window.
       if (this._wizardBuildPoll) clearInterval(this._wizardBuildPoll);
       const start = Date.now();
+      let stableSince = 0;
+      let lastCount = 0;
       this._wizardBuildPoll = setInterval(() => {
         const fleetAgents = this.agents.filter(a => a && a.id !== 'operator');
-        if (fleetAgents.length >= 1) {
+        const count = fleetAgents.length;
+        const now = Date.now();
+        if (count === 0) {
+          // No fleet yet — keep waiting and reset the stability window.
+          stableSince = 0;
+          lastCount = 0;
+        } else if (count === lastCount) {
+          // Count unchanged — start (or continue) the stability window.
+          if (!stableSince) stableSince = now;
+          if (now - stableSince >= 10_000) {
+            clearInterval(this._wizardBuildPoll);
+            this._wizardBuildPoll = null;
+            this._wizardAdvance('first-output', {
+              trigger: 'fleet_stable',
+              agents: fleetAgents.map(a => a.id).slice(0, 8),
+              stableSeconds: 10,
+            });
+            return;
+          }
+        } else {
+          // Count changed — reset stability window to current count.
+          stableSince = now;
+          lastCount = count;
+        }
+        if (now - start > 5 * 60 * 1000) {
+          // 5 minute hard cap — if the build never stabilised we
+          // surface a terminal ``build_failed`` card instead of
+          // silently leaving the spinner on screen.
           clearInterval(this._wizardBuildPoll);
           this._wizardBuildPoll = null;
-          this._wizardAdvance('first-output', {
-            trigger: 'fleet_populated',
-            agents: fleetAgents.map(a => a.id).slice(0, 8),
+          this._wizardAdvance('build_failed', {
+            trigger: 'timeout',
+            elapsedMs: now - start,
           });
-        } else if (Date.now() - start > 5 * 60 * 1000) {
-          // 5 minute hard cap — if the Operator never created agents
-          // we give up and let the user fall back to typing.
-          clearInterval(this._wizardBuildPoll);
-          this._wizardBuildPoll = null;
+          this.track('wizard_build_timeout', {
+            elapsedMs: now - start,
+            fleetCount: count,
+          });
+          return;
         }
         // Each poll triggers a fetchAgents to keep the local cache fresh.
         if (typeof this.fetchAgents === 'function') this.fetchAgents();
@@ -2153,11 +2203,45 @@ function dashboard() {
 
     // Phase 4 — return progress-dot index for a given step. Used by
     // the wizard card progress indicator (4 dots: ask, confirming,
-    // building, first-output).
+    // building, first-output). ``build_failed`` is a terminal sad-state
+    // alternative to ``first-output`` and renders the same dot index
+    // (3) so the user can see the progress reached the build phase
+    // before failing.
     wizardStepIndex() {
       const order = ['ask', 'confirming', 'building', 'first-output'];
+      if (this.wizard.step === 'build_failed') return 3;
       const idx = order.indexOf(this.wizard.step);
       return idx < 0 ? 0 : idx;
+    },
+
+    // Fix #2 — terminal ``build_failed`` retry button. Resets the
+    // wizard back to ``ask`` so the user can try again with a new
+    // chip selection.
+    wizardRetryBuild() {
+      this.track('wizard_chip_clicked', {
+        label: 'retry_build',
+        step: this.wizard.step,
+      });
+      this._wizardTeardown();
+      this.wizard = {
+        step: 'ask',
+        plan: null,
+        startedAt: Date.now(),
+        lastChip: '',
+      };
+      this._wizardLastTrack = '';
+      this._wizardSave();
+    },
+
+    // Fix #2 — terminal ``build_failed`` "Type instead" exit button.
+    // Closes the wizard so the user can chat freely with the operator
+    // without the failed-build card lingering.
+    wizardExitToTyping() {
+      this.track('wizard_chip_clicked', {
+        label: 'type_instead',
+        step: this.wizard.step,
+      });
+      this._wizardComplete({ reason: 'build_failed_exit' });
     },
 
     _wizardTeardown() {
@@ -2181,7 +2265,14 @@ function dashboard() {
       // because startWizard guards on step !== 'idle'. We also bail out
       // if the user already advanced past 'ask' (restored from
       // localStorage), so a hot reload mid-build keeps the building UI.
+      //
+      // Fix #4 — operatorReady gate: the wizard card's parent element
+      // has ``x-show="operatorReady"``, so starting the wizard while
+      // the operator is unhealthy would persist ``step='ask'`` to
+      // localStorage and emit telemetry while the user sees nothing.
+      // ``checkOperatorReady`` retries this on health transitions.
       if (this.wizard.step !== 'idle') return;
+      if (!this.operatorReady) return;
       if (!this._isFirstVisit()) return;
       this.startWizard();
     },
