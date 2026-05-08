@@ -400,6 +400,35 @@ class TestNotificationsBellMarkup:
     def test_mark_all_read_link(self):
         assert "markAllNotificationsRead()" in _INDEX_HTML
 
+    def test_legacy_notifications_bell_removed(self):
+        # The Phase 1 placeholder bell read its dropdown items from the
+        # in-memory ``events`` array (mirrored the activity feed). It
+        # competed visually with the Phase 2 persistent bell — both
+        # rendered side-by-side in the top nav. Removing it is the
+        # whole point of this fix; assert the unique markers from the
+        # legacy block are gone.
+        # 1) Legacy used `notificationsOpen = !notificationsOpen` for
+        #    its toggle (Phase 2 uses `toggleNotifications()`).
+        assert "notificationsOpen = !notificationsOpen" not in _INDEX_HTML
+        # 2) Legacy listed `(events || []).slice(0, 10)` in its
+        #    dropdown. The Phase 2 bell iterates `notifications` instead.
+        assert "(events || []).slice(0, 10)" not in _INDEX_HTML
+        # 3) Legacy showed a "No recent activity" placeholder; Phase 2
+        #    hides the dropdown entirely when empty.
+        assert "No recent activity" not in _INDEX_HTML
+
+    def test_only_one_notifications_bell_renders(self):
+        # The bell SVG path is identifying enough — both Phase 1 and
+        # Phase 2 used the same ``M18 8A6 6 0 0...`` Feather icon. After
+        # the fix exactly one bell remains in the top-nav.
+        # Match the bell-shape path with whitespace-tolerance (Phase 1
+        # used ``A6 6 0 0 0`` while Phase 2 collapsed to ``A6 6 0 006``;
+        # any future SVG change still picks both up).
+        bells = re.findall(r'M18 8A6 6 0\s*0?\s*0?6 8c0 7-3 9-3 9h18s-3-2-3-9', _INDEX_HTML)
+        assert len(bells) == 1, (
+            f"Expected exactly one notifications bell SVG, found {len(bells)}"
+        )
+
 
 # ── Activity translation (formatActivityForUser) ──────────────────────
 

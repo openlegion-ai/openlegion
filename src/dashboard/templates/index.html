@@ -247,39 +247,6 @@
           <span class="hidden sm:inline">Needs you</span>
           <span class="font-mono px-1 rounded bg-red-700/60 text-white text-[10px]" x-text="needsYouItems.length"></span>
         </button>
-        <!-- Phase 1 — notifications bell (subtle gray, top-right). For
-             Phase 1 this is a placeholder shell that opens a simple
-             dropdown listing the most recent activity events. The
-             persistent /api/notifications endpoint lands in Phase 2;
-             until then the bell mirrors ``events`` so the surface is
-             reserved without doubling backend complexity. -->
-        <div class="relative">
-          <button
-            @click="notificationsOpen = !notificationsOpen"
-            class="relative text-gray-500 hover:text-gray-200 transition-colors p-1.5 rounded"
-            :title="'Notifications' + ((events && events.length) ? ' — ' + events.length + ' recent' : '')"
-            aria-label="Notifications"
-          >
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
-              <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
-            </svg>
-            <span x-show="events && events.length > 0" class="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-gray-400"></span>
-          </button>
-          <div x-show="notificationsOpen" x-cloak @click.outside="notificationsOpen = false"
-            class="absolute right-0 top-full mt-1 w-72 bg-gray-900 border border-gray-700 rounded-lg shadow-xl z-50 max-h-96 overflow-y-auto">
-            <div class="px-3 py-2 border-b border-gray-800 text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Notifications</div>
-            <template x-if="!events || events.length === 0">
-              <div class="px-3 py-4 text-xs text-gray-500 text-center">No recent activity</div>
-            </template>
-            <template x-for="(evt, i) in (events || []).slice(0, 10)" :key="i">
-              <div class="px-3 py-2 border-b border-gray-800/60 text-[11px] text-gray-300 hover:bg-gray-800/40">
-                <div class="font-mono text-[9px] text-gray-600" x-text="evt.type"></div>
-                <div class="truncate" x-text="evt.agent_id || ''"></div>
-              </div>
-            </template>
-          </div>
-        </div>
         <!-- Phase 1 — side-panel toggle. Hidden on Chat tab (the messenger
              is already full-screen there). Cmd+K is reserved for the
              command palette so we use a visible button with a tooltip;

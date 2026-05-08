@@ -785,6 +785,151 @@ def create_dashboard_router(
     if event_bus is not None:
         event_bus.add_listener(platform_success.handle_event)
 
+    # ── Notifications producer ────────────────────────────────────────
+    #
+    # Bridges the EventBus → NotificationStore so the Phase 2 bell
+    # actually lights up when real events fire. The store class + GET
+    # endpoints exist already (see :class:`NotificationStore`), but
+    # without this listener nothing ever calls ``add()`` and the bell
+    # stays empty.
+    #
+    # Subscribers run synchronously on the emit caller's stack
+    # (``EventBus.emit`` invokes them under a lock-free loop and
+    # swallows their exceptions). Each handler does at most one short
+    # SQLite write — the store's WAL connection is process-shared and
+    # ``add()`` is O(1) — so this stays well under the "cheap and
+    # non-blocking" bar set by ``EventBus.add_listener``.
+    def _notifications_producer(evt: dict) -> None:
+        if notification_store is None:
+            return
+        event_type = evt.get("type", "")
+        agent_id = evt.get("agent") or None
+        data = evt.get("data") or {}
+        try:
+            if event_type == "task_outcome":
+                # Only deliveries surface as notifications. Rejections
+                # / rework / re-rates aren't a "you have new finished
+                # work" signal — they're either operator-initiated
+                # (the operator already knows) or surfaced via the
+                # task drawer.
+                outcome = (data.get("outcome") or "").lower()
+                if outcome != "delivered":
+                    return
+                actor = data.get("assignee") or agent_id or "Someone"
+                title = f"{actor} delivered draft"
+                body = (data.get("feedback") or "").strip()[:200] or None
+                notification_store.add(
+                    kind="delivered",
+                    title=title,
+                    body=body,
+                    agent_id=actor,
+                    payload={
+                        "task_id": data.get("task_id"),
+                        "project_id": data.get("project_id"),
+                        "outcome": outcome,
+                    },
+                )
+                return
+
+            if event_type == "pending_action_created":
+                summary = (data.get("summary") or "").strip()
+                action_kind = data.get("action_kind") or "action"
+                label = summary or action_kind
+                title = f"Approval needed: {label}"[:200]
+                notification_store.add(
+                    kind="approval",
+                    title=title,
+                    body=summary[:200] or None,
+                    agent_id=agent_id,
+                    payload={
+                        "nonce": data.get("nonce"),
+                        "target_kind": data.get("target_kind"),
+                        "target_id": data.get("target_id"),
+                        "action_kind": action_kind,
+                    },
+                )
+                return
+
+            if event_type == "credential_request":
+                actor = agent_id or "An agent"
+                service = (data.get("service") or data.get("name") or "a credential")
+                title = f"{actor} needs {service}"[:200]
+                description = (data.get("description") or "").strip()[:200] or None
+                notification_store.add(
+                    kind="credential",
+                    title=title,
+                    body=description,
+                    agent_id=agent_id,
+                    payload={
+                        "request_id": data.get("request_id"),
+                        "name": data.get("name"),
+                        "service": data.get("service"),
+                    },
+                )
+                return
+
+            if event_type == "browser_login_request":
+                actor = agent_id or "An agent"
+                service = (data.get("service") or "a site")
+                title = f"{actor} needs sign-in to {service}"[:200]
+                description = (data.get("description") or "").strip()[:200] or None
+                notification_store.add(
+                    kind="credential",
+                    title=title,
+                    body=description,
+                    agent_id=agent_id,
+                    payload={
+                        "request_id": data.get("request_id"),
+                        "service": data.get("service"),
+                        "url": data.get("url"),
+                    },
+                )
+                return
+
+            if event_type == "health_change":
+                # Only surface degradations — flapping back to healthy
+                # is good news that doesn't need user attention.
+                current = (data.get("current") or "").lower()
+                if current not in ("degraded", "unhealthy", "failed"):
+                    return
+                actor = agent_id or "An agent"
+                title = f"{actor} is {current}"[:200]
+                notification_store.add(
+                    kind="alert",
+                    title=title,
+                    body=None,
+                    agent_id=agent_id,
+                    payload={
+                        "previous": data.get("previous"),
+                        "current": current,
+                        "failures": data.get("failures"),
+                    },
+                )
+                return
+
+            if event_type == "credit_exhausted":
+                actor = agent_id or "An agent"
+                title = f"{actor} is out of credit"[:200]
+                body = (data.get("error") or "").strip()[:200] or None
+                notification_store.add(
+                    kind="alert",
+                    title=title,
+                    body=body,
+                    agent_id=agent_id,
+                    payload={"error": data.get("error")},
+                )
+                return
+        except Exception as e:
+            # Notifications are a polish surface — never let a write
+            # failure break the broadcast path or starve other
+            # listeners. ``EventBus.emit`` already wraps callbacks in
+            # try/except and logs at debug, but we log at warning here
+            # so a bad mapping is visible without flipping log levels.
+            logger.warning("Notifications producer failed for %s: %s", event_type, e)
+
+    if event_bus is not None:
+        event_bus.add_listener(_notifications_producer)
+
     jinja_env = Environment(
         loader=FileSystemLoader(str(_TEMPLATES_DIR)),
         autoescape=True,

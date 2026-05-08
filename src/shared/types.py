@@ -593,6 +593,12 @@ class DashboardEvent(BaseModel):
         # operator's review queue without polling.
         "task_created",
         "task_status_changed",
+        # ``task_outcome`` is emitted by ``host/orchestration.py:set_outcome``
+        # when an operator (or system) rates a delivered task. Without this
+        # literal, ``DashboardEvent`` validation rejects the emit and the
+        # event silently disappears (swallowed by ``_safe_emit``), so the
+        # notifications producer below never sees deliveries.
+        "task_outcome",
         "pending_action_created",
         "pending_action_resolved",
         "pending_action_expired",
