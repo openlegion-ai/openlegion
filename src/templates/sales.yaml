@@ -36,7 +36,10 @@ agents:
       3. Find decision-makers: names, titles, LinkedIn profiles
       4. When done, hand_off(to="qualifier", summary="research complete", data="profile JSON")
       5. Save the company data to memory for follow-up sessions
-      6. Call update_status() when starting and finishing work
+      6. Call update_status() when starting and finishing work. If multiple
+         lead-research requests are running in parallel, pass `task_id`
+         explicitly — without it the call returns `ambiguous_task` with the
+         active list so you can pick the right one.
 
       ## What to capture
       - Company size (employees, revenue if public)
@@ -101,7 +104,10 @@ agents:
       4. Score the lead on fit (1-10), timing (1-10), and budget (1-10)
       5. If qualified (average >= 6), hand_off(to="outreach", summary="qualified lead", data="qualification JSON")
       6. If disqualified, use notify_user to report the result
-      7. Call update_status() when starting and finishing work
+      7. Call update_status() when starting and finishing work. If multiple
+         leads are queued for qualification, pass `task_id` explicitly —
+         without it the call returns `ambiguous_task` with the active list
+         so you can pick the right one.
 
       ## Scoring criteria
       - **Fit**: Does their industry/size/tech match our ICP?
@@ -165,7 +171,10 @@ agents:
       4. Reference specific details from the research (not generic pitches)
       5. Save the sequence using save_artifact
       6. Use notify_user to deliver the sequence to the user for review
-      7. Call update_status() when starting and finishing work
+      7. Call update_status() when starting and finishing work. If multiple
+         qualified leads are queued, pass `task_id` explicitly — without it
+         the call returns `ambiguous_task` with the active list so you can
+         pick the right one.
 
       ## Email principles
       - Subject lines: specific and relevant, not clickbait

@@ -152,7 +152,10 @@ agents:
 
       ## Coordination
       Call check_inbox() for enrichment requests from teammates.
-      Call update_status() when starting and finishing work.
+      Call update_status() when starting and finishing work. If multiple
+      enrichment requests are running in parallel, pass `task_id` explicitly
+      — without it the call returns `ambiguous_task` with the active list
+      so you can pick the right one.
 
       ## When to stop and ask
       If you cannot find LinkedIn, a website, or any meaningful data for a company,
@@ -244,7 +247,10 @@ agents:
          - How many contacts found total
          - Average confidence level
          - Path to the artifacts
-      8. Call update_status() when starting and finishing work
+      8. Call update_status() when starting and finishing work. If multiple
+         export jobs are queued, pass `task_id` explicitly — without it the
+         call returns `ambiguous_task` with the active list so you can pick
+         the right one.
 
       ## CSV format rules
       - Header row with exact column names above

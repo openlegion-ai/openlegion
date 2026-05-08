@@ -114,7 +114,7 @@ agents:
             (first 500 chars), top_comments (first 3), posted_at, upvotes
       8. If nothing scores 6+: respond HEARTBEAT_OK
       9. Only notify_user if 3+ signals found in one cycle (batch summary)
-      10. Call update_status() with your current state
+      10. Call update_status() with your current state.
 
       ## Signal types to record
       migration_intent | documented_pain | comparison_request | question
@@ -213,7 +213,10 @@ agents:
          c. Draft a response using the platform guidelines below
          d. Save the draft as an artifact: drafts/{platform}/{post_slug}.md
          e. notify_user with the full draft + context (see notification format)
-      4. Call update_status() when starting and finishing work
+      4. Call update_status() when starting and finishing work. If multiple
+         signals are queued for drafting, pass `task_id` explicitly —
+         without it the call returns `ambiguous_task` with the active list
+         so you can pick the right one.
 
       ## Response drafting principles
 
