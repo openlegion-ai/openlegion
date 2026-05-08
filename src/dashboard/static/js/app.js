@@ -660,6 +660,10 @@ function dashboard() {
     _whatsNewTourPrevFocus: null,
     _whatsNewTourKeyHandler: null,
 
+    // Track the element focused before the side panel opened so ESC
+    // restores focus to the original trigger on close.
+    _messengerSidePanelPrevFocus: null,
+
     // WebSocket reconnect countdown (Alpine-reactive mirror)
     wsReconnectIn: 0,
 
@@ -1723,6 +1727,9 @@ function dashboard() {
       this.messengerSidePanelOpen = !this.messengerSidePanelOpen;
       try {
         if (this.messengerSidePanelOpen) {
+          // Capture the previously focused element so ESC can restore
+          // focus on close (mirrors _whatsNewTourPrevFocus pattern).
+          try { this._messengerSidePanelPrevFocus = document.activeElement; } catch (_) {}
           localStorage.setItem('ol_messenger_side_panel_open', '1');
           // Open Operator by default if no chat is active.
           if (!this.openChats.includes('operator')) this.openChats.push('operator');
@@ -1735,6 +1742,13 @@ function dashboard() {
           });
         } else {
           localStorage.removeItem('ol_messenger_side_panel_open');
+          // Restore focus when toggled closed via the same button.
+          try {
+            if (this._messengerSidePanelPrevFocus && this._messengerSidePanelPrevFocus.focus) {
+              this._messengerSidePanelPrevFocus.focus();
+            }
+          } catch (_) {}
+          this._messengerSidePanelPrevFocus = null;
         }
       } catch (e) { /* ignore */ }
     },
@@ -1744,6 +1758,13 @@ function dashboard() {
       if (!this.messengerSidePanelOpen) return;
       this.messengerSidePanelOpen = false;
       try { localStorage.removeItem('ol_messenger_side_panel_open'); } catch (e) { /* ignore */ }
+      // Restore focus to the trigger element captured on open.
+      try {
+        if (this._messengerSidePanelPrevFocus && this._messengerSidePanelPrevFocus.focus) {
+          this._messengerSidePanelPrevFocus.focus();
+        }
+      } catch (_) {}
+      this._messengerSidePanelPrevFocus = null;
     },
 
     /**
@@ -1768,6 +1789,21 @@ function dashboard() {
     loadOlderMessages(agentId) {
       const cur = this._chatVisibleLimit[agentId] || 50;
       this._chatVisibleLimit = { ...this._chatVisibleLimit, [agentId]: cur + 50 };
+    },
+
+    /**
+     * Caption for the "Load older" button — shows the visible-vs-total
+     * count when computable so users know how deep the history is.
+     * Format: "Load 50 older (340 of 500)" when total > limit; falls
+     * back to "Load 50 older" when totals aren't yet known.
+     */
+    loadOlderCaption(agentId) {
+      const all = this.chatHistories[agentId] || [];
+      const limit = this._chatVisibleLimit[agentId] || 50;
+      const total = all.length;
+      const visible = Math.min(limit, total);
+      if (total > limit) return `Load 50 older (${visible} of ${total})`;
+      return 'Load 50 older';
     },
 
     /** Mark a worker conversation opened on the server (Phase 1 contract). */
@@ -3002,7 +3038,7 @@ function dashboard() {
           previewToggleAriaId: previewAriaId,
           actions: [
             primary,
-            { label: 'Cancel', style: 'gray', handler: () => this.cancelPendingAction(p.nonce) },
+            { label: 'Cancel', style: 'gray', handler: () => this._confirmCancelPendingAction(p.nonce, this._humanizeAction(p.action_kind, p.target_kind, p.target_id, p.summary)) },
           ],
         });
       }
@@ -3508,6 +3544,22 @@ function dashboard() {
       } catch (e) {
         this.showToast(`Cancel failed: ${e.message || e}`);
       }
+    },
+
+    /**
+     * Confirm-then-cancel wrapper for the Needs-You "Cancel" pending
+     * action button. Pops the existing confirm modal so a stray click
+     * doesn't dismiss the team's request — they can't retry until they
+     * ask again. The label is the action title shown on the chip.
+     */
+    _confirmCancelPendingAction(nonce, label) {
+      const safeLabel = (label && String(label).trim()) || 'this approval';
+      this.showConfirm(
+        'Cancel approval?',
+        `Cancelling will dismiss "${safeLabel}". The team won't be able to retry until they ask again.`,
+        async () => { await this.cancelPendingAction(nonce); },
+        true,
+      );
     },
 
     // Confirm-button handler for the inline pending_action_card.
@@ -9393,7 +9445,7 @@ function dashboard() {
     formatActivityForUser(event) {
       if (!event || !event.type) return null;
       const d = event.data || {};
-      const agent = event.agent ? this.agentDisplayName(event.agent) : 'Someone';
+      const agent = event.agent ? this.agentDisplayName(event.agent) : 'An agent';
       switch (event.type) {
         case 'tool_start': {
           const toolName = d.tool || d.name || event.tool_name || '';
@@ -9560,6 +9612,25 @@ function dashboard() {
       if (this.showTechDetail) return true;
       const summary = this.formatActivityForUser(event);
       return summary !== null;
+    },
+
+    /**
+     * Count of events hidden by the showTechDetail filter — power
+     * users see them inline, others get a low-noise rollup at the
+     * bottom of the feed ("+ N coordination events"). Returns 0 when
+     * there's nothing to surface (filter active, tech detail on, or
+     * no hidden events).
+     */
+    get hiddenCoordinationEventsCount() {
+      if (this.showTechDetail) return 0;
+      if (this.eventFilters && this.eventFilters.length > 0) return 0;
+      const events = this.events || [];
+      let n = 0;
+      for (const e of events) {
+        if (e && e.type === 'agent_state' && (e.data?.state === 'registered')) continue;
+        if (!this.isActivityEventVisible(e)) n += 1;
+      }
+      return n;
     },
 
     // Toggle the persistent "Show technical detail" preference.
@@ -9896,7 +9967,7 @@ function dashboard() {
         case 'approval': return '?';
         case 'alert': return '⚠';
         case 'blocker': return '⚠';
-        case 'credential': return '🔑';
+        case 'credential': return 'K';
         case 'info':
         default: return '•';
       }

@@ -777,8 +777,8 @@
                      visible window (Decision 12). -->
                 <div x-show="hasOlderMessages('operator')" x-cloak class="text-center py-2">
                   <button @click="loadOlderMessages('operator')"
-                    class="text-[11px] text-gray-500 hover:text-gray-300 px-3 py-1 rounded border border-gray-800 hover:border-gray-700 transition-colors">
-                    Load older &rarr;
+                    class="text-[11px] text-gray-500 hover:text-gray-300 px-3 py-1 rounded border border-gray-800 hover:border-gray-700 transition-colors"
+                    x-text="loadOlderCaption('operator')">
                   </button>
                 </div>
                 <template x-for="(msg, i) in visibleChatHistory('operator')" :key="i">
@@ -6260,6 +6260,17 @@
                 </template>
               </div>
             </template>
+            <!-- Low-noise rollup: when tech detail is off, surface a single
+                 line summarising how many implementation events were
+                 hidden so power users still know they exist without
+                 seeing the noise. Hidden when no events are filtered. -->
+            <div x-show="hiddenCoordinationEventsCount > 0 && filteredEvents.length > 0"
+                 x-cloak
+                 class="text-center text-[11px] text-gray-600 italic py-2"
+                 data-testid="hidden-events-rollup">
+              <span x-text="'+ ' + hiddenCoordinationEventsCount + ' coordination event' + (hiddenCoordinationEventsCount === 1 ? '' : 's')"></span>
+              <button @click="setShowTechDetail(true)" class="ml-2 underline hover:text-gray-400 transition-colors">show</button>
+            </div>
             <!-- Empty state -->
             <div x-show="filteredEvents.length === 0" class="text-center py-16">
               <svg class="empty-state-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -7795,8 +7806,8 @@
                tab, keyed by the active chat id. -->
           <div x-show="hasOlderMessages(activeChatId)" x-cloak class="text-center py-2">
             <button @click="loadOlderMessages(activeChatId)"
-              class="text-[11px] text-gray-500 hover:text-gray-300 px-3 py-1 rounded border border-gray-800 hover:border-gray-700 transition-colors">
-              Load older &rarr;
+              class="text-[11px] text-gray-500 hover:text-gray-300 px-3 py-1 rounded border border-gray-800 hover:border-gray-700 transition-colors"
+              x-text="loadOlderCaption(activeChatId)">
             </button>
           </div>
           <template x-for="(msg, i) in visibleChatHistory(activeChatId)" :key="i">
@@ -8496,7 +8507,7 @@
       <div class="fixed inset-0 z-[150] flex items-center justify-center bg-black/70 backdrop-blur-sm p-0 sm:p-4"
            data-testid="whats-new-overlay"
            @click.self="dismissWhatsNewTour('overlay')">
-        <div role="dialog" aria-modal="true" aria-labelledby="whats-new-title"
+        <div role="dialog" aria-modal="true" :aria-labelledby="'whats-new-title-' + whatsNewTour.step"
              data-testid="whats-new-modal"
              class="relative w-full h-full sm:h-auto sm:max-w-md sm:rounded-2xl bg-gradient-to-b from-indigo-900/40 to-gray-900/95 sm:border sm:border-indigo-700/40 shadow-2xl overflow-y-auto sm:overflow-visible flex flex-col sm:block">
           <!-- Step 1 -->
@@ -8511,7 +8522,7 @@
                   Skip
                 </button>
               </div>
-              <h2 id="whats-new-title" class="text-lg font-semibold text-white mb-2">
+              <h2 id="whats-new-title-1" class="text-lg font-semibold text-white mb-2">
                 We&rsquo;ve simplified your dashboard
               </h2>
               <p class="text-sm text-gray-300 leading-relaxed mb-6 flex-1">
@@ -8543,7 +8554,7 @@
                   Skip
                 </button>
               </div>
-              <h2 id="whats-new-title" class="text-lg font-semibold text-white mb-3">
+              <h2 id="whats-new-title-2" class="text-lg font-semibold text-white mb-3">
                 Operator is one click away
               </h2>
               <div class="rounded-xl bg-gray-900/60 border border-indigo-500/30 p-4 mb-4 flex items-center gap-3">
@@ -8583,7 +8594,7 @@
               <div class="flex items-start justify-between mb-3">
                 <div class="text-[11px] uppercase tracking-wide text-indigo-300/80">Step 3 of 3</div>
               </div>
-              <h2 id="whats-new-title" class="text-lg font-semibold text-white mb-3">
+              <h2 id="whats-new-title-3" class="text-lg font-semibold text-white mb-3">
                 Approvals and notifications are in the top nav
               </h2>
               <div class="rounded-xl bg-gray-900/60 border border-indigo-500/30 p-4 mb-4 flex items-center gap-3">

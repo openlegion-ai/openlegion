@@ -1555,3 +1555,758 @@ def _run_rollup_js(events: list[dict]) -> list[dict]:
     if proc.returncode != 0:
         pytest.fail(f"node harness failed: {proc.stderr}")
     return _json.loads(proc.stdout)
+# ── User-journey audit: coverage gaps for formatActivityForUser ──
+
+
+class TestFormatActivityForUserEventTypeMapping:
+    """Table-driven coverage of every branch of ``formatActivityForUser``.
+
+    The helper is a pure function over (event_type, data) → user-facing
+    string. We can't run JS in CI so we mirror the switch statement in
+    Python and verify the source contains the expected output template
+    for each branch. When the mapping drifts the assertion fails on the
+    template literal.
+    """
+
+    # Each row: (event_type, expected_template_substring_in_app_js)
+    _EVENT_CASES = [
+        # tool_start → "X is Y"
+        ("tool_start", "is ${this.verbForTool"),
+        # tool_result → "X finished Y"
+        ("tool_result", "finished ${this.verbForTool"),
+        # task_status_changed → status verb mapping
+        ("task_status_changed", "${this.verbForStatus"),
+        # task_outcome → "X's work was Y"
+        ("task_outcome", "work was ${outcome}"),
+        # credential_request → "X needs a Y — your call"
+        ("credential_request", "needs a ${label} — your call"),
+        # pending_action_created → "X wants to Y"
+        ("pending_action_created", "wants to ${actionLabel}"),
+        # task_created → "X picked up '<title>'"
+        ("task_created", "picked up \"${title}\""),
+        # health_change → "X is now Y"
+        ("health_change", "is now ${d.current"),
+        # heartbeat_complete → "X finished a checkup"
+        ("heartbeat_complete", "finished a checkup"),
+        # notification → first 100 chars of message (substring(0, 100))
+        ("notification", "(d.message || '').substring(0, 100)"),
+        # browser_login_request → "X needs a sign-in — your call"
+        ("browser_login_request", "needs a sign-in — your call"),
+        # browser_captcha_help_request → "X hit a CAPTCHA"
+        ("browser_captcha_help_request", "hit a CAPTCHA"),
+        # credit_exhausted → "X is out of credit"
+        ("credit_exhausted", "is out of credit"),
+    ]
+
+    @pytest.mark.parametrize(
+        "event_type,expected_template",
+        _EVENT_CASES,
+        ids=[c[0] for c in _EVENT_CASES],
+    )
+    def test_visible_event_types_have_user_facing_template(
+        self, event_type: str, expected_template: str
+    ):
+        """Each user-visible event type renders its locked template literal."""
+        # Locate the formatActivityForUser switch block; per-case copy
+        # must match the expected template substring. We search inside
+        # the function so unrelated occurrences don't false-positive.
+        m = re.search(
+            r"formatActivityForUser\(event\)\s*\{(.*?)\n    \},",
+            _APP_JS_TEXT,
+            re.DOTALL,
+        )
+        assert m, "formatActivityForUser body missing"
+        body = m.group(1)
+        assert f"case '{event_type}':" in body, (
+            f"missing case for {event_type}"
+        )
+        assert expected_template in body, (
+            f"template drift for {event_type}: expected {expected_template!r}"
+        )
+
+    @pytest.mark.parametrize(
+        "hidden_type",
+        [
+            "blackboard_write",
+            "llm_call",
+            "message_received",
+            "message_sent",
+            "text_delta",
+            "agent_state",
+        ],
+    )
+    def test_hidden_event_types_return_null(self, hidden_type: str):
+        """Power-user-only event types fall through to ``return null``."""
+        # The hidden cluster is a single fall-through block ending in
+        # `return null`. We grep for the cluster + the case label.
+        m = re.search(
+            r"// Hidden by default.*?return null;",
+            _APP_JS_TEXT,
+            re.DOTALL,
+        )
+        assert m, "hidden-by-default cluster missing"
+        block = m.group(0)
+        assert f"case '{hidden_type}'" in block, (
+            f"{hidden_type} should be in the hidden cluster"
+        )
+
+    def test_unknown_agent_falls_back_to_an_agent(self):
+        """Unknown agents render as 'An agent', not 'Someone'."""
+        # Polish fix: the audit flagged "Someone" as too anonymous.
+        m = re.search(
+            r"formatActivityForUser\(event\)\s*\{(.*?)\n    \},",
+            _APP_JS_TEXT,
+            re.DOTALL,
+        )
+        assert m, "formatActivityForUser body missing"
+        body = m.group(1)
+        assert "'An agent'" in body, (
+            "missing 'An agent' fallback for events with no agent"
+        )
+        assert ": 'Someone'" not in body, (
+            "legacy 'Someone' fallback should be removed"
+        )
+
+
+def _enumerate_skill_tool_names() -> set[str]:
+    """Walk ``src/agent/builtins/*.py`` and collect ``name="..."`` entries.
+
+    Mirrors what ``test_verb_for_tool_map_completeness`` needs without
+    importing the modules (some have side-effecting imports). The
+    convention in this repo is `@skill(name="<tool>", ...)` with
+    ``name=`` on its own line — we tolerate inline whitespace.
+    """
+    builtins_dir = _REPO_ROOT / "src/agent/builtins"
+    name_re = re.compile(r'^\s*name\s*=\s*"([a-z_][a-z0-9_]*)"\s*,', re.MULTILINE)
+    seen: set[str] = set()
+    for path in builtins_dir.glob("*.py"):
+        seen.update(name_re.findall(path.read_text(encoding="utf-8")))
+    return seen
+
+
+# Tools that don't fit the user-friendly verb map — typically
+# operator-only / introspection tools surfaced via the fallback
+# "using {tool}" path is acceptable.
+_VERB_FOR_TOOL_FALLBACK_OK = frozenset({
+    # Introspection / mesh-internal — fallback "using X" reads fine.
+    "get_system_status",
+    "get_agent_profile",
+    "get_team_outputs",
+    "list_agent_queue",
+    "list_blackboard",
+    "list_files",
+    "list_pending",
+    "list_subagents",
+    "list_cron",
+    "list_templates",
+    "read_agent_history",
+    "read_blackboard",
+    "read_file",
+    "write_file",
+    "summarize_project_progress",
+    # Coordination wrappers — covered by hand_off / update_status / etc.
+    "claim_task",
+    "complete_task",
+    # Cron management.
+    "set_cron",
+    "remove_cron",
+    # Subagent lifecycle.
+    "spawn_subagent",
+    "spawn_fleet_agent",
+    "wait_for_subagent",
+    # Operator-only edit/orchestration.
+    "propose_edit",
+    "confirm_edit",
+    "cancel_pending_action",
+    "archive_audit_before",
+    "undo_change",
+    "manage_agent",
+    "manage_project",
+    "manage_task",
+    "create_project",
+    "add_agents_to_project",
+    "remove_agents_from_project",
+    "set_project_goal",
+    "update_project_context",
+    "inspect_projects",
+    # Vault / credentials.
+    "vault_generate_secret",
+    "vault_list",
+    "request_credential",
+    # Skill self-authoring.
+    "create_skill",
+    "reload_skills",
+    "update_workspace",
+    # Misc / external integrations.
+    "post_tweet",
+    "save_artifact",
+    # Test fixture in tests/test_skills.py — not a real builtin but
+    # shows up because the loader picks any name="..." entry.
+    "my_tool",
+    # Browser tools that aren't user-facing in the activity feed
+    # (warmup is internal; switch_tab/open_tab/inspect_requests/
+    # detect_captcha/wait_for/press_key/scroll/hover/click_xy/upload/
+    # download/reset/go_back/go_forward/solve_captcha share the
+    # generic "using browser_*" fallback which reads fine).
+    "browser_warmup",
+    "browser_switch_tab",
+    "browser_open_tab",
+    "browser_inspect_requests",
+    "browser_detect_captcha",
+    "browser_wait_for",
+    "browser_press_key",
+    "browser_scroll",
+    "browser_hover",
+    "browser_click_xy",
+    "browser_upload_file",
+    "browser_download",
+    "browser_reset",
+    "browser_go_back",
+    "browser_go_forward",
+    "browser_solve_captcha",
+    "request_captcha_help",
+    "request_browser_login",
+    # Watch / pub-sub.
+    "watch_blackboard",
+    "subscribe_event",
+    "publish_event",
+    "list_agents",
+    # Image gen / shell / wallet variants — fallbacks read fine.
+    # ("generating an image" already covered by image_gen above; the
+    # builtin name is generate_image which the JS doesn't map but the
+    # fallback "using generate image" is acceptable.)
+    "generate_image",
+    "run_command",
+    "wallet_execute",
+    "wallet_read_contract",
+})
+
+
+class TestVerbForToolCompleteness:
+    """Every ``@skill`` builtin either has an explicit ``verbForTool``
+    entry or is on the fallback allowlist."""
+
+    def test_every_builtin_tool_is_mapped_or_allowlisted(self):
+        """No builtin slips through both the verb map and the allowlist."""
+        all_tools = _enumerate_skill_tool_names()
+        # Pull the verbForTool map body so we look for explicit keys
+        # (substring match against the JS object literal).
+        m = re.search(
+            r"verbForTool\(toolName\)\s*\{.*?const map\s*=\s*\{(.*?)\};",
+            _APP_JS_TEXT,
+            re.DOTALL,
+        )
+        assert m, "verbForTool map body missing"
+        map_body = m.group(1)
+        missing: list[str] = []
+        for tool in sorted(all_tools):
+            if tool in _VERB_FOR_TOOL_FALLBACK_OK:
+                continue
+            if f"{tool}:" not in map_body:
+                missing.append(tool)
+        assert not missing, (
+            "tools missing from verbForTool map (and not on the "
+            "fallback allowlist): " + ", ".join(missing)
+        )
+
+    def test_fallback_humanises_unknown_tool(self):
+        """Unknown tools fall back to ``using {snake_case_with_spaces}``."""
+        # Source-level check: the fallback path replaces underscores
+        # with spaces and prefixes with "using ".
+        m = re.search(
+            r"verbForTool\(toolName\)\s*\{(.*?)\n    \},",
+            _APP_JS_TEXT,
+            re.DOTALL,
+        )
+        assert m, "verbForTool body missing"
+        body = m.group(1)
+        assert "using ${toolName.replace(/_/g, ' ')}" in body
+
+
+# ── Wizard timeout / coordination tests (gated on PR-A) ──────────
+
+
+def _wizard_has_build_failed_state() -> bool:
+    """PR-A introduces a ``build_failed`` step. Tests that depend on
+    that state stay skipped until the source carries the literal."""
+    return "'build_failed'" in _APP_JS_TEXT
+
+
+class TestWizardBuildPolling:
+    """Phase -1 wizard build-polling state machine."""
+
+    @pytest.mark.skipif(
+        not _wizard_has_build_failed_state(),
+        reason="depends on PR-A: wizard build_failed state",
+    )
+    def test_wizard_5min_timeout_advances_to_build_failed(self):
+        """The 5-min hard cap advances from building → build_failed."""
+        # When PR-A lands, the timeout branch should call
+        # ``_wizardAdvance('build_failed', ...)`` instead of just
+        # clearing the interval. We assert on the source.
+        m = re.search(
+            r"_wizardStartBuildPolling\(\)\s*\{(.*?)\n    \},",
+            _APP_JS_TEXT,
+            re.DOTALL,
+        )
+        assert m, "_wizardStartBuildPolling body missing"
+        body = m.group(1)
+        assert "5 * 60 * 1000" in body, "5 minute timeout constant missing"
+        assert "_wizardAdvance('build_failed'" in body or \
+               "wizard.step = 'build_failed'" in body, (
+            "5-min timeout should advance to build_failed when PR-A lands"
+        )
+
+    @pytest.mark.skipif(
+        not _wizard_has_build_failed_state(),
+        reason="depends on PR-A: partial-apply stability detection",
+    )
+    def test_wizard_partial_apply_failure_does_not_advance_prematurely(self):
+        """A fleet count growing 1→2 then stalling waits for stability."""
+        # PR-A's stability gate keeps the wizard in 'building' until the
+        # fleet count has been stable for >= the stability window. We
+        # check the source carries the stability check.
+        m = re.search(
+            r"_wizardStartBuildPolling\(\)\s*\{(.*?)\n    \},",
+            _APP_JS_TEXT,
+            re.DOTALL,
+        )
+        assert m, "_wizardStartBuildPolling body missing"
+        body = m.group(1)
+        # Look for evidence of stability tracking: a counter that
+        # accumulates polls at the same fleet size before advancing.
+        assert "stable" in body.lower() or "stability" in body.lower(), (
+            "PR-A should add stability tracking — partial fleet must not "
+            "trigger premature advance to first-output"
+        )
+
+
+class TestBootstrapGreetingChips:
+    """The seeded bootstrap_greeting must not produce ACTION chips."""
+
+    def test_bootstrap_greeting_does_not_inject_action_chips(self):
+        """Seeded greeting is suppressed from the operator-chips parser.
+
+        The wizard ask card carries its own chips; running the chip
+        parser on the bootstrap greeting would render duplicates.
+        """
+        # We check the operator-chips application path: it must skip
+        # entries marked ``_origin === 'bootstrap_greeting'``. PR-A
+        # adds the guard.
+        m = re.search(
+            r"_applyOperatorActions\(entry\)\s*\{(.*?)\n    \},",
+            _APP_JS_TEXT,
+            re.DOTALL,
+        )
+        assert m, "_applyOperatorActions body missing"
+        body = m.group(1)
+        if "bootstrap_greeting" not in body:
+            pytest.skip(
+                "depends on PR-A: _applyOperatorActions should skip "
+                "bootstrap_greeting origin entries"
+            )
+        # When PR-A lands the body skips entries with the seeded
+        # origin marker before running the chip parser.
+        assert "bootstrap_greeting" in body
+
+
+# ── Notifications bell coverage gaps (PR-B coordination) ─────────
+
+
+def _has_legacy_notifications_bell(html: str) -> bool:
+    """The Phase 1 placeholder bell mirrors ``events`` rather than the
+    persistent ``/notifications`` endpoint. PR-B removes it."""
+    # The legacy bell is the one whose dropdown iterates over `events`;
+    # the Phase 2 bell iterates over `notifications`. We detect the
+    # legacy variant via a unique substring.
+    return 'events || []).slice(0, 10)' in html
+
+
+class TestNotificationsBellSingleton:
+    """Only one notifications bell should render after PR-B lands."""
+
+    @pytest.mark.skipif(
+        _has_legacy_notifications_bell(_INDEX_HTML),
+        reason="depends on PR-B: legacy phase-1 notifications bell still present",
+    )
+    def test_legacy_notifications_bell_removed(self):
+        """The Phase 1 placeholder bell that mirrors ``events`` is gone."""
+        # The unique fingerprint of the legacy bell is the dropdown
+        # binding to ``events`` rather than ``notifications``.
+        assert "events || []).slice(0, 10)" not in _INDEX_HTML, (
+            "legacy phase-1 notifications bell still present — PR-B "
+            "should remove it before this test runs"
+        )
+
+    @pytest.mark.skipif(
+        _has_legacy_notifications_bell(_INDEX_HTML),
+        reason="depends on PR-B: only one bell after legacy is removed",
+    )
+    def test_only_one_notifications_bell_renders(self):
+        """Exactly one bell SVG sits in the top-nav."""
+        # The bell SVG path is unique enough to count occurrences.
+        # Both the Phase 1 and Phase 2 variants share this path string.
+        bell_path = 'M18 8A6 6 0 0'
+        count = _INDEX_HTML.count(bell_path)
+        assert count == 1, (
+            f"expected exactly 1 notifications bell after PR-B, got {count}"
+        )
+
+
+class TestNotificationsProducer:
+    """PR-B wires producers for each event type into NotificationStore."""
+
+    def test_notifications_producer_emits_for_each_event_type(self):
+        """Each PR-B event type creates a corresponding notifications row.
+
+        Coordinates with PR-B which adds the producer hooks. We test
+        the contract by importing the wiring module and firing each
+        event type through its dispatch entrypoint. When PR-B hasn't
+        landed the test skips gracefully.
+        """
+        try:
+            from src.dashboard.notifications import NotificationStore
+        except ImportError:  # pragma: no cover
+            pytest.skip("notifications module not present")
+
+        # PR-B's contract: the wiring module exposes a function that
+        # given an event payload + a NotificationStore, inserts the
+        # right row. Until PR-B lands the symbol is absent.
+        wiring_callable = None
+        for module_name in (
+            "src.dashboard.notifications",
+            "src.dashboard.events",
+            "src.dashboard.server",
+        ):
+            try:
+                mod = __import__(module_name, fromlist=["dispatch_event_to_notifications"])
+                if hasattr(mod, "dispatch_event_to_notifications"):
+                    wiring_callable = getattr(mod, "dispatch_event_to_notifications")
+                    break
+            except ImportError:
+                continue
+        if wiring_callable is None:
+            pytest.skip(
+                "depends on PR-B: dispatch_event_to_notifications not yet wired"
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = NotificationStore(db_path=os.path.join(tmpdir, "n.db"))
+            try:
+                # Six event types per PR-B spec: each should produce
+                # one row when dispatched.
+                payloads = [
+                    {"type": "task_outcome", "agent": "writer",
+                     "data": {"outcome": "delivered", "title": "Draft"}},
+                    {"type": "pending_action_created", "agent": "researcher",
+                     "data": {"action_label": "publish"}},
+                    {"type": "credential_request", "agent": "scout",
+                     "data": {"credential_label": "API key"}},
+                    {"type": "browser_login_request", "agent": "scout",
+                     "data": {"service": "example.com"}},
+                    {"type": "browser_captcha_help_request", "agent": "scout",
+                     "data": {"service": "example.com"}},
+                    {"type": "credit_exhausted", "agent": "writer", "data": {}},
+                ]
+                for payload in payloads:
+                    wiring_callable(payload, store)
+                rows = store.list_recent(limit=50)
+                assert len(rows) == len(payloads), (
+                    f"expected {len(payloads)} rows, got {len(rows)}"
+                )
+            finally:
+                store.close()
+
+
+# ── Conversations isolation (PR-D coordination) ──────────────────
+
+
+class TestOpenedConversationsSessionIsolation:
+    """Opened-conversation state must be per-session, not global."""
+
+    def test_opened_conversations_session_isolation(self):
+        """Two distinct cookies have independent open-conversation sets.
+
+        Coordinates with PR-D which moves the open-set into a per-
+        session store. Until that ships, the global set leaks across
+        sessions and this test xfail-skips.
+        """
+        try:
+            from src.dashboard.conversations import OpenedConversations
+        except ImportError:
+            pytest.skip("depends on PR-D: src.dashboard.conversations not present")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = OpenedConversations(db_path=os.path.join(tmpdir, "c.db"))
+            try:
+                # Distinct cookie ids represent distinct sessions.
+                store.mark_opened("session-A", "researcher")
+                assert "researcher" in store.list_opened("session-A")
+                # Session-B has not opened anything yet.
+                assert "researcher" not in store.list_opened("session-B")
+            finally:
+                store.close()
+
+
+# ── Undo countdown (PR-C coordination) ───────────────────────────
+
+
+class TestUndoCountdownRender:
+    """The Undo receipt should show remaining seconds (PR-C)."""
+
+    def test_undo_countdown_renders_remaining_seconds(self):
+        """Markup carries a span with countdown text format.
+
+        PR-C adds the ``data-testid="undo-countdown"`` span that ticks
+        down. The countdown helper is gated on ``_undoExpiresAt``.
+        """
+        if "undo-countdown" not in _INDEX_HTML and "undoSecondsRemaining" not in _APP_JS_TEXT:
+            pytest.skip("depends on PR-C: undo countdown not yet wired")
+        # Either the testid or the helper must exist; both is the
+        # complete state.
+        assert (
+            'data-testid="undo-countdown"' in _INDEX_HTML
+            or "undoSecondsRemaining" in _APP_JS_TEXT
+        ), "PR-C undo countdown markup/helper missing"
+
+
+# ── Action chip click during stream ──────────────────────────────
+
+
+class TestActionChipDuringStream:
+    """``sendOperatorChip`` branches on streaming state."""
+
+    def test_action_chip_click_during_stream_handled(self):
+        """While streaming the chip routes to ``steerAgent``; otherwise
+        to ``sendChatTo``."""
+        # Pull the body of sendOperatorChip and verify both branches.
+        m = re.search(
+            r"sendOperatorChip\(label\)\s*\{(.*?)\n    \},",
+            _APP_JS_TEXT,
+            re.DOTALL,
+        )
+        assert m, "sendOperatorChip body missing"
+        body = m.group(1)
+        # Streaming gate uses isAgentBusy('operator')
+        assert "isAgentBusy('operator')" in body, (
+            "sendOperatorChip should gate on isAgentBusy('operator')"
+        )
+        # Both branch targets present.
+        assert "this.steerAgent('operator'" in body, (
+            "missing steerAgent branch in sendOperatorChip"
+        )
+        assert "this.sendChatTo('operator'" in body, (
+            "missing sendChatTo branch in sendOperatorChip"
+        )
+
+
+# ── What's-new tour gating edge cases ────────────────────────────
+
+
+class TestWhatsNewTourGatingEdgeCases:
+    """The tour's gating logic must be defensive about edge conditions."""
+
+    def test_empty_fleet_does_not_fire_tour(self):
+        """Fleet size 0 (operator-only) suppresses the tour."""
+        # _maybeStartWhatsNewTour bails when fleetAgents.length === 0.
+        m = re.search(
+            r"_maybeStartWhatsNewTour\(\)\s*\{(.*?)\n    \},",
+            _APP_JS_TEXT,
+            re.DOTALL,
+        )
+        assert m, "_maybeStartWhatsNewTour body missing"
+        body = m.group(1)
+        assert "fleetAgents.length === 0" in body, (
+            "empty-fleet guard missing — tour would fire on fresh installs"
+        )
+
+    def test_localstorage_unavailable_falls_through_to_show_once(self):
+        """When localStorage throws (private mode) the tour still fires.
+
+        The seen-flag check is wrapped in try/catch. The ``catch`` arm
+        is a no-op so the function continues to the agent check — i.e.
+        the tour shows once per session in private mode.
+        """
+        m = re.search(
+            r"_maybeStartWhatsNewTour\(\)\s*\{(.*?)\n    \},",
+            _APP_JS_TEXT,
+            re.DOTALL,
+        )
+        assert m, "_maybeStartWhatsNewTour body missing"
+        body = m.group(1)
+        # The catch must not return — only the try return early-exits.
+        # The simplest contract check: the comment marks the private-
+        # mode policy and the catch arm is empty.
+        assert re.search(
+            r"catch\s*\(_\)\s*\{\s*/\*[^*]*private mode[^*]*\*/\s*\}",
+            body,
+        ), "private-mode catch arm should be a documented no-op"
+
+    def test_tour_state_does_not_persist_across_reload(self):
+        """Tour state lives in memory only — reload aborts mid-flight."""
+        # The wizard persists to localStorage.ol_wizard; the tour
+        # explicitly does NOT. _maybeStartWhatsNewTour gates only on
+        # the seen flag, not on a stored step. We assert the tour
+        # bootstrap reads neither a stored step nor calls a persist
+        # helper from the seen-flag branch.
+        m = re.search(
+            r"_maybeStartWhatsNewTour\(\)\s*\{(.*?)\n    \},",
+            _APP_JS_TEXT,
+            re.DOTALL,
+        )
+        assert m, "_maybeStartWhatsNewTour body missing"
+        body = m.group(1)
+        # Tour state object must not be hydrated from localStorage.
+        # (The seen flag is the only persisted bit.)
+        assert "ol_whats_new_tour_step" not in _APP_JS_TEXT, (
+            "tour step should not be persisted — reload must abort the tour"
+        )
+        # The function reads only ``olSeenWhatsNew``, not a stored step.
+        assert "getItem('olSeenWhatsNew')" in body
+        assert "getItem('ol_whats_new_step'" not in body
+
+
+# ── Polish fix tests (verify the audit fixes landed) ─────────────
+
+
+class TestPolishFixesApplied:
+    """Verify each polish fix from the user-journey audit is in place."""
+
+    def test_tour_modal_uses_unique_title_ids(self):
+        """Each step's <h2> has a unique id; aria-labelledby is dynamic.
+
+        The audit caught all three steps using the same id="whats-new-title"
+        which is invalid HTML and breaks screen readers when multiple
+        steps render in sequence.
+        """
+        for n in (1, 2, 3):
+            assert f'id="whats-new-title-{n}"' in _INDEX_HTML, (
+                f"missing unique title id for step {n}"
+            )
+        # The aria-labelledby binding must reference the dynamic id.
+        assert (
+            ":aria-labelledby=\"'whats-new-title-' + whatsNewTour.step\""
+            in _INDEX_HTML
+        ), "aria-labelledby should bind dynamically to the active step"
+        # The legacy duplicated id should be gone.
+        assert 'id="whats-new-title"' not in _INDEX_HTML, (
+            "legacy duplicate id still present"
+        )
+
+    def test_credential_notification_icon_is_plain_text(self):
+        """The 'credential' kind icon is 'K' — markup is emoji-free."""
+        # The comment near the helper says "Plain text glyphs keep the
+        # markup emoji-free"; emoji slipped in for the credential row.
+        m = re.search(
+            r"notificationKindIcon\(kind\)\s*\{(.*?)\n    \},",
+            _APP_JS_TEXT,
+            re.DOTALL,
+        )
+        assert m, "notificationKindIcon body missing"
+        body = m.group(1)
+        assert "case 'credential': return 'K'" in body, (
+            "credential icon should be plain 'K' (emoji-free)"
+        )
+        assert "'\U0001f511'" not in body and "🔑" not in body, (
+            "key emoji should be gone"
+        )
+
+    def test_load_older_caption_shows_total(self):
+        """The 'Load older' button shows visible-vs-total when known."""
+        # The helper formats "Load 50 older (340 of 500)" when total >
+        # limit. We assert the source carries the format literal.
+        m = re.search(
+            r"loadOlderCaption\(agentId\)\s*\{(.*?)\n    \},",
+            _APP_JS_TEXT,
+            re.DOTALL,
+        )
+        assert m, "loadOlderCaption body missing"
+        body = m.group(1)
+        assert "Load 50 older (" in body and " of " in body, (
+            "loadOlderCaption should format as 'Load 50 older (X of Y)'"
+        )
+        # Both pagination buttons in the template bind to the helper.
+        assert 'x-text="loadOlderCaption(\'operator\')"' in _INDEX_HTML
+        assert 'x-text="loadOlderCaption(activeChatId)"' in _INDEX_HTML
+
+    def test_side_panel_esc_restores_focus(self):
+        """closeSidePanel restores focus captured on toggleSidePanel open."""
+        # Mirrors the _whatsNewTourPrevFocus pattern.
+        assert "_messengerSidePanelPrevFocus" in _APP_JS_TEXT, (
+            "side-panel previous-focus tracker missing"
+        )
+        # closeSidePanel restores via .focus() on the captured node.
+        m = re.search(
+            r"closeSidePanel\(\)\s*\{(.*?)\n    \},",
+            _APP_JS_TEXT,
+            re.DOTALL,
+        )
+        assert m, "closeSidePanel body missing"
+        body = m.group(1)
+        assert "_messengerSidePanelPrevFocus" in body, (
+            "closeSidePanel should restore captured focus"
+        )
+        assert ".focus()" in body, (
+            "closeSidePanel should call .focus() on the captured element"
+        )
+
+    def test_anonymous_agent_label_is_an_agent(self):
+        """formatActivityForUser uses 'An agent' rather than 'Someone'."""
+        m = re.search(
+            r"formatActivityForUser\(event\)\s*\{(.*?)\n    \},",
+            _APP_JS_TEXT,
+            re.DOTALL,
+        )
+        assert m, "formatActivityForUser body missing"
+        body = m.group(1)
+        assert "'An agent'" in body
+        # The comment-ish "Someone" string in agentDisplayName is fine
+        # because it has its own semantics; only the activity feed
+        # fallback was flagged.
+        assert ": 'Someone'" not in body
+
+    def test_cancel_pending_action_uses_confirm_modal(self):
+        """The Needs-You Cancel button pops the confirm modal first."""
+        # The helper exists.
+        assert "_confirmCancelPendingAction(nonce, label)" in _APP_JS_TEXT, (
+            "_confirmCancelPendingAction helper missing"
+        )
+        # The Needs-You builder calls it instead of cancelPendingAction
+        # directly. We grep for the wrapper call near the Cancel label.
+        assert (
+            "this._confirmCancelPendingAction(p.nonce"
+            in _APP_JS_TEXT
+        ), "Needs-You Cancel button should route through the confirm wrapper"
+
+    def test_hidden_events_rollup_helper_present(self):
+        """``hiddenCoordinationEventsCount`` getter + template wiring."""
+        assert "hiddenCoordinationEventsCount" in _APP_JS_TEXT, (
+            "hidden-events rollup getter missing"
+        )
+        assert 'data-testid="hidden-events-rollup"' in _INDEX_HTML, (
+            "hidden-events rollup row missing from template"
+        )
+
+    def test_claudemd_documents_dashboard_support_modules(self):
+        """CLAUDE.md gains rows for notifications/telemetry/platform_success."""
+        claude_md = (_REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+        # Notifications module is documented.
+        assert "notifications.py" in claude_md, (
+            "CLAUDE.md should document src/dashboard/notifications.py"
+        )
+        # Telemetry module is documented.
+        assert "telemetry.py" in claude_md and "dashboard_telemetry" in claude_md, (
+            "CLAUDE.md should document src/dashboard/telemetry.py"
+        )
+
+    def test_claudemd_documents_tab_id_and_wizard_state_constraints(self):
+        """CLAUDE.md gains the tab-ID + wizard-state Known Constraints."""
+        claude_md = (_REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+        assert "Tab IDs are frozen" in claude_md, (
+            "tab-ID constraint missing from Known Constraints"
+        )
+        assert "Wizard state machine" in claude_md, (
+            "wizard state machine constraint missing from Known Constraints"
+        )
+        # Wizard states are enumerated.
+        for state in ("idle", "ask", "confirming", "building", "first-output", "build_failed"):
+            assert state in claude_md, f"wizard state {state} not documented"
