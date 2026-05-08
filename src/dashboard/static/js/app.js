@@ -398,17 +398,23 @@ function dashboard() {
       { id: 'task-board', label: 'Tasks' },
       { id: 'team-outputs', label: 'Outputs' },
     ],
-    // Phase 3 — Home single-scroll layout.
-    // ``homeTab`` is the sub-route within the Home (workplace) tab.
-    //   ``main`` (default) → single-scroll layout: Needs You + Just
-    //     delivered + Happening now + In progress.
-    //   ``tasks`` → full kanban sub-page (lifted from the legacy
-    //     ``task-board`` sub-tab content). Reachable via the
-    //     "See full task board →" link or the URL ``/home/tasks``.
-    // Sub-tabs (Activity/Projects/Tasks/Outputs) collapsed; the legacy
-    // ``workplaceTab`` state stays for backward compat with deep links
-    // and any test that still toggles it.
-    homeTab: 'main',
+    // Phase 4 — Board (workplace) restructured around the kanban as
+    // the default surface. ``homeTab`` is the sub-route within the
+    // Board tab.
+    //   ``kanban`` (default) → kanban board: Needs You + Stuck tasks
+    //     + 4-column kanban (Pending / Working / Blocked / Done) with
+    //     a × cancel button on every card. Empty sections hide.
+    //   ``activity`` → single-scroll activity feed: Just delivered +
+    //     Happening now + In progress. Lifted from the legacy
+    //     ``main`` layout; reachable via the "View activity feed →"
+    //     link below the kanban or the URL ``/home/activity``.
+    // Backward compat: the legacy ``main`` value (Phase 3 default)
+    // and ``tasks`` value (Phase 3 kanban sub-page) both resolve to
+    // the new ``kanban`` default — old bookmarks land on the kanban
+    // because the kanban IS the new default. The legacy
+    // ``workplaceTab`` state stays for back-compat with deep links
+    // that still toggle it.
+    homeTab: 'kanban',
     workplaceEnabled: true,
     workplaceProjects: [],
     workplaceTasks: [],
@@ -455,7 +461,6 @@ function dashboard() {
     recentlyDeliveredArtifacts: {},
     recentlyDeliveredExpanded: {},
     _recentlyDeliveredFetching: {},
-    workplaceTaskColumns: ['pending', 'accepted', 'working', 'blocked', 'done'],
     workplaceProjectFilter: '',
     // Per-column flag: when true, the kanban column ignores the 14-day
     // archive cutoff and shows old pending/blocked rows. Keyed by status
@@ -747,12 +752,13 @@ function dashboard() {
         return '/system/' + (this.systemTab || 'activity');
       }
       if (this.activeTab === 'fleet') return '/agents';
-      // Phase 3 — Home (workplace) sub-routing. Default lands on the
-      // single-scroll layout (``/home``); the kanban sub-page is at
-      // ``/home/tasks``. Bookmarks for ``/home`` keep working when the
-      // user switches between Home and other tabs.
+      // Phase 4 — Board (workplace) sub-routing. Default lands on
+      // the kanban (``/home``); the activity feed sub-page is at
+      // ``/home/activity``. Legacy ``/home/tasks`` still maps to
+      // the same default in ``_parsePath`` (kanban IS the default,
+      // so old bookmarks survive without a redirect).
       if (this.activeTab === 'workplace') {
-        return this.homeTab === 'tasks' ? '/home/tasks' : '/home';
+        return this.homeTab === 'activity' ? '/home/activity' : '/home';
       }
       return '/';
     },
@@ -773,24 +779,29 @@ function dashboard() {
         return (st ? st.label : 'System') + ' \u2014 OpenLegion';
       }
       if (this.activeTab === 'workplace') {
-        return this.homeTab === 'tasks' ? 'Tasks \u2014 OpenLegion' : 'Board \u2014 OpenLegion';
+        return this.homeTab === 'activity' ? 'Activity \u2014 OpenLegion' : 'Board \u2014 OpenLegion';
       }
       return 'Agents \u2014 OpenLegion';
     },
 
     _parsePath(path) {
       const clean = path.replace(/^\/+/, '').replace(/\/+$/, '');
-      const route = { tab: 'chat', activityView: 'traces', systemTab: 'activity', agentId: null, identityTab: 'config', homeTab: 'main' };
+      const route = { tab: 'chat', activityView: 'traces', systemTab: 'activity', agentId: null, identityTab: 'config', homeTab: 'kanban' };
       if (!clean) return route;
 
       if (clean === 'chat') { route.tab = 'chat'; return route; }
       if (clean === 'agents' || clean.startsWith('agents/')) { route.tab = 'fleet'; }
-      // Phase 3 — Home sub-routing. ``/home`` → single-scroll layout;
-      // ``/home/tasks`` → kanban sub-page. Anything deeper falls back
-      // to the main layout.
-      if (clean === 'home') { route.tab = 'workplace'; route.homeTab = 'main'; return route; }
+      // Phase 4 — Board sub-routing. ``/home`` → kanban (default);
+      // ``/home/activity`` → single-scroll activity feed. Legacy
+      // ``/home/tasks`` (Phase 3 kanban sub-page URL) still resolves
+      // to the kanban — the kanban IS the default now, so old
+      // bookmarks survive without a redirect.
+      if (clean === 'home') { route.tab = 'workplace'; route.homeTab = 'kanban'; return route; }
+      if (clean === 'home/activity' || clean.startsWith('home/activity')) {
+        route.tab = 'workplace'; route.homeTab = 'activity'; return route;
+      }
       if (clean === 'home/tasks' || clean.startsWith('home/tasks')) {
-        route.tab = 'workplace'; route.homeTab = 'tasks'; return route;
+        route.tab = 'workplace'; route.homeTab = 'kanban'; return route;
       }
 
       const agentMatch = clean.match(/^agents\/([^/]+)(?:\/([^/]+))?$/);
@@ -858,14 +869,14 @@ function dashboard() {
               if (route.systemTab === 'activity') this.activityView = route.activityView;
             }
             if (route.tab === 'workplace') {
-              this.homeTab = route.homeTab || 'main';
+              this.homeTab = route.homeTab || 'kanban';
             }
             this.switchTab(route.tab);
           } else if (route.tab === 'workplace') {
-            // Phase 3 — already on Home; just sync sub-page state
+            // Phase 4 — already on Board; just sync sub-page state
             // without re-running loadWorkplace (no new fetch needed).
-            if (this.homeTab !== (route.homeTab || 'main')) {
-              this.homeTab = route.homeTab || 'main';
+            if (this.homeTab !== (route.homeTab || 'kanban')) {
+              this.homeTab = route.homeTab || 'kanban';
             }
           } else if (route.tab === 'system') {
             if (this.systemTab !== route.systemTab) {
@@ -2559,12 +2570,15 @@ function dashboard() {
       if (!this._skipPush) this._pushUrl(false);
     },
 
-    // Phase 3 — Home sub-page switcher. ``main`` is the default
-    // single-scroll layout; ``tasks`` opens the kanban sub-page. Pushes
-    // a new history entry so the back button returns to the previous
-    // sub-page (or out of Home entirely if the user navigated in).
+    // Phase 4 — Board sub-page switcher. ``kanban`` is the default
+    // (kanban board with cancel buttons); ``activity`` opens the
+    // single-scroll activity feed. Legacy values (``main``,
+    // ``tasks``) are coerced to the kanban default so old call
+    // sites keep working. Pushes a new history entry so the back
+    // button returns to the previous sub-page (or out of Board
+    // entirely if the user navigated in).
     switchHomeTab(tabId) {
-      const target = tabId === 'tasks' ? 'tasks' : 'main';
+      const target = tabId === 'activity' ? 'activity' : 'kanban';
       if (this.homeTab === target) return;
       this.homeTab = target;
       this._pushUrl(false);
@@ -2835,7 +2849,17 @@ function dashboard() {
     },
 
     workplaceTasksByStatus(status) {
-      return (this.workplaceTasks || []).filter(t => t.status === status);
+      // The kanban only has 4 columns (pending/working/blocked/done);
+      // the transient ``accepted`` status — emitted by ``update_status``
+      // when an agent acknowledges a task before they start working —
+      // folds into Pending so it stays visible on the board. Without
+      // this fold, ``accepted`` rows render in zero columns and the
+      // operator can't see (or cancel) them.
+      const tasks = this.workplaceTasks || [];
+      if (status === 'pending') {
+        return tasks.filter(t => t.status === 'pending' || t.status === 'accepted');
+      }
+      return tasks.filter(t => t.status === status);
     },
 
     // Icon for an activity feed entry. Plain text glyphs keep the
@@ -3512,6 +3536,210 @@ function dashboard() {
       const total = this.workplaceTasksByStatus(status).length;
       const visible = this.workplaceTasksByStatusFiltered(status).length;
       return Math.max(0, total - visible);
+    },
+
+    // Phase 4 — title truncation for kanban cards + Stuck tasks
+    // panel. Long titles (some agents accidentally hand off with
+    // their full instruction text — ~250 chars seen in production)
+    // wreck the kanban grid; truncate to 80 chars + ellipsis on
+    // render. The full title still surfaces in the drill-in modal
+    // and via the ``title=`` tooltip on hover.
+    truncateTitle(title, max) {
+      const limit = Number.isFinite(max) ? max : 80;
+      const s = String(title || '').trim();
+      if (s.length <= limit) return s;
+      return s.slice(0, limit - 1).trimEnd() + '…';
+    },
+
+    // Phase 4 — Stuck tasks: tasks that have been pending or working
+    // for >24h with no status change. Computed from ``workplaceTasks``
+    // by checking ``updated_at`` (or ``created_at`` for never-started
+    // tasks). Returns an array of ``{id, title, assignee, project_id,
+    // status, stuck_seconds, stuck_label}`` so the template can
+    // render the count badge + ``Stuck for N days`` caption without
+    // recomputing on every reactive read. Capped at 25 to keep the
+    // panel from blowing past the fold; if a fleet has 25+ stuck
+    // tasks the operator has bigger problems than UI density.
+    get stuckTasks() {
+      const tasks = this.workplaceTasks || [];
+      const now = Date.now() / 1000;
+      const cutoff = 24 * 3600;  // 24 hours in seconds
+      const out = [];
+      for (const t of tasks) {
+        if (t.status !== 'pending' && t.status !== 'working') continue;
+        // Defensive: operator is the orchestrator, not a worker — its
+        // own ledger should never produce user-facing "stuck" rows even
+        // if a future code path accidentally assigns work to it.
+        if (t.assignee === 'operator') continue;
+        const updated = typeof t.updated_at === 'number'
+          ? t.updated_at
+          : (t.updated_at ? new Date(t.updated_at).getTime() / 1000 : 0);
+        const created = typeof t.created_at === 'number'
+          ? t.created_at
+          : (t.created_at ? new Date(t.created_at).getTime() / 1000 : 0);
+        const ts = updated || created || 0;
+        if (!ts) continue;
+        const age = now - ts;
+        if (age < cutoff) continue;
+        const days = Math.floor(age / 86400);
+        const label = days >= 1
+          ? `Stuck for ${days} day${days === 1 ? '' : 's'}`
+          : `Stuck for ${Math.floor(age / 3600)}h`;
+        out.push({
+          id: t.id,
+          title: t.title || '(untitled)',
+          assignee: t.assignee || '',
+          project_id: t.project_id || '',
+          status: t.status,
+          stuck_seconds: age,
+          stuck_label: label,
+        });
+        if (out.length >= 25) break;
+      }
+      // Oldest first so the most painful entries surface at the top.
+      out.sort((a, b) => b.stuck_seconds - a.stuck_seconds);
+      return out;
+    },
+
+    // Phase 4 — kanban activity feed noise filter. The legacy
+    // /workplace/feed payload includes ``status_unchanged`` rows
+    // (emitted when the same status is reported twice — typically
+    // from a heartbeat probe re-affirming "still working"). Those
+    // rows are pure implementation noise from the user's POV; we
+    // hide them by default and surface them only when
+    // ``showTechDetail`` is on. Preserves the original ``workplaceFeed``
+    // array so the WS plumbing keeps appending to one source of truth.
+    get workplaceFeedVisible() {
+      const feed = this.workplaceFeed || [];
+      if (this.showTechDetail) return feed;
+      return feed.filter(ev => ev && ev.event_type !== 'status_unchanged');
+    },
+
+    // Phase 4 — task cancel modal state. ``cancelTaskCandidate`` is
+    // the task object the user is about to cancel; null means the
+    // modal is closed. ``cancelTaskInFlight`` disables the confirm
+    // button while the POST is in flight so a double-click doesn't
+    // fire two cancels.
+    cancelTaskCandidate: null,
+    cancelTaskInFlight: false,
+
+    // Open the cancel-task confirmation modal. Accepts a task object
+    // (from the kanban or stuck-tasks panel) — we copy just the fields
+    // the modal needs so a downstream re-fetch doesn't blow away the
+    // candidate while the user is staring at the dialog.
+    confirmCancelTask(task) {
+      if (!task || !task.id) return;
+      this.cancelTaskCandidate = {
+        id: task.id,
+        title: task.title || '(untitled)',
+        assignee: task.assignee || '',
+        project_id: task.project_id || '',
+      };
+    },
+
+    closeCancelTaskModal() {
+      if (this.cancelTaskInFlight) return;
+      this.cancelTaskCandidate = null;
+    },
+
+    // Fire the cancel — POSTs to the dashboard proxy which forwards
+    // to the mesh's ``/mesh/tasks/{id}/cancel``. On success we close
+    // the modal and reload tasks so the kanban + stuck-tasks panel
+    // both reflect the change immediately. The mesh also emits a
+    // ``task_status_changed`` event so the WS path catches up too.
+    async cancelTaskNow() {
+      const cand = this.cancelTaskCandidate;
+      if (!cand || this.cancelTaskInFlight) return;
+      this.cancelTaskInFlight = true;
+      try {
+        const resp = await fetch(
+          `${window.__config.apiBase}/workplace/tasks/${encodeURIComponent(cand.id)}/cancel`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Requested-With': 'XMLHttpRequest',
+            },
+            body: JSON.stringify({ reason: 'Cancelled from board' }),
+          },
+        );
+        if (!resp.ok) {
+          let detail = '';
+          try { detail = (await resp.json()).detail || ''; } catch (e) { /* ignore */ }
+          if (typeof this.showToast === 'function') {
+            this.showToast(`Cancel failed: ${detail || resp.status}`);
+          }
+          return;
+        }
+        if (typeof this.showToast === 'function') {
+          this.showToast(`Cancelled "${this.truncateTitle(cand.title, 40)}"`);
+        }
+        this.cancelTaskCandidate = null;
+        // Refresh tasks so the kanban + stuck-tasks panel update.
+        if (typeof this.loadWorkplaceTasks === 'function') {
+          await this.loadWorkplaceTasks();
+        }
+      } catch (e) {
+        if (typeof this.showToast === 'function') {
+          this.showToast(`Cancel failed: ${e.message || e}`);
+        }
+      } finally {
+        this.cancelTaskInFlight = false;
+      }
+    },
+
+    // Restart agent — used by the [Restart agent] button on the
+    // Stuck tasks panel. Hits the existing
+    // ``/api/agents/{id}/restart`` dashboard endpoint; on success we
+    // reload tasks so the panel reflects whatever the agent emits
+    // when it comes back online.
+    //
+    // Routed through ``showConfirm`` (same modal pattern as the regular
+    // Restart Agent button on the agent card — see ``restartAgent``)
+    // so a stray click in the Stuck tasks panel doesn't kill an agent's
+    // active work without an explicit confirmation. The fetch logic
+    // lives in the confirm callback so the modal's spinner state ties
+    // to the actual restart, not just the click.
+    async restartAgentForStuck(agentId) {
+      if (!agentId) return;
+      const display = typeof this.agentDisplayName === 'function'
+        ? this.agentDisplayName(agentId)
+        : agentId;
+      this.showConfirm(
+        'Restart agent?',
+        `This will interrupt any active work for "${display}". Their current task will be cancelled. Continue?`,
+        async () => {
+          try {
+            const resp = await fetch(
+              `${window.__config.apiBase}/agents/${encodeURIComponent(agentId)}/restart`,
+              {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'X-Requested-With': 'XMLHttpRequest',
+                },
+                body: '{}',
+              },
+            );
+            if (!resp.ok) {
+              let detail = '';
+              try { detail = (await resp.json()).detail || ''; } catch (e) { /* ignore */ }
+              if (typeof this.showToast === 'function') {
+                this.showToast(`Restart failed: ${detail || resp.status}`);
+              }
+              return;
+            }
+            if (typeof this.showToast === 'function') {
+              this.showToast(`Restarting ${agentId}…`);
+            }
+          } catch (e) {
+            if (typeof this.showToast === 'function') {
+              this.showToast(`Restart failed: ${e.message || e}`);
+            }
+          }
+        },
+        true,
+      );
     },
 
     // Audit-log Revert: re-uses the soft-edit undo endpoint via the
@@ -9540,6 +9768,16 @@ function dashboard() {
         case 'message_sent':
         case 'text_delta':
         case 'agent_state':
+          return null;
+        // Phase 4 — heartbeat-driven re-affirmations of the same
+        // status (the orchestration layer emits ``status_unchanged``
+        // when a task transition is requested but already at the
+        // target). Filtered for the same reason as the noise events
+        // above: hidden by default, available via "Show technical
+        // detail" for debugging. The engine emits the single name
+        // ``status_unchanged`` (see orchestration.py) — there is no
+        // alternate spelling on the wire.
+        case 'status_unchanged':
           return null;
         default:
           return event.summary || null;

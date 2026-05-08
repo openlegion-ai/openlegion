@@ -3777,15 +3777,17 @@
             x-text="'Show ' + (needsYouItems.length - needsYouCollapsedCap) + ' more'"></button>
         </section>
 
-        <!-- Phase 3 — sub-tab bar collapsed into a single-scroll layout.
-             ``homeTab === 'main'`` renders Just delivered + Happening now
-             + In progress in one column. ``homeTab === 'tasks'`` lifts
-             the kanban into its own sub-page reachable via the "See full
-             task board →" link below. The legacy ``workplaceTab`` state
-             stays in place for backward compat (in-place outputs/projects
-             links keep working) but no sub-tab bar is rendered. -->
-        <div x-show="homeTab === 'tasks'" x-cloak class="mb-3">
-          <button type="button" @click="switchHomeTab('main')"
+        <!-- Phase 4 — Board redesigned around the kanban as default.
+             ``homeTab === 'kanban'`` (default) renders Needs you +
+             Stuck tasks + 4-column kanban with × cancel buttons.
+             ``homeTab === 'activity'`` lifts the legacy single-scroll
+             layout (Just delivered / Happening now / In progress) into
+             its own sub-page reachable via the "View activity feed →"
+             link below the kanban. The legacy ``workplaceTab`` state
+             stays in place for back-compat with deep links that still
+             toggle it; no sub-tab bar is rendered. -->
+        <div x-show="homeTab === 'activity'" x-cloak class="mb-3">
+          <button type="button" @click="switchHomeTab('kanban')"
             class="text-[12px] text-gray-400 hover:text-gray-200 inline-flex items-center gap-1 transition-colors"
             data-testid="home-back-to-main">
             <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
@@ -3803,15 +3805,16 @@
           </div>
         </template>
 
-        <!-- Phase 3 — Home single-scroll layout (homeTab === 'main').
-             All four legacy sub-tabs collapse into one vertical column:
-             Just delivered (recentlyDeliveredItems), Happening now
-             (workplaceFeed, capped at 5 with disclosure), and In
-             progress (a 4-card slice of workplaceTasks with a "See full
-             task board →" link to /home/tasks). Empty sections hide
-             entirely so an idle Board has no extra chrome. -->
-        <template x-if="workplaceEnabled && homeTab === 'main'">
-          <div class="space-y-4" data-testid="home-main">
+        <!-- Phase 4 — Activity sub-page (homeTab === 'activity'). The
+             legacy Phase 3 single-scroll layout: Just delivered
+             (recentlyDeliveredItems), Happening now (workplaceFeed,
+             capped at 5 with disclosure), and In progress (a 4-card
+             slice of workplaceTasks). The kanban is now the default
+             board; this page is reached via the "View activity feed →"
+             link below the kanban. Empty sections hide entirely so an
+             idle activity feed has no extra chrome. -->
+        <template x-if="workplaceEnabled && homeTab === 'activity'">
+          <div class="space-y-4" data-testid="home-activity">
             <!-- Just delivered — last 7 days of completed outputs.
                  Replaces the legacy ``team-outputs`` sub-tab; kept inline
                  with a drill-in for the full artifact preview. -->
@@ -3864,18 +3867,21 @@
 
             <!-- Happening now — capped at 5 events on the main scroll;
                  "See all" disclosure expands inline. Empty section hides
-                 entirely (no header, no chrome). -->
+                 entirely (no header, no chrome). Phase 4: source switched
+                 to ``workplaceFeedVisible`` which strips
+                 ``status_unchanged`` heartbeat noise unless the user
+                 has the "Show technical detail" toggle on. -->
             <div x-data="{ feedExpanded: false }"
-                 x-show="workplaceFeed.length || workplaceSectionLoading.feed || workplaceErrors.feed"
+                 x-show="workplaceFeedVisible.length || workplaceSectionLoading.feed || workplaceErrors.feed"
                  data-testid="home-happening-now">
               <div class="flex items-center justify-between mb-1.5">
                 <div class="text-[11px] uppercase tracking-wide text-gray-500 font-medium">Happening now</div>
                 <button type="button"
-                  x-show="!feedExpanded && workplaceFeed.length > 5"
+                  x-show="!feedExpanded && workplaceFeedVisible.length > 5"
                   @click="feedExpanded = true"
                   class="text-[11px] text-gray-400 hover:text-gray-200">See all &rarr;</button>
                 <button type="button"
-                  x-show="feedExpanded && workplaceFeed.length > 5"
+                  x-show="feedExpanded && workplaceFeedVisible.length > 5"
                   @click="feedExpanded = false"
                   class="text-[11px] text-gray-400 hover:text-gray-200">Show less</button>
               </div>
@@ -3886,7 +3892,7 @@
                    layout doesn't jump when content arrives. Hidden once
                    the load resolves (success or error — the error banner
                    below takes over in the failure case). -->
-              <template x-if="workplaceSectionLoading.feed && !workplaceFeed.length && !workplaceErrors.feed">
+              <template x-if="workplaceSectionLoading.feed && !workplaceFeedVisible.length && !workplaceErrors.feed">
                 <div class="space-y-2" data-testid="workplace-feed-skeleton">
                   <div class="bg-gray-800/40 border border-gray-700/50 rounded-lg p-3">
                     <div class="h-3 w-2/3 bg-gray-800 rounded animate-pulse"></div>
@@ -3915,9 +3921,11 @@
               </template>
 
               <!-- Chronological activity list, capped at 5 unless
-                   ``feedExpanded`` is true. -->
+                   ``feedExpanded`` is true. Source is the noise-filtered
+                   ``workplaceFeedVisible`` (see getter for filtering
+                   rules). -->
               <div class="space-y-2">
-                <template x-for="ev in (feedExpanded ? workplaceFeed : workplaceFeed.slice(0, 5))" :key="ev.event_id">
+                <template x-for="ev in (feedExpanded ? workplaceFeedVisible : workplaceFeedVisible.slice(0, 5))" :key="ev.event_id">
                   <button type="button"
                     class="w-full text-left bg-gray-800/40 border border-gray-700/50 rounded-lg p-3 hover:bg-gray-800/70 transition-colors"
                     @click="openTaskDrillIn(ev.task_id)">
@@ -3938,15 +3946,15 @@
 
             <!-- In progress — 4-card slice of workplaceTasks filtered to
                  working / pending / accepted statuses (most-recent
-                 first). "See full task board →" lifts to the kanban
-                 sub-page (/home/tasks). Empty section hides entirely. -->
+                 first). Phase 4: "Back to Work" links to the kanban
+                 (the new default). Empty section hides entirely. -->
             <template x-if="(workplaceTasks || []).filter(t => ['working','pending','accepted'].includes(t.status)).length">
               <div data-testid="home-in-progress">
                 <div class="flex items-center justify-between mb-1.5">
                   <div class="text-[11px] uppercase tracking-wide text-gray-500 font-medium">In progress</div>
-                  <button type="button" @click="switchHomeTab('tasks')"
+                  <button type="button" @click="switchHomeTab('kanban')"
                     class="text-[11px] text-indigo-300 hover:text-indigo-200"
-                    data-testid="home-see-task-board">See full task board &rarr;</button>
+                    data-testid="home-see-task-board">Back to Work &rarr;</button>
                 </div>
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
                   <template x-for="t in (workplaceTasks || []).filter(t => ['working','pending','accepted'].includes(t.status)).slice(0, 4)" :key="'ip-' + t.id">
@@ -3967,7 +3975,7 @@
             <!-- Idle empty state — shown only when EVERY section above
                  is empty AND there's nothing pending. Calm prompt,
                  verb-driven CTA. -->
-            <template x-if="!workplaceSectionLoading.feed && !workplaceErrors.feed && !workplaceFeed.length && !recentlyDeliveredItems.length && !needsYouItems.length && !(workplaceTasks || []).filter(t => ['working','pending','accepted'].includes(t.status)).length">
+            <template x-if="!workplaceSectionLoading.feed && !workplaceErrors.feed && !workplaceFeedVisible.length && !recentlyDeliveredItems.length && !needsYouItems.length && !(workplaceTasks || []).filter(t => ['working','pending','accepted'].includes(t.status)).length">
               <div class="text-sm text-gray-300 py-6 text-center" data-testid="home-idle-empty">
                 Your team is idle.
                 <button type="button" @click="activeTab = 'chat'"
@@ -3981,7 +3989,7 @@
                  when every section is empty; this one stays so users with
                  active projects but no fresh activity still see the
                  reassurance copy that Phase 2 promised. -->
-            <template x-if="!workplaceSectionLoading.feed && !workplaceErrors.feed && !workplaceFeed.length && workplaceProjects.length">
+            <template x-if="!workplaceSectionLoading.feed && !workplaceErrors.feed && !workplaceFeedVisible.length && workplaceProjects.length">
               <div class="text-sm text-gray-500 py-4">Once your team starts working, you'll see updates here.</div>
             </template>
           </div>
@@ -4052,7 +4060,7 @@
                   </template>
                 </div>
                 <div class="flex flex-wrap gap-1.5 text-[11px]">
-                  <template x-for="status in workplaceTaskColumns" :key="status">
+                  <template x-for="status in ['pending','accepted','working','blocked','done']" :key="status">
                     <span class="px-2 py-0.5 rounded bg-gray-900/60 text-gray-300"
                       x-show="(p.counts && p.counts[status]) || 0">
                       <span x-text="status"></span>:
@@ -4078,20 +4086,71 @@
           </div>
         </template>
 
-        <!-- Task board (kanban) sub-tab -->
-        <!-- Responsive grid: 1 col on phones (<sm), 2 cols on tablets
-             (sm-lg), 5 cols on desktop (lg+). On the smallest phones the
-             grid still hits 1 column, which is fine for stacked reading;
-             at the awkward 600-1023 px width range we previously crammed
-             5 columns into <=1023 px and produced 153 px cards. The
-             outer ``overflow-x-auto`` + inner ``min-w-[640px]`` give
-             phone users a horizontal-scroll fallback so each column
-             keeps a usable width when they prefer the kanban layout. -->
-        <template x-if="workplaceEnabled && homeTab === 'tasks'">
-          <div>
+        <!-- Phase 4 — Stuck tasks panel. Sits between "Needs you" and
+             the kanban grid so it inherits the sticky-feel of the
+             attention bar above it without claiming a sticky position
+             of its own. Only renders when ``stuckTasks`` is non-empty.
+             Shows tasks that have been pending or working >24h. Each
+             row carries [Cancel] + [Restart agent] for the operator's
+             two-fastest unblockers. -->
+        <template x-if="workplaceEnabled && homeTab === 'kanban' && stuckTasks.length">
+          <section class="bg-amber-950/30 border border-amber-800/50 rounded-xl p-3 mb-3"
+            data-testid="board-stuck-tasks"
+            aria-label="Stuck tasks">
+            <div class="flex items-center justify-between mb-2">
+              <div class="flex items-center gap-2">
+                <span class="text-[11px] uppercase tracking-wide text-amber-300 font-semibold">Stuck tasks</span>
+                <span class="font-mono px-1.5 rounded bg-amber-700/40 text-amber-100 text-[10px]"
+                  x-text="stuckTasks.length"></span>
+              </div>
+              <span class="text-[10px] text-amber-300/70">Pending or working &gt; 24h with no status change</span>
+            </div>
+            <div class="space-y-1.5">
+              <template x-for="s in stuckTasks" :key="'stuck-' + s.id">
+                <div class="flex items-center gap-2 bg-gray-900/40 border border-amber-800/30 rounded-md px-2.5 py-1.5"
+                  data-testid="board-stuck-task-row">
+                  <button type="button" class="min-w-0 flex-1 text-left"
+                    @click="openTaskDrillIn(s.id)">
+                    <div class="text-xs text-gray-100 truncate"
+                      :title="s.title"
+                      x-text="truncateTitle(s.title, 80)"></div>
+                    <div class="text-[10px] text-amber-200/80 mt-0.5">
+                      <span x-text="s.assignee || '(unassigned)'"></span>
+                      <span x-show="s.project_id" class="text-gray-500"
+                        x-text="'· ' + (s.project_id || '')"></span>
+                      <span class="ml-1 text-amber-300" x-text="'· ' + s.stuck_label"></span>
+                    </div>
+                  </button>
+                  <button type="button"
+                    @click.stop="confirmCancelTask(s)"
+                    class="text-[10px] px-2 py-0.5 rounded bg-gray-800 hover:bg-red-800/60 text-gray-300 hover:text-red-100 border border-gray-700 hover:border-red-700/60 transition-colors shrink-0"
+                    data-testid="board-stuck-task-cancel">Cancel</button>
+                  <button type="button"
+                    x-show="s.assignee"
+                    @click.stop="restartAgentForStuck(s.assignee)"
+                    class="text-[10px] px-2 py-0.5 rounded bg-gray-800 hover:bg-amber-800/60 text-gray-300 hover:text-amber-100 border border-gray-700 hover:border-amber-700/60 transition-colors shrink-0"
+                    data-testid="board-stuck-task-restart">Restart agent</button>
+                </div>
+              </template>
+            </div>
+          </section>
+        </template>
+
+        <!-- Phase 4 — Kanban board (default Board view).
+             Responsive grid: 1 col on phones (<sm), 2 cols at 640px+,
+             4 cols on desktop (lg+). On the smallest phones the grid
+             still hits 1 column, which is fine for stacked reading;
+             the outer ``overflow-x-auto`` + inner ``min-w-[640px]``
+             give phone users a horizontal-scroll fallback so each
+             column keeps a usable width when they prefer the kanban
+             layout. Status columns: Pending / Working / Blocked /
+             Done — ``accepted`` (transient) folds into Pending via
+             the existing ``workplaceTasksByStatus`` filter. -->
+        <template x-if="workplaceEnabled && homeTab === 'kanban'">
+          <div data-testid="board-kanban">
             <!-- Error banner for /workplace/tasks. Tasks lives outside
                  the kanban grid because errored loads should still let
-                 the user retry without seeing five empty columns. -->
+                 the user retry without seeing four empty columns. -->
             <template x-if="workplaceErrors.tasks">
               <div class="bg-red-900/20 border border-red-800/40 rounded-lg p-3 mb-3 flex flex-wrap items-center gap-2"
                    role="alert" data-testid="workplace-tasks-error">
@@ -4102,8 +4161,8 @@
             </template>
             <!-- Skeleton kanban while /workplace/tasks is in flight -->
             <template x-if="workplaceSectionLoading.tasks && !workplaceTasks.length && !workplaceErrors.tasks">
-              <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 mb-3" data-testid="workplace-tasks-skeleton">
-                <template x-for="i in 5" :key="'sk-task-' + i">
+              <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 mb-3" data-testid="workplace-tasks-skeleton">
+                <template x-for="i in 4" :key="'sk-task-' + i">
                   <div class="bg-gray-800/40 border border-gray-700/50 rounded-lg p-3">
                     <div class="h-3 w-1/2 bg-gray-800 rounded animate-pulse mb-2"></div>
                     <div class="h-8 bg-gray-800 rounded animate-pulse mt-2"></div>
@@ -4113,37 +4172,54 @@
               </div>
             </template>
           <div class="overflow-x-auto custom-scrollbar -mx-3 px-3 sm:mx-0 sm:px-0">
-            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 min-w-[640px] sm:min-w-0">
-              <template x-for="status in workplaceTaskColumns" :key="status">
-                <div class="bg-gray-800/40 border border-gray-700/50 rounded-lg p-3">
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 min-w-[640px] sm:min-w-0">
+              <template x-for="status in ['pending','working','blocked','done']" :key="status">
+                <div class="bg-gray-800/40 border border-gray-700/50 rounded-lg p-2.5">
                   <!-- Sticky column header so cards keep their context
                        when the column scrolls. ``z-10`` keeps it above
                        the cards but below the global Needs-you panel
                        (which sits at z-10 on a different stacking
                        context — they don't overlap visually). -->
-                  <div class="text-xs font-medium text-gray-300 uppercase tracking-wide mb-2 flex items-center justify-between sticky top-0 z-10 bg-gray-800/80 backdrop-blur-sm -mx-3 px-3 py-1.5 border-b border-gray-700/40">
+                  <div class="text-[11px] font-medium text-gray-300 uppercase tracking-wide mb-2 flex items-center justify-between sticky top-0 z-10 bg-gray-800/80 backdrop-blur-sm -mx-2.5 px-2.5 py-1.5 border-b border-gray-700/40">
                     <span x-text="status"></span>
                     <span class="text-gray-500 font-mono" x-text="workplaceTasksByStatus(status).length"></span>
                   </div>
-                  <div class="space-y-2">
+                  <div class="space-y-1.5">
                     <template x-for="t in workplaceTasksByStatusFiltered(status)" :key="t.id">
-                      <div class="bg-gray-900/60 border border-gray-700/40 rounded-md p-2 text-xs cursor-pointer hover:bg-gray-900/90 hover:border-gray-600 transition-colors"
-                        @click="openTaskDrillIn(t.id)">
-                        <div class="font-medium text-gray-200 truncate" x-text="t.title"></div>
-                        <div class="text-[11px] text-gray-400 mt-1 flex items-center gap-1.5">
-                          <span x-text="t.assignee || ''"></span>
-                          <span x-show="t.project_id" class="text-gray-500"
-                            x-text="'· ' + (t.project_id || '')"></span>
-                          <template x-if="t.outcome">
-                            <span class="ml-auto px-1.5 py-0.5 rounded text-[10px] font-medium"
-                              :class="{
-                                'bg-emerald-900/30 text-emerald-300': t.outcome === 'accepted',
-                                'bg-amber-900/30 text-amber-300': t.outcome === 'rework',
-                                'bg-red-900/30 text-red-300': t.outcome === 'rejected',
-                              }"
-                              x-text="t.outcome"></span>
-                          </template>
-                        </div>
+                      <div class="group bg-gray-900/60 border border-gray-700/40 rounded-md px-2 py-1.5 text-[11px] hover:bg-gray-900/90 hover:border-gray-600 transition-colors relative"
+                        data-testid="board-kanban-card">
+                        <!-- Phase 4 cancel button: top-right × on every
+                             card; opens the confirmation modal. Hidden
+                             on the Done column (you can't cancel a
+                             completed task) and on rated cards. The
+                             ``@click.stop`` keeps the row click (drill-in)
+                             from firing. -->
+                        <button type="button"
+                          x-show="status !== 'done' && !t.outcome"
+                          @click.stop="confirmCancelTask(t)"
+                          aria-label="Cancel task"
+                          class="absolute top-1 right-1 w-5 h-5 flex items-center justify-center rounded text-gray-500 hover:text-red-300 hover:bg-red-900/30 transition-colors opacity-0 group-hover:opacity-100 focus:opacity-100"
+                          data-testid="board-kanban-card-cancel">
+                          <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                        </button>
+                        <button type="button" class="block w-full text-left pr-5"
+                          @click="openTaskDrillIn(t.id)">
+                          <div class="font-medium text-gray-200 leading-snug"
+                            :title="t.title"
+                            x-text="truncateTitle(t.title, 80)"></div>
+                          <div class="text-[10px] text-gray-400 mt-1 flex items-center gap-1.5">
+                            <span class="truncate" x-text="t.assignee || ''"></span>
+                            <template x-if="t.outcome">
+                              <span class="ml-auto px-1.5 py-0.5 rounded text-[9px] font-medium"
+                                :class="{
+                                  'bg-emerald-900/30 text-emerald-300': t.outcome === 'accepted',
+                                  'bg-amber-900/30 text-amber-300': t.outcome === 'rework',
+                                  'bg-red-900/30 text-red-300': t.outcome === 'rejected',
+                                }"
+                                x-text="t.outcome"></span>
+                            </template>
+                          </div>
+                        </button>
                       </div>
                     </template>
                     <!-- Archived disclosure: only the pending and blocked
@@ -4153,7 +4229,7 @@
                     <template x-if="workplaceArchivedCount(status) > 0">
                       <button type="button"
                         @click="boardShowArchived = { ...boardShowArchived, [status]: !boardShowArchived[status] }"
-                        class="w-full text-[11px] text-gray-400 hover:text-gray-200 px-2 py-1 rounded border border-dashed border-gray-700/60 hover:border-gray-600 transition-colors text-left">
+                        class="w-full text-[10px] text-gray-400 hover:text-gray-200 px-2 py-1 rounded border border-dashed border-gray-700/60 hover:border-gray-600 transition-colors text-left">
                         <span x-show="!boardShowArchived[status]"
                           x-text="'Show ' + workplaceArchivedCount(status) + ' archived ▸'"></span>
                         <span x-show="boardShowArchived[status]" x-cloak>Hide archived &#9662;</span>
@@ -4164,6 +4240,59 @@
               </template>
             </div>
           </div>
+          <!-- Phase 4 — Activity feed link. The single-scroll layout
+               (Just delivered + Happening now + In progress) lives at
+               /home/activity; users land here only if they click in
+               (back-compat with the Phase 3 default that opened the
+               feed first). -->
+          <div class="mt-4 text-center">
+            <button type="button" @click="switchHomeTab('activity')"
+              class="text-[12px] text-gray-400 hover:text-indigo-200 transition-colors"
+              data-testid="board-view-activity">View activity feed &rarr;</button>
+          </div>
+          </div>
+        </template>
+
+        <!-- Phase 4 — task cancel confirmation modal. Opens via
+             ``confirmCancelTask`` (kanban × button or stuck-tasks
+             [Cancel]). Closes via Escape or clicking the backdrop.
+             The mesh-side cancel route is creator/assignee/operator/
+             internal-gated — the dashboard proxy uses ``x-mesh-internal``
+             so any session with an ``ol_session`` cookie can cancel
+             from this UI. -->
+        <template x-if="cancelTaskCandidate">
+          <div class="fixed inset-0 z-[70] flex items-center justify-center p-4"
+            @keydown.escape.window="closeCancelTaskModal()"
+            data-testid="cancel-task-modal">
+            <div class="absolute inset-0 bg-black/60 backdrop-blur-sm"
+              @click="closeCancelTaskModal()"></div>
+            <div class="relative w-full max-w-md bg-gray-900 border border-gray-700 rounded-xl shadow-2xl overflow-hidden">
+              <div class="p-5">
+                <h3 class="text-base font-semibold text-white mb-1">Cancel this task?</h3>
+                <p class="text-sm text-gray-300">
+                  Cancel task
+                  <span class="text-gray-100 font-medium">"<span x-text="truncateTitle(cancelTaskCandidate.title, 60)"></span>"</span>?
+                  <template x-if="cancelTaskCandidate.assignee">
+                    <span>This will stop <span class="text-gray-100" x-text="cancelTaskCandidate.assignee"></span> from working on it.</span>
+                  </template>
+                  You can create a new task for them later.
+                </p>
+              </div>
+              <div class="flex items-center justify-end gap-2 px-5 py-3 bg-gray-950/40 border-t border-gray-800">
+                <button type="button"
+                  @click="closeCancelTaskModal()"
+                  :disabled="cancelTaskInFlight"
+                  class="text-xs px-3 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-200 transition-colors disabled:opacity-50">Keep it</button>
+                <button type="button"
+                  @click="cancelTaskNow()"
+                  :disabled="cancelTaskInFlight"
+                  class="text-xs px-3 py-1.5 rounded bg-red-700 hover:bg-red-600 text-white transition-colors disabled:opacity-50"
+                  data-testid="cancel-task-confirm">
+                  <span x-show="!cancelTaskInFlight">Cancel task</span>
+                  <span x-show="cancelTaskInFlight" x-cloak>Cancelling…</span>
+                </button>
+              </div>
+            </div>
           </div>
         </template>
 
