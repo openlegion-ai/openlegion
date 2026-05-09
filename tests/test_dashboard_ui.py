@@ -535,6 +535,90 @@ class TestActivityVerbs:
             assert f"{status}:" in _APP_JS_TEXT, f"verbForStatus missing {status}"
 
 
+class TestEventBusAuditFollowUpHandlers:
+    """Source-level checks that the SPA wires up the EventBus follow-up
+    fixes from the audit:
+
+    * ``task_artifact_added`` refreshes the task drawer when open and
+      nudges the workplace tasks list (debounced).
+    * ``task_status_changed`` cancel renders the cancel reason inline.
+    * ``agent_state restart_failed`` surfaces the error via ``showToast``.
+    """
+
+    def test_task_artifact_added_handler_refreshes_drawer(self):
+        # The handler must short-circuit on the open drawer's task ID
+        # and call ``loadTaskDrillIn`` so the new artifact lands without
+        # a refresh.
+        m = re.search(
+            r"if \(evt\.type === 'task_artifact_added'\)\s*\{(.*?)\n      \}",
+            _APP_JS_TEXT,
+            re.DOTALL,
+        )
+        assert m, "task_artifact_added branch missing"
+        body = m.group(1)
+        assert "drillInTaskId" in body, (
+            "Handler must check the open drawer's taskId"
+        )
+        assert "loadTaskDrillIn" in body, (
+            "Handler must call loadTaskDrillIn on match"
+        )
+        assert "loadWorkplaceTasks" in body, (
+            "Handler must nudge the workplace tasks list (debounced)"
+        )
+
+    def test_cancel_reason_appears_in_workplace_feed_summary(self):
+        # ``_pushWorkplaceFeedFromEvent`` builds the cancelled summary.
+        # Reason must be appended in parens when present.
+        m = re.search(
+            r"} else if \(status === 'cancelled'\)\s*\{(.*?)\}",
+            _APP_JS_TEXT,
+            re.DOTALL,
+        )
+        assert m, "cancelled branch in workplace feed missing"
+        body = m.group(1)
+        assert "data.reason" in body, (
+            "Cancel summary must read data.reason from the event payload"
+        )
+
+    def test_cancel_reason_appears_in_format_activity_for_user(self):
+        # The activity-feed renderer also surfaces cancel reason inline.
+        m = re.search(
+            r"case 'task_status_changed':\s*\{(.*?)\}",
+            _APP_JS_TEXT,
+            re.DOTALL,
+        )
+        assert m, "task_status_changed case missing"
+        body = m.group(1)
+        assert "cancelled" in body and "d.reason" in body, (
+            "task_status_changed handler must include cancel reason"
+        )
+
+    def test_restart_failed_surfaces_toast_with_error(self):
+        # The ``agent_state restart_failed`` branch must:
+        #   * clear the spinner (via agentRestartingMap)
+        #   * call showToast with the error string
+        # We anchor on the if-condition + the closing brace of the
+        # outer block, then assert on the body. Brace-matching with
+        # nested blocks is fragile under a single regex, so we slice
+        # generously and check substrings.
+        idx = _APP_JS_TEXT.find(
+            "if (evt.type === 'agent_state' && evt.data?.state === 'restart_failed'"
+        )
+        assert idx != -1, "restart_failed branch missing"
+        # Slice forward enough to include the toast block; 1500 chars
+        # is more than enough but bounded in case the file ever grows.
+        body = _APP_JS_TEXT[idx:idx + 1500]
+        assert "agentRestartingMap" in body, (
+            "restart_failed handler must clear the agentRestartingMap entry"
+        )
+        assert "showToast" in body, (
+            "restart_failed handler must call showToast with the error"
+        )
+        assert "evt.data?.error" in body or "data?.error" in body, (
+            "Toast must include the error from the event payload"
+        )
+
+
 # ── Pure-Python reimplementation of the JS chip parser ──────────
 #
 # Mirrors ``_parseOperatorActions`` in ``app.js``. We mirror the contract

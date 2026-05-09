@@ -5463,3 +5463,65 @@ class TestDashboardEventBusCoverage:
         assert stored[0]["data"]["request_id"] == "req-xyz"
         assert stored[0]["data"]["agent_id"] == "alpha"
         assert stored[0]["data"]["service"] == "github_token"
+
+    @patch("src.cli.config._load_config")
+    def test_restart_timeout_emits_restart_failed(self, mock_load):
+        """When ``runtime.stop_agent`` hangs the request handler hard-caps
+        at 60s via ``asyncio.wait_for``. The SPA must still get a
+        ``restart_failed`` agent_state event so the spinner clears."""
+        mock_load.return_value = {
+            "llm": {"default_model": "openai/gpt-4o-mini"},
+            "agents": {"alpha": {"role": "tester", "model": "x"}},
+            "network": {},
+        }
+        runtime = self.components["runtime"]
+
+        # Force ``stop_agent`` to hang. ``asyncio.to_thread`` runs it on
+        # an executor; ``asyncio.wait_for`` cancels the wrapper future
+        # but cannot interrupt the OS thread. We use a trivial sleep to
+        # simulate the daemon hang without leaking a real long-lived
+        # thread — patch the call to raise asyncio.TimeoutError directly
+        # by stubbing ``asyncio.wait_for`` is fragile, so instead we
+        # raise a TimeoutError-equivalent from ``stop_agent`` itself
+        # (the dashboard catches both the asyncio.TimeoutError branch
+        # and the generic Exception branch with separate emits).
+        import asyncio as _asyncio
+        runtime.stop_agent.side_effect = _asyncio.TimeoutError("daemon hang")
+
+        resp = self.client.post("/dashboard/api/agents/alpha/restart")
+        # Either 504 (TimeoutError caught) or 500 (generic) — both emit
+        # restart_failed. The point of this test is the SPA spinner
+        # clears no matter which path fired.
+        assert resp.status_code in (500, 504), resp.text
+        assert "agent_restarting" in self._types_seen()
+        failed = [
+            e for e in self.captured
+            if e["type"] == "agent_state"
+            and e.get("data", {}).get("state") == "restart_failed"
+        ]
+        # Belt-and-suspenders: at least one restart_failed fired.
+        # The finally-block backstop should never double-fire because
+        # the explicit emit above already set ``fired_terminal``.
+        assert len(failed) == 1, (
+            f"Expected exactly one restart_failed emit, got {len(failed)}"
+        )
+
+    def test_blackboard_delete_emits_event(self):
+        """``DELETE /api/blackboard/{key}`` mirrors the mesh-side delete
+        emit so the SPA's blackboard view refreshes live."""
+        self.components["blackboard"].write(
+            "live/key", {"v": 1}, written_by="alpha",
+        )
+        resp = self.client.delete("/dashboard/api/blackboard/live/key")
+        assert resp.status_code == 200
+        deletes = [e for e in self.captured if e["type"] == "blackboard_delete"]
+        assert len(deletes) == 1
+        assert deletes[0]["data"]["key"] == "live/key"
+        assert deletes[0]["data"]["deleted_by"] == "operator"
+
+    def test_blackboard_delete_history_blocked_no_emit(self):
+        """The 400 reject path doesn't emit (nothing was deleted)."""
+        resp = self.client.delete("/dashboard/api/blackboard/history/x")
+        assert resp.status_code == 400
+        deletes = [e for e in self.captured if e["type"] == "blackboard_delete"]
+        assert deletes == []
