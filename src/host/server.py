@@ -5178,6 +5178,15 @@ def create_mesh_app(
 
         # Hot-reload: runtime config (model, thinking) — env-var fields that
         # won't get picked up by the YAML write alone.
+        #
+        # ``hot_reload_ok`` defaults to True for fields that don't
+        # hot-reload (config-write only) so the emit doesn't lie about
+        # in-process state for those. For fields that DO hot-reload, it
+        # tracks the agent-side ack — surfaced as ``live: bool`` on the
+        # ``agent_config_updated`` event so the SPA can render a
+        # "saved — restart to apply" hint when the running agent still
+        # has the old config (Docker hang, agent crash, transport timeout).
+        hot_reload_ok = True
         if (
             transport
             and agent_id in router.agent_registry
@@ -5195,11 +5204,20 @@ def create_mesh_app(
                 # success — the YAML write is durable, but runtime state
                 # only catches up on restart.
                 if isinstance(result, dict) and "error" in result:
+                    hot_reload_ok = False
                     logger.warning(
                         "Hot-reload %s for '%s' returned error: %s",
                         field, agent_id, result["error"],
                     )
+                elif isinstance(result, dict) and result.get("status") not in (None, "ok"):
+                    # Non-"ok" status from the agent counts as a soft failure.
+                    hot_reload_ok = False
+                    logger.warning(
+                        "Hot-reload %s for '%s' returned non-ok status: %s",
+                        field, agent_id, result.get("status"),
+                    )
             except Exception as e:
+                hot_reload_ok = False
                 logger.warning(
                     "Failed to hot-reload %s for '%s': %s",
                     field, agent_id, e,
@@ -5265,29 +5283,34 @@ def create_mesh_app(
             undoable=undoable,
         )
 
-        # Emit a generic "config updated" event so the dashboard's
-        # agent config card flips to the new value live without a
-        # full reload. The soft-edit / undo paths layer their own
-        # ``operator_action_receipt[*]`` events on top of this; the
-        # confirm-edit (hard field) path relies solely on this event
-        # because hard fields don't render a Revert receipt.
+        # Emit a "config updated" event so the dashboard's agent config
+        # card flips to the new value live without a full reload. Two
+        # rules guard this emit:
         #
-        # ``_HARD_EDIT_FIELDS`` is closed over from the enclosing app
-        # factory. Hard fields are the ones flagged above as
-        # "secrets" — none of the current hard fields contain
-        # outright secrets (model / permissions / budget / thinking),
-        # but ``permissions`` payloads can be large and structured.
-        # We pass them through verbatim; when a future hard field is
-        # added that does contain secrets, redact at the call site.
-        if event_bus is not None:
+        #   * Gated to hard fields. Soft fields are already covered by
+        #     ``operator_action_receipt`` (which carries the value
+        #     diff). Firing both for a soft edit is redundant noise the
+        #     SPA would have to dedupe.
+        #
+        #   * No ``new_value`` / ``old_value`` on the wire. The SPA
+        #     handler refetches the agent detail anyway (it never reads
+        #     the diff out of this event), and ``permissions`` ACL
+        #     diffs are structurally sensitive — keeping them out of WS
+        #     frames avoids leaking on a misconfigured listener.
+        #
+        # ``live`` reports whether the agent-side hot-reload (model /
+        # thinking) actually took. ``True`` for fields that don't
+        # hot-reload. ``False`` means the YAML / config-store write
+        # landed but the running container still has the old config —
+        # the SPA can show "saved — restart to apply".
+        if field in HARD_EDIT_FIELDS and event_bus is not None:
             try:
                 event_bus.emit(
                     "agent_config_updated", agent=agent_id,
                     data={
                         "agent_id": agent_id,
                         "field": field,
-                        "new_value": new_value,
-                        "old_value": old_value,
+                        "live": hot_reload_ok,
                     },
                 )
             except Exception as e:

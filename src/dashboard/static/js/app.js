@@ -4092,7 +4092,8 @@ function dashboard() {
       } else if (status === 'failed') {
         summary = `${actor} failed task '${title}'`;
       } else if (status === 'cancelled') {
-        summary = `${actor} cancelled task '${title}'`;
+        const reason = data.reason ? ` (${data.reason})` : '';
+        summary = `${actor} cancelled task '${title}'${reason}`;
       } else if (status === 'working') {
         summary = `${actor} started task '${title}'`;
       } else if (status === 'accepted') {
@@ -4373,6 +4374,25 @@ function dashboard() {
         this.handleWorkplaceEvent(evt);
       }
 
+      // Live task-artifact attach. The orchestration layer emits
+      // ``task_artifact_added`` whenever a tool result is logged onto a
+      // task. Without an SPA handler the user has to refresh the task
+      // drawer to see the new artifact. Best-effort: refresh the drawer
+      // when it's open on the task in question, and nudge the workplace
+      // tasks list (debounced) so any aggregate counts stay current.
+      if (evt.type === 'task_artifact_added') {
+        const taskId = evt.data?.task_id;
+        if (taskId) {
+          if (this.drillInTaskId === taskId && typeof this.loadTaskDrillIn === 'function') {
+            this.loadTaskDrillIn(taskId);
+          }
+          if (typeof this.loadWorkplaceTasks === 'function') {
+            if (this._workplaceTasksDebounce) clearTimeout(this._workplaceTasksDebounce);
+            this._workplaceTasksDebounce = setTimeout(() => this.loadWorkplaceTasks(), 250);
+          }
+        }
+      }
+
       // PR 1 — operator_action_receipt: append a receipt card to the
       // operator chat history so the user sees what was changed and gets
       // a one-click [Undo]. Also append into the affected agent's chat
@@ -4397,6 +4417,21 @@ function dashboard() {
           if (!this.chatHistories[data.agent_id]) this.chatHistories[data.agent_id] = [];
           this.chatHistories[data.agent_id].push({ ...card });
         }
+        // Refresh the open agent detail panel so the config card flips
+        // to the new value live. Soft edits no longer fire
+        // ``agent_config_updated`` (gated to hard fields per the audit
+        // follow-up); this is the receipt-side equivalent of the
+        // agent_config_updated handler below.
+        const viewing = this.selectedAgent || this.detailAgent;
+        if (
+          data.agent_id && viewing === data.agent_id
+          && typeof this.fetchAgentDetail === 'function'
+        ) {
+          if (this._agentDetailsDebounce) clearTimeout(this._agentDetailsDebounce);
+          this._agentDetailsDebounce = setTimeout(
+            () => this.fetchAgentDetail(viewing), 250,
+          );
+        }
       }
       if (evt.type === 'operator_action_receipt_undone') {
         const data = evt.data || {};
@@ -4409,6 +4444,19 @@ function dashboard() {
               }
             }
           }
+        }
+        // Refresh the agent detail panel so the reverted value lands
+        // live (the undo apply path goes through `_apply_pending_change`
+        // which no longer fires `agent_config_updated` for soft fields).
+        const viewing = this.selectedAgent || this.detailAgent;
+        if (
+          data.agent_id && viewing === data.agent_id
+          && typeof this.fetchAgentDetail === 'function'
+        ) {
+          if (this._agentDetailsDebounce) clearTimeout(this._agentDetailsDebounce);
+          this._agentDetailsDebounce = setTimeout(
+            () => this.fetchAgentDetail(viewing), 250,
+          );
         }
       }
       if (evt.type === 'operator_action_receipt_superseded') {
@@ -4501,6 +4549,15 @@ function dashboard() {
           const next = { ...this.agentRestartingMap };
           delete next[evt.agent];
           this.agentRestartingMap = next;
+        }
+        // Surface the reason. Comment above promises the SPA exposes
+        // ``error`` for the toast — wire that through here so the user
+        // sees WHY the restart failed instead of just the silent clear.
+        if (typeof this.showToast === 'function') {
+          const err = evt.data?.error || 'Unknown error';
+          const who = (typeof this.agentDisplayName === 'function')
+            ? this.agentDisplayName(evt.agent) : evt.agent;
+          this.showToast(`Restart failed for ${who}: ${err}`);
         }
       }
 
@@ -9871,7 +9928,8 @@ function dashboard() {
         }
         case 'task_status_changed': {
           const newStatus = d.new_status || d.status || event.new_status || '';
-          return `${agent} ${this.verbForStatus(newStatus)}`;
+          const reason = (newStatus === 'cancelled' && d.reason) ? ` (${d.reason})` : '';
+          return `${agent} ${this.verbForStatus(newStatus)}${reason}`;
         }
         case 'task_outcome': {
           const outcome = d.outcome || event.outcome || 'reviewed';

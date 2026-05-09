@@ -564,3 +564,83 @@ class TestNotificationsProducerEmitsLiveEvent:
             "previous": "unhealthy", "current": "healthy", "failures": 0,
         })
         assert self._added_events() == []
+
+    # ── Audit follow-up: ``payload`` must ride on the live event ──
+    #
+    # Without the payload, a live-injected notification can't deep-link
+    # (no ``task_id`` / ``request_id`` / ``nonce``) until the 60s poll
+    # replaces it with the persisted version that does carry it. Each
+    # producer branch should pass the SAME payload it persisted to the
+    # store through into ``_emit_notification_added``.
+
+    def test_task_outcome_delivered_emit_carries_payload(self):
+        self.bus.emit("task_outcome", agent="operator", data={
+            "task_id": "t-1",
+            "project_id": "proj-a",
+            "assignee": "writer",
+            "outcome": "delivered",
+        })
+        added = self._added_events()
+        assert len(added) == 1
+        payload = added[0]["data"].get("payload") or {}
+        assert payload.get("task_id") == "t-1"
+        assert payload.get("project_id") == "proj-a"
+        assert payload.get("outcome") == "delivered"
+
+    def test_pending_action_created_emit_carries_payload(self):
+        self.bus.emit("pending_action_created", agent="operator", data={
+            "nonce": "abc123",
+            "summary": "Switch model",
+            "action_kind": "edit_agent",
+            "target_kind": "agent",
+            "target_id": "writer",
+        })
+        added = self._added_events()
+        assert len(added) == 1
+        payload = added[0]["data"].get("payload") or {}
+        assert payload.get("nonce") == "abc123"
+        assert payload.get("target_id") == "writer"
+        assert payload.get("action_kind") == "edit_agent"
+
+    def test_credential_request_emit_carries_payload(self):
+        self.bus.emit("credential_request", agent="researcher", data={
+            "name": "google_api_key",
+            "service": "Google API",
+            "request_id": "req-42",
+        })
+        added = self._added_events()
+        assert len(added) == 1
+        payload = added[0]["data"].get("payload") or {}
+        assert payload.get("request_id") == "req-42"
+        assert payload.get("service") == "Google API"
+
+    def test_browser_login_request_emit_carries_payload(self):
+        self.bus.emit("browser_login_request", agent="researcher", data={
+            "service": "LinkedIn",
+            "url": "https://www.linkedin.com/login",
+            "request_id": "br-9",
+        })
+        added = self._added_events()
+        assert len(added) == 1
+        payload = added[0]["data"].get("payload") or {}
+        assert payload.get("request_id") == "br-9"
+        assert payload.get("url") == "https://www.linkedin.com/login"
+
+    def test_health_change_emit_carries_payload(self):
+        self.bus.emit("health_change", agent="researcher", data={
+            "previous": "healthy", "current": "unhealthy", "failures": 3,
+        })
+        added = self._added_events()
+        assert len(added) == 1
+        payload = added[0]["data"].get("payload") or {}
+        assert payload.get("current") == "unhealthy"
+        assert payload.get("failures") == 3
+
+    def test_credit_exhausted_emit_carries_payload(self):
+        self.bus.emit("credit_exhausted", agent="writer", data={
+            "error": "Insufficient credits",
+        })
+        added = self._added_events()
+        assert len(added) == 1
+        payload = added[0]["data"].get("payload") or {}
+        assert payload.get("error") == "Insufficient credits"
