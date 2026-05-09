@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from src.cli.runtime import _default_embedding_model
 from src.host.runtime import (
     DockerBackend,
@@ -507,6 +509,100 @@ class TestDockerBackendSlimResources:
         mock_container.stop.assert_called_once()
         mock_container.remove.assert_called_once()
         assert backend.browser_service_url is None
+
+    @pytest.mark.parametrize(
+        "max_agents,exp_mem,exp_shm,exp_cpu,exp_max_browsers",
+        [
+            # Basic — cax11 (default when env unset == 0)
+            (0, "2g", "512m", 100000, 1),
+            (1, "2g", "512m", 100000, 1),
+            # Growth — cax21 (max_browsers == max_agents in this band)
+            (2, "4g", "1g", 150000, 2),
+            (5, "4g", "1g", 150000, 5),
+            # Pro — cax31 (mem-bound, capped at 10 browsers even with 15 agents)
+            (6, "8g", "2g", 200000, 6),
+            (10, "8g", "2g", 200000, 10),
+            (15, "8g", "2g", 200000, 10),
+            # Pro Max — cax41 (32GB ARM, 30 agents / 30 browsers / 16GB / 4.0 CPU)
+            (16, "16g", "4g", 400000, 16),
+            (30, "16g", "4g", 400000, 30),
+            (50, "16g", "4g", 400000, 30),  # capped at 30
+        ],
+    )
+    def test_browser_tier_sizing(self, max_agents, exp_mem, exp_shm, exp_cpu, exp_max_browsers):
+        """Browser container resources scale across the 4-tier plan table
+        (Basic / Growth / Pro / Pro Max) driven by OPENLEGION_MAX_AGENTS."""
+        import os as _os
+
+        import docker as _docker
+
+        backend = self._make_backend()
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("nope")
+        backend.client = mock_client
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        with patch("httpx.get", return_value=mock_resp), \
+             patch.dict(_os.environ, {"OPENLEGION_MAX_AGENTS": str(max_agents)}):
+            backend.start_browser_service()
+
+        run_call = mock_client.containers.run.call_args
+        assert run_call.kwargs.get("mem_limit") == exp_mem
+        assert run_call.kwargs.get("shm_size") == exp_shm
+        assert run_call.kwargs.get("cpu_quota") == exp_cpu
+        env = run_call.kwargs.get("environment", {})
+        assert env.get("MAX_BROWSERS") == str(exp_max_browsers)
+
+    def test_browser_max_concurrent_env_forwarded(self):
+        """OPENLEGION_BROWSER_MAX_CONCURRENT (provisioner-set per-instance scale
+        cap) must be forwarded into the browser container — otherwise the
+        provisioner's scale_instance write to /opt/openlegion/.env is a no-op."""
+        import os as _os
+
+        import docker as _docker
+
+        backend = self._make_backend()
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("nope")
+        backend.client = mock_client
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        with patch("httpx.get", return_value=mock_resp), \
+             patch.dict(_os.environ, {"OPENLEGION_BROWSER_MAX_CONCURRENT": "7"}):
+            backend.start_browser_service()
+
+        run_call = mock_client.containers.run.call_args
+        env = run_call.kwargs.get("environment", {})
+        assert env.get("OPENLEGION_BROWSER_MAX_CONCURRENT") == "7"
+
+    def test_browser_max_concurrent_env_absent_when_unset(self):
+        """When OPENLEGION_BROWSER_MAX_CONCURRENT is not in the host env, do
+        NOT inject an empty value into the container env (browser container
+        falls back to its own default via _resolve_max_browsers)."""
+        import os as _os
+
+        import docker as _docker
+
+        backend = self._make_backend()
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("nope")
+        backend.client = mock_client
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        with patch("httpx.get", return_value=mock_resp), \
+             patch.dict(_os.environ, {}, clear=False):
+            _os.environ.pop("OPENLEGION_BROWSER_MAX_CONCURRENT", None)
+            backend.start_browser_service()
+
+        run_call = mock_client.containers.run.call_args
+        env = run_call.kwargs.get("environment", {})
+        assert "OPENLEGION_BROWSER_MAX_CONCURRENT" not in env
 
     def test_browser_has_net_admin_in_bridge_mode(self):
         """Browser container gets the minimal cap set its entrypoint needs in bridge mode."""

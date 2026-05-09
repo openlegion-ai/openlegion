@@ -112,7 +112,8 @@ Resources scale with the `OPENLEGION_MAX_AGENTS` environment variable:
 |------|------------------------|-----|-----|-----|-------------|
 | Basic | ≤ 1 | 2GB | 512MB | 1.0 core | 1 |
 | Growth | 2–5 | 4GB | 1GB | 1.5 cores | `max_agents` |
-| Pro | > 5 | 8GB | 2GB | 2.0 cores | `min(max_agents, 10)` |
+| Pro | 6–15 | 8GB | 2GB | 2.0 cores | `min(max_agents, 10)` |
+| Pro Max | > 15 | 16GB | 4GB | 4.0 cores | `min(max_agents, 30)` |
 
 SHM (shared memory) is critical for Firefox compositor IPC — too small causes VNC rendering freezes.
 
