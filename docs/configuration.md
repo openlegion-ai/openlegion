@@ -11,7 +11,8 @@ OpenLegion uses YAML and JSON files in the `config/` directory. Config files are
 | `config/permissions.json` | JSON | Per-agent ACL matrix |
 | `config/cron.json` | JSON | Scheduled job state (auto-managed) |
 | `config/projects/` | Directory | Per-project data (project.md, members) |
-| `config/settings.json` | JSON | Dashboard-managed runtime settings: browser speed/delay/timeout, execution limits (`max_iterations`, `chat_max_tool_rounds`, etc.), default budgets, and a `browser_flags` dict that overrides any flag in [`src/browser/flags.py:KNOWN_FLAGS`](../src/browser/flags.py) (precedence sits between per-agent overrides and env vars). Written by the dashboard and injected as env vars into agent containers at startup. **The four `_ENV_ONLY_FLAGS` (`CAPTCHA_SOLVER_KEY`, `CAPTCHA_SOLVER_KEY_SECONDARY`, `CAPTCHA_SOLVER_PROXY_LOGIN`, `CAPTCHA_SOLVER_PROXY_PASSWORD`) are stripped from this file at load with a warning** — settings.json is plaintext on disk with no chmod / encryption, so solver secrets must come from env vars only. See [Browser Flag Precedence](#browser-flag-precedence). |
+| `config/settings.json` | JSON | Dashboard-managed runtime settings: browser speed/delay/timeout, execution limits (`max_iterations`, `chat_max_tool_rounds`, etc.), default budgets, and a `browser_flags` dict that overrides any flag in [`src/browser/flags.py:KNOWN_FLAGS`](../src/browser/flags.py) (precedence sits between per-agent overrides and env vars). Read by the browser service via `src/browser/flags.py`. The dashboard also bridges the CAPTCHA solver provider/key fields into the host process env (via `os.environ[…]` in `src/host/runtime.py`) so the browser container picks them up. **The four `_ENV_ONLY_FLAGS` (`CAPTCHA_SOLVER_KEY`, `CAPTCHA_SOLVER_KEY_SECONDARY`, `CAPTCHA_SOLVER_PROXY_LOGIN`, `CAPTCHA_SOLVER_PROXY_PASSWORD`) are stripped from this file at load with a one-time warning that names the stripped keys** — settings.json is plaintext on disk with no chmod / encryption, so solver secrets must come from env vars only. See [Browser Flag Precedence](#browser-flag-precedence). |
+| `config/api_keys.json` | JSON | Named API keys for mesh authentication. Shape: `{"keys": {key_id: {name, key_hash, created_at, last_used_at}}}`. Key IDs are `"ak_" + token_hex(6)`; the raw key is returned **once** at creation (`POST /api/api-keys`) and never persisted — only the salted SHA-256 hash (`sha256(key_id + raw_key)`) is stored. Name capped at 128 chars. The legacy `OPENLEGION_API_KEY` env var (single key) is also accepted as a back-compat fallback. |
 | `data/captcha_costs.json` | JSON | Runtime CAPTCHA spend ledger (chmod `0o600`). Per-agent monthly buckets in millicents (1/100,000 USD); persisted as a periodic snapshot from in-memory state on the 60s metrics tick. Override path with `CAPTCHA_COST_COUNTER_PATH`. State is current-month only — older windows defer to the planned SQLite snapshots. Restart loses at most one tick of spend. |
 | `config/network.yaml` | YAML | Network settings (`no_proxy` exclusion list for proxy mode). |
 | `.env` | dotenv | API keys and credentials |
@@ -51,9 +52,9 @@ agents:
 | `role` | string | Yes | Short description of the agent's purpose |
 | `model` | string | No | LLM model in `provider/model` format. Falls back to `llm.default_model` in mesh.yaml, then `openai/gpt-4o-mini` if neither is set. |
 | `skills_dir` | string | No | Path to custom skills directory |
-| `system_prompt` | string | No | Custom system prompt. Auto-generated if omitted. Also accepted as `instructions` |
-| `resources.memory_limit` | string | No | Reserved for future use. Currently hardcoded to `384m` by the runtime for security. |
-| `resources.cpu_limit` | float | No | Reserved for future use. Currently hardcoded to `0.15` by the runtime for security. |
+| `system_prompt` | string | No | Custom system prompt. Auto-generated if omitted. Also accepted as `instructions` — first non-empty wins (`src/cli/config.py`). Distinct from the top-level `initial_instructions` (below): `system_prompt`/`instructions` seed the runtime system prompt, `initial_instructions` seeds the `INSTRUCTIONS.md` workspace file on first boot. |
+| `resources.memory_limit` | string | No | Reserved for future use. Currently hardcoded by the runtime for security — `384m` for workers, `128m` for the operator agent (selected by `ALLOWED_TOOLS` env). |
+| `resources.cpu_limit` | float | No | Reserved for future use. Currently hardcoded by the runtime for security — `0.15` for workers, `0.05` for the operator agent. |
 | `budget.daily_usd` | float | No | Daily spend cap in USD (default: `10.00`) |
 | `budget.monthly_usd` | float | No | Monthly spend cap in USD (default: `200.00`) |
 | `soul` | string | No | Seeds `SOUL.md` on first boot — defines the agent's personality and behavioral guidelines |
@@ -97,11 +98,12 @@ mesh:
 llm:
   default_model: anthropic/claude-haiku-4-5-20251001
   embedding_model: text-embedding-3-small
-  max_tokens: 4096
-  temperature: 0.7
   failover:
-    primary: anthropic/claude-sonnet-4-6
-    fallback: openai/gpt-4.1-mini
+    anthropic/claude-sonnet-4-6:
+      - anthropic/claude-haiku-4-5-20251001
+      - openai/gpt-4.1-mini
+    openai/gpt-4o:
+      - openai/gpt-4o-mini
 
 channels:
   telegram:
@@ -121,11 +123,8 @@ collaboration: true
 | `mesh.host` | string | `0.0.0.0` | Bind address for mesh server |
 | `mesh.port` | integer | `8420` | Mesh server port |
 | `llm.default_model` | string | -- | Default model for agents without explicit model |
-| `llm.embedding_model` | string | *auto* | Model for memory embeddings. Auto-detected from default LLM provider (OpenAI → `text-embedding-3-small`; Anthropic, Google, DeepSeek, and all others → `"none"`). Must produce 1536-dim vectors. Set to `"none"` to disable vector search (FTS5 keyword search still works) |
-| `llm.max_tokens` | integer | `4096` | Max output tokens per completion |
-| `llm.temperature` | float | `0.7` | Sampling temperature |
-| `llm.failover.primary` | string | -- | Primary model for failover routing |
-| `llm.failover.fallback` | string | -- | Fallback model when primary fails |
+| `llm.embedding_model` | string | *auto* | Model for memory embeddings. Auto-detected from the default LLM provider via `_PROVIDER_EMBEDDING_DEFAULTS` in `src/cli/runtime.py`: only the prefixes `openai/`, `gpt-`, `o1`, `o3`, `o4` resolve to `text-embedding-3-small`; everything else (Anthropic, Google, DeepSeek, xAI, Groq, …) falls through to `"none"`. Must produce 1536-dim vectors. Set to `"none"` to disable vector search (FTS5 keyword search still works). |
+| `llm.failover` | dict[string, list[string]] | -- | Per-model failover chains, typed as `dict[str, list[str]]` in `src/host/credentials.py`. Map each primary `provider/model` to an ordered fallback list. The legacy `{primary: ..., fallback: ...}` single-pair shape is **not** recognized and is silently ignored. |
 | `collaboration` | boolean | `true` | Allow inter-agent messaging |
 
 ### Channel Configuration
@@ -147,7 +146,7 @@ See [Channels](channels.md) for full setup instructions.
 
 ## `config/permissions.json`
 
-Per-agent access control lists. Default policy is **deny** -- if not listed, it's blocked.
+Per-agent access control lists. Default policy is **deny** -- if not listed, it's blocked. If `config/permissions.json` is missing entirely, **every agent gets deny-all**. An optional `"default"` agent entry acts as a template fallback for any agent not otherwise listed (see `src/host/permissions.py`).
 
 ```json
 {
@@ -186,7 +185,7 @@ Blackboard patterns use the `projects/{name}/*` namespace. When an agent joins a
 | `blackboard_read` | list[string] | Glob patterns for readable blackboard keys |
 | `blackboard_write` | list[string] | Glob patterns for writable blackboard keys |
 | `allowed_apis` | list[string] | External APIs accessible through the vault proxy |
-| `allowed_credentials` | list[string] | Glob patterns for accessible credential names. `["*"]` grants access to all agent-tier credentials; `[]` denies all. System credentials (LLM provider keys) are always blocked regardless of patterns. |
+| `allowed_credentials` | list[string] | Glob patterns for accessible credential names. Matched with `fnmatch` (case-insensitive). `["*"]` grants access to all agent-tier credentials; `[]` denies all. System credentials (LLM provider keys) are always blocked regardless of patterns. |
 | `can_use_browser` | boolean | Whether this agent can use the shared browser service. Default: `false`. |
 | `browser_actions` | list[string] \| null | Per-action gate inside the browser surface, applied only when `can_use_browser=true`. Three forms with non-obvious semantics: `null` (default — field omitted) **and** `["*"]` both grant **all** known browser actions including any added in future phases. `[]` denies every action (equivalent to `can_use_browser=false`). Any specific list (e.g. `["navigate", "snapshot", "screenshot"]`) is an **allowlist** — only listed actions are permitted; everything else is denied. The action validator is `KNOWN_BROWSER_ACTIONS` in `src/host/permissions.py` (currently 26 entries: `navigate`, `snapshot`, `click`, `type`, `hover`, `screenshot`, `reset`, `focus`, `status`, `detect_captcha`, `scroll`, `wait_for`, `press_key`, `go_back`, `go_forward`, `switch_tab`, `upload_file`, `download`, `find_text`, `open_tab`, `fill_form`, `click_xy`, `inspect_requests`, `solve_captcha`, `request_captcha_help`, `request_browser_login`); typo'd names get HTTP 400 at the mesh gate. |
 | `can_spawn` | boolean | Whether this agent can spawn ephemeral fleet agents via `spawn_fleet_agent`. Default: `false`. |
@@ -197,6 +196,12 @@ Blackboard patterns use the `projects/{name}/*` namespace. When an agent joins a
 | `wallet_spend_limit_daily_usd` | float | Daily aggregate transaction limit in USD. `0` uses the global default. |
 | `wallet_rate_limit_per_hour` | integer | Max transactions per hour. `0` uses the global default. |
 | `wallet_allowed_contracts` | list[string] | Contract addresses this agent can interact with. Empty list allows all. |
+| `can_manage_fleet` | boolean | Control-plane: create/register/deregister agents via mesh endpoints. Default: `false` for workers, `true` for the operator agent. |
+| `can_manage_projects` | boolean | Control-plane: create/archive projects and edit membership. Default: `false` for workers, `true` for operator. |
+| `can_edit_agent_config` | boolean | Control-plane: propose/confirm edits to another agent's instructions/soul/model/etc. Default: `false` for workers, `true` for operator. |
+| `can_view_fleet_metrics` | boolean | Control-plane: access `/mesh/system/metrics` and `/mesh/agents/{id}/metrics`. Default: `false` for workers, `true` for operator. |
+| `can_route_tasks` | boolean | Control-plane: create durable orchestration task records (Task 6 surface). Default: `false` for workers, `true` for operator. |
+| `can_request_user_credentials` | boolean | Allow `request_credential` and `request_browser_login` tools. Default: `false` for workers, `true` for operator. |
 
 ### Glob Patterns
 
@@ -231,6 +236,9 @@ OPENLEGION_CRED_SLACK_BOT_TOKEN=xoxb-...
 OPENLEGION_CRED_SLACK_APP_TOKEN=xapp-...
 OPENLEGION_CRED_WHATSAPP_ACCESS_TOKEN=EAAx...
 OPENLEGION_CRED_WHATSAPP_PHONE_NUMBER_ID=1234...
+# Required for WhatsApp inbound webhook signature verification (X-Hub-Signature-256).
+# Without it, signature verification is skipped with a WARNING.
+OPENLEGION_CRED_WHATSAPP_VERIFY_TOKEN=...
 ```
 
 All credentials in the `OPENLEGION_SYSTEM_*` and `OPENLEGION_CRED_*` tiers are loaded by the credential vault (`src/host/credentials.py`). Agents never see values directly -- they make API calls through the mesh proxy, which injects credentials server-side.
@@ -240,6 +248,8 @@ All credentials in the `OPENLEGION_SYSTEM_*` and `OPENLEGION_CRED_*` tiers are l
 **Channel credential fallback:** Channel bot tokens (Telegram, Discord, Slack, WhatsApp) are resolved with a four-tier fallback chain: `mesh.yaml` channel config field (e.g. `channels.telegram.bot_token`) → `OPENLEGION_SYSTEM_<NAME>` → `OPENLEGION_CRED_<NAME>` → legacy unprefixed `<NAME>` (e.g., `TELEGRAM_BOT_TOKEN`). The `OPENLEGION_CRED_` prefix is recommended for channel tokens.
 
 **Important:** LLM provider keys **must** use the `OPENLEGION_SYSTEM_` prefix. The mesh proxy only looks for provider keys in the system tier. A provider key stored with `OPENLEGION_CRED_` will be treated as an agent-tier credential and will not be used for LLM calls.
+
+**Key/value validation.** Credential names must match `^[A-Za-z_][A-Za-z0-9_]*$`; values reject embedded newline (`\n`) and carriage-return (`\r`) bytes (`src/host/credentials.py`). The per-agent `.agent.env` files generated for `SandboxBackend` agents are written with `chmod 0o600` (`src/host/runtime.py`).
 
 ## `config/cron.json`
 
@@ -274,7 +284,6 @@ Beyond credentials, these environment variables affect runtime behavior:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OPENLEGION_LOG_FORMAT` | `json` | Log output format: `json` (structured) or `text` (human-readable) |
-| `VNC_PORT` | `6080` | KasmVNC web port for browser viewing (set automatically in containers) |
 | `MCP_SERVERS` | -- | JSON string of MCP server configs (set automatically in containers) |
 | `MESH_AUTH_TOKEN` | -- | Agent auth token (set automatically in containers) |
 | `MESH_HOST` | -- | Mesh host URL (set automatically in containers) |
@@ -282,11 +291,19 @@ Beyond credentials, these environment variables affect runtime behavior:
 | `THINKING` | `off` | Extended thinking/reasoning mode (set automatically from `thinking` in agents.yaml) |
 | `PROJECT_NAME` | -- | Project this agent belongs to (set automatically for project members) |
 | `EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model for memory vector search (set automatically from `llm.embedding_model` in mesh.yaml). Set to `"none"` to disable vector search |
-| `OPENLEGION_MAX_AGENTS` | `0` | Plan limit: maximum agents to start. `0` means unlimited. If set to N > 0, only the first N agents are started. **Also drives plan-aware browser-service sizing** (`src/host/runtime.py:start_browser_service`) — the browser container's memory, SHM, CPU quota, and `MAX_BROWSERS` cap are scaled by this value: ≤1 → Basic (2GB / 512m / 1.0 CPU / 1 browser), ≤5 → Growth (4GB / 1g / 1.5 CPU / N browsers), >5 → Pro (8GB / 2g / 2.0 CPU / `min(N, 10)` browsers). |
-| `OPENLEGION_MAX_PROJECTS` | -- | Plan limit: maximum projects allowed. If unset, projects are unlimited. If set to `0`, projects are disabled entirely. If set to N > 0, only N projects are allowed. |
-| `OPENLEGION_HOST_NETWORK` | `0` | Use Docker host networking for agent containers instead of bridge network. Set to `1`, `true`, or `yes` (case-insensitive) to enable. Not recommended — disables network isolation. Also propagates to the browser service, which **additionally requires** `OPENLEGION_BROWSER_ALLOW_HOST_NETWORK=1` (see below). |
-| `OPENLEGION_BROWSER_ALLOW_HOST_NETWORK` | `0` | **Hard gate** for running the browser container in host-network mode. When `OPENLEGION_HOST_NETWORK=1` and this flag is unset (or anything other than `1`/`true`/`yes`), `start_browser_service` raises `RuntimeError` at boot. The egress iptables filter cannot install in the host network namespace, so host mode strips the authoritative SSRF control. Set this to acknowledge the regression and run anyway (INSECURE — the browser will reach the host's private networks). |
+| `OPENLEGION_MAX_AGENTS` | `0` | Plan limit: maximum agents to start. `0` means unlimited. If set to N > 0, only the first N agents are started. **Also drives plan-aware browser-service sizing** (`src/host/runtime.py:start_browser_service`) — the browser container's memory, SHM, CPU quota, and `MAX_BROWSERS` cap are selected by the `max_agents <= 1` / `<= 5` / `> 5` branches: ≤1 → Basic (2GB / 512m / 1.0 CPU / 1 browser), ≤5 → Growth (4GB / 1g / 1.5 CPU / N browsers), >5 → Pro (8GB / 2g / 2.0 CPU / `min(N, 10)` browsers). Note: `OPENLEGION_MAX_AGENTS=0` (the default, meaning "unlimited agents") falls into the `<= 1` branch and selects the **Basic** browser-service tier — counterintuitive but intentional for self-host installs that haven't declared a plan. |
+| `OPENLEGION_MAX_PROJECTS` | -- | Plan limit. Three-state semantics: **unset** (env var absent) → projects are unlimited; **set to `0`** → projects are disabled entirely, `POST /mesh/projects` returns HTTP 403; **set to N > 0** → only N projects are allowed. Distinction is `_max_projects_env is not None` in `src/host/server.py`. |
+| `OPENLEGION_PROJECT_SCOPE_MODE` | `enforce` | Project-scope rollout kill switch. Accepts `"warn"` or `"enforce"` (case-insensitive via `.lower()`). Invalid values default to `"enforce"` with a WARNING. **Read once at module import — restart the mesh to change.** |
+| `OPENLEGION_ORCHESTRATION_TASKS_V2` | `1` | Toggle the durable orchestration v2 tasks store. `"1"` enables; `"0"` falls back to the legacy blackboard task path. **Read once at module import — restart the mesh to flip.** |
+| `OPENLEGION_ORCHESTRATION_TASKS_DB` | `data/tasks.db` | Override the SQLite path for the orchestration v2 tasks store. |
+| `OPENLEGION_API_KEY` | -- | Legacy single API key for back-compat with the named-key system (`config/api_keys.json`). Compared with `hmac.compare_digest`. Prefer creating named keys via `POST /api/api-keys`. |
+| `OPENLEGION_APP_URL` | -- | App URL used by the dashboard's external SSO link (read by `src/dashboard/server.py`). |
+| `OPENLEGION_HOST_NETWORK` | `0` | Use Docker host networking for agent containers instead of bridge network. Enabled only when the literal lowercase value is one of `"1"`, `"true"`, `"yes"` (after `.strip()`) — `True`, `YES`, etc. are rejected. Not recommended — disables network isolation. Also propagates to the browser service, which **additionally requires** `OPENLEGION_BROWSER_ALLOW_HOST_NETWORK=1` (see below). |
+| `OPENLEGION_BROWSER_ALLOW_HOST_NETWORK` | `0` | **Hard gate** for running the browser container in host-network mode. Same case-sensitive literal match as `OPENLEGION_HOST_NETWORK` — only `"1"`/`"true"`/`"yes"` lowercase are accepted. When `OPENLEGION_HOST_NETWORK=1` and this flag is unset, `start_browser_service` raises `RuntimeError` at boot. The egress iptables filter cannot install in the host network namespace, so host mode strips the authoritative SSRF control. Set this to acknowledge the regression and run anyway (INSECURE — the browser will reach the host's private networks). |
 | `OPENLEGION_SYSTEM_WALLET_MASTER_SEED` | -- | BIP-39 mnemonic (24 words) for HD wallet key derivation. Required to enable wallet features. Generate with `openlegion wallet init`. |
+| `OPENLEGION_WALLET_LIMIT_PER_TX_USD` | `10.0` | Default per-transaction USD cap applied when an agent's `wallet_spend_limit_per_tx_usd` is `0`. |
+| `OPENLEGION_WALLET_LIMIT_DAILY_USD` | `100.0` | Default daily aggregate USD cap applied when an agent's `wallet_spend_limit_daily_usd` is `0`. |
+| `OPENLEGION_WALLET_RATE_LIMIT_PER_HOUR` | `10` | Default transactions-per-hour cap applied when an agent's `wallet_rate_limit_per_hour` is `0`. |
 | `BROWSER_OS` | `windows` | OS fingerprint for Camoufox browser: `windows`, `macos`, or `linux`. Windows is recommended (≈70% desktop market share; Linux is a datacenter signal). |
 | `BROWSER_LOCALE` | `en-US` | BCP-47 locale tag for browser fingerprint (e.g. `en-US`, `de-DE`). |
 | `BROWSER_UA_VERSION` | -- | Override Firefox version in User-Agent string (e.g. `138.0`). Useful when Camoufox's bundled Firefox is too old for sites that enforce minimum browser versions (e.g. Shopify). Uses Camoufox's native config system. Ignored when a non-default `BROWSER_DEVICE_PROFILE` pins its own UA. |
@@ -294,9 +311,14 @@ Beyond credentials, these environment variables affect runtime behavior:
 | `BROWSER_PROXY_URL` | -- | Proxy URL for browser traffic (HTTP/HTTPS only, e.g. `http://proxy:8080`). SOCKS5 is not supported. Residential proxies recommended. |
 | `BROWSER_PROXY_USER` | -- | Proxy authentication username. |
 | `BROWSER_PROXY_PASS` | -- | Proxy authentication password. |
-| `OPENLEGION_BROWSER_MAX_CONCURRENT` | `5` | Per-service cap on simultaneous Camoufox browser instances (clamped to `[1, 64]`). **Startup-only** — runtime reconfig is unsupported (would need to bound the acquire semaphore mid-flight). The operator settings layer (`config/settings.json:browser_flags`) cannot override it either — `_resolve_max_browsers` is read once at process launch in `src/browser/__main__.py`. Restart the browser service to change this. The legacy name `MAX_BROWSERS` is still honored as a fallback for older deployments. |
+| `OPENLEGION_BROWSER_MAX_CONCURRENT` | *autodetected* | Per-service cap on simultaneous Camoufox browser instances (clamped to `[1, 64]`). When unset, autodetected from container memory by `_max_from_memory(total_mb)` in `src/browser/__main__.py`: `(total_mb - _HEADROOM_MB) // _MEM_PER_BROWSER_MB` where `_HEADROOM_MB=3072` and `_MEM_PER_BROWSER_MB=450`. Falls back to `_FALLBACK_DEFAULT=5` only when memory detection fails (typically non-Linux dev environments). **Startup-only** — runtime reconfig is unsupported (would need to bound the acquire semaphore mid-flight). The operator settings layer (`config/settings.json:browser_flags`) cannot override it either — `_resolve_max_browsers` is read once at process launch. Restart the browser service to change this. The legacy name `MAX_BROWSERS` is still honored as a fallback for older deployments. |
+| `BROWSER_AUTH_TOKEN` | -- | Bearer token the mesh uses to call the browser service (`/browser/*` endpoints). When `MESH_AUTH_TOKEN` is set and `BROWSER_AUTH_TOKEN` is missing, the browser service raises `RuntimeError` at startup unless `BROWSER_AUTH_INSECURE=1` is set. |
+| `BROWSER_AUTH_INSECURE` | -- | Set to `1` to disable browser-service bearer auth (dev only). Logged as a WARNING at startup. |
 | `BROWSER_EGRESS_ALLOWLIST` | -- | Comma-separated CIDR allowlist for the browser container's iptables egress filter. By default the entrypoint REJECTs all RFC1918 / loopback / link-local / CGNAT / IANA-reserved ranges (the authoritative SSRF control for browser-initiated traffic); use this to punch through specific destinations (e.g. `BROWSER_EGRESS_ALLOWLIST=10.0.0.5/32` for a private proxy). When `BROWSER_PROXY_URL` is a literal RFC1918 / loopback / link-local / reserved IP, the runtime errors at startup unless this flag covers it. |
 | `BROWSER_EGRESS_DISABLE` | -- | Disable the browser egress filter entirely (no iptables rules installed). Removes the SSRF guarantee; intended for operator debugging only. |
+| `OPENLEGION_BROWSER_ALLOW_ENGINE_MISMATCH` | -- | Truthy string → allow UA / engine fingerprint mismatch (e.g. claiming Safari while running Camoufox's Gecko engine). Off by default; toggle only when intentionally serving a mobile profile to a site that doesn't probe engine-level signals (`src/browser/stealth.py`). |
+| `OPENLEGION_CAPTCHA_SOLVER_PROVIDER` | -- | Alias bridge for `CAPTCHA_SOLVER_PROVIDER`. The dashboard writes this from `config/settings.json:captcha_solver_provider` into `os.environ` at boot (`src/host/runtime.py`); the browser container reads the canonical name. |
+| `OPENLEGION_CAPTCHA_SOLVER_KEY` | -- | Alias bridge for `CAPTCHA_SOLVER_KEY`. Same env-bridge pattern as above (`src/host/runtime.py`, `src/dashboard/server.py`). |
 | `OPENLEGION_SYSTEM_PROXY` | -- | System-wide outbound HTTP proxy URL for all agent traffic. Managed via the dashboard proxy settings page. |
 | `HTTP_PROXY` / `HTTPS_PROXY` | -- | Per-agent proxy URLs. Auto-injected into agent containers by the runtime when a per-agent proxy is configured. Read by the agent-side `http_request` tool. |
 | `OPENLEGION_TOOL_TIMEOUT` | `300` | Per-tool execution timeout in seconds (hard ceiling). |
@@ -325,7 +347,9 @@ Highest to lowest:
 A malformed value at any layer logs a warning and falls through to the next, so a broken per-agent override cannot mask a valid env-var fallback.
 
 ```json
-// config/settings.json — operator-wide overrides for any flag in KNOWN_FLAGS
+// config/settings.json — operator-wide overrides for any flag in KNOWN_FLAGS.
+// All values are stored as strings and coerced via typed accessors
+// (`get_bool` / `get_int` / `get_float`) at read time, so quote bools/ints.
 {
   "browser_flags": {
     "BROWSER_DEVICE_PROFILE": "desktop-windows",
@@ -393,10 +417,10 @@ Cost caps are **opt-in** — unset = no cap. All amounts are USD; the runtime le
 
 | Variable | Default | Description |
 |---|---|---|
-| `CAPTCHA_COST_LIMIT_USD_PER_AGENT_MONTH` | -- | Per-agent monthly USD cap. When exceeded, solver short-circuits with `skipped="cost_cap"`. |
-| `CAPTCHA_COST_LIMIT_USD_PER_TENANT_MONTH` | -- | Per-tenant monthly USD cap (tenant = project membership from `config/projects/`). Drives 50/80/100% threshold alerts. |
+| `CAPTCHA_COST_LIMIT_USD_PER_AGENT_MONTH` | -- (no cap when unset) | Per-agent monthly USD cap. When exceeded, solver short-circuits with `skipped="cost_cap"`. |
+| `CAPTCHA_COST_LIMIT_USD_PER_TENANT_MONTH` | -- (no cap when unset) | Per-tenant monthly USD cap (tenant = project membership from `config/projects/`). Drives 50/80/100% threshold alerts. |
 | `CAPTCHA_COST_COUNTER_PATH` | `data/captcha_costs.json` | Path to the persisted cost counter snapshot. chmod `0o600`. |
-| `OPENLEGION_CAPTCHA_FORCE_SOLVE_DOMAINS` | -- | Comma-separated; force normal solver flow on hosts otherwise classified `unsolvable` by `src/browser/captcha_policy.py` (e.g. `challenges.cloudflare.com`, `humansecurity.com`, `captcha-delivery.com`). |
+| `OPENLEGION_CAPTCHA_FORCE_SOLVE_DOMAINS` | -- | Comma-separated; force normal solver flow on hosts otherwise classified `unsolvable` by `src/browser/captcha_policy.py` (e.g. `challenges.cloudflare.com`, `humansecurity.com`, `captcha-delivery.com`). Read once at module import — restart browser service to apply changes. |
 | `OPENLEGION_CAPTCHA_SKIP_SOLVE_DOMAINS` | -- | Comma-separated; force escalation-only on hosts the solver would otherwise attempt. Read once at module import — restart browser service to apply changes. |
 | `BROWSER_CAPTCHA_REDETECT_ENABLED` | `true` | Gate the MutationObserver-based post-action captcha re-detection on `click` / `type` / `press_key` / `fill_form`. |
 
@@ -420,6 +444,7 @@ Default-off feature gates for high-trust browser surfaces. When tripped, the cor
 | `BROWSER_SCREENSHOT_QUALITY` | `75` | WebP quality 1–100. |
 | `BROWSER_RESOLUTION_POOL` | `true` | Per-agent deterministic viewport pool (1280×720 → 1920×1080) keyed by SHA-256 of the agent ID. Disable for fixed 1920×1080. |
 | `BROWSER_ENABLE_ADBLOCK` | `true` | Gates the uBlock Origin install during the schema-v3 profile migration. |
+| `BROWSER_PLATFORM_TIMING_ENABLED` | `true` | Per-platform pre-navigation timing jitter. Disable to remove the small think-time delay before each nav (e.g. for deterministic test runs). |
 
 ### Browser Behavior Recorder
 
@@ -496,7 +521,12 @@ The shared Camoufox browser ships four device-emulation profiles, selected via `
 ```
 
 ```python
-# Per-agent override (typically wired from the dashboard flags panel)
+# Per-agent override (typically wired from the dashboard flags panel).
+# NOTE: `flags.set_agent_override` mutates **in-process state** inside the
+# browser service. Calling it from a separate Python process — e.g. a
+# standalone script on the host — has no effect on the running container.
+# Operators set per-agent overrides via the dashboard "Browser Flags"
+# panel; the snippet below is for in-process dev / test wiring only.
 from src.browser import flags
 flags.set_agent_override("agent-mobile-scout", "BROWSER_DEVICE_PROFILE", "mobile-ios")
 ```

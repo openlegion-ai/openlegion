@@ -8,7 +8,7 @@ Comprehensive documentation for the OpenLegion multi-agent runtime.
 |----------|-------------|
 | [Architecture](architecture.md) | System architecture, trust zones, component overview |
 | [Security Model](security.md) | Defense-in-depth layers, container hardening, credential isolation |
-| [Agent Tools](agent-tools.md) | Complete reference for all built-in agent tools |
+| [Agent Tools](agent-tools.md) | Reference for the core built-in agent tools (exec, file, http, browser, mesh, memory, vault, etc.). Operator/fleet/subagent/introspect modules are documented separately. |
 | [MCP Integration](mcp.md) | Model Context Protocol support for external tool servers |
 | [Memory System](memory.md) | Five-layer memory architecture, write-then-compact pattern |
 | [Configuration](configuration.md) | All config files, environment variables, agent definitions |

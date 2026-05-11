@@ -11,13 +11,36 @@ cd openlegion
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-# Run tests (no Docker needed)
+# Run tests (no Docker needed). The -x flag stops at the first failure.
 pytest tests/ --ignore=tests/test_e2e.py --ignore=tests/test_e2e_chat.py \
   --ignore=tests/test_e2e_memory.py --ignore=tests/test_e2e_triggering.py -x
 
 # Run a single test file
 pytest tests/test_loop.py -x -v
 ```
+
+Or use the bundled `Makefile`:
+
+```bash
+make install   # runs install.sh — checks deps, creates .venv, installs package
+make test      # runs the unit + integration suite (same ignores as above)
+make lint      # ruff check + ruff format on src/ and tests/
+make start     # openlegion start (inside .venv)
+make stop      # openlegion stop
+make clean     # remove .venv and cache directories
+```
+
+### Worktree Workflow (Mandatory)
+
+All code changes must happen on a `git worktree`, never directly on `main`. Multiple subagents work concurrently — without isolated worktrees they overwrite each other's changes. See [CLAUDE.md → Git Workflow](../CLAUDE.md) for the full policy. The short version:
+
+```bash
+git worktree add -b feat/your-change .claude/worktrees/your-change
+cd .claude/worktrees/your-change
+# work, commit, push, open a PR
+```
+
+Never run `pip install` from a worktree — it hijacks the global `openlegion` entry point. Always merge through a GitHub PR; do not push to `main` directly.
 
 ## Testing
 
@@ -45,6 +68,34 @@ pytest tests/test_e2e.py -x -v
 # Full suite
 pytest tests/ -x
 ```
+
+`pyproject.toml` sets `asyncio_mode = "auto"`, so `async def` test functions do **not** need a `@pytest.mark.asyncio` decorator.
+
+### Test Markers
+
+A custom `browser` marker is defined in `pyproject.toml` for tests that drive a real Playwright browser:
+
+```python
+import pytest
+
+@pytest.mark.browser
+async def test_navigate_real_browser():
+    ...
+```
+
+Playwright is intentionally **not** in the `[dev]` extra (browser binaries balloon the install). CI does not run these tests. Install Playwright manually if you need them: `pip install playwright && playwright install firefox`.
+
+### CI Matrix
+
+`.github/workflows/test.yml` runs three jobs on every PR + push:
+
+| Job | Trigger | Setup | Command |
+|-----|---------|-------|---------|
+| `test` | PR + push | Python 3.11 **and** 3.12 × 3 shards (matrix of 6), `uv pip install --system -e ".[dev]" Pillow` | `pytest ... -n auto --dist=loadfile --splits 3 --group ${{ matrix.shard }}` |
+| `coverage` | push only | Python 3.12, `uv pip install` | `pytest ... -n auto --cov=src --cov-report=term-missing --cov-report=xml` |
+| `lint` | PR + push | Python 3.12 | `pip install ruff && ruff check src/ tests/` |
+
+Sharding uses `pytest-split` (`--splits 3 --group N`). `--dist=loadfile` keeps all tests from one file on the same xdist worker so fixture caches are reused — important for `tests/test_browser_service.py` (≈500 tests with shared setup).
 
 ### Test File Map
 
@@ -103,7 +154,7 @@ pytest tests/ -x
 
 ### Testing Conventions
 
-**Mock LLM responses, not the loop.** Tests create `AgentLoop` with a mock `LLMClient` that returns predetermined `LLMResponse` objects:
+**Mock LLM responses, not the loop.** Tests create `AgentLoop` with a mock `LLMClient` that returns predetermined `LLMResponse` objects. The canonical helper lives in `tests/test_loop.py:_make_loop()` — copy from there rather than rolling your own setup:
 
 ```python
 async def _make_loop(tool_calls=None, text="Done"):
@@ -203,6 +254,8 @@ conn.execute("PRAGMA journal_mode=WAL")
 conn.execute("PRAGMA busy_timeout=30000")  # 30s for mesh/costs/memory; traces uses 5000
 ```
 
+The shorter `5000`ms timeout on the traces DB is intentional: traces writes are append-only and high-volume, so blocking the request path for 30s on lock contention would mask real latency problems. Other stores can afford to wait. See `CLAUDE.md` → Known Constraints (8) for the rationale.
+
 No Redis, no external databases.
 
 ## Adding New Components
@@ -239,13 +292,17 @@ async def your_tool(param1: str, param2: int = 10, *, mesh_client=None) -> dict:
 4. Add a method to `src/agent/mesh_client.py` if agents need to call it
 5. Add HTTP endpoint tests in `tests/test_dashboard.py` (which covers `create_mesh_app()` HTTP handlers). Reserve `tests/test_mesh.py` for blackboard/pubsub layer tests.
 
+All endpoints are registered inside the `create_mesh_app()` factory in `src/host/server.py` — `@app` is a local variable, so routes must live in that function's scope. Permission checks use the helpers defined alongside (`_require_any_auth`, `_require_operator_or_internal`) and the per-agent `permissions.can_*()` calls. Agent identity is taken from the request (typically a Bearer token resolved against `_auth_tokens`); there is no top-level `_get_agent_id(request)` helper.
+
 ```python
+# Inside create_mesh_app() in src/host/server.py
 @app.post("/mesh/your_endpoint")
-async def your_endpoint(request: YourRequest):
-    agent_id = _get_agent_id(request)
+async def your_endpoint(request: Request, body: YourRequest):
+    _require_any_auth(request)
+    agent_id = _agent_id_from_token(request)  # resolved against _auth_tokens
     if not permissions.can_do_thing(agent_id):
         raise HTTPException(403, "Not permitted")
-    result = do_thing(request)
+    result = do_thing(body)
     return {"status": "ok", "data": result}
 ```
 
@@ -256,6 +313,16 @@ async def your_endpoint(request: YourRequest):
 3. The base class `handle_message()` handles all command parsing
 4. Add startup logic in `src/cli/channels.py`
 5. Add tests in `tests/test_channels.py`
+
+### Self-Authored Skills and the Marketplace
+
+Agents can author their own skills via `src/agent/builtins/skill_tool.py`, and operators can install skills from git repositories via `src/marketplace.py`. Both paths run untrusted Python — the safety net is **AST validation** before the file is imported:
+
+- `_FORBIDDEN_IMPORTS` (23 modules) — blocks `os`, `subprocess`, `socket`, etc.
+- `_FORBIDDEN_CALLS` (16 functions) — blocks `eval`, `exec`, `open`, `compile`, `__import__`, etc.
+- `_FORBIDDEN_ATTRS` (11 attributes) — blocks `__dict__`, `__subclasses__`, `__globals__`, etc.
+
+Marketplace clones are also hardened against malicious repositories: `git clone` runs with `-c core.hooksPath=/dev/null`, `-c protocol.ext.allow=never`, `-c core.symlinks=false`, and an environment of `GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0`. Depth is `1`, only `https://` and `git@` URLs are accepted.
 
 ## Project Structure
 
@@ -324,6 +391,10 @@ openlegion/
 │   ├── dashboard/               # Web dashboard
 │   │   ├── server.py            # FastAPI router + API endpoints
 │   │   ├── events.py            # EventBus for real-time streaming
+│   │   ├── auth.py              # Session cookie verification
+│   │   ├── notifications.py     # Persistent notifications store
+│   │   ├── telemetry.py         # SPA telemetry event sink
+│   │   ├── platform_success.py  # Per-tenant success scoring
 │   │   ├── templates/           # Dashboard HTML (Alpine.js + Tailwind)
 │   │   └── static/              # CSS + JS assets
 │   ├── setup_wizard.py          # Guided setup wizard
@@ -342,9 +413,15 @@ openlegion/
 │   ├── mesh.yaml
 │   ├── permissions.json
 │   └── cron.json
-├── tests/                       # Test suite (~3100 tests)
+├── tests/                       # Test suite (~155 test files)
 │   └── fixtures/                # Test fixtures (echo MCP server, etc.)
+├── tools/                       # Standalone dev tools
+│   ├── behavior_analyze.py      # Browser/captcha behavior analysis
+│   ├── behavior_baseline.jsonl  # Recorded baseline for comparison
+│   └── captcha_validation/      # Captcha solver validation harness
 ├── Dockerfile.agent             # Agent container image
+├── Dockerfile.browser           # Shared browser service image
+├── Makefile                     # install / start / stop / test / lint / clean
 └── pyproject.toml               # Project metadata
 ```
 
@@ -383,9 +460,10 @@ openlegion/
 
 | Group | Packages | Purpose |
 |-------|----------|---------|
-| `dev` | `pytest`, `pytest-asyncio`, `pytest-cov`, `pytest-xdist`, `ruff` | Testing, coverage, and linting |
+| `dev` | `pytest`, `pytest-asyncio`, `pytest-cov`, `pytest-split`, `pytest-xdist`, `ruff` | Testing, coverage, sharding, and linting (`pytest-split` is what CI uses for `--splits 3`) |
 | `mcp` | `mcp>=1.0` | MCP tool support |
 | `channels` | `python-telegram-bot`, `discord.py`, `slack-bolt` | Messaging channels |
+| `wallet` | `web3`, `eth-account`, `mnemonic`, `solders`, `solana` | Ethereum + Solana wallet support |
 
 ## Common Mistakes
 

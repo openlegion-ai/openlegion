@@ -22,14 +22,13 @@ OpenLegion is designed assuming agents will be compromised. Defense-in-depth acr
 
 Agents run as non-root (UID 1000) with:
 - `no-new-privileges` security option
-- 384MB memory limit (agents are slim — no browser)
-- 0.15 CPU quota (agents are I/O-bound, waiting on LLM APIs)
+- Memory / CPU split by role (`src/host/runtime.py:304-311`): **workers get 384 MB / 0.15 CPU**, **operator gets 128 MB / 0.05 CPU** (operator is detected via `env_overrides.ALLOWED_TOOLS` — it's a coordination agent, not a tool-runner, so it gets the lighter ceiling).
 - PID limit: 256 processes (`pids_limit: 256`)
 - `cap_drop: ALL` (no capabilities re-added)
 - Read-only root filesystem (`read_only: True`)
 - Tmpfs at `/tmp` (100MB, noexec, nosuid)
 - No host filesystem access (only `/data` volume)
-- Regular Docker bridge network — agents have internet egress. SSRF protection at the application layer in `src/agent/builtins/http_tool.py` blocks private/CGNAT/IPv4-mapped/6to4/Teredo ranges, pins DNS, allows max 5 redirects with re-validation at each hop, and strips `Authorization` on cross-origin redirects.
+- Regular Docker bridge network — agents have internet egress. SSRF protection at the application layer in `src/agent/builtins/http_tool.py` blocks private / loopback / link-local / reserved / unspecified (`0.0.0.0`) / CGNAT / IPv4-mapped / 6to4 / Teredo / multicast ranges, pins DNS per hop (fail-closed on resolution error), allows max 5 redirects with re-validation at each hop, and strips `Authorization` on cross-origin redirects. **This application-layer block is the only SSRF control for agent traffic — there is no kernel-enforced fallback** (unlike the browser container; see §SSRF Protection for the asymmetry).
 
 ```bash
 openlegion start  # Default container isolation
@@ -39,9 +38,16 @@ openlegion start  # Default container isolation
 
 Browser operations run in a separate, longer-lived container with a different posture (writable `/home/browser` for Firefox state) and plan-tier-scaled resources: 2–8GB RAM, 0.5–2.0 CPU, 512MB–2GB SHM, 1–10 concurrent browsers (see Architecture). Capability set: `cap_drop=["ALL"]` plus `cap_add=["NET_ADMIN","SETUID","SETGID"]` — the minimum needed to install the egress filter and drop privileges via `gosu`.
 
-The container's authoritative SSRF control is an **iptables egress filter** installed by `docker/browser-entrypoint.sh` before the browser process starts. The entrypoint runs as root, uses `NET_ADMIN` to REJECT outbound traffic to RFC1918, loopback, link-local, CGNAT, and IANA-reserved IPv4 ranges plus IPv6 equivalents, then drops to UID 1000 via `tini -- gosu browser:browser python -m src.browser`. The long-running Firefox/FastAPI process holds no effective capabilities (`no-new-privileges` blocks re-acquisition).
+The container's authoritative SSRF control is an **iptables egress filter** installed by `docker/browser-entrypoint.sh` before the browser process starts. The entrypoint runs as root, uses `NET_ADMIN` to REJECT outbound traffic to RFC1918, loopback, link-local, CGNAT, and IANA-reserved IPv4 ranges plus IPv6 equivalents, then drops to UID 1000 via `exec tini -- gosu browser:browser python -m src.browser`. The long-running Firefox/FastAPI process holds no effective capabilities (`no-new-privileges` blocks re-acquisition). **tini (PID 1, root) retains** `NET_ADMIN/SETUID/SETGID` in its effective set — no code in this repo asks tini to exercise those caps (tini just forks/execs its child and reaps zombies), but this is a defense-in-depth note worth being explicit about.
 
-The mesh-side `_resolve_and_pin()` check on `navigate`/`open_tab` (`src/host/server.py`) is a friendly early-reject only — the iptables filter is the boundary that must hold.
+The filter is **fail-closed**:
+- Missing `iptables-restore` → exit 1
+- Missing `NET_ADMIN` cap (i.e. `iptables -L OUTPUT -n` fails) → exit 1
+- IPv6 rules fail to install while IPv6 kernel support exists → exit 1
+- Loopback (`-o lo`) is allowed so the FastAPI service can reach in-container peers (per-agent KasmVNCs, the upload-staging surface)
+- Bypassing the filter requires explicit `BROWSER_EGRESS_DISABLE=1`
+
+The mesh-side `_resolve_and_pin()` check on `navigate`/`open_tab` (`src/host/server.py`) is a friendly early-reject only — the iptables filter is the boundary that must hold. When `BROWSER_EGRESS_DISABLE=1` is set or the service is launched in host-network mode (requires `OPENLEGION_BROWSER_ALLOW_HOST_NETWORK=1`), **the iptables filter is bypassed** and the only remaining SSRF defense is the mesh-side early-reject — which covers only `navigate`/`open_tab`. Be deliberate before flipping either knob.
 
 Egress operator knobs:
 - `BROWSER_EGRESS_ALLOWLIST=cidr,...` — punch holes for specific destinations.
@@ -82,7 +88,7 @@ Credentials are split into two tiers to prevent agents from accessing LLM provid
 | **System** | `anthropic_api_key`, `openai_api_key`, `gemini_api_base` | Mesh proxy only (internal). Agents can **never** resolve these. |
 | **Agent** | `brave_search_api_key`, `myservice_password`, user-created credentials | Only agents in the `allowed_credentials` allowlist |
 
-System credentials are identified by matching known provider names (`anthropic`, `openai`, `gemini`, `deepseek`, `moonshot`, `minimax`, `xai`, `groq`, `zai`) with key suffixes (`_api_key`, `_api_base`). Everything else is an agent credential.
+System credentials are identified by matching known provider names with key suffixes (`_api_key`, `_api_base`). Everything else is an agent credential. The known set is `_LITELLM_NATIVE_PROVIDERS` (`src/host/credentials.py:207-211`) — **15 providers** as of this writing: `anthropic`, `openai`, `openrouter`, `gemini`, `mistral`, `deepseek`, `groq`, `together_ai`, `fireworks_ai`, `perplexity`, `minimax`, `moonshot`, `xai`, `zai`, `ollama`. A credential named e.g. `openrouter_api_key` or `mistral_api_base` is therefore system-tier and unreachable to agents regardless of `allowed_credentials` configuration.
 
 Per-agent access is controlled by `allowed_credentials` glob patterns in `config/permissions.json`:
 
@@ -118,6 +124,36 @@ Call sites:
 - **Browser snapshots / element queries** — `browser_get_elements` and `browser_navigate` deep-redact accessibility tree text and resolved `$CRED{name}` values from form fills.
 - **Captured network metadata** — `inspect_requests` returns URLs only (no bodies / headers) and the URLs flow through `redact_url`.
 - **Solver logs** — CAPTCHA solver request URLs are redacted before logging (the `clientKey` query param is in the sensitive set).
+
+### `.env` Persistence
+
+`config/.env` is the persistent backing store for credentials. Writes go through `_persist_to_env()` in `src/host/credentials.py:91-186` with the following protections:
+
+- Reject env keys/values containing `\r\n` — env-injection prevention (`credentials.py:100-101`).
+- Validate env key format against `^[A-Za-z_][A-Za-z0-9_]*$` (`credentials.py:103`).
+- Atomic write — temp file + `chmod(0o600)` + `fsync` + `rename` (`credentials.py:140-153`). The `.env` file is created/replaced with `0o600` permissions on every persist.
+- Values single-quoted to disable python-dotenv interpolation; production also passes `interpolate=False` as a second layer.
+
+`SandboxBackend` writes the agent's auth token to `.agent.env` with `chmod(0o600)` (`runtime.py:875`) so the microVM root filesystem can't be read by another user on the host.
+
+### Wallet Seed Protection
+
+The wallet master seed is a 256-bit BIP-39 mnemonic stored as `OPENLEGION_SYSTEM_WALLET_MASTER_SEED` and never resolvable by agents (system-tier credential). Reveal handling (`src/dashboard/server.py:3907-3963`):
+
+- **`POST /dashboard/api/wallet/init`** generates the seed and returns it **once** in the response body, with `Cache-Control: no-store, Pragma: no-cache` to defeat caches and intermediate logging. If a seed is already configured, returns HTTP 409.
+- **`GET /dashboard/api/wallet/seed`** returns **HTTP 410 Gone** with detail "Seed reveal disabled. The seed was shown at wallet init time." There is no second-chance reveal endpoint — if the operator missed it, rotation is the only path forward.
+
+All signing happens server-side in `src/host/wallet.py`; per-agent EVM keys are derived via BIP-44 `m/44'/60'/{agent_index}'/0/0` and per-agent Solana keys via HMAC-SHA512 over a PBKDF2 of the seed. Private keys never leave the mesh process.
+
+### Named API Keys for External Integrations
+
+`src/host/api_keys.py` issues named API keys for outside callers (webhooks, scripts, etc.):
+
+- **Key ID**: `"ak_" + secrets.token_hex(6)`. **Raw key**: `secrets.token_urlsafe(32)`.
+- **Storage**: only a salted hash, `sha256(key_id + raw_key)`, persists to `config/api_keys.json`. The raw key is returned exactly once at creation and is unrecoverable thereafter.
+- **`list_keys()`** never returns hashes — only id / name / created / last_used metadata.
+- **Comparison** uses `_hmac.compare_digest` for constant-time matching.
+- Legacy fallback: the `OPENLEGION_API_KEY` env var is still accepted, also via `_hmac.compare_digest`.
 
 ### Adding New Service Integrations
 
@@ -158,16 +194,17 @@ Every inter-agent operation checks per-agent ACLs defined in `config/permissions
 
 ### Per-action Browser Gating
 
-Agents with `can_use_browser=true` can be further restricted to a subset of browser actions via `browser_actions: list[str] | None`. The mesh validates the requested action name against `KNOWN_BROWSER_ACTIONS` (in `src/host/permissions.py`, currently 26 names: `navigate`, `snapshot`, `click`, `type`, `hover`, `screenshot`, `reset`, `focus`, `status`, `detect_captcha`, `scroll`, `wait_for`, `press_key`, `go_back`, `go_forward`, `switch_tab`, `upload_file`, `download`, `find_text`, `open_tab`, `fill_form`, `click_xy`, `inspect_requests`, `solve_captcha`, `request_captcha_help`, `request_browser_login`) and rejects unknowns with HTTP 400. Permission is then checked via `PermissionMatrix.can_browser_action`.
+Agents with `can_use_browser=true` can be further restricted to a subset of browser actions via `browser_actions: list[str] | None`. Two distinct checks run on every browser call:
 
-Three states for `browser_actions`:
+1. **Input validation** — the requested action name must appear in `KNOWN_BROWSER_ACTIONS` (`src/host/permissions.py:31-67`, currently 26 names: `navigate`, `snapshot`, `click`, `type`, `hover`, `screenshot`, `reset`, `focus`, `status`, `detect_captcha`, `scroll`, `wait_for`, `press_key`, `go_back`, `go_forward`, `switch_tab`, `upload_file`, `download`, `find_text`, `open_tab`, `fill_form`, `click_xy`, `inspect_requests`, `solve_captcha`, `request_captcha_help`, `request_browser_login`). Typos and unknown action names are **rejected with HTTP 400** before any permission check fires. This is an input validator, not a permission gate — its job is to reject malformed requests, not to enumerate the allowed surface.
+2. **Permission check** — `PermissionMatrix.can_browser_action(agent, action)` (`permissions.py:196-228`) consults `browser_actions`:
 
-| Value | Meaning |
-|-------|---------|
-| `None` (default; field omitted) | All current and future actions. Default-allow UX — turning the browser on grants full surface. |
-| `["*"]` | All actions (explicit form). |
-| Specific list (e.g. `["navigate", "snapshot"]`) | Only the listed actions; everything else denied. |
-| `[]` | No actions. Equivalent to `can_use_browser=false`. |
+| `browser_actions` value | Meaning |
+|-------------------------|---------|
+| `None` (default; field omitted) | All current and future actions. Default-allow UX — turning the browser on grants full surface. Notably, future actions added to `KNOWN_BROWSER_ACTIONS` will pass through without a permissions-file change. |
+| `["*"]` | All actions (explicit form). Functionally identical to `None`, but signals operator intent. |
+| Specific list (e.g. `["navigate", "snapshot"]`) | Only the listed actions; everything else denied. Does **not** re-validate the list against `KNOWN_BROWSER_ACTIONS`, so a grant for a future action name will work the day that action ships. |
+| `[]` | Deny all browser actions. Equivalent to `can_use_browser=false`. |
 
 The asymmetry vs. `allowed_credentials` (where `[]` is the safe deny-all default) is intentional: browser permissions default-allow because turning the browser on without granting actions is rarely what an operator wants. Use `[]` only when you mean "deny all browser actions for this agent". The default-permission inheritance (when an agent has no own entry but a `default` key exists in the permissions file) propagates `browser_actions` along with the other fields.
 
@@ -175,21 +212,28 @@ The asymmetry vs. `allowed_credentials` (where `[]` is the safe deny-all default
 
 `RESERVED_AGENT_IDS = {"mesh", "operator", "canary-probe"}` (`src/shared/types.py`). Agent creation rejects these names; `canary-probe` is reserved for the stealth-canary subsystem so a real agent cannot collide with its profile. The CLI also explicitly rejects the literal `operator` from project membership (`src/cli/config.py`) — operator is a system trust zone, not a project member.
 
+### `MessageOrigin` Propagation
+
+Not a security primitive in its own right, but the propagation pattern matters for delivery correctness on inter-agent handoffs. `MessageOrigin` (channel + user + kind) is the routing handle that lets a completion notification reach the originating channel/user when work has been handed off across agents. `wake_agent` and `create_task` (`src/agent/mesh_client.py`) both accept an optional `origin: MessageOrigin` and merge `origin_header(origin)` (from `src/shared/trace.py`) into the outbound request. New cross-agent paths that produce work for another agent should read `current_origin` once and forward it to both calls — otherwise the receiving agent's lane worker has no way to auto-notify the originating channel when the handoff completes, and the user sees silence.
+
 ## Input Validation
 
 ### SSRF Protection
 
-Two distinct controls — different traffic, different posture:
+Two distinct controls cover two distinct traffic paths, with **deliberately asymmetric layering**:
 
-**Agent HTTP traffic** (`src/agent/builtins/http_tool.py`, application-layer):
-- Resolves hostnames and rejects private, loopback, link-local, and reserved IP ranges
-- Checks both initial URLs and redirect targets (via httpx event hook)
-- IPv4-mapped IPv6 addresses (e.g., `::ffff:127.0.0.1`) are also blocked
-- CGNAT range (100.64.0.0/10, RFC 6598), 6to4 (`2002::/16`), and Teredo (`2001::/32`) are blocked
-- Max 5 redirects with re-validation at each hop; `Authorization` stripped on cross-origin redirect
-- Prevents agents from using the HTTP tool to scan internal networks or access host services
+**Agent HTTP traffic** (`src/agent/builtins/http_tool.py`, application-layer — **this is the only SSRF control for agent containers; no kernel-level fallback exists**):
+- Resolves hostnames via `socket.getaddrinfo` and rejects every IP in the resolution set if any is blocked
+- Blocks `is_private`, `is_loopback`, `is_link_local`, `is_reserved`, `is_unspecified` (`0.0.0.0`), `is_multicast`, plus CGNAT (`100.64.0.0/10`, RFC 6598)
+- IPv4-mapped IPv6 (`::ffff:.../96`), 6to4 (`2002::/16`), and Teredo (`2001::/32`) are recursively decoded and their embedded IPv4 re-checked
+- Pins DNS by replacing the hostname with the resolved IP in the request URL, preserving the original Host/SNI for TLS validation
+- **Fail-closed on DNS error** — `ValueError("SSRF protection: DNS resolution failed (fail-closed)")` rather than allowing the request through
+- Max 5 redirects with re-validation at each hop (re-resolves DNS, re-checks IP); `Authorization` stripped on cross-origin redirects
+- A compromised agent container with arbitrary code execution (e.g. a `skill_tool` bypass or `exec_tool` escape) **could in principle reach private IPs via raw syscalls** — the agent container has a regular bridge network, not iptables egress filtering. The application-layer block stops the supported tool surface; it is not a kernel boundary.
 
-**Browser-initiated traffic** is filtered by the **iptables egress rules in the browser service container** (see Browser Service Container above). That filter is the authoritative SSRF boundary for everything the browser does — page loads, embedded subresources, `inspect_requests` activity, downloads. The mesh-side `_resolve_and_pin()` check on `navigate` and `open_tab` is a friendly early-reject only; it returns HTTP 400 with a clear error before the browser ever opens a connection, but it is not the security boundary.
+**Browser-initiated traffic** is filtered by the **iptables egress rules in the browser service container** (see Browser Service Container above). That filter is the authoritative SSRF boundary for everything the browser does — page loads, embedded subresources, `inspect_requests` activity, downloads, redirects, XHR, fetch, WebSockets. The mesh-side `_resolve_and_pin()` check on `navigate` and `open_tab` is a **friendly early-reject only**; it returns HTTP 400 with a clear error before the browser ever opens a connection, but it covers only those two action paths — everything else relies on iptables.
+
+The asymmetry is intentional. The browser container is rich-by-necessity (Firefox + Playwright + Xvnc) and needs kernel-level confinement; the agent container is slim and locked down (read-only fs, no caps, no browser) so the kernel boundary it offers is the container itself. Both designs are deliberate, but **don't assume a reader who sees one layer can infer the other**.
 
 **Proxy configuration:**
 - The dashboard accepts only HTTP / HTTPS proxies for system or per-agent egress; SOCKS4 / SOCKS5 are rejected with HTTP 400.
@@ -204,6 +248,14 @@ Agent file tools (`src/agent/builtins/file_tool.py`) validate all paths through 
 3. **Stage 2 — Symlink-safe walk**: resolves each path component individually using `lstat()` to detect symlinks at every step, preventing symlink chains that point outside `/data`.
 4. **Stage 3 — Final `is_relative_to()` check**: confirms the fully resolved path is still under `/data`.
 All file operations are scoped to the container's `/data` volume.
+
+### Workspace File Surface
+
+Workspace files (the agent's own `SOUL.md` / `INSTRUCTIONS.md` / `MEMORY.md` / etc.) are managed through a dedicated `/workspace/{filename}` endpoint on the **agent's own** FastAPI server, not via the general `/data` file tools. Three protections:
+
+- **`_WORKSPACE_ALLOWLIST` frozenset** (`src/agent/server.py:326-329`) — exactly 8 entries: `SOUL.md`, `HEARTBEAT.md`, `USER.md`, `INSTRUCTIONS.md`, `AGENTS.md`, `MEMORY.md`, `INTERFACE.md`, `OBSERVATIONS.md`. Reads / writes to anything outside this list return HTTP 400.
+- **`_FILE_CAPS`** (`src/agent/server.py:332-340`) — char-count caps per file, enforced on `PUT` with HTTP 413 on overflow: `SOUL.md=4000`, `INSTRUCTIONS.md=12000`, `AGENTS.md=12000`, `USER.md=4000`, `MEMORY.md=16000`, `INTERFACE.md=4000`, `HEARTBEAT.md=None` (uncapped).
+- **`x-mesh-internal` gate on `PUT /workspace/{filename}`** (`src/agent/server.py:397-402`) — the agent cannot call its own workspace endpoint via `http_tool` or `exec+curl`. Writes must originate from the mesh on loopback with the internal header set. Reads from the agent's own loop are allowed without the gate.
 
 ### Skill Self-Authoring
 
@@ -307,19 +359,56 @@ Each agent receives a unique auth token at startup (`MESH_AUTH_TOKEN`). All requ
 
 ### Auth Tiers
 
-The mesh distinguishes three caller tiers via header / token shape:
+The mesh distinguishes three caller tiers, but only **two** identification mechanisms exist — Bearer token and the internal-header-plus-loopback pair. Operator is not a separate auth header; it is just the Bearer token whose `agent_id` resolves to `"operator"`.
 
 | Tier | How identified | Used by |
 |------|----------------|---------|
-| **Agent** | Bearer token issued at agent startup | Normal `/mesh/*` calls from agent containers |
-| **Operator** | Operator session / token | Dashboard-originated mutations, fleet-management routes |
-| **Internal** | Loopback request with `x-mesh-internal: 1` (validated as loopback by the server) | Same-host startup glue, browser-service ↔ mesh polling |
+| **Agent** | `Authorization: Bearer <token>` matched via `hmac.compare_digest` against the per-agent token issued at startup (`_extract_verified_agent_id`, `src/host/server.py:830-862`). | Normal `/mesh/*` calls from agent containers |
+| **Operator** | Same Bearer mechanism as Agent, but the token matches `_auth_tokens["operator"]` (`server.py:864-873`). There is no separate operator-session header on the mesh; the dashboard's `ol_session` cookie is a distinct surface that protects the dashboard UI itself (and the VNC proxy), not `/mesh/*` calls. | Dashboard-originated mutations, fleet-management routes, operator-as-agent calls |
+| **Internal** | `x-mesh-internal: 1` header **AND** loopback `request.client.host` (`_is_internal_caller`, `server.py:314-337`). Either alone is insufficient. | Same-host startup glue, browser-service ↔ mesh polling |
 
-Most mesh endpoints accept any of the three. Sensitive surfaces use `_require_operator_or_internal`, which returns **HTTP 403 to agent-tier callers** even with a valid Bearer token. Endpoints demoted to operator-only:
+When `_auth_tokens` is empty (dev/unconfigured), `_extract_verified_agent_id` returns `"unknown"` and authentication is effectively off — operators running in that mode should know auth is fully disabled.
+
+Most mesh endpoints accept any of the three. Sensitive surfaces use `_require_operator_or_internal`, which returns **HTTP 403 to agent-tier callers** even with a valid Bearer token (recorded as `_record_denial("role")`); unknown tokens get HTTP 401 (`_record_denial("auth")`). Endpoints demoted to operator-only include:
 - `GET /mesh/system/metrics` — fleet-wide health, cost, and budget
 - `GET /mesh/agents/{id}/metrics` — per-agent cost / budget detail
+- `GET /mesh/agents/{id}/stale-tasks` — oldest non-terminal tasks for an agent
 
 This is a behavior change from previous versions where any authenticated agent could read these endpoints. Custom agents that polled them now receive 403; switch to dashboard-side reads instead.
+
+Denial counters (`auth`, `scope`, `role`, `permission`, `rate`) are surfaced on `/mesh/system/metrics` as `tool_denials_24h` for the operator heartbeat. Observability only — no enforcement effect.
+
+### Dashboard Session Cookie
+
+The dashboard surface (UI, `/dashboard/*`, `/ws/events`, `/agent-vnc/*`) is gated by an `ol_session` cookie verified in `src/dashboard/auth.py`:
+
+- **Cookie format**: `"{expiry}.{signature}"` where signature is `HMAC-SHA256(cookie-signing-key, expiry_str)`.
+- **Cookie signing key** is derived once via `HMAC-SHA256(access_token, "ol-cookie-signing")` from `/opt/openlegion/.access_token` and cached.
+- **24-hour hard cap** (`COOKIE_MAX_AGE = 24*3600`, `auth.py:30,83-84`): cookies whose claimed expiry exceeds `now + 24h + 5min skew` are **rejected even if the signature verifies**. Defense in depth against a misbehaving or compromised issuer setting long-lived cookies.
+- **Comparison** uses `hmac.compare_digest` for constant-time signature checks.
+
+### SSO Trust Boundary
+
+SSO is split between two components, only one of which is engine code:
+
+- **Engine implements** `verify_session_cookie()` (above) and reads the `ol_session` cookie on every dashboard request.
+- **Engine does NOT implement** `/__auth/callback`, HMAC token issuance, or one-time-use replay protection. Those live in an external **Caddy auth gate** sidecar deployed via cloud-init (per CLAUDE.md / Architecture). The engine receives only the cookie the gate sets after consuming the SSO token.
+
+In other words: any guarantee about token replay / single-use lives outside engine code. Don't attribute SSO-tier guarantees to engine; they belong to the auth gate.
+
+### Dashboard XSS / CSRF Posture
+
+- **Primary XSS defense is Jinja `autoescape=True`** on dashboard templates. CSP is set on the dashboard index (`script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; …`) but the `'unsafe-inline'` + `'unsafe-eval'` allowances are required for Alpine.js's `Function()` constructor and the Tailwind CDN. Be honest: those allowances materially weaken CSP's XSS-mitigation value — treat CSP here as defense-in-depth around the source-origin guarantees (`default-src 'self'`, `object-src 'none'`), not as XSS protection in its own right.
+- **CSRF**: state-changing dashboard endpoints require the `X-Requested-With` header (`_csrf_check`, `src/dashboard/server.py:716-726`), wired as a global router dependency on `/dashboard/*`. Relies on browsers' CORS preflight blocking custom headers from cross-origin scripts.
+
+### VNC Reverse Proxy
+
+`/agent-vnc/{agent_id}/{path}` (HTTP + WebSocket) is a cross-zone surface — it terminates browser traffic at the dashboard and forwards into the browser service. Two distinct checks before the proxy reaches across:
+
+- **Reject any caller bearing a known agent Bearer token** (HTTP 403, WS close code 1008). Token compared via `hmac.compare_digest` against every entry in `_auth_tokens`. WS path also checks the `?token=` query param.
+- **Require `ol_session`** dashboard cookie (HTTP and WebSocket). A logged-in human is the only valid caller.
+
+The proxy then attaches a service-tier Bearer for the upstream browser-service call. (A new `httpx.AsyncClient(timeout=10)` per request is a known cost — see CLAUDE.md note #5.)
 
 ### Operator-only Browser Surfaces
 
@@ -375,8 +464,8 @@ The window is **not** cleared automatically. The operator must rotate the agent'
 
 Two-stage upload prevents large bodies from sitting in agent address space and supports idempotent retries:
 
-- `POST /mesh/browser/upload-stage` — Phase A: streams raw bytes into a tmpfs-backed staging directory keyed by an opaque handle. Body-size cap from `OPENLEGION_UPLOAD_STAGE_MAX_MB` (default 50 MB, min 1). Resolved staging paths are validated with `is_relative_to` against the staging dir to block traversal. `Idempotency-Key` header supported. Abandoned `.partial` files reaped at 5× TTL.
-- `POST /mesh/browser/upload_file` — Phase B: resolves staged handles to bytes, streams them to the browser container, and drives the `upload_file` action. Cap of 5 files per call. Idempotency is per `(caller, key)` and a cached envelope is returned on replay without re-driving the browser. Cross-replay (same call, different key per handle) returns 404 on the inconsistent handle.
+- `POST /mesh/browser/upload-stage` — Phase A: streams raw bytes into a tmpfs-backed staging directory keyed by an opaque handle. Body-size cap from `OPENLEGION_UPLOAD_STAGE_MAX_MB` (default **50 MB**, min 1). Resolved staging paths are validated with `is_relative_to` against the staging dir to block traversal. `Idempotency-Key` header supported. Abandoned `.partial` files reaped at **5× TTL**.
+- `POST /mesh/browser/upload_file` — Phase B: resolves staged handles to bytes, streams them to the browser container, and drives the `upload_file` action. Cap of **5 files per call** (`_UPLOAD_MAX_FILES`). Idempotency is per `(caller, key)` and a cached envelope is returned on replay without re-driving the browser. Cross-replay (same call, different key per handle) returns 404 on the inconsistent handle.
 - `POST /mesh/browser/download` — triggers a download in the browser, then streams it to the target agent's `/artifacts/ingest` via a nonce-guarded `_download_stream?nonce=...` and cleans up via `_download_cleanup`. The browser-suggested filename is sanitized with `_sanitize_artifact_name` before reaching the agent. Operator kill switch: `BROWSER_DOWNLOADS_DISABLED=true` returns a 403 forbidden envelope.
 
 All three are gated by `permissions.can_browser_action(target, "upload_file" | "download")` plus the standard rate limits (`upload_stage`, `upload_apply` — see Rate Limiting).

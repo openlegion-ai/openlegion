@@ -27,8 +27,10 @@ Layer 3: Workspace Files          <- Durable, human-readable storage
 Layer 2: Structured Memory DB     <- Hierarchical vector database
   |  SQLite + sqlite-vec + FTS5
   |  Facts with embeddings (KNN similarity search)
-  |  Auto-categorization with category-scoped search
-  |  3-tier retrieval: categories -> scoped facts -> flat fallback
+  |  Hybrid scoring: (0.7 * vector + 0.3 * keyword) * decay_score
+  |  Three-tier retrieval: categories -> scoped facts -> flat fallback
+  |  Vector search auto-disables after 3 consecutive embedding failures
+  |  (falls back to keyword-only)
   |  Reinforcement scoring with access-count boost + recency decay
   |
 Layer 1: Salience Tracking        <- Prioritizes important facts
@@ -120,7 +122,7 @@ Daily logs are auto-loaded into heartbeat messages (last 2 days, capped at 4000 
 
 ### BM25 Search
 
-The workspace supports keyword search across all markdown files using a built-in BM25 implementation:
+The workspace supports keyword search across all markdown files using a built-in BM25 implementation (separate from the FTS5 BM25 used by structured memory — workspace search runs over markdown files on disk, not the per-agent SQLite database):
 - Tokenization with stop-word removal
 - BM25 scoring (k1=1.5, b=0.75)
 - Returns ranked snippets with file paths
@@ -128,7 +130,7 @@ The workspace supports keyword search across all markdown files using a built-in
 
 ## Structured Memory (`src/agent/memory.py`)
 
-The per-agent SQLite database (`data/{agent_id}.db`) stores three types of data:
+The per-agent SQLite database (`/data/{agent_id}.db` — absolute path inside the container, on the persistent `/data` volume) stores three types of data:
 - **Facts** with embeddings for semantic search (described below)
 - **Task checkpoints** — iteration state, message history, token usage, and budget state, used to resume interrupted tasks after a container restart
 - **Chat checkpoints** — conversation state for crash recovery across chat sessions
@@ -140,31 +142,59 @@ SQLite database with three search capabilities:
 - 1536-dimensional embeddings for each fact
 - KNN similarity search for semantic recall
 - Embeddings generated via the mesh LLM proxy
+- Default embedding model is `text-embedding-3-small` (OpenAI). The provider is picked from the LLM model prefix in `src/cli/runtime.py:_default_embedding_model`; non-OpenAI providers (Anthropic, xAI, Groq, …) default to `"none"` which disables vector search entirely — those agents fall back to keyword-only retrieval.
+- After `_EMBED_FAILURE_THRESHOLD = 3` consecutive embedding failures (network errors, missing provider key, etc.) the store sets `embed_fn = None` for the rest of the process lifetime and logs a warning. Vector search silently degrades to keyword-only until the container restarts.
 
 ### Full-Text Search (FTS5)
 
-- SQLite FTS5 index with the default `unicode61` tokenizer for keyword matching
-- Queries are sanitized to alphanumeric terms (special characters stripped, words 2+ chars, limit 20 terms)
+- SQLite FTS5 index for keyword matching (no explicit tokenizer — uses SQLite's implicit `unicode61` default)
+- Queries are sanitized to alphanumeric terms (special characters stripped, words 2+ chars, limit 20 terms, joined with `OR`)
 - Combined with vector search for hybrid retrieval
+
+### Hybrid Scoring
+
+Each fact returned by `search()` is scored as:
+
+```
+final_score = (0.7 * vector_score + 0.3 * keyword_score) * decay_score
+```
+
+- `vector_score = 1 / (1 + cosine_distance)` from sqlite-vec KNN
+- `keyword_score` is normalized BM25 rank (0..1) from FTS5
+- `decay_score` is the per-fact salience multiplier (see Salience Scoring below)
+
+Facts not returned by both retrievals get the missing component as `0.0`, so a pure vector hit and a pure keyword hit are still comparable.
 
 ### Hierarchical Retrieval
 
-Three-tier search strategy:
+Three-tier search strategy (`search_hierarchical`):
 
-1. **Category search** -- Find relevant categories first
+1. **Category search** -- Vector search on category embeddings → top 3 categories
 2. **Scoped facts** -- Search within those categories
 3. **Flat fallback** -- If scoped search yields too few results, search all facts
 
+The `memory_tool` builtin wraps this with `_search_with_fallback`: it calls `search_hierarchical` first and silently falls back to flat `search()` if the hierarchical path raises.
+
 ### Auto-Categorization
 
-Facts are automatically categorized when saved. Categories are inferred from the key/value content (e.g., "user_preference" -> "preferences", "project_goal" -> "project_info").
+Facts are automatically categorized when saved by `_auto_categorize`:
+
+1. **Vector match** — compare the new fact's embedding against existing category embeddings (cosine similarity, threshold `_CATEGORY_SIM_THRESHOLD = 0.7`). On a match, the fact joins that category.
+2. **LLM fallback** — if no category matches and a `categorize_fn` callback is configured, the LLM is asked to name a category.
+3. **Text fallback** — if no `categorize_fn` is configured (the default for stock agents — `__main__.py` only wires `embed_fn`), the fact's own `category` field text is used as the category name (defaulting to `"general"`). No keyword inference is performed.
+
+Category embeddings are recomputed as the running average of member embeddings every `_CATEGORY_RECOMPUTE_INTERVAL = 10` new members.
+
+### Dedup-by-Key in `store_fact`
+
+`store_fact(key, value, …)` deduplicates on `key`: if a row with the same key already exists, the row's `value`, `confidence`, and `last_accessed` are updated, `access_count` is incremented, and `decay_score` is boosted by `_compute_boost(new_count)` (capped at 10.0 via `MIN(boost, 10.0)`). The FTS5 row is rebuilt to match. This is the mechanism behind the reinforcement scoring described below — saving the same key repeatedly compounds its salience instead of creating duplicates.
 
 ### Salience Scoring
 
-Each fact has a salience score that combines:
-- **Access count** -- How often the fact has been recalled
-- **Recency decay** -- Score decreases over time since last access
-- **Boost** -- High-salience facts auto-surface in initial context
+Each fact has a `decay_score` (initialised to `1.0` at insert, decayed by `SALIENCE_DECAY_RATE = 0.95` over time) that combines:
+- **Access count** -- Incremented on every `store_fact` and `search` hit; drives the boost capped at 10.0
+- **Recency decay** -- `decay_score` decreases over time since `last_accessed`
+- **Boost** -- The boosted `decay_score` multiplies the hybrid score (see Hybrid Scoring), so high-salience facts auto-surface in initial context
 
 ## Cross-Session Memory
 

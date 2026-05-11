@@ -12,6 +12,16 @@ Every channel provides a unified interface:
 - **Agent labels** -- every response is prefixed with `[agent_name]` so users know who's talking
 - **Notifications** -- cron and heartbeat results push to all connected users
 
+### Shared mechanics
+
+All four external adapters inherit from `Channel` in `src/channels/base.py` and share:
+
+- **PairingManager** — one shared protocol (`/start <code>` claims ownership, `/allow` / `/revoke` / `/paired` per-owner) backs the pairing table shown for each channel below. The four channels are not independent flows.
+- **`sanitize_for_prompt()` on all inbound messages** — every text reaching the LLM passes through the shared sanitizer (`base.py:224`), which strips invisible Unicode and prompt-injection markers.
+- **`MessageOrigin` stamping** — every inbound channel message is tagged with `MessageOrigin(kind="human", channel=<channel_type>, user=<user_id>)` (`base.py:246-254`). This is what lets a busy agent's reply route back to the originating user/channel after a hand-off completes (see [Notifications & Auto-Notify](#notifications--auto-notify)).
+- **`chunk_text()` helper** — splits long responses against per-platform message size limits.
+- **Streaming debounce** — Telegram, Discord, and Slack all share `_EDIT_INTERVAL = 0.5` seconds (500 ms) to batch progressive edits and stay under platform rate limits.
+
 ## Commands
 
 ### Channel Commands (available on all platforms)
@@ -94,14 +104,16 @@ Set your bot token in `.env`:
 OPENLEGION_CRED_TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
 ```
 
-Enable in `config/mesh.yaml`:
+Optionally configure in `config/mesh.yaml`:
 
 ```yaml
 channels:
   telegram:
-    enabled: true
     default_agent: assistant
+    allowed_users: [123456789]   # Optional: pre-allowed Telegram user IDs
 ```
+
+The channel auto-starts whenever a token resolves — there is **no `enabled` flag** in `src/cli/channels.py:50` (token-presence drives activation). Drop the token to disable.
 
 ### Pairing
 
@@ -121,9 +133,9 @@ The first user to send `/start ABC123` becomes the **owner**. The owner can then
 | `/revoke <user_id>` | Owner: revoke a user's access |
 | `/paired` | Owner: list paired users |
 
-After pairing, the bot sends a help summary with all available commands. Unauthorized users receive a one-time access denial message with their user ID.
+After pairing, the bot sends a help summary with all available commands. Unauthorized users receive a one-time access denial message with their user ID. `!start <code>` is accepted as a fallback to `/start <code>` (consistent with the `!`-prefix convention used across channels).
 
-Pairing state is stored in `config/telegram_paired.json`.
+Pairing state is stored in `config/telegram_paired.json` — the pairing code is generated once via `_ensure_pairing_code()` and persisted, so it survives CLI restarts.
 
 ### Features
 
@@ -143,15 +155,16 @@ Set your bot token in `.env` (see [Env Var Lookup](#env-var-lookup) for all acce
 OPENLEGION_CRED_DISCORD_BOT_TOKEN=MTIz...
 ```
 
-Enable in `config/mesh.yaml`:
+Optionally configure in `config/mesh.yaml`:
 
 ```yaml
 channels:
   discord:
-    enabled: true
     default_agent: assistant
     allowed_guilds: [987654321]  # Optional: restrict to specific servers
 ```
+
+As with Telegram, the channel auto-starts on token presence — there is no `enabled` flag.
 
 ### Bot Permissions
 
@@ -206,14 +219,15 @@ OPENLEGION_CRED_SLACK_BOT_TOKEN=xoxb-...
 OPENLEGION_CRED_SLACK_APP_TOKEN=xapp-...
 ```
 
-Enable in `config/mesh.yaml`:
+Optionally configure in `config/mesh.yaml`:
 
 ```yaml
 channels:
   slack:
-    enabled: true
     default_agent: assistant
 ```
+
+The channel auto-starts when **both** the bot token and app token resolve — there is no `enabled` flag.
 
 ### Requirements
 
@@ -222,6 +236,8 @@ Slack uses **Socket Mode** (no public URL needed). In the [Slack API dashboard](
 1. Enable **Socket Mode** and generate an app-level token (`xapp-...`)
 2. Add **Bot Token Scopes**: `chat:write`, `app_mentions:read`, `channels:history`, `im:history`
 3. Enable **Event Subscriptions**: `message.channels`, `message.im`, `app_mention`
+
+On startup the adapter validates that the app token begins with `xapp-` (otherwise refuses to start — `src/channels/slack.py:74`) and calls `client.auth_test()` against the bot token before opening the Socket Mode connection. If either token is missing, the channel is silently skipped (token-presence gates activation).
 
 ### Pairing
 
@@ -262,18 +278,19 @@ In production you must also set the app secret for webhook signature verificatio
 WHATSAPP_APP_SECRET=<your-app-secret-from-meta-dashboard>
 ```
 
-Enable in `config/mesh.yaml`:
+Optionally configure in `config/mesh.yaml`:
 
 ```yaml
 channels:
   whatsapp:
-    enabled: true
     default_agent: assistant
 ```
 
+The channel auto-starts when **both** `WHATSAPP_ACCESS_TOKEN` and `WHATSAPP_PHONE_NUMBER_ID` resolve — there is no `enabled` flag.
+
 ### Requirements
 
-WhatsApp uses the **Cloud API** with webhook-based message delivery. In the [Meta Developer Portal](https://developers.facebook.com/):
+WhatsApp uses the **Cloud API** (pinned to Graph API `v21.0` via `_GRAPH_API_BASE` in `src/channels/whatsapp.py:36`) with webhook-based message delivery. In the [Meta Developer Portal](https://developers.facebook.com/):
 
 1. Create a WhatsApp Business app
 2. Generate a permanent access token
@@ -282,7 +299,7 @@ WhatsApp uses the **Cloud API** with webhook-based message delivery. In the [Met
 
 ### Security
 
-**Production deployments must set `WHATSAPP_APP_SECRET`.** Without it, `X-Hub-Signature-256` webhook signature verification is disabled — any HTTP client can inject arbitrary messages. When `MESH_AUTH_TOKEN` is set (i.e., production mode) and `WHATSAPP_APP_SECRET` is absent, startup raises a `RuntimeError`.
+**Production deployments must set `WHATSAPP_APP_SECRET`.** Without it, `X-Hub-Signature-256` webhook signature verification is disabled — any HTTP client can inject arbitrary messages. When `MESH_AUTH_TOKEN` is set (i.e., production mode) and `WHATSAPP_APP_SECRET` is absent, channel startup raises a `RuntimeError` (`src/channels/whatsapp.py:103-108`). Incoming signatures are compared with `hmac.compare_digest` (timing-safe).
 
 Set the app secret to the value shown in the Meta dashboard under your WhatsApp app → App Settings → App Secret:
 
@@ -294,7 +311,7 @@ The secret is read directly from the `WHATSAPP_APP_SECRET` environment variable 
 
 ### Verify Token
 
-The webhook verification token is auto-generated as a random `secrets.token_hex(16)` value if none is configured. To use a deterministic, replay-safe token instead (recommended for reproducible deployments), set it explicitly:
+If no verify token is configured, a fresh `secrets.token_hex(16)` is generated **on every CLI restart** (`src/cli/channels.py:137`). The Meta Developer Portal webhook config is matched against this token via `hub.verify_token` during the GET handshake (`whatsapp.py:202-211`), so an auto-generated token will break the Meta dashboard's saved webhook subscription on every restart. **Set a stable token explicitly** for any deployment beyond local experimentation:
 
 ```bash
 OPENLEGION_SYSTEM_WHATSAPP_VERIFY_TOKEN=my-stable-verify-token
@@ -343,7 +360,13 @@ curl -X POST http://localhost:8420/webhook/hook/<hook_id> \
   -d '{"company": "Acme Corp", "source": "website"}'
 ```
 
-Each webhook is configured with a target agent. When a payload arrives, it is dispatched to that agent as a task.
+Each webhook is configured with a target agent. When a payload arrives, it is dispatched to that agent as a task. See [triggering.md → Webhooks](triggering.md#webhooks) for creation, signature verification, the 1 MB body cap, and payload sanitization details.
+
+## Notifications & Auto-Notify
+
+When a lane completes a task that originated from a channel handoff, the result is forwarded back to the originating user via `_handle_notify_origin` (`src/cli/runtime.py:567-609`). The router reads `MessageOrigin.channel` to pick the channel, then `MessageOrigin.user` to address the recipient, and calls `channel.send_to_user(user, "[agent_name] <text>")` on that channel's own event loop (Telegram/Discord/Slack each run in their own daemon-thread loop; WhatsApp is webhook-driven and called directly). If the originating channel is no longer connected, the message is dropped with a debug log.
+
+Mass notifications via `notify_user` (the agent tool) fan out across **all** active channels and the REPL — they are not origin-routed.
 
 ## Writing a Custom Channel
 
@@ -362,11 +385,17 @@ class MyChannel(Channel):
         pass
 
     async def send_notification(self, text: str) -> None:
-        # Push cron/heartbeat results to users
+        # Push cron/heartbeat results to ALL registered users (fan-out).
+        pass
+
+    async def send_to_user(self, user_id: str, text: str) -> None:
+        # Deliver an auto-notify reply to a SPECIFIC user. Required for
+        # MessageOrigin routing — without it, lane auto-notify falls
+        # back to the base-class warning + drop (see base.py:169-179).
         pass
 ```
 
-The base class provides `handle_message()` which handles all command parsing, @mention routing, and agent dispatch. Your subclass only needs to bridge the platform's message transport.
+The base class provides `handle_message()` which handles all command parsing, @mention routing, sanitization (`sanitize_for_prompt`), `MessageOrigin` stamping, and agent dispatch. Your subclass only needs to bridge the platform's message transport — and must implement both `send_notification` (fan-out) and `send_to_user` (origin-targeted), because the lane worker calls `send_to_user` when forwarding completed-task results back to the originating user (see [Notifications & Auto-Notify](#notifications--auto-notify)).
 
 ### Callback Functions
 
