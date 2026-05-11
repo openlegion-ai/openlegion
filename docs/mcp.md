@@ -4,7 +4,7 @@ OpenLegion supports the **Model Context Protocol (MCP)** -- the emerging standar
 
 ## Overview
 
-MCP servers are external processes that expose tools via a standardized protocol. OpenLegion launches them as subprocesses inside agent containers using stdio transport, discovers their tools, and routes LLM tool calls through the MCP protocol.
+MCP servers are external processes that expose tools via a standardized protocol. OpenLegion launches them as subprocesses inside agent containers using **stdio transport only** (the HTTP/SSE transports are not wired up — `MCPClient` calls `stdio_client(params)` directly), discovers their tools, and routes LLM tool calls through the MCP protocol.
 
 ```
 LLM -> tool_call("read_file", {path: "/data/report.csv"})
@@ -16,9 +16,11 @@ LLM -> tool_call("read_file", {path: "/data/report.csv"})
 
 ## Configuration
 
-Add `mcp_servers` to any agent in `config/agents.yaml`:
+`mcp_servers` is an agent-level field on a fleet template (`src/templates/*.yaml`) or on a runtime agent record. The host serializes the list as JSON into the `MCP_SERVERS` environment variable when launching the agent container (`DockerBackend` in `src/host/runtime.py`).
 
 ```yaml
+# src/templates/your_template.yaml
+name: analyst
 agents:
   analyst:
     role: "Data analyst"
@@ -32,20 +34,22 @@ agents:
         args: ["--db", "/data/analytics.db"]
 ```
 
+There is no top-level `config/agents.yaml` file shipped with the repo — agents are defined either via the fleet template system (`src/cli/config.py:_load_templates`) or created at runtime through the dashboard / operator tools.
+
 ### Server Config Fields
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `name` | string | Yes | Unique identifier for the server |
 | `command` | string | Yes | Command to launch the server |
-| `args` | list[string] | No | Command-line arguments |
-| `env` | dict[string, string] | No | Environment variables for the server process |
+| `args` | list[string] | No | Command-line arguments (defaults to `[]`) |
+| `env` | dict[string, string] | No | Environment variables for the server process (defaults to `None`, meaning the subprocess inherits the agent container's environment) |
 
 ## How It Works
 
 ### Startup Sequence
 
-1. The runtime layer (`DockerBackend` in `src/host/runtime.py`) reads `mcp_servers` from agent config in `config/agents.yaml` and serializes it as JSON into the `MCP_SERVERS` environment variable passed to the agent container
+1. The runtime layer (`DockerBackend` in `src/host/runtime.py`) reads `mcp_servers` from the agent's record and serializes it as JSON into the `MCP_SERVERS` environment variable passed to the agent container (`environment["MCP_SERVERS"] = json.dumps(mcp_servers)`)
 2. Agent container starts; `src/agent/__main__.py` reads `MCP_SERVERS`
 3. `MCPClient` is created and passed to `SkillRegistry`
 4. During lifespan startup, `MCPClient.start()` launches each server:
@@ -53,7 +57,7 @@ agents:
    - Opens stdio transport via `AsyncExitStack`
    - Establishes `ClientSession` and calls `initialize()`
    - Calls `list_tools()` to discover available tools
-5. Tools are registered in `SkillRegistry` alongside built-in skills (name conflicts resolved by renaming at this point)
+5. Each tool is recorded in the `MCPClient` schema table with `"function": "mcp"` and an `_mcp_original_name` field that preserves the original tool name (used at call time — see Tool Call Routing). `SkillRegistry._register_mcp_tools()` then inserts those entries alongside built-in skills.
 6. Agent registers with mesh, reporting MCP tools in its capabilities
 
 If a server fails to start at step 4, its tools are not registered but the agent continues normally with built-in skills and any successfully started MCP servers.
@@ -67,12 +71,13 @@ When the LLM calls a tool:
 1. `SkillRegistry.execute()` looks up the name in the unified skill dict
 2. If the entry has `"function": "mcp"`, it routes to `MCPClient.call_tool(name, arguments)`
 3. `MCPClient` looks up which server provides the tool via its internal `_tool_to_server` map
-4. Sends the call via the MCP session to the correct subprocess
-5. Converts the MCP `CallToolResult` to a dict: text content blocks are concatenated under a `"result"` key; image and binary content blocks are silently dropped
+4. The renamed-on-conflict name is mapped back to `_mcp_original_name` before being sent over the wire, so the MCP server receives the tool name it actually exposes (useful when grepping server-side logs)
+5. Sends the call via the MCP session to the correct subprocess
+6. Converts the MCP `CallToolResult` to a dict: text content blocks are concatenated under a `"result"` key; image and binary content blocks are silently dropped. If `result.isError` is true, the text is returned under an `"error"` key instead.
 
-Each `call_tool()` call has a **60-second timeout**. If the server does not respond in time, the call returns an error dict.
+Each `call_tool()` call has a **60-second timeout** (`asyncio.wait_for(..., timeout=60)`). If the server does not respond in time, the call returns `{"error": "MCP tool '...' timed out after 60s"}`.
 
-If an agent has `ALLOWED_TOOLS` configured (operator mode), MCP tool names must appear in that allowlist to be accessible — the restriction applies equally to built-ins and MCP tools.
+If an agent has `ALLOWED_TOOLS` configured (operator mode — `loop.py:277-287` sets `_is_operator = (allowed_tools is not None)`), MCP tool names must appear in that allowlist to be accessible — the restriction applies equally to built-ins and MCP tools.
 
 ### Name Conflict Resolution
 
@@ -134,7 +139,9 @@ Some well-known MCP servers that work with OpenLegion:
 | GitHub | `@modelcontextprotocol/server-github` | GitHub API operations |
 | Playwright | `@playwright/mcp` | Browser automation (70+ tools) |
 
-**Note:** npm-based MCP servers require Node.js in the agent container. Python-based MCP servers work with the default container image — the `mcp` Python SDK is pre-installed in `Dockerfile.agent`. If you use a custom agent image, ensure the `mcp` package is included; without it the `MCPClient` import fails silently (the error is logged and MCP is disabled for that agent).
+**Caveat:** the default `Dockerfile.agent` image is Python-only — Node.js is **not** installed. npm-based MCP servers (most of the entries above, including `@modelcontextprotocol/server-filesystem`, `@modelcontextprotocol/server-github`, and `@playwright/mcp`) will fail to launch out of the box; you must build a custom agent image with Node.js installed and the server package available on `PATH`. Python-based MCP servers work with the default image — the `mcp` Python SDK is pre-installed in `Dockerfile.agent`.
+
+If you use a custom agent image and the `mcp` package is missing, the `from mcp import ...` block at the top of `src/agent/mcp_client.py` swallows the `ImportError` silently with no log line — the only visible signal is that `MCPClient.start()` later logs `"MCP SDK not installed — cannot start MCP servers"` and returns early, but only if `mcp_servers` is actually configured for that agent.
 
 ## Writing a Custom MCP Server
 
@@ -155,7 +162,7 @@ if __name__ == "__main__":
     server.run(transport="stdio")
 ```
 
-Configure it in `config/agents.yaml`:
+Configure it on an agent — either in a fleet template under `src/templates/*.yaml` or by setting `mcp_servers` directly on the agent record (the host will serialize it into `MCP_SERVERS` for you):
 
 ```yaml
 mcp_servers:

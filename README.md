@@ -8,11 +8,11 @@
    
 [![License: BSL 1.1](https://img.shields.io/badge/license-BSL%201.1-orange.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
-[![Tests: 4600+](https://img.shields.io/badge/tests-4600%2B%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
+[![Tests: 5800+](https://img.shields.io/badge/tests-5800%2B%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/mXNkjpDvvr)
 [![Twitter](https://img.shields.io/badge/Twitter-@openlegion-1DA1F2?logo=x&logoColor=white)](https://x.com/openlegion)
 [![LiteLLM](https://img.shields.io/badge/LLM-100%2B%20providers-orange.svg)](https://litellm.ai)
-[![Docker](https://img.shields.io/badge/isolation-Docker%20%2B%20microVM-blue.svg)]()
+[![Docker](https://img.shields.io/badge/isolation-Docker%20%2B%20Sandbox-blue.svg)]()
    
 </div>
 
@@ -56,7 +56,7 @@ https://github.com/user-attachments/assets/8bd3fe95-5734-474d-92f0-40616daf91ad
 
 ## Quick Start
 
-**Requirements:** Python 3.10+, Docker (running), an LLM API key ([Anthropic](https://console.anthropic.com/) / [Moonshot](https://platform.moonshot.cn/) / [OpenAI](https://platform.openai.com/api-keys))
+**Requirements:** Python 3.10+, Docker (running), at least one LLM provider key (Anthropic, OpenAI, Gemini, Moonshot, Deepseek, xAI, Groq, Minimax, Zai, or Ollama — the setup wizard walks you through it; existing Anthropic Claude CLI or OpenAI Codex CLI logins can be imported).
 
 **macOS / Linux:**
 
@@ -77,22 +77,27 @@ openlegion start
 
 > **Windows note:** Docker Desktop (not Docker Engine) is required on Windows. WSL2 must be enabled. See Docker's [WSL2 backend guide](https://docs.docker.com/desktop/wsl/) if containers fail to start.
 
-> First install downloads ~70 packages and takes 2-3 minutes. Subsequent installs are fast.
+> First install downloads dependencies into a venv; this may take several minutes the first time. Subsequent installs are fast.
 >
 > **First run:** On the very first `openlegion start`, Docker builds the `openlegion-agent:latest` and `openlegion-browser:latest` images from the `Dockerfile.agent` and `Dockerfile.browser` in the repo root. The browser image is significantly larger (Camoufox + KasmVNC + Openbox + Xvnc) and can take several minutes with no progress output — this is normal. Subsequent starts are fast.
 >
 > **Background mode:** `openlegion start -d` polls for startup for up to 90 seconds. If a Docker image build is needed on first run, this timeout may be exceeded — wait for the build to finish and re-run `openlegion start -d`.
 >
+> **First run also creates:** `config/agents.yaml`, `config/permissions.json`, `config/mesh.yaml`, agent volumes, and an `operator` agent that you didn't define — that's a built-in fleet-management agent (lighter resource caps, excluded from cost/quota math). See [CLI Reference](#cli-reference) for `openlegion reset` if you want to wipe state and start over.
+>
 > **Need help?** See the **[full setup guide](QUICKSTART.md)** for platform-specific instructions and troubleshooting.
 
+### Common commands
+
 ```bash
-# Add more agents from the REPL
-/add
+# Start (interactive REPL); use /add inside the REPL to register more agents
+openlegion start
 
 # Run in background
 openlegion start -d
-openlegion chat researcher   # connect from another terminal
-openlegion stop              # clean shutdown
+openlegion chat <agent_name>   # connect from another terminal to an agent you created
+openlegion stop                # clean shutdown
+openlegion reset               # destructive: wipe config/, data/, skills/* (keeps .env)
 ```
 
 ---
@@ -119,8 +124,8 @@ OpenLegion was designed from day one assuming agents will be compromised.
 | **Cost controls** | None | Per-agent daily + monthly budget caps |
 | **Multi-agent routing** | LLM CEO agent | Fleet model — blackboard + pub/sub coordination |
 | **LLM providers** | Broad | 100+ via LiteLLM with health-tracked failover |
-| **Test coverage** | Minimal | 4600+ tests including full Docker E2E |
-| **Codebase size** | 430,000+ lines | ~62,000 lines — still auditable in a day |
+| **Test coverage** | Minimal | 5800+ tests across 155 test files including full Docker E2E |
+| **Codebase size** | 430,000+ lines | ~77,000 lines in `src/` — still auditable in a day |
 
 ---
 
@@ -134,7 +139,7 @@ Chat with your agent fleet via **Telegram**, **Discord**, **Slack**, **WhatsApp*
 via cron schedules, webhooks, heartbeat monitoring, and file watchers — without being
 prompted.
 
-**4600+ tests passing** across the application code.
+**5800+ tests passing** across 155 test files.
 **Fully auditable in a day.**
 No LangChain. No Redis. No Kubernetes. No CEO agent. BSL License.
 
@@ -193,9 +198,9 @@ connections.
 │  │ Blackboard │ │ PubSub  │ │  Message   │ │   Credential Vault     │   │
 │  │ (SQLite)   │ │         │ │  Router    │ │   (API Proxy)          │   │
 │  │            │ │ Topics, │ │            │ │                        │   │
-│  │ Key-value, │ │ subs,   │ │ Permission │ │ LLM, Anthropic,       │   │
-│  │ versioned, │ │ notify  │ │ enforced   │ │ OpenAI, Apollo,        │   │
-│  │ TTL, GC    │ │         │ │ routing    │ │ Hunter, Brave Search   │   │
+│  │ Key-value, │ │ subs,   │ │ Permission │ │ LLM, image_gen,        │   │
+│  │ versioned, │ │ notify  │ │ enforced   │ │ Apollo, Hunter,        │   │
+│  │ TTL, GC    │ │         │ │ routing    │ │ Brave Search           │   │
 │  └────────────┘ └─────────┘ └───────────┘ └────────────────────────┘   │
 │                                                                         │
 │  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐                    │
@@ -208,16 +213,20 @@ connections.
 │  └──────────────┘ └──────────────┘ └──────────────┘                    │
 └──────────────────────────────────────────────────────────────────────────┘
                │
-               │  Docker Network (bridge / host)
+               │  Docker Network (bridge by default; host opt-in via
+               │  OPENLEGION_HOST_NETWORK=1 / _BROWSER_ALLOW_HOST_NETWORK=1)
                │
      ┌─────────┼──────────┬──────────────────────┐
      ▼         ▼          ▼                      ▼
 ┌─────────┐ ┌─────────┐ ┌─────────┐       ┌─────────┐
 │ Agent A │ │ Agent B │ │ Agent C │  ...  │ Agent N │
-│ :8401   │ │ :8402   │ │ :8403   │       │ :840N   │
+│ :8400   │ │ :8400   │ │ :8400   │       │ :8400   │
 └─────────┘ └─────────┘ └─────────┘       └─────────┘
   Each agent: isolated Docker container, own /data volume,
-  own memory DB, own workspace, 384MB RAM, 0.15 CPU
+  own memory DB, own workspace, 384MB RAM, 0.15 CPU. FastAPI
+  listens on :8400 *inside* the container; host port is allocated
+  dynamically by the runtime. The built-in `operator` agent runs
+  with lighter caps (128MB / 0.05 CPU).
 ```
 
 ### Trust Zones
@@ -250,6 +259,8 @@ blackboard access.
 | `signals/*` | Inter-agent signals | `signals/research_complete` |
 | `history/*` | Append-only audit log | `history/action_xyz` |
 
+These prefixes are conventions, not enforced schemas — agents can write any key that matches their `blackboard_write` glob.
+
 ### Credential Vault (API Proxy)
 
 Agents never hold API keys. All external API calls route through the mesh.
@@ -267,7 +278,7 @@ the next model in the chain retries the full request from the start.
 
 ### Permission Matrix
 
-Every inter-agent operation is checked against per-agent ACLs:
+Every inter-agent operation is checked against per-agent ACLs. The shape — agents call the blackboard with **natural keys** (e.g. `read_blackboard("tasks/foo")`) and `MeshClient` transparently namespaces them under the active project, so the patterns below are matched against the resolved key (`projects/myproject/tasks/foo`):
 
 ```json
 {
@@ -284,7 +295,9 @@ Every inter-agent operation is checked against per-agent ACLs:
 }
 ```
 
-`browser_actions: null` means all known browser actions are allowed (default). Set to a list (e.g. `["navigate", "screenshot", "get_elements"]`) to narrow capability for sensitive agents; set to `[]` to deny all browser use even when `can_use_browser` is true.
+Matching is **exact match (or `*`)** for `can_message`, `can_publish`, and `can_subscribe`, and **glob (`fnmatch`)** for `blackboard_read`, `blackboard_write`, and `allowed_credentials`.
+
+`browser_actions` semantics: `null` (default) = all known actions allowed; `["*"]` = explicit allow-all; specific list (e.g. `["browser_navigate", "browser_screenshot"]`) = narrow allowlist; `[]` = deny all browser use even when `can_use_browser` is true.
 
 Blackboard patterns use the `projects/{name}/*` namespace. When an agent joins a
 project, it receives read/write access to that namespace. Standalone agents get
@@ -298,27 +311,27 @@ Agent containers are slim — no browser. Browsing is handled by a shared browse
 - **Image**: `openlegion-agent:latest` (Python 3.12, system tools — no browser)
 - **Network**: Bridge with port mapping (macOS/Windows) or host network (Linux)
 - **Volume**: `openlegion_data_{agent_id}` mounted at `/data` (agent names with spaces/special chars are sanitized)
-- **Resources**: 384MB RAM, 0.15 CPU (agents are I/O-bound — waiting on LLM APIs)
-- **Security**: `no-new-privileges`, runs as non-root `agent` user (UID 1000)
-- **Port**: 8400 (FastAPI)
+- **Resources**: 384MB RAM, 0.15 CPU (agents are I/O-bound — waiting on LLM APIs). The built-in `operator` agent runs at 128MB / 0.05 CPU.
+- **Security**: `no-new-privileges`, `cap_drop=[ALL]`, `read_only=True`, `tmpfs=/tmp`, non-root UID 1000
+- **Port**: 8400 (FastAPI, inside the container; host port allocated dynamically)
 
 **Browser service container** (shared across all agents):
 - **Image**: `openlegion-browser:latest` (Camoufox stealth browser + KasmVNC)
-- **Resources**: 2–8GB RAM (scaled by fleet size), 1–2 CPU (scaled by fleet size), 512MB–2GB shared memory (scaled by fleet size)
-- **Ports**: 8500 (browser API), 6080 (KasmVNC web client)
-- **Capacity**: 1–10 concurrent browser sessions (scaled by fleet size)
+- **Resources**: 2–8GB RAM, 1–2 CPU, 512MB–2GB shared memory — scaled by `OPENLEGION_MAX_AGENTS` plan tier
+- **Ports**: 8500 (browser API) is the only exposed port. Per-agent KasmVNC instances run internally on 6100..6163 and are reverse-proxied by the mesh at `/agent-vnc/{agent_id}/...` (no direct port exposed to the host).
+- **Capacity**: 1, 5, or 10 concurrent browser sessions on the standard plan tiers; absolute cap 64 via `OPENLEGION_BROWSER_MAX_CONCURRENT` (legacy alias `MAX_BROWSERS`). Restart the browser service to apply a change.
 
 ### Browser Capabilities
 
 Beyond the basic navigation/screenshot/click tools, the browser service ships with:
 
-- **CAPTCHA solving.** Optional 2captcha or capsolver provider configured per-fleet via `CAPTCHA_SOLVER_KEY` + `CAPTCHA_SOLVER_PROVIDER`. (Solver creds are env-only by design and bypass the `OPENLEGION_CRED_*` vault — see `_ENV_ONLY_FLAGS` in `src/browser/flags.py`.) Auto-solve runs after `browser_navigate`; behavioral / persistent challenges escalate to `request_captcha_help` which posts a card to the dashboard for the user to clear via the live VNC viewer. Disabled fleet-wide with `CAPTCHA_DISABLED=1`.
-- **Per-agent + per-tenant solver cost caps.** `CAPTCHA_COST_LIMIT_USD_PER_AGENT_MONTH` and `CAPTCHA_COST_LIMIT_USD_PER_TENANT_MONTH` enforce monthly spend with 50/80/100% threshold alerts. Per-tenant rollups exportable as CSV via `/dashboard/api/billing/captcha-rollup` (curl-only).
+- **CAPTCHA solving.** Optional 2captcha or capsolver provider configured per-fleet via `CAPTCHA_SOLVER_KEY` + `CAPTCHA_SOLVER_PROVIDER`. Solver credentials (`CAPTCHA_SOLVER_KEY`, `CAPTCHA_SOLVER_KEY_SECONDARY`, `CAPTCHA_SOLVER_PROXY_LOGIN`, `CAPTCHA_SOLVER_PROXY_PASSWORD`) are env-only by design — they bypass the `OPENLEGION_CRED_*` vault and are stripped from `config/settings.json` at load (`_ENV_ONLY_FLAGS` in `src/browser/flags.py`). Auto-solve runs after `browser_navigate`; behavioral / persistent challenges escalate to `request_captcha_help` which posts a card to the dashboard for the user to clear via the live VNC viewer. Disabled fleet-wide with `CAPTCHA_DISABLED=1`.
+- **Per-agent + per-tenant solver cost caps.** `CAPTCHA_COST_LIMIT_USD_PER_AGENT_MONTH` and `CAPTCHA_COST_LIMIT_USD_PER_TENANT_MONTH` enforce monthly spend with 50/80/100% threshold alerts. Per-tenant rollups available at `/dashboard/api/billing/captcha-rollup` (requires a dashboard session cookie and the `X-Requested-With` CSRF header).
 - **Fingerprint health monitoring.** A rolling per-agent rejection window detects when a fingerprint is "burned" (>50% rejection over the last 10 events across Cloudflare / DataDome / PerimeterX / Imperva / Akamai BMP signals); subsequent CAPTCHA envelopes carry `fingerprint_burn=True` and a `retry_with_fresh_profile` hint. Operator clears state manually after profile rotation.
 - **JS-challenge detection.** Vendor-specific selectors detect Cloudflare 1xxx / Under Attack / Press & Hold and similar interstitials before the agent attempts to extract content.
 - **Mobile emulation profiles.** `BROWSER_DEVICE_PROFILE` env var (per-agent or fleet-wide) selects a mobile UA + viewport + touch profile when sites gate on desktop fingerprints. Configured via env, not the dashboard.
 - **Session continuity (opt-in).** `BROWSER_SESSION_PERSISTENCE_ENABLED=1` enables a per-agent storage-state sidecar so cookies and localStorage survive container restarts. Default-off; operator/curl-only management via `/dashboard/api/agents/{id}/session`.
-- **Two-stage workspace upload.** `browser_upload_file` reads from the agent's `/data` and uploads via a stage-then-apply protocol with idempotency keys and a tmpfs partial reaper, so a half-completed upload can never end up attached to a form.
+- **Two-stage workspace upload.** `browser_upload_file` reads from the agent's `/data` and uploads via a stage-then-apply protocol with idempotency keys and a tmpfs partial reaper, so a half-completed upload can never end up attached to a form. Per-file cap 50 MB (`OPENLEGION_UPLOAD_STAGE_MAX_MB`), max 5 files per call.
 
 ---
 
@@ -356,19 +369,22 @@ chat, status, capabilities, and results.
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### Task Mode (`execute_task`)
+### Task Mode (`POST /task`)
 
 Accepts a `TaskAssignment` for task execution. Runs a bounded loop
 (max 20 iterations) of decide → act → learn. Returns a `TaskResult` with
 structured output and optional blackboard promotions.
 
-### Chat Mode (`chat`)
+### Chat Mode (`POST /chat`)
 
-Accepts a user message. On the first message, loads workspace context
-(PROJECT.md if in a project, INSTRUCTIONS.md, SOUL.md, USER.md, MEMORY.md, SYSTEM.md) into the system prompt,
-injects a live Runtime Context block (permissions, budget, fleet, cron),
-and searches memory for relevant facts. Executes tool calls in a bounded loop
-(max 30 rounds per turn, auto-compaction every 200 rounds with seamless continuation) and runs context compaction when needed.
+Accepts a user message. On the first message, loads bootstrap workspace files
+into the system prompt — PROJECT.md (project members only), SYSTEM.md,
+INSTRUCTIONS.md, SOUL.md, USER.md, MEMORY.md — injects a live Runtime Context
+block (permissions, budget, fleet, cron), and searches memory for relevant facts.
+Executes tool calls in a bounded loop with three caps from `loop.py`:
+`CHAT_MAX_TOOL_ROUNDS=30` per turn, `CHAT_MAX_TOTAL_ROUNDS=200` total before
+auto-compaction kicks in, and `_MAX_SESSION_CONTINUES=5` auto-continuations
+(after which the session halts with an error rather than continuing forever).
 
 ### Tool Loop Detection
 
@@ -420,7 +436,7 @@ canonicalized parameters and results over a 15-call sliding window.
 | `generate_image` | Generate an image via Gemini or DALL-E 3 and save as an artifact |
 | `memory_search` | Hybrid search across workspace files and structured DB |
 | `memory_save` | Save fact to workspace and structured memory DB |
-| `web_search` | Search the web via DuckDuckGo (no API key) |
+| `web_search` | Search the web via DuckDuckGo (HTML scrape — no API key, but subject to occasional rate limits / CAPTCHAs) |
 | `notify_user` | Send notification to user across all connected channels |
 | `list_agents` | Discover agents in your project (standalone agents see only themselves) |
 | `read_blackboard` | Read from the shared blackboard |
@@ -446,11 +462,11 @@ canonicalized parameters and results over a 15-call sliding window.
 | `wait_for_subagent` | Wait for a subagent to complete and return its result |
 | `vault_generate_secret` | Generate and store a random secret (returns opaque handle) |
 | `vault_list` | List credential names (names only, never values) |
-| `wallet_get_address` | Get Ethereum/Solana wallet address for an agent |
-| `wallet_get_balance` | Get wallet balance (ETH or SOL) |
-| `wallet_read_contract` | Read data from an Ethereum smart contract |
-| `wallet_transfer` | Transfer ETH or SOL to an address |
-| `wallet_execute` | Execute an Ethereum smart contract function |
+| `wallet_get_address` | Get Ethereum/Solana wallet address for an agent (requires `[wallet]` extras) |
+| `wallet_get_balance` | Get wallet balance (ETH or SOL) (requires `[wallet]` extras) |
+| `wallet_read_contract` | Read data from an Ethereum smart contract (requires `[wallet]` extras) |
+| `wallet_transfer` | Transfer ETH or SOL to an address (requires `[wallet]` extras) |
+| `wallet_execute` | Execute an Ethereum smart contract function (requires `[wallet]` extras) |
 | `get_system_status` | Query own runtime state: permissions, budget, fleet, cron, health |
 | `read_agent_history` | Read another agent's conversation logs |
 
@@ -481,16 +497,18 @@ Layer 4: Learnings                ← Self-improvement through failure tracking
   │  Auto-injected into system prompt each session
   │
 Layer 3: Workspace Files          ← Durable, human-readable storage
-  │  INSTRUCTIONS.md, SOUL.md, USER.md  (loaded into system prompt)
-  │  SYSTEM.md                    (auto-generated architecture guide + runtime snapshot)
-  │  MEMORY.md                    (curated long-term facts)
-  │  HEARTBEAT.md                 (autonomous monitoring rules)
-  │  memory/YYYY-MM-DD.md         (daily session logs)
-  │  BM25 search across all files
+  │  Bootstrap files loaded into the first-message system prompt:
+  │    PROJECT.md (project members only), SYSTEM.md, INSTRUCTIONS.md,
+  │    SOUL.md, USER.md, MEMORY.md
+  │  Other workspace files:
+  │    HEARTBEAT.md             (autonomous monitoring rules)
+  │    INTERFACE.md, AGENTS.md  (channel + roster context)
+  │    memory/YYYY-MM-DD.md     (daily session logs)
+  │  FTS5 keyword search across files
   │
 Layer 2: Structured Memory DB     ← Hierarchical vector database
   │  SQLite + sqlite-vec + FTS5
-  │  Facts with embeddings (KNN similarity search)
+  │  Hybrid search: 0.7 vector similarity + 0.3 FTS5 keyword
   │  Auto-categorization with category-scoped search
   │  3-tier retrieval: categories → scoped facts → flat fallback
   │  Reinforcement scoring with access-count boost + recency decay
@@ -541,7 +559,7 @@ can schedule their own jobs using the `set_cron` tool.
 
 Supports 5-field cron expressions (`minute hour dom month dow`), interval
 shorthand (`every 30m`, `every 2h`), and state persisted to `config/cron.json`.
-Cron jobs can also dispatch in **tool-mode** (`tool_name` + `tool_params`), invoking a built-in tool directly without an LLM round — useful for cheap deterministic monitoring.
+Cron jobs can also dispatch in **tool-mode** (`tool_name` + `tool_params`), invoking a built-in tool directly without an LLM round — useful for cheap deterministic monitoring. For example, set_cron with `tool_name="http_request"` and `tool_params={"url": "...", "method": "GET"}` polls an endpoint on a schedule without spending tokens.
 
 ### Heartbeat System
 
@@ -560,9 +578,12 @@ makes always-on agents economically viable.
 
 ### Webhook Endpoints
 
-Named webhook URLs that dispatch payloads to agents:
+Named webhook URLs that dispatch payloads to agents. Create one from the
+dashboard (System → Automation) or via the mesh API; the URL it returns is
+what you POST to. Payloads are sanitized and capped at 1MB.
 
 ```bash
+# Replace hook_a1b2c3d4 with the ID returned when you created the hook.
 curl -X POST http://localhost:8420/webhook/hook/hook_a1b2c3d4 \
   -H "Content-Type: application/json" \
   -d '{"event": "push", "repo": "myproject"}'
@@ -573,9 +594,10 @@ curl -X POST http://localhost:8420/webhook/hook/hook_a1b2c3d4 \
 Poll directories for new/modified files matching glob patterns. Uses polling
 (not inotify) for Docker volume compatibility.
 
-File watchers are configured programmatically via the `FileWatcher.watch()` method,
+File watchers are configured programmatically via the `FileWatcher.watch()` API,
 specifying a directory path, glob pattern, target agent, and message template
-(supports `{filepath}` and `{filename}` placeholders).
+(supports `{filepath}` and `{filename}` placeholders). There is no REPL or CLI
+command to manage watchers — they're set up from code or via dashboard endpoints.
 
 ---
 
@@ -611,7 +633,7 @@ Defense-in-depth with six layers:
 | Credential separation | Vault holds keys, agents call via proxy | Key leakage, unauthorized API use |
 | Permission enforcement | Per-agent ACLs for messaging, blackboard, pub/sub, APIs | Unauthorized data access |
 | Input validation | Path traversal prevention, SSRF blocking, safe condition eval (no `eval()`), token budgets, iteration limits, rate limiting | Injection, runaway loops, network abuse |
-| Unicode sanitization | Invisible character stripping at ~70 call sites across 17 source files, covering all external input boundaries | Prompt injection via hidden Unicode |
+| Unicode sanitization | Invisible character stripping at ~110 call sites across 17 source files, covering all external input boundaries | Prompt injection via hidden Unicode |
 
 ### Dual Runtime Backend
 
@@ -621,7 +643,7 @@ OpenLegion supports two isolation levels:
 |---|---|---|
 | **Isolation** | Shared kernel, namespace separation | Own kernel per agent (hypervisor) |
 | **Escape risk** | Kernel exploit could escape | Hypervisor boundary — much harder |
-| **Performance** | Native speed | Near-native (Rosetta 2 on Apple Silicon) |
+| **Performance** | Native speed | Near-native (Apple Virtualization.framework on macOS / Hyper-V on Windows) |
 | **Requirements** | Any Docker install | Docker Desktop 4.58+ |
 | **Enable** | `openlegion start` | `openlegion start --sandbox` |
 
@@ -645,17 +667,24 @@ openlegion start --sandbox
 
 ```
 openlegion [--verbose/-v] [--quiet/-q] [--json]
-├── start [--config PATH] [-d] [--sandbox]     # Start runtime + interactive REPL (inline setup on first run)
-├── stop                                       # Stop all containers
-├── chat [name] [--port PORT]                  # Connect to a running agent
+├── start [--config PATH] [-d] [--sandbox] [--port PORT]   # Start runtime + interactive REPL (inline setup on first run)
+├── stop                                                   # Stop the runtime + agent containers
+├── chat [name] [--port PORT]                              # Connect to a running agent
 ├── status [--port PORT] [--wide/-w] [--watch N] [--json]  # Show agent status
-├── version [--verbose/-v]                     # Show version and environment info
-└── wallet                                     # Manage agent wallets
-    ├── init                                   # Generate master wallet seed
-    └── show [agent_id]                        # Show wallet addresses
+├── projects [--port PORT] [--json]                        # List active projects
+├── project <project_id> [--port PORT] [--json]            # Show one project (members, blockers, task counts)
+├── tasks [--agent X] [--project Y] [--status S] [--port PORT] [--json]   # List durable task records
+├── pending [--port PORT] [--json]                         # List pending actions awaiting confirmation
+├── confirm <nonce> [--port PORT]                          # Confirm a pending action
+├── cancel <nonce> [--port PORT]                           # Cancel a pending action
+├── reset [-y]                                             # DESTRUCTIVE: stop everything and wipe config/, data/, skills/* (keeps .env)
+├── version [--verbose/-v]                                 # Show version and environment info
+└── wallet                                                 # Manage agent wallets (derives EVM + Solana from one master seed)
+    ├── init                                               # Generate the master wallet seed (shown once; HTTP 410 thereafter)
+    └── show [agent_id]                                    # Show wallet addresses
 ```
 
-> Agent management, credentials, blackboard, cron, projects, and channels
+> Agent management, credentials, blackboard, cron, and channels
 > are managed via **REPL commands** (below) inside a running session, or via the
 > **web dashboard** at `http://localhost:8420` (default port; change with `--port` flag or `mesh.port` in `config/mesh.yaml`).
 
@@ -792,8 +821,13 @@ OPENLEGION_CRED_WHATSAPP_ACCESS_TOKEN=EAAx...
 OPENLEGION_CRED_WHATSAPP_PHONE_NUMBER_ID=1234...
 OPENLEGION_CRED_WHATSAPP_APP_SECRET=...        # X-Hub-Signature-256 verification (production)
 
-# Log format: "json" (default) or "text" (human-readable)
+# Log format: "json" (default — production / structured) or "text" (human-readable).
+# If you see JSON logs locally and want plain text, set this to "text".
 OPENLEGION_LOG_FORMAT=text
+
+# Plan limits (0 = unlimited). HTTP 403 once exceeded.
+# OPENLEGION_MAX_AGENTS=0
+# OPENLEGION_MAX_PROJECTS=0
 ```
 
 ### Connecting Channels
@@ -829,7 +863,7 @@ the emerging standard for LLM tool interoperability. Any MCP-compatible tool ser
 can be plugged into an agent via config, with tools automatically discovered and
 exposed to the LLM alongside built-in skills.
 
-> **Note:** MCP support is an optional dependency. Install it with `pip install openlegion[mcp]` (or add `mcp` to your requirements). Without it, agents with `mcp_servers` configured will log an import error and skip MCP tool loading at startup.
+> **Note:** MCP support is an optional dependency and is NOT installed by `./install.sh`. From the cloned repo, activate the venv and run `pip install -e '.[mcp]'`. Without it, agents with `mcp_servers` configured will log an import error and skip MCP tool loading at startup. Wallet tools likewise require the optional `[wallet]` group (`web3`, `eth-account`, `mnemonic`, `solders`, `solana`).
 
 ### Configuration
 
@@ -893,61 +927,7 @@ pytest tests/
 
 ### Test Coverage
 
-| Category | Tests | What's Tested |
-|----------|-------|---------------|
-| Dashboard | 215 | Fleet management, blackboard, costs, traces, queues, cron, settings, config, streaming broadcast, workspace proxy, projects |
-| Built-in Tools | 167 | run_command, file, browser tools, memory, mesh, vault, get_system_status, path traversal, discovery |
-| Browser Service | 137 | Camoufox sessions, screenshots, reset/recovery, tab switching, anti-detection |
-| Credentials | 110 | Vault, API proxy, provider detection, two-tier system, credential lifecycle |
-| CLI | 99 | Agent add/list/edit/remove, chat, REPL commands, cron management, version |
-| Workspace | 90 | File scaffold, loading, BM25 search, daily logs, learnings, heartbeat, identity files, SYSTEM.md |
-| Agent Loop | 82 | Task execution, tool calling, cancellation, tool memory, chat helpers, daily log enrichment, task logging |
-| Integration | 68 | Multi-component mesh operations, notifications |
-| Mesh | 65 | Blackboard, PubSub, MessageRouter, permissions |
-| Channels (base) | 62 | Abstract channel, commands, per-user routing, chunking, steer, debug, addkey normalization, parallel broadcast |
-| Cron | 58 | Cron expressions, intervals, dispatch, persistence, enriched heartbeat, skip-LLM, concurrent mutations |
-| Templates | 54 | Template loading, agent creation, model interpolation, all 13 templates |
-| Runtime Backend | 54 | DockerBackend, SandboxBackend, extra_env, name sanitization, detection, VNC allocation |
-| Projects | 42 | Multi-project CRUD, config, agent membership, blackboard key scoping, cross-project permission isolation |
-| Context Manager | 41 | Token estimation (tiktoken + model-aware), compaction, flushing, flush reset |
-| Sanitization | 38 | Invisible Unicode stripping, bidi overrides, tag chars, zero-width |
-| Discord Channel | 36 | Slash commands, message routing, pairing, chunking, embed formatting |
-| Agent Server | 35 | Workspace API, heartbeat-context endpoint, content sanitization, file allowlist |
-| Skills | 34 | Discovery, execution, injection, MCP integration |
-| Memory Store | 34 | SQLite ops, vector search, categories, hierarchical search, tool outcomes |
-| Events | 31 | Event streaming, filtering, WebSocket, notification events |
-| Traces | 30 | Trace recording, grouping, summaries, prompt preview extraction |
-| Setup Wizard | 29 | Quickstart, full setup, API key validation, templates, inline setup, two-tier credentials |
-| Chat | 28 | Chat mode, streaming, workspace integration |
-| Models | 24 | Model cost registry, context windows, provider detection |
-| Transcript | 24 | Transcript formatting, safety, round-trip fidelity |
-| WhatsApp Channel | 22 | Cloud API, webhook verification, message chunking, non-text reply |
-| Slack Channel | 22 | Socket Mode, thread routing, pairing, command translation |
-| Attachments | 21 | Image base64 encoding, PDF text extraction, multimodal content blocks |
-| Marketplace | 20 | Install, manifest parsing, validation, path traversal, remove |
-| Costs | 20 | Usage recording, budgets, vault integration, budget overrun warnings |
-| Dashboard Workspace | 19 | Workspace proxy endpoints, filename validation, transport forwarding, sanitization |
-| Chat Workspace | 19 | Cross-session memory, corrections, learnings |
-| Transport | 18 | HttpTransport, SandboxTransport, resolve_url |
-| Subagent | 17 | Spawn, depth/concurrent limits, TTL timeout, skill cloning, memory isolation |
-| LLM Params | 17 | Parameter allowlisting, model-specific options |
-| Failover | 15 | Health tracking, chain cascade, cooldown |
-| Loop Detector | 14 | Agent loop detection and intervention |
-| Lanes | 14 | Per-agent FIFO task queues |
-| Vault | 13 | Credential storage, generation, capture, budget enforcement |
-| Dashboard Auth | 10 | Session cookies, HMAC verification, SSO flow |
-| MCP Client | 10 | Tool discovery, routing, conflicts, lifecycle |
-| Embedding Fallback | 10 | Graceful degradation when embeddings fail |
-| Types | 9 | Pydantic validation, serialization |
-| Health Monitor | 8 | Ephemeral cleanup, TTL expiry, event emission, restart with missing config |
-| MCP E2E | 7 | Real MCP protocol with live server subprocess |
-| Webhooks | 7 | Add/remove, persistence, dispatch |
-| File Watchers | 7 | Polling, dispatch, pattern matching |
-| Memory Tools | 6 | memory_search, memory_save |
-| Memory Integration | 6 | Vector search, cross-task recall, salience |
-| E2E | 17 | Container health, workflow, chat, memory, triggering |
-| Web Search | 2 | DuckDuckGo search tool |
-| **Total** | **4600+** | (Phase 6-10 added captcha/session/profile/health/cost tests not broken out above) |
+Roughly **5800+ test cases across 155 test files** (`find tests -name '*.py' | xargs grep -c '^def test_'`). Coverage includes every module under `src/` — `tests/test_FOO.py` maps to `src/.../FOO.py` (see CLAUDE.md for the full mapping). The four `tests/test_e2e*.py` files require Docker and a real LLM key; everything else runs in CI in under a few minutes per shard.
 
 ---
 
@@ -1035,7 +1015,10 @@ src/
 ├── shared/
 │   ├── types.py                        # All Pydantic models (the contract)
 │   ├── utils.py                        # ID generation, logging, sanitization
-│   └── trace.py                        # Trace ID generation + correlation
+│   ├── trace.py                        # Trace ID generation + correlation
+│   ├── models.py                       # Model cost / context window registry (LiteLLM-backed)
+│   ├── redaction.py                    # Central credential / URL redactor
+│   └── operator_playbooks.py           # Built-in operator agent prompts
 ├── browser/
 │   ├── __main__.py                     # Container entry (KasmVNC + Openbox + FastAPI)
 │   ├── server.py                       # Browser service FastAPI server
@@ -1062,8 +1045,13 @@ src/
 ├── dashboard/
 │   ├── server.py                       # Dashboard FastAPI router + API
 │   ├── events.py                       # EventBus for real-time streaming
-│   ├── templates/index.html            # Dashboard UI (Alpine.js + Tailwind)
-│   └── static/                         # CSS + JS assets
+│   ├── auth.py                         # Session cookie verification (CSRF + HMAC)
+│   ├── notifications.py                # Persistent notifications store (SQLite)
+│   ├── telemetry.py                    # SPA telemetry event sink
+│   ├── platform_success.py             # Per-tenant success scoring
+│   ├── conversations.py                # Chat-panel conversation state
+│   ├── templates/index.html            # Dashboard UI (Alpine.js + Tailwind via CDN)
+│   └── static/                         # CSS + JS assets + avatars
 ├── setup_wizard.py                    # Guided setup wizard
 ├── marketplace.py                     # Skill marketplace (git-based install/remove)
 └── templates/
@@ -1098,7 +1086,7 @@ config/
 | The mesh is the only door | No agent has network access except through the mesh. No agent holds credentials. |
 | Private by default, shared by promotion | Agents keep knowledge private. Facts are explicitly promoted to the blackboard. |
 | Explicit failure handling | Domain-specific exceptions propagated with context. No silent error swallowing. |
-| Small enough to audit | ~62,000 total lines. The entire codebase is still auditable in a day. |
+| Small enough to audit | ~77,000 lines in `src/`. The entire codebase is still auditable in a day. |
 | Skills over features | New capabilities are agent skills, not mesh code. |
 | SQLite for all state | Single-file databases. No external services. WAL mode for concurrent reads. |
 | Zero vendor lock-in | LiteLLM supports 100+ providers. Markdown workspace files. No proprietary formats. |
@@ -1131,7 +1119,7 @@ Looking for alternatives? OpenLegion is often compared to:
 
 OpenLegion differs from all of these in combining **fleet orchestration,
 Docker isolation, credential vaulting, and cost enforcement** in a single
-~62,000 line auditable codebase.
+~77,000-line auditable codebase.
 
 **Keywords:** autonomous AI agents, multi-agent framework, LLM agent orchestration,
 self-hosted AI agents, Docker AI agents, OpenClaw alternative, AI agent security,

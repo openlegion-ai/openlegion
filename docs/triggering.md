@@ -6,6 +6,8 @@ OpenLegion agents can be triggered automatically through cron schedules, heartbe
 
 Scheduled tasks that dispatch messages to agents at regular intervals. The cron scheduler runs in the mesh host (not agent containers), so schedules survive container restarts.
 
+The scheduler loop ticks every `TICK_INTERVAL = 5` seconds (`src/host/cron.py:76`). 5-field cron jobs are rate-limited to fire at most once per minute via a `last_run` dedup guard, and each job runs under a per-job `asyncio.Lock` — if a previous run is still in flight when the next tick arrives, the new run is skipped rather than overlapping. When an agent is removed, all of its jobs are purged automatically via `remove_agent_jobs(agent_id)`.
+
 ### Schedule Syntax
 
 Two formats are supported:
@@ -101,6 +103,8 @@ By default, cron jobs suppress empty or trivial agent responses. The complete se
 
 Heartbeats are a cost-efficient form of autonomous monitoring. They run **cheap deterministic probes first**, and only invoke the LLM when probes find actionable items.
 
+The default heartbeat schedule is `"every 15m"` (`DEFAULT_HEARTBEAT_SCHEDULE`, `src/host/cron.py:77`). The **operator agent's heartbeat is forced to `"every 15m"` regardless of `mesh.heartbeat_schedule`** — see `src/cli/runtime.py:825`.
+
 ### How Heartbeats Work
 
 ```
@@ -172,7 +176,9 @@ Each agent can have a `HEARTBEAT.md` file in its workspace that defines autonomo
 
 Heartbeat schedules can be changed via:
 1. **Dashboard Automations tab** — edit the cron schedule directly
-2. **Operator agent** — via propose_edit/confirm_edit with a cron expression (e.g. `0 */8 * * *`) or interval (e.g. `every 6h`)
+2. **Operator agent** — via `edit_agent(agent_id, field="heartbeat_schedule", value=...)` with a cron expression (e.g. `0 */8 * * *`) or interval (e.g. `every 6h`)
+
+`heartbeat_schedule` is a **soft** field on `edit_agent` — it applies immediately with a 5-minute Undo receipt and retargets the live cron job in lockstep with the YAML write. The legacy `propose_edit`/`confirm_edit` pair does NOT accept `heartbeat_schedule` (`_PROPOSE_EDIT_FIELDS = _VALID_FIELDS - {"heartbeat_schedule"}` in `src/agent/builtins/operator_tools.py:159`); use `edit_agent` instead.
 
 Both methods sync the schedule to the cron scheduler immediately — no restart required. The dashboard displays update in real-time.
 
@@ -192,13 +198,14 @@ This replaces the previous pattern where agents had to waste tool calls reading 
 
 ### Skip-LLM Optimization
 
-Heartbeats skip the LLM dispatch entirely (zero cost) when all three conditions are met:
+Heartbeats skip the LLM dispatch entirely (zero cost) when all four conditions are met:
 
-1. **HEARTBEAT.md is default** — the file is empty (after stripping whitespace) or its content is **exactly** `# Heartbeat Rules` (exact equality, not prefix matching). A file containing `# Heartbeat Rules` followed by any additional content is considered customized and will be sent to the LLM.
-2. **No recent activity** — daily logs are empty
-3. **No probes triggered** — disk usage normal, no pending signals or tasks
+1. **Not manually triggered** — manual runs (e.g. `/cron run`, dashboard "Run now") always dispatch so the user sees a result
+2. **HEARTBEAT.md is default** — the file is empty (after stripping whitespace) or its content is **exactly** `# Heartbeat Rules` (exact equality, not prefix matching). A file containing `# Heartbeat Rules` followed by any additional content is considered customized and will be sent to the LLM.
+3. **No recent activity** — daily logs are empty
+4. **No probes triggered** — disk usage normal, no pending signals or tasks
 
-This makes always-on heartbeats economically viable even at high frequencies.
+This makes always-on heartbeats economically viable even at high frequencies. See `src/host/cron.py:394`.
 
 ## Tool-Mode Cron
 
@@ -235,26 +242,27 @@ curl -X POST http://localhost:8420/webhook/hook/<hook_id> \
   -d '{"company": "Acme Corp", "source": "website"}'
 ```
 
-The webhook payload is included in the message dispatched to the configured agent.
+The webhook payload is included in the message dispatched to the configured agent. Request bodies are capped at **1 MB** (`_MAX_WEBHOOK_BODY = 1_048_576`, `src/host/webhooks.py:156`); oversized requests are rejected with HTTP 413 (Content-Length pre-check followed by a raw-body post-check). The payload JSON is truncated to **3000 chars** when assembled into the dispatch message and run through `sanitize_for_prompt()` before reaching the agent (`src/host/webhooks.py:26-32`).
+
+### Creating Webhooks
+
+Webhook creation is a **dashboard-only** flow. The endpoint is `POST /api/webhooks` on the dashboard router (`src/dashboard/server.py:5706`); it uses dashboard SSO cookie auth (`ol_session`), not `MESH_AUTH_TOKEN`. There is no `/mesh/webhooks` endpoint.
+
+In practice you create webhooks from the dashboard System → Integrations tab. The request body is `{"name": "<label>", "agent": "<agent_id>", "instructions"?: "<extra>", "secret"?: "<existing-secret>"}`; the server stores `require_signature = bool(body.get("secret"))` and assigns a random 32-byte hex secret (`secrets.token_hex(32)`) if none was supplied. The created hook's secret is returned **once** in the response — store it immediately.
+
+To rotate the secret on an existing hook, `PATCH /api/webhooks/{hook_id}` with `{"regenerate_secret": true}`.
 
 ### Webhook Signature Verification
 
-Webhooks can optionally require HMAC-SHA256 signature verification. When a webhook is created with `require_signature: true`, the server generates a random 32-byte hex secret and returns it once. Callers must include the signature in the `X-Webhook-Signature` header (not to be confused with WhatsApp's `X-Hub-Signature-256`):
+Webhooks can optionally require HMAC-SHA256 signature verification. When a webhook is created with a secret (`require_signature` becomes true), callers must include the signature in the `x-webhook-signature` header (HTTP headers are case-insensitive; not to be confused with WhatsApp's `X-Hub-Signature-256`):
 
 ```bash
-# Create a webhook with signature verification
-curl -X POST http://localhost:8420/mesh/webhooks \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $MESH_AUTH_TOKEN" \
-  -d '{"agent": "researcher", "name": "my-hook", "require_signature": true}'
-# Response includes "secret": "<hex>" -- save this, it is shown once
-
 # Send a signed payload
 BODY='{"company": "Acme"}'
 SIG=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "$SECRET" | awk '{print $2}')
 curl -X POST http://localhost:8420/webhook/hook/<hook_id> \
   -H "Content-Type: application/json" \
-  -H "X-Webhook-Signature: $SIG" \
+  -H "x-webhook-signature: $SIG" \
   -d "$BODY"
 ```
 
@@ -272,6 +280,8 @@ Agent: Research is done, notifying the team.
 → publish_event(topic="research_complete", data={"prospect": "Acme Corp", "score": 8})
 ```
 
+The matching subscribe-side tool is `subscribe_event(topic, callback_message)` (`src/agent/builtins/mesh_tool.py:284`).
+
 ### Permission Requirements
 
 Pub/sub is permission-controlled. Agents need explicit ACLs:
@@ -284,6 +294,40 @@ Pub/sub is permission-controlled. Agents need explicit ACLs:
   }
 }
 ```
+
+## Agent-to-Agent Coordination
+
+Pub/sub is a fan-out signal — for **direct** agent-to-agent work handoffs use the structured coordination protocol in `src/agent/builtins/coordination_tool.py`:
+
+| Tool | Purpose |
+|------|---------|
+| `hand_off(to, summary, data)` | Writes `tasks/{to}/{handoff_id}` to the blackboard, then `wake_agent(to, msg, origin=...)`. Propagates `MessageOrigin` so completion routes back to the original channel/user. |
+| `check_inbox()` | Pull pending handoffs/signals/tasks for the current agent. |
+| `update_status(state, task_id?)` | Report progress on an active task. With 2+ active tasks and no `task_id`, returns an `ambiguous_task` payload so the LLM can pick a `task_id` without a follow-up `check_inbox` call. |
+| `complete_task(task_key)` | Mark a task complete; releases the auto-notify back to the originator. |
+
+Unprocessed handoffs expire after `_HANDOFF_TTL = 86_400` seconds (24h) as a safety net (`coordination_tool.py:36`).
+
+### MessageRouter
+
+Cross-agent calls go through `MessageRouter` (`src/host/mesh.py:738`), which resolves the target string to a container URL:
+
+- **Agent ID** — exact match against the agent registry
+- **`capability:<name>`** — first agent whose declared capabilities include `<name>`
+
+Permissions are enforced on every routed call; unknown targets return `{"error": "Delivery failed..."}` after a single retry.
+
+### Lanes
+
+Each agent has a FIFO task lane (`src/host/lanes.py`) with three dispatch modes:
+
+| Mode | Behavior |
+|------|----------|
+| `followup` (default) | Queue the message; process after the current task finishes. |
+| `steer` | Inject the message into the agent's active conversation between tool rounds. Rate-limited to `_STEER_WAKEUP_MAX = 10` wakeups per `_STEER_WAKEUP_WINDOW = 3600` seconds. |
+| `collect` | Batch queued messages while the agent is busy, then dispatch them as a single combined message once the agent becomes free. |
+
+When a lane completes a task that originated from a channel handoff (`auto_notify=True`), the result is forwarded back to the originating channel/user with a `[agent_name]` prefix. The send is capped at `_NOTIFY_FORWARD_TIMEOUT = 30` seconds (`lanes.py:29`).
 
 ## Notification Routing
 
@@ -318,17 +362,26 @@ File watchers are configured programmatically via the `FileWatcher.watch()` meth
 | `path` | string | Directory to watch |
 | `pattern` | string | Glob pattern to match files (e.g., `*.csv`, `*.json`) |
 | `agent` | string | Agent to notify when a match is found |
-| `message` | string | Message template (`{filepath}` and `{filename}` are replaced with the matched file's full path and name) |
+| `message_template` | string \| None | Optional message template. `{filepath}` and `{filename}` are replaced with the matched file's full path and name. Defaults to `"New file detected: {filepath}\nFilename: {filename}\nProcess this file."` when omitted. |
 
-The watcher polls at a configurable interval, tracks file modification times, and dispatches to the target agent when new or changed files are detected.
+The watcher polls at a hardcoded `POLL_INTERVAL = 5` seconds (`src/host/watchers.py:22`; not user-configurable — no parameter on `watch()`, no env var), tracks file modification times, and dispatches to the target agent when new or changed files are detected.
+
+**First-scan is silent.** On `start()` the watcher records existing-file mtimes via `_scan(dispatch=False)` so the initial set of files is treated as the baseline — only files added or modified after startup dispatch. Drop files into the watch directory **after** start, not before.
+
+Every dispatched message is run through `sanitize_for_prompt()` before reaching the agent (`watchers.py:77`).
 
 ## Source Files
 
 | File | Role |
 |------|------|
 | `src/host/cron.py` | Cron scheduler, heartbeat probes, interval/cron parsing |
-| `src/host/server.py` | Webhook endpoints, cron management API |
-| `src/host/mesh.py` | PubSub system for event-driven triggering |
-| `src/agent/builtins/mesh_tool.py` | Agent-side `set_cron`, `list_cron`, `remove_cron` tools |
+| `src/host/server.py` | Cron management API |
+| `src/host/webhooks.py` | Webhook router, HMAC verification, 1 MB body cap |
+| `src/host/mesh.py` | Pub/Sub system and `MessageRouter` |
+| `src/host/lanes.py` | Per-agent FIFO task queues (followup/steer/collect) |
+| `src/agent/builtins/mesh_tool.py` | Agent-side `set_cron`, `list_cron`, `remove_cron`, `publish_event`, `subscribe_event` tools |
+| `src/agent/builtins/coordination_tool.py` | `hand_off`, `check_inbox`, `update_status`, `complete_task` |
 | `src/host/watchers.py` | Polling-based file watchers for Docker volume compatibility |
+| `src/dashboard/server.py` | Webhook creation API (`POST /api/webhooks`) |
 | `config/cron.json` | Persisted job state |
+| `config/webhooks.json` | Persisted webhook config |
