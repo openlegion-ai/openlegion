@@ -155,11 +155,12 @@ The browser service runs in a separate container with `cap_drop=ALL` plus `cap_a
 
 Resources scale with the `OPENLEGION_MAX_AGENTS` environment variable (`src/host/runtime.py:386-392`). **The number of concurrent browser sessions is gated separately by `OPENLEGION_BROWSER_MAX_CONCURRENT` (legacy alias `MAX_BROWSERS`) resolved in `src/browser/__main__.py` — default 5, clamped to `[1, 64]`, startup-only.**
 
-| Tier | `OPENLEGION_MAX_AGENTS` | RAM | SHM | CPU |
-|------|------------------------|-----|-----|-----|
-| Basic | ≤ 1 | 2GB | 512MB | 1.0 core |
-| Growth | 2–5 | 4GB | 1GB | 1.5 cores |
-| Pro | > 5 | 8GB | 2GB | 2.0 cores |
+| Tier | `OPENLEGION_MAX_AGENTS` | RAM | SHM | CPU | Max Browsers |
+|------|------------------------|-----|-----|-----|-------------|
+| Basic | ≤ 1 | 2GB | 512MB | 1.0 core | 1 |
+| Growth | 2–5 | 4GB | 1GB | 1.5 cores | `max_agents` |
+| Pro | 6–15 | 8GB | 2GB | 2.0 cores | `min(max_agents, 10)` |
+| Pro Max | > 15 | 16GB | 4GB | 4.0 cores | `min(max_agents, 30)` |
 
 SHM (shared memory) is critical for Firefox compositor IPC — too small causes VNC rendering freezes. Each per-agent X stack shares this allocation.
 

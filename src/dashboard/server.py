@@ -805,11 +805,17 @@ def create_dashboard_router(
         title: str,
         body: str | None,
         agent_id: str | None,
+        payload: dict | None = None,
     ) -> None:
         """Push a ``notification_added`` event so the bell updates live.
 
         Best-effort — any failure is logged at debug; the persistent
         store row is the source of truth and the 60s poll catches up.
+
+        ``payload`` mirrors the ``payload`` dict passed to
+        ``notification_store.add()`` so live-injected rows can deep-link
+        immediately (instead of waiting for the next 60s poll to replace
+        them with the persisted version that does carry it).
         """
         if event_bus is None:
             return
@@ -823,6 +829,7 @@ def create_dashboard_router(
                     "title": title,
                     "body": body or "",
                     "agent_id": agent_id,
+                    "payload": payload or {},
                 },
             )
         except Exception as e:
@@ -847,18 +854,19 @@ def create_dashboard_router(
                 actor = data.get("assignee") or agent_id or "Someone"
                 title = f"{actor} delivered draft"
                 body = (data.get("feedback") or "").strip()[:200] or None
+                payload = {
+                    "task_id": data.get("task_id"),
+                    "project_id": data.get("project_id"),
+                    "outcome": outcome,
+                }
                 nid = notification_store.add(
                     kind="delivered",
                     title=title,
                     body=body,
                     agent_id=actor,
-                    payload={
-                        "task_id": data.get("task_id"),
-                        "project_id": data.get("project_id"),
-                        "outcome": outcome,
-                    },
+                    payload=payload,
                 )
-                _emit_notification_added(nid, "delivered", title, body, actor)
+                _emit_notification_added(nid, "delivered", title, body, actor, payload)
                 return
 
             if event_type == "pending_action_created":
@@ -867,19 +875,20 @@ def create_dashboard_router(
                 label = summary or action_kind
                 title = f"Approval needed: {label}"[:200]
                 body = summary[:200] or None
+                payload = {
+                    "nonce": data.get("nonce"),
+                    "target_kind": data.get("target_kind"),
+                    "target_id": data.get("target_id"),
+                    "action_kind": action_kind,
+                }
                 nid = notification_store.add(
                     kind="approval",
                     title=title,
                     body=body,
                     agent_id=agent_id,
-                    payload={
-                        "nonce": data.get("nonce"),
-                        "target_kind": data.get("target_kind"),
-                        "target_id": data.get("target_id"),
-                        "action_kind": action_kind,
-                    },
+                    payload=payload,
                 )
-                _emit_notification_added(nid, "approval", title, body, agent_id)
+                _emit_notification_added(nid, "approval", title, body, agent_id, payload)
                 return
 
             if event_type == "credential_request":
@@ -887,18 +896,19 @@ def create_dashboard_router(
                 service = (data.get("service") or data.get("name") or "a credential")
                 title = f"{actor} needs {service}"[:200]
                 description = (data.get("description") or "").strip()[:200] or None
+                payload = {
+                    "request_id": data.get("request_id"),
+                    "name": data.get("name"),
+                    "service": data.get("service"),
+                }
                 nid = notification_store.add(
                     kind="credential",
                     title=title,
                     body=description,
                     agent_id=agent_id,
-                    payload={
-                        "request_id": data.get("request_id"),
-                        "name": data.get("name"),
-                        "service": data.get("service"),
-                    },
+                    payload=payload,
                 )
-                _emit_notification_added(nid, "credential", title, description, agent_id)
+                _emit_notification_added(nid, "credential", title, description, agent_id, payload)
                 return
 
             if event_type == "browser_login_request":
@@ -906,18 +916,19 @@ def create_dashboard_router(
                 service = (data.get("service") or "a site")
                 title = f"{actor} needs sign-in to {service}"[:200]
                 description = (data.get("description") or "").strip()[:200] or None
+                payload = {
+                    "request_id": data.get("request_id"),
+                    "service": data.get("service"),
+                    "url": data.get("url"),
+                }
                 nid = notification_store.add(
                     kind="credential",
                     title=title,
                     body=description,
                     agent_id=agent_id,
-                    payload={
-                        "request_id": data.get("request_id"),
-                        "service": data.get("service"),
-                        "url": data.get("url"),
-                    },
+                    payload=payload,
                 )
-                _emit_notification_added(nid, "credential", title, description, agent_id)
+                _emit_notification_added(nid, "credential", title, description, agent_id, payload)
                 return
 
             if event_type == "health_change":
@@ -928,32 +939,34 @@ def create_dashboard_router(
                     return
                 actor = agent_id or "An agent"
                 title = f"{actor} is {current}"[:200]
+                payload = {
+                    "previous": data.get("previous"),
+                    "current": current,
+                    "failures": data.get("failures"),
+                }
                 nid = notification_store.add(
                     kind="alert",
                     title=title,
                     body=None,
                     agent_id=agent_id,
-                    payload={
-                        "previous": data.get("previous"),
-                        "current": current,
-                        "failures": data.get("failures"),
-                    },
+                    payload=payload,
                 )
-                _emit_notification_added(nid, "alert", title, None, agent_id)
+                _emit_notification_added(nid, "alert", title, None, agent_id, payload)
                 return
 
             if event_type == "credit_exhausted":
                 actor = agent_id or "An agent"
                 title = f"{actor} is out of credit"[:200]
                 body = (data.get("error") or "").strip()[:200] or None
+                payload = {"error": data.get("error")}
                 nid = notification_store.add(
                     kind="alert",
                     title=title,
                     body=body,
                     agent_id=agent_id,
-                    payload={"error": data.get("error")},
+                    payload=payload,
                 )
-                _emit_notification_added(nid, "alert", title, body, agent_id)
+                _emit_notification_added(nid, "alert", title, body, agent_id, payload)
                 return
         except Exception as e:
             # Notifications are a polish surface — never let a write
@@ -2602,12 +2615,24 @@ def create_dashboard_router(
                 )
             except Exception as e:
                 logger.debug("agent_restarting emit failed: %s", e)
+        import asyncio
+        # Sentinel ensures SPA always gets a terminal event — covers the
+        # path where ``runtime.stop_agent`` / ``start_agent`` blocks
+        # indefinitely (e.g. Docker daemon hang) and the ``finally``
+        # below has to fire a generic ``restart_failed``. Without this
+        # the spinner would never clear and the user would refresh.
+        fired_terminal = False
         try:
             from src.cli.config import _load_config
             cfg = _load_config()
             agent_cfg = cfg.get("agents", {}).get(agent_id, {})
             default_model = cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
-            runtime.stop_agent(agent_id)
+            # Hard-cap the synchronous Docker stop/start at 120s combined
+            # so a hung daemon returns control to the request handler.
+            await asyncio.wait_for(
+                asyncio.to_thread(runtime.stop_agent, agent_id),
+                timeout=60,
+            )
             skills_dir = agent_cfg.get("skills_dir", "")
             if skills_dir:
                 skills_dir = str(Path(skills_dir).resolve())
@@ -2625,14 +2650,18 @@ def create_dashboard_router(
                 _proxy_url, cfg.get("network", {}).get("no_proxy", ""),
             )
             restart_env.update(_proxy_env)
-            url = runtime.start_agent(
-                agent_id=agent_id,
-                role=agent_cfg.get("role", "assistant"),
-                skills_dir=skills_dir,
-                model=agent_cfg.get("model", default_model),
-                mcp_servers=agent_cfg.get("mcp_servers") or None,
-                thinking=agent_cfg.get("thinking", ""),
-                env_overrides=restart_env,
+            url = await asyncio.wait_for(
+                asyncio.to_thread(
+                    runtime.start_agent,
+                    agent_id=agent_id,
+                    role=agent_cfg.get("role", "assistant"),
+                    skills_dir=skills_dir,
+                    model=agent_cfg.get("model", default_model),
+                    mcp_servers=agent_cfg.get("mcp_servers") or None,
+                    thinking=agent_cfg.get("thinking", ""),
+                    env_overrides=restart_env,
+                ),
+                timeout=60,
             )
             if router is not None:
                 router.register_agent(agent_id, url, role=agent_cfg.get("role", ""))
@@ -2653,9 +2682,28 @@ def create_dashboard_router(
                         "agent_restarted", agent=agent_id,
                         data={"agent_id": agent_id, "ready": ready},
                     )
+                    fired_terminal = True
                 except Exception as e:
                     logger.debug("agent_restarted emit failed: %s", e)
+            else:
+                # No bus to emit on, but the success path still
+                # logically "fired" — don't double-emit in finally.
+                fired_terminal = True
             return {"restarted": True, "ready": ready}
+        except asyncio.TimeoutError as e:
+            logger.error(f"Restart timed out for agent {agent_id}")
+            if event_bus is not None:
+                try:
+                    event_bus.emit(
+                        "agent_state", agent=agent_id,
+                        data={"state": "restart_failed", "error": "Restart timed out"},
+                    )
+                    fired_terminal = True
+                except Exception as emit_e:
+                    logger.debug(
+                        "agent_state restart_failed emit failed: %s", emit_e,
+                    )
+            raise HTTPException(status_code=504, detail="Restart timed out") from e
         except Exception as e:
             logger.error(f"Failed to restart agent {agent_id}: {e}")
             # Emit a failure signal via the existing ``agent_state``
@@ -2667,11 +2715,29 @@ def create_dashboard_router(
                         "agent_state", agent=agent_id,
                         data={"state": "restart_failed", "error": str(e)},
                     )
+                    fired_terminal = True
                 except Exception as emit_e:
                     logger.debug(
                         "agent_state restart_failed emit failed: %s", emit_e,
                     )
             raise HTTPException(status_code=500, detail=str(e))
+        finally:
+            # Belt-and-suspenders: if neither the success emit nor the
+            # explicit failure emit fired (e.g. an emit raised, the task
+            # was cancelled, or some unexpected control-flow path), make
+            # sure the SPA still gets a terminal event so the spinner
+            # clears.
+            if not fired_terminal and event_bus is not None:
+                try:
+                    event_bus.emit(
+                        "agent_state", agent=agent_id,
+                        data={"state": "restart_failed", "error": "Restart did not complete"},
+                    )
+                except Exception as emit_e:
+                    logger.debug(
+                        "agent_state restart_failed (finally) emit failed: %s",
+                        emit_e,
+                    )
 
     @api_router.put("/api/agents/{agent_id}/budget")
     async def api_update_budget(agent_id: str, request: Request) -> dict:
@@ -4653,6 +4719,16 @@ def create_dashboard_router(
         if key.startswith("history/"):
             raise HTTPException(status_code=400, detail="Cannot delete from history namespace")
         blackboard.delete(key, deleted_by="dashboard")
+        # Mirror the mesh-side DELETE emit so the SPA's blackboard view
+        # refreshes live without waiting on the next poll. Best-effort.
+        if event_bus is not None:
+            try:
+                event_bus.emit(
+                    "blackboard_delete", agent="operator",
+                    data={"key": key, "deleted_by": "operator"},
+                )
+            except Exception as e:
+                logger.debug("blackboard_delete emit failed: %s", e)
         return {"deleted": True, "key": key}
 
     # ── Trace inspector ──────────────────────────────────────

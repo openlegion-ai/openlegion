@@ -373,23 +373,27 @@ class DockerBackend(RuntimeBackend):
         self.browser_auth_token = secrets.token_urlsafe(32)
         mesh_host = "127.0.0.1" if self.use_host_network else "host.docker.internal"
 
-        # Scale browser container resources based on plan size.
-        # Each Camoufox instance uses ~200-400 MB RAM.  We size the
-        # container memory and max concurrent browsers to support as
-        # many agents browsing simultaneously as the VPS can handle.
+        # Resource sizing per plan (mem_limit + shm_size + cpu_quota + max_browsers).
         # shm_size is for Firefox compositor IPC — too small causes VNC freezes.
         #
-        #   Plan    Server         Agents  Mem   SHM   CPU   Max Browsers
-        #   Basic   cax11  4GB 2c    1    2GB  512m  1.0c     1
-        #   Growth  cax21  8GB 4c    5    4GB    1g  1.5c     5
-        #   Pro     cax31 16GB 8c   15    8GB    2g  2.0c    10
+        #   Plan      Server         Agents  Mem   SHM   CPU   Max Browsers
+        #   Basic     cax11  4GB 2c    1    2GB  512m  1.0c     1
+        #   Growth    cax21  8GB 4c    5    4GB    1g  1.5c     5
+        #   Pro       cax31 16GB 8c   15    8GB    2g  2.0c    10  (mem-bound)
+        #   Pro Max   cax41 32GB 16c  30   16GB    4g  4.0c    30
+        #
+        # Pro keeps a 10-browser cap on cax31 deliberately: 15 agents × 384MB +
+        # 8GB browser container + 2GB OS = 15.76GB on a 16GB box. Lifting browsers
+        # to 15 would leave only ~240MB headroom and risk OOM under load.
         max_agents = int(os.environ.get("OPENLEGION_MAX_AGENTS", "0"))
         if max_agents <= 1:
             max_browsers, browser_mem, browser_shm, browser_cpu = 1, "2g", "512m", 100000
         elif max_agents <= 5:
             max_browsers, browser_mem, browser_shm, browser_cpu = max_agents, "4g", "1g", 150000
-        else:
+        elif max_agents <= 15:
             max_browsers, browser_mem, browser_shm, browser_cpu = min(max_agents, 10), "8g", "2g", 200000
+        else:
+            max_browsers, browser_mem, browser_shm, browser_cpu = min(max_agents, 30), "16g", "4g", 400000
 
         # Override browser idle timeout from dashboard config; also bridge
         # the dashboard-saved CAPTCHA solver provider/key into the host
@@ -436,6 +440,12 @@ class DockerBackend(RuntimeBackend):
                     "BROWSER_EGRESS_ALLOWLIST", "BROWSER_EGRESS_DISABLE"):
             if os.environ.get(var):
                 environment[var] = os.environ[var]
+
+        # Forward provisioner-set browser concurrency cap to the browser container
+        # so per-instance scale changes (via OPENLEGION_BROWSER_MAX_CONCURRENT in
+        # .env) take effect on the next engine restart.
+        if os.environ.get("OPENLEGION_BROWSER_MAX_CONCURRENT"):
+            environment["OPENLEGION_BROWSER_MAX_CONCURRENT"] = os.environ["OPENLEGION_BROWSER_MAX_CONCURRENT"]
 
         # If the operator configured a proxy whose host is a literal private IP,
         # the egress filter will block the browser from reaching it unless the
