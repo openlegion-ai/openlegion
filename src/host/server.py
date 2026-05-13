@@ -5092,7 +5092,10 @@ def create_mesh_app(
             ),
         }
 
-    async def _apply_pending_change(change_id: str, change: dict, *, undoable: bool = False) -> dict:
+    async def _apply_pending_change(
+        change_id: str, change: dict,
+        *, undoable: bool = False, is_undo: bool = False,
+    ) -> dict:
         """Apply a consumed pending change — shared by soft, confirm, and undo paths.
 
         ``undoable`` flags the audit row as Revert-eligible. Only the
@@ -5119,17 +5122,25 @@ def create_mesh_app(
         if field == "permissions":
             from src.cli.config import _load_permissions, _save_permissions
             perms = _load_permissions()
-            # Use setdefault so the write applies even if the agent's
-            # entry was never backfilled (defensive — startup runs
-            # ``_ensure_all_agent_permissions`` so this should be rare,
-            # but the unified edit path now routes more permissions
-            # edits here and a silent no-op would be worse than a
-            # late-init). Falsy ``new_value`` (None, empty dict) is a
-            # caller bug; ``_validate_edit`` rejects bad shapes upstream.
+            # Apply semantics differ between forward and undo paths:
+            #   * Forward apply (caller passed partial dict): MERGE the
+            #     keys into the agent's existing perms so other granted
+            #     bits aren't clobbered. `setdefault` covers the rare
+            #     case of a never-backfilled agent.
+            #   * Undo (``is_undo=True``): REPLACE the agent's perms
+            #     dict with the stored old full state. A merge would
+            #     leave the granted keys in place — the original edit
+            #     only wrote keys that changed, so a merge of the old
+            #     full dict doesn't unset what was added. REPLACE
+            #     restores correctly. The dashboard already warns when
+            #     undoing an older receipt would discard newer edits.
             if isinstance(new_value, dict):
-                perms.setdefault("permissions", {}).setdefault(
-                    agent_id, {},
-                ).update(new_value)
+                if is_undo:
+                    perms.setdefault("permissions", {})[agent_id] = new_value
+                else:
+                    perms.setdefault("permissions", {}).setdefault(
+                        agent_id, {},
+                    ).update(new_value)
                 _save_permissions(perms)
             # Hot-reload the in-memory permission matrix
             if permissions is not None:
@@ -5590,6 +5601,10 @@ def create_mesh_app(
 
         # Reapply the old value. Note swap: new=old (the value the user
         # had before the edit), old=new (the value being reverted).
+        # ``is_undo=True`` flips the permissions branch from merge to
+        # replace so a partial-grant edit can be unset (merge would
+        # leave the granted keys in place since the stored old_value
+        # was the full pre-edit dict).
         try:
             await _apply_pending_change(
                 undo_token,
@@ -5599,6 +5614,7 @@ def create_mesh_app(
                     "old_value": record["new_value"],
                     "new_value": record["old_value"],
                 },
+                is_undo=True,
             )
         except HTTPException:
             # Agent might have been deleted between record + undo.

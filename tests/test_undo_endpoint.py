@@ -311,3 +311,74 @@ async def test_undo_emits_undone_event(mesh_app):
         assert "operator_action_receipt_undone" in kinds
     finally:
         blackboard.close()
+
+
+@pytest.mark.asyncio
+async def test_undo_hard_field_model_restores_yaml(mesh_app):
+    """Hard-field undo: a model edit applied immediately via the
+    unified /edit-soft endpoint can be reverted by token. Verifies the
+    30-min-TTL receipt path is bidirectional — _apply_pending_change
+    runs in reverse when the undo endpoint is called."""
+    app, _, tmp_path = mesh_app
+    afile = tmp_path / "config" / "agents.yaml"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        token = await _do_soft_edit(
+            c, field="model", value="anthropic/claude-opus-4-7",
+        )
+        cfg = yaml.safe_load(afile.read_text())
+        assert cfg["agents"]["writer"]["model"] == "anthropic/claude-opus-4-7"
+        r = await c.post(
+            f"/mesh/changes/undo/{token}",
+            json={},
+            headers=_human_origin_headers(),
+        )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["success"] is True
+    assert body["agent_id"] == "writer"
+    assert body["field"] == "model"
+    # Restored to the pre-edit model.
+    cfg2 = yaml.safe_load(afile.read_text())
+    assert cfg2["agents"]["writer"]["model"] == "openai/gpt-4o-mini"
+
+
+@pytest.mark.asyncio
+async def test_undo_hard_field_permissions_restores_matrix(mesh_app):
+    """Hard-field undo for permissions: the grant is reverted in
+    permissions.json AND the in-memory matrix is reloaded. Defensive
+    fix exercise — even when no prior entry existed for the agent, the
+    setdefault path stores both the apply and the undo state."""
+    app, _, tmp_path = mesh_app
+    perms_file = tmp_path / "config" / "permissions.json"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        # Grant browser permission (writer had no entry → setdefault).
+        r = await c.post(
+            "/mesh/agents/writer/edit-soft",
+            json={
+                "field": "permissions",
+                "value": {"can_use_browser": True},
+                "reason": "user_asked",
+            },
+            headers=_human_origin_headers(),
+        )
+        assert r.status_code == 200, r.text
+        token = r.json()["undo_token"]
+        # Entry exists with the grant.
+        import json
+        perms_after = json.loads(perms_file.read_text())
+        assert perms_after["permissions"]["writer"]["can_use_browser"] is True
+        # Undo restores the empty/prior state.
+        r2 = await c.post(
+            f"/mesh/changes/undo/{token}",
+            json={},
+            headers=_human_origin_headers(),
+        )
+    assert r2.status_code == 200, r2.text
+    assert r2.json()["field"] == "permissions"
+    # File rewritten with the pre-grant state.
+    perms_reverted = json.loads(perms_file.read_text())
+    # writer's entry may still exist but can_use_browser is no longer set
+    # (or absent, depending on initial state — both shapes mean "not
+    # granted"). The grant key, if present, must not be True.
+    writer_perms = perms_reverted.get("permissions", {}).get("writer", {})
+    assert writer_perms.get("can_use_browser") is not True
