@@ -5119,8 +5119,17 @@ def create_mesh_app(
         if field == "permissions":
             from src.cli.config import _load_permissions, _save_permissions
             perms = _load_permissions()
-            if agent_id in perms.get("permissions", {}):
-                perms["permissions"][agent_id].update(new_value)
+            # Use setdefault so the write applies even if the agent's
+            # entry was never backfilled (defensive — startup runs
+            # ``_ensure_all_agent_permissions`` so this should be rare,
+            # but the unified edit path now routes more permissions
+            # edits here and a silent no-op would be worse than a
+            # late-init). Falsy ``new_value`` (None, empty dict) is a
+            # caller bug; ``_validate_edit`` rejects bad shapes upstream.
+            if isinstance(new_value, dict):
+                perms.setdefault("permissions", {}).setdefault(
+                    agent_id, {},
+                ).update(new_value)
                 _save_permissions(perms)
             # Hot-reload the in-memory permission matrix
             if permissions is not None:
