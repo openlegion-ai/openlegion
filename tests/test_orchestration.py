@@ -798,6 +798,26 @@ def test_event_bus_unset_disables_emit(tmp_path):
     assert captured == []
 
 
+def test_task_status_changed_payload_carries_title_and_outcome(tmp_path):
+    """The ``task_status_changed`` payload is enriched with ``title`` and
+    ``outcome`` so downstream consumers (the dashboard delivered-
+    notification producer, the activity feed) don't need a follow-up
+    task lookup. ``outcome`` is the row's stored value at read time —
+    ``None`` for never-rated, set for already-rated transitions (the
+    producer uses this to skip pinging the bell on auto-graded work)."""
+    t = _make_store(tmp_path)
+    _bus, captured = _attach_event_bus(t)
+    rec = t.create(
+        creator="scout", assignee="analyst", title="Q3 launch brief",
+    )
+    captured.clear()
+    t.update_status(rec["id"], "accepted", actor="analyst")
+    evt = next(c for c in captured if c[0] == "task_status_changed")
+    assert evt[2]["title"] == "Q3 launch brief"
+    # Never rated yet → outcome is None on the wire.
+    assert evt[2]["outcome"] is None
+
+
 # ── PR 4 — outcome capture + rework spawning ──────────────────────
 
 

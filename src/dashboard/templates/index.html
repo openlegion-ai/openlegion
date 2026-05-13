@@ -3848,14 +3848,17 @@
                             <button type="button"
                               @click.stop="rateDelivery(t.id, 'accepted')"
                               title="Accept — looks good"
+                              aria-label="Accept this delivery"
                               class="text-sm px-1.5 py-0.5 rounded hover:bg-emerald-500/20 text-emerald-300">&#x1F44D;</button>
                             <button type="button"
                               @click.stop="rateDelivery(t.id, 'acknowledged')"
                               title="Acknowledge — reviewed without judgement"
+                              aria-label="Acknowledge this delivery without judgement"
                               class="text-sm px-1.5 py-0.5 rounded hover:bg-gray-500/20 text-gray-400">&#x2796;</button>
                             <button type="button"
                               @click.stop="openInlineRework(t.id)"
                               title="Needs rework — add a brief"
+                              aria-label="Mark this delivery for rework"
                               class="text-sm px-1.5 py-0.5 rounded hover:bg-amber-500/20 text-amber-300">&#x1F44E;</button>
                           </div>
                         </template>

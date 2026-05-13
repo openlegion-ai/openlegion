@@ -170,6 +170,7 @@ def _validate_edit(agent_id: str, field: str, value) -> dict | None:
             "description": "Config field to change",
             "enum": [
                 "instructions", "soul", "model", "role", "heartbeat",
+                "heartbeat_schedule",
                 "interface", "thinking", "budget", "permissions",
             ],
         },

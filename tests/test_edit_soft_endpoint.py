@@ -321,6 +321,69 @@ async def test_edit_soft_emits_receipt_event(mesh_app):
 
 
 @pytest.mark.asyncio
+async def test_edit_soft_hard_field_emits_agent_config_updated(
+    mesh_app, monkeypatch,
+):
+    """Hard-field edits MUST also emit ``agent_config_updated`` so the
+    dashboard's agent config card flips to the new value live. Soft
+    fields are covered by ``operator_action_receipt``; hard fields fire
+    BOTH events (receipt for chat-card rendering + config_updated for
+    the SPA's agent-detail panel). ``live`` reports whether the
+    agent-side hot-reload (model / thinking) succeeded — True here
+    because no agent container is registered with the test mesh, so the
+    push-to-agent branch is skipped and ``hot_reload_ok`` stays True.
+    """
+    app, server_module, tmp_path = mesh_app
+    events: list[tuple[str, str, dict]] = []
+
+    class _Bus:
+        def emit(self, event_type, agent="", data=None):
+            events.append((event_type, agent, data))
+
+    blackboard = Blackboard(str(tmp_path / "bb_cfg.db"))
+    pubsub = PubSub()
+    permissions = PermissionMatrix()
+    permissions.permissions["operator"] = AgentPermissions(
+        agent_id="operator", can_route_tasks=True,
+    )
+    router = MessageRouter(permissions, {})
+    bus = _Bus()
+    app2 = server_module.create_mesh_app(
+        blackboard=blackboard,
+        pubsub=pubsub,
+        router=router,
+        permissions=permissions,
+        event_bus=bus,
+    )
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app2), base_url="http://t") as c:
+            r = await c.post(
+                "/mesh/agents/writer/edit-soft",
+                json={
+                    "field": "permissions",
+                    "value": {"can_use_browser": True},
+                    "reason": "user_asked",
+                },
+                headers=_human_origin_headers(),
+            )
+        assert r.status_code == 200, r.text
+        cfg_events = [e for e in events if e[0] == "agent_config_updated"]
+        assert len(cfg_events) == 1
+        _, agent, data = cfg_events[0]
+        assert agent == "writer"
+        assert data["agent_id"] == "writer"
+        assert data["field"] == "permissions"
+        # No new_value on the wire — permissions diffs are sensitive.
+        assert "new_value" not in data and "old_value" not in data
+        # ``live`` reports hot-reload status. No agent registered, so
+        # the push-to-agent branch is skipped and ``hot_reload_ok``
+        # stays True (default for fields without an agent-side reload).
+        assert data["live"] is True
+    finally:
+        blackboard.close()
+
+
+@pytest.mark.asyncio
 async def test_edit_soft_supersede_emits_marker_for_prior_receipts(mesh_app):
     """A second soft-edit on the same field must mark the prior receipt
     as superseded so the dashboard can warn the operator before they

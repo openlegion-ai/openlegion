@@ -896,18 +896,22 @@ class Tasks:
         if not new_assignee:
             raise ValueError("new_assignee is required")
         now = time.time()
-        emitted: tuple[str, str | None] | None = None
+        emitted: tuple[str, str | None, str | None, str | None] | None = None
         with self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 row = conn.execute(
-                    "SELECT assignee, status, project_id FROM tasks WHERE id=?",
+                    "SELECT assignee, status, project_id, title, outcome "
+                    "FROM tasks WHERE id=?",
                     (task_id,),
                 ).fetchone()
                 if not row:
                     conn.execute("ROLLBACK")
                     raise TaskNotFound(task_id)
-                old_assignee, current_status, project_id = row
+                (
+                    old_assignee, current_status, project_id,
+                    task_title, task_outcome,
+                ) = row
                 if current_status in TERMINAL_STATUSES:
                     conn.execute("ROLLBACK")
                     raise InvalidStatusTransition(
@@ -922,18 +926,22 @@ class Tasks:
                     {"from": old_assignee, "to": new_assignee, "reason": reason},
                 )
                 conn.execute("COMMIT")
-                emitted = (current_status, project_id)
+                emitted = (current_status, project_id, task_title, task_outcome)
             except (TaskNotFound, InvalidStatusTransition):
                 raise
             except Exception:
                 conn.execute("ROLLBACK")
                 raise
         if emitted is not None:
-            current_status, project_id = emitted
-            # Task 9 — reroute is a status_changed event with old==new
-            # status; the assignee field carries the *new* assignee so
-            # the dashboard sees who picked up the work. The audit row
-            # already records ``rerouted`` separately for full history.
+            current_status, project_id, task_title, task_outcome = emitted
+            # Reroute is a status_changed event with old==new status; the
+            # assignee field carries the *new* assignee so the dashboard
+            # sees who picked up the work. The audit row already records
+            # ``rerouted`` separately for full history. ``title`` and
+            # ``outcome`` ride on the payload to match the shape emitted
+            # by ``update_status`` — downstream consumers (notification
+            # producer, activity feed) get a uniform schema regardless
+            # of which transition path fired.
             self._safe_emit(
                 "task_status_changed",
                 agent=actor,
@@ -945,6 +953,8 @@ class Tasks:
                     "new_status": current_status,
                     "actor": actor,
                     "ts": now,
+                    "title": task_title,
+                    "outcome": task_outcome,
                 },
             )
         return self.get(task_id)  # type: ignore[return-value]

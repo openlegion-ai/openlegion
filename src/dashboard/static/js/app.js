@@ -461,6 +461,20 @@ function dashboard() {
     recentlyDeliveredArtifacts: {},
     recentlyDeliveredExpanded: {},
     _recentlyDeliveredFetching: {},
+    // Inline rework state for the "Recently delivered" cards — keyed by
+    // task_id. Opens an inline textarea on the card instead of bouncing
+    // through the drillIn modal so the user stays in flow. Cleared by
+    // ``rateDelivery`` after a successful submit. Initialized here in
+    // the data section so Alpine treats them as first-class reactive
+    // state (template helpers ``inlineReworkIsOpen`` / ``inlineReworkText``
+    // read them indirectly, but a future direct-template read should
+    // still react).
+    _inlineReworkOpen: {},
+    _inlineReworkText: {},
+    // Per-task in-flight guard for inline rating clicks — prevents a
+    // user from double-firing rateDelivery while the POST is still
+    // round-tripping. Cleared in the finally block of ``rateDelivery``.
+    _rateDeliveryInflight: {},
     workplaceProjectFilter: '',
     // Per-column flag: when true, the kanban column ignores the 14-day
     // archive cutoff and shows old pending/blocked rows. Keyed by status
@@ -3432,8 +3446,7 @@ function dashboard() {
     //     with the comment populated.
     async rateDelivery(taskId, outcome, feedback = '') {
       if (!taskId) return;
-      if (this._rateDeliveryInflight && this._rateDeliveryInflight[taskId]) return;
-      this._rateDeliveryInflight = this._rateDeliveryInflight || {};
+      if (this._rateDeliveryInflight[taskId]) return;
       this._rateDeliveryInflight[taskId] = true;
       try {
         const resp = await fetch(
@@ -3463,12 +3476,8 @@ function dashboard() {
           }
         }
         // Clear the per-card inline rework state if it was open.
-        if (this._inlineReworkOpen && this._inlineReworkOpen[taskId]) {
-          delete this._inlineReworkOpen[taskId];
-        }
-        if (this._inlineReworkText && this._inlineReworkText[taskId]) {
-          delete this._inlineReworkText[taskId];
-        }
+        delete this._inlineReworkOpen[taskId];
+        delete this._inlineReworkText[taskId];
         if (outcome === 'rework' && data.rework_task_id) {
           this.showToast(`Rework task created${data.rework_assignee ? ' for ' + data.rework_assignee : ''}.`);
         } else if (outcome === 'rework' && data.rework_error) {
@@ -3483,24 +3492,20 @@ function dashboard() {
       }
     },
 
-    // Inline rework state — keyed by task_id. Opens an inline textarea
-    // on the card instead of bouncing through the drillIn modal so the
-    // user stays in flow.
-    _inlineReworkOpen: {},
-    _inlineReworkText: {},
-
+    // ``_inlineReworkOpen`` / ``_inlineReworkText`` / ``_rateDeliveryInflight``
+    // declared in the data section above so Alpine treats them as
+    // reactive state. Method below just read/write them.
     inlineReworkIsOpen(taskId) {
       return !!(this._inlineReworkOpen && this._inlineReworkOpen[taskId]);
     },
 
     openInlineRework(taskId) {
-      this._inlineReworkOpen = this._inlineReworkOpen || {};
       this._inlineReworkOpen[taskId] = true;
     },
 
     closeInlineRework(taskId) {
-      if (this._inlineReworkOpen) delete this._inlineReworkOpen[taskId];
-      if (this._inlineReworkText) delete this._inlineReworkText[taskId];
+      delete this._inlineReworkOpen[taskId];
+      delete this._inlineReworkText[taskId];
     },
 
     inlineReworkText(taskId) {
@@ -3508,7 +3513,6 @@ function dashboard() {
     },
 
     setInlineReworkText(taskId, value) {
-      this._inlineReworkText = this._inlineReworkText || {};
       this._inlineReworkText[taskId] = value;
     },
 
