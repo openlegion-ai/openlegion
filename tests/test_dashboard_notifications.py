@@ -342,34 +342,84 @@ class TestNotificationsProducerWiring:
         _teardown(self.components)
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
-    def test_task_outcome_delivered_creates_notification(self):
-        self.bus.emit("task_outcome", agent="operator", data={
+    def test_task_status_changed_to_done_creates_delivered_notification(self):
+        """Worker finishes a task (status->done, outcome=NULL): bell
+        pings with kind=delivered so the user knows there's new work
+        to review. This replaces the legacy outcome=='delivered' path
+        which never fired because 'delivered' was never a valid
+        outcome value.
+        """
+        self.bus.emit("task_status_changed", agent="writer", data={
             "task_id": "t-1",
             "project_id": "proj-a",
             "assignee": "writer",
-            "status": "done",
-            "outcome": "delivered",
-            "feedback": "Looks good",
+            "old_status": "working",
+            "new_status": "done",
+            "title": "Q3 launch brief draft",
+            "outcome": None,
         })
         rows = self.store.list_recent()
         assert len(rows) == 1
         row = rows[0]
         assert row["kind"] == "delivered"
         assert "writer" in row["title"]
-        assert "delivered" in row["title"].lower()
+        assert "Q3 launch brief" in row["title"]
         assert row["payload"]["task_id"] == "t-1"
+        assert row["payload"]["assignee"] == "writer"
 
-    def test_task_outcome_rejected_does_not_create_delivery_notification(self):
-        # Only "delivered" outcomes surface — rejection / rework / re-rate
-        # are operator-initiated and surface elsewhere (task drawer).
+    def test_task_status_changed_skips_operator_self_delivery(self):
+        """Operator-self transitions don't ping — the operator IS the
+        user's surface; it doesn't deliver TO the user."""
+        self.bus.emit("task_status_changed", agent="operator", data={
+            "task_id": "t-op",
+            "assignee": "operator",
+            "old_status": "working",
+            "new_status": "done",
+            "title": "operator-self maintenance",
+        })
+        assert self.store.list_recent() == []
+
+    def test_task_status_changed_skips_already_rated(self):
+        """An auto-graded or pre-rated transition doesn't fire a fresh
+        notification — the rating already represents review."""
+        self.bus.emit("task_status_changed", agent="writer", data={
+            "task_id": "t-auto",
+            "assignee": "writer",
+            "old_status": "working",
+            "new_status": "done",
+            "title": "auto-rated delivery",
+            "outcome": "accepted",
+        })
+        assert self.store.list_recent() == []
+
+    def test_task_status_changed_non_done_transition_no_notification(self):
+        self.bus.emit("task_status_changed", agent="writer", data={
+            "task_id": "t-block",
+            "assignee": "writer",
+            "old_status": "working",
+            "new_status": "blocked",
+            "title": "still in flight",
+        })
+        assert self.store.list_recent() == []
+
+    def test_task_outcome_does_not_create_notification(self):
+        """task_outcome events no longer create bell entries — the
+        delivery already pinged when the worker finished. Re-rates,
+        rejections, etc. update the UI via direct WebSocket listeners,
+        not via a fresh notification row."""
         self.bus.emit("task_outcome", agent="operator", data={
-            "task_id": "t-2",
-            "outcome": "rejected",
+            "task_id": "t-r1",
+            "outcome": "rework",
             "assignee": "writer",
         })
         self.bus.emit("task_outcome", agent="operator", data={
-            "task_id": "t-3",
-            "outcome": "needs_rework",
+            "task_id": "t-r2",
+            "outcome": "accepted",
+            "assignee": "writer",
+        })
+        self.bus.emit("task_outcome", agent="operator", data={
+            "task_id": "t-r3",
+            "outcome": "acknowledged",
             "assignee": "writer",
         })
         assert self.store.list_recent() == []
@@ -490,12 +540,13 @@ class TestNotificationsProducerEmitsLiveEvent:
     def _added_events(self) -> list[dict]:
         return [e for e in self.captured if e["type"] == "notification_added"]
 
-    def test_task_outcome_delivered_emits_notification_added(self):
-        self.bus.emit("task_outcome", agent="operator", data={
+    def test_task_status_changed_to_done_emits_notification_added(self):
+        self.bus.emit("task_status_changed", agent="writer", data={
             "task_id": "t-1",
             "assignee": "writer",
-            "outcome": "delivered",
-            "feedback": "Great work",
+            "old_status": "working",
+            "new_status": "done",
+            "title": "Great brief",
         })
         added = self._added_events()
         assert len(added) == 1
@@ -573,19 +624,21 @@ class TestNotificationsProducerEmitsLiveEvent:
     # producer branch should pass the SAME payload it persisted to the
     # store through into ``_emit_notification_added``.
 
-    def test_task_outcome_delivered_emit_carries_payload(self):
-        self.bus.emit("task_outcome", agent="operator", data={
+    def test_task_status_changed_done_emit_carries_payload(self):
+        self.bus.emit("task_status_changed", agent="writer", data={
             "task_id": "t-1",
             "project_id": "proj-a",
             "assignee": "writer",
-            "outcome": "delivered",
+            "old_status": "working",
+            "new_status": "done",
+            "title": "Q3 brief",
         })
         added = self._added_events()
         assert len(added) == 1
         payload = added[0]["data"].get("payload") or {}
         assert payload.get("task_id") == "t-1"
         assert payload.get("project_id") == "proj-a"
-        assert payload.get("outcome") == "delivered"
+        assert payload.get("assignee") == "writer"
 
     def test_pending_action_created_emit_carries_payload(self):
         self.bus.emit("pending_action_created", agent="operator", data={

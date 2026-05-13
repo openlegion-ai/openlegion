@@ -309,12 +309,17 @@ async def test_manage_task_retry_over_budget(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_manage_project_archive_provenance_required():
+async def test_manage_project_archive_autonomous_allowed():
+    """The provenance gate was dropped — operator can archive a project
+    autonomously (e.g. during heartbeat). The "undo" comes from
+    archive being reversible via the dedicated unarchive endpoint."""
     from src.agent.builtins.operator_tools import manage_project
+    mc = MagicMock()
+    mc.archive_project = AsyncMock(return_value={"archived": True, "project": "p1"})
     messages = [{"role": "user", "content": "x", "_origin": "system:heartbeat"}]
     result = await manage_project("p1", "archive",
-                                    mesh_client=MagicMock(), _messages=messages)
-    assert result["error"] == "provenance_check_failed"
+                                    mesh_client=mc, _messages=messages)
+    assert result["archived"] is True
 
 
 @pytest.mark.asyncio
@@ -368,12 +373,24 @@ async def test_manage_project_delete_returns_nonce_for_confirmation():
 
 
 @pytest.mark.asyncio
-async def test_manage_project_delete_provenance_required():
+async def test_manage_project_delete_autonomous_allowed():
+    """Delete provenance gate was dropped at the operator-tool layer.
+    Delete still has a mesh-side confirmation TTL window so the brief
+    Confirm step in the dashboard remains; that's tested separately by
+    the propose-delete endpoint tests. The operator-tool itself just
+    forwards the call without checking message origin."""
     from src.agent.builtins.operator_tools import manage_project
+    mc = MagicMock()
+    mc.propose_delete_project = AsyncMock(return_value={
+        "change_id": "n1",
+        "summary": "Delete project 'growth'",
+        "requires_confirmation": True,
+    })
     messages = [{"role": "user", "content": "hb", "_origin": "system:heartbeat"}]
     result = await manage_project("growth", "delete",
-                                    mesh_client=MagicMock(), _messages=messages)
-    assert result["error"] == "provenance_check_failed"
+                                    mesh_client=mc, _messages=messages)
+    assert result["change_id"] == "n1"
+    assert result["requires_confirmation"] is True
 
 
 @pytest.mark.asyncio

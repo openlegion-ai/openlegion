@@ -117,8 +117,12 @@ async def test_edit_soft_happy_path_writes_yaml_and_returns_undo(mesh_app):
 
 
 @pytest.mark.asyncio
-async def test_edit_soft_rejects_hard_field(mesh_app):
-    """model is a hard field — must 400 with 'use propose-edit'."""
+async def test_edit_soft_accepts_hard_field_model_with_30min_ttl(mesh_app):
+    """Hard fields (model/permissions/budget/thinking) now apply
+    immediately via /edit-soft and emit a receipt with a 30-min undo
+    window. The propose+confirm gate was retired in favor of "all
+    edits apply immediately, undo is the safety net".
+    """
     app, _, _ = mesh_app
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         r = await c.post(
@@ -126,8 +130,78 @@ async def test_edit_soft_rejects_hard_field(mesh_app):
             json={"field": "model", "value": "anthropic/claude-haiku", "reason": "user_asked"},
             headers=_human_origin_headers(),
         )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["success"] is True
+    assert body["agent_id"] == "writer"
+    assert body["field"] == "model"
+    assert body["undo_token"]
+    # 30-minute TTL on the receipt for hard fields.
+    assert body["ttl_seconds"] == 1800
+    assert body["field_class"] == "hard"
+
+
+@pytest.mark.asyncio
+async def test_edit_soft_accepts_hard_field_permissions(mesh_app):
+    """Permissions edits apply immediately with a 30-min undo window."""
+    app, _, _ = mesh_app
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/agents/writer/edit-soft",
+            json={
+                "field": "permissions",
+                "value": {"can_use_browser": True},
+                "reason": "user_asked",
+            },
+            headers=_human_origin_headers(),
+        )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["field_class"] == "hard"
+    assert body["ttl_seconds"] == 1800
+    assert body["undo_token"]
+
+
+@pytest.mark.asyncio
+async def test_edit_soft_soft_field_keeps_5min_ttl(mesh_app):
+    """Soft fields keep the snappy 5-minute undo window."""
+    app, _, _ = mesh_app
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/agents/writer/edit-soft",
+            json={"field": "instructions", "value": "# tightened", "reason": "user_asked"},
+            headers=_human_origin_headers(),
+        )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["field_class"] == "soft"
+    assert body["ttl_seconds"] == 300
+
+
+@pytest.mark.asyncio
+async def test_edit_soft_rejects_invalid_model_value(mesh_app):
+    """Validation still runs — empty model rejected with 400."""
+    app, _, _ = mesh_app
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/agents/writer/edit-soft",
+            json={"field": "model", "value": "", "reason": "user_asked"},
+            headers=_human_origin_headers(),
+        )
     assert r.status_code == 400
-    assert "propose" in r.text.lower()
+    assert "model" in r.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_edit_soft_rejects_invalid_thinking_value(mesh_app):
+    app, _, _ = mesh_app
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/agents/writer/edit-soft",
+            json={"field": "thinking", "value": "ultra", "reason": "user_asked"},
+            headers=_human_origin_headers(),
+        )
+    assert r.status_code == 400
 
 
 @pytest.mark.asyncio

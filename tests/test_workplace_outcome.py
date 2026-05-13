@@ -178,6 +178,24 @@ class TestWorkplaceOutcome:
         )
         assert resp.status_code == 400
 
+    def test_outcome_acknowledged_no_feedback_allowed(self):
+        """The new 'acknowledged' outcome is the neutral ➖ rating: it
+        records that the user reviewed the work without judgement,
+        accepts an empty feedback string, and does NOT spawn a rework
+        task."""
+        rec = _create_done_task(
+            self.tasks, creator="op", assignee="analyst", title="t",
+        )
+        resp = self.client.post(
+            f"/dashboard/api/workplace/tasks/{rec['id']}/outcome",
+            json={"outcome": "acknowledged", "feedback": ""},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["ok"] is True
+        assert body["task"]["outcome"] == "acknowledged"
+        assert "rework_task_id" not in body
+
     def test_outcome_non_terminal_returns_409(self):
         rec = self.tasks.create(creator="op", assignee="analyst", title="t")
         self.tasks.update_status(rec["id"], "working", actor="analyst")

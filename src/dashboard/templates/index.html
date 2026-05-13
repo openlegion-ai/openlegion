@@ -3836,10 +3836,62 @@
                         <span class="text-emerald-400 text-xs shrink-0">&check;</span>
                         <div class="min-w-0 flex-1 text-xs text-gray-200 truncate" x-text="t.title || '(untitled)'"></div>
                         <div class="text-[11px] text-gray-500 hidden sm:block shrink-0" x-text="(t.assignee || '') + (t.completed_at ? ' · ' + (formatRelativeTime((t.completed_at || 0) * 1000) || 'just now') : '')"></div>
+                        <!-- Inline rating buttons. Hidden once the task
+                             carries an ``outcome`` — the rating chip
+                             shows instead. ``rateDelivery`` posts to
+                             the existing /workplace/tasks/{id}/outcome
+                             endpoint; the optimistic update flips this
+                             group to the chip without waiting on a
+                             round-trip. -->
+                        <template x-if="!t.outcome">
+                          <div class="flex items-center gap-1 shrink-0" data-testid="rate-buttons">
+                            <button type="button"
+                              @click.stop="rateDelivery(t.id, 'accepted')"
+                              title="Accept — looks good"
+                              class="text-sm px-1.5 py-0.5 rounded hover:bg-emerald-500/20 text-emerald-300">&#x1F44D;</button>
+                            <button type="button"
+                              @click.stop="rateDelivery(t.id, 'acknowledged')"
+                              title="Acknowledge — reviewed without judgement"
+                              class="text-sm px-1.5 py-0.5 rounded hover:bg-gray-500/20 text-gray-400">&#x2796;</button>
+                            <button type="button"
+                              @click.stop="openInlineRework(t.id)"
+                              title="Needs rework — add a brief"
+                              class="text-sm px-1.5 py-0.5 rounded hover:bg-amber-500/20 text-amber-300">&#x1F44E;</button>
+                          </div>
+                        </template>
+                        <template x-if="t.outcome">
+                          <span class="text-[10px] px-1.5 py-0.5 rounded shrink-0"
+                                :class="t.outcome === 'accepted' ? 'bg-emerald-900/40 text-emerald-300 border border-emerald-700/40' : (t.outcome === 'rework' ? 'bg-amber-900/40 text-amber-300 border border-amber-700/40' : (t.outcome === 'rejected' ? 'bg-rose-900/40 text-rose-300 border border-rose-700/40' : 'bg-gray-700/40 text-gray-300 border border-gray-600/40'))"
+                                x-text="drillInOutcomeLabel(t.outcome) || t.outcome"></span>
+                        </template>
                         <button type="button"
                           @click.stop="openTaskDrillIn(t.id)"
                           class="text-[11px] px-2 py-0.5 rounded bg-gray-700 hover:bg-gray-600 text-gray-200 shrink-0">Open</button>
                       </div>
+                      <!-- Inline rework brief. Expands when the user
+                           clicks &#x1F44E; on the card. Submit calls the
+                           same rateDelivery handler with outcome='rework'
+                           which auto-spawns the follow-up task. Cancel
+                           clears the textarea without writing. -->
+                      <template x-if="inlineReworkIsOpen(t.id)">
+                        <div class="mt-1.5 pl-5" data-testid="inline-rework">
+                          <textarea
+                            :value="inlineReworkText(t.id)"
+                            @input="setInlineReworkText(t.id, $event.target.value)"
+                            rows="2"
+                            maxlength="2000"
+                            placeholder="What needs to change? This becomes the rework brief."
+                            class="w-full text-[11px] text-gray-200 bg-gray-900/60 border border-gray-700/50 rounded px-2 py-1.5 focus:outline-none focus:border-amber-500/60"></textarea>
+                          <div class="flex items-center gap-2 mt-1">
+                            <button type="button"
+                              @click.stop="submitInlineRework(t.id)"
+                              class="text-[11px] px-2 py-0.5 rounded bg-amber-600 hover:bg-amber-500 text-white">Submit rework</button>
+                            <button type="button"
+                              @click.stop="closeInlineRework(t.id)"
+                              class="text-[11px] px-2 py-0.5 rounded bg-gray-700 hover:bg-gray-600 text-gray-200">Cancel</button>
+                          </div>
+                        </div>
+                      </template>
                       <!-- Inline artifact preview. Hidden until the
                            lazy fetch completes; collapses again if the
                            artifact turns out to be non-text or absent. -->

@@ -760,13 +760,15 @@ class MeshClient:
         return response.json()
 
     async def edit_soft(self, agent_id: str, field: str, value, reason: str) -> dict:
-        """Apply a soft-edit immediately. Returns ``undo_token``+``expires_at``.
+        """Apply an agent-config edit immediately. Returns receipt.
 
-        Backed by ``POST /mesh/agents/{id}/edit-soft``. The endpoint
-        rejects hard fields (model/budget/permissions/thinking) with 400,
-        in which case the operator-tool layer should fall through to the
-        propose+confirm path. Soft edits are revertible for 5 minutes
-        via ``undo_change``.
+        Backed by ``POST /mesh/agents/{id}/edit-soft`` (path name retained
+        for backward compatibility; semantically it is "edit-apply"). All
+        fields — soft (instructions/soul/heartbeat/...) and hard (model/
+        permissions/budget/thinking) — apply immediately. The undo TTL is
+        field-aware: 5 min for soft fields, 30 min for hard fields. The
+        response includes ``undo_token``, ``expires_at``, ``ttl_seconds``,
+        and ``field_class``.
         """
         client = await self._get_client()
         response = await client.post(

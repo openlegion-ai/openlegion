@@ -2940,6 +2940,7 @@ function dashboard() {
 
     drillInOutcomeLabel(outcome) {
       if (outcome === 'accepted') return 'Accepted';
+      if (outcome === 'acknowledged') return 'Acknowledged';
       if (outcome === 'rework') return 'Marked for rework';
       if (outcome === 'rejected') return 'Rejected';
       return '';
@@ -2972,7 +2973,10 @@ function dashboard() {
       // (e.g. operator hit "Reject" by accident). The submit button for
       // the existing rating is disabled to prevent a no-op double-click.
       if (this.drillInData.task.outcome === outcome) return false;
-      if (outcome === 'accepted') return true;
+      // ``accepted`` and ``acknowledged`` are silent-allowed; ``rework``
+      // and ``rejected`` require feedback text so the agent has
+      // something to learn from.
+      if (outcome === 'accepted' || outcome === 'acknowledged') return true;
       return Boolean((this.drillInComment || '').trim());
     },
 
@@ -3227,6 +3231,41 @@ function dashboard() {
         });
       }
 
+      // Unrated deliveries — synthetic singleton entry. The user's
+      // primary feedback signal is the rating on completed work, so we
+      // surface a "N deliveries need rating" nudge once any of the
+      // Recently Delivered cards are unrated. Click jumps to the
+      // Activity sub-tab where the cards (with inline rating buttons)
+      // live.
+      const unrated = (this.recentlyDeliveredItems || []).filter(t => !t.outcome).length;
+      if (unrated > 0) {
+        items.push({
+          id: 'unrated-deliveries',
+          kind: 'unrated',
+          icon: '?',
+          title: unrated === 1
+            ? '1 delivery needs your rating'
+            : `${unrated} deliveries need your rating`,
+          subtitle: this._needsYouSubtitle({ text: 'Thumbs up, neutral, or rework' }),
+          actions: [
+            {
+              label: 'Review',
+              style: 'indigo',
+              handler: () => {
+                this.activeTab = 'workplace';
+                this.homeTab = 'activity';
+                // Scroll the first unrated card into view next tick so
+                // the user lands directly on the rating buttons.
+                requestAnimationFrame(() => {
+                  const el = document.querySelector('[data-testid="home-just-delivered"]');
+                  if (el && el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                });
+              },
+            },
+          ],
+        });
+      }
+
       return items;
     },
 
@@ -3379,6 +3418,107 @@ function dashboard() {
       if (n > nowSec) n = nowSec;
       if (n < 0) n = 0;
       return n;
+    },
+
+    // Inline rate handler for the "Recently delivered" cards. Reuses
+    // the dashboard ``/workplace/tasks/{id}/outcome`` endpoint that the
+    // drillIn modal hits. Optimistically updates the local row so the
+    // buttons collapse to a rating chip without waiting for the
+    // ``task_outcome`` event round-trip.
+    //
+    // ``outcome``: 'accepted' | 'acknowledged' | 'rework'
+    //   - 'accepted' / 'acknowledged' send no feedback (silent rating).
+    //   - 'rework' opens the inline textarea; this method is called
+    //     with the comment populated.
+    async rateDelivery(taskId, outcome, feedback = '') {
+      if (!taskId) return;
+      if (this._rateDeliveryInflight && this._rateDeliveryInflight[taskId]) return;
+      this._rateDeliveryInflight = this._rateDeliveryInflight || {};
+      this._rateDeliveryInflight[taskId] = true;
+      try {
+        const resp = await fetch(
+          `${window.__config.apiBase}/workplace/tasks/${encodeURIComponent(taskId)}/outcome`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Requested-With': 'XMLHttpRequest',
+            },
+            body: JSON.stringify({ outcome, feedback: feedback || '' }),
+          }
+        );
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          this.showToast(data.detail || `Rate failed (HTTP ${resp.status})`);
+          return;
+        }
+        // Optimistic write-back so the card flips to "Rated" without
+        // waiting on the next ``task_outcome`` WebSocket event.
+        const updated = data.task || {};
+        for (const list of [this.workplaceTasks, this.workplaceOutputs, this.recentlyDeliveredItems]) {
+          const row = (list || []).find(r => r.id === taskId);
+          if (row) {
+            row.outcome = updated.outcome || outcome;
+            row.feedback_text = updated.feedback_text ?? (feedback || null);
+          }
+        }
+        // Clear the per-card inline rework state if it was open.
+        if (this._inlineReworkOpen && this._inlineReworkOpen[taskId]) {
+          delete this._inlineReworkOpen[taskId];
+        }
+        if (this._inlineReworkText && this._inlineReworkText[taskId]) {
+          delete this._inlineReworkText[taskId];
+        }
+        if (outcome === 'rework' && data.rework_task_id) {
+          this.showToast(`Rework task created${data.rework_assignee ? ' for ' + data.rework_assignee : ''}.`);
+        } else if (outcome === 'rework' && data.rework_error) {
+          this.showToast(`Rework noted but follow-up task could not be spawned: ${data.rework_error}`);
+        } else {
+          this.showToast(`Rated: ${this.drillInOutcomeLabel(outcome) || outcome}.`);
+        }
+      } catch (e) {
+        this.showToast(`Rate failed: ${e.message || e}`);
+      } finally {
+        delete this._rateDeliveryInflight[taskId];
+      }
+    },
+
+    // Inline rework state — keyed by task_id. Opens an inline textarea
+    // on the card instead of bouncing through the drillIn modal so the
+    // user stays in flow.
+    _inlineReworkOpen: {},
+    _inlineReworkText: {},
+
+    inlineReworkIsOpen(taskId) {
+      return !!(this._inlineReworkOpen && this._inlineReworkOpen[taskId]);
+    },
+
+    openInlineRework(taskId) {
+      this._inlineReworkOpen = this._inlineReworkOpen || {};
+      this._inlineReworkOpen[taskId] = true;
+    },
+
+    closeInlineRework(taskId) {
+      if (this._inlineReworkOpen) delete this._inlineReworkOpen[taskId];
+      if (this._inlineReworkText) delete this._inlineReworkText[taskId];
+    },
+
+    inlineReworkText(taskId) {
+      return (this._inlineReworkText && this._inlineReworkText[taskId]) || '';
+    },
+
+    setInlineReworkText(taskId, value) {
+      this._inlineReworkText = this._inlineReworkText || {};
+      this._inlineReworkText[taskId] = value;
+    },
+
+    submitInlineRework(taskId) {
+      const text = (this.inlineReworkText(taskId) || '').trim();
+      if (!text) {
+        this.showToast('Add a brief — what should change in the rework?');
+        return;
+      }
+      this.rateDelivery(taskId, 'rework', text);
     },
 
     // Recompute the memoised "Recently delivered" slice. Called whenever

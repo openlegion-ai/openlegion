@@ -156,21 +156,15 @@ def _validate_edit(agent_id: str, field: str, value) -> dict | None:
     return None
 
 
-_PROPOSE_EDIT_FIELDS = _VALID_FIELDS - {"heartbeat_schedule"}
-
-
 @skill(
     name="propose_edit",
     description=(
-        "Propose a change to an agent's config. Returns a preview diff and "
-        "change_id; show the preview and get user approval before calling "
-        "confirm_edit. See INSTRUCTIONS.md for field formats."
+        "DEPRECATED — calls edit_agent under the hood. All config edits now "
+        "apply immediately and emit an undo receipt; no separate confirm step "
+        "is needed. Prefer edit_agent directly."
     ),
     parameters={
-        "agent_id": {
-            "type": "string",
-            "description": "Target agent ID",
-        },
+        "agent_id": {"type": "string", "description": "Target agent ID"},
         "field": {
             "type": "string",
             "description": "Config field to change",
@@ -185,156 +179,64 @@ _PROPOSE_EDIT_FIELDS = _VALID_FIELDS - {"heartbeat_schedule"}
         },
     },
 )
-async def propose_edit(agent_id: str, field: str, value, *, mesh_client=None, **_kw) -> dict:
-    """Propose a config change for an agent. Returns preview for user review."""
-    if not _is_operator():
-        return {"error": "This tool is only available to the operator agent."}
-    if mesh_client is None:
-        return {"error": "No mesh_client available"}
-
-    # Self-modification prevention
-    if agent_id.lower() == _OPERATOR_AGENT_ID:
-        return {
-            "error": (
-                "Cannot modify the operator agent. "
-                "Use the dashboard to change operator settings."
-            ),
-        }
-
-    # Validate field. ``heartbeat_schedule`` is soft-only — the propose
-    # path is for hard fields, so reject the schedule here and route the
-    # caller to ``edit_agent`` instead.
-    if field not in _PROPOSE_EDIT_FIELDS:
-        return {
-            "error": (
-                f"Invalid field '{field}'. "
-                f"Must be one of: {sorted(_PROPOSE_EDIT_FIELDS)}"
-            ),
-        }
-
-    # Permission ceiling validation
-    if field == "permissions" and isinstance(value, dict):
-        for key, max_val in _OPERATOR_PERMISSION_CEILING.items():
-            if key not in value:
-                continue
-            if isinstance(max_val, bool):
-                if value[key] and not max_val:
-                    return {
-                        "error": (
-                            f"Permission ceiling exceeded: '{key}' cannot be set "
-                            "to True by the operator. Use the dashboard for "
-                            "advanced permissions."
-                        ),
-                    }
-            elif isinstance(max_val, list):
-                requested = set(value.get(key, []))
-                allowed = set(max_val)
-                if "*" not in allowed and not requested.issubset(allowed):
-                    excess = requested - allowed
-                    return {
-                        "error": (
-                            f"Permission ceiling exceeded: '{key}' patterns "
-                            f"{excess} exceed allowed {allowed}. Use the "
-                            "dashboard for advanced permissions."
-                        ),
-                    }
-
-    # Budget validation
-    if field == "budget" and isinstance(value, dict):
-        daily = value.get("daily_usd", 0)
-        monthly = value.get("monthly_usd", 0)
-        if not isinstance(daily, (int, float)) or not (0.01 <= daily <= 1000):
-            return {"error": f"daily_usd must be 0.01-1000, got {daily}"}
-        if not isinstance(monthly, (int, float)) or not (0.10 <= monthly <= 30000):
-            return {"error": f"monthly_usd must be 0.10-30000, got {monthly}"}
-
-    # Thinking validation
-    if field == "thinking" and value not in ("off", "low", "medium", "high"):
-        return {
-            "error": (
-                f"thinking must be 'off', 'low', 'medium', or 'high', "
-                f"got '{value}'"
-            ),
-        }
-
-    try:
-        result = await mesh_client.propose_config_change(agent_id, field, value)
-        return result
-    except Exception as e:
-        return {"error": f"Failed to propose edit: {e}"}
+async def propose_edit(
+    agent_id: str, field: str, value, *,
+    mesh_client=None, _messages=None, **_kw,
+) -> dict:
+    """Deprecated shim — applies the edit immediately via edit_agent."""
+    result = await edit_agent(
+        agent_id, field, value, reason="user_asked",
+        mesh_client=mesh_client, _messages=_messages,
+    )
+    if isinstance(result, dict) and "error" not in result:
+        result.setdefault(
+            "deprecation_notice",
+            "propose_edit is deprecated. The change applied immediately; "
+            "no confirm_edit call is needed. Use edit_agent next time.",
+        )
+    return result
 
 
 @skill(
     name="confirm_edit",
     description=(
-        "Apply a previously proposed agent config change. Only call this after "
-        "the user has seen the preview and explicitly confirmed. Will fail if "
-        "the user has not confirmed in the conversation."
+        "DEPRECATED — no-op. Config edits now apply immediately via "
+        "edit_agent and emit an undo receipt, so there is no pending change "
+        "to confirm. Tool retained only so in-flight conversations don't "
+        "break; do not call from new code."
     ),
     parameters={
         "change_id": {
             "type": "string",
-            "description": "Change ID from propose_edit",
+            "description": "Legacy change_id (ignored)",
         },
     },
 )
 async def confirm_edit(change_id: str, *, mesh_client=None, _messages=None, **_kw) -> dict:
-    """Apply a proposed config change after user confirmation."""
+    """Deprecated no-op. Returns a friendly hint to use edit_agent."""
     if not _is_operator():
         return {"error": "This tool is only available to the operator agent."}
-    if mesh_client is None:
-        return {"error": "No mesh_client available"}
-
-    # Provenance check: require user confirmation
-    from src.agent.loop import _last_message_is_user_origin
-
-    if _messages is None or not _last_message_is_user_origin(_messages):
-        return {
-            "error": "provenance_check_failed",
-            "detail": (
-                "User confirmation required. Please show the proposed change "
-                "to the user and ask them to confirm before calling confirm_edit."
-            ),
-        }
-
-    try:
-        result = await mesh_client.confirm_config_change(change_id)
-        return result
-    except Exception as e:
-        error_str = str(e)
-        # Task 2d migrated /mesh/config/confirm from 404 -> 400 with
-        # "Pending action invalid or expired" for unknown/expired/
-        # digest-mismatch/origin-failure rows. Match either form so
-        # existing operator UX (re-propose) keeps working.
-        lower = error_str.lower()
-        if (
-            "404" in error_str
-            or "not found" in lower
-            or "invalid or expired" in lower
-        ):
-            return {
-                "error": "change_expired_or_lost",
-                "detail": (
-                    "The proposed change was not found (expired or server "
-                    "restarted). Please call propose_edit again."
-                ),
-            }
-        return {"error": f"Failed to confirm edit: {e}"}
+    return {
+        "success": True,
+        "applied": False,
+        "deprecation_notice": (
+            "confirm_edit is a no-op. Config edits now apply immediately "
+            "when you call edit_agent; the user sees an undo receipt with a "
+            "5–30 minute revert window. Don't call confirm_edit anymore."
+        ),
+    }
 
 
 @skill(
     name="edit_agent",
     description=(
-        "Change an agent's configuration. Branches internally on field severity:\n"
-        "- Soft fields (instructions, soul, heartbeat, heartbeat_schedule, "
-        "interface, role) apply IMMEDIATELY. The user sees a receipt card "
-        "with [View diff] [Undo] (5-minute undo window). No confirmation "
-        "step needed — act decisively on what the user asked for.\n"
-        "- Hard fields (model, budget, permissions, thinking) return a "
-        "preview + change_id (expires in 5 minutes for most actions, "
-        "30 minutes for hard-field edits so the user has time to think). "
-        "Show the preview to the user; on explicit "
-        "confirmation call confirm_edit(change_id).\n\n"
+        "Change an agent's configuration. All edits apply IMMEDIATELY and "
+        "emit a receipt card with [View diff] [Undo]. No confirmation step "
+        "— act decisively on what the user asked for. The undo window is "
+        "5 minutes for soft fields (instructions/soul/role/heartbeat/"
+        "heartbeat_schedule/interface) and 30 minutes for hard fields "
+        "(model/permissions/budget/thinking) so the user has more time to "
+        "catch a costly edit.\n\n"
         "Always pass `reason` so the audit trail captures intent.\n\n"
         "Fields & value formats:\n"
         "- instructions/soul/heartbeat/interface/role: string\n"
@@ -385,13 +287,16 @@ async def edit_agent(
     _messages=None,
     **_kw,
 ) -> dict:
-    """Change agent config — soft fields direct-apply, hard fields propose.
+    """Change agent config — apply immediately, emit an undo receipt.
 
-    For soft fields: skips the provenance gate and writes immediately;
-    the receipt card with [Undo] is the safety net (user can always
-    revert within 5 minutes). For hard fields: behaves like the legacy
-    propose_edit — the operator must show preview to the user and wait
-    for explicit confirm before calling confirm_edit(change_id).
+    All fields go through the same path. The mesh records an undo
+    receipt with a TTL of 5 min for soft fields or 30 min for hard
+    fields; the dashboard renders [View diff] [Undo] on the receipt
+    card. Provenance is intentionally NOT required at this layer — the
+    receipt is the safety net, and dropping the gate lets the operator
+    self-tune during heartbeat without a human in the loop. The
+    permission ceiling in :data:`_OPERATOR_PERMISSION_CEILING` still
+    blocks irreversible grants (``can_spawn``, ``can_use_wallet``).
     """
     if not _is_operator():
         return {"error": "This tool is only available to the operator agent."}
@@ -409,60 +314,36 @@ async def edit_agent(
     if err is not None:
         return err
 
-    if field in _SOFT_EDIT_FIELDS:
-        # Soft path: direct write + receipt + undo. Provenance is NOT
-        # required because the receipt card with [Undo] gives the user
-        # a 5-minute reversal window. ``operator_proactive`` is logged
-        # via ``reason`` for audit but doesn't change the gate.
-        if reason == "operator_proactive":
-            logger.info(
-                "operator_proactive soft-edit: agent=%s field=%s",
-                agent_id, field,
-            )
-        try:
-            result = await mesh_client.edit_soft(agent_id, field, value, reason)
-        except Exception as e:
-            return {"error": f"Failed to apply edit: {e}"}
-        return {
-            "success": True,
-            "applied": True,
-            "agent_id": agent_id,
-            "field": field,
-            "undo_token": result.get("undo_token"),
-            "expires_at": result.get("expires_at"),
-            "summary": result.get("summary"),
-            "message": (
-                "Done. The user sees a receipt card and can Undo within 5 minutes."
-            ),
-        }
-
-    # Hard path: provenance gate + propose+confirm. Mirrors the legacy
-    # propose_edit behaviour so existing dashboard surfacing keeps
-    # working until PR 2 swaps the amber bubble for an inline card.
-    from src.agent.loop import _last_message_is_user_origin
-
-    if _messages is None or not _last_message_is_user_origin(_messages):
-        return {
-            "error": "provenance_check_failed",
-            "detail": (
-                f"Hard field {field!r} requires explicit user request. "
-                "Ask the user, then retry edit_agent after they confirm."
-            ),
-        }
-
+    if reason == "operator_proactive":
+        logger.info(
+            "operator_proactive edit: agent=%s field=%s",
+            agent_id, field,
+        )
     try:
-        result = await mesh_client.propose_config_change(agent_id, field, value)
+        result = await mesh_client.edit_soft(agent_id, field, value, reason)
     except Exception as e:
-        return {"error": f"Failed to propose edit: {e}"}
-    # Annotate so the operator's prompt machinery knows it must show the
-    # preview and wait for confirmation before calling confirm_edit.
-    result.setdefault("requires_confirmation", True)
-    result.setdefault(
-        "next_step",
-        "Show the preview_diff to the user. On explicit confirmation, "
-        "call confirm_edit(change_id).",
+        return {"error": f"Failed to apply edit: {e}"}
+
+    field_class = result.get("field_class") or (
+        "hard" if field not in _SOFT_EDIT_FIELDS else "soft"
     )
-    return result
+    ttl_seconds = result.get("ttl_seconds") or (1800 if field_class == "hard" else 300)
+    minutes = ttl_seconds // 60
+    return {
+        "success": True,
+        "applied": True,
+        "agent_id": agent_id,
+        "field": field,
+        "field_class": field_class,
+        "undo_token": result.get("undo_token"),
+        "expires_at": result.get("expires_at"),
+        "ttl_seconds": ttl_seconds,
+        "summary": result.get("summary"),
+        "message": (
+            f"Done. The user sees a receipt card and can Undo within "
+            f"{minutes} minute{'s' if minutes != 1 else ''}."
+        ),
+    }
 
 
 @skill(
@@ -655,20 +536,17 @@ async def create_agent(
     _messages=None,
     **_kw,
 ) -> dict:
-    """Create a new custom agent. Provenance-gated."""
+    """Create a new custom agent.
+
+    Provenance gate dropped: operator can spawn agents autonomously
+    (e.g. during heartbeat in response to its own analysis). The
+    plan-tier budget cap ``OPENLEGION_MAX_AGENTS`` and the permission
+    ceiling (``can_spawn=False`` for created agents) are the real walls.
+    """
     if not _is_operator():
         return {"error": "This tool is only available to the operator agent."}
     if mesh_client is None:
         return {"error": "No mesh_client available"}
-
-    # Provenance check
-    from src.agent.loop import _last_message_is_user_origin
-
-    if _messages is None or not _last_message_is_user_origin(_messages):
-        return {
-            "error": "provenance_check_failed",
-            "detail": "User confirmation required to create an agent.",
-        }
 
     try:
         return await mesh_client.create_custom_agent(
@@ -778,19 +656,16 @@ async def create_project(
     _messages=None,
     **_kw,
 ) -> dict:
-    """Create a new project. Provenance-gated."""
+    """Create a new project.
+
+    Provenance gate dropped — operator can create projects
+    autonomously. Plan-tier cap ``OPENLEGION_MAX_PROJECTS`` is the
+    quota wall.
+    """
     if not _is_operator():
         return {"error": "This tool is only available to the operator agent."}
     if mesh_client is None:
         return {"error": "No mesh_client available"}
-
-    from src.agent.loop import _last_message_is_user_origin
-
-    if _messages is None or not _last_message_is_user_origin(_messages):
-        return {
-            "error": "provenance_check_failed",
-            "detail": "User confirmation required to create a project.",
-        }
 
     try:
         return await mesh_client.create_project(
@@ -823,19 +698,11 @@ async def add_agents_to_project(
     _messages=None,
     **_kw,
 ) -> dict:
-    """Add agents to a project. Provenance-gated."""
+    """Add agents to a project."""
     if not _is_operator():
         return {"error": "This tool is only available to the operator agent."}
     if mesh_client is None:
         return {"error": "No mesh_client available"}
-
-    from src.agent.loop import _last_message_is_user_origin
-
-    if _messages is None or not _last_message_is_user_origin(_messages):
-        return {
-            "error": "provenance_check_failed",
-            "detail": "User confirmation required to add agents to a project.",
-        }
 
     results = []
     for aid in agent_ids:
@@ -870,19 +737,11 @@ async def remove_agents_from_project(
     _messages=None,
     **_kw,
 ) -> dict:
-    """Remove agents from a project. Provenance-gated."""
+    """Remove agents from a project."""
     if not _is_operator():
         return {"error": "This tool is only available to the operator agent."}
     if mesh_client is None:
         return {"error": "No mesh_client available"}
-
-    from src.agent.loop import _last_message_is_user_origin
-
-    if _messages is None or not _last_message_is_user_origin(_messages):
-        return {
-            "error": "provenance_check_failed",
-            "detail": "User confirmation required to remove agents from a project.",
-        }
 
     results = []
     for aid in agent_ids:
@@ -919,19 +778,11 @@ async def update_project_context(
     _messages=None,
     **_kw,
 ) -> dict:
-    """Update project description/context. Provenance-gated."""
+    """Update project description/context."""
     if not _is_operator():
         return {"error": "This tool is only available to the operator agent."}
     if mesh_client is None:
         return {"error": "No mesh_client available"}
-
-    from src.agent.loop import _last_message_is_user_origin
-
-    if _messages is None or not _last_message_is_user_origin(_messages):
-        return {
-            "error": "provenance_check_failed",
-            "detail": "User confirmation required to update project context.",
-        }
 
     try:
         return await mesh_client.update_project_context(project_name, context)
@@ -1470,18 +1321,17 @@ async def manage_project(
     **_kw,
 ) -> dict:
     """Consolidated project lifecycle tool (archive | delete).
-    Provenance-gated.
+
+    Archive is reversible and applies immediately. Delete still goes
+    through a brief confirmation window (mesh-side propose_delete with
+    a short TTL); a follow-up PR will convert delete to immediate-apply
+    with a 72h undo. Operator can call either autonomously — the user's
+    feedback signal on output is the safety net.
     """
     if not _is_operator():
         return {"error": "This tool is only available to the operator agent."}
     if mesh_client is None:
         return {"error": "No mesh_client available"}
-    from src.agent.loop import _last_message_is_user_origin
-    if _messages is None or not _last_message_is_user_origin(_messages):
-        return {
-            "error": "provenance_check_failed",
-            "detail": f"User confirmation required to {action} a project.",
-        }
 
     if action == "archive":
         try:
@@ -1537,7 +1387,11 @@ async def manage_agent(
     **_kw,
 ) -> dict:
     """Consolidated agent lifecycle tool (archive | delete).
-    Provenance-gated.
+
+    Archive is reversible and applies immediately. Delete still goes
+    through a brief confirmation window (mesh-side propose_delete with
+    a short TTL); a follow-up PR will convert delete to immediate-apply
+    with a 72h undo. Operator can call either autonomously.
     """
     if not _is_operator():
         return {"error": "This tool is only available to the operator agent."}
@@ -1545,12 +1399,6 @@ async def manage_agent(
         return {"error": "No mesh_client available"}
     if agent_id.lower() == _OPERATOR_AGENT_ID:
         return {"error": f"Cannot {action} the operator agent."}
-    from src.agent.loop import _last_message_is_user_origin
-    if _messages is None or not _last_message_is_user_origin(_messages):
-        return {
-            "error": "provenance_check_failed",
-            "detail": f"User confirmation required to {action} an agent.",
-        }
 
     if action == "archive":
         try:
