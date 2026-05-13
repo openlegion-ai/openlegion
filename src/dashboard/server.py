@@ -842,31 +842,53 @@ def create_dashboard_router(
         agent_id = evt.get("agent") or None
         data = evt.get("data") or {}
         try:
-            if event_type == "task_outcome":
-                # Only deliveries surface as notifications. Rejections
-                # / rework / re-rates aren't a "you have new finished
-                # work" signal — they're either operator-initiated
-                # (the operator already knows) or surfaced via the
-                # task drawer.
-                outcome = (data.get("outcome") or "").lower()
-                if outcome != "delivered":
+            if event_type == "task_status_changed":
+                # A non-operator worker finishing a task is the
+                # "you have new work to review" signal. Operator-self
+                # status changes are excluded because the operator
+                # doesn't deliver to the user — the user IS the
+                # operator's surface. Also skip already-rated
+                # transitions (e.g. a rework task moving to done was
+                # auto-graded) so we don't double-ping the bell.
+                if (data.get("new_status") or "").lower() != "done":
                     return
-                actor = data.get("assignee") or agent_id or "Someone"
-                title = f"{actor} delivered draft"
-                body = (data.get("feedback") or "").strip()[:200] or None
+                assignee = data.get("assignee") or agent_id
+                if not assignee or assignee == "operator":
+                    return
+                if data.get("outcome"):
+                    # Already rated (auto-graded or pre-rated).
+                    return
+                task_id = data.get("task_id")
+                if not task_id:
+                    return
+                title = data.get("title") or "delivered work"
+                short_title = (title[:80] + "…") if len(title) > 80 else title
+                heading = f"{assignee} delivered: {short_title}"[:200]
+                preview = (data.get("preview_text") or "").strip()[:200] or None
                 payload = {
-                    "task_id": data.get("task_id"),
+                    "task_id": task_id,
                     "project_id": data.get("project_id"),
-                    "outcome": outcome,
+                    "assignee": assignee,
+                    "title": title,
                 }
                 nid = notification_store.add(
                     kind="delivered",
-                    title=title,
-                    body=body,
-                    agent_id=actor,
+                    title=heading,
+                    body=preview,
+                    agent_id=assignee,
                     payload=payload,
                 )
-                _emit_notification_added(nid, "delivered", title, body, actor, payload)
+                _emit_notification_added(
+                    nid, "delivered", heading, preview, assignee, payload,
+                )
+                return
+
+            if event_type == "task_outcome":
+                # Outcome updates (user rated a delivery) do NOT create
+                # new bell notifications — the delivery already pinged
+                # the user when the worker finished. The dashboard's
+                # task drawer listens to ``task_outcome`` directly for
+                # live UI updates on the Recently Delivered panel.
                 return
 
             if event_type == "pending_action_created":
@@ -6759,10 +6781,13 @@ def create_dashboard_router(
     ) -> dict:
         """Record an operator outcome rating on a completed task.
 
-        Body: ``{outcome: "accepted"|"rework"|"rejected", feedback: str}``.
-        For ``rework``, also spawns a new linked task with the feedback
-        as its brief and the same assignee — the new task id is returned
-        in ``rework_task_id``.
+        Body: ``{outcome: "accepted"|"acknowledged"|"rework"|"rejected",
+        feedback: str}``. ``accepted`` and ``acknowledged`` allow empty
+        feedback (the rating itself is the signal). ``rework`` and
+        ``rejected`` require a non-empty comment so the agent / audit
+        trail has something to learn from. For ``rework``, also spawns a
+        new linked task with the feedback as its brief and the same
+        assignee — the new task id is returned in ``rework_task_id``.
         """
         from src.host.orchestration import (
             MAX_FEEDBACK_CHARS,

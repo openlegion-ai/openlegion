@@ -47,21 +47,30 @@ async def test_propose_edit_validates_field():
 
 @pytest.mark.asyncio
 async def test_propose_edit_accepts_interface_field():
-    """The 'interface' field should be valid and forwarded to the mesh."""
+    """The 'interface' field should be valid and forwarded to the mesh via edit_soft."""
     from src.agent.builtins.operator_tools import propose_edit
 
     mc = MagicMock()
-    mc.propose_config_change = AsyncMock(
-        return_value={"change_id": "iface1", "preview_diff": "..."},
+    mc.edit_soft = AsyncMock(
+        return_value={
+            "success": True,
+            "undo_token": "tok-iface",
+            "expires_at": "2026-05-13T00:05:00+00:00",
+            "ttl_seconds": 300,
+            "field_class": "soft",
+            "summary": "Updated writer's interface",
+        },
     )
     result = await propose_edit(
         "writer", "interface", "Accepts research, produces notes.",
         mesh_client=mc,
     )
     assert "error" not in result
-    assert result["change_id"] == "iface1"
-    mc.propose_config_change.assert_awaited_once_with(
-        "writer", "interface", "Accepts research, produces notes.",
+    assert result["applied"] is True
+    assert result["undo_token"] == "tok-iface"
+    assert "deprecation_notice" in result
+    mc.edit_soft.assert_awaited_once_with(
+        "writer", "interface", "Accepts research, produces notes.", "user_asked",
     )
 
 
@@ -89,19 +98,28 @@ async def test_propose_edit_permission_ceiling_can_use_wallet():
 
 @pytest.mark.asyncio
 async def test_propose_edit_permission_ceiling_allows_permitted():
-    """Permissions within the ceiling should pass through to mesh."""
+    """Permissions within the ceiling should pass through to mesh via edit_soft (hard field)."""
     from src.agent.builtins.operator_tools import propose_edit
 
     mc = MagicMock()
-    mc.propose_config_change = AsyncMock(
-        return_value={"change_id": "abc", "preview_diff": "..."},
+    mc.edit_soft = AsyncMock(
+        return_value={
+            "success": True,
+            "undo_token": "tok-perm",
+            "expires_at": "2026-05-13T00:30:00+00:00",
+            "ttl_seconds": 1800,
+            "field_class": "hard",
+            "summary": "Updated writer's permissions",
+        },
     )
     result = await propose_edit(
         "writer", "permissions", {"can_use_browser": True}, mesh_client=mc,
     )
-    assert result["change_id"] == "abc"
-    mc.propose_config_change.assert_awaited_once_with(
-        "writer", "permissions", {"can_use_browser": True},
+    assert "error" not in result
+    assert result["applied"] is True
+    assert result["undo_token"] == "tok-perm"
+    mc.edit_soft.assert_awaited_once_with(
+        "writer", "permissions", {"can_use_browser": True}, "user_asked",
     )
 
 
@@ -113,17 +131,25 @@ async def test_propose_edit_permission_ceiling_allows_artifacts_write():
     from src.agent.builtins.operator_tools import propose_edit
 
     mc = MagicMock()
-    mc.propose_config_change = AsyncMock(
-        return_value={"change_id": "art1", "preview_diff": "..."},
+    mc.edit_soft = AsyncMock(
+        return_value={
+            "success": True,
+            "undo_token": "tok-art",
+            "expires_at": "2026-05-13T00:30:00+00:00",
+            "ttl_seconds": 1800,
+            "field_class": "hard",
+            "summary": "Updated writer's permissions",
+        },
     )
     result = await propose_edit(
         "writer", "permissions", {"blackboard_write": ["artifacts/*"]},
         mesh_client=mc,
     )
     assert "error" not in result
-    assert result["change_id"] == "art1"
-    mc.propose_config_change.assert_awaited_once_with(
-        "writer", "permissions", {"blackboard_write": ["artifacts/*"]},
+    assert result["applied"] is True
+    assert result["undo_token"] == "tok-art"
+    mc.edit_soft.assert_awaited_once_with(
+        "writer", "permissions", {"blackboard_write": ["artifacts/*"]}, "user_asked",
     )
 
 
@@ -180,14 +206,25 @@ async def test_propose_edit_budget_valid():
     from src.agent.builtins.operator_tools import propose_edit
 
     mc = MagicMock()
-    mc.propose_config_change = AsyncMock(
-        return_value={"change_id": "b1", "preview_diff": "budget diff"},
+    mc.edit_soft = AsyncMock(
+        return_value={
+            "success": True,
+            "undo_token": "tok-b1",
+            "expires_at": "2026-05-13T00:30:00+00:00",
+            "ttl_seconds": 1800,
+            "field_class": "hard",
+            "summary": "Updated writer's budget",
+        },
     )
     result = await propose_edit(
         "writer", "budget", {"daily_usd": 5, "monthly_usd": 100},
         mesh_client=mc,
     )
-    assert result["change_id"] == "b1"
+    assert result["applied"] is True
+    assert result["undo_token"] == "tok-b1"
+    mc.edit_soft.assert_awaited_once_with(
+        "writer", "budget", {"daily_usd": 5, "monthly_usd": 100}, "user_asked",
+    )
 
 
 @pytest.mark.asyncio
@@ -206,25 +243,48 @@ async def test_propose_edit_thinking_valid():
     from src.agent.builtins.operator_tools import propose_edit
 
     mc = MagicMock()
-    mc.propose_config_change = AsyncMock(
-        return_value={"change_id": "t1", "preview_diff": "..."},
+    mc.edit_soft = AsyncMock(
+        return_value={
+            "success": True,
+            "undo_token": "tok-t1",
+            "expires_at": "2026-05-13T00:30:00+00:00",
+            "ttl_seconds": 1800,
+            "field_class": "hard",
+            "summary": "Updated writer's thinking",
+        },
     )
     result = await propose_edit(
         "writer", "thinking", "high", mesh_client=mc,
     )
-    assert result["change_id"] == "t1"
+    assert result["applied"] is True
+    assert result["undo_token"] == "tok-t1"
 
 
 @pytest.mark.asyncio
 async def test_propose_edit_success():
+    """propose_edit now applies immediately via edit_soft and emits a deprecation notice."""
     from src.agent.builtins.operator_tools import propose_edit
 
     mc = MagicMock()
-    mc.propose_config_change = AsyncMock(
-        return_value={"change_id": "abc", "preview_diff": "..."},
+    mc.edit_soft = AsyncMock(
+        return_value={
+            "success": True,
+            "undo_token": "tok-abc",
+            "expires_at": "2026-05-13T00:05:00+00:00",
+            "ttl_seconds": 300,
+            "field_class": "soft",
+            "summary": "Updated writer's instructions",
+        },
     )
     result = await propose_edit("writer", "instructions", "new text", mesh_client=mc)
-    assert result["change_id"] == "abc"
+    assert result["applied"] is True
+    assert result["undo_token"] == "tok-abc"
+    assert result["field_class"] == "soft"
+    assert result["ttl_seconds"] == 300
+    assert "deprecation_notice" in result
+    mc.edit_soft.assert_awaited_once_with(
+        "writer", "instructions", "new text", "user_asked",
+    )
 
 
 @pytest.mark.asyncio
@@ -241,91 +301,45 @@ async def test_propose_edit_mesh_error():
     from src.agent.builtins.operator_tools import propose_edit
 
     mc = MagicMock()
-    mc.propose_config_change = AsyncMock(side_effect=RuntimeError("connection refused"))
+    mc.edit_soft = AsyncMock(side_effect=RuntimeError("connection refused"))
     result = await propose_edit("writer", "instructions", "new text", mesh_client=mc)
     assert "error" in result
     assert "connection refused" in result["error"]
 
 
 @pytest.mark.asyncio
-async def test_confirm_edit_provenance_rejection():
-    from src.agent.builtins.operator_tools import confirm_edit
-
-    messages = [{"role": "user", "content": "check", "_origin": "system:heartbeat"}]
-    result = await confirm_edit("abc", mesh_client=MagicMock(), _messages=messages)
-    assert result["error"] == "provenance_check_failed"
-    assert "detail" in result
-
-
-@pytest.mark.asyncio
-async def test_confirm_edit_success_with_user_origin():
+async def test_confirm_edit_is_deprecated_noop():
+    """confirm_edit is now a no-op deprecation stub — returns applied=False
+    with a deprecation_notice regardless of arguments. The legacy provenance
+    gate has been removed (config edits now apply immediately via edit_agent
+    with a built-in undo receipt, so there is nothing to confirm)."""
     from src.agent.builtins.operator_tools import confirm_edit
 
     mc = MagicMock()
-    mc.confirm_config_change = AsyncMock(return_value={"success": True})
-    messages = [{"role": "user", "content": "yes do it", "_origin": "user"}]
-    result = await confirm_edit("abc", mesh_client=mc, _messages=messages)
-    assert result["success"] is True
-
-
-@pytest.mark.asyncio
-async def test_confirm_edit_success_no_origin_legacy():
-    """Messages without _origin should be treated as user-originated."""
-    from src.agent.builtins.operator_tools import confirm_edit
-
-    mc = MagicMock()
-    mc.confirm_config_change = AsyncMock(return_value={"success": True})
-    messages = [{"role": "user", "content": "yes"}]
-    result = await confirm_edit("abc", mesh_client=mc, _messages=messages)
-    assert result["success"] is True
-
-
-@pytest.mark.asyncio
-async def test_confirm_edit_no_mesh_client():
-    from src.agent.builtins.operator_tools import confirm_edit
-
-    result = await confirm_edit("abc")
-    assert "error" in result
-    assert "mesh_client" in result["error"].lower()
-
-
-@pytest.mark.asyncio
-async def test_confirm_edit_no_messages_fails_closed():
-    """When _messages is None, provenance fails closed (security: no bypass via cron/invoke)."""
-    from src.agent.builtins.operator_tools import confirm_edit
-
-    mc = MagicMock()
-    mc.confirm_config_change = AsyncMock(return_value={"success": True})
+    mc.confirm_config_change = AsyncMock()  # should NEVER be called
     result = await confirm_edit("abc", mesh_client=mc, _messages=None)
-    assert result["error"] == "provenance_check_failed"
+    assert result["success"] is True
+    assert result["applied"] is False
+    notice = result["deprecation_notice"].lower()
+    assert "no-op" in notice or "deprecat" in notice
+    mc.confirm_config_change.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_confirm_edit_not_found_error():
+async def test_confirm_edit_deprecation_notice_regardless_of_messages():
+    """confirm_edit no-ops the same way whether or not _messages is set
+    (no provenance check anymore)."""
     from src.agent.builtins.operator_tools import confirm_edit
 
     mc = MagicMock()
-    mc.confirm_config_change = AsyncMock(
-        side_effect=RuntimeError("404 not found"),
-    )
+    mc.confirm_config_change = AsyncMock()
     messages = [{"role": "user", "content": "yes", "_origin": "user"}]
     result = await confirm_edit("abc", mesh_client=mc, _messages=messages)
-    assert result["error"] == "change_expired_or_lost"
-    assert "propose_edit" in result["detail"]
-
-
-@pytest.mark.asyncio
-async def test_confirm_edit_generic_error():
-    from src.agent.builtins.operator_tools import confirm_edit
-
-    mc = MagicMock()
-    mc.confirm_config_change = AsyncMock(
-        side_effect=RuntimeError("server exploded"),
-    )
-    messages = [{"role": "user", "content": "yes", "_origin": "user"}]
-    result = await confirm_edit("abc", mesh_client=mc, _messages=messages)
-    assert "error" in result
-    assert "server exploded" in result["error"]
+    assert result["success"] is True
+    assert result["applied"] is False
+    notice = result["deprecation_notice"].lower()
+    assert "no-op" in notice or "deprecat" in notice
+    mc.confirm_config_change.assert_not_awaited()
 
 
 # ── _last_message_is_user_origin tests ────────────────────
@@ -779,15 +793,22 @@ async def test_create_agent_no_mesh_client():
 
 
 @pytest.mark.asyncio
-async def test_create_agent_provenance_rejected():
+async def test_create_agent_no_provenance_is_accepted():
+    """Provenance gate dropped — create_agent now goes straight through to
+    the mesh whether or not _messages carries a user-origin message."""
     from src.agent.builtins.operator_tools import create_agent
 
-    messages = [{"role": "user", "content": "heartbeat", "_origin": "system:heartbeat"}]
+    mc = MagicMock()
+    mc.create_custom_agent = AsyncMock(
+        return_value={"created": True, "agent": "mybot"},
+    )
+    # No _messages at all — previously a hard reject; now a happy path.
     result = await create_agent(
         "mybot", "helper", "do things",
-        mesh_client=MagicMock(), _messages=messages,
+        mesh_client=mc, _messages=None,
     )
-    assert result["error"] == "provenance_check_failed"
+    assert result["created"] is True
+    mc.create_custom_agent.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -825,22 +846,6 @@ async def test_create_agent_conflict():
         mesh_client=mc, _messages=messages,
     )
     assert "already exists" in result["error"]
-
-
-@pytest.mark.asyncio
-async def test_create_agent_no_messages_fails_closed():
-    """When _messages is None, provenance fails closed (security: no bypass via cron/invoke)."""
-    from src.agent.builtins.operator_tools import create_agent
-
-    mc = MagicMock()
-    mc.create_custom_agent = AsyncMock(
-        return_value={"created": True, "agent": "mybot"},
-    )
-    result = await create_agent(
-        "mybot", "helper", "do things",
-        mesh_client=mc, _messages=None,
-    )
-    assert result["error"] == "provenance_check_failed"
 
 
 # ── inspect_projects tests ──────────────────────────────────
@@ -923,15 +928,20 @@ async def test_inspect_projects_named_not_found():
 
 
 @pytest.mark.asyncio
-async def test_create_project_provenance_rejected():
+async def test_create_project_no_provenance_is_accepted():
+    """Provenance gate dropped — create_project now applies immediately."""
     from src.agent.builtins.operator_tools import create_project
 
-    messages = [{"role": "user", "content": "hb", "_origin": "system:heartbeat"}]
+    mc = MagicMock()
+    mc.create_project = AsyncMock(
+        return_value={"created": True, "name": "myproj"},
+    )
     result = await create_project(
         "myproj", "a project",
-        mesh_client=MagicMock(), _messages=messages,
+        mesh_client=mc, _messages=None,
     )
-    assert result["error"] == "provenance_check_failed"
+    assert result["created"] is True
+    mc.create_project.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -955,15 +965,21 @@ async def test_create_project_success():
 
 
 @pytest.mark.asyncio
-async def test_add_agents_to_project_provenance_rejected():
+async def test_add_agents_to_project_no_provenance_is_accepted():
+    """Provenance gate dropped — add_agents_to_project goes through."""
     from src.agent.builtins.operator_tools import add_agents_to_project
 
-    messages = [{"role": "user", "content": "hb", "_origin": "system:heartbeat"}]
+    mc = MagicMock()
+    mc.add_agent_to_project = AsyncMock(
+        return_value={"added": True, "project": "proj", "agent": "a1"},
+    )
     result = await add_agents_to_project(
         "proj", ["a1"],
-        mesh_client=MagicMock(), _messages=messages,
+        mesh_client=mc, _messages=None,
     )
-    assert result["error"] == "provenance_check_failed"
+    assert result["project"] == "proj"
+    assert result["results"][0]["added"] is True
+    mc.add_agent_to_project.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1007,15 +1023,21 @@ async def test_add_agents_partial_failure():
 
 
 @pytest.mark.asyncio
-async def test_remove_agents_from_project_provenance_rejected():
+async def test_remove_agents_from_project_no_provenance_is_accepted():
+    """Provenance gate dropped — remove_agents_from_project goes through."""
     from src.agent.builtins.operator_tools import remove_agents_from_project
 
-    messages = [{"role": "user", "content": "hb", "_origin": "system:heartbeat"}]
+    mc = MagicMock()
+    mc.remove_agent_from_project = AsyncMock(
+        return_value={"removed": True, "project": "proj", "agent": "a1"},
+    )
     result = await remove_agents_from_project(
         "proj", ["a1"],
-        mesh_client=MagicMock(), _messages=messages,
+        mesh_client=mc, _messages=None,
     )
-    assert result["error"] == "provenance_check_failed"
+    assert result["project"] == "proj"
+    assert result["results"][0]["removed"] is True
+    mc.remove_agent_from_project.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1039,15 +1061,20 @@ async def test_remove_agents_from_project_success():
 
 
 @pytest.mark.asyncio
-async def test_update_project_context_provenance_rejected():
+async def test_update_project_context_no_provenance_is_accepted():
+    """Provenance gate dropped — update_project_context goes through."""
     from src.agent.builtins.operator_tools import update_project_context
 
-    messages = [{"role": "user", "content": "hb", "_origin": "system:heartbeat"}]
+    mc = MagicMock()
+    mc.update_project_context = AsyncMock(
+        return_value={"updated": True, "project": "proj"},
+    )
     result = await update_project_context(
         "proj", "new context",
-        mesh_client=MagicMock(), _messages=messages,
+        mesh_client=mc, _messages=None,
     )
-    assert result["error"] == "provenance_check_failed"
+    assert result["updated"] is True
+    mc.update_project_context.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1141,13 +1168,20 @@ async def test_edit_agent_soft_field_proactive_reason_logs_but_applies():
 
 
 @pytest.mark.asyncio
-async def test_edit_agent_hard_field_proposes_with_provenance():
-    """model is a hard field — must call propose_config_change AFTER provenance."""
+async def test_edit_agent_hard_field_applies_immediately():
+    """Hard fields now apply IMMEDIATELY via edit_soft (no propose+confirm,
+    no provenance gate). Field class on the response is "hard" and the
+    undo TTL is 1800s (30 min)."""
     from src.agent.builtins.operator_tools import edit_agent
 
     mc = MagicMock()
-    mc.propose_config_change = AsyncMock(return_value={
-        "change_id": "cid-1", "preview_diff": "...",
+    mc.edit_soft = AsyncMock(return_value={
+        "success": True,
+        "undo_token": "tok-hard",
+        "expires_at": "2026-05-13T00:30:00+00:00",
+        "ttl_seconds": 1800,
+        "field_class": "hard",
+        "summary": "Updated writer's model",
     })
     messages = [{"role": "user", "content": "switch to opus", "_origin": "user"}]
     result = await edit_agent(
@@ -1155,25 +1189,37 @@ async def test_edit_agent_hard_field_proposes_with_provenance():
         reason="user_asked",
         mesh_client=mc, _messages=messages,
     )
-    assert result["change_id"] == "cid-1"
-    assert result["requires_confirmation"] is True
-    assert "next_step" in result
-    mc.propose_config_change.assert_awaited_once()
+    assert result["success"] is True
+    assert result["applied"] is True
+    assert result["field_class"] == "hard"
+    assert result["ttl_seconds"] == 1800
+    assert result["undo_token"] == "tok-hard"
+    mc.edit_soft.assert_awaited_once_with(
+        "writer", "model", "anthropic/claude-opus-4", "user_asked",
+    )
 
 
 @pytest.mark.asyncio
-async def test_edit_agent_hard_field_no_provenance_fails():
-    """Hard fields keep the provenance gate — no user message → error."""
+async def test_edit_agent_hard_field_no_provenance_still_applies():
+    """Hard fields no longer require provenance — _messages=None works."""
     from src.agent.builtins.operator_tools import edit_agent
 
     mc = MagicMock()
-    mc.propose_config_change = AsyncMock(return_value={"change_id": "x"})
+    mc.edit_soft = AsyncMock(return_value={
+        "success": True,
+        "undo_token": "tok-no-prov",
+        "expires_at": "2026-05-13T00:30:00+00:00",
+        "ttl_seconds": 1800,
+        "field_class": "hard",
+        "summary": "Updated writer's model",
+    })
     result = await edit_agent(
         "writer", "model", "anthropic/claude-opus",
         mesh_client=mc, _messages=None,
     )
-    assert result["error"] == "provenance_check_failed"
-    mc.propose_config_change.assert_not_awaited()
+    assert result["applied"] is True
+    assert result["field_class"] == "hard"
+    mc.edit_soft.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1393,18 +1439,35 @@ async def test_edit_agent_heartbeat_schedule_blocks_self_modification():
     assert "operator" in result["error"].lower()
 
 
-def test_propose_edit_rejects_heartbeat_schedule_field():
-    """Soft-only field; legacy propose_edit must refuse it."""
+def test_propose_edit_accepts_heartbeat_schedule_via_edit_agent():
+    """Legacy propose_edit now forwards to edit_agent, which DOES accept
+    heartbeat_schedule (a valid soft field). The deprecation shim should
+    not reject it."""
     import asyncio
 
     from src.agent.builtins.operator_tools import propose_edit
 
+    mc = MagicMock()
+    mc.edit_soft = AsyncMock(
+        return_value={
+            "success": True,
+            "undo_token": "tok-hs",
+            "expires_at": "2026-05-13T00:05:00+00:00",
+            "ttl_seconds": 300,
+            "field_class": "soft",
+            "summary": "Updated writer's heartbeat_schedule",
+        },
+    )
     result = asyncio.run(propose_edit(
         "writer", "heartbeat_schedule", "*/15 * * * *",
-        mesh_client=MagicMock(),
+        mesh_client=mc,
     ))
-    assert "error" in result
-    assert "heartbeat_schedule" in result["error"] or "Invalid field" in result["error"]
+    assert "error" not in result
+    assert result["applied"] is True
+    assert "deprecation_notice" in result
+    mc.edit_soft.assert_awaited_once_with(
+        "writer", "heartbeat_schedule", "*/15 * * * *", "user_asked",
+    )
 
 
 # ── list_pending ─────────────────────────────────────────────

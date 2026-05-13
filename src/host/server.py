@@ -5119,8 +5119,17 @@ def create_mesh_app(
         if field == "permissions":
             from src.cli.config import _load_permissions, _save_permissions
             perms = _load_permissions()
-            if agent_id in perms.get("permissions", {}):
-                perms["permissions"][agent_id].update(new_value)
+            # Use setdefault so the write applies even if the agent's
+            # entry was never backfilled (defensive — startup runs
+            # ``_ensure_all_agent_permissions`` so this should be rare,
+            # but the unified edit path now routes more permissions
+            # edits here and a silent no-op would be worse than a
+            # late-init). Falsy ``new_value`` (None, empty dict) is a
+            # caller bug; ``_validate_edit`` rejects bad shapes upstream.
+            if isinstance(new_value, dict):
+                perms.setdefault("permissions", {}).setdefault(
+                    agent_id, {},
+                ).update(new_value)
                 _save_permissions(perms)
             # Hot-reload the in-memory permission matrix
             if permissions is not None:
@@ -5338,27 +5347,41 @@ def create_mesh_app(
             "heartbeat_schedule": "heartbeat schedule",
             "interface": "interface contract",
             "role": "role",
+            "model": "model",
+            "permissions": "permissions",
+            "budget": "budget",
+            "thinking": "thinking config",
         }.get(field, field)
+
+    _EDITABLE_FIELDS = _SOFT_EDIT_FIELDS | _HARD_EDIT_FIELDS
 
     @app.post("/mesh/agents/{agent_id}/edit-soft")
     async def edit_agent_soft(agent_id: str, request: Request) -> dict:
-        """Apply a soft-edit immediately and emit a revertible receipt.
+        """Apply an agent-config edit immediately and emit a revertible receipt.
 
         Path constraints:
           * Caller must be ``operator`` (or an internal caller for tests).
           * ``X-Origin`` must validate (``_validated_origin``) — the
             operator-tool layer already did its own provenance check, so
             here we just require *some* validatable origin and store the
-            kind on the audit trail. Soft edits intentionally do NOT
+            kind on the audit trail. All edits intentionally do NOT
             require ``kind="human"`` because the receipt+undo card is
-            the safety net (the user can always revert within 5min).
-          * ``field`` must be in :data:`_SOFT_EDIT_FIELDS`. Hard fields
-            return 400 with a "use propose-edit for {field}" message so
-            the operator tool can fall through to the existing path.
+            the safety net (the user can always revert).
+          * ``field`` must be in :data:`_EDITABLE_FIELDS` (the union of
+            soft and hard fields). Both classes apply immediately; the
+            only difference is the undo-receipt TTL — see
+            ``_ttl_for_field`` (5 min for personality/instructions/role
+            cluster, 30 min for model/permissions/budget/thinking).
 
-        Returns ``{success, undo_token, expires_at, summary}``. The
-        ``operator_action_receipt`` event is emitted on the bus so the
-        dashboard can render the inline receipt card immediately.
+        Returns ``{success, undo_token, expires_at, summary, ttl_seconds}``.
+        The ``operator_action_receipt`` event is emitted on the bus so the
+        dashboard can render the inline receipt card immediately. For
+        hard fields, ``agent_config_updated`` ALSO fires (handled by
+        ``_apply_pending_change``).
+
+        Path name retained as ``/edit-soft`` for backward compatibility
+        with the dashboard SPA and any external scripts; semantically it
+        is now "edit-apply".
         """
         _require_any_auth(request)
         caller = _extract_verified_agent_id(request)
@@ -5375,16 +5398,10 @@ def create_mesh_app(
         reason = data.get("reason", "user_asked")
         if not field:
             raise HTTPException(400, "field is required")
-        if field in _HARD_EDIT_FIELDS:
+        if field not in _EDITABLE_FIELDS:
             raise HTTPException(
                 400,
-                f"Use /mesh/agents/{{id}}/propose for {field!r} (hard field — "
-                "requires explicit confirmation).",
-            )
-        if field not in _SOFT_EDIT_FIELDS:
-            raise HTTPException(
-                400,
-                f"Invalid field {field!r}. Soft fields: {sorted(_SOFT_EDIT_FIELDS)}",
+                f"Invalid field {field!r}. Editable fields: {sorted(_EDITABLE_FIELDS)}",
             )
 
         # Self-modification block. The operator-tool layer also blocks
@@ -5392,6 +5409,20 @@ def create_mesh_app(
         # bypasses the tool.
         if agent_id == "operator":
             raise HTTPException(400, "The operator agent cannot be edited via soft-edit")
+
+        # Validate runtime-critical values for hard fields before they
+        # can be persisted. Mirrors the validation block in the now-
+        # deprecated /propose endpoint.
+        if field == "model":
+            if not isinstance(new_value, str) or not new_value:
+                raise HTTPException(400, "model must be a non-empty string")
+        elif field == "thinking":
+            from src.agent.llm import LLMClient
+            if new_value not in LLMClient.VALID_THINKING_LEVELS:
+                raise HTTPException(
+                    400,
+                    f"thinking must be one of: {sorted(LLMClient.VALID_THINKING_LEVELS)}",
+                )
 
         from src.cli.config import _load_config
         agent_cfg = _load_config()
@@ -5401,14 +5432,19 @@ def create_mesh_app(
 
         # ``heartbeat_schedule`` is sourced from the live cron job, not
         # YAML — the cron table is the source of truth for an agent's
-        # actual heartbeat cadence (PR-L'). Read the current schedule
-        # so the audit/Undo flow restores the right value.
+        # actual heartbeat cadence. Permissions live in permissions.json,
+        # not agents.yaml. Everything else (model, budget, thinking,
+        # instructions, soul, ...) reads from the agent's YAML row.
         if field == "heartbeat_schedule":
             old_value = ""
             if cron_scheduler is not None:
                 hb_job = cron_scheduler.find_heartbeat_job(agent_id)
                 if hb_job is not None:
                     old_value = hb_job.schedule
+        elif field == "permissions":
+            from src.cli.config import _load_permissions
+            perms = _load_permissions()
+            old_value = perms.get("permissions", {}).get(agent_id, {})
         else:
             yaml_key = _CONFIG_FIELD_MAP.get(field, field)
             old_value = agents[agent_id].get(yaml_key, "")
@@ -5445,6 +5481,9 @@ def create_mesh_app(
         # Record the change for undo. Summary uses humanized field names
         # so receipt cards read naturally ("Updated writer's personality")
         # without the dashboard having to do its own field translation.
+        # TTL is field-aware: hard fields (model/permissions/budget/
+        # thinking) get the longer 30-min window so the user has more
+        # time to catch a costly edit; soft fields keep the snappy 5 min.
         summary = f"Updated {agent_id}'s {_humanize_field(field)}"
         record = change_history.record(
             undo_token=undo_token,
@@ -5455,7 +5494,7 @@ def create_mesh_app(
             new_value=new_value,
             summary=summary,
             reason=reason,
-            ttl=_CHANGE_TTL_SECONDS,
+            ttl=_ttl_for_field(field),
         )
 
         # Emit the receipt event. Dashboard listens for this and appends
@@ -5520,6 +5559,8 @@ def create_mesh_app(
             "expires_at": datetime.fromtimestamp(
                 record["expires_at"], tz=timezone.utc,
             ).isoformat(),
+            "ttl_seconds": _ttl_for_field(field),
+            "field_class": "hard" if field in _HARD_EDIT_FIELDS else "soft",
             "summary": summary,
             "supersedes_count": len(prior_unconsumed),
         }

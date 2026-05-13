@@ -1530,9 +1530,11 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     "list_agent_queue", "get_team_outputs", "summarize_project_progress",
     # Coordination + chat
     "list_templates", "apply_template", "hand_off", "check_inbox",
-    # Configuration edits — PR 1: edit_agent collapses the soft/hard branch
-    # behind one tool; confirm_edit stays for the explicit hard-field step;
-    # undo_change lets the operator self-revert soft edits within the TTL.
+    # Configuration edits — edit_agent applies every field immediately
+    # and emits an undo receipt (5min for soft fields, 30min for hard).
+    # undo_change lets the operator self-revert within the TTL.
+    # confirm_edit kept for back-compat with in-flight conversations
+    # that may still call it; it is a no-op stub.
     "edit_agent", "confirm_edit", "undo_change",
     # Creation
     "create_agent", "create_project",

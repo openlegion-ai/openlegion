@@ -45,13 +45,23 @@ VALID_STATUSES: frozenset[str] = frozenset({
 
 TERMINAL_STATUSES: frozenset[str] = frozenset({"done", "failed", "cancelled"})
 
-# Outcome enum (Task 9 PR 4) — operator-supplied judgement on a
-# completed task. ``None`` means "not yet rated". Outcomes are
-# write-many: every submission appends a ``task_outcome`` audit event
-# and the ``tasks.outcome`` column reflects the LATEST rating, so an
-# operator who clicks the wrong button can re-rate without admin
-# intervention.
-VALID_OUTCOMES: frozenset[str] = frozenset({"accepted", "rework", "rejected"})
+# Outcome enum — operator-supplied judgement on a completed task.
+# ``None`` means "not yet rated". Outcomes are write-many: every
+# submission appends a ``task_outcome`` audit event and the
+# ``tasks.outcome`` column reflects the LATEST rating, so a re-rate just
+# overwrites without admin intervention.
+#
+# - ``accepted``: positive signal. Writes a reinforcement memory entry.
+# - ``rework``: negative signal with a fix-it brief. Auto-spawns a
+#   rework task AND writes the feedback into the rated agent's memory
+#   so the agent recalls it on the next task.
+# - ``rejected``: terminal negative. Writes feedback to memory; does
+#   NOT auto-spawn a rework.
+# - ``acknowledged``: neutral, "reviewed without judgement". Does not
+#   write to memory and does not spawn rework.
+VALID_OUTCOMES: frozenset[str] = frozenset(
+    {"accepted", "rework", "rejected", "acknowledged"}
+)
 
 # Feedback length cap (chars). Bounded so the SQLite row stays small
 # and the UI textarea doesn't smuggle a multi-MB blob into the table.
@@ -782,13 +792,16 @@ class Tasks:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 row = conn.execute(
-                    "SELECT status, project_id, assignee FROM tasks WHERE id=?",
+                    "SELECT status, project_id, assignee, title, outcome "
+                    "FROM tasks WHERE id=?",
                     (task_id,),
                 ).fetchone()
                 if not row:
                     conn.execute("ROLLBACK")
                     raise TaskNotFound(task_id)
-                current, project_id, assignee = row[0], row[1], row[2]
+                current, project_id, assignee, task_title, task_outcome = (
+                    row[0], row[1], row[2], row[3], row[4],
+                )
                 if current == status:
                     # No-op transition. Record the event so the audit
                     # trail still shows the call, but skip the row update.
@@ -830,14 +843,20 @@ class Tasks:
                     },
                 )
                 conn.execute("COMMIT")
-                emitted_change = (current, status, project_id, assignee)
+                emitted_change = (
+                    current, status, project_id, assignee,
+                    task_title, task_outcome,
+                )
             except (TaskNotFound, InvalidStatusTransition):
                 raise
             except Exception:
                 conn.execute("ROLLBACK")
                 raise
         if emitted_change is not None:
-            old_status, new_status, project_id, assignee = emitted_change
+            (
+                old_status, new_status, project_id, assignee,
+                task_title, task_outcome,
+            ) = emitted_change
             payload: dict = {
                 "task_id": task_id,
                 "project_id": project_id,
@@ -846,6 +865,13 @@ class Tasks:
                 "new_status": new_status,
                 "actor": actor,
                 "ts": now,
+                # ``title`` and ``outcome`` carried on every transition so
+                # downstream consumers (delivery-notification producer,
+                # activity feed) don't need a follow-up task lookup. The
+                # producer short-circuits on ``outcome`` to avoid pinging
+                # the bell for already-rated (e.g. auto-graded) work.
+                "title": task_title,
+                "outcome": task_outcome,
             }
             # Merge caller-supplied context (e.g. cancel ``reason``) so
             # the dashboard activity feed can render rich status_changed
@@ -870,18 +896,22 @@ class Tasks:
         if not new_assignee:
             raise ValueError("new_assignee is required")
         now = time.time()
-        emitted: tuple[str, str | None] | None = None
+        emitted: tuple[str, str | None, str | None, str | None] | None = None
         with self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 row = conn.execute(
-                    "SELECT assignee, status, project_id FROM tasks WHERE id=?",
+                    "SELECT assignee, status, project_id, title, outcome "
+                    "FROM tasks WHERE id=?",
                     (task_id,),
                 ).fetchone()
                 if not row:
                     conn.execute("ROLLBACK")
                     raise TaskNotFound(task_id)
-                old_assignee, current_status, project_id = row
+                (
+                    old_assignee, current_status, project_id,
+                    task_title, task_outcome,
+                ) = row
                 if current_status in TERMINAL_STATUSES:
                     conn.execute("ROLLBACK")
                     raise InvalidStatusTransition(
@@ -896,18 +926,22 @@ class Tasks:
                     {"from": old_assignee, "to": new_assignee, "reason": reason},
                 )
                 conn.execute("COMMIT")
-                emitted = (current_status, project_id)
+                emitted = (current_status, project_id, task_title, task_outcome)
             except (TaskNotFound, InvalidStatusTransition):
                 raise
             except Exception:
                 conn.execute("ROLLBACK")
                 raise
         if emitted is not None:
-            current_status, project_id = emitted
-            # Task 9 — reroute is a status_changed event with old==new
-            # status; the assignee field carries the *new* assignee so
-            # the dashboard sees who picked up the work. The audit row
-            # already records ``rerouted`` separately for full history.
+            current_status, project_id, task_title, task_outcome = emitted
+            # Reroute is a status_changed event with old==new status; the
+            # assignee field carries the *new* assignee so the dashboard
+            # sees who picked up the work. The audit row already records
+            # ``rerouted`` separately for full history. ``title`` and
+            # ``outcome`` ride on the payload to match the shape emitted
+            # by ``update_status`` — downstream consumers (notification
+            # producer, activity feed) get a uniform schema regardless
+            # of which transition path fired.
             self._safe_emit(
                 "task_status_changed",
                 agent=actor,
@@ -919,6 +953,8 @@ class Tasks:
                     "new_status": current_status,
                     "actor": actor,
                     "ts": now,
+                    "title": task_title,
+                    "outcome": task_outcome,
                 },
             )
         return self.get(task_id)  # type: ignore[return-value]

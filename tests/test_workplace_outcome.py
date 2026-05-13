@@ -178,6 +178,85 @@ class TestWorkplaceOutcome:
         )
         assert resp.status_code == 400
 
+    def test_outcome_acknowledged_no_feedback_allowed(self):
+        """The new 'acknowledged' outcome is the neutral ➖ rating: it
+        records that the user reviewed the work without judgement,
+        accepts an empty feedback string, and does NOT spawn a rework
+        task."""
+        rec = _create_done_task(
+            self.tasks, creator="op", assignee="analyst", title="t",
+        )
+        resp = self.client.post(
+            f"/dashboard/api/workplace/tasks/{rec['id']}/outcome",
+            json={"outcome": "acknowledged", "feedback": ""},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["ok"] is True
+        assert body["task"]["outcome"] == "acknowledged"
+        assert "rework_task_id" not in body
+
+    def test_outcome_acknowledged_does_not_spawn_rework(self):
+        """Regression guard: only outcome=='rework' creates a follow-up
+        task. Accept / acknowledged / rejected all stay leaf nodes.
+        Without this we could silently regress to over-spawning when the
+        endpoint logic is touched again."""
+        rec = _create_done_task(
+            self.tasks, creator="op", assignee="analyst",
+            title="research X", project_id="research",
+        )
+        resp = self.client.post(
+            f"/dashboard/api/workplace/tasks/{rec['id']}/outcome",
+            json={"outcome": "acknowledged", "feedback": "noted"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["task"]["outcome"] == "acknowledged"
+        assert "rework_task_id" not in body
+        assert "rework_assignee" not in body
+        # No "Rework: ..." task was persisted (check pending inbox AND
+        # terminal history so we'd see a stray rework either way).
+        rework_titles = [
+            t["title"] for t in self.tasks.list_inbox(
+                "analyst", include_terminal=True,
+            )
+            if t["title"].startswith("Rework: ")
+        ]
+        assert rework_titles == []
+
+    def test_rerate_from_rework_to_acknowledged_leaves_spawned_task(self):
+        """Documents the per-question-2a deferred behavior: re-rating a
+        previously-rework task as 👍 / ➖ does NOT auto-cancel the
+        spawned rework task. The user must cancel it manually. This
+        test exists so a future change that adds auto-cancel breaks
+        this test loudly rather than silently changing semantics.
+        """
+        rec = _create_done_task(
+            self.tasks, creator="op", assignee="analyst", title="t",
+            project_id="research",
+        )
+        # Initial rating: rework — spawns a follow-up task.
+        first = self.client.post(
+            f"/dashboard/api/workplace/tasks/{rec['id']}/outcome",
+            json={"outcome": "rework", "feedback": "tighten the lead"},
+        )
+        assert first.status_code == 200
+        rework_id = first.json().get("rework_task_id")
+        assert rework_id, "first rework rating should spawn a task"
+        # Re-rate as acknowledged — should NOT cancel the spawned task.
+        second = self.client.post(
+            f"/dashboard/api/workplace/tasks/{rec['id']}/outcome",
+            json={"outcome": "acknowledged", "feedback": ""},
+        )
+        assert second.status_code == 200
+        assert second.json()["task"]["outcome"] == "acknowledged"
+        # The previously-spawned rework task is still in the DB and in
+        # a non-terminal state. (Auto-cancel-on-rerate is the deferred
+        # follow-up.)
+        rework_task = self.tasks.get(rework_id)
+        assert rework_task is not None
+        assert rework_task["status"] not in ("cancelled",)
+
     def test_outcome_non_terminal_returns_409(self):
         rec = self.tasks.create(creator="op", assignee="analyst", title="t")
         self.tasks.update_status(rec["id"], "working", actor="analyst")

@@ -76,12 +76,20 @@ they're set up for exactly this." Don't explain the architecture.
 Team setup flows: create agents → create project → customize instructions → \
 set up credentials. Each phase has detailed guidance that loads automatically.
 
-To change an agent after setup, use edit_agent(). Soft fields \
-(instructions, soul, heartbeat, interface, role) apply immediately and the \
-user sees a receipt with [Undo] for 5 minutes — act decisively, don't ask. \
-Hard fields (model, budget, permissions, thinking) need explicit \
-confirmation: edit_agent() returns a preview, you show it, user confirms, \
-you call confirm_edit(change_id).
+To change an agent after setup, use edit_agent(). All edits apply \
+IMMEDIATELY and the user sees a receipt with [Undo]. The window is \
+5 minutes for soft fields (instructions, soul, heartbeat, interface, role) \
+and 30 minutes for hard fields (model, permissions, budget, thinking) so \
+the user has more time to catch a costly edit. There is no separate \
+"propose then confirm" step — act decisively, don't ask for permission.
+
+The user's primary feedback is the rating they give on completed work \
+(👍 accept / ➖ acknowledge / 👎 rework). Read every 👎 — the feedback \
+text becomes the brief for the rework task that auto-spawns. Watch for \
+patterns: if one agent racks up multiple reworks in a row, that's a \
+signal to tune its instructions or soul. Surface this proactively: \
+"Writer's last 3 drafts got reworked — want me to tighten its \
+instructions based on the feedback?"
 
 After setup, monitor fleet health and proactively improve agent configurations. \
 When the user engages, surface completed work and any issues worth mentioning.
@@ -91,7 +99,7 @@ When the user engages, surface completed work and any issues worth mentioning.
 After the team's first few tasks, proactively offer a tune-up: "Your team's \
 had a few runs now. Want me to review how they're coordinating and tighten \
 anything that's not working smoothly?" When the user engages, call \
-check_inbox() to surface completed work.
+check_inbox() to surface completed work and read the recent outcome ratings.
 
 ## Tool Errors
 
@@ -259,60 +267,53 @@ Once you know the intent, act decisively.
 
 ## Soft fields — apply immediately
 
-For instructions, soul, heartbeat, interface, role: act on what the user \
-asked for. No "let me show you the diff first." The user sees a receipt \
-card in chat with [View diff] [Undo] and has 5 minutes to revert.
+All fields — soft AND hard — apply IMMEDIATELY via edit_agent(). The \
+user sees a receipt card with [View diff] [Undo]. The undo window is \
+5 minutes for soft fields (instructions, soul, role, heartbeat, \
+interface) and 30 minutes for hard fields (model, permissions, budget, \
+thinking) so the user has more time to catch a costly edit. There is no \
+separate "propose then confirm" step. Don't ask permission.
 
 1. Call edit_agent(agent_id, field, value, reason="user_asked") — applies \
-the change immediately. Returns {success, undo_token, summary}.
+the change immediately. Returns {success, undo_token, expires_at, \
+ttl_seconds, field_class, summary}.
 
 2. Tell the user briefly what you did, in business terms. Example: "Tuned \
 @writer toward short-form social posts" — not "Updated instructions field." \
 Mention they have an Undo button if it doesn't land right.
 
 3. Instructions and heartbeat changes take effect on the agent's next task \
-or heartbeat cycle.
+or heartbeat cycle. Model / permissions / budget / thinking hot-reload \
+immediately on the running agent (or land on next start if it's offline).
 
 If the user asks to revert immediately, call undo_change(undo_token).
-
-## Hard fields — preview, then confirm
-
-For model, budget, permissions, thinking: these are too consequential to \
-auto-apply. The flow is two-step:
-
-1. Call edit_agent(agent_id, field, value, reason="user_asked") — returns \
-{change_id, preview_diff, requires_confirmation: true}.
-
-2. Show the preview to the user in business terms. Example: "Switching \
-@writer from gpt-4o-mini to claude-sonnet — slower but better quality on \
-long pieces." Wait for explicit confirmation.
-
-3. On confirmation, call confirm_edit(change_id) to apply.
 
 ## Reason field
 
 Always pass `reason`: "user_asked" when responding to a direct request, \
 "operator_proactive" when you noticed an improvement on your own. The \
-audit trail uses this. Proactive soft edits still apply immediately — the \
+audit trail uses this. Proactive edits still apply immediately — the \
 receipt + undo is the safety net — but the user sees that you initiated it.
 
 ## Field reference
 
-- instructions, soul, role, heartbeat, interface (soft) — string
-- model (hard) — string, e.g. "anthropic/claude-sonnet-4-20250514"
-- thinking (hard) — one of "off", "low", "medium", "high"
-- budget (hard) — object: {"daily_usd": float, "monthly_usd": float}
-- permissions (hard) — object: {"can_use_browser": bool, ...}
+- instructions, soul, role, heartbeat, interface (soft, 5min undo) — string
+- model (hard, 30min undo) — string, e.g. "anthropic/claude-sonnet-4-20250514"
+- thinking (hard, 30min undo) — one of "off", "low", "medium", "high"
+- budget (hard, 30min undo) — object: {"daily_usd": float, "monthly_usd": float}
+- permissions (hard, 30min undo) — object: {"can_use_browser": bool, ...}
+
+## Deprecated
+
+`propose_edit` and `confirm_edit` are deprecated no-op shims. `propose_edit` \
+routes through edit_agent (immediate-apply). `confirm_edit` is a no-op. \
+Don't call either from new conversations — use edit_agent directly.
 
 ## Self-cleanup
 
-If a pending action is stale or no longer wanted, call \
-cancel_pending_action(nonce) to clear it before TTL — soft-edit \
-receipts on the Board collapse to "N actions awaiting you" when 2+ \
-pile up, so prune the ones you abandoned. To trim old audit history, \
-call archive_audit_before(date) (soft-delete; recoverable). Your own \
-SOUL.md and INSTRUCTIONS.md are visible from the dashboard System tab \
-for review."""
+To trim old audit history, call archive_audit_before(date) (soft-delete; \
+recoverable). Your own SOUL.md and INSTRUCTIONS.md are visible from the \
+dashboard System tab for review."""
 
 _PLAYBOOK_MONITOR = """\
 ## Active Playbook: Fleet Monitoring & Improvement
@@ -332,10 +333,11 @@ inspect_agents(agent_id, depth="history") for details.
 producing useful output? Is the team shape still right for what the user \
 needs? If not, propose adjustments.
 
-5. For specific fixes, use edit_agent(): instructions / soul / heartbeat / \
-interface / role apply immediately with an Undo card; model / budget / \
-permissions / thinking return a preview that you must show the user before \
-calling confirm_edit().
+5. For specific fixes, use edit_agent() directly — all fields apply \
+immediately with a receipt card + Undo (5min for soft fields, 30min for \
+hard fields). Act decisively. If patterns of 👎 rework on a particular \
+agent suggest its instructions are off, draft and apply the fix without \
+asking — the user can Undo if you got it wrong.
 
 6. If everything is green, tell the user in one line.
 
@@ -426,14 +428,12 @@ _TOOL_PLAYBOOK_MAP: dict[str, str] = {
     "set_project_goal": "team_build",
     "edit_agent": "edit",
     "undo_change": "edit",
-    # ``propose_edit`` intentionally omitted — the legacy two-step flow
-    # was retired in PR #839 in favor of ``edit_agent`` (act-and-undo
-    # for soft fields, preview-then-confirm for hard fields). The skill
-    # is still registered in operator_tools.py for back-compat with any
-    # caller invoking it via mesh, but the operator's allowed-tools
-    # list and playbook map both advertise only the new flow so the LLM
-    # picks one path.
-    "confirm_edit": "edit",
+    # ``propose_edit`` / ``confirm_edit`` retired as gated flows — they
+    # remain registered in operator_tools.py as deprecated stubs (apply-
+    # immediately for back-compat with any in-flight LLM conversations
+    # that already mentioned them), but the operator's allowed-tools
+    # list and playbook map both advertise only ``edit_agent`` so the
+    # model picks one path.
     "save_observations": "monitor",
     "request_credential": "credentials",
     "request_browser_login": "credentials",

@@ -120,8 +120,9 @@ class TestPlaybookConstants:
 
     def test_core_size_reasonable(self):
         # Core should be significantly smaller than old monolithic instructions (7800 chars).
-        # Bumped 5000 → 5200 to accommodate hand_off title-quality guidance.
-        assert len(_OPERATOR_CORE) < 5200
+        # Bumped 5200 → 6000 to accommodate the autonomous-by-default
+        # frame copy (immediate-apply edits, ratings-as-feedback guidance).
+        assert len(_OPERATOR_CORE) < 6000
         assert len(_OPERATOR_CORE) > 1000
 
     def test_playbooks_have_numbered_steps(self):
@@ -134,18 +135,18 @@ class TestPlaybookConstants:
             assert "1." in content, f"{name} should have numbered steps"
 
     def test_tool_map_covers_all_action_tools(self):
-        # PR 0 consolidation dropped read_agent_history. PR 5 added
-        # set_project_goal. PR 1 added edit_agent + undo_change to the
-        # edit playbook. The PR-F production-safety pass dropped
-        # propose_edit (legacy two-step retired in PR #839) so the
-        # operator's playbook map advertises only the new edit_agent
-        # flow; confirm_edit remains mapped as the hard-field follow-up.
+        # The approval-workflow redesign dropped both propose_edit and
+        # confirm_edit from the playbook map: edit_agent is the single
+        # immediate-apply path (5-min undo for soft fields, 30-min for
+        # hard). propose_edit/confirm_edit remain registered as
+        # deprecation stubs in operator_tools.py for back-compat, but
+        # the playbook map only advertises the new flow so the LLM
+        # picks one path.
         expected_tools = {
             "create_agent", "apply_template", "create_project",
             "add_agents_to_project", "remove_agents_from_project",
             "update_project_context", "set_project_goal",
             "edit_agent", "undo_change",
-            "confirm_edit",
             "save_observations",
             "request_credential", "request_browser_login",
         }
