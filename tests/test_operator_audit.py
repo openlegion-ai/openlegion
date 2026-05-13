@@ -437,6 +437,76 @@ async def test_mesh_client_confirm_config_change():
     await client.close()
 
 
+@pytest.mark.asyncio
+async def test_mesh_client_edit_soft_wires_unified_endpoint():
+    """MeshClient.edit_soft is the primary client method for the unified
+    edit endpoint that now accepts both soft and hard fields. Verifies
+    URL, payload shape, and that the response (including the new
+    ``ttl_seconds`` and ``field_class`` keys) is passed through.
+    """
+    from src.agent.mesh_client import MeshClient
+
+    client = MeshClient("http://localhost:8420", "operator")
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.raise_for_status = MagicMock()
+    mock_response.json.return_value = {
+        "success": True,
+        "agent_id": "alpha",
+        "field": "model",
+        "undo_token": "tok-xyz",
+        "expires_at": "2026-05-13T20:00:00+00:00",
+        "ttl_seconds": 1800,
+        "field_class": "hard",
+        "summary": "Updated alpha's model",
+    }
+    mock_http = AsyncMock(return_value=mock_response)
+    with patch.object(client, "_get_client", return_value=AsyncMock(post=mock_http)):
+        result = await client.edit_soft(
+            "alpha", "model", "anthropic/claude-opus-4-7", "user_asked",
+        )
+        assert result["undo_token"] == "tok-xyz"
+        assert result["ttl_seconds"] == 1800
+        assert result["field_class"] == "hard"
+        mock_http.assert_called_once()
+        call_args = mock_http.call_args
+        assert "/mesh/agents/alpha/edit-soft" in call_args[0][0]
+        body = call_args[1]["json"]
+        assert body["field"] == "model"
+        assert body["value"] == "anthropic/claude-opus-4-7"
+        assert body["reason"] == "user_asked"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_mesh_client_undo_change_wires_endpoint():
+    """MeshClient.undo_change targets /mesh/changes/undo/{token} so the
+    operator-tool layer's ``undo_change`` skill can reverse an edit by
+    token. Verifies URL shape and response passthrough.
+    """
+    from src.agent.mesh_client import MeshClient
+
+    client = MeshClient("http://localhost:8420", "operator")
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.raise_for_status = MagicMock()
+    mock_response.json.return_value = {
+        "success": True,
+        "agent_id": "alpha",
+        "field": "model",
+        "restored_value": "openai/gpt-4o-mini",
+    }
+    mock_http = AsyncMock(return_value=mock_response)
+    with patch.object(client, "_get_client", return_value=AsyncMock(post=mock_http)):
+        result = await client.undo_change("tok-xyz")
+        assert result["success"] is True
+        assert result["restored_value"] == "openai/gpt-4o-mini"
+        mock_http.assert_called_once()
+        call_args = mock_http.call_args
+        assert "/mesh/changes/undo/tok-xyz" in call_args[0][0]
+    await client.close()
+
+
 # === Audit archive tests (PR C) ===
 
 

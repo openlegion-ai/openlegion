@@ -205,6 +205,23 @@ async def test_edit_soft_rejects_invalid_thinking_value(mesh_app):
 
 
 @pytest.mark.asyncio
+async def test_edit_soft_rejects_empty_field(mesh_app):
+    """Empty `field` payload must 400 with 'field is required' before any
+    YAML or audit write — guards against caller bugs that drop the
+    field key. Pre-existing guard, now reachable by hard-field callers
+    too via the unified endpoint."""
+    app, _, _ = mesh_app
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/agents/writer/edit-soft",
+            json={"field": "", "value": "ignored"},
+            headers=_human_origin_headers(),
+        )
+    assert r.status_code == 400
+    assert "field is required" in r.text.lower()
+
+
+@pytest.mark.asyncio
 async def test_edit_soft_rejects_invalid_field(mesh_app):
     app, _, _ = mesh_app
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
