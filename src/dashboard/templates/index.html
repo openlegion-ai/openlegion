@@ -6653,6 +6653,78 @@
             </div>
           </div>
 
+          <!-- Capabilities — what the operator can reach.
+               ``opInternetEnabled`` mirrors the operator's
+               ``can_use_internet`` permission; the toggle flips it via
+               the dedicated ``/api/operator/internet-access`` endpoint
+               which pushes to the running container so http_request /
+               web_search disappear from the next LLM tool surface
+               immediately (no restart). ``null`` = state not yet
+               fetched; ``opInternetLoading`` debounces double-clicks. -->
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-5"
+               x-data="{ opInternetEnabled: null, opInternetLoading: false, opInternetLive: true }"
+               x-init="(async () => {
+                 try {
+                   const r = await fetch(`${window.__config.apiBase}/operator/internet-access`);
+                   if (r.ok) { const d = await r.json(); opInternetEnabled = !!d.enabled; }
+                 } catch (e) { /* leave null → toggle disabled */ }
+               })()"
+               data-testid="operator-capabilities-card">
+            <div class="flex items-center gap-2 mb-3">
+              <svg class="w-4 h-4 text-gray-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M12 21a9 9 0 100-18 9 9 0 000 18zm0 0c2.5-2.5 4-6 4-9s-1.5-6.5-4-9m0 18c-2.5-2.5-4-6-4-9s1.5-6.5 4-9m-9 9h18"/>
+              </svg>
+              <h3 class="text-sm font-medium text-gray-200">Capabilities</h3>
+            </div>
+            <div class="flex items-center justify-between gap-3">
+              <div class="min-w-0 flex-1">
+                <div class="text-xs text-gray-200">Internet access (HTTPS)</div>
+                <div class="text-[11px] text-gray-500 mt-0.5">
+                  Allows the operator to use <code class="text-gray-400">http_request</code>
+                  and <code class="text-gray-400">web_search</code> tools.
+                  Off-toggle filters them out of the next LLM call —
+                  no container restart needed.
+                </div>
+              </div>
+              <button type="button"
+                @click="(async () => {
+                  if (opInternetEnabled === null || opInternetLoading) return;
+                  const next = !opInternetEnabled;
+                  opInternetLoading = true;
+                  try {
+                    const r = await fetch(`${window.__config.apiBase}/operator/internet-access`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                      body: JSON.stringify({ enabled: next }),
+                    });
+                    const d = await r.json().catch(() => ({}));
+                    if (!r.ok) { showToast(d.detail || `Toggle failed (HTTP ${r.status})`); return; }
+                    opInternetEnabled = !!d.enabled;
+                    opInternetLive = d.live !== false;
+                    showToast(opInternetEnabled ? 'Internet access enabled.' : 'Internet access disabled.');
+                  } catch (e) {
+                    showToast(`Toggle failed: ${e.message || e}`);
+                  } finally {
+                    opInternetLoading = false;
+                  }
+                })()"
+                :disabled="opInternetEnabled === null || opInternetLoading"
+                :aria-pressed="opInternetEnabled === true"
+                :aria-label="opInternetEnabled ? 'Disable internet access for operator' : 'Enable internet access for operator'"
+                :class="opInternetEnabled === null ? 'bg-gray-700 cursor-wait' : (opInternetEnabled ? 'bg-emerald-600 hover:bg-emerald-500' : 'bg-gray-700 hover:bg-gray-600')"
+                class="relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-500/40 disabled:opacity-60"
+                data-testid="operator-internet-toggle">
+                <span :class="opInternetEnabled ? 'translate-x-5' : 'translate-x-1'"
+                      class="inline-block h-3 w-3 transform rounded-full bg-white transition-transform"></span>
+              </button>
+            </div>
+            <div x-show="opInternetEnabled === true && !opInternetLive"
+                 class="mt-2 text-[11px] text-amber-400">
+              Saved — restart the operator to fully apply
+              (the container couldn't be reached for live update).
+            </div>
+          </div>
+
           <!-- Pending actions surface — replaced by the inline
                ``pending_action_card`` chat message. Kept as a small
                empty-state pointer so users coming from the previous

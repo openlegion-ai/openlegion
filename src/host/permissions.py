@@ -115,6 +115,7 @@ class PermissionMatrix:
                 allowed_credentials=default.allowed_credentials,
                 can_use_browser=default.can_use_browser,
                 browser_actions=default.browser_actions,
+                can_use_internet=default.can_use_internet,
                 can_spawn=default.can_spawn,
                 can_manage_cron=default.can_manage_cron,
                 can_manage_fleet=default.can_manage_fleet,
@@ -192,6 +193,21 @@ class PermissionMatrix:
             return True
         perms = self.get_permissions(agent_id)
         return perms.can_use_browser
+
+    def can_use_internet(self, agent_id: str) -> bool:
+        """Check if agent has external-internet access (HTTPS / web search).
+
+        Returns True for trusted mesh-internal callers. Otherwise reads
+        ``AgentPermissions.can_use_internet``. The operator gets True by
+        default via ``_ensure_operator_agent``; worker agents default to
+        False — their http_request / web_search tools are historically
+        ungated, so this only affects agents whose runtime explicitly
+        consults the flag (today: operator's ``_allowed_tools`` filter).
+        """
+        if self._is_trusted(agent_id):
+            return True
+        perms = self.get_permissions(agent_id)
+        return perms.can_use_internet
 
     def can_browser_action(self, agent_id: str, action: str) -> bool:
         """Check if agent has permission for a specific browser action.

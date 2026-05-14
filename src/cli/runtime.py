@@ -400,6 +400,22 @@ class RuntimeContext:
                 # so subsequent restarts and chat-resets do NOT re-emit.
                 from src.shared.operator_playbooks import _OPERATOR_GREETING
                 agent_env["INITIAL_GREETING"] = _OPERATOR_GREETING
+                # Seed the runtime internet-access state from the
+                # operator's stored permission so a restart while the
+                # toggle is OFF doesn't briefly re-expose http_request /
+                # web_search. ``_load_permissions`` is cheap (JSON read);
+                # default-True matches the operator-by-default UX.
+                try:
+                    from src.cli.config import _load_permissions
+                    _op_perms = _load_permissions().get(
+                        "permissions", {},
+                    ).get(_OPERATOR_AGENT_ID, {})
+                    _internet_on = _op_perms.get("can_use_internet", True)
+                    agent_env["OL_INTERNET_ACCESS_ENABLED"] = (
+                        "true" if _internet_on else "false"
+                    )
+                except Exception:
+                    agent_env["OL_INTERNET_ACCESS_ENABLED"] = "true"
 
             # Project env vars
             project_name = agent_projects.get(agent_id)
