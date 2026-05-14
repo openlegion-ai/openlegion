@@ -30,7 +30,7 @@ from __future__ import annotations
 import importlib
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 import yaml
