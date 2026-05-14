@@ -5091,6 +5091,140 @@ class TestWorkplaceTabRoutes:
             resp = client.post("/dashboard/api/workplace/pending/missing/cancel")
         assert resp.status_code == 404
 
+    # ── Pending confirm proxy: dashboard → mesh with X-Origin: human ──
+    #
+    # The confirm button in the workplace panel + the inline
+    # pending_action chat card both POST through this proxy.
+    # Direct browser fetches to ``/mesh/pending/{nonce}/confirm``
+    # used to 401 / 403 because the mesh's ``_confirm_origin_check``
+    # rejects requests without an ``X-Origin: kind=human`` header AND
+    # without a bearer token. The proxy mints both server-side.
+
+    def _patch_pending_confirm_proxy(self, *, status_code: int = 200):
+        """Patch httpx so the confirm proxy can assert request shape.
+
+        Captures the headers + body the proxy hands to the mesh so the
+        tests can verify (a) ``x-mesh-internal`` and ``X-Agent-ID:
+        operator`` are sent (loopback identity), (b) ``X-Origin``
+        encodes ``kind=human;channel=dashboard;user=...``, (c) the
+        ``payload_digest`` body field round-trips.
+        """
+        captured: dict = {"headers": None, "json": None, "url": None}
+
+        class _StubResp:
+            def __init__(self, code: int, body: dict):
+                self.status_code = code
+                self._body = body
+                self.text = "" if not body else str(body)
+
+            def json(self):
+                return self._body
+
+        class _StubClient:
+            def __init__(self_inner, *a, **kw):
+                pass
+
+            async def __aenter__(self_inner):
+                return self_inner
+
+            async def __aexit__(self_inner, *a):
+                return False
+
+            async def post(self_inner, url, json=None, headers=None):
+                captured["url"] = url
+                captured["json"] = json
+                captured["headers"] = dict(headers or {})
+                if status_code == 404:
+                    return _StubResp(
+                        404,
+                        {"detail": "Pending action invalid or expired"},
+                    )
+                if status_code >= 400:
+                    return _StubResp(status_code, {"detail": "mesh error"})
+                return _StubResp(
+                    200,
+                    {
+                        "success": True,
+                        "applied": True,
+                        "agent_id": "alpha",
+                        "field": "model",
+                    },
+                )
+
+        from unittest.mock import patch
+        return patch("httpx.AsyncClient", _StubClient), captured
+
+    def test_workplace_pending_confirm_proxies_with_human_origin(self):
+        client = self._client_with_v2(False)
+        patcher, captured = self._patch_pending_confirm_proxy()
+        with patcher:
+            resp = client.post(
+                "/dashboard/api/workplace/pending/n7/confirm",
+                json={"payload_digest": "abc123"},
+            )
+        assert resp.status_code == 200
+        # URL targets the mesh's nonce-keyed confirm route.
+        assert captured["url"].endswith("/mesh/pending/n7/confirm")
+        # Body propagated payload_digest so the mesh's drift check runs.
+        assert captured["json"] == {"payload_digest": "abc123"}
+        # Loopback identity headers — without these the mesh would
+        # require a bearer token.
+        assert captured["headers"]["x-mesh-internal"] == "1"
+        assert captured["headers"]["X-Agent-ID"] == "operator"
+        # CSRF marker preserved end-to-end so dashboard-side hooks
+        # (and any future strict middleware) still see it.
+        assert captured["headers"]["X-Requested-With"] == "XMLHttpRequest"
+        # The critical fix: X-Origin must decode to ``kind=human`` so
+        # the mesh's ``_confirm_origin_check`` accepts the call. The
+        # header is JSON-encoded by ``origin_header(MessageOrigin(...))``.
+        from src.shared.types import MessageOrigin
+        parsed = MessageOrigin.from_header_value(
+            captured["headers"].get("X-Origin", ""),
+            trust_kind=True,
+        )
+        assert parsed is not None
+        assert parsed.kind == "human"
+        assert parsed.channel == "dashboard"
+        assert parsed.user  # session id populated
+
+    def test_workplace_pending_confirm_no_body_still_works(self):
+        """The workplace-list Confirm button posts an empty body. The
+        proxy must not require ``payload_digest`` — it's an optional
+        drift check used only by the inline chat card."""
+        client = self._client_with_v2(False)
+        patcher, captured = self._patch_pending_confirm_proxy()
+        with patcher:
+            resp = client.post(
+                "/dashboard/api/workplace/pending/n8/confirm",
+            )
+        assert resp.status_code == 200
+        # payload_digest stripped (not None) so the mesh doesn't fail
+        # the optional-digest check with a literal ``None``.
+        assert captured["json"] == {}
+
+    def test_workplace_pending_confirm_propagates_404(self):
+        client = self._client_with_v2(False)
+        patcher, _ = self._patch_pending_confirm_proxy(status_code=404)
+        with patcher:
+            resp = client.post(
+                "/dashboard/api/workplace/pending/missing/confirm",
+                json={},
+            )
+        assert resp.status_code == 404
+
+    def test_workplace_pending_confirm_propagates_mesh_errors(self):
+        client = self._client_with_v2(False)
+        patcher, _ = self._patch_pending_confirm_proxy(status_code=400)
+        with patcher:
+            resp = client.post(
+                "/dashboard/api/workplace/pending/n9/confirm",
+                json={},
+            )
+        # Mesh-side validation failures (e.g. payload_digest mismatch)
+        # must surface to the SPA so its error toast renders, not get
+        # masked as 500.
+        assert resp.status_code == 400
+
     # ── Phase 4: kanban-default Board + task cancel ─────────────────
 
     def _patch_task_cancel_proxy(self, *, status_code: int = 200):

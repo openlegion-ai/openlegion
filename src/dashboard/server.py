@@ -6582,6 +6582,82 @@ def create_dashboard_router(
         except Exception:
             return {"pending": []}
 
+    @api_router.post("/api/workplace/pending/{nonce}/confirm")
+    async def api_workplace_pending_confirm(
+        nonce: str, request: Request,
+    ) -> dict:
+        """Confirm a pending action — backs every dashboard "Confirm" button.
+
+        The browser must NOT hit ``/mesh/pending/{nonce}/confirm``
+        directly. The mesh endpoint requires (a) a bearer token (in
+        production with ``OPENLEGION_AUTH_TOKEN`` set) OR
+        ``x-mesh-internal`` + loopback, AND (b) an ``X-Origin`` header
+        with ``kind="human"`` for the ``_confirm_origin_check`` gate.
+        A browser session has neither, so the call returned 401 (prod)
+        or 403 ("Confirmation requires human origin", dev) — the exact
+        symptom users hit when clicking Confirm on a pending action.
+
+        This proxy:
+          * Forwards over loopback with ``x-mesh-internal=1`` +
+            ``X-Agent-ID: operator`` so the mesh trusts identity.
+          * Mints a ``human`` ``MessageOrigin`` from the dashboard
+            session id and stamps it via ``X-Origin`` so
+            ``_confirm_origin_check`` passes.
+          * Threads ``payload_digest`` through from the request body
+            (the inline pending-action chat card sends it to detect
+            in-flight schema drift on hard-field edits).
+
+        Returns the mesh response on success; mirrors 404 / non-2xx
+        upstream codes so the SPA's existing error handling keeps
+        working.
+        """
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        payload_digest = body.get("payload_digest")
+        from src.shared.trace import origin_header
+        from src.shared.types import MessageOrigin
+        origin = MessageOrigin(
+            kind="human",
+            channel="dashboard",
+            user=_operator_session_id(request),
+        )
+        import httpx
+        url = f"http://127.0.0.1:{mesh_port}/mesh/pending/{nonce}/confirm"
+        fwd_body: dict = {}
+        if payload_digest is not None:
+            fwd_body["payload_digest"] = payload_digest
+        headers = {
+            "X-Requested-With": "XMLHttpRequest",
+            "x-mesh-internal": "1",
+            "X-Agent-ID": "operator",
+            "Content-Type": "application/json",
+        }
+        headers.update(origin_header(origin))
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(url, json=fwd_body, headers=headers)
+        except Exception as e:
+            logger.warning("workplace pending confirm proxy failed: %s", e)
+            raise HTTPException(502, f"Mesh unreachable: {e}")
+        if resp.status_code == 404:
+            raise HTTPException(
+                404, "Pending action not found or already expired",
+            )
+        if resp.status_code >= 400:
+            try:
+                detail = resp.json().get("detail", resp.text)
+            except Exception:
+                detail = resp.text
+            raise HTTPException(resp.status_code, detail)
+        try:
+            return resp.json()
+        except Exception:
+            return {"ok": True, "nonce": nonce}
+
     @api_router.post("/api/workplace/pending/{nonce}/cancel")
     async def api_workplace_pending_cancel(nonce: str) -> dict:
         """Cancel a pending action — backs the dashboard "Cancel" button.
