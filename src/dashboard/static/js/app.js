@@ -3927,11 +3927,21 @@ function dashboard() {
 
     async confirmPendingAction(nonce) {
       try {
-        const resp = await fetch(`/mesh/pending/${encodeURIComponent(nonce)}/confirm`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: '{}',
-        });
+        // Route via the dashboard's loopback proxy so the mesh sees
+        // x-mesh-internal + a human X-Origin. A direct browser-side
+        // fetch to /mesh/pending/.../confirm fails the auth +
+        // human-origin gates (see api_workplace_pending_confirm).
+        const resp = await fetch(
+          `${window.__config.apiBase}/workplace/pending/${encodeURIComponent(nonce)}/confirm`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Requested-With': 'XMLHttpRequest',
+            },
+            body: '{}',
+          },
+        );
         if (!resp.ok) {
           const data = await resp.json().catch(() => ({}));
           this.showToast(`Confirm failed: ${data.detail || resp.status}`);
@@ -3988,11 +3998,19 @@ function dashboard() {
     // message here so the round-trip stays the source of truth.
     async confirmPendingActionCard(msg) {
       try {
-        const resp = await fetch(`/mesh/pending/${encodeURIComponent(msg.event_id)}/confirm`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-          body: JSON.stringify({ payload_digest: msg.payload_digest || undefined }),
-        });
+        // Loopback proxy — see confirmPendingAction note. payload_digest
+        // threads through so the mesh's drift check still fires.
+        const resp = await fetch(
+          `${window.__config.apiBase}/workplace/pending/${encodeURIComponent(msg.event_id)}/confirm`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Requested-With': 'XMLHttpRequest',
+            },
+            body: JSON.stringify({ payload_digest: msg.payload_digest || undefined }),
+          },
+        );
         if (!resp.ok) {
           const data = await resp.json().catch(() => ({}));
           this.showToast(`Confirm failed: ${data.detail || resp.status}`);
@@ -4005,11 +4023,20 @@ function dashboard() {
 
     async cancelPendingActionCard(msg) {
       try {
-        const resp = await fetch(`/mesh/pending/${encodeURIComponent(msg.event_id)}/cancel`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-          body: '{}',
-        });
+        // Loopback proxy (the cancel endpoint doesn't require human
+        // origin, but a direct browser call still fails in prod
+        // because the mesh requires a bearer token or x-mesh-internal).
+        const resp = await fetch(
+          `${window.__config.apiBase}/workplace/pending/${encodeURIComponent(msg.event_id)}/cancel`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Requested-With': 'XMLHttpRequest',
+            },
+            body: '{}',
+          },
+        );
         if (!resp.ok) {
           const data = await resp.json().catch(() => ({}));
           this.showToast(`Cancel failed: ${data.detail || resp.status}`);
