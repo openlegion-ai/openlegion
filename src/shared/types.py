@@ -301,6 +301,14 @@ class AgentPermissions(BaseModel):
                                                # (opt-out restriction).
                                                # [] = no actions (equivalent
                                                # to can_use_browser=False).
+    # ``can_use_internet`` gates external HTTPS / web-search tool calls
+    # (``http_request``, ``web_search``). Workers default to ``False``
+    # but their tools are also default-ungated historically, so the
+    # field has no effect for them unless the agent-side filter explicitly
+    # consults it. The operator gets ``True`` via
+    # ``_ensure_operator_agent`` so it can reach the internet by default;
+    # the Operator Settings UI surfaces a toggle that flips this field.
+    can_use_internet: bool = False
     # ``can_spawn`` (Task 3 narrowed semantics): gates EPHEMERAL spawning
     # only — subagents, cron-triggered spawns, and template applies that
     # produce short-lived workers. Durable fleet operations (creating

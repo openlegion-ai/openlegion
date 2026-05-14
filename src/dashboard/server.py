@@ -2659,10 +2659,26 @@ def create_dashboard_router(
             if skills_dir:
                 skills_dir = str(Path(skills_dir).resolve())
             # Preserve operator's ALLOWED_TOOLS on restart
-            from src.cli.config import _OPERATOR_AGENT_ID, _OPERATOR_ALLOWED_TOOLS
+            from src.cli.config import (
+                _OPERATOR_AGENT_ID,
+                _OPERATOR_ALLOWED_TOOLS,
+                _load_permissions,
+            )
             restart_env: dict[str, str] = {}
             if agent_id == _OPERATOR_AGENT_ID:
                 restart_env["ALLOWED_TOOLS"] = ",".join(_OPERATOR_ALLOWED_TOOLS)
+                # Re-seed internet-access flag on restart so the
+                # operator's toggle state survives the bounce. Default
+                # True matches the operator-by-default UX.
+                try:
+                    _op_perms = _load_permissions().get(
+                        "permissions", {},
+                    ).get(_OPERATOR_AGENT_ID, {})
+                    restart_env["OL_INTERNET_ACCESS_ENABLED"] = (
+                        "true" if _op_perms.get("can_use_internet", True) else "false"
+                    )
+                except Exception:
+                    restart_env["OL_INTERNET_ACCESS_ENABLED"] = "true"
             # Proxy goes in env_overrides (not runtime.extra_env) so
             # concurrent single-agent restarts don't stomp each other.
             _proxy_url = resolve_agent_proxy(
@@ -4870,6 +4886,82 @@ def create_dashboard_router(
             return resp.json()
         except Exception:
             return {"ok": True, "archived_count": 0, "before_date": before_date}
+
+    # ── Operator: internet access toggle ─────────────────────
+
+    @api_router.get("/api/operator/internet-access")
+    async def api_operator_internet_access_status() -> dict:
+        """Return the operator's current internet-access state.
+
+        Proxies to mesh ``GET /mesh/operator/internet-access``. The
+        Operator Settings UI calls this on mount to render the toggle's
+        initial position.
+        """
+        import httpx
+        url = f"http://127.0.0.1:{mesh_port}/mesh/operator/internet-access"
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    url,
+                    headers={
+                        "x-mesh-internal": "1",
+                        "X-Agent-ID": "operator",
+                    },
+                )
+        except Exception as e:
+            logger.warning("operator internet-access status proxy failed: %s", e)
+            raise HTTPException(502, f"Mesh unreachable: {e}")
+        if resp.status_code >= 400:
+            try:
+                detail = resp.json().get("detail", resp.text)
+            except Exception:
+                detail = resp.text
+            raise HTTPException(resp.status_code, detail)
+        return resp.json()
+
+    @api_router.post("/api/operator/internet-access")
+    async def api_operator_internet_access_set(request: Request) -> dict:
+        """Flip the operator's internet access on/off.
+
+        Body: ``{"enabled": bool}``. Proxies to mesh
+        ``POST /mesh/operator/internet-access`` which writes the
+        permission, reloads the matrix, pushes to the operator container,
+        and emits ``agent_config_updated``. Response shape:
+        ``{success, enabled, previous, live}``.
+        """
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if not isinstance(body, dict) or "enabled" not in body:
+            raise HTTPException(400, "'enabled' is required")
+        enabled = body.get("enabled")
+        if not isinstance(enabled, bool):
+            raise HTTPException(400, "'enabled' must be a boolean")
+        import httpx
+        url = f"http://127.0.0.1:{mesh_port}/mesh/operator/internet-access"
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(
+                    url,
+                    json={"enabled": enabled},
+                    headers={
+                        "X-Requested-With": "XMLHttpRequest",
+                        "x-mesh-internal": "1",
+                        "X-Agent-ID": "operator",
+                        "Content-Type": "application/json",
+                    },
+                )
+        except Exception as e:
+            logger.warning("operator internet-access set proxy failed: %s", e)
+            raise HTTPException(502, f"Mesh unreachable: {e}")
+        if resp.status_code >= 400:
+            try:
+                detail = resp.json().get("detail", resp.text)
+            except Exception:
+                detail = resp.text
+            raise HTTPException(resp.status_code, detail)
+        return resp.json()
 
     # ── Queue status ─────────────────────────────────────────
 

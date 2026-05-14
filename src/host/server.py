@@ -5576,6 +5576,128 @@ def create_mesh_app(
             "supersedes_count": len(prior_unconsumed),
         }
 
+    @app.post("/mesh/operator/internet-access")
+    async def operator_internet_access(request: Request) -> dict:
+        """Toggle the operator's ability to use http_request / web_search.
+
+        Body: ``{"enabled": bool}``. Operator-only or internal callers.
+
+        Two-step apply: (1) flip ``operator.can_use_internet`` in
+        permissions.json + reload the mesh-side matrix; (2) push to the
+        operator container's ``/config`` endpoint so the agent loop's
+        ``_runtime_disabled_tools`` is updated immediately — the next
+        LLM tool surface filters ``http_request`` and ``web_search`` out
+        when disabled, or restores them when re-enabled. ``hot_reload_ok``
+        in the response reports whether the container-side push
+        succeeded; the permissions-file write is the source of truth
+        regardless (the container picks it up on next restart).
+
+        Emits ``agent_config_updated`` (agent=``operator``,
+        ``field="can_use_internet"``, ``live=<bool>``) and writes an
+        ``edit_agent`` audit row tagged ``undoable=False`` (the toggle
+        is its own UI affordance — flipping it back is just a re-click).
+        """
+        _require_any_auth(request)
+        caller = _extract_verified_agent_id(request)
+        if caller != "operator" and not _is_internal_caller(request):
+            raise HTTPException(
+                403, "Only the operator can toggle internet access",
+            )
+
+        data = await request.json()
+        if "enabled" not in data:
+            raise HTTPException(400, "'enabled' is required")
+        enabled = data.get("enabled")
+        if not isinstance(enabled, bool):
+            raise HTTPException(400, "'enabled' must be a boolean")
+
+        from src.cli.config import (
+            _OPERATOR_AGENT_ID,
+            _load_permissions,
+            _save_permissions,
+        )
+
+        perms = _load_permissions()
+        op_perms = perms.setdefault("permissions", {}).setdefault(
+            _OPERATOR_AGENT_ID, {},
+        )
+        previous = bool(op_perms.get("can_use_internet", False))
+        op_perms["can_use_internet"] = enabled
+        _save_permissions(perms)
+        if permissions is not None:
+            permissions.reload()
+
+        # Push to the operator's container so the runtime tool surface
+        # flips immediately. ``hot_reload_ok`` defaults True when the
+        # container isn't registered (e.g. mid-restart) — the durable
+        # write is what matters; the container picks it up on next boot.
+        hot_reload_ok = True
+        if transport is not None and _OPERATOR_AGENT_ID in router.agent_registry:
+            try:
+                result = await transport.request(
+                    _OPERATOR_AGENT_ID, "POST", "/config",
+                    json={"internet_access_enabled": enabled}, timeout=10,
+                )
+                if isinstance(result, dict) and "error" in result:
+                    hot_reload_ok = False
+                    logger.warning(
+                        "Operator /config push failed: %s", result["error"],
+                    )
+            except Exception as e:
+                hot_reload_ok = False
+                logger.warning(
+                    "Operator /config push raised: %s", e,
+                )
+
+        blackboard.log_audit(
+            action="edit_agent",
+            target=_OPERATOR_AGENT_ID,
+            field="can_use_internet",
+            before_value=json.dumps(previous),
+            after_value=json.dumps(enabled),
+            undoable=False,
+        )
+
+        if event_bus is not None:
+            try:
+                event_bus.emit(
+                    "agent_config_updated", agent=_OPERATOR_AGENT_ID,
+                    data={
+                        "agent_id": _OPERATOR_AGENT_ID,
+                        "field": "can_use_internet",
+                        "live": hot_reload_ok,
+                    },
+                )
+            except Exception as e:
+                logger.debug(
+                    "agent_config_updated emit failed for internet-access: %s", e,
+                )
+
+        return {
+            "success": True,
+            "enabled": enabled,
+            "previous": previous,
+            "live": hot_reload_ok,
+        }
+
+    @app.get("/mesh/operator/internet-access")
+    async def operator_internet_access_status(request: Request) -> dict:
+        """Read the operator's current internet-access state.
+
+        Returned shape: ``{"enabled": bool}``. The Operator Settings UI
+        polls this to render the toggle's initial state on mount.
+        """
+        _require_any_auth(request)
+        caller = _extract_verified_agent_id(request)
+        if caller != "operator" and not _is_internal_caller(request):
+            raise HTTPException(
+                403, "Only the operator can read internet-access state",
+            )
+        from src.cli.config import _OPERATOR_AGENT_ID, _load_permissions
+        perms = _load_permissions()
+        op_perms = perms.get("permissions", {}).get(_OPERATOR_AGENT_ID, {})
+        return {"enabled": bool(op_perms.get("can_use_internet", False))}
+
     @app.post("/mesh/changes/undo/{undo_token}")
     async def undo_change(undo_token: str, request: Request) -> dict:
         """Reverse a recent soft edit. 5-minute TTL.

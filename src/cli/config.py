@@ -1552,6 +1552,10 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     # (never values) so the operator can check what credentials already
     # exist before calling request_credential.
     "vault_list", "request_credential", "request_browser_login",
+    # Internet access (gated by ``can_use_internet`` permission — the
+    # agent's runtime filters these out of the effective allowlist when
+    # the Operator Settings → Internet access toggle is OFF).
+    "http_request", "web_search",
 ]
 
 _OPERATOR_HEARTBEAT_TOOLS: list[str] = [
@@ -1703,6 +1707,13 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
         if not op_perms.get("can_request_user_credentials", False):
             op_perms["can_request_user_credentials"] = True
             needs_update = True
+        # Internet access: backfill True for existing operators that
+        # predate the field. Idempotent — once set (True OR False), the
+        # ``not in`` guard skips so the user's explicit OFF choice is
+        # preserved across restarts.
+        if "can_use_internet" not in op_perms:
+            op_perms["can_use_internet"] = True
+            needs_update = True
         if needs_update:
             perms.setdefault("permissions", {})[_OPERATOR_AGENT_ID] = op_perms
             _save_permissions(perms)
@@ -1726,6 +1737,13 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
         permissions={
             "can_spawn": True,
             "can_use_browser": False,
+            # Operator gets internet (HTTPS + web search) by default so
+            # it can fetch reference material and answer factual
+            # questions without delegating to a worker. The dashboard
+            # surfaces a toggle in Operator Settings → "Internet
+            # access" that flips this off when the user wants the
+            # operator sandboxed.
+            "can_use_internet": True,
             "blackboard_read": ["*"],
             "blackboard_write": ["*"],
             "can_publish": ["*"],

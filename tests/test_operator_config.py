@@ -248,7 +248,10 @@ class TestOperatorConstants:
         # PR 1 swaps propose_edit (-1) for edit_agent + undo_change (+2) → 26.
         # Self-cleanup PR adds cancel_pending_action + archive_audit_before (+2) → 28.
         # PR F adds list_pending + vault_list (+2) → 30.
-        assert len(_OPERATOR_ALLOWED_TOOLS) == 30
+        # Internet-access PR adds http_request + web_search (+2) → 32 (gated
+        # by the can_use_internet permission + runtime filter; see
+        # tests/test_operator_internet_access.py).
+        assert len(_OPERATOR_ALLOWED_TOOLS) == 32
         assert len(_OPERATOR_HEARTBEAT_TOOLS) == 4
         # Heartbeat tools should be a subset of allowed tools
         assert set(_OPERATOR_HEARTBEAT_TOOLS).issubset(set(_OPERATOR_ALLOWED_TOOLS))
