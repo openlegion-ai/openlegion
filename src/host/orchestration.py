@@ -32,7 +32,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from src.shared.task_titles import _normalize_title_and_description
+from src.shared.task_titles import normalize_title_and_description
 from src.shared.utils import setup_logging
 
 logger = setup_logging("host.orchestration")
@@ -60,7 +60,7 @@ MAX_FEEDBACK_CHARS: int = 2000
 
 # Title length policy lives in ``src.shared.task_titles`` so the agent
 # coordination tool can import it without crossing the trust boundary.
-# See ``_normalize_title_and_description`` (imported above) — applied in
+# See ``normalize_title_and_description`` (imported above) — applied in
 # ``Tasks.create`` as the authoritative server-side check.
 
 # Allowed status transitions. Keys are FROM, values are sets of valid TOs.
@@ -399,7 +399,7 @@ class Tasks:
         # of-text in the dashboard kanban. Apply the title-length policy
         # here so every task in the system stays bounded regardless of
         # which call path created it.
-        title, description = _normalize_title_and_description(title, description)
+        title, description = normalize_title_and_description(title, description)
 
         tid = task_id or f"task_{uuid.uuid4().hex[:12]}"
         now = time.time()

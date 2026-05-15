@@ -32,8 +32,8 @@ from src.host.orchestration import (
 from src.shared.task_titles import (
     MAX_TITLE_CHARS,
     SHORT_TITLE_TARGET,
-    _derive_short_title,
-    _normalize_title_and_description,
+    derive_short_title,
+    normalize_title_and_description,
 )
 
 
@@ -129,13 +129,13 @@ def test_create_task_split_when_only_long_summary(tmp_path):
 
 
 def test_normalize_title_short_passthrough():
-    title, desc = _normalize_title_and_description("Short title", None)
+    title, desc = normalize_title_and_description("Short title", None)
     assert title == "Short title"
     assert desc is None
 
 
 def test_normalize_title_short_with_description():
-    title, desc = _normalize_title_and_description("Short", "details")
+    title, desc = normalize_title_and_description("Short", "details")
     assert title == "Short"
     assert desc == "details"
 
@@ -143,7 +143,7 @@ def test_normalize_title_short_with_description():
 def test_normalize_title_long_with_description():
     """Long title + caller description → trust caller, cap title."""
     long = "X" * 500
-    title, desc = _normalize_title_and_description(long, "caller-desc")
+    title, desc = normalize_title_and_description(long, "caller-desc")
     assert len(title) <= MAX_TITLE_CHARS
     assert desc == "caller-desc"
 
@@ -155,7 +155,7 @@ def test_normalize_title_long_no_description_splits():
         "Use the existing template at templates/launch-brief.md. "
         "Target audience: engineering managers evaluating agent platforms."
     )
-    title, desc = _normalize_title_and_description(long_summary, None)
+    title, desc = normalize_title_and_description(long_summary, None)
     assert len(title) <= SHORT_TITLE_TARGET + 1
     assert desc == long_summary
     # The short title should carry the leading clause meaningfully.
@@ -164,30 +164,30 @@ def test_normalize_title_long_no_description_splits():
 
 def test_derive_short_title_first_sentence():
     text = "Draft Q3 launch brief. Use the existing template at X."
-    assert _derive_short_title(text) == "Draft Q3 launch brief"
+    assert derive_short_title(text) == "Draft Q3 launch brief"
 
 
 def test_derive_short_title_first_line():
     text = "Subject line\n\nBody paragraph that is much longer..."
-    assert _derive_short_title(text) == "Subject line"
+    assert derive_short_title(text) == "Subject line"
 
 
 def test_derive_short_title_dash_split():
     text = "TEST RUN — execute now, do NOT wait for the 08:00 cron"
-    out = _derive_short_title(text)
+    out = derive_short_title(text)
     assert out == "TEST RUN"
 
 
 def test_derive_short_title_word_boundary_cut():
     text = "A" + " B" * 60  # one short word + many short tokens, no sentence break
-    out = _derive_short_title(text)
+    out = derive_short_title(text)
     assert len(out) <= SHORT_TITLE_TARGET + 1
     assert out.endswith("…")
 
 
 def test_derive_short_title_collapses_whitespace():
     text = "Multi   line\t\t\twith   weird     spacing all on one"
-    out = _derive_short_title(text)
+    out = derive_short_title(text)
     assert "  " not in out  # collapsed
 
 
@@ -200,11 +200,11 @@ def test_derive_short_title_returns_empty_for_whitespace():
     early-return makes the helper tell its caller "I have nothing"
     rather than fabricating a title.
     """
-    assert _derive_short_title("") == ""
-    assert _derive_short_title("   ") == ""
-    assert _derive_short_title("\t\n  \n\t") == ""
+    assert derive_short_title("") == ""
+    assert derive_short_title("   ") == ""
+    assert derive_short_title("\t\n  \n\t") == ""
     # The audit case — 200 chars of spaces.
-    assert _derive_short_title(" " * 200) == ""
+    assert derive_short_title(" " * 200) == ""
 
 
 def test_create_task_rejects_whitespace_only_title(tmp_path):

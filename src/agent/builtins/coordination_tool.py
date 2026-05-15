@@ -20,7 +20,7 @@ import time
 from src.agent.skills import skill
 from src.shared.task_titles import (
     LONG_TITLE_THRESHOLD,
-    _normalize_title_and_description,
+    normalize_title_and_description,
 )
 from src.shared.types import AGENT_ID_RE_PATTERN
 from src.shared.utils import generate_id, sanitize_for_prompt, setup_logging
@@ -524,7 +524,7 @@ async def _hand_off_v2(
     # mirror it here so the title we surface in result envelopes, wake
     # messages, and downstream logs is already short.
     if len(summary) > LONG_TITLE_THRESHOLD:
-        title, description = _normalize_title_and_description(summary, None)
+        title, description = normalize_title_and_description(summary, None)
         # ``description`` is the full original ``summary`` here — keep
         # it intact so the recipient still sees the complete instruction.
     else:

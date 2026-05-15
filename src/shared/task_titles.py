@@ -1,12 +1,11 @@
 """Title-length policy for task records.
 
 Lives in ``src/shared`` because both the mesh-side task store
-(``src.host.orchestration.Tasks.create``) and the agent-side
-coordination tool (``src.agent.builtins.coordination_tool._hand_off_v2``)
-apply this policy. Agent containers ship only ``src/agent`` +
-``src/shared``, so any helper they reach for must live here — importing
-from ``src.host`` across the trust boundary fails with
-``ModuleNotFoundError`` inside the agent container.
+(``Tasks.create``) and the agent-side ``hand_off`` tool apply this
+policy. Agent containers ship only ``src/agent`` + ``src/shared``, so
+any helper agents reach for must live here — importing from
+``src.host`` across the trust boundary raises ``ModuleNotFoundError``
+inside the agent container.
 
 ``MAX_TITLE_CHARS`` is a hard cap. ``LONG_TITLE_THRESHOLD`` is the soft
 ceiling: when a caller submits a single ``title`` longer than this and no
@@ -23,7 +22,7 @@ LONG_TITLE_THRESHOLD: int = 100
 SHORT_TITLE_TARGET: int = 80
 
 
-def _derive_short_title(text: str) -> str:
+def derive_short_title(text: str) -> str:
     """Extract a short single-line label from a longer task instruction.
 
     Strategy: take the first non-empty line, then split on sentence
@@ -69,7 +68,7 @@ def _derive_short_title(text: str) -> str:
     return candidate
 
 
-def _normalize_title_and_description(
+def normalize_title_and_description(
     title: str, description: str | None,
 ) -> tuple[str, str | None]:
     """Apply the title-length policy.
@@ -94,7 +93,7 @@ def _normalize_title_and_description(
         return title[:MAX_TITLE_CHARS], description
     # Long title, no description: treat title as description, derive
     # a short title from it.
-    short = _derive_short_title(title)
+    short = derive_short_title(title)
     if not short:
         # Pathological input (whitespace-only after splitting). Fall
         # back to a hard cut so we always have *some* title.
