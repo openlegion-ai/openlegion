@@ -1345,7 +1345,7 @@ class TestHandOffTitleQuality:
     async def test_hand_off_long_summary_splits_into_title_and_description(self):
         """Summary > 100 chars: title is short, description is full text."""
         from src.agent.builtins.coordination_tool import hand_off
-        from src.host.orchestration import SHORT_TITLE_TARGET
+        from src.shared.task_titles import SHORT_TITLE_TARGET
 
         mc = _make_mesh_client(agent_id="scout", v2_enabled=True)
         mc.list_agents.return_value = {"writer": {"role": "writer"}}
