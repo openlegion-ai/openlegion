@@ -1324,7 +1324,7 @@ def create_dashboard_router(
     # router instance — restarting the engine resets the window which is
     # the desired behavior (operators rarely depend on the precise number
     # surviving a process boundary).
-    _COOKIE_IMPORT_LIMIT = 10
+    _COOKIE_IMPORT_LIMIT = 60
     _COOKIE_IMPORT_WINDOW_S = 60 * 60
     _cookie_import_buckets: dict[tuple[str, str], list[float]] = {}
     _cookie_import_lock = threading.Lock()

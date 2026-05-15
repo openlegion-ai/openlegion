@@ -19,7 +19,7 @@ import os
 import re
 import time
 import uuid as _uuid
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Callable, Coroutine
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
@@ -715,41 +715,52 @@ def create_mesh_app(
 
     # -- Per-agent rate limiting --------------------------------------------------
     # Each bucket is keyed by (endpoint_name, agent_id).
-    _rate_ts: dict[str, list[float]] = defaultdict(list)
+    # Sliding-window rate-limit buckets keyed by f"{endpoint}:{agent_id}".
+    # Deque + popleft makes pruning amortized O(1) — each timestamp is
+    # walked off the head exactly once instead of full-scanning on every
+    # request. With the post-bump limits (up to 20k/min), the old list
+    # comprehension would have spent meaningful CPU inside the lock.
+    _rate_ts: dict[str, deque[float]] = defaultdict(deque)
     _rate_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
     _RATE_LIMITS: dict[str, tuple[int, int]] = {
         # (max_requests, window_seconds)
-        "api_proxy": (30, 60),
-        "vault_resolve": (5, 60),
-        "vault_store": (10, 3600),
-        "blackboard_read": (200, 60),
-        "blackboard_write": (100, 60),
-        "publish": (200, 60),
-        "notify": (10, 60),
-        "cron_create": (10, 3600),
-        "spawn": (5, 3600),
-        "wallet_read": (120, 60),
-        "wallet_transfer": (10, 3600),
-        "wallet_execute": (10, 3600),
-        "image_gen": (10, 60),
-        "agent_profile": (30, 60),
-        "upload_stage": (30, 60),
-        "upload_apply": (30, 60),
+        # Self-hosted single-tenant: limits only exist to catch a genuinely
+        # runaway loop. Cost budgets (costs.py) and per-tx wallet caps are
+        # the real spend guardrails — these buckets should never fire in
+        # normal operation.
+        "api_proxy": (6000, 60),
+        "vault_resolve": (10000, 60),
+        "vault_store": (600, 60),
+        "blackboard_read": (20000, 60),
+        "blackboard_write": (10000, 60),
+        "publish": (20000, 60),
+        "notify": (3000, 60),
+        "cron_create": (1000, 60),
+        "spawn": (600, 60),
+        "wallet_read": (6000, 60),
+        "wallet_transfer": (600, 60),
+        "wallet_execute": (600, 60),
+        "image_gen": (600, 60),
+        "agent_profile": (6000, 60),
+        "upload_stage": (3000, 60),
+        "upload_apply": (3000, 60),
     }
 
     async def _check_rate_limit(endpoint: str, agent_id: str) -> None:
         """Enforce per-agent rate limit. Raises 429 if exceeded."""
-        limit, window = _RATE_LIMITS.get(endpoint, (100, 60))
+        limit, window = _RATE_LIMITS.get(endpoint, (10000, 60))
         bucket_key = f"{endpoint}:{agent_id}"
         async with _rate_locks[bucket_key]:
             now = time.time()
-            ts_list = _rate_ts[bucket_key]
-            ts_list[:] = [t for t in ts_list if now - t < window]
-            if len(ts_list) >= limit:
+            bucket = _rate_ts[bucket_key]
+            cutoff = now - window
+            while bucket and bucket[0] <= cutoff:
+                bucket.popleft()
+            if len(bucket) >= limit:
                 _record_denial("rate")
                 raise HTTPException(429, f"Rate limit exceeded for {endpoint}")
-            ts_list.append(now)
+            bucket.append(now)
 
     def _notify_watchers_batch(watcher_ids: list[str], msg: str) -> None:
         """Batch-notify watchers via a single cross-thread call."""
@@ -778,9 +789,11 @@ def create_mesh_app(
         data, pub/sub subscriptions, lane workers, cron jobs, cost
         records, trace records, and wallet records.
         """
-        stale = [k for k in _rate_ts if k.endswith(f":{agent_id}")]
+        suffix = f":{agent_id}"
+        stale = [k for k in _rate_ts if k.endswith(suffix)]
         for k in stale:
-            del _rate_ts[k]
+            _rate_ts.pop(k, None)
+            _rate_locks.pop(k, None)
         if credential_vault is not None:
             credential_vault.cleanup_agent(agent_id)
         blackboard.cleanup_agent_data(agent_id)
@@ -3251,8 +3264,8 @@ def create_mesh_app(
     # agent status without a dashboard session cookie.
     # Authenticated via X-API-Key header against named keys in ApiKeyManager.
 
-    _RATE_LIMITS["ext_credentials"] = (30, 60)
-    _RATE_LIMITS["ext_status"] = (60, 60)
+    _RATE_LIMITS["ext_credentials"] = (3000, 60)
+    _RATE_LIMITS["ext_status"] = (6000, 60)
 
     def _require_api_key(request: Request) -> str:
         """Verify the X-API-Key header.  Returns the key ID for rate limiting."""
@@ -7021,6 +7034,12 @@ def create_mesh_app(
     app.state.upload_stage_partial_ttl_s = _UPLOAD_STAGE_PARTIAL_TTL_S
     app.state.upload_stage_gc_once = _upload_stage_gc_once
     app.state.upload_stage_active_handles = _active_stage_handles
+
+    # Exposed for tests so they can pre-fill rate-limit buckets instead
+    # of looping thousands of times against the spam-only ceilings. Not
+    # used by production code paths.
+    app.state.rate_ts = _rate_ts
+    app.state.rate_limits = _RATE_LIMITS
 
     @app.on_event("startup")
     async def _start_upload_stage_gc() -> None:
