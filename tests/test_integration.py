@@ -15,6 +15,21 @@ from src.host.permissions import PermissionMatrix
 from src.host.server import create_mesh_app
 from src.shared.types import AgentPermissions
 
+# Mirror of src/host/server.py:_RATE_LIMITS["vault_resolve"]; bump together.
+EXPECTED_VAULT_RESOLVE_LIMIT = 10000
+
+
+def _prefill_rate_bucket(app, endpoint: str, agent_id: str, count: int) -> None:
+    """Stuff ``count`` timestamps into the rate-limit bucket so the next
+    request lands at ``count + 1``. Used so high-ceiling tests don't have
+    to make thousands of HTTP calls."""
+    import time
+
+    bucket = app.state.rate_ts[f"{endpoint}:{agent_id}"]
+    now = time.time()
+    for _ in range(count):
+        bucket.append(now)
+
 
 @pytest.fixture
 def mesh_components(tmp_path, monkeypatch):
@@ -604,25 +619,30 @@ def test_vault_list_wildcard_excludes_system(vault_components):
 
 
 def test_vault_resolve_rate_limited(vault_components):
-    """After 5 resolves, subsequent ones return 429."""
+    """Once the per-agent vault_resolve bucket is full, the next resolve
+    returns 429. Looping the full ``limit + 1`` requests would be slow
+    against the spam-only ceiling, so we pre-fill the bucket instead.
+    """
     client = vault_components["client"]
     vault = vault_components["vault"]
     vault.credentials["rate_test"] = "value"
 
-    # First 5 should succeed
-    for _ in range(5):
-        resp = client.post(
-            "/mesh/vault/resolve",
-            json={"agent_id": "trusted", "name": "rate_test"},
-        )
-        assert resp.status_code == 200
+    limit = EXPECTED_VAULT_RESOLVE_LIMIT
+    _prefill_rate_bucket(client.app, "vault_resolve", "trusted", limit - 1)
 
-    # 6th should be rate limited
+    # One more should succeed (consumes the final token).
     resp = client.post(
         "/mesh/vault/resolve",
         json={"agent_id": "trusted", "name": "rate_test"},
     )
-    assert resp.status_code == 429
+    assert resp.status_code == 200, resp.text
+
+    # The next call must be 429.
+    resp = client.post(
+        "/mesh/vault/resolve",
+        json={"agent_id": "trusted", "name": "rate_test"},
+    )
+    assert resp.status_code == 429, resp.text
 
 
 # === Notify Endpoint Tests ===

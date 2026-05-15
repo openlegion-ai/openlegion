@@ -793,11 +793,16 @@ class TestCSRFAndAuth:
         auth.reset_cache()
 
 
+# Mirror of src/dashboard/server.py:_COOKIE_IMPORT_LIMIT; bump together.
+EXPECTED_COOKIE_IMPORT_LIMIT = 60
+
+
 class TestRateLimit:
-    def test_eleventh_call_within_window_returns_429(self, setup):
+    def test_call_past_limit_returns_429(self, setup):
         client = setup["client"]
-        # Send 10 requests — all should succeed.
-        for i in range(10):
+        limit = EXPECTED_COOKIE_IMPORT_LIMIT
+        # First ``limit`` requests succeed.
+        for i in range(limit):
             resp = client.post(
                 "/dashboard/api/agents/alpha/browser/import_cookies",
                 json={"format": "playwright",
@@ -805,7 +810,7 @@ class TestRateLimit:
                                    "domain": ".example.com"}]},
             )
             assert resp.status_code == 200, f"call {i}: {resp.text}"
-        # 11th must be rate-limited.
+        # Call ``limit + 1`` must be rate-limited.
         resp = client.post(
             "/dashboard/api/agents/alpha/browser/import_cookies",
             json={"format": "playwright",

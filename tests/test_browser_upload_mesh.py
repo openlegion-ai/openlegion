@@ -14,6 +14,21 @@ from unittest.mock import MagicMock
 
 import pytest
 
+# Mirror of src/host/server.py:_RATE_LIMITS["upload_apply"]; bump together.
+EXPECTED_UPLOAD_APPLY_LIMIT = 3000
+
+
+def _prefill_rate_bucket(app, endpoint: str, agent_id: str, count: int) -> None:
+    """Stuff ``count`` timestamps into the rate-limit bucket so the next
+    request lands at ``count + 1``. Used so high-ceiling tests don't have
+    to make thousands of HTTP calls."""
+    import time
+
+    bucket = app.state.rate_ts[f"{endpoint}:{agent_id}"]
+    now = time.time()
+    for _ in range(count):
+        bucket.append(now)
+
 
 def _build_app(tmp_path, *, perms_map, monkeypatch=None, ttl_s=60, max_mb=50):
     from src.host.costs import CostTracker
@@ -483,21 +498,28 @@ class TestApplyRateLimit:
             )
             handle = stage.json()["staged_handle"]
 
-            # Patch the rate-limit table to be tight (2 requests/min) for
-            # upload_apply via the running app's stored state.
-            # We achieve this by issuing many calls; the default is 30/60s
-            # per the impl. To keep the test fast we hit the cap.
-            statuses: list[int] = []
-            for _ in range(35):
-                resp = await client.post(
-                    "/mesh/browser/upload_file",
-                    json={"ref": "e1", "staged_handles": [handle]},
-                    headers={"X-Agent-ID": "worker"},
-                )
-                statuses.append(resp.status_code)
-                if resp.status_code == 429:
-                    break
-        assert 429 in statuses, statuses
+            # Pre-fill the upload_apply bucket to limit - 1 so the next
+            # call still succeeds and the call after trips the limiter.
+            # Looping the full ``limit + 1`` HTTP requests would be slow
+            # against the spam-only 3000/min ceiling.
+            limit = EXPECTED_UPLOAD_APPLY_LIMIT
+            _prefill_rate_bucket(app, "upload_apply", "worker", limit - 1)
+
+            # One more should succeed (consumes the final token).
+            resp = await client.post(
+                "/mesh/browser/upload_file",
+                json={"ref": "e1", "staged_handles": [handle]},
+                headers={"X-Agent-ID": "worker"},
+            )
+            assert resp.status_code != 429, resp.text
+
+            # The next call must be 429.
+            resp = await client.post(
+                "/mesh/browser/upload_file",
+                json={"ref": "e1", "staged_handles": [handle]},
+                headers={"X-Agent-ID": "worker"},
+            )
+            assert resp.status_code == 429, resp.text
 
 
 class TestIdempotencyTtl:
@@ -1099,20 +1121,22 @@ class TestApplyParseOrder:
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test",
         ) as client:
-            statuses: list[int] = []
-            for _ in range(40):
-                # Send a body that would 400 if parsed (no ref, no
-                # handles). We expect 400 until the rate-limit kicks in,
-                # then 429 — the moment we see 429 we stop.
-                resp = await client.post(
-                    "/mesh/browser/upload_file",
-                    json={},
-                    headers={"X-Agent-ID": "worker"},
-                )
-                statuses.append(resp.status_code)
-                if resp.status_code == 429:
-                    break
-            assert 429 in statuses, statuses
+            # Burn the apply bucket to the ceiling so the next call must
+            # be 429 — and crucially, must come back as 429 even though
+            # the body would otherwise 400 from parse failure. That's
+            # the invariant under test: rate-limit fires BEFORE parse.
+            limit = EXPECTED_UPLOAD_APPLY_LIMIT
+            _prefill_rate_bucket(app, "upload_apply", "worker", limit)
+
+            # A body that would 400 if parsed (no ref, no handles) —
+            # it must come back as 429 instead because the rate-limit
+            # check runs first.
+            resp = await client.post(
+                "/mesh/browser/upload_file",
+                json={},
+                headers={"X-Agent-ID": "worker"},
+            )
+            assert resp.status_code == 429, resp.text
 
             # Confirm a malformed body (which would normally raise on
             # json parse) is now stopped at the rate-limit gate.

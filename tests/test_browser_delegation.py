@@ -17,6 +17,21 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+# Mirror of src/host/server.py:_RATE_LIMITS["notify"]; bump together.
+EXPECTED_NOTIFY_LIMIT = 3000
+
+
+def _prefill_rate_bucket(app, endpoint: str, agent_id: str, count: int) -> None:
+    """Stuff ``count`` timestamps into the rate-limit bucket so the next
+    request lands at ``count + 1``. Used so high-ceiling tests don't have
+    to make thousands of HTTP calls."""
+    import time
+
+    bucket = app.state.rate_ts[f"{endpoint}:{agent_id}"]
+    now = time.time()
+    for _ in range(count):
+        bucket.append(now)
+
 # ── Skill tests ─────────────────────────────────────────────────────
 
 
@@ -932,12 +947,11 @@ class TestBrowserLoginRequestEndpoint:
         the target, which would let one noisy caller exhaust an unrelated
         peer's notify quota via repeated delegation.
 
-        Strategy: ``notify`` is 10/min. Spam 11 delegated requests from
-        operator → social-manager. If the bucket is keyed by caller
-        (operator), the 11th request returns 429. If it were keyed by
-        target, all 11 succeed (because operator's bucket is empty). We
-        also verify that after operator is exhausted, social-manager can
-        still issue its own request (target's bucket untouched).
+        Strategy: pre-fill the caller's (operator's) ``notify`` bucket to
+        ``limit - 1``. One delegated request succeeds (operator hits the
+        ceiling); the next must 429 — proving the bucket is keyed on
+        caller. We then verify the target's (social-manager's) bucket is
+        untouched: it can still issue its own self-path request.
         """
         from httpx import ASGITransport, AsyncClient
 
@@ -949,34 +963,48 @@ class TestBrowserLoginRequestEndpoint:
             },
         )
 
+        limit = EXPECTED_NOTIFY_LIMIT
+        _prefill_rate_bucket(app, "notify", "operator", limit - 1)
+
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test",
         ) as client:
-            statuses: list[int] = []
-            for _ in range(11):
-                resp = await client.post(
-                    "/mesh/browser-login-request",
-                    json={
-                        "agent_id": "operator",
-                        "target_agent_id": "social-manager",
-                        "url": "https://x.com/login",
-                        "service": "X",
-                        "description": "Log in",
-                    },
-                    headers={"X-Agent-ID": "operator"},
-                )
-                statuses.append(resp.status_code)
+            # One more delegated call should succeed (consumes the final
+            # token in operator's bucket).
+            resp = await client.post(
+                "/mesh/browser-login-request",
+                json={
+                    "agent_id": "operator",
+                    "target_agent_id": "social-manager",
+                    "url": "https://x.com/login",
+                    "service": "X",
+                    "description": "Log in",
+                },
+                headers={"X-Agent-ID": "operator"},
+            )
+            assert resp.status_code == 200, resp.text
 
-            # First 10 succeed; 11th hits the caller's notify limit (10/min).
-            assert statuses[:10] == [200] * 10, statuses
-            assert statuses[10] == 429, statuses
+            # Next call must 429 — the bucket is keyed on caller, and
+            # operator's bucket is now full.
+            resp = await client.post(
+                "/mesh/browser-login-request",
+                json={
+                    "agent_id": "operator",
+                    "target_agent_id": "social-manager",
+                    "url": "https://x.com/login",
+                    "service": "X",
+                    "description": "Log in",
+                },
+                headers={"X-Agent-ID": "operator"},
+            )
+            assert resp.status_code == 429, resp.text
             assert "Rate limit exceeded" in (
                 resp.json().get("detail") or ""
             ), resp.text
 
             # social-manager's own bucket must be untouched: it can still
-            # issue a self-path request even though operator just spammed
-            # 10 delegated requests targeting it.
+            # issue a self-path request even though operator just
+            # spammed delegated requests targeting it.
             resp = await client.post(
                 "/mesh/browser-login-request",
                 json={

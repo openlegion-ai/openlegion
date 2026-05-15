@@ -6856,6 +6856,12 @@ def create_mesh_app(
     app.state.upload_stage_gc_once = _upload_stage_gc_once
     app.state.upload_stage_active_handles = _active_stage_handles
 
+    # Exposed for tests so they can pre-fill rate-limit buckets instead
+    # of looping thousands of times against the spam-only ceilings. Not
+    # used by production code paths.
+    app.state.rate_ts = _rate_ts
+    app.state.rate_limits = _RATE_LIMITS
+
     @app.on_event("startup")
     async def _start_upload_stage_gc() -> None:
         asyncio.create_task(_upload_stage_gc_loop())
