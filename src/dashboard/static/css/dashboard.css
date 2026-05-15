@@ -206,6 +206,12 @@
   border-bottom: 1px solid rgba(42, 42, 58, 0.4);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
+  /* backdrop-filter already creates a stacking context, but its z-index is
+     auto — siblings later in the DOM (main content) paint above it. Lift it
+     so absolute children (notification bell dropdown, etc.) stack above
+     main without each dropdown needing its own portal. */
+  position: relative;
+  z-index: 50;
 }
 
 .nav-tab {
@@ -504,7 +510,11 @@ select:focus-visible,
   outline: none;
 }
 
-.setting-hint .setting-hint-text {
+/* Tooltip body — flat selector so the JS-portaled instance on <body>
+   gets the full styling (the original markup nests this inside
+   .setting-hint, but the runtime portal lives at the body level to
+   escape backdrop-filter/transform containing-block traps). */
+.setting-hint-text {
   display: none;
   position: fixed;
   background: rgba(17, 17, 24, 0.97);
@@ -523,7 +533,7 @@ select:focus-visible,
   pointer-events: none;
 }
 
-.setting-hint .setting-hint-text::after {
+.setting-hint-text::after {
   content: '';
   position: absolute;
   top: 100%;
@@ -533,7 +543,7 @@ select:focus-visible,
 }
 
 /* Flipped: tooltip appears below the icon */
-.setting-hint .setting-hint-text.hint-below::after {
+.setting-hint-text.hint-below::after {
   top: auto;
   bottom: 100%;
   border-top-color: transparent;
