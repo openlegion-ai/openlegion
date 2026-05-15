@@ -720,27 +720,29 @@ def create_mesh_app(
 
     _RATE_LIMITS: dict[str, tuple[int, int]] = {
         # (max_requests, window_seconds)
-        "api_proxy": (30, 60),
-        "vault_resolve": (5, 60),
-        "vault_store": (10, 3600),
-        "blackboard_read": (200, 60),
-        "blackboard_write": (100, 60),
-        "publish": (200, 60),
-        "notify": (10, 60),
-        "cron_create": (10, 3600),
-        "spawn": (5, 3600),
-        "wallet_read": (120, 60),
-        "wallet_transfer": (10, 3600),
-        "wallet_execute": (10, 3600),
-        "image_gen": (10, 60),
-        "agent_profile": (30, 60),
-        "upload_stage": (30, 60),
-        "upload_apply": (30, 60),
+        # Self-hosted single-tenant defaults: high enough to never interfere
+        # with normal operation; act as runaway-loop guardrails only.
+        "api_proxy": (600, 60),
+        "vault_resolve": (600, 60),
+        "vault_store": (120, 60),
+        "blackboard_read": (2000, 60),
+        "blackboard_write": (1000, 60),
+        "publish": (2000, 60),
+        "notify": (300, 60),
+        "cron_create": (300, 60),
+        "spawn": (60, 60),
+        "wallet_read": (600, 60),
+        "wallet_transfer": (60, 60),
+        "wallet_execute": (60, 60),
+        "image_gen": (60, 60),
+        "agent_profile": (600, 60),
+        "upload_stage": (300, 60),
+        "upload_apply": (300, 60),
     }
 
     async def _check_rate_limit(endpoint: str, agent_id: str) -> None:
         """Enforce per-agent rate limit. Raises 429 if exceeded."""
-        limit, window = _RATE_LIMITS.get(endpoint, (100, 60))
+        limit, window = _RATE_LIMITS.get(endpoint, (1000, 60))
         bucket_key = f"{endpoint}:{agent_id}"
         async with _rate_locks[bucket_key]:
             now = time.time()
@@ -3251,8 +3253,8 @@ def create_mesh_app(
     # agent status without a dashboard session cookie.
     # Authenticated via X-API-Key header against named keys in ApiKeyManager.
 
-    _RATE_LIMITS["ext_credentials"] = (30, 60)
-    _RATE_LIMITS["ext_status"] = (60, 60)
+    _RATE_LIMITS["ext_credentials"] = (300, 60)
+    _RATE_LIMITS["ext_status"] = (600, 60)
 
     def _require_api_key(request: Request) -> str:
         """Verify the X-API-Key header.  Returns the key ID for rate limiting."""

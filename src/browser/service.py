@@ -411,7 +411,7 @@ def _resolve_rate_limit(agent_id: str) -> int:
     """Read the per-hour solve-rate limit for an agent, with fallback default."""
     from src.browser.flags import get_int
     return get_int(
-        "CAPTCHA_RATE_LIMIT_PER_HOUR", 20,
+        "CAPTCHA_RATE_LIMIT_PER_HOUR", 200,
         agent_id=agent_id, min_value=0, max_value=10000,
     )
 

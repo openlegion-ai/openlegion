@@ -149,7 +149,7 @@ class WalletService:
             os.environ.get("OPENLEGION_WALLET_LIMIT_DAILY_USD", "100.0"),
         )
         self._default_rate_per_hour = int(
-            os.environ.get("OPENLEGION_WALLET_RATE_LIMIT_PER_HOUR", "10"),
+            os.environ.get("OPENLEGION_WALLET_RATE_LIMIT_PER_HOUR", "120"),
         )
 
         # In-memory caches
