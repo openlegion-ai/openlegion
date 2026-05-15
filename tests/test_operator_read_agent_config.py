@@ -146,3 +146,27 @@ async def test_read_agent_config_no_mesh_client():
     result = await read_agent_config("alpha", mesh_client=None)
     assert "error" in result
     assert "mesh_client" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_read_agent_config_normalizes_field_whitespace():
+    """fields=['instructions ', ' soul'] is normalized, not rejected."""
+    from src.agent.builtins.operator_tools import read_agent_config
+
+    mc = MagicMock()
+    mc.get_agent_config = AsyncMock(
+        return_value={
+            "agent_id": "alpha",
+            "config": {"instructions": "x", "soul": "y"},
+        }
+    )
+
+    result = await read_agent_config(
+        "alpha", fields=["instructions ", " soul"], mesh_client=mc,
+    )
+
+    # No error raised; mesh receives the cleaned list.
+    assert "error" not in result
+    mc.get_agent_config.assert_awaited_once_with(
+        "alpha", fields=["instructions", "soul"],
+    )

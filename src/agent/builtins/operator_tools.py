@@ -285,6 +285,10 @@ async def read_agent_config(
 
     valid = _HARD_EDIT_FIELDS | _SOFT_EDIT_FIELDS
     if fields:
+        # Normalize before validating — mesh-side parsing strips whitespace,
+        # so accepting ["instructions "] (trailing space) keeps the read↔write
+        # symmetry consistent (edit_agent doesn't reject on whitespace either).
+        fields = [f.strip() for f in fields if isinstance(f, str) and f.strip()]
         unknown = [f for f in fields if f not in valid]
         if unknown:
             return {

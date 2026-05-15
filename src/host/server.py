@@ -3220,27 +3220,48 @@ def create_mesh_app(
         escalation_to = _acfg_profile.get("escalation_to")
         forbidden = list(_acfg_profile.get("forbidden") or [])
 
-        # Runtime debugging fields requested by operator workflows.
-        last_heartbeat_at: str | None = None
-        if cron_scheduler is not None:
-            hb_job = cron_scheduler.find_heartbeat_job(agent_id)
-            if hb_job is not None:
-                last_heartbeat_at = hb_job.last_run
+        # Runtime debugging fields: operator-or-internal only. Two reasons:
+        # (a) spend totals + heartbeat liveness are operational visibility
+        #     that peer agents shouldn't have over each other, mirroring how
+        #     /mesh/system/metrics gates per-agent cost behind the same
+        #     operator-or-internal tier;
+        # (b) /profile is in the routing hot path (peer agents call it for
+        #     capability/escalation discovery), and we don't want to pay
+        #     two SQL aggregates per call on that path. Skipping them when
+        #     the caller isn't operator-or-internal keeps the hot path lean.
+        caller_for_gate = _resolve_agent_id("", request)
+        runtime_visible = (
+            caller_for_gate == "operator" or _is_internal_caller(request)
+        )
 
-        spend_today_usd = 0.0
-        spend_month_usd = 0.0
-        if cost_tracker is not None:
-            try:
-                spend_today_usd = float(
-                    cost_tracker.get_spend(agent=agent_id, period="today").get("total_cost", 0.0)
-                )
-                spend_month_usd = float(
-                    cost_tracker.get_spend(agent=agent_id, period="month").get("total_cost", 0.0)
-                )
-            except Exception:
-                pass
+        runtime_fields: dict[str, object] = {}
+        if runtime_visible:
+            last_heartbeat_at: str | None = None
+            if cron_scheduler is not None:
+                hb_job = cron_scheduler.find_heartbeat_job(agent_id)
+                if hb_job is not None:
+                    last_heartbeat_at = hb_job.last_run
+            runtime_fields["last_heartbeat_at"] = last_heartbeat_at
 
-        return {
+            spend_today_usd = 0.0
+            spend_month_usd = 0.0
+            if cost_tracker is not None:
+                try:
+                    spend_today_usd = float(
+                        cost_tracker.get_spend(agent=agent_id, period="today").get("total_cost", 0.0)
+                    )
+                    spend_month_usd = float(
+                        cost_tracker.get_spend(agent=agent_id, period="month").get("total_cost", 0.0)
+                    )
+                except Exception:
+                    logger.debug(
+                        "cost_tracker.get_spend failed for %s",
+                        agent_id, exc_info=True,
+                    )
+            runtime_fields["spend_today_usd"] = spend_today_usd
+            runtime_fields["spend_month_usd"] = spend_month_usd
+
+        response = {
             "agent_id": agent_id,
             "role": role,
             "status": status,
@@ -3258,10 +3279,9 @@ def create_mesh_app(
             "expected_outputs": expected_outputs,
             "escalation_to": escalation_to,
             "forbidden": forbidden,
-            "last_heartbeat_at": last_heartbeat_at,
-            "spend_today_usd": spend_today_usd,
-            "spend_month_usd": spend_month_usd,
         }
+        response.update(runtime_fields)
+        return response
 
     # === Request Traces ===
 
