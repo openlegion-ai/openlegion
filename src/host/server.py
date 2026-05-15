@@ -3220,6 +3220,26 @@ def create_mesh_app(
         escalation_to = _acfg_profile.get("escalation_to")
         forbidden = list(_acfg_profile.get("forbidden") or [])
 
+        # Runtime debugging fields requested by operator workflows.
+        last_heartbeat_at: str | None = None
+        if cron_scheduler is not None:
+            hb_job = cron_scheduler.find_heartbeat_job(agent_id)
+            if hb_job is not None:
+                last_heartbeat_at = hb_job.last_run
+
+        spend_today_usd = 0.0
+        spend_month_usd = 0.0
+        if cost_tracker is not None:
+            try:
+                spend_today_usd = float(
+                    cost_tracker.get_spend(agent=agent_id, period="today").get("total_cost", 0.0)
+                )
+                spend_month_usd = float(
+                    cost_tracker.get_spend(agent=agent_id, period="month").get("total_cost", 0.0)
+                )
+            except Exception:
+                pass
+
         return {
             "agent_id": agent_id,
             "role": role,
@@ -3238,6 +3258,9 @@ def create_mesh_app(
             "expected_outputs": expected_outputs,
             "escalation_to": escalation_to,
             "forbidden": forbidden,
+            "last_heartbeat_at": last_heartbeat_at,
+            "spend_today_usd": spend_today_usd,
+            "spend_month_usd": spend_month_usd,
         }
 
     # === Request Traces ===
@@ -4942,17 +4965,74 @@ def create_mesh_app(
     }
 
     @app.get("/mesh/agents/{agent_id}/config")
-    async def get_agent_config(agent_id: str, request: Request) -> dict:
-        """Read agent config from agents.yaml."""
+    async def get_agent_config(
+        agent_id: str,
+        request: Request,
+        fields: str = "",
+    ) -> dict:
+        """Read agent config in canonical edit_agent shape (operator-only).
+
+        Returns ``{agent_id, config: {...}}`` where ``config`` mirrors the
+        field surface of ``edit_agent``: ``model``, ``instructions``, ``soul``,
+        ``heartbeat``, ``heartbeat_schedule``, ``interface``, ``role``,
+        ``permissions``, ``budget``, ``thinking``. The value sources are
+        normalized — ``initial_*`` yaml internals translated, permissions
+        loaded from PermissionMatrix, heartbeat_schedule pulled from the
+        cron scheduler.
+
+        Optional ``?fields=instructions,soul`` filters the response to a
+        subset (case-sensitive, comma-separated). Unknown field names are
+        silently dropped (the operator tool validates upfront).
+        """
         _require_any_auth(request)
         if _resolve_agent_id("", request) != "operator":
             raise HTTPException(403, "Only the operator can read agent configs")
+        await _check_rate_limit("agent_profile", "operator")
+
         from src.cli.config import _load_config
-        agent_cfg = _load_config()
-        agents = agent_cfg.get("agents", {})
+        agent_cfg_root = _load_config()
+        agents = agent_cfg_root.get("agents", {})
         if agent_id not in agents:
             raise HTTPException(404, f"Agent '{agent_id}' not found")
-        return {"agent_id": agent_id, "config": agents[agent_id]}
+        raw = agents[agent_id]
+
+        # Translate yaml internals -> canonical edit_agent field names.
+        full: dict = {
+            "model": raw.get("model", ""),
+            "role": raw.get("role", ""),
+            "thinking": raw.get("thinking", "off") or "off",
+            "budget": raw.get("budget", {}),
+            "instructions": raw.get("initial_instructions", ""),
+            "soul": raw.get("initial_soul", ""),
+            "heartbeat": raw.get("initial_heartbeat", ""),
+            "interface": raw.get("initial_interface", ""),
+        }
+
+        # Permissions live in PERMISSIONS_FILE, not agents.yaml. Load via
+        # PermissionMatrix and serialize the AgentPermissions Pydantic model
+        # so the operator gets the same shape edit_agent accepts.
+        if permissions is not None:
+            try:
+                perms = permissions.get_permissions(agent_id)
+                full["permissions"] = perms.model_dump() if hasattr(perms, "model_dump") else perms.dict()
+            except Exception:
+                full["permissions"] = {}
+        else:
+            full["permissions"] = {}
+
+        # heartbeat_schedule lives in the cron scheduler.
+        full["heartbeat_schedule"] = ""
+        if cron_scheduler is not None:
+            job = cron_scheduler.find_heartbeat_job(agent_id)
+            if job is not None:
+                full["heartbeat_schedule"] = job.schedule or ""
+
+        # Optional ?fields= subset filter.
+        if fields:
+            wanted = {f.strip() for f in fields.split(",") if f.strip()}
+            full = {k: v for k, v in full.items() if k in wanted}
+
+        return {"agent_id": agent_id, "config": full}
 
     @app.post("/mesh/agents/{agent_id}/propose")
     async def propose_agent_config_change(agent_id: str, request: Request) -> dict:

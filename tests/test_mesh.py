@@ -1881,3 +1881,69 @@ async def test_get_agent_profile_carries_structured_routing_fields(tmp_path):
         bb.close()
         costs.close()
         traces.close()
+
+
+@pytest.mark.asyncio
+async def test_get_agent_profile_carries_runtime_debug_fields(tmp_path):
+    """`/mesh/agents/{id}/profile` surfaces last_heartbeat_at + spend totals."""
+    from unittest.mock import patch
+
+    import yaml as yaml_mod
+    from httpx import ASGITransport, AsyncClient
+
+    from src.host.costs import CostTracker
+    from src.host.cron import CronScheduler
+    from src.host.server import create_mesh_app
+    from src.host.traces import TraceStore
+
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir(parents=True)
+    agents_path = cfg_dir / "agents.yaml"
+    agents_path.write_text(yaml_mod.dump({"agents": {
+        "writer": {"role": "writer", "model": "x"},
+    }}))
+    (cfg_dir / "mesh.yaml").write_text(yaml_mod.dump({"mesh": {"port": 8420}}))
+    projects_dir = cfg_dir / "projects"
+    projects_dir.mkdir()
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix()
+    router = MessageRouter(perms, {})
+    costs = CostTracker(str(tmp_path / "costs.db"))
+    traces = TraceStore(str(tmp_path / "traces.db"))
+    cron = CronScheduler(config_path=str(tmp_path / "cron.json"))
+    router.register_agent("writer", "http://writer:8400", ["file_write"])
+
+    # Seed cost tracker with a known spend for "writer".
+    costs.track_fixed_cost(agent="writer", model="gpt-4o", cost_usd=0.42)
+
+    # Seed cron scheduler with a heartbeat job and force last_run.
+    job = cron.add_job(agent="writer", schedule="every 15m", heartbeat=True)
+    job.last_run = "2026-05-15T10:00:00+00:00"
+
+    app = create_mesh_app(
+        blackboard=bb, pubsub=pubsub, router=router, permissions=perms,
+        cost_tracker=costs, trace_store=traces, cron_scheduler=cron,
+    )
+
+    try:
+        with patch("src.cli.config.AGENTS_FILE", agents_path), \
+             patch("src.cli.config.CONFIG_FILE", cfg_dir / "mesh.yaml"), \
+             patch("src.cli.config.PROJECTS_DIR", projects_dir):
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test",
+            ) as client:
+                resp = await client.get(
+                    "/mesh/agents/writer/profile",
+                    headers={"x-mesh-internal": "1"},
+                )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["last_heartbeat_at"] == "2026-05-15T10:00:00+00:00"
+        assert data["spend_today_usd"] == pytest.approx(0.42)
+        assert data["spend_month_usd"] == pytest.approx(0.42)
+    finally:
+        bb.close()
+        costs.close()
+        traces.close()

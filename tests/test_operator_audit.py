@@ -381,13 +381,54 @@ async def test_mesh_client_get_agent_config():
     mock_response = MagicMock()
     mock_response.status_code = 200
     mock_response.raise_for_status = MagicMock()
-    mock_response.json.return_value = {"agent_id": "alpha", "config": {"model": "gpt-4o"}}
+    mock_response.json.return_value = {
+        "agent_id": "alpha",
+        "config": {
+            "model": "gpt-4o",
+            "instructions": "do things",
+            "soul": "",
+            "heartbeat": "",
+            "heartbeat_schedule": "every 15m",
+            "interface": "",
+            "role": "writer",
+            "permissions": {},
+            "budget": {},
+            "thinking": "off",
+        },
+    }
 
     with patch.object(client, "_get_with_retry", return_value=mock_response) as mock_get:
         result = await client.get_agent_config("alpha")
         mock_get.assert_called_once()
         call_args = mock_get.call_args
         assert "mesh/agents/alpha/config" in call_args[0][0]
+        # No fields filter: only requesting_agent param.
+        params = call_args[1]["params"]
+        assert "fields" not in params
+        assert result["agent_id"] == "alpha"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_mesh_client_get_agent_config_with_fields():
+    """MeshClient.get_agent_config forwards a fields filter."""
+    from src.agent.mesh_client import MeshClient
+
+    client = MeshClient("http://localhost:8420", "operator")
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.raise_for_status = MagicMock()
+    mock_response.json.return_value = {
+        "agent_id": "alpha",
+        "config": {"instructions": "do things", "soul": ""},
+    }
+
+    with patch.object(client, "_get_with_retry", return_value=mock_response) as mock_get:
+        result = await client.get_agent_config("alpha", fields=["instructions", "soul"])
+        mock_get.assert_called_once()
+        call_args = mock_get.call_args
+        params = call_args[1]["params"]
+        assert params["fields"] == "instructions,soul"
         assert result["agent_id"] == "alpha"
     await client.close()
 
