@@ -1493,52 +1493,67 @@ function dashboard() {
         }
       });
 
-      // ── Tooltip positioning for .setting-hint elements ──
-      // Uses position:fixed to escape overflow:hidden ancestors.
+      // ── Tooltip portal for .setting-hint elements ──
+      // .agent-card has `backdrop-filter` and a hover `transform`; .nav-bar
+      // has `backdrop-filter`. All three properties create a new containing
+      // block for position:fixed descendants AND a new stacking context, so
+      // a tooltip rendered inside one of these ancestors gets trapped:
+      // it's clipped by the card's `overflow: hidden`, and its z-index can't
+      // escape the ancestor's stacking layer. We sidestep this with a single
+      // shared portal node parked on <body>, populated on hover.
+      const _hintPortal = (() => {
+        let el = null;
+        return () => {
+          if (!el || !document.body.contains(el)) {
+            el = document.createElement('span');
+            el.className = 'setting-hint-text';
+            el.setAttribute('role', 'tooltip');
+            el.style.display = 'none';
+            document.body.appendChild(el);
+          }
+          return el;
+        };
+      })();
       const _positionHint = (hint) => {
-        const text = hint.querySelector('.setting-hint-text');
-        if (!text) return;
+        const source = hint.querySelector('.setting-hint-text');
+        if (!source) return;
+        const portal = _hintPortal();
+        // Current tooltips are plain text. If HTML is ever needed,
+        // swap textContent for cloned childNodes.
+        portal.textContent = source.textContent;
+        portal.classList.remove('hint-below');
         const r = hint.getBoundingClientRect();
         const gap = 6;
-        // Measure tooltip (show off-screen briefly)
-        text.style.visibility = 'hidden';
-        text.style.display = 'block';
-        text.style.top = '-9999px';
-        text.style.left = '-9999px';
-        const tw = text.offsetWidth;
-        const th = text.offsetHeight;
-        // Default: above, left-aligned with icon
+        // Measure off-screen
+        portal.style.visibility = 'hidden';
+        portal.style.display = 'block';
+        portal.style.top = '-9999px';
+        portal.style.left = '-9999px';
+        const tw = portal.offsetWidth;
+        const th = portal.offsetHeight;
+        // Default: above the icon, left-aligned
         let top = r.top - gap - th;
         let left = r.left;
         let below = false;
-        // Flip below if clipped at top
         if (top < 8) {
           top = r.bottom + gap;
           below = true;
         }
-        // Clamp to right edge
         if (left + tw > window.innerWidth - 8) {
           left = window.innerWidth - tw - 8;
         }
-        // Clamp to left edge
         if (left < 8) left = 8;
-        // Arrow points at icon center
         const arrowX = Math.min(Math.max(r.left + r.width / 2 - left, 8), tw - 8);
-        text.style.setProperty('--arrow-x', arrowX + 'px');
-        text.style.top = top + 'px';
-        text.style.left = left + 'px';
-        text.style.visibility = '';
-        text.classList.toggle('hint-below', below);
+        portal.style.setProperty('--arrow-x', arrowX + 'px');
+        portal.style.top = top + 'px';
+        portal.style.left = left + 'px';
+        portal.style.visibility = '';
+        portal.classList.toggle('hint-below', below);
       };
-      const _hideHint = (hint) => {
-        const text = hint.querySelector('.setting-hint-text');
-        if (!text) return;
-        text.style.display = '';
-        text.style.top = '';
-        text.style.left = '';
-        text.style.visibility = '';
-        text.classList.remove('hint-below');
-        text.style.removeProperty('--arrow-x');
+      const _hideHint = () => {
+        const portal = _hintPortal();
+        portal.style.display = 'none';
+        portal.classList.remove('hint-below');
       };
       document.addEventListener('mouseenter', (e) => {
         const hint = e.target.closest('.setting-hint');
