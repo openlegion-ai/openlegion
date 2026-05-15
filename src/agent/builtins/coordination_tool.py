@@ -18,6 +18,10 @@ import re
 import time
 
 from src.agent.skills import skill
+from src.shared.task_titles import (
+    LONG_TITLE_THRESHOLD,
+    _normalize_title_and_description,
+)
 from src.shared.types import AGENT_ID_RE_PATTERN
 from src.shared.utils import generate_id, sanitize_for_prompt, setup_logging
 
@@ -516,16 +520,9 @@ async def _hand_off_v2(
     # task title) and the full instruction (becomes the description).
     # Agents historically dumped multi-sentence instructions into
     # ``summary`` — that produced wall-of-text titles in the dashboard.
-    # The orchestration store applies the same policy as a backstop, but
-    # we mirror it here so the title we surface in result envelopes,
-    # wake messages, and downstream logs is already short. Server-side
-    # truncation in ``Tasks.create`` (see ``_normalize_title_and_description``)
-    # handles any long titles that slip through, so this is defense in
-    # depth rather than the only check.
-    from src.host.orchestration import (
-        LONG_TITLE_THRESHOLD,
-        _normalize_title_and_description,
-    )
+    # ``Tasks.create`` applies the same policy as a backstop, but we
+    # mirror it here so the title we surface in result envelopes, wake
+    # messages, and downstream logs is already short.
     if len(summary) > LONG_TITLE_THRESHOLD:
         title, description = _normalize_title_and_description(summary, None)
         # ``description`` is the full original ``summary`` here — keep

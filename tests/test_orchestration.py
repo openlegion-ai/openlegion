@@ -23,13 +23,15 @@ import pytest
 
 from src.host.orchestration import (
     DEFAULT_RETENTION_SECONDS,
-    MAX_TITLE_CHARS,
-    SHORT_TITLE_TARGET,
     TERMINAL_STATUSES,
     VALID_STATUSES,
     InvalidStatusTransition,
     TaskNotFound,
     Tasks,
+)
+from src.shared.task_titles import (
+    MAX_TITLE_CHARS,
+    SHORT_TITLE_TARGET,
     _derive_short_title,
     _normalize_title_and_description,
 )
