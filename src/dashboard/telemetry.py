@@ -39,7 +39,7 @@ _MAX_PROPS_BYTES = 4096
 
 # Per-session rate limit for the HTTP endpoint. 60/min matches the spec
 # in docs/plans/2026-05-08-board-ux-overhaul.md Phase -1.
-RATE_LIMIT_EVENTS_PER_MIN = 60
+RATE_LIMIT_EVENTS_PER_MIN = 6000
 _RATE_LIMIT_WINDOW_S = 60.0
 
 

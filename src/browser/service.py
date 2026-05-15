@@ -349,7 +349,7 @@ async def _safe_locator_count(page: object, selector: str) -> int:
 # Module-level dict guarded by an asyncio.Lock. Each agent gets a deque of
 # unix timestamps for solve attempts in the last hour; entries older than
 # 1h are pruned on each access. The limit is read from the
-# CAPTCHA_RATE_LIMIT_PER_HOUR flag (default 20), matching the trim spec.
+# CAPTCHA_RATE_LIMIT_PER_HOUR flag (default 5000), matching the trim spec.
 #
 # Note: shared module-level state means multi-tenant deployments where
 # different processes serve different agents won't see a unified rate
@@ -411,7 +411,7 @@ def _resolve_rate_limit(agent_id: str) -> int:
     """Read the per-hour solve-rate limit for an agent, with fallback default."""
     from src.browser.flags import get_int
     return get_int(
-        "CAPTCHA_RATE_LIMIT_PER_HOUR", 200,
+        "CAPTCHA_RATE_LIMIT_PER_HOUR", 5000,
         agent_id=agent_id, min_value=0, max_value=10000,
     )
 

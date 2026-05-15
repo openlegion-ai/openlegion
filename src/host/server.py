@@ -720,29 +720,31 @@ def create_mesh_app(
 
     _RATE_LIMITS: dict[str, tuple[int, int]] = {
         # (max_requests, window_seconds)
-        # Self-hosted single-tenant defaults: high enough to never interfere
-        # with normal operation; act as runaway-loop guardrails only.
-        "api_proxy": (600, 60),
-        "vault_resolve": (600, 60),
-        "vault_store": (120, 60),
-        "blackboard_read": (2000, 60),
-        "blackboard_write": (1000, 60),
-        "publish": (2000, 60),
-        "notify": (300, 60),
-        "cron_create": (300, 60),
-        "spawn": (60, 60),
-        "wallet_read": (600, 60),
-        "wallet_transfer": (60, 60),
-        "wallet_execute": (60, 60),
-        "image_gen": (60, 60),
-        "agent_profile": (600, 60),
-        "upload_stage": (300, 60),
-        "upload_apply": (300, 60),
+        # Self-hosted single-tenant: limits only exist to catch a genuinely
+        # runaway loop. Cost budgets (costs.py) and per-tx wallet caps are
+        # the real spend guardrails — these buckets should never fire in
+        # normal operation.
+        "api_proxy": (6000, 60),
+        "vault_resolve": (10000, 60),
+        "vault_store": (600, 60),
+        "blackboard_read": (20000, 60),
+        "blackboard_write": (10000, 60),
+        "publish": (20000, 60),
+        "notify": (3000, 60),
+        "cron_create": (1000, 60),
+        "spawn": (600, 60),
+        "wallet_read": (6000, 60),
+        "wallet_transfer": (600, 60),
+        "wallet_execute": (600, 60),
+        "image_gen": (600, 60),
+        "agent_profile": (6000, 60),
+        "upload_stage": (3000, 60),
+        "upload_apply": (3000, 60),
     }
 
     async def _check_rate_limit(endpoint: str, agent_id: str) -> None:
         """Enforce per-agent rate limit. Raises 429 if exceeded."""
-        limit, window = _RATE_LIMITS.get(endpoint, (1000, 60))
+        limit, window = _RATE_LIMITS.get(endpoint, (10000, 60))
         bucket_key = f"{endpoint}:{agent_id}"
         async with _rate_locks[bucket_key]:
             now = time.time()
@@ -3253,8 +3255,8 @@ def create_mesh_app(
     # agent status without a dashboard session cookie.
     # Authenticated via X-API-Key header against named keys in ApiKeyManager.
 
-    _RATE_LIMITS["ext_credentials"] = (300, 60)
-    _RATE_LIMITS["ext_status"] = (600, 60)
+    _RATE_LIMITS["ext_credentials"] = (3000, 60)
+    _RATE_LIMITS["ext_status"] = (6000, 60)
 
     def _require_api_key(request: Request) -> str:
         """Verify the X-API-Key header.  Returns the key ID for rate limiting."""
