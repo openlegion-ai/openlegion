@@ -19,7 +19,7 @@ import os
 import re
 import time
 import uuid as _uuid
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Callable, Coroutine
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
@@ -715,7 +715,12 @@ def create_mesh_app(
 
     # -- Per-agent rate limiting --------------------------------------------------
     # Each bucket is keyed by (endpoint_name, agent_id).
-    _rate_ts: dict[str, list[float]] = defaultdict(list)
+    # Sliding-window rate-limit buckets keyed by f"{endpoint}:{agent_id}".
+    # Deque + popleft makes pruning amortized O(1) — each timestamp is
+    # walked off the head exactly once instead of full-scanning on every
+    # request. With the post-bump limits (up to 20k/min), the old list
+    # comprehension would have spent meaningful CPU inside the lock.
+    _rate_ts: dict[str, deque[float]] = defaultdict(deque)
     _rate_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
     _RATE_LIMITS: dict[str, tuple[int, int]] = {
@@ -748,12 +753,14 @@ def create_mesh_app(
         bucket_key = f"{endpoint}:{agent_id}"
         async with _rate_locks[bucket_key]:
             now = time.time()
-            ts_list = _rate_ts[bucket_key]
-            ts_list[:] = [t for t in ts_list if now - t < window]
-            if len(ts_list) >= limit:
+            bucket = _rate_ts[bucket_key]
+            cutoff = now - window
+            while bucket and bucket[0] <= cutoff:
+                bucket.popleft()
+            if len(bucket) >= limit:
                 _record_denial("rate")
                 raise HTTPException(429, f"Rate limit exceeded for {endpoint}")
-            ts_list.append(now)
+            bucket.append(now)
 
     def _notify_watchers_batch(watcher_ids: list[str], msg: str) -> None:
         """Batch-notify watchers via a single cross-thread call."""
@@ -782,9 +789,11 @@ def create_mesh_app(
         data, pub/sub subscriptions, lane workers, cron jobs, cost
         records, trace records, and wallet records.
         """
-        stale = [k for k in _rate_ts if k.endswith(f":{agent_id}")]
+        suffix = f":{agent_id}"
+        stale = [k for k in _rate_ts if k.endswith(suffix)]
         for k in stale:
-            del _rate_ts[k]
+            _rate_ts.pop(k, None)
+            _rate_locks.pop(k, None)
         if credential_vault is not None:
             credential_vault.cleanup_agent(agent_id)
         blackboard.cleanup_agent_data(agent_id)

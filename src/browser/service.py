@@ -412,7 +412,7 @@ def _resolve_rate_limit(agent_id: str) -> int:
     from src.browser.flags import get_int
     return get_int(
         "CAPTCHA_RATE_LIMIT_PER_HOUR", 5000,
-        agent_id=agent_id, min_value=0, max_value=10000,
+        agent_id=agent_id, min_value=0, max_value=100000,
     )
 
 

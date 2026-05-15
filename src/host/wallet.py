@@ -19,6 +19,7 @@ import hmac as _hmac
 import os
 import sqlite3
 import time
+from collections import deque
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
@@ -154,7 +155,7 @@ class WalletService:
 
         # In-memory caches
         self._price_cache: dict[str, tuple[float, float]] = {}
-        self._tx_timestamps: dict[str, list[float]] = {}
+        self._tx_timestamps: dict[str, deque[float]] = {}
 
         # Lazy-init RPC providers (one per chain)
         self._evm_providers: dict[str, Any] = {}
@@ -941,8 +942,10 @@ class WalletService:
             )
 
         now = time.time()
-        ts = self._tx_timestamps.setdefault(agent_id, [])
-        ts[:] = [t for t in ts if now - t < 3600]
+        ts = self._tx_timestamps.setdefault(agent_id, deque())
+        cutoff = now - 3600
+        while ts and ts[0] <= cutoff:
+            ts.popleft()
         if len(ts) >= rate:
             return (
                 f"Rate limit exceeded: {len(ts)} transactions in the last hour "
