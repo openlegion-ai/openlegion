@@ -4193,16 +4193,18 @@ def create_mesh_app(
         eff_origin = origin if origin is not None else MessageOrigin(
             kind="agent", channel="", user="",
         )
+        # Build the coroutine first so we can close it explicitly if the
+        # dispatch loop is unhealthy — otherwise an orphaned coroutine
+        # would emit a "coroutine was never awaited" warning.
+        coro = lane_manager.enqueue(
+            target, sanitize_for_prompt(message), mode="followup",
+            origin=eff_origin, auto_notify=had_origin,
+        )
         try:
-            asyncio.run_coroutine_threadsafe(
-                lane_manager.enqueue(
-                    target, sanitize_for_prompt(message), mode="followup",
-                    origin=eff_origin, auto_notify=had_origin,
-                ),
-                dispatch_loop,
-            )
+            asyncio.run_coroutine_threadsafe(coro, dispatch_loop)
             return True
         except Exception as e:
+            coro.close()
             logger.warning("Operator wake enqueue for %s failed: %s", target, e)
             return False
 
@@ -4973,13 +4975,15 @@ def create_mesh_app(
             raise HTTPException(404, f"Task '{task_id}' not found")
         # Tell the previous assignee to drop the work — but only if
         # they were actually in a runnable state and aren't the caller
-        # (no point waking yourself to tell yourself to stop). Without
-        # this, a worker keeps churning on a task the operator already
-        # took back until the next heartbeat.
+        # (no point waking yourself to tell yourself to stop). ``blocked``
+        # is included on purpose: a blocked assignee is typically waiting
+        # for the operator to weigh in, and cancellation IS the answer.
+        # Without this, a worker keeps churning (or keeps waiting) on a
+        # task the operator already took back until the next heartbeat.
         if (
             prior_assignee
             and prior_assignee != caller
-            and prior_status in ("pending", "accepted", "working")
+            and prior_status in ("pending", "accepted", "working", "blocked")
         ):
             origin = _validated_origin(request, caller)
             title = updated.get("title") or task_id

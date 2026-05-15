@@ -1562,3 +1562,127 @@ async def test_cancel_does_not_wake_self_canceller(v2_app_with_lanes):
     assert "analyst" not in targets, (
         f"self-cancel should not wake self, got {lane_calls!r}"
     )
+
+
+@pytest.mark.asyncio
+async def test_cancel_blocked_task_wakes_assignee(v2_app_with_lanes):
+    """A blocked assignee is usually waiting on the operator. Cancelling
+    IS the answer, so the wake must fire — without it the worker keeps
+    waiting until heartbeat."""
+    app, lane_calls = v2_app_with_lanes
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "analyst", "title": "needs input", "project": "research"},
+            headers={"X-Agent-ID": "operator"},
+        )
+        tid = r.json()["id"]
+        await c.post(
+            f"/mesh/tasks/{tid}/status", json={"status": "working"},
+            headers={"X-Agent-ID": "analyst"},
+        )
+        await c.post(
+            f"/mesh/tasks/{tid}/status",
+            json={"status": "blocked", "blocker_note": "need scope clarification"},
+            headers={"X-Agent-ID": "analyst"},
+        )
+        lane_calls.clear()
+        r = await c.post(
+            f"/mesh/tasks/{tid}/cancel",
+            json={"reason": "scope withdrawn"},
+            headers={"X-Agent-ID": "operator"},
+        )
+    assert r.status_code == 200, r.text
+    targets = [call[0][0] for call in lane_calls]
+    assert "analyst" in targets, (
+        f"cancel-of-blocked must wake the waiting assignee, got {lane_calls!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_reroute_to_unregistered_agent_succeeds_without_wake(v2_app_with_lanes):
+    """The wake must be best-effort — rerouting to an agent that isn't
+    in the router registry shouldn't 5xx the operator's HTTP request.
+    The state change has already committed; the wake silently no-ops."""
+    app, lane_calls = v2_app_with_lanes
+    # Grant the unregistered target permission to be routed to.
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "analyst", "title": "drift", "project": "research"},
+            headers={"X-Agent-ID": "operator"},
+        )
+        tid = r.json()["id"]
+        # Reroute to a syntactically valid id that is NOT in the registry.
+        # The route validator only checks the regex; registration is
+        # optional from the route's perspective, so the state change
+        # must still succeed and the wake must be silently skipped.
+        lane_calls.clear()
+        r = await c.post(
+            f"/mesh/tasks/{tid}/reroute",
+            json={"new_assignee": "ghost_agent"},
+            headers={"X-Agent-ID": "operator"},
+        )
+    assert r.status_code == 200, r.text
+    assert lane_calls == [], (
+        f"unregistered target must not enqueue a wake, got {lane_calls!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_reroute_propagates_human_origin_to_wake(v2_app_with_lanes):
+    """When the operator acts on behalf of a paired human, the wake's
+    ``auto_notify`` must be True so the lane worker pings the human's
+    channel back when the rerouted task completes."""
+    app, lane_calls = v2_app_with_lanes
+    headers = _human_origin_headers(agent_id="operator", channel="cli", user="u1")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "analyst", "title": "ship it", "project": "research"},
+            headers=headers,
+        )
+        tid = r.json()["id"]
+        lane_calls.clear()
+        r = await c.post(
+            f"/mesh/tasks/{tid}/reroute",
+            json={"new_assignee": "tracker"},
+            headers=headers,
+        )
+    assert r.status_code == 200, r.text
+    tracker_call = next(c for c in lane_calls if c[0][0] == "tracker")
+    kwargs = tracker_call[1]
+    assert kwargs.get("auto_notify") is True, (
+        f"human origin must enable auto_notify, got kwargs={kwargs!r}"
+    )
+    origin = kwargs.get("origin")
+    assert origin is not None and origin.kind == "human", (
+        f"expected human origin to propagate, got {origin!r}"
+    )
+    assert origin.channel == "cli" and origin.user == "u1"
+
+
+@pytest.mark.asyncio
+async def test_agent_origin_does_not_request_auto_notify(v2_app_with_lanes):
+    """Operator-initiated calls without a human origin must NOT set
+    ``auto_notify`` — the lane worker would have nowhere to ping back."""
+    app, lane_calls = v2_app_with_lanes
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "analyst", "title": "self start", "project": "research"},
+            headers={"X-Agent-ID": "operator"},
+        )
+        tid = r.json()["id"]
+        lane_calls.clear()
+        r = await c.post(
+            f"/mesh/tasks/{tid}/reroute",
+            json={"new_assignee": "tracker"},
+            headers={"X-Agent-ID": "operator"},
+        )
+    assert r.status_code == 200, r.text
+    tracker_call = next(c for c in lane_calls if c[0][0] == "tracker")
+    kwargs = tracker_call[1]
+    assert kwargs.get("auto_notify") is False, (
+        f"agent-only origin must keep auto_notify off, got kwargs={kwargs!r}"
+    )
