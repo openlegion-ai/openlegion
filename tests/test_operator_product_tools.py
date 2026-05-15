@@ -1321,3 +1321,368 @@ async def test_hard_edit_emits_agent_config_updated_without_value_diff(
     # apply" hint when the running agent still has the old config.
     assert "live" in updated[0]["data"]
     assert isinstance(updated[0]["data"]["live"], bool)
+
+
+# ── Operator task-action wake propagation ─────────────────────────────
+
+
+def _build_app_with_lanes(tmp_path, server_module, *, perms_map, agents,
+                          cost_tracker, container_manager):
+    """Build the mesh app with a stub lane manager + dedicated dispatch loop.
+
+    Returns ``(app, blackboard, lane_calls, teardown)``. ``lane_calls``
+    is the list of (args, kwargs) every ``lane_manager.enqueue`` call
+    is recorded into so tests can assert the operator-driven wake.
+    """
+    import asyncio
+    import threading
+
+    blackboard = Blackboard(str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    permissions = PermissionMatrix()
+    for aid, perms in perms_map.items():
+        permissions.permissions[aid] = AgentPermissions(agent_id=aid, **perms)
+    router = MessageRouter(permissions, agents)
+
+    lane_calls: list[tuple[tuple, dict]] = []
+
+    def _enqueue(*args, **kwargs):
+        lane_calls.append((args, kwargs))
+
+        async def _noop():
+            return None
+
+        return _noop()
+
+    lane_manager = MagicMock()
+    lane_manager.enqueue = _enqueue
+
+    dispatch_loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=dispatch_loop.run_forever, daemon=True)
+    thread.start()
+
+    app = server_module.create_mesh_app(
+        blackboard=blackboard,
+        pubsub=pubsub,
+        router=router,
+        permissions=permissions,
+        cost_tracker=cost_tracker,
+        container_manager=container_manager,
+        lane_manager=lane_manager,
+        dispatch_loop=dispatch_loop,
+    )
+
+    def _teardown():
+        blackboard.close()
+        dispatch_loop.call_soon_threadsafe(dispatch_loop.stop)
+        thread.join(timeout=2)
+        dispatch_loop.close()
+
+    return app, lane_calls, _teardown
+
+
+@pytest.fixture
+def v2_app_with_lanes(tmp_path, monkeypatch):
+    """``v2_app`` variant wired to a stub lane manager.
+
+    Used to verify operator state changes (reroute / retry / cancel)
+    actually enqueue a wake for the affected agent instead of leaving
+    them idle until the next heartbeat.
+    """
+    pdir = _projects_layout(tmp_path)
+    afile = _agents_yaml(tmp_path, names=["scout", "analyst", "tracker"])
+    monkeypatch.chdir(tmp_path)
+    import src.cli.config as cli_cfg
+    monkeypatch.setattr(cli_cfg, "PROJECTS_DIR", pdir)
+    monkeypatch.setattr(cli_cfg, "AGENTS_FILE", afile)
+    monkeypatch.setattr(
+        cli_cfg, "PERMISSIONS_FILE", tmp_path / "config" / "permissions.json",
+    )
+
+    server_module = _reload_server(
+        monkeypatch, v2=True, tasks_db=str(tmp_path / "tasks.db"),
+    )
+
+    perms_map = {
+        "operator": {"can_route_tasks": True, "can_manage_projects": True},
+        "scout":    {"can_route_tasks": True, "can_message": ["analyst", "operator"]},
+        "analyst":  {"can_route_tasks": False, "can_message": ["scout"]},
+        "tracker":  {"can_route_tasks": False, "can_message": []},
+    }
+    cost_tracker = MagicMock()
+    cost_tracker.check_budget = MagicMock(
+        return_value={
+            "allowed": True, "daily_used": 1.0, "daily_limit": 10.0,
+            "monthly_used": 5.0, "monthly_limit": 200.0,
+        },
+    )
+    container_manager = MagicMock()
+    container_manager.stop_agent = MagicMock(return_value=True)
+
+    app, lane_calls, teardown = _build_app_with_lanes(
+        tmp_path, server_module,
+        perms_map=perms_map,
+        agents={
+            "scout": "http://scout:8400",
+            "analyst": "http://analyst:8400",
+            "tracker": "http://tracker:8400",
+            "operator": "http://operator:8400",
+        },
+        cost_tracker=cost_tracker,
+        container_manager=container_manager,
+    )
+    try:
+        yield app, lane_calls
+    finally:
+        teardown()
+        monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_V2", raising=False)
+        monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)
+        importlib.reload(server_module)
+
+
+@pytest.mark.asyncio
+async def test_reroute_wakes_new_assignee(v2_app_with_lanes):
+    """Operator reroute should fire-and-forget a lane enqueue on the
+    new assignee so it starts work immediately."""
+    app, lane_calls = v2_app_with_lanes
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "analyst", "title": "investigate", "project": "research"},
+            headers={"X-Agent-ID": "operator"},
+        )
+        tid = r.json()["id"]
+        r = await c.post(
+            f"/mesh/tasks/{tid}/reroute",
+            json={"new_assignee": "tracker", "reason": "load balance"},
+            headers={"X-Agent-ID": "operator"},
+        )
+    assert r.status_code == 200, r.text
+    targets = [call[0][0] for call in lane_calls]
+    assert "tracker" in targets, f"expected tracker wake, got {lane_calls!r}"
+    # Pull the matching call and check the message + mode.
+    tracker_call = next(c for c in lane_calls if c[0][0] == "tracker")
+    message = tracker_call[0][1]
+    assert "rerouted" in message.lower()
+    assert "investigate" in message
+    assert "check_inbox" in message
+    assert tracker_call[1].get("mode") == "followup"
+
+
+@pytest.mark.asyncio
+async def test_retry_wakes_clone_assignee(v2_app_with_lanes):
+    """Operator retry on a failed task should wake the clone's assignee."""
+    app, lane_calls = v2_app_with_lanes
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "analyst", "title": "build report", "project": "research"},
+            headers={"X-Agent-ID": "operator"},
+        )
+        tid = r.json()["id"]
+        await c.post(
+            f"/mesh/tasks/{tid}/status", json={"status": "working"},
+            headers={"X-Agent-ID": "analyst"},
+        )
+        await c.post(
+            f"/mesh/tasks/{tid}/status", json={"status": "failed"},
+            headers={"X-Agent-ID": "analyst"},
+        )
+        lane_calls.clear()
+        r = await c.post(
+            f"/mesh/tasks/{tid}/retry",
+            json={"assignee": "tracker"},
+            headers={"X-Agent-ID": "operator"},
+        )
+    assert r.status_code == 200, r.text
+    targets = [call[0][0] for call in lane_calls]
+    assert "tracker" in targets, f"expected tracker wake, got {lane_calls!r}"
+    tracker_call = next(c for c in lane_calls if c[0][0] == "tracker")
+    message = tracker_call[0][1]
+    assert "retried" in message.lower()
+    assert "build report" in message
+    assert "check_inbox" in message
+
+
+@pytest.mark.asyncio
+async def test_cancel_wakes_prior_assignee(v2_app_with_lanes):
+    """Operator cancelling an active task should wake the assignee so
+    they stop work instead of churning until the next heartbeat."""
+    app, lane_calls = v2_app_with_lanes
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "analyst", "title": "scan logs", "project": "research"},
+            headers={"X-Agent-ID": "operator"},
+        )
+        tid = r.json()["id"]
+        await c.post(
+            f"/mesh/tasks/{tid}/status", json={"status": "working"},
+            headers={"X-Agent-ID": "analyst"},
+        )
+        lane_calls.clear()
+        r = await c.post(
+            f"/mesh/tasks/{tid}/cancel",
+            json={"reason": "scope changed"},
+            headers={"X-Agent-ID": "operator"},
+        )
+    assert r.status_code == 200, r.text
+    targets = [call[0][0] for call in lane_calls]
+    assert "analyst" in targets, f"expected analyst wake, got {lane_calls!r}"
+    analyst_call = next(c for c in lane_calls if c[0][0] == "analyst")
+    message = analyst_call[0][1]
+    assert "cancelled" in message.lower()
+    assert "scan logs" in message
+
+
+@pytest.mark.asyncio
+async def test_cancel_does_not_wake_self_canceller(v2_app_with_lanes):
+    """If the assignee cancels their own task, no self-wake fires —
+    you don't need to tell yourself to stop."""
+    app, lane_calls = v2_app_with_lanes
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "analyst", "title": "tail logs", "project": "research"},
+            headers={"X-Agent-ID": "operator"},
+        )
+        tid = r.json()["id"]
+        await c.post(
+            f"/mesh/tasks/{tid}/status", json={"status": "working"},
+            headers={"X-Agent-ID": "analyst"},
+        )
+        lane_calls.clear()
+        r = await c.post(
+            f"/mesh/tasks/{tid}/cancel",
+            json={"reason": "redundant"},
+            headers={"X-Agent-ID": "analyst"},
+        )
+    assert r.status_code == 200, r.text
+    targets = [call[0][0] for call in lane_calls]
+    assert "analyst" not in targets, (
+        f"self-cancel should not wake self, got {lane_calls!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancel_blocked_task_wakes_assignee(v2_app_with_lanes):
+    """A blocked assignee is usually waiting on the operator. Cancelling
+    IS the answer, so the wake must fire — without it the worker keeps
+    waiting until heartbeat."""
+    app, lane_calls = v2_app_with_lanes
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "analyst", "title": "needs input", "project": "research"},
+            headers={"X-Agent-ID": "operator"},
+        )
+        tid = r.json()["id"]
+        await c.post(
+            f"/mesh/tasks/{tid}/status", json={"status": "working"},
+            headers={"X-Agent-ID": "analyst"},
+        )
+        await c.post(
+            f"/mesh/tasks/{tid}/status",
+            json={"status": "blocked", "blocker_note": "need scope clarification"},
+            headers={"X-Agent-ID": "analyst"},
+        )
+        lane_calls.clear()
+        r = await c.post(
+            f"/mesh/tasks/{tid}/cancel",
+            json={"reason": "scope withdrawn"},
+            headers={"X-Agent-ID": "operator"},
+        )
+    assert r.status_code == 200, r.text
+    targets = [call[0][0] for call in lane_calls]
+    assert "analyst" in targets, (
+        f"cancel-of-blocked must wake the waiting assignee, got {lane_calls!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_reroute_to_unregistered_agent_succeeds_without_wake(v2_app_with_lanes):
+    """The wake must be best-effort — rerouting to an agent that isn't
+    in the router registry shouldn't 5xx the operator's HTTP request.
+    The state change has already committed; the wake silently no-ops."""
+    app, lane_calls = v2_app_with_lanes
+    # Grant the unregistered target permission to be routed to.
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "analyst", "title": "drift", "project": "research"},
+            headers={"X-Agent-ID": "operator"},
+        )
+        tid = r.json()["id"]
+        # Reroute to a syntactically valid id that is NOT in the registry.
+        # The route validator only checks the regex; registration is
+        # optional from the route's perspective, so the state change
+        # must still succeed and the wake must be silently skipped.
+        lane_calls.clear()
+        r = await c.post(
+            f"/mesh/tasks/{tid}/reroute",
+            json={"new_assignee": "ghost_agent"},
+            headers={"X-Agent-ID": "operator"},
+        )
+    assert r.status_code == 200, r.text
+    assert lane_calls == [], (
+        f"unregistered target must not enqueue a wake, got {lane_calls!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_reroute_propagates_human_origin_to_wake(v2_app_with_lanes):
+    """When the operator acts on behalf of a paired human, the wake's
+    ``auto_notify`` must be True so the lane worker pings the human's
+    channel back when the rerouted task completes."""
+    app, lane_calls = v2_app_with_lanes
+    headers = _human_origin_headers(agent_id="operator", channel="cli", user="u1")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "analyst", "title": "ship it", "project": "research"},
+            headers=headers,
+        )
+        tid = r.json()["id"]
+        lane_calls.clear()
+        r = await c.post(
+            f"/mesh/tasks/{tid}/reroute",
+            json={"new_assignee": "tracker"},
+            headers=headers,
+        )
+    assert r.status_code == 200, r.text
+    tracker_call = next(c for c in lane_calls if c[0][0] == "tracker")
+    kwargs = tracker_call[1]
+    assert kwargs.get("auto_notify") is True, (
+        f"human origin must enable auto_notify, got kwargs={kwargs!r}"
+    )
+    origin = kwargs.get("origin")
+    assert origin is not None and origin.kind == "human", (
+        f"expected human origin to propagate, got {origin!r}"
+    )
+    assert origin.channel == "cli" and origin.user == "u1"
+
+
+@pytest.mark.asyncio
+async def test_agent_origin_does_not_request_auto_notify(v2_app_with_lanes):
+    """Operator-initiated calls without a human origin must NOT set
+    ``auto_notify`` — the lane worker would have nowhere to ping back."""
+    app, lane_calls = v2_app_with_lanes
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "analyst", "title": "self start", "project": "research"},
+            headers={"X-Agent-ID": "operator"},
+        )
+        tid = r.json()["id"]
+        lane_calls.clear()
+        r = await c.post(
+            f"/mesh/tasks/{tid}/reroute",
+            json={"new_assignee": "tracker"},
+            headers={"X-Agent-ID": "operator"},
+        )
+    assert r.status_code == 200, r.text
+    tracker_call = next(c for c in lane_calls if c[0][0] == "tracker")
+    kwargs = tracker_call[1]
+    assert kwargs.get("auto_notify") is False, (
+        f"agent-only origin must keep auto_notify off, got kwargs={kwargs!r}"
+    )

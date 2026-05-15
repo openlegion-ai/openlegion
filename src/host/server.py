@@ -4182,6 +4182,45 @@ def create_mesh_app(
             "monthly_limit": check.get("monthly_limit"),
         }
 
+    def _try_wake_agent(
+        target: str, message: str, origin: "MessageOrigin | None",
+    ) -> bool:
+        """Best-effort lane enqueue so an operator state change is acted on now.
+
+        Used by reroute / retry / cancel: the task store is already
+        updated when this fires, so any failure here is logged but
+        non-fatal — the worker will pick the change up on its next
+        heartbeat. Fire-and-forget against ``dispatch_loop`` (same
+        pattern as ``/mesh/wake``) so the HTTP response doesn't block
+        on the agent finishing the work. ``auto_notify`` is only set
+        when a real origin was provided, so completion of the woken
+        work flows back to the originating human channel.
+        """
+        from src.shared.types import MessageOrigin
+
+        if lane_manager is None or dispatch_loop is None:
+            return False
+        if not target or target not in router.agent_registry:
+            return False
+        had_origin = origin is not None
+        eff_origin = origin if origin is not None else MessageOrigin(
+            kind="agent", channel="", user="",
+        )
+        # Build the coroutine first so we can close it explicitly if the
+        # dispatch loop is unhealthy — otherwise an orphaned coroutine
+        # would emit a "coroutine was never awaited" warning.
+        coro = lane_manager.enqueue(
+            target, sanitize_for_prompt(message), mode="followup",
+            origin=eff_origin, auto_notify=had_origin,
+        )
+        try:
+            asyncio.run_coroutine_threadsafe(coro, dispatch_loop)
+            return True
+        except Exception as e:
+            coro.close()
+            logger.warning("Operator wake enqueue for %s failed: %s", target, e)
+            return False
+
     @app.post("/mesh/tasks/{task_id}/reroute")
     async def reroute_task(task_id: str, request: Request) -> dict:
         """Reassign a task. Operator-only or callers with ``can_route_tasks``.
@@ -4227,6 +4266,18 @@ def create_mesh_app(
             raise HTTPException(404, f"Task '{task_id}' not found")
         except InvalidStatusTransition as e:
             raise HTTPException(400, str(e))
+        # Wake the new assignee so they pick the task up immediately
+        # instead of waiting for their next heartbeat. State change has
+        # already succeeded; wake is best-effort.
+        origin = _validated_origin(request, caller)
+        title = updated.get("title") or task_id
+        reason_suffix = f" ({reason})" if reason else ""
+        _try_wake_agent(
+            new_assignee,
+            f"Operator rerouted task to you: {title!r}{reason_suffix}. "
+            "Call check_inbox() to pick it up.",
+            origin,
+        )
         return updated
 
     @app.post("/mesh/tasks/{task_id}/retry")
@@ -4299,6 +4350,14 @@ def create_mesh_app(
             parent_task_id=original["id"],
             priority=original.get("priority", 0) or 0,
             origin=origin_dict,
+        )
+        # Wake the (possibly new) assignee on the clone so the retry
+        # starts immediately rather than waiting for a heartbeat.
+        _try_wake_agent(
+            new_assignee,
+            f"Operator retried failed task as {clone['id']!r}: {title!r}. "
+            "Call check_inbox() to pick it up.",
+            origin,
         )
         return {"clone": clone, "original_id": original["id"]}
 
@@ -4919,12 +4978,36 @@ def create_mesh_app(
             )
         body = await request.json() if (await request.body()) else {}
         reason = sanitize_for_prompt(body.get("reason") or "") if isinstance(body, dict) else ""
+        prior_assignee = record.get("assignee") or ""
+        prior_status = record.get("status") or ""
         try:
             updated = store.cancel(task_id, actor=caller, reason=reason)
         except InvalidStatusTransition as e:
             raise HTTPException(400, str(e))
         except TaskNotFound:
             raise HTTPException(404, f"Task '{task_id}' not found")
+        # Tell the previous assignee to drop the work — but only if
+        # they were actually in a runnable state and aren't the caller
+        # (no point waking yourself to tell yourself to stop). ``blocked``
+        # is included on purpose: a blocked assignee is typically waiting
+        # for the operator to weigh in, and cancellation IS the answer.
+        # Without this, a worker keeps churning (or keeps waiting) on a
+        # task the operator already took back until the next heartbeat.
+        if (
+            prior_assignee
+            and prior_assignee != caller
+            and prior_status in ("pending", "accepted", "working", "blocked")
+        ):
+            origin = _validated_origin(request, caller)
+            title = updated.get("title") or task_id
+            reason_suffix = f" ({reason})" if reason else ""
+            _try_wake_agent(
+                prior_assignee,
+                f"Operator cancelled task {task_id!r}: {title!r}"
+                f"{reason_suffix}. Stop work on it and call check_inbox() "
+                "for next steps.",
+                origin,
+            )
         return updated
 
     # === Operator Config Endpoints ===
