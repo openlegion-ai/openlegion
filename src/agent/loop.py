@@ -2729,6 +2729,28 @@ class AgentLoop:
                                 if err:
                                     internal_error = str(err)
                         yield event
+                except asyncio.CancelledError:
+                    # Client disconnect / server cancel after the
+                    # task was marked ``working``. ``CancelledError``
+                    # is NOT an ``Exception`` subclass in Python
+                    # 3.8+, so the broader except below doesn't see
+                    # it. Without this branch the task stays stuck
+                    # in ``working`` forever (codex P2 from PR R2
+                    # round 2). Best-effort close via shield so our
+                    # cancellation can't kill the close mid-flight;
+                    # suppress the propagated CancelledError from
+                    # the awaited shield so we always re-raise the
+                    # original cancellation cleanly.
+                    if task_id:
+                        import contextlib
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await asyncio.shield(
+                                self._auto_close_task(
+                                    task_id, "cancelled",
+                                    error="agent_chat_cancelled",
+                                )
+                            )
+                    raise
                 except Exception as e:
                     # Auto-fail the originating task before propagating
                     # (mirrors the non-streaming chat() path). Re-raise
