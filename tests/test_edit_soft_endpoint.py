@@ -51,6 +51,13 @@ def mesh_app(tmp_path, monkeypatch):
     """Mesh app pinned to a tmp_path with `writer` agent on disk."""
     afile = _agents_yaml(tmp_path, names=["writer", "researcher"])
     monkeypatch.chdir(tmp_path)
+    # Existing tests assume any model string is valid. /edit-soft (and
+    # /propose) now run BYOK provider validation on the ``model`` field,
+    # so plant placeholder keys for the two providers existing tests
+    # reference (anthropic, openai). New validator-specific tests below
+    # override these with their own setenv.
+    monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant-fixture")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-oai-fixture")
     import src.cli.config as cli_cfg
     monkeypatch.setattr(cli_cfg, "AGENTS_FILE", afile)
     monkeypatch.setattr(cli_cfg, "PERMISSIONS_FILE", tmp_path / "config" / "permissions.json")
@@ -190,6 +197,55 @@ async def test_edit_soft_rejects_invalid_model_value(mesh_app):
         )
     assert r.status_code == 400
     assert "model" in r.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_edit_soft_rejects_model_without_provider_credentials(
+    mesh_app, monkeypatch,
+):
+    """BYOK validation closes the /edit-soft back-door: if the operator
+    tries to retarget an agent at a model whose provider has no API
+    key configured, the edit must 400 — otherwise the agent silently
+    dies on its next LLM call (same failure mode PR #901 plugged at
+    create-agent time).
+    """
+    app, _, _ = mesh_app
+    # Mesh fixture set both anthropic + openai; for this test, drop
+    # openai so requesting an openai/* model has no backing key.
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", raising=False)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/agents/writer/edit-soft",
+            json={"field": "model", "value": "openai/gpt-4o", "reason": "u"},
+            headers=_human_origin_headers(),
+        )
+    assert r.status_code == 400, r.text
+    body = r.text.lower()
+    assert "openai" in body
+    assert "credentials" in body or "key" in body
+
+
+@pytest.mark.asyncio
+async def test_edit_soft_accepts_model_when_provider_has_credentials(
+    mesh_app,
+):
+    """Positive case: the fixture provides an anthropic key, so a
+    /edit-soft to an anthropic/* model is accepted.
+    """
+    app, _, _ = mesh_app
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/agents/writer/edit-soft",
+            json={
+                "field": "model",
+                "value": "anthropic/claude-sonnet-4-20250514",
+                "reason": "u",
+            },
+            headers=_human_origin_headers(),
+        )
+    assert r.status_code == 200, r.text
+    assert r.json()["field"] == "model"
 
 
 @pytest.mark.asyncio

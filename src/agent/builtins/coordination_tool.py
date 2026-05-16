@@ -18,6 +18,7 @@ import re
 import time
 
 from src.agent.skills import skill
+from src.shared.redaction import redact_string
 from src.shared.task_titles import (
     LONG_TITLE_THRESHOLD,
     normalize_title_and_description,
@@ -221,7 +222,11 @@ async def hand_off(
             origin=origin,
         )
     except Exception as e:
-        wake_error = str(e)[:200]
+        # Redact credentials BEFORE truncation — an HTTP-level exception
+        # may carry the failing URL with an API key in the query string.
+        # Without this the wake_error field leaks secrets into the LLM
+        # context that the caller reads back via the handoff response.
+        wake_error = redact_string(str(e))[:200]
         logger.warning("Wake for %s failed (task still queued): %s", to, e)
 
     result = {
@@ -629,7 +634,11 @@ async def _hand_off_v2(
             task_id=task_id or None,
         )
     except Exception as e:
-        wake_error = str(e)[:200]
+        # Redact credentials BEFORE truncation — an HTTP-level exception
+        # may carry the failing URL with an API key in the query string.
+        # Without this the wake_error field leaks secrets into the LLM
+        # context that the caller reads back via the handoff response.
+        wake_error = redact_string(str(e))[:200]
         logger.warning("Wake for %s failed (task still queued): %s", to, e)
 
     result = {

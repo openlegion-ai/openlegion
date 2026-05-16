@@ -1452,6 +1452,37 @@ class TestHandOffWakeFailureSurfacing:
         assert len(result["wake_error"]) <= 200
 
     @pytest.mark.asyncio
+    async def test_hand_off_wake_error_redacts_credentials(self):
+        """Wake exception messages frequently quote the failing URL with
+        an API key in the query string. The wake_error field is read
+        back into the LLM's context, so credentials there leak into
+        the model trail. Must be redacted BEFORE truncation.
+
+        Uses an ``sk-`` prefixed token long enough to match the OpenAI/
+        Anthropic short-form SECRET_PATTERN (``sk-[A-Za-z0-9]{20,}``).
+        """
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="scout")
+        mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
+        leaky_token = "sk-" + "a" * 40  # matches SECRET_PATTERN
+        leaky = (
+            f"POST https://internal.example.com/wake?api_key={leaky_token} "
+            f"failed with 500"
+        )
+        mc.wake_agent.side_effect = RuntimeError(leaky)
+
+        result = await hand_off(
+            to="analyst",
+            summary="research done",
+            mesh_client=mc,
+        )
+
+        assert result["wake_failed"] is True
+        assert leaky_token not in result["wake_error"]
+        assert "[REDACTED]" in result["wake_error"]
+
+    @pytest.mark.asyncio
     async def test_hand_off_v2_returns_wake_failed_when_wake_raises(self):
         """V2 path: wake failure surfaces ``wake_failed`` + ``wake_error``."""
         from src.agent.builtins.coordination_tool import hand_off

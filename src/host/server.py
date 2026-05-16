@@ -4302,18 +4302,22 @@ def create_mesh_app(
                         "status": status,
                         "ts": int(time.time()),
                     }
+                    # ``body["result"]`` is supposed to be a dict, but
+                    # nothing enforces that on the wire. A caller passing
+                    # a string ("ok") used to AttributeError here and the
+                    # back-edge silently dropped — coerce defensively.
+                    raw_result = body.get("result")
+                    result_dict = raw_result if isinstance(raw_result, dict) else {}
                     if status == "blocked":
                         payload["blocker_note"] = blocker_note or ""
                     if status == "failed":
                         payload["error"] = (
                             body.get("error")
-                            or (body.get("result") or {}).get("error", "")
+                            or result_dict.get("error", "")
                             or ""
                         )
                     if status == "done":
-                        payload["summary"] = (
-                            (body.get("result") or {}).get("summary", "")
-                        )
+                        payload["summary"] = result_dict.get("summary", "")
                     blackboard.write(
                         f"inbox/{origin_user}/task_event/{task_id}",
                         payload,
@@ -5406,6 +5410,24 @@ def create_mesh_app(
         if field == "model":
             if not isinstance(new_value, str) or not new_value:
                 raise HTTPException(400, "model must be a non-empty string")
+            # Same BYOK validation as /edit-soft and create-agent —
+            # /propose is deprecated per CLAUDE.md but still active for
+            # back-compat, so close the gap here too.
+            from src.shared.models import (
+                get_available_providers,
+                resolve_provider_for_model,
+            )
+            _provider = resolve_provider_for_model(new_value)
+            _providers_with_creds = get_available_providers()
+            if _provider and _provider not in _providers_with_creds:
+                raise HTTPException(
+                    400,
+                    f"Model '{new_value}' requires '{_provider}' credentials, "
+                    f"but no {_provider.upper()} key is configured. Available "
+                    f"providers: {sorted(_providers_with_creds) or 'none'}. "
+                    f"Set OPENLEGION_SYSTEM_{_provider.upper()}_API_KEY or pick "
+                    f"a different model.",
+                )
         elif field == "thinking":
             from src.agent.llm import LLMClient
             if new_value not in LLMClient.VALID_THINKING_LEVELS:
@@ -5868,6 +5890,26 @@ def create_mesh_app(
         if field == "model":
             if not isinstance(new_value, str) or not new_value:
                 raise HTTPException(400, "model must be a non-empty string")
+            # Match create-agent BYOK validation (PR #901): block edits
+            # that would point the agent at a model whose provider has
+            # no credentials. Otherwise /edit-soft is a back-door
+            # around the create-time check — the agent would silently
+            # fail on its next LLM call.
+            from src.shared.models import (
+                get_available_providers,
+                resolve_provider_for_model,
+            )
+            _provider = resolve_provider_for_model(new_value)
+            _providers_with_creds = get_available_providers()
+            if _provider and _provider not in _providers_with_creds:
+                raise HTTPException(
+                    400,
+                    f"Model '{new_value}' requires '{_provider}' credentials, "
+                    f"but no {_provider.upper()} key is configured. Available "
+                    f"providers: {sorted(_providers_with_creds) or 'none'}. "
+                    f"Set OPENLEGION_SYSTEM_{_provider.upper()}_API_KEY or pick "
+                    f"a different model.",
+                )
         elif field == "thinking":
             from src.agent.llm import LLMClient
             if new_value not in LLMClient.VALID_THINKING_LEVELS:

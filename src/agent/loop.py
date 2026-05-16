@@ -1718,6 +1718,17 @@ class AgentLoop:
         # Guard is BEFORE _chat_lock to avoid blocking on a held lock.
         if self.current_task is not None:
             await self._steer_queue.put(user_message)
+            # A task_id rode in on this wake but we're busy — the steer
+            # queue has no task_id channel, so the auto-close path would
+            # never fire. Fail the originating task now so the sender's
+            # check_inbox sees a clear ``task_failed`` back-edge with a
+            # specific reason, instead of waiting 7 days for the TTL.
+            # Best-effort: _auto_close_task is exception-safe.
+            if task_id:
+                await self._auto_close_task(
+                    task_id, "failed",
+                    error="agent_busy_steered",
+                )
             return {
                 "response": (
                     "Agent is working on a task. Your message has been queued "
@@ -1780,7 +1791,13 @@ class AgentLoop:
         result_payload: dict | None = None,
         error: str | None = None,
     ) -> None:
-        """Best-effort terminal transition. Never raises — failures log only."""
+        """Best-effort terminal transition. Never raises — failures log only.
+
+        Log severity differentiates state-conflict (HTTP 400, the
+        transition was already done or invalid for current state — benign)
+        from infrastructure failures (network / 5xx — operator action
+        required because the task will dangle in ``pending`` forever).
+        """
         try:
             await self.mesh_client.set_task_status(
                 task_id, status,
@@ -1788,10 +1805,26 @@ class AgentLoop:
                 error=error,
             )
         except Exception as e:
-            logger.warning(
-                "Failed to auto-close task %s as %s: %s",
-                task_id, status, e,
-            )
+            # Discriminate HTTP errors: 4xx is usually "state machine said
+            # no" (benign, e.g. concurrent transition already landed);
+            # 5xx / network / anything else means the mesh is unhealthy
+            # and the task will silently dangle without an alert.
+            resp = getattr(e, "response", None)
+            http_status = getattr(resp, "status_code", None)
+            if isinstance(http_status, int) and 400 <= http_status < 500:
+                logger.warning(
+                    "Auto-close %s → %s rejected by state machine (%s): %s",
+                    task_id, status, http_status, e,
+                )
+            else:
+                # No HTTP response or 5xx → the originating agent will
+                # never see this task close. Surface loudly so operators
+                # notice via standard error-log monitoring.
+                logger.error(
+                    "Auto-close %s → %s FAILED (%s) — task may dangle "
+                    "in pending until a heartbeat or manual close: %s",
+                    task_id, status, http_status or "no response", e,
+                )
 
     # ── Chat helpers (shared by streaming and non-streaming) ────
 
