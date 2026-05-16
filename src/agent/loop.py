@@ -2623,6 +2623,7 @@ class AgentLoop:
     async def chat_stream(
         self, user_message: str, *, trace_id: str | None = None,
         origin: "MessageOrigin | None" = None,
+        task_id: str | None = None,
     ):
         """Streaming chat that yields SSE events as they happen.
 
@@ -2631,9 +2632,43 @@ class AgentLoop:
           {"type": "tool_result", "name": str, "output": any}
           {"type": "text_delta", "content": str}
           {"type": "done", "response": str, "tool_outputs": list, "tokens_used": int}
+
+        ``task_id`` mirrors :meth:`chat` — when set, the streaming turn
+        is treated as the execution of that specific task. On clean
+        completion we call ``set_task_status(done)`` with the
+        accumulated response as summary; on exception we call
+        ``set_task_status(failed)`` before re-raising. Without
+        ``task_id`` (legacy callers, free-form chat) the auto-close
+        is skipped. Closes the streaming-path gap left by PR #903
+        which only plumbed task_id through the non-streaming
+        :meth:`chat`.
         """
-        # Redirect to steer queue if a task is running.
+        # Redirect to steer queue if a task is running. Mirrors the
+        # non-streaming path's split: a task_id handoff arriving on
+        # a busy agent gets cleanly rejected (no steer queue, clear
+        # back-edge) so the originator doesn't redirect work while
+        # we silently queue and re-execute it later. Free-form
+        # chat (no task_id) keeps the legacy steer-queue UX.
         if self.current_task is not None:
+            if task_id:
+                await self._auto_close_task(
+                    task_id, "failed",
+                    error="agent_busy_handoff_rejected",
+                )
+                yield {
+                    "type": "text_delta",
+                    "content": (
+                        "Agent is working on another task — handoff "
+                        "rejected. Originator notified via back-edge."
+                    ),
+                }
+                yield {
+                    "type": "done",
+                    "response": "",
+                    "tool_outputs": [],
+                    "tokens_used": 0,
+                }
+                return
             await self._steer_queue.put(user_message)
             yield {
                 "type": "text_delta",
@@ -2650,19 +2685,107 @@ class AgentLoop:
             }
             return
 
-        from src.shared.trace import current_origin, current_trace_id
-        current_trace_id.set(trace_id)
-        origin_token = current_origin.set(origin)
-        try:
-            async with self._chat_lock:
-                await self._maybe_restore_session()
+        # NOTE: ``current_origin`` / ``current_trace_id`` are intentionally
+        # NOT set here. The /chat/stream endpoint's ``event_generator``
+        # sets them in the OUTER task before the per-iteration
+        # ``asyncio.ensure_future`` loop spawns child tasks — that way
+        # every iteration's task inherits them via context copy.
+        # Setting here would be both redundant AND broken: the
+        # ``set()`` runs in iteration 1's task, the matching
+        # ``reset(token)`` at the finally runs in iteration N's task,
+        # and Python's ``ContextVar.reset()`` raises ValueError when
+        # the token was created in a different context.
+        async with self._chat_lock:
+            await self._maybe_restore_session()
+            # State machine requires pending → working before → done
+            # (same as the non-streaming chat path — codex P1 from
+            # PR R2 review caught this gap). Without it, every
+            # streaming handoff would be a no-op pending → done
+            # which 4xx's and leaves the task pending forever.
+            # Best-effort: _auto_close_task is exception-safe.
+            if task_id:
+                await self._auto_close_task(task_id, "working")
+            # Capture the final response for task auto-close. The
+            # ``done`` event carries the full response; collecting
+            # text_delta would also work but ``done`` is canonical.
+            final_response = ""
+            tool_limit_hit = False
+            internal_error: str | None = None
+            try:
                 try:
                     async for event in self._chat_stream_inner(user_message):
+                        if isinstance(event, dict):
+                            if event.get("type") == "done":
+                                final_response = event.get("response", "") or ""
+                                if event.get("tool_limit_reached"):
+                                    tool_limit_hit = True
+                                # _chat_stream_inner catches Exception
+                                # internally and yields a ``done`` event
+                                # with ``error: str``. Detect it so we
+                                # don't misclassify a swallowed failure
+                                # as a successful close (codex P2 from
+                                # PR R2 review).
+                                err = event.get("error")
+                                if err:
+                                    internal_error = str(err)
                         yield event
-                finally:
-                    await self._checkpoint_chat_session()
-        finally:
-            current_origin.reset(origin_token)
+                except asyncio.CancelledError:
+                    # Client disconnect / server cancel after the
+                    # task was marked ``working``. ``CancelledError``
+                    # is NOT an ``Exception`` subclass in Python
+                    # 3.8+, so the broader except below doesn't see
+                    # it. Without this branch the task stays stuck
+                    # in ``working`` forever (codex P2 from PR R2
+                    # round 2). Best-effort close via shield so our
+                    # cancellation can't kill the close mid-flight;
+                    # suppress the propagated CancelledError from
+                    # the awaited shield so we always re-raise the
+                    # original cancellation cleanly.
+                    if task_id:
+                        import contextlib
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await asyncio.shield(
+                                self._auto_close_task(
+                                    task_id, "cancelled",
+                                    error="agent_chat_cancelled",
+                                )
+                            )
+                    raise
+                except Exception as e:
+                    # Auto-fail the originating task before propagating
+                    # (mirrors the non-streaming chat() path). Re-raise
+                    # so the existing error handling above can surface
+                    # the failure to the caller.
+                    if task_id:
+                        await self._auto_close_task(
+                            task_id, "failed",
+                            error=str(e)[:500],
+                        )
+                    raise
+                # Auto-close on completion. Three possible terminal
+                # states for the streaming path:
+                #   1. ``internal_error`` — _chat_stream_inner caught
+                #      an exception and emitted error-flagged done.
+                #   2. ``tool_limit_reached`` — max-iterations exit.
+                #   3. Otherwise — clean completion.
+                if task_id:
+                    if internal_error is not None:
+                        await self._auto_close_task(
+                            task_id, "failed",
+                            error=internal_error[:500],
+                        )
+                    elif tool_limit_hit:
+                        await self._auto_close_task(
+                            task_id, "failed",
+                            error="max_iterations_reached",
+                        )
+                    else:
+                        await self._auto_close_task(
+                            task_id, "done",
+                            result_payload={"summary": final_response[:500]},
+                        )
+            finally:
+                await self._checkpoint_chat_session()
 
     async def _chat_stream_inner(self, user_message: str):
         self.state = "working"
@@ -2883,11 +3006,18 @@ class AgentLoop:
             msg = f"Error: {e}"
             if self.workspace:
                 self.workspace.append_chat_message("assistant", msg)
+            # ``error`` field flags this as a swallowed internal
+            # failure so the outer ``chat_stream`` wrapper can
+            # auto-close the originating task as ``failed`` instead
+            # of misclassifying it as ``done`` (the response text
+            # "Error: ..." is human-readable but not parseable
+            # reliably as a failure signal — codex P2 from PR R2).
             yield {
                 "type": "done",
                 "response": msg,
                 "tool_outputs": tool_outputs,
                 "tokens_used": total_tokens,
+                "error": str(e),
             }
         finally:
             self.state = "idle"
