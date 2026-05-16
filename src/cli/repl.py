@@ -524,7 +524,7 @@ class REPLSession:
 
             standalone = sorted(all_agents - assigned)
             if standalone:
-                click.echo(f"\n  Standalone: {', '.join(standalone)}")
+                click.echo(f"\n  Solo: {', '.join(standalone)}")
             click.echo()
 
         elif sub == "use":

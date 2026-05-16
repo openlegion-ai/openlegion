@@ -47,7 +47,26 @@ ENV_FILE = PROJECT_ROOT / ".env"
 CONFIG_FILE = PROJECT_ROOT / "config" / "mesh.yaml"
 AGENTS_FILE = PROJECT_ROOT / "config" / "agents.yaml"
 PERMISSIONS_FILE = PROJECT_ROOT / "config" / "permissions.json"
-PROJECTS_DIR = PROJECT_ROOT / "config" / "projects"
+def _resolve_teams_dir() -> Path:
+    """Pick whichever of config/teams/ or config/projects/ exists.
+
+    Prefers the canonical ``config/teams/``; falls back to
+    ``config/projects/`` so deployments that haven't run the startup
+    migrator yet keep working. When neither exists, returns
+    ``config/teams/`` (the canonical create target).
+    """
+    teams = PROJECT_ROOT / "config" / "teams"
+    projects = PROJECT_ROOT / "config" / "projects"
+    if teams.exists():
+        return teams
+    if projects.exists():
+        return projects
+    return teams
+
+
+TEAMS_DIR = _resolve_teams_dir()
+# Back-compat alias — kept until PR 3.
+PROJECTS_DIR = TEAMS_DIR
 NETWORK_FILE = PROJECT_ROOT / "config" / "network.yaml"
 TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
 DOCKER_IMAGE = "openlegion-agent:latest"
@@ -508,7 +527,7 @@ def _add_agent_permissions(name: str, permissions: dict | None = None) -> None:
         # permissions.json instead of being silently dropped.
         for key in (
             "can_use_browser", "can_spawn", "can_manage_cron",
-            "can_manage_fleet", "can_manage_projects", "can_edit_agent_config",
+            "can_manage_fleet", "can_manage_teams", "can_manage_projects", "can_edit_agent_config",
             "can_view_fleet_metrics", "can_route_tasks",
             "can_request_user_credentials",
         ):
@@ -1543,9 +1562,13 @@ _OPERATOR_AGENT_ID = "operator"
 _OPERATOR_ALLOWED_TOOLS: list[str] = [
     # Monitoring + heartbeat
     "get_system_status", "notify_user", "save_observations",
-    # Inspection (consolidated read tools)
-    "inspect_agents", "inspect_projects",
-    "list_agent_queue", "get_team_outputs", "summarize_project_progress",
+    # Inspection (consolidated read tools). Team-named tools (PR 2)
+    # are the canonical surface; project-named legacy entries are
+    # retained alongside them through PR 3 so SDK consumers that
+    # invoke either name keep working.
+    "inspect_agents", "inspect_teams", "inspect_projects",
+    "list_agent_queue", "get_team_outputs",
+    "summarize_team_progress", "summarize_project_progress",
     # Coordination + chat
     "list_templates", "apply_template", "hand_off", "check_inbox",
     # Configuration edits — edit_agent applies every field immediately
@@ -1555,13 +1578,14 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     # that may still call it; it is a no-op stub.
     "edit_agent", "confirm_edit", "undo_change",
     # Creation
-    "create_agent", "create_project",
-    # Project membership + context
+    "create_agent", "create_team", "create_project",
+    # Team membership + context
+    "add_agents_to_team", "remove_agents_from_team", "update_team_context",
     "add_agents_to_project", "remove_agents_from_project", "update_project_context",
     # PR 5 — north-star setter is no-confirmation meta-config.
-    "set_project_goal",
+    "set_team_goal", "set_project_goal",
     # Lifecycle (consolidated archive/delete)
-    "manage_project", "manage_agent", "manage_task",
+    "manage_team", "manage_project", "manage_agent", "manage_task",
     # Self-cleanup — operator can clear stale pending actions and prune
     # the audit log without waiting for TTL. ``list_pending`` lets the
     # operator find the nonce before calling cancel_pending_action.
@@ -1710,7 +1734,11 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
         if not op_perms.get("can_manage_fleet", False):
             op_perms["can_manage_fleet"] = True
             needs_update = True
+        if not op_perms.get("can_manage_teams", False):
+            op_perms["can_manage_teams"] = True
+            needs_update = True
         if not op_perms.get("can_manage_projects", False):
+            # Back-compat alias — kept until PR 3.
             op_perms["can_manage_projects"] = True
             needs_update = True
         if not op_perms.get("can_edit_agent_config", False):
@@ -1767,7 +1795,10 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
             "can_publish": ["*"],
             "can_subscribe": ["*"],
             # Control-plane permissions (Task 3) — operator gets all six.
+            # ``can_manage_teams`` is canonical (PR 2 rename);
+            # ``can_manage_projects`` retained as a back-compat alias.
             "can_manage_fleet": True,
+            "can_manage_teams": True,
             "can_manage_projects": True,
             "can_edit_agent_config": True,
             "can_view_fleet_metrics": True,

@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 def _generate_id(prefix: str, length: int = 12) -> str:
@@ -323,7 +323,13 @@ class AgentPermissions(BaseModel):
     # on existing agent records default to False at load time so
     # pre-existing configs don't accidentally grant durable powers.
     can_manage_fleet: bool = False         # /mesh/agents/create, register/deregister
-    can_manage_projects: bool = False      # project create/archive, membership
+    # ``can_manage_teams`` (new canonical name; ``can_manage_projects``
+    # kept as a back-compat alias). Either flag granted upstream is
+    # mirrored onto the other via :meth:`_unify_manage_teams_alias` so
+    # existing yaml configs that still spell ``can_manage_projects`` keep
+    # working until PR 3 retires the alias.
+    can_manage_teams: bool = False         # team create/archive, membership
+    can_manage_projects: bool = False      # DEPRECATED: alias for can_manage_teams
     can_edit_agent_config: bool = False    # propose/confirm edits to instructions/soul/etc.
     can_view_fleet_metrics: bool = False   # /mesh/system/metrics, /mesh/agents/{id}/metrics
     can_route_tasks: bool = False          # durable task records (Task 6)
@@ -334,6 +340,16 @@ class AgentPermissions(BaseModel):
     wallet_spend_limit_daily_usd: float = 0.0
     wallet_rate_limit_per_hour: int = 0
     wallet_allowed_contracts: list[str] = []
+
+    @model_validator(mode="after")
+    def _unify_manage_teams_alias(self) -> "AgentPermissions":
+        # Either flag granted on input implies both are set downstream so
+        # callers can read either field without an OR. PR 3 removes the
+        # alias entirely.
+        if self.can_manage_teams or self.can_manage_projects:
+            object.__setattr__(self, "can_manage_teams", True)
+            object.__setattr__(self, "can_manage_projects", True)
+        return self
 
 
 # === Agent Configuration ===
@@ -384,21 +400,25 @@ class AgentConfig(BaseModel):
     model_config = {"extra": "allow"}
 
 
-# === Projects ===
+# === Teams ===
 
 
-class ProjectMetadata(BaseModel):
-    """Project definition loaded from config/projects/<name>/metadata.yaml.
+class TeamMetadata(BaseModel):
+    """Team definition loaded from config/teams/<name>/metadata.yaml.
 
     ``status`` defaults to ``"active"``; operator product tools use
-    ``"archived"`` to stop scheduling and hide the project from default
+    ``"archived"`` to stop scheduling and hide the team from default
     list views without deleting its data. Archive is reversible; delete
     requires archive first plus a separate human-confirmed step.
 
-    ``north_star`` and ``success_criteria`` capture the project's goal as
+    ``north_star`` and ``success_criteria`` capture the team's goal as
     first-class fields. Both are nullable for backwards compatibility —
-    projects that predate this schema simply have ``None`` and the UI
+    teams that predate this schema simply have ``None`` and the UI
     renders an empty-state placeholder.
+
+    A back-compat alias :data:`ProjectMetadata` is exported below — it
+    points at the same class so existing imports keep working through
+    the project→team rename. PR 3 removes the alias.
     """
 
     name: str
@@ -409,6 +429,10 @@ class ProjectMetadata(BaseModel):
     settings: dict[str, Any] = {}
     north_star: str | None = None
     success_criteria: list[str] | None = None
+
+
+# Back-compat alias — keep until PR 3.
+ProjectMetadata = TeamMetadata
 
 
 # === Coordination Requests ===
@@ -638,13 +662,21 @@ class DashboardEvent(BaseModel):
         # the new value live (secret fields are redacted in the
         # payload).
         "agent_config_updated",
-        # Project CRUD — create / update / delete so the projects list
-        # refreshes without polling.
+        # Team (formerly "project") CRUD — create / update / delete so
+        # the teams list refreshes without polling. Both the legacy
+        # ``project_*`` literals and the new ``team_*`` literals are kept
+        # through PR 3 — emitters fire BOTH so old listeners keep
+        # working.
         "project_created",
         "project_updated",
         "project_deleted",
         "project_archived",
         "project_unarchived",
+        "team_created",
+        "team_updated",
+        "team_deleted",
+        "team_archived",
+        "team_unarchived",
         # Blackboard delete — mirror of ``blackboard_write`` for the
         # delete endpoint so the SPA can reflect removals live.
         "blackboard_delete",

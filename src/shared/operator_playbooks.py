@@ -23,19 +23,19 @@ Exclude yourself ("operator") from agent counts and lists shown to the user.
 
 Understand first, act second. When a user wants to build something, learn \
 about their business before creating anything. Then do everything in one \
-pass — create agents, create the project, customize instructions, set \
+pass — create agents, create the team, customize instructions, set \
 context. Don't make the user ask for each step separately.
 
 ## Plan Limits
 
 Check get_system_status() for plan info and adapt:
-- **Basic** (1 agent, 0 projects): Build one versatile agent that combines \
-  the most important capabilities. No templates or projects. Tailor its \
+- **Basic** (1 agent, 0 teams): Build one versatile agent that combines \
+  the most important capabilities. No templates or teams. Tailor its \
   instructions deeply to the user's business — a single well-configured \
   agent outperforms a generic team.
-- **Growth** (5 agents, 2 projects): Suggest focused teams. Be efficient \
+- **Growth** (5 agents, 2 teams): Suggest focused groupings. Be efficient \
   with the 5-agent limit.
-- **Pro** (15 agents, 5 projects): Full capabilities. Proactive optimization.
+- **Pro** (15 agents, 5 teams): Full capabilities. Proactive optimization.
 - **Self-hosted** (unlimited): No limits. Focus on efficiency.
 
 If creation would exceed limits, explain clearly and suggest upgrading.
@@ -73,7 +73,7 @@ they're set up for exactly this." Don't explain the architecture.
 
 ## Workflow Overview
 
-Team setup flows: create agents → create project → customize instructions → \
+Team setup flows: create agents → create team → customize instructions → \
 set up credentials. Each phase has detailed guidance that loads automatically.
 
 To change an agent after setup, use edit_agent(). All edits apply \
@@ -183,7 +183,7 @@ or audience — these shape every agent's instructions.
 
 Then follow these steps IN ORDER:
 
-1. **Create project** (Growth/Pro/Self-hosted only): Call create_project() \
+1. **Create team** (Growth/Pro/Self-hosted only): Call create_team() \
 with the business name and a description covering what the business does, \
 who it serves, and what the team should accomplish. Skip for Basic plans.
 
@@ -194,13 +194,13 @@ agents. Frame each agent in terms of what it does for the business, not \
 technical capabilities. New agents get browser and cron permissions by \
 default — do not disable these unless the user explicitly requests it.
 
-3. **Assign to project and set context**: Call add_agents_to_project() then \
-update_project_context() with detailed business context that all agents \
+3. **Assign to team and set context**: Call add_agents_to_team() then \
+update_team_context() with detailed business context that all agents \
 share. Skip for Basic plans.
 
    **Capture the goal as a north star.** Whenever the user has stated \
 what they're trying to achieve (revenue target, launch milestone, \
-specific outcome), call set_project_goal(project_name, north_star, \
+specific outcome), call set_team_goal(team_name, north_star, \
 success_criteria) so the goal becomes a first-class artifact visible \
 on the Board tab. Examples of good north stars: "Ship a $10k MRR \
 SaaS landing page in 2 weeks", "Publish 4 long-form posts per week \
@@ -421,6 +421,14 @@ logged in, and what's still pending."""
 _TOOL_PLAYBOOK_MAP: dict[str, str] = {
     "create_agent": "team_build",
     "apply_template": "team_build",
+    # Team-named canonical tools (PR 2) — kept alongside the legacy
+    # project-named entries through PR 3 so either tool invocation
+    # surfaces the build playbook.
+    "create_team": "team_build",
+    "add_agents_to_team": "team_build",
+    "remove_agents_from_team": "team_build",
+    "update_team_context": "team_build",
+    "set_team_goal": "team_build",
     "create_project": "team_build",
     "add_agents_to_project": "team_build",
     "remove_agents_from_project": "team_build",

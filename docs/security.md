@@ -186,7 +186,7 @@ Every inter-agent operation checks per-agent ACLs defined in `config/permissions
 }
 ```
 
-- **Project-scoped blackboard** -- agents can only access keys under their project's namespace (`projects/{name}/*`). The `MeshClient` auto-prefixes all blackboard keys with the project namespace, so agents use natural keys while isolation is enforced transparently. Standalone agents get empty blackboard permissions.
+- **Team-scoped blackboard** -- agents can only access keys under their team's namespace (`projects/{name}/*`, on-disk prefix retained through PR 2 of the project→team rename). The `MeshClient` auto-prefixes all blackboard keys with the team namespace, so agents use natural keys while isolation is enforced transparently. Solo agents get empty blackboard permissions.
 - **Glob patterns** for blackboard paths and credential access
 - **Explicit allowlists** for messaging, pub/sub, API access, and credential access
 - **Default deny** -- if not listed, it's blocked
@@ -210,7 +210,7 @@ The asymmetry vs. `allowed_credentials` (where `[]` is the safe deny-all default
 
 ### Reserved Agent IDs
 
-`RESERVED_AGENT_IDS = {"mesh", "operator", "canary-probe"}` (`src/shared/types.py`). Agent creation rejects these names; `canary-probe` is reserved for the stealth-canary subsystem so a real agent cannot collide with its profile. The CLI also explicitly rejects the literal `operator` from project membership (`src/cli/config.py`) — operator is a system trust zone, not a project member.
+`RESERVED_AGENT_IDS = {"mesh", "operator", "canary-probe"}` (`src/shared/types.py`). Agent creation rejects these names; `canary-probe` is reserved for the stealth-canary subsystem so a real agent cannot collide with its profile. The CLI also explicitly rejects the literal `operator` from team membership (`src/cli/config.py`) — operator is a system trust zone, not a team member.
 
 ### `MessageOrigin` Propagation
 
@@ -444,9 +444,9 @@ A separate one-shot **health check** runs against the provider's status endpoint
 Both caps are opt-in (no default). Configure with USD amounts; enforcement uses millicents (1/100,000 USD) internally for accumulator precision.
 
 - `CAPTCHA_COST_LIMIT_USD_PER_AGENT_MONTH` — short-circuits with `solver_outcome="cost_cap"` before provider HTTP when the agent's running monthly spend would exceed the cap.
-- `CAPTCHA_COST_LIMIT_USD_PER_TENANT_MONTH` — same pattern at tenant (project) granularity. The metrics tick emits **threshold alerts at 50 % / 80 % / 100 %** of the cap (once per crossing per month) on the EventBus as `tenant_spend_threshold` events.
+- `CAPTCHA_COST_LIMIT_USD_PER_TENANT_MONTH` — same pattern at tenant (team) granularity. The metrics tick emits **threshold alerts at 50 % / 80 % / 100 %** of the cap (once per crossing per month) on the EventBus as `tenant_spend_threshold` events.
 
-Tenant lookup is by `_tenant_for(agent_id)` reverse-mapping `config/projects/`; agents not enrolled in a project have no tenant and do not appear in tenant rollups. State resets at month rollover.
+Tenant lookup is by `_tenant_for(agent_id)` reverse-mapping `config/projects/`; agents not enrolled on a team have no tenant and do not appear in tenant rollups. State resets at month rollover.
 
 When a cap is configured but the solver provider name or the (provider, kind) price is unknown, the solve **fails closed** with `solver_outcome="provider_missing"` or `"price_missing"` rather than letting an untrackable charge slip past. Reset by configuring the provider, waiting for next month, or explicitly disabling the cap.
 

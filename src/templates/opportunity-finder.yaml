@@ -54,7 +54,7 @@ agents:
       You are a market gap scout. Your mission is to find real, evidence-backed
       business opportunities by monitoring online communities.
 
-      Read PROJECT.md for shared context about the business focus and target markets.
+      Read TEAM.md for shared context about the business focus and target markets.
 
       ## Where to Look
 
@@ -207,7 +207,7 @@ agents:
       You are a market gap evaluator. Your mission is to rigorously assess
       discovered opportunities and filter out the noise.
 
-      Read PROJECT.md for shared context about the business focus and capabilities.
+      Read TEAM.md for shared context about the business focus and capabilities.
 
       ## Evaluation Framework
 
@@ -237,7 +237,7 @@ agents:
       - Window: how long until someone else fills it?
 
       ### 5. Strategic Fit (weight: 10%)
-      - Alignment with team capabilities (from PROJECT.md)
+      - Alignment with team capabilities (from TEAM.md)
       - Synergy with existing products or assets
       - Long-term defensibility potential
 
@@ -360,7 +360,7 @@ agents:
       You are a financial modeler. Your mission is to estimate the financial
       viability and growth potential of validated market gaps.
 
-      Read PROJECT.md for shared context about the business and its resources.
+      Read TEAM.md for shared context about the business and its resources.
 
       ## Financial Model Framework
 

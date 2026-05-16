@@ -243,33 +243,10 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         """Streaming chat. Returns SSE events for tool use and text deltas."""
         _trace_id = request.headers.get("x-trace-id")
         _origin = _origin_from_mesh_request(request)
-        # Mirrors the non-streaming /chat path (PR #903): when a
-        # wake rides ``x-task-id``, plumb it so the streaming loop
-        # auto-closes the originating handoff task on completion.
-        _task_id = request.headers.get("x-task-id") or None
-
         async def event_generator():
-            # Set current_origin / current_trace_id in THIS task's
-            # context — not inside ``loop.chat_stream``'s generator
-            # body — so the per-iteration ``asyncio.ensure_future``
-            # child tasks below inherit the origin. If the contextvar
-            # is only set inside the generator body, only iteration 1
-            # carries it; iterations 2+ run in fresh child tasks
-            # that copied event_generator's parent context (no
-            # origin), and tool dispatches in later iterations read
-            # ``None``. This is the production reproducer for the
-            # operator delete-confirm bug — the manage_agent →
-            # propose_delete_agent path called ``current_origin.get()``
-            # in iteration N and got ``None``, so the propose row
-            # stored ``origin_kind=None`` and the confirm gate
-            # rejected it.
-            from src.shared.trace import current_origin, current_trace_id
-            current_trace_id.set(_trace_id)
-            current_origin.set(_origin)
-
             stream = loop.chat_stream(
                 sanitize_for_prompt(msg.message), trace_id=_trace_id,
-                origin=_origin, task_id=_task_id,
+                origin=_origin,
             )
             stream_iter = stream.__aiter__()
             # Use asyncio.wait (not wait_for) so the pending __anext__
@@ -300,36 +277,8 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
     @app.post("/chat/reset")
     async def chat_reset() -> dict:
         """Clear conversation history."""
-        result = await loop.reset_chat()
-        if not isinstance(result, dict):
-            result = {}
-        return {"status": "ok", **result}
-
-    @app.get("/chat/archives")
-    async def chat_archives_list() -> dict:
-        """List archived conversation transcripts (newest first, cap 100)."""
-        if not loop.workspace:
-            return {"archives": []}
-        return {"archives": loop.workspace.list_chat_archives()}
-
-    @app.get("/chat/archives/{name}")
-    async def chat_archive_get(name: str) -> dict:
-        """Return a single archived transcript by filename."""
-        if not loop.workspace:
-            raise HTTPException(404, "No workspace")
-        messages = loop.workspace.load_chat_archive(name)
-        if messages is None:
-            raise HTTPException(404, "Archive not found")
-        return {"name": name, "messages": messages, "count": len(messages)}
-
-    @app.delete("/chat/archives/{name}")
-    async def chat_archive_delete(name: str) -> dict:
-        if not loop.workspace:
-            raise HTTPException(404, "No workspace")
-        ok = loop.workspace.delete_chat_archive(name)
-        if not ok:
-            raise HTTPException(404, "Archive not found")
-        return {"deleted": True, "name": name}
+        await loop.reset_chat()
+        return {"status": "ok"}
 
     @app.get("/chat/history")
     async def chat_history() -> dict:
@@ -469,18 +418,20 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         path.write_text(content)
         return {"filename": filename, "size": path.stat().st_size}
 
-    @app.put("/project")
-    async def update_project(request: Request) -> dict:
-        """Accept an updated PROJECT.md from the mesh host.
+    async def _update_team_md(request: Request) -> dict:
+        """Shared handler for ``PUT /team`` and ``PUT /project``.
 
-        PROJECT.md is fleet-wide (not per-agent), so it's separate from
-        the identity file allowlist. The mesh pushes updates here after
-        the user edits it on the dashboard.
+        TEAM.md (formerly PROJECT.md) is fleet-wide (not per-agent), so
+        it's separate from the identity file allowlist. The mesh pushes
+        updates here after the user edits it on the dashboard. The body
+        is written to BOTH ``TEAM.md`` and ``PROJECT.md`` in the
+        workspace so the bootstrap loader resolves under either name
+        through PR 3.
         """
         if not request.headers.get("x-mesh-internal"):
             raise HTTPException(
                 403,
-                "Project updates via this endpoint require X-Mesh-Internal header.",
+                "Team updates via this endpoint require X-Mesh-Internal header.",
             )
         if not loop.workspace:
             raise HTTPException(503, "Workspace not available")
@@ -489,9 +440,24 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         if not isinstance(content, str):
             raise HTTPException(400, "content must be a string")
         content = sanitize_for_prompt(content)
-        path = loop.workspace.root / "PROJECT.md"
-        path.write_text(content)
-        return {"updated": True, "size": path.stat().st_size}
+        team_path = loop.workspace.root / "TEAM.md"
+        project_path = loop.workspace.root / "PROJECT.md"
+        team_path.write_text(content)
+        project_path.write_text(content)
+        return {"updated": True, "size": team_path.stat().st_size}
+
+    @app.put("/team")
+    async def update_team(request: Request) -> dict:
+        """Accept an updated TEAM.md from the mesh host."""
+        return await _update_team_md(request)
+
+    @app.put("/project")
+    async def update_project(request: Request) -> dict:
+        """DEPRECATED: accept an updated PROJECT.md from the mesh host.
+
+        Kept for back-compat through PR 3 — delegates to ``PUT /team``.
+        """
+        return await _update_team_md(request)
 
     @app.post("/config")
     async def update_runtime_config(request: Request) -> dict:

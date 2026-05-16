@@ -19,36 +19,11 @@ window.fetch = function(input, init) {
   }
   return _origFetch.call(this, input, init);
 };
-// Client-side-only chat roles — pushed into `chatHistories[agentId]`
-// but NEVER stored server-side. Used by `_loadChatHistory` to keep
-// these cards across a history reload (the server transcript filter
-// would otherwise drop anything not in {user, agent, notification}).
-// If you push a new role into chatHistories anywhere in this file,
-// add it here so it survives reloads. Origin: PR #902 follow-up
-// (operator-confirm-flow review gaps).
-const OVERLAY_CHAT_ROLES = new Set([
-  'pending_action_card',
-  'credential_request',
-  'browser_login_request',
-  'browser_captcha_help_request',
-  'operator_action_receipt',
-  'credit_exhausted',
-]);
-
-// Needs-You item kinds whose "open" action belongs on the Work tab
-// (rather than Chat). `pending` and `blocker` live in the Work tab's
-// sticky panel / task drawer; `unrated` jumps to Work > Activity for
-// the rating buttons. Everything else (credential / browser_login /
-// captcha / worker_dm) routes to Chat where the overlay card lives.
-// Origin: PR #902 follow-up.
-const _BADGE_WORK_TAB_KINDS = new Set(['pending', 'blocker', 'unrated']);
-
 const _IDENTITY_TABS = [
   { id: 'config', label: 'Config', file: null, access: 'user' },
   { id: 'identity', label: 'Identity', file: null, access: 'user' },
   { id: 'memory', label: 'Memory', file: null, access: 'agent' },
   { id: 'activity', label: 'Activity', file: null, access: 'auto' },
-  { id: 'archives', label: 'Archives', file: null, access: 'user' },
   { id: 'logs', label: 'Logs', file: null, access: 'auto' },
   { id: 'capabilities', label: 'Tools', file: null, access: 'auto' },
   { id: 'files', label: 'Files', file: null, access: 'auto' },
@@ -77,7 +52,7 @@ function dashboard() {
       // (Agents → Team, Board → Work, System → Settings).
       // Work sits 2nd: it's the second-most-visited tab after Chat.
       { id: 'workplace', label: 'Work' },
-      { id: 'fleet', label: 'Team' },
+      { id: 'fleet', label: 'Teams' },
       { id: 'system', label: 'Settings' },
     ],
     // Side panel toggle for non-Chat tabs (Phase 1 Decision 5). Persists
@@ -364,20 +339,6 @@ function dashboard() {
     agentCapabilities: null,
     agentActivity: [],
     agentActivityLoading: false,
-
-    // Archives identity tab — list of {name, ts_iso, size_bytes,
-    // message_count, preview} entries plus a lazy per-archive cache.
-    // NOTE: per-archive state is keyed by `${agentId}/${name}` (see
-    // _archiveKey). Archive filenames are timestamp-derived and can
-    // collide across agents that reset in the same minute — keying by
-    // name alone would surface another agent's transcript after a tab
-    // switch. Always pass through _archiveKey().
-    agentArchives: [],
-    agentArchivesLoading: false,
-    agentArchivesError: '',
-    agentArchivesAgentId: '',     // pins which agent the current list is for
-    _agentArchiveContent: {},     // _archiveKey -> {messages, count, loading, error}
-    agentArchiveExpanded: {},     // _archiveKey -> bool
 
     // Credit exhausted state
     creditExhausted: false,
@@ -1444,30 +1405,6 @@ function dashboard() {
         document.title = this._buildTitle();
       }
 
-      // Operator chat container is x-show="operatorReady" — until fetchAgents
-      // resolves it's display:none (scrollHeight=0) and the init scroll below
-      // silently no-ops. Re-fire once when the gate flips so users land on the
-      // latest message rather than the top of the restored history.
-      this.$watch('operatorReady', (val, oldVal) => {
-        if (!val || oldVal) return;
-        this.$nextTick(() => {
-          if (this.activeTab === 'chat' || this.messengerSidePanelOpen) {
-            this._scrollChat(this.activeChatId || 'operator', true);
-          }
-        });
-      });
-
-      // Side-panel open transition — the chat-messages container mounts at
-      // scrollTop=0; force a scroll on the open edge so click-toggles land
-      // on the latest message. localStorage-restored opens are handled below
-      // since the assignment already happened during state restore.
-      this.$watch('messengerSidePanelOpen', (val) => {
-        if (!val) return;
-        this.$nextTick(() => {
-          if (this.activeChatId) this._scrollChat(this.activeChatId, true);
-        });
-      });
-
       // Ensure operator chat is initialized when landing on the chat tab
       if (this.activeTab === 'chat' || initRoute.tab === 'chat') {
         if (!this.openChats.includes('operator')) {
@@ -1480,14 +1417,6 @@ function dashboard() {
           this._scrollChat('operator', true);
           const el = document.getElementById('operator-chat-input');
           if (el) el.focus();
-        });
-      }
-
-      // Side panel restored from localStorage above (line ~1233) — the
-      // $watch doesn't fire on init-time assignment, so scroll explicitly.
-      if (this.messengerSidePanelOpen && this.activeChatId) {
-        this.$nextTick(() => {
-          this._scrollChat(this.activeChatId, true);
         });
       }
 
@@ -1871,7 +1800,6 @@ function dashboard() {
           this.chatPanelMinimized = false;
           this._loadChatHistory(this.activeChatId || 'operator');
           this.$nextTick(() => {
-            this._scrollChat(this.activeChatId || 'operator', true);
             const el = document.getElementById('operator-chat-input');
             if (el) el.focus();
           });
@@ -2119,41 +2047,6 @@ function dashboard() {
       if (action && typeof action.handler === 'function') {
         action.handler();
       }
-    },
-
-    // Top-nav Needs-You badge click handler. Routes to the Work tab when
-    // any item is a durable pending action (the Work tab's unified panel
-    // renders confirm/cancel inline), otherwise falls back to chat where
-    // the credential/browser/captcha overlay cards live. The kind-aware
-    // routing replaces the legacy "always chat" handler that buried
-    // destructive operator confirms behind a tab switch.
-    _routeNeedsYouBadge() {
-      try {
-        const itemCount = (this.needsYouItems || []).length;
-        this.track('needs_you_click', {
-          item_count: itemCount,
-          item_kind: 'badge',
-          action_label: 'badge',
-        });
-        this._trackFirstAction('needs_you_click');
-      } catch (_) { /* ignore */ }
-      // kind → tab mapping:
-      //   pending / blocker / unrated → Work tab (sticky Needs-You panel
-      //     for pending+blocker; Activity feed with rating buttons for
-      //     unrated). No chat surface for these.
-      //   credential / browser_login / captcha / worker_dm → Chat tab
-      //     where the overlay card lives in operator chat (or the
-      //     worker's own chat for worker_dm).
-      // See _BADGE_WORK_TAB_KINDS at the top of this file.
-      const hasWorkKind = (this.needsYouItems || []).some(
-        i => _BADGE_WORK_TAB_KINDS.has(i.kind),
-      );
-      this.switchTab(hasWorkKind ? 'workplace' : 'chat');
-      this.$nextTick(() => {
-        const selector = hasWorkKind ? '[data-needs-you-panel]' : '[data-pending-cards]';
-        const el = document.querySelector(selector);
-        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      });
     },
 
     trackEmptyStateCta(sectionId) {
@@ -4047,18 +3940,6 @@ function dashboard() {
       }
     },
 
-    // Normalises the FastAPI ``detail`` field on a pending-action confirm/cancel
-    // error. The mesh now returns ``{code, message}`` on consume() failures so
-    // the dashboard can show a precise reason; older endpoints (cancel) still
-    // return a bare string. Returns ``{text, code}`` for the toast + telemetry.
-    _formatPendingError(detail, fallback) {
-      if (!detail) return { text: String(fallback ?? ''), code: '' };
-      if (typeof detail === 'string') return { text: detail, code: '' };
-      const text = detail.message || String(fallback ?? '');
-      const code = typeof detail.code === 'string' ? detail.code : '';
-      return { text, code };
-    },
-
     async confirmPendingAction(nonce) {
       try {
         // Route via the dashboard's loopback proxy so the mesh sees
@@ -4078,9 +3959,7 @@ function dashboard() {
         );
         if (!resp.ok) {
           const data = await resp.json().catch(() => ({}));
-          const { text, code } = this._formatPendingError(data.detail, resp.status);
-          this.track('pending_confirm_failed', { code: code || 'unknown', nonce });
-          this.showToast(`Confirm failed: ${text || resp.status}`);
+          this.showToast(`Confirm failed: ${data.detail || resp.status}`);
           return;
         }
         this.workplacePending = this.workplacePending.filter(p => p.nonce !== nonce);
@@ -4099,11 +3978,7 @@ function dashboard() {
         });
         if (!resp.ok) {
           const data = await resp.json().catch(() => ({}));
-          // detail is now {code, message} (matches confirm) — route
-          // through the shared formatter so `[object Object]` can't
-          // leak into the toast.
-          const { text } = this._formatPendingError(data.detail, resp.status);
-          this.showToast(`Cancel failed: ${text || resp.status}`);
+          this.showToast(`Cancel failed: ${data.detail || resp.status}`);
           return;
         }
         this.workplacePending = this.workplacePending.filter(p => p.nonce !== nonce);
@@ -4153,13 +4028,7 @@ function dashboard() {
         );
         if (!resp.ok) {
           const data = await resp.json().catch(() => ({}));
-          const { text, code } = this._formatPendingError(data.detail, resp.status);
-          this.track('pending_confirm_failed', {
-            code: code || 'unknown',
-            nonce: msg.event_id || '',
-            via: 'card',
-          });
-          this.showToast(`Confirm failed: ${text || resp.status}`);
+          this.showToast(`Confirm failed: ${data.detail || resp.status}`);
           return;
         }
       } catch (e) {
@@ -4185,10 +4054,7 @@ function dashboard() {
         );
         if (!resp.ok) {
           const data = await resp.json().catch(() => ({}));
-          // detail is structured {code, message} on 404 — see comment
-          // on cancelPendingAction.
-          const { text } = this._formatPendingError(data.detail, resp.status);
-          this.showToast(`Cancel failed: ${text || resp.status}`);
+          this.showToast(`Cancel failed: ${data.detail || resp.status}`);
           return;
         }
       } catch (e) {
@@ -4571,25 +4437,12 @@ function dashboard() {
 
     _toastId: 0,
 
-    showToast(msg, opts) {
-      // Back-compat: `opts` accepts either a number (legacy duration ms)
-      // or an object `{ action: {label, handler} | null, durationMs }`.
-      // Older callers passing `showToast('...', 2000)` keep working.
+    showToast(msg, duration) {
       const id = ++this._toastId;
-      let duration = 4000;
-      let action = null;
-      if (typeof opts === 'number') {
-        duration = opts;
-      } else if (opts && typeof opts === 'object') {
-        if (typeof opts.durationMs === 'number') duration = opts.durationMs;
-        if (opts.action && typeof opts.action.handler === 'function') {
-          action = opts.action;
-        }
-      }
-      this.toastQueue.push({ id, msg, action });
+      this.toastQueue.push({ id, msg });
       setTimeout(() => {
         this.toastQueue = this.toastQueue.filter(t => t.id !== id);
-      }, duration);
+      }, duration || 4000);
     },
 
     dismissToast(id) {
@@ -5726,9 +5579,6 @@ function dashboard() {
       if (tab.id === 'activity') {
         await this.fetchAgentActivity(agentId);
       }
-      if (tab.id === 'archives') {
-        await this.loadAgentArchives(agentId);
-      }
       if (tab.id === 'logs') {
         await this.fetchIdentityLogs(agentId);
         await this.fetchIdentityLearnings(agentId);
@@ -5739,121 +5589,6 @@ function dashboard() {
       if (tab.id === 'files') {
         await this.fetchAgentFiles(agentId, '.');
       }
-    },
-
-    // Compose the composite key for per-archive UI state. Archive
-    // filenames are timestamp-derived (YYYY-MM-DD_HHMMSS.jsonl) so two
-    // agents resetting at the same minute would otherwise share a key
-    // and overwrite each other's expanded/cached transcript state.
-    // If you key archive state, always include agent_id to prevent
-    // same-name cross-agent collisions.
-    _archiveKey(agentId, name) {
-      return `${agentId || ''}/${name || ''}`;
-    },
-
-    // Deep-link the user to the Archives tab for the given agent. Used
-    // by the reset toast's "View" action so a confirmation can become a
-    // navigation in one click. drillDown switches activeTab='fleet' and
-    // sets detailAgent; we then flip the identityTab and kick the fetch.
-    _openArchivesForAgent(agentId) {
-      if (!agentId) return;
-      this.drillDown(agentId);
-      this.identityTab = 'archives';
-      this.$nextTick(() => {
-        if (typeof this.loadAgentArchives === 'function') {
-          this.loadAgentArchives(agentId);
-        }
-      });
-    },
-
-    async loadAgentArchives(agentId) {
-      if (!agentId) return;
-      // Pin the in-flight agent so stale responses (user switched agent
-      // mid-fetch) can be dropped on arrival.
-      this.agentArchivesAgentId = agentId;
-      this.agentArchivesLoading = true;
-      this.agentArchivesError = '';
-      // Clear stale list before fetching so the prior agent's archives
-      // don't flash while the new fetch is in flight.
-      this.agentArchives = [];
-      try {
-        const resp = await fetch(`${window.__config.apiBase}/agents/${encodeURIComponent(agentId)}/chat-archives`);
-        if (this.agentArchivesAgentId !== agentId) return;
-        if (!resp.ok) {
-          this.agentArchivesError = `Couldn't load archives (HTTP ${resp.status})`;
-          this.agentArchives = [];
-          return;
-        }
-        const data = await resp.json();
-        if (this.agentArchivesAgentId !== agentId) return;
-        this.agentArchives = data.archives || [];
-      } catch (e) {
-        if (this.agentArchivesAgentId !== agentId) return;
-        this.agentArchivesError = (e && e.message) ? `Couldn't load archives: ${e.message}` : "Couldn't load archives";
-        this.agentArchives = [];
-      } finally {
-        if (this.agentArchivesAgentId === agentId) {
-          this.agentArchivesLoading = false;
-        }
-      }
-    },
-
-    async openAgentArchive(agentId, name) {
-      const key = this._archiveKey(agentId, name);
-      const wasExpanded = !!this.agentArchiveExpanded[key];
-      this.agentArchiveExpanded = { ...this.agentArchiveExpanded, [key]: !wasExpanded };
-      if (wasExpanded) return;
-      if (this._agentArchiveContent[key] && !this._agentArchiveContent[key].error) return;
-      this._agentArchiveContent = {
-        ...this._agentArchiveContent,
-        [key]: { messages: [], count: 0, loading: true, error: '' },
-      };
-      try {
-        const resp = await fetch(`${window.__config.apiBase}/agents/${encodeURIComponent(agentId)}/chat-archives/${encodeURIComponent(name)}`);
-        if (!resp.ok) {
-          this._agentArchiveContent = {
-            ...this._agentArchiveContent,
-            [key]: { messages: [], count: 0, loading: false, error: `HTTP ${resp.status}` },
-          };
-          return;
-        }
-        const data = await resp.json();
-        this._agentArchiveContent = {
-          ...this._agentArchiveContent,
-          [key]: { messages: data.messages || [], count: data.count || 0, loading: false, error: '' },
-        };
-      } catch (e) {
-        this._agentArchiveContent = {
-          ...this._agentArchiveContent,
-          [key]: { messages: [], count: 0, loading: false, error: (e && e.message) || 'fetch failed' },
-        };
-      }
-    },
-
-    async deleteAgentArchive(agentId, name) {
-      this.showConfirm('Delete archive', 'Permanently delete this archived conversation? This cannot be undone.', async () => {
-        try {
-          const resp = await fetch(`${window.__config.apiBase}/agents/${encodeURIComponent(agentId)}/chat-archives/${encodeURIComponent(name)}`, {
-            method: 'DELETE',
-            headers: { 'X-Requested-With': 'XMLHttpRequest' },
-          });
-          if (!resp.ok) {
-            this.showToast(`Delete failed: HTTP ${resp.status}`);
-            return;
-          }
-          const key = this._archiveKey(agentId, name);
-          this.agentArchives = this.agentArchives.filter(a => a.name !== name);
-          const next = { ...this._agentArchiveContent };
-          delete next[key];
-          this._agentArchiveContent = next;
-          const expanded = { ...this.agentArchiveExpanded };
-          delete expanded[key];
-          this.agentArchiveExpanded = expanded;
-          this.showToast('Archive deleted');
-        } catch (e) {
-          this.showToast(`Delete error: ${e.message || e}`);
-        }
-      }, true);
     },
 
     async fetchAgentCapabilities(agentId) {
@@ -7859,7 +7594,6 @@ function dashboard() {
         if (!resp.ok) return;
         const data = await resp.json();
         const localMsgs = this.chatHistories[agentId] || [];
-        const wasEmpty = localMsgs.length === 0;
         if (!data.messages || data.messages.length === 0) {
           // Server returned empty — agent may be restarting or transcript not yet
           // initialized. Preserve local messages to avoid losing visible history.
@@ -7893,13 +7627,7 @@ function dashboard() {
         // 1. User messages sent after the last server timestamp
         // 2. Agent messages from just-completed streams not yet persisted
         // 3. Notifications injected via WebSocket not yet in the server transcript
-        // 4. Client-side overlay cards (pending actions, credential/browser/captcha
-        //    requests, operator-action receipts, credit-exhausted toasts) — these
-        //    are NEVER part of the server-side transcript, so the role-allowlist
-        //    filter must keep them or they vanish on every refresh. Roles live in
-        //    OVERLAY_CHAT_ROLES at the top of this file.
         const trailing = localMsgs.filter(m => {
-          if (OVERLAY_CHAT_ROLES.has(m.role)) return true;
           if (m.role === 'notification') {
             if ((m.ts || 0) <= lastServerTs) return false;
             return !serverMsgs.some(s =>
@@ -7915,11 +7643,7 @@ function dashboard() {
           ? [...serverMsgs, ...trailing]
           : serverMsgs;
         this._saveChatToSession();
-        // Force scroll when the local cache was empty (first fetch on mount) —
-        // the sticky nearBottom heuristic would otherwise treat scrollTop=0
-        // as "user scrolled to top" and skip. Live-update refreshes keep the
-        // conservative behavior to preserve a user's scroll position.
-        this.$nextTick(() => this._scrollChat(agentId, wasEmpty));
+        this.$nextTick(() => this._scrollChat(agentId));
       } catch (e) {
         console.debug('_loadChatHistory failed for', agentId, e.message || e);
       }
@@ -8060,35 +7784,14 @@ function dashboard() {
     _scrollTimers: {},
 
     _scrollChat(agentId, force) {
-      if (!agentId) return;
-      // The previous dedup silently dropped subsequent triggers — if the
-      // first scroll fired before the chat-messages container had mounted
-      // (Alpine x-for / x-show / async _loadChatHistory), no later attempt
-      // would catch up. Cancel and reschedule so the newest caller wins.
-      if (this._scrollTimers[agentId]) clearTimeout(this._scrollTimers[agentId]);
-      let lastSet = null;
-      const tryScroll = (allowForce) => {
-        const el = document.getElementById('chat-messages-' + agentId);
-        if (!el) return;
-        const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
-        // If we set scrollTop on a prior attempt and it has since drifted,
-        // the user scrolled manually — respect that and stop chasing.
-        const userMoved = lastSet !== null && Math.abs(el.scrollTop - lastSet) > 4;
-        if ((allowForce && force) || (distance < 150 && !userMoved)) {
-          el.scrollTop = el.scrollHeight;
-          lastSet = el.scrollTop;
-        }
-      };
+      if (this._scrollTimers[agentId]) return;
       this._scrollTimers[agentId] = setTimeout(() => {
         delete this._scrollTimers[agentId];
-        tryScroll(true);
-        // Late-render safety net — covers (a) Alpine x-for renders that
-        // land after the 50ms timer, (b) async _loadChatHistory replacing
-        // the message array, (c) avatar image-load reflows that grow
-        // scrollHeight after the initial paint. The retries respect
-        // manual user scrolling (force is one-shot via allowForce).
-        setTimeout(() => tryScroll(false), 250);
-        setTimeout(() => tryScroll(false), 800);
+        const el = document.getElementById('chat-messages-' + agentId);
+        if (!el) return;
+        // Only auto-scroll if user is near the bottom (within 150px) or forced
+        const nearBottom = force || (el.scrollHeight - el.scrollTop - el.clientHeight < 150);
+        if (nearBottom) el.scrollTop = el.scrollHeight;
       }, 50);
     },
 
@@ -8650,7 +8353,7 @@ function dashboard() {
       }
       // Match projects
       if (this.projects.length > 0) {
-        if ('standalone'.startsWith(q) || 'unassigned'.startsWith(q)) {
+        if ('standalone'.startsWith(q) || 'unassigned'.startsWith(q) || 'solo'.startsWith(q)) {
           results.push({ type: 'action', label: 'Standalone agents', desc: 'Show agents not in any project', action: () => { this.switchTab('fleet'); this.switchProject(null); } });
         }
         for (const proj of this.projects) {
@@ -8732,30 +8435,10 @@ function dashboard() {
           this._stopChatRecovery(agentId);
           const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/reset`, { method: 'POST' });
           if (resp.ok) {
-            const data = await resp.json().catch(() => ({}));
+            this.showToast(`${agentId} conversation reset`);
             this.chatHistories[agentId] = [];
             delete this._chatFetchedAt[agentId];
             this._saveChatToSession();
-            // Friendly toast points users at Archives without alarm-shape
-            // language. The confirm dialog already promises memory is
-            // preserved, so no need to restate that here. Branch on
-            // archived_to so we don't lie when no archive was written
-            // (empty transcript, write failure, 100-collision).
-            let toast;
-            let action = null;
-            if (data.archived_to) {
-              toast = 'Fresh chat started — previous conversation saved to Archives';
-              if (data.message_count && data.message_count > 0) {
-                toast += ` (${data.message_count} message${data.message_count === 1 ? '' : 's'})`;
-              }
-              action = { label: 'View', handler: () => this._openArchivesForAgent(agentId) };
-            } else {
-              toast = 'Conversation cleared';
-            }
-            this.showToast(toast, { action });
-            if (this.detailAgent === agentId && this.identityTab === 'archives') {
-              this.loadAgentArchives(agentId);
-            }
           } else {
             this.showToast('Reset failed');
           }

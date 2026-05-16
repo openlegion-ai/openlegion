@@ -43,7 +43,9 @@ class CostTracker:
         self.db.execute("PRAGMA busy_timeout=30000")
         self._init_schema()
         self.budgets: dict[str, dict[str, float]] = {}
-        self._project_budgets: dict[str, dict] = {}
+        # ``_team_budgets`` (formerly ``_project_budgets``). Back-compat
+        # property below exposes the legacy attribute name.
+        self._team_budgets: dict[str, dict] = {}
 
     def _init_schema(self) -> None:
         self.db.executescript("""
@@ -220,7 +222,27 @@ class CostTracker:
             "by_model": by_model,
         }
 
-    # ── Project-level budget enforcement ──────────────────────────
+    # ── Team-level budget enforcement (formerly "project-level") ──────────
+
+    # Back-compat alias for the legacy attribute name.
+    @property
+    def _project_budgets(self) -> dict[str, dict]:
+        """DEPRECATED: alias for :attr:`_team_budgets`."""
+        return self._team_budgets
+
+    def set_team_budget(
+        self,
+        team: str,
+        members: list[str],
+        daily_usd: float = 50.0,
+        monthly_usd: float = 1000.0,
+    ) -> None:
+        """Set an aggregate budget for a team (sum of member agents)."""
+        self._team_budgets[team] = {
+            "members": members,
+            "daily_usd": daily_usd,
+            "monthly_usd": monthly_usd,
+        }
 
     def set_project_budget(
         self,
@@ -229,19 +251,19 @@ class CostTracker:
         daily_usd: float = 50.0,
         monthly_usd: float = 1000.0,
     ) -> None:
-        """Set an aggregate budget for a project (sum of member agents)."""
-        self._project_budgets[project] = {
-            "members": members,
-            "daily_usd": daily_usd,
-            "monthly_usd": monthly_usd,
-        }
+        """DEPRECATED: alias for :meth:`set_team_budget`."""
+        self.set_team_budget(project, members, daily_usd, monthly_usd)
 
-    def get_project_spend(self, project: str, period: str = "today") -> dict:
-        """Aggregate spend across all member agents for a project."""
-        pbudget = self._project_budgets.get(project)
-        if pbudget is None:
-            return {"project": project, "error": "No project budget configured"}
-        members = pbudget["members"]
+    def get_team_spend(self, team: str, period: str = "today") -> dict:
+        """Aggregate spend across all member agents for a team.
+
+        Response includes BOTH ``team`` and ``project`` keys for
+        back-compat through PR 3.
+        """
+        tbudget = self._team_budgets.get(team)
+        if tbudget is None:
+            return {"team": team, "project": team, "error": "No team budget configured"}
+        members = tbudget["members"]
         total_cost = 0.0
         total_tokens = 0
         agent_breakdown = []
@@ -255,14 +277,19 @@ class CostTracker:
                 "tokens": spend.get("total_tokens", 0),
             })
         return {
-            "project": project,
+            "team": team,
+            "project": team,  # back-compat alias
             "period": period,
             "total_cost": round(total_cost, 4),
             "total_tokens": total_tokens,
-            "daily_limit": pbudget["daily_usd"],
-            "monthly_limit": pbudget["monthly_usd"],
+            "daily_limit": tbudget["daily_usd"],
+            "monthly_limit": tbudget["monthly_usd"],
             "agents": agent_breakdown,
         }
+
+    def get_project_spend(self, project: str, period: str = "today") -> dict:
+        """DEPRECATED: alias for :meth:`get_team_spend`."""
+        return self.get_team_spend(project, period)
 
     def get_all_agents_spend(self, period: str = "today") -> list[dict]:
         since = _period_to_since(period)

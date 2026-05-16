@@ -251,7 +251,9 @@ class TestOperatorConstants:
         # Internet-access PR adds http_request + web_search (+2) → 32 (gated
         # by the can_use_internet permission + runtime filter; see
         # tests/test_operator_internet_access.py).
-        assert len(_OPERATOR_ALLOWED_TOOLS) == 32
+        # Project→team rename PR 2 adds 8 canonical *_team tools alongside
+        # the legacy *_project entries → 40.
+        assert len(_OPERATOR_ALLOWED_TOOLS) == 40
         assert len(_OPERATOR_HEARTBEAT_TOOLS) == 4
         # Heartbeat tools should be a subset of allowed tools
         assert set(_OPERATOR_HEARTBEAT_TOOLS).issubset(set(_OPERATOR_ALLOWED_TOOLS))

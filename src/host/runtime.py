@@ -272,18 +272,27 @@ class DockerBackend(RuntimeBackend):
             volumes[str(Path(skills_dir).as_posix() if platform.system() == "Windows" else skills_dir)] = {
                 "bind": "/app/skills", "mode": "ro",
             }
-        # Mount project-specific PROJECT.md (standalone agents get none)
-        # Check env_overrides first (per-agent), then fall back to extra_env (system-wide)
-        project_md_path = (env_overrides or {}).get(
-            "PROJECT_MD_PATH", self.extra_env.get("PROJECT_MD_PATH", ""),
+        # Mount team-specific TEAM.md (solo agents get none).
+        # Resolution order honours both new ``TEAM_MD_PATH`` and legacy
+        # ``PROJECT_MD_PATH`` envs; the mount inside the container is
+        # ``/app/TEAM.md`` (canonical) plus ``/app/PROJECT.md`` (legacy
+        # alias mount of the same file) so the workspace bootstrap can
+        # find the content under either name. Check env_overrides first
+        # (per-agent), then fall back to extra_env (system-wide).
+        team_md_path = (env_overrides or {}).get(
+            "TEAM_MD_PATH",
+            (env_overrides or {}).get(
+                "PROJECT_MD_PATH",
+                self.extra_env.get("TEAM_MD_PATH", self.extra_env.get("PROJECT_MD_PATH", "")),
+            ),
         )
-        if project_md_path and Path(project_md_path).exists():
-            host_path = project_md_path
+        if team_md_path and Path(team_md_path).exists():
+            host_path = team_md_path
             if platform.system() == "Windows":
-                host_path = Path(project_md_path).as_posix()
-            volumes[host_path] = {"bind": "/app/PROJECT.md", "mode": "ro"}
-        elif project_md_path:
-            logger.warning("Project file not found: %s", project_md_path)
+                host_path = Path(team_md_path).as_posix()
+            volumes[host_path] = {"bind": "/app/TEAM.md", "mode": "ro"}
+        elif team_md_path:
+            logger.warning("Team file not found: %s", team_md_path)
 
         marketplace_dir = self.project_root / "skills" / "_marketplace"
         if marketplace_dir.is_dir():
@@ -810,15 +819,23 @@ class SandboxBackend(RuntimeBackend):
         ws.mkdir(parents=True, exist_ok=True)
         (ws / "data" / "workspace").mkdir(parents=True, exist_ok=True)
 
-        # Copy project-specific PROJECT.md (standalone agents get none)
-        # Check env_overrides first (per-agent), then fall back to extra_env (system-wide)
-        project_md_path = (env_overrides or {}).get(
-            "PROJECT_MD_PATH", self.extra_env.get("PROJECT_MD_PATH", ""),
+        # Copy team-specific TEAM.md (solo agents get none).
+        # Both ``TEAM_MD_PATH`` (new) and ``PROJECT_MD_PATH`` (legacy)
+        # envs are honoured; the workspace receives both ``TEAM.md`` and
+        # ``PROJECT.md`` (same content) so the bootstrap loader resolves
+        # under either name through PR 3.
+        team_md_path = (env_overrides or {}).get(
+            "TEAM_MD_PATH",
+            (env_overrides or {}).get(
+                "PROJECT_MD_PATH",
+                self.extra_env.get("TEAM_MD_PATH", self.extra_env.get("PROJECT_MD_PATH", "")),
+            ),
         )
-        if project_md_path and Path(project_md_path).exists():
-            shutil.copy2(project_md_path, ws / "PROJECT.md")
-        elif project_md_path:
-            logger.warning("Project file not found: %s", project_md_path)
+        if team_md_path and Path(team_md_path).exists():
+            shutil.copy2(team_md_path, ws / "TEAM.md")
+            shutil.copy2(team_md_path, ws / "PROJECT.md")
+        elif team_md_path:
+            logger.warning("Team file not found: %s", team_md_path)
 
         # Copy skills
         skills_dest = ws / "skills"

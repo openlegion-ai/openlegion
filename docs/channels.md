@@ -55,7 +55,7 @@ These commands require interactive prompts or local system access and are only a
 | `/blackboard [list\|get\|set\|del]` | View/edit shared blackboard entries |
 | `/queue` | Show agent task queue status |
 | `/cron [list\|del\|pause\|resume\|run]` | Manage cron jobs |
-| `/project [list\|use\|info]` | Manage multi-project namespaces |
+| `/project [list\|use\|info]` | Manage multi-team namespaces |
 | `/credential [add\|list\|remove]` | Manage API credentials |
 | `/removekey [name]` | Remove a credential from the vault |
 | `/logs [--level LEVEL]` | Show recent runtime logs |

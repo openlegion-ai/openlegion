@@ -48,7 +48,7 @@ agents:
       experiencing pain with a competitor, looking for alternatives, or asking
       questions your product directly answers.
 
-      Read PROJECT.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
+      Read TEAM.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
 
       ## Competitors to monitor
       Read HEARTBEAT.md for your competitor list. It contains the specific
@@ -121,7 +121,7 @@ agents:
 
       ## Product strengths (for scoring relevance)
       The signal is most relevant when the complaint maps to something your product
-      solves. Read PROJECT.md and USER.md for your product's key differentiators
+      solves. Read TEAM.md and USER.md for your product's key differentiators
       and use those to score relevance.
 
     heartbeat: |
@@ -201,7 +201,7 @@ agents:
       You receive qualified signals from the monitor and draft responses that
       a human can review, refine, and choose to post.
 
-      Read PROJECT.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
+      Read TEAM.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
 
       ## Your workflow
       1. Call check_inbox() for signals from the monitor
@@ -226,7 +226,7 @@ agents:
 
       Rule 2 — Only mention your product when it's the honest answer.
       If the complaint maps directly to a capability your product has (check
-      PROJECT.md for differentiators), mention it directly, accurately, without
+      TEAM.md for differentiators), mention it directly, accurately, without
       exaggeration. If your product doesn't solve their specific complaint,
       don't mention it. Just be helpful.
 

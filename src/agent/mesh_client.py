@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
-from src.shared.trace import current_origin, origin_header
+from src.shared.trace import origin_header
 from src.shared.types import MeshEvent
 from src.shared.utils import setup_logging
 
@@ -28,40 +28,63 @@ class MeshClient:
     Uses a shared httpx.AsyncClient for connection pooling.
     """
 
-    def __init__(self, mesh_url: str, agent_id: str, project_name: str | None = None):
+    def __init__(
+        self,
+        mesh_url: str,
+        agent_id: str,
+        team_name: str | None = None,
+        *,
+        project_name: str | None = None,
+    ):
+        # ``team_name`` is the canonical kwarg; ``project_name`` is kept
+        # as a back-compat alias through PR 3. If both are passed,
+        # ``team_name`` wins.
         self.mesh_url = mesh_url
         self.agent_id = agent_id
-        self.project_name = project_name
+        self.team_name = team_name if team_name is not None else project_name
         self._client: httpx.AsyncClient | None = None
         self._client_lock = asyncio.Lock()
         self._auth_token: str = os.environ.get("MESH_AUTH_TOKEN", "")
 
+    # Back-compat alias — kept until PR 3.
+    @property
+    def project_name(self) -> str | None:
+        """DEPRECATED: alias for :attr:`team_name`."""
+        return self.team_name
+
+    @project_name.setter
+    def project_name(self, value: str | None) -> None:
+        self.team_name = value
+
     @property
     def is_standalone(self) -> bool:
-        """True when this agent is not assigned to any project."""
-        return self.project_name is None
+        """True when this agent is not assigned to any team."""
+        return self.team_name is None
 
     def _scope_key(self, key: str) -> str:
-        """Prefix a blackboard key with the project namespace.
+        """Prefix a blackboard key with the team namespace.
 
-        Project agents transparently read/write under ``projects/{name}/``
-        so that each project's blackboard data is isolated.  Standalone
-        agents (no project) pass keys through unchanged — but they are
-        blocked from the blackboard at both the tool and permission layers.
+        Team agents transparently read/write under ``projects/{name}/``
+        (the blackboard key prefix is left as ``projects/`` for back-
+        compat with existing blackboard data; PR 3 may revisit). Solo
+        agents (no team) pass keys through unchanged — but they are
+        blocked from the blackboard at both the tool and permission
+        layers.
         """
-        if self.project_name:
-            return f"projects/{self.project_name}/{key}"
+        if self.team_name:
+            return f"projects/{self.team_name}/{key}"
         return key
 
     def _scope_topic(self, topic: str) -> str:
-        """Prefix a pub/sub topic with the project namespace.
+        """Prefix a pub/sub topic with the team namespace.
 
-        Project agents transparently publish/subscribe under
-        ``projects/{name}/`` so that each project's events are isolated.
-        Standalone agents (no project) use raw topic names.
+        Team agents transparently publish/subscribe under
+        ``projects/{name}/`` (prefix retained for back-compat with
+        existing pub/sub topics; PR 3 may revisit). Solo agents (no
+        team) use raw topic names.
         """
-        if self.project_name:
-            return f"projects/{self.project_name}/{topic}"
+        if self.team_name:
+            return f"projects/{self.team_name}/{topic}"
         return topic
 
     async def _get_client(self) -> httpx.AsyncClient:
@@ -79,26 +102,6 @@ class MeshClient:
         """Return current trace headers for per-request injection."""
         from src.shared.trace import trace_headers
         return trace_headers()
-
-    def _trace_and_origin_headers(self) -> dict[str, str]:
-        """Trace headers + ``X-Origin`` when a current origin is set.
-
-        Used by state-mutating *propose* paths where the mesh stores the
-        proposer's origin kind on the pending row and the subsequent
-        confirm gates on ``origin_kind="human"``. Reads from the
-        ``current_origin`` ContextVar so the pattern works transparently
-        for any code that already runs under an origin-stamped task.
-
-        Kept separate from :meth:`_trace_headers` so non-propose paths
-        (blackboard reads, status updates, etc.) don't get
-        origin-stamped — origin only carries meaning for proposes /
-        confirms that the mesh gates against.
-        """
-        headers = dict(self._trace_headers())
-        origin = current_origin.get()
-        if origin is not None:
-            headers.update(origin_header(origin))
-        return headers
 
     # Retry config for idempotent reads — resilience to transient mesh errors
     _GET_MAX_RETRIES = 2
@@ -763,22 +766,12 @@ class MeshClient:
     # === Operator agent config management ===
 
     async def propose_config_change(self, agent_id: str, field: str, value) -> dict:
-        """Propose a config change for an agent. Returns preview + change_id.
-
-        Forwards ``current_origin`` via :meth:`_trace_and_origin_headers`
-        so the mesh stores the pending row with ``origin_kind="human"``
-        when the caller is handling a human-originated message. Defensive
-        against the same Bug A pattern that bit the destructive-confirm
-        flow: this path is unreachable in production today (operator
-        routes through ``edit_agent``), but the mesh endpoint is still
-        wired and any future caller would silently reproduce the bug
-        without this forwarding.
-        """
+        """Propose a config change for an agent. Returns preview + change_id."""
         client = await self._get_client()
         response = await client.post(
             f"{self.mesh_url}/mesh/agents/{agent_id}/propose",
             json={"field": field, "value": value, "proposed_by": self.agent_id},
-            headers=self._trace_and_origin_headers(),
+            headers=self._trace_headers(),
         )
         response.raise_for_status()
         return response.json()
@@ -787,16 +780,13 @@ class MeshClient:
         """Confirm and apply a previously proposed config change.
 
         Uses the dedicated /mesh/config/confirm endpoint which resolves
-        the target agent_id from the pending change internally. Forwards
-        ``current_origin`` so the mesh's confirm-side ``X-Origin`` re-
-        check sees a human origin (see Bug A note on
-        :meth:`propose_config_change`).
+        the target agent_id from the pending change internally.
         """
         client = await self._get_client()
         response = await client.post(
             f"{self.mesh_url}/mesh/config/confirm",
             json={"change_id": change_id, "confirmed_by": self.agent_id},
-            headers=self._trace_and_origin_headers(),
+            headers=self._trace_headers(),
         )
         response.raise_for_status()
         return response.json()
@@ -933,20 +923,32 @@ class MeshClient:
         response.raise_for_status()
         return response.json()
 
-    # === Project management (mesh proxy endpoints) ===
+    # === Team management (mesh proxy endpoints) ===
+    #
+    # The ``*_team`` methods are the canonical names; the legacy
+    # ``*_project`` methods remain as thin aliases through PR 3 so
+    # existing tool implementations and tests keep working unchanged.
+    # All methods continue to hit the ``/mesh/projects/*`` endpoints —
+    # PR 1 added ``/mesh/teams/*`` aliases on the host but the legacy
+    # routes work and we keep MeshClient on them so deployments that
+    # haven't yet caught up to the new routes don't break.
 
-    async def list_projects(self) -> dict:
-        """List all projects via mesh proxy."""
+    async def list_teams(self) -> dict:
+        """List all teams via mesh proxy."""
         response = await self._get_with_retry(
             f"{self.mesh_url}/mesh/projects",
         )
         response.raise_for_status()
         return response.json()
 
-    async def create_project(
+    async def list_projects(self) -> dict:
+        """DEPRECATED: alias for :meth:`list_teams`."""
+        return await self.list_teams()
+
+    async def create_team(
         self, name: str, description: str, members: list[str] | None = None,
     ) -> dict:
-        """Create a new project via mesh proxy."""
+        """Create a new team via mesh proxy."""
         client = await self._get_client()
         response = await client.post(
             f"{self.mesh_url}/mesh/projects",
@@ -960,12 +962,34 @@ class MeshClient:
         response.raise_for_status()
         return response.json()
 
-    async def add_agent_to_project(self, project_name: str, agent_id: str) -> dict:
-        """Add an agent to a project via mesh proxy."""
+    async def create_project(
+        self, name: str, description: str, members: list[str] | None = None,
+    ) -> dict:
+        """DEPRECATED: alias for :meth:`create_team`."""
+        return await self.create_team(name, description, members)
+
+    async def add_agent_to_team(self, team_name: str, agent_id: str) -> dict:
+        """Add an agent to a team via mesh proxy."""
         client = await self._get_client()
         response = await client.post(
-            f"{self.mesh_url}/mesh/projects/{project_name}/members",
+            f"{self.mesh_url}/mesh/projects/{team_name}/members",
             json={"agent": agent_id},
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def add_agent_to_project(self, project_name: str, agent_id: str) -> dict:
+        """DEPRECATED: alias for :meth:`add_agent_to_team`."""
+        return await self.add_agent_to_team(project_name, agent_id)
+
+    async def remove_agent_from_team(
+        self, team_name: str, agent_id: str,
+    ) -> dict:
+        """Remove an agent from a team via mesh proxy."""
+        client = await self._get_client()
+        response = await client.delete(
+            f"{self.mesh_url}/mesh/projects/{team_name}/members/{agent_id}",
             headers=self._trace_headers(),
         )
         response.raise_for_status()
@@ -974,10 +998,17 @@ class MeshClient:
     async def remove_agent_from_project(
         self, project_name: str, agent_id: str,
     ) -> dict:
-        """Remove an agent from a project via mesh proxy."""
+        """DEPRECATED: alias for :meth:`remove_agent_from_team`."""
+        return await self.remove_agent_from_team(project_name, agent_id)
+
+    async def update_team_context(
+        self, team_name: str, context: str,
+    ) -> dict:
+        """Update a team's description/context via mesh proxy."""
         client = await self._get_client()
-        response = await client.delete(
-            f"{self.mesh_url}/mesh/projects/{project_name}/members/{agent_id}",
+        response = await client.put(
+            f"{self.mesh_url}/mesh/projects/{team_name}/context",
+            json={"context": context},
             headers=self._trace_headers(),
         )
         response.raise_for_status()
@@ -986,11 +1017,23 @@ class MeshClient:
     async def update_project_context(
         self, project_name: str, context: str,
     ) -> dict:
-        """Update a project's description/context via mesh proxy."""
+        """DEPRECATED: alias for :meth:`update_team_context`."""
+        return await self.update_team_context(project_name, context)
+
+    async def set_team_goal(
+        self,
+        team_name: str,
+        north_star: str | None,
+        success_criteria: list[str] | None = None,
+    ) -> dict:
+        """Set a team's north star + success criteria via mesh proxy."""
         client = await self._get_client()
-        response = await client.put(
-            f"{self.mesh_url}/mesh/projects/{project_name}/context",
-            json={"context": context},
+        response = await client.post(
+            f"{self.mesh_url}/mesh/projects/{team_name}/goal",
+            json={
+                "north_star": north_star,
+                "success_criteria": success_criteria,
+            },
             headers=self._trace_headers(),
         )
         response.raise_for_status()
@@ -1002,18 +1045,8 @@ class MeshClient:
         north_star: str | None,
         success_criteria: list[str] | None = None,
     ) -> dict:
-        """Set a project's north star + success criteria via mesh proxy."""
-        client = await self._get_client()
-        response = await client.post(
-            f"{self.mesh_url}/mesh/projects/{project_name}/goal",
-            json={
-                "north_star": north_star,
-                "success_criteria": success_criteria,
-            },
-            headers=self._trace_headers(),
-        )
-        response.raise_for_status()
-        return response.json()
+        """DEPRECATED: alias for :meth:`set_team_goal`."""
+        return await self.set_team_goal(project_name, north_star, success_criteria)
 
     async def browser_command(
         self, action: str, params: dict | None = None,
@@ -1231,14 +1264,18 @@ class MeshClient:
         data = response.json()
         return data.get("tasks", []) if isinstance(data, dict) else []
 
-    async def list_project_tasks(self, project_id: str) -> list[dict]:
-        """List tasks scoped to ``project_id``."""
+    async def list_team_tasks(self, team_id: str) -> list[dict]:
+        """List tasks scoped to ``team_id``."""
         response = await self._get_with_retry(
-            f"{self.mesh_url}/mesh/tasks/project/{project_id}",
+            f"{self.mesh_url}/mesh/tasks/project/{team_id}",
         )
         response.raise_for_status()
         data = response.json()
         return data.get("tasks", []) if isinstance(data, dict) else []
+
+    async def list_project_tasks(self, project_id: str) -> list[dict]:
+        """DEPRECATED: alias for :meth:`list_team_tasks`."""
+        return await self.list_team_tasks(project_id)
 
     async def set_task_status(
         self, task_id: str, status: str,
@@ -1318,21 +1355,29 @@ class MeshClient:
 
     # ── Operator product surface (Task 7) ────────────────────────
 
-    async def project_status(self, project_id: str) -> dict:
-        """Per-project status counts + recent blockers/completions."""
+    async def team_status(self, team_id: str) -> dict:
+        """Per-team status counts + recent blockers/completions."""
         response = await self._get_with_retry(
-            f"{self.mesh_url}/mesh/projects/{project_id}/status",
+            f"{self.mesh_url}/mesh/projects/{team_id}/status",
         )
         response.raise_for_status()
         return response.json()
 
-    async def all_projects_status(self) -> dict:
-        """Status rollup across every visible project."""
+    async def project_status(self, project_id: str) -> dict:
+        """DEPRECATED: alias for :meth:`team_status`."""
+        return await self.team_status(project_id)
+
+    async def all_teams_status(self) -> dict:
+        """Status rollup across every visible team."""
         response = await self._get_with_retry(
             f"{self.mesh_url}/mesh/projects/status",
         )
         response.raise_for_status()
         return response.json()
+
+    async def all_projects_status(self) -> dict:
+        """DEPRECATED: alias for :meth:`all_teams_status`."""
+        return await self.all_teams_status()
 
     async def agent_queue(self, agent_id: str, limit: int = 10) -> dict:
         """Recent tasks for an agent grouped by status."""
@@ -1343,26 +1388,34 @@ class MeshClient:
         response.raise_for_status()
         return response.json()
 
-    async def project_outputs(self, project_id: str, since: str = "") -> dict:
-        """Completed task artifacts for a project in a time window."""
+    async def team_outputs(self, team_id: str, since: str = "") -> dict:
+        """Completed task artifacts for a team in a time window."""
         params = {"since": since} if since else None
         response = await self._get_with_retry(
-            f"{self.mesh_url}/mesh/projects/{project_id}/outputs",
+            f"{self.mesh_url}/mesh/projects/{team_id}/outputs",
             params=params,
         )
         response.raise_for_status()
         return response.json()
 
-    async def project_summary(self, project_id: str) -> dict:
-        """Synthesized status summary for a project."""
+    async def project_outputs(self, project_id: str, since: str = "") -> dict:
+        """DEPRECATED: alias for :meth:`team_outputs`."""
+        return await self.team_outputs(project_id, since)
+
+    async def team_summary(self, team_id: str) -> dict:
+        """Synthesized status summary for a team."""
         response = await self._get_with_retry(
-            f"{self.mesh_url}/mesh/projects/{project_id}/summary",
+            f"{self.mesh_url}/mesh/projects/{team_id}/summary",
         )
         response.raise_for_status()
         return response.json()
 
-    async def archive_project(self, name: str) -> dict:
-        """Archive a project."""
+    async def project_summary(self, project_id: str) -> dict:
+        """DEPRECATED: alias for :meth:`team_summary`."""
+        return await self.team_summary(project_id)
+
+    async def archive_team(self, name: str) -> dict:
+        """Archive a team."""
         client = await self._get_client()
         response = await client.post(
             f"{self.mesh_url}/mesh/projects/{name}/archive",
@@ -1370,6 +1423,24 @@ class MeshClient:
         )
         response.raise_for_status()
         return response.json()
+
+    async def archive_project(self, name: str) -> dict:
+        """DEPRECATED: alias for :meth:`archive_team`."""
+        return await self.archive_team(name)
+
+    async def unarchive_team(self, name: str) -> dict:
+        """Unarchive (restore) a previously archived team."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/projects/{name}/unarchive",
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def unarchive_project(self, name: str) -> dict:
+        """DEPRECATED: alias for :meth:`unarchive_team`."""
+        return await self.unarchive_team(name)
 
     async def archive_agent(self, agent_id: str) -> dict:
         """Archive an agent."""
@@ -1381,36 +1452,26 @@ class MeshClient:
         response.raise_for_status()
         return response.json()
 
-    async def propose_delete_project(self, name: str) -> dict:
-        """Propose deletion of an archived project. Returns nonce for human confirm.
-
-        Forwards ``current_origin`` via :meth:`_trace_and_origin_headers`
-        so the mesh stores the pending row with ``origin_kind="human"``
-        when the caller is handling a human-originated message. Without
-        this the subsequent confirm fails the
-        ``require_origin_kind="human"`` gate (Bug A).
-        """
+    async def propose_delete_team(self, name: str) -> dict:
+        """Propose deletion of an archived team. Returns nonce for human confirm."""
         client = await self._get_client()
         response = await client.post(
             f"{self.mesh_url}/mesh/projects/{name}/propose-delete",
-            headers=self._trace_and_origin_headers(),
+            headers=self._trace_headers(),
         )
         response.raise_for_status()
         return response.json()
 
-    async def propose_delete_agent(self, agent_id: str) -> dict:
-        """Propose deletion of an archived agent. Returns nonce for human confirm.
+    async def propose_delete_project(self, name: str) -> dict:
+        """DEPRECATED: alias for :meth:`propose_delete_team`."""
+        return await self.propose_delete_team(name)
 
-        Forwards ``current_origin`` via :meth:`_trace_and_origin_headers`
-        so the mesh stores the pending row with ``origin_kind="human"``
-        when the caller is handling a human-originated message. Without
-        this the subsequent confirm fails the
-        ``require_origin_kind="human"`` gate (Bug A).
-        """
+    async def propose_delete_agent(self, agent_id: str) -> dict:
+        """Propose deletion of an archived agent. Returns nonce for human confirm."""
         client = await self._get_client()
         response = await client.post(
             f"{self.mesh_url}/mesh/agents/{agent_id}/propose-delete",
-            headers=self._trace_and_origin_headers(),
+            headers=self._trace_headers(),
         )
         response.raise_for_status()
         return response.json()

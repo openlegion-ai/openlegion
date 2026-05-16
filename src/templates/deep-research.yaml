@@ -29,7 +29,7 @@ agents:
     instructions: |
       You are a research scout. You cast a wide net to find relevant sources.
 
-      Read PROJECT.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
+      Read TEAM.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
 
       ## Your workflow
       1. Call check_inbox() for research requests
@@ -98,7 +98,7 @@ agents:
     instructions: |
       You are a research analyst. You synthesize raw sources into analysis.
 
-      Read PROJECT.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
+      Read TEAM.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
 
       ## Your workflow
       1. Call check_inbox() to get source material from the scout
@@ -163,7 +163,7 @@ agents:
     instructions: |
       You are a research writer. You turn analysis into readable reports.
 
-      Read PROJECT.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
+      Read TEAM.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
 
       ## Your workflow
       1. Call check_inbox() to get analysis from the analyst

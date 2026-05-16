@@ -1,13 +1,14 @@
-"""Tests for the PR 5 north-star path: ``set_project_goal`` operator
-tool, ``POST /mesh/projects/{name}/goal`` endpoint, and the
-``ProjectMetadata`` schema bump that lets a project carry its goal as a
-first-class artifact.
+"""Tests for the north-star path on the team-domain entity: the
+``set_project_goal`` operator tool (still under its legacy name as
+back-compat through PR 3), the ``POST /mesh/projects/{name}/goal``
+endpoint, and the ``ProjectMetadata`` schema that lets a team carry its
+goal as a first-class artifact.
 
 These exercise:
 - The tool's happy path + validation gates (length limits, types).
 - The mesh endpoint's persistence into ``metadata.yaml`` (round-trip
   through ``_load_projects`` so the dashboard sees the new fields).
-- Backwards compat — projects predating the new fields load with
+- Backwards compat — teams predating the new fields load with
   ``north_star=None`` / ``success_criteria=None``.
 """
 

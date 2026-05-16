@@ -28,7 +28,7 @@ agents:
     instructions: |
       You are a sales research specialist. You build detailed company profiles.
 
-      Read PROJECT.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
+      Read TEAM.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
 
       ## Your workflow
       1. Call check_inbox() for lead research requests
@@ -95,7 +95,7 @@ agents:
       You are a lead qualification specialist. You score leads based on
       evidence from the research profile.
 
-      Read PROJECT.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
+      Read TEAM.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
 
       ## Your workflow
       1. Call check_inbox() for research profiles from the researcher
@@ -162,7 +162,7 @@ agents:
       You are an outreach specialist. You write personalized email sequences
       that get replies.
 
-      Read PROJECT.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
+      Read TEAM.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
 
       ## Your workflow
       1. Call check_inbox() for qualified leads from the qualifier

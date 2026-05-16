@@ -142,15 +142,34 @@ class TestPlaybookConstants:
         # deprecation stubs in operator_tools.py for back-compat, but
         # the playbook map only advertises the new flow so the LLM
         # picks one path.
-        expected_tools = {
-            "create_agent", "apply_template", "create_project",
-            "add_agents_to_project", "remove_agents_from_project",
-            "update_project_context", "set_project_goal",
-            "edit_agent", "undo_change",
-            "save_observations",
+        # Team-named canonical entries (PR 2 of the project→team rename)
+        # sit alongside their legacy ``*_project`` aliases in
+        # ``_TOOL_PLAYBOOK_MAP``. Both names route to the same playbook so
+        # either tool invocation pulls in the build guidance. We assert
+        # the legacy + canonical pairs explicitly plus the non-domain
+        # shared tools — every other entry should be one of these.
+        keys = set(_TOOL_PLAYBOOK_MAP.keys())
+        # Every legacy *_project tool MUST still be registered.
+        for legacy in {
+            "create_project", "add_agents_to_project",
+            "remove_agents_from_project", "update_project_context",
+            "set_project_goal",
+        }:
+            assert legacy in keys, f"legacy tool {legacy} missing from playbook map"
+        # Every new *_team canonical tool MUST be registered too.
+        for canonical in {
+            "create_team", "add_agents_to_team",
+            "remove_agents_from_team", "update_team_context",
+            "set_team_goal",
+        }:
+            assert canonical in keys, f"team-named tool {canonical} missing from playbook map"
+        # Non-domain tools that are unrelated to the rename must remain.
+        for shared in {
+            "create_agent", "apply_template", "edit_agent",
+            "undo_change", "save_observations",
             "request_credential", "request_browser_login",
-        }
-        assert set(_TOOL_PLAYBOOK_MAP.keys()) == expected_tools
+        }:
+            assert shared in keys, f"core tool {shared} missing from playbook map"
 
     def test_sticky_turns_reasonable(self):
         assert 3 <= PLAYBOOK_STICKY_TURNS <= 10
@@ -161,13 +180,16 @@ class TestPlaybookConstants:
         # team_build; the edit playbook references both edit_agent (always)
         # and confirm_edit (hard-field follow-up step).
         assert "edit_agent" in _PLAYBOOK_TEAM_BUILD
-        assert "create_project" in _PLAYBOOK_TEAM_BUILD
+        # Project→team rename PR 2 flipped the playbook prose to the
+        # canonical team-named tools. The legacy ``*_project`` names
+        # remain callable (and remain in ``_TOOL_PLAYBOOK_MAP``) but the
+        # prose itself nudges the operator toward the new names.
+        assert "create_team" in _PLAYBOOK_TEAM_BUILD
         assert "create_agent" in _PLAYBOOK_TEAM_BUILD
         assert "apply_template" in _PLAYBOOK_TEAM_BUILD
-        assert "add_agents_to_project" in _PLAYBOOK_TEAM_BUILD
-        assert "update_project_context" in _PLAYBOOK_TEAM_BUILD
+        assert "add_agents_to_team" in _PLAYBOOK_TEAM_BUILD
         # PR 5: the operator should proactively save the goal as a north star.
-        assert "set_project_goal" in _PLAYBOOK_TEAM_BUILD
+        assert "set_team_goal" in _PLAYBOOK_TEAM_BUILD
         assert "north star" in _PLAYBOOK_TEAM_BUILD.lower()
         assert "request_credential" in _PLAYBOOK_TEAM_BUILD
         assert "request_browser_login" in _PLAYBOOK_TEAM_BUILD

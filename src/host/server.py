@@ -35,12 +35,7 @@ from src.host.orchestration import (
     TaskNotFound,
     Tasks,
 )
-from src.host.pending_actions import (
-    PendingActions,
-)
-from src.host.pending_actions import (
-    format_pending_reason as _humanize_pending_reason,
-)
+from src.host.pending_actions import PendingActions
 from src.shared.redaction import redact_url
 from src.shared.types import (
     AGENT_ID_RE_PATTERN,
@@ -182,16 +177,21 @@ def _store_pending_change(agent_id: str, field: str, old_value: object, new_valu
 
     Backed by ``PendingActions`` (SQLite). Capped at ``_MAX_PENDING``
     rows per process; oldest expires-first row is evicted to make room.
-    The reap + cap-check + evict + insert sequence runs inside a single
-    ``BEGIN IMMEDIATE`` via :meth:`PendingActions.store_with_cap` so
-    concurrent proposers can't both observe ``count < max`` and double-
-    insert.
     """
     store = _get_pending_actions_store()
+    store.reap_expired()
+    pending = store.list_pending()
+    if len(pending) >= _MAX_PENDING:
+        # Evict the row whose ``expires_at`` is soonest -- matches the
+        # legacy behavior (``min(...)`` over ``expires_at``).
+        oldest = min(pending, key=lambda r: r["expires_at"])
+        with store._conn() as conn:
+            conn.execute(
+                "DELETE FROM pending_actions WHERE nonce=?", (oldest["nonce"],),
+            )
     change_id = str(_uuid.uuid4())
     payload = {"old_value": old_value, "new_value": new_value}
-    store.store_with_cap(
-        max_pending=_MAX_PENDING,
+    store.store(
         nonce=change_id,
         actor="operator",
         target_kind="agent",
@@ -222,7 +222,7 @@ def _get_pending_change(change_id: str) -> dict | None:
 def _consume_pending_change(change_id: str) -> dict | None:
     """Atomically consume a pending change. Returns legacy dict shape or None."""
     store = _get_pending_actions_store()
-    rec, _ = store.consume(change_id)
+    rec = store.consume(change_id)
     if rec is None:
         return None
     payload = rec.get("payload") or {}
@@ -400,24 +400,30 @@ def _validated_origin(
     return _downgrade_origin(origin, "unpaired channel user")
 
 
-# ── Task 5: Project scope isolation (default enforce) ─────────────────
+# ── Task 5: Team scope isolation (default enforce) ────────────────────
 #
-# ``OPENLEGION_PROJECT_SCOPE_MODE`` is the kill switch for the project
+# ``OPENLEGION_TEAM_SCOPE_MODE`` (new canonical; ``OPENLEGION_PROJECT_SCOPE_MODE``
+# kept as a back-compat fallback) is the kill switch for the team
 # isolation rollout. Default ``enforce`` — workers see only their own
-# project members on ``/mesh/agents`` and only their own project
-# blackboard ACLs. ``warn`` is preserved as an emergency rollback that
-# restores the legacy fleet-wide visibility while still emitting
-# structured warnings on every call that would have been denied under
-# enforce. Read once at module import (env vars don't change at
-# runtime); invalid values fall back to ``enforce`` with a logged
-# warning.
-_PROJECT_SCOPE_MODE = os.environ.get("OPENLEGION_PROJECT_SCOPE_MODE", "enforce").lower()
-if _PROJECT_SCOPE_MODE not in {"warn", "enforce"}:
+# team members on ``/mesh/agents`` and only their own team blackboard
+# ACLs. ``warn`` is preserved as an emergency rollback that restores the
+# legacy fleet-wide visibility while still emitting structured warnings
+# on every call that would have been denied under enforce. Read once at
+# module import (env vars don't change at runtime); invalid values fall
+# back to ``enforce`` with a logged warning. PR 3 removes the legacy
+# env var fallback.
+_TEAM_SCOPE_MODE = os.environ.get(
+    "OPENLEGION_TEAM_SCOPE_MODE",
+    os.environ.get("OPENLEGION_PROJECT_SCOPE_MODE", "enforce"),
+).lower()
+if _TEAM_SCOPE_MODE not in {"warn", "enforce"}:
     logger.warning(
-        "Invalid OPENLEGION_PROJECT_SCOPE_MODE=%r, defaulting to enforce",
-        _PROJECT_SCOPE_MODE,
+        "Invalid OPENLEGION_TEAM_SCOPE_MODE=%r, defaulting to enforce",
+        _TEAM_SCOPE_MODE,
     )
-    _PROJECT_SCOPE_MODE = "enforce"
+    _TEAM_SCOPE_MODE = "enforce"
+# Back-compat alias — keep until PR 3.
+_PROJECT_SCOPE_MODE = _TEAM_SCOPE_MODE
 
 
 # ── Task 6: Durable orchestration task records ────────────────────────
@@ -448,21 +454,80 @@ def _record_scope_warn() -> None:
     _scope_warn_count += 1
 
 
-# Counter for cross-project blackboard access (read or write where the
-# caller's project differs from the existing key's writer-project). Pure
+# Counter for cross-team blackboard access (read or write where the
+# caller's team differs from the existing key's writer-team). Pure
 # observability for Phase 3 enforcement design — NOT a denial. Surfaced on
-# ``/mesh/system/metrics`` as ``blackboard_cross_project_total``. Counter
-# is process-lifetime (resets on restart), naming follows ``scope_warn_total``
-# rather than the ``_24h`` mental model — restarts are roughly daily-ish in
-# practice and a true 24h window would need a separate ledger.
-_blackboard_xproject_count: dict[str, int] = {"read": 0, "write": 0}
+# ``/mesh/system/metrics`` as BOTH ``blackboard_cross_team_total`` and
+# the legacy ``blackboard_cross_project_total`` (same value, kept through
+# PR 3 for back-compat). Counter is process-lifetime (resets on restart),
+# naming follows ``scope_warn_total`` rather than the ``_24h`` mental
+# model — restarts are roughly daily-ish in practice and a true 24h
+# window would need a separate ledger.
+_blackboard_xteam_count: dict[str, int] = {"read": 0, "write": 0}
+# Back-compat alias — keep until PR 3.
+_blackboard_xproject_count = _blackboard_xteam_count
+
+
+def _record_blackboard_xteam(kind: str) -> None:
+    """Bump the cross-team blackboard counter."""
+    if kind not in _blackboard_xteam_count:
+        return
+    _blackboard_xteam_count[kind] += 1
 
 
 def _record_blackboard_xproject(kind: str) -> None:
-    """Bump the cross-project blackboard counter."""
-    if kind not in _blackboard_xproject_count:
+    """DEPRECATED: alias for :func:`_record_blackboard_xteam`."""
+    _record_blackboard_xteam(kind)
+
+
+# Maps legacy ``project_*`` lifecycle event names to the new ``team_*``
+# equivalents. Used by :func:`_emit_team_event` to fan out a single
+# logical event under both names through PR 3 so existing dashboard /
+# integration listeners keep working while new code can subscribe to
+# the canonical ``team_*`` names.
+_PROJECT_TO_TEAM_EVENT = {
+    "project_created": "team_created",
+    "project_updated": "team_updated",
+    "project_deleted": "team_deleted",
+    "project_archived": "team_archived",
+    "project_unarchived": "team_unarchived",
+}
+
+
+def _emit_team_event(
+    event_bus,
+    legacy_event: str,
+    *,
+    agent: str,
+    name: str,
+    extra: dict | None = None,
+    logger=logger,
+) -> None:
+    """Emit a project lifecycle event under BOTH the legacy and new names.
+
+    Payload always contains ``project_id`` / ``team_id`` / ``name``.
+    ``extra`` is merged on top so callers can pass description /
+    members / etc. Each emit is independently try/except'd so a failure
+    on the legacy fan-out doesn't suppress the new one (and vice
+    versa).
+    """
+    if event_bus is None:
         return
-    _blackboard_xproject_count[kind] += 1
+    payload: dict = {
+        "project_id": name,
+        "team_id": name,
+        "name": name,
+    }
+    if extra:
+        payload.update(extra)
+    team_event = _PROJECT_TO_TEAM_EVENT.get(legacy_event)
+    for ev in (legacy_event, team_event):
+        if not ev:
+            continue
+        try:
+            event_bus.emit(ev, agent=agent, data=payload)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("%s emit failed: %s", ev, e)
 
 
 # Per-category denial counter surfaced on ``/mesh/system/metrics`` as
@@ -608,6 +673,20 @@ def create_mesh_app(
     app.change_history = change_history
     if event_bus is not None:
         change_history.set_event_bus(event_bus)
+
+    # PR 2 — project → team rename. Idempotent on-startup migrator
+    # renames ``config/projects/`` → ``config/teams/`` and copies
+    # PROJECT.md → TEAM.md in each agent workspace. The DB column
+    # rename is gated behind ``OPENLEGION_TEAM_MIGRATION_RENAME_DB=1``
+    # (off by default this PR — see :mod:`src.host.team_migration` for
+    # rationale). Failures log and continue — back-compat aliases keep
+    # the previous-version data path working. Operators can disable the
+    # whole migrator with ``OPENLEGION_DISABLE_TEAM_MIGRATION=1``.
+    try:
+        from src.host.team_migration import migrate_project_to_team
+        migrate_project_to_team()
+    except Exception as e:
+        logger.error("team_migration failed at startup: %s — continuing", e, exc_info=True)
 
     # Task 6: durable orchestration task records. The store is only
     # constructed when the feature flag is on; when off, the new
@@ -3599,13 +3678,21 @@ def create_mesh_app(
                 })
 
         # -- Plan limits from env vars --
+        # ``OPENLEGION_MAX_TEAMS`` is the new canonical env var name;
+        # ``OPENLEGION_MAX_PROJECTS`` kept as a back-compat fallback
+        # through PR 3.
         import os
         max_agents = int(os.environ.get("OPENLEGION_MAX_AGENTS", "0"))
-        max_projects = int(os.environ.get("OPENLEGION_MAX_PROJECTS", "0"))
+        max_teams = int(
+            os.environ.get(
+                "OPENLEGION_MAX_TEAMS",
+                os.environ.get("OPENLEGION_MAX_PROJECTS", "0"),
+            )
+        )
 
-        # Count actual projects
+        # Count actual teams
         from src.cli.config import _load_projects
-        current_projects = len(_load_projects())
+        current_teams = len(_load_projects())
 
         # -- BYOK visibility (Bug 5) --
         # Operators (and the operator agent's heartbeat playbook) need
@@ -3647,23 +3734,34 @@ def create_mesh_app(
             "plan_limits": {
                 "max_agents": max_agents,
                 "current_agents": total,
-                "max_projects": max_projects,
-                "current_projects": current_projects,
+                # BOTH ``max_teams`` and the legacy ``max_projects`` keys
+                # are emitted with the same value for back-compat through
+                # PR 3. Same for ``current_teams`` / ``current_projects``.
+                "max_teams": max_teams,
+                "current_teams": current_teams,
+                "max_projects": max_teams,
+                "current_projects": current_teams,
             },
             # Task 5: count of warn-mode "would have denied" hits since
             # process start. Operators watch this number drop toward
-            # zero before flipping ``OPENLEGION_PROJECT_SCOPE_MODE`` to
+            # zero before flipping ``OPENLEGION_TEAM_SCOPE_MODE`` to
             # ``enforce``. The flag itself is reported alongside so the
-            # operator dashboard can render the right state.
+            # operator dashboard can render the right state. BOTH keys
+            # emitted for back-compat.
             "scope_warn_total": _scope_warn_count,
-            "project_scope_mode": _PROJECT_SCOPE_MODE,
+            "team_scope_mode": _TEAM_SCOPE_MODE,
+            "project_scope_mode": _TEAM_SCOPE_MODE,
             # Phase 3 Slice 1 (PR-O'.1) telemetry: process-lifetime count
-            # of cross-project blackboard accesses (caller's project set
-            # is disjoint from the existing entry's writer-project set).
-            # Pure observability — informs the design doc for PR-O'.2;
-            # NO enforcement effect today. Counts kinds separately so the
-            # design can branch on read vs write volume.
-            "blackboard_cross_project_total": dict(_blackboard_xproject_count),
+            # of cross-team blackboard accesses (caller's team set is
+            # disjoint from the existing entry's writer-team set). Pure
+            # observability — informs the design doc for PR-O'.2; NO
+            # enforcement effect today. Counts kinds separately so the
+            # design can branch on read vs write volume. BOTH the new
+            # ``blackboard_cross_team_total`` and the legacy
+            # ``blackboard_cross_project_total`` keys carry the same
+            # counter (kept through PR 3).
+            "blackboard_cross_team_total": dict(_blackboard_xteam_count),
+            "blackboard_cross_project_total": dict(_blackboard_xteam_count),
             # PR-K' minimal denial observability. 24h window, auto-reset
             # at the day boundary. Operator-readable categories:
             # ``auth`` / ``scope`` / ``role`` / ``permission`` / ``rate``.
@@ -3851,19 +3949,22 @@ def create_mesh_app(
 
         from src.cli.config import _create_project, _load_config, _load_projects
 
-        _max_projects_env = _os.environ.get("OPENLEGION_MAX_PROJECTS")
-        if _max_projects_env is not None:
-            _max_projects = int(_max_projects_env)
-            if _max_projects == 0:
+        _max_teams_env = _os.environ.get(
+            "OPENLEGION_MAX_TEAMS",
+            _os.environ.get("OPENLEGION_MAX_PROJECTS"),
+        )
+        if _max_teams_env is not None:
+            _max_teams = int(_max_teams_env)
+            if _max_teams == 0:
                 raise HTTPException(
                     403,
-                    "Projects are not available on your plan. Upgrade for project support.",
+                    "Teams are not available on your plan. Upgrade for team support.",
                 )
             current_count = len(_load_projects())
-            if current_count >= _max_projects:
+            if current_count >= _max_teams:
                 raise HTTPException(
                     403,
-                    f"Project limit reached ({_max_projects}). Upgrade your plan for more projects.",
+                    f"Team limit reached ({_max_teams}). Upgrade your plan for more teams.",
                 )
 
         body = await request.json()
@@ -3884,19 +3985,22 @@ def create_mesh_app(
         except ValueError as e:
             raise HTTPException(400, str(e))
         if event_bus is not None:
-            try:
-                event_bus.emit(
-                    "project_created", agent="operator",
-                    data={
-                        "project_id": name,
-                        "name": name,
-                        "description": description,
-                        "members": list(members),
-                    },
-                )
-            except Exception as e:
-                logger.debug("project_created emit failed: %s", e)
-        return {"created": True, "name": name}
+            # Emit BOTH ``project_created`` and ``team_created`` with the
+            # same payload for back-compat through PR 3. Payload carries
+            # BOTH ``project_id`` and ``team_id`` keys.
+            payload = {
+                "project_id": name,
+                "team_id": name,
+                "name": name,
+                "description": description,
+                "members": list(members),
+            }
+            for ev in ("project_created", "team_created"):
+                try:
+                    event_bus.emit(ev, agent="operator", data=payload)
+                except Exception as e:
+                    logger.debug("%s emit failed: %s", ev, e)
+        return {"created": True, "name": name, "team_id": name, "project_id": name}
 
     @app.post("/mesh/teams")
     async def mesh_create_team(request: Request) -> dict:
@@ -3908,19 +4012,22 @@ def create_mesh_app(
 
         from src.cli.config import _create_project, _load_config, _load_projects
 
-        _max_projects_env = _os.environ.get("OPENLEGION_MAX_PROJECTS")
-        if _max_projects_env is not None:
-            _max_projects = int(_max_projects_env)
-            if _max_projects == 0:
+        _max_teams_env = _os.environ.get(
+            "OPENLEGION_MAX_TEAMS",
+            _os.environ.get("OPENLEGION_MAX_PROJECTS"),
+        )
+        if _max_teams_env is not None:
+            _max_teams = int(_max_teams_env)
+            if _max_teams == 0:
                 raise HTTPException(
                     403,
                     "Teams are not available on your plan. Upgrade for team support.",
                 )
             current_count = len(_load_projects())
-            if current_count >= _max_projects:
+            if current_count >= _max_teams:
                 raise HTTPException(
                     403,
-                    f"Team limit reached ({_max_projects}). Upgrade your plan for more teams.",
+                    f"Team limit reached ({_max_teams}). Upgrade your plan for more teams.",
                 )
 
         body = await request.json()
@@ -3941,19 +4048,19 @@ def create_mesh_app(
         except ValueError as e:
             raise HTTPException(400, str(e))
         if event_bus is not None:
-            try:
-                event_bus.emit(
-                    "project_created", agent="operator",
-                    data={
-                        "project_id": name,
-                        "name": name,
-                        "description": description,
-                        "members": list(members),
-                    },
-                )
-            except Exception as e:
-                logger.debug("project_created emit failed: %s", e)
-        return {"created": True, "name": name, "team_name": name}
+            payload = {
+                "project_id": name,
+                "team_id": name,
+                "name": name,
+                "description": description,
+                "members": list(members),
+            }
+            for ev in ("project_created", "team_created"):
+                try:
+                    event_bus.emit(ev, agent="operator", data=payload)
+                except Exception as e:
+                    logger.debug("%s emit failed: %s", ev, e)
+        return {"created": True, "name": name, "team_name": name, "team_id": name, "project_id": name}
 
     @app.post("/mesh/projects/{name}/members")
     async def mesh_add_project_member(name: str, request: Request) -> dict:
@@ -4032,15 +4139,8 @@ def create_mesh_app(
             _delete_project(name)
         except ValueError as e:
             raise HTTPException(404, str(e))
-        if event_bus is not None:
-            try:
-                event_bus.emit(
-                    "project_deleted", agent="operator",
-                    data={"project_id": name, "name": name},
-                )
-            except Exception as e:
-                logger.debug("project_deleted emit failed: %s", e)
-        return {"deleted": True, "name": name}
+        _emit_team_event(event_bus, "project_deleted", agent="operator", name=name)
+        return {"deleted": True, "name": name, "team_id": name, "project_id": name}
 
     @app.delete("/mesh/teams/{team_name}")
     async def mesh_delete_team(team_name: str, request: Request) -> dict:
@@ -4053,15 +4153,11 @@ def create_mesh_app(
             _delete_project(team_name)
         except ValueError as e:
             raise HTTPException(404, str(e))
-        if event_bus is not None:
-            try:
-                event_bus.emit(
-                    "project_deleted", agent="operator",
-                    data={"project_id": team_name, "name": team_name},
-                )
-            except Exception as e:
-                logger.debug("project_deleted emit failed: %s", e)
-        return {"deleted": True, "name": team_name, "team_name": team_name}
+        _emit_team_event(event_bus, "project_deleted", agent="operator", name=team_name)
+        return {
+            "deleted": True, "name": team_name,
+            "team_name": team_name, "team_id": team_name, "project_id": team_name,
+        }
 
     @app.put("/mesh/projects/{name}/context")
     async def mesh_update_project_context(name: str, request: Request) -> dict:
@@ -4091,20 +4187,12 @@ def create_mesh_app(
         project_md = PROJECTS_DIR / name / "project.md"
         project_md.write_text(f"# {name}\n\n{context}\n")
 
-        if event_bus is not None:
-            try:
-                event_bus.emit(
-                    "project_updated", agent="operator",
-                    data={
-                        "project_id": name,
-                        "name": name,
-                        "field": "context",
-                    },
-                )
-            except Exception as e:
-                logger.debug("project_updated emit failed: %s", e)
+        _emit_team_event(
+            event_bus, "project_updated", agent="operator", name=name,
+            extra={"field": "context"},
+        )
 
-        return {"updated": True, "project": name}
+        return {"updated": True, "project": name, "team": name, "team_id": name, "project_id": name}
 
     @app.put("/mesh/teams/{team_name}/context")
     async def mesh_update_team_context(team_name: str, request: Request) -> dict:
@@ -4134,20 +4222,15 @@ def create_mesh_app(
         project_md = PROJECTS_DIR / team_name / "project.md"
         project_md.write_text(f"# {team_name}\n\n{context}\n")
 
-        if event_bus is not None:
-            try:
-                event_bus.emit(
-                    "project_updated", agent="operator",
-                    data={
-                        "project_id": team_name,
-                        "name": team_name,
-                        "field": "context",
-                    },
-                )
-            except Exception as e:
-                logger.debug("project_updated emit failed: %s", e)
+        _emit_team_event(
+            event_bus, "project_updated", agent="operator", name=team_name,
+            extra={"field": "context"},
+        )
 
-        return {"updated": True, "project": team_name, "team_name": team_name}
+        return {
+            "updated": True, "project": team_name, "team": team_name,
+            "team_name": team_name, "team_id": team_name, "project_id": team_name,
+        }
 
     @app.post("/mesh/projects/{name}/goal")
     async def mesh_set_project_goal(name: str, request: Request) -> dict:
@@ -4219,22 +4302,17 @@ def create_mesh_app(
         with open(meta_file, "w") as f:
             yaml.dump(meta, f, default_flow_style=False, sort_keys=False)
 
-        if event_bus is not None:
-            try:
-                event_bus.emit(
-                    "project_updated", agent="operator",
-                    data={
-                        "project_id": name,
-                        "name": name,
-                        "field": "goal",
-                    },
-                )
-            except Exception as e:
-                logger.debug("project_updated emit failed: %s", e)
+        _emit_team_event(
+            event_bus, "project_updated", agent="operator", name=name,
+            extra={"field": "goal"},
+        )
 
         return {
             "success": True,
             "project_name": name,
+            "team_name": name,
+            "team_id": name,
+            "project_id": name,
             "north_star": north_star,
             "success_criteria": success_criteria,
         }
@@ -4309,23 +4387,17 @@ def create_mesh_app(
         with open(meta_file, "w") as f:
             yaml.dump(meta, f, default_flow_style=False, sort_keys=False)
 
-        if event_bus is not None:
-            try:
-                event_bus.emit(
-                    "project_updated", agent="operator",
-                    data={
-                        "project_id": team_name,
-                        "name": team_name,
-                        "field": "goal",
-                    },
-                )
-            except Exception as e:
-                logger.debug("project_updated emit failed: %s", e)
+        _emit_team_event(
+            event_bus, "project_updated", agent="operator", name=team_name,
+            extra={"field": "goal"},
+        )
 
         return {
             "success": True,
             "project_name": team_name,
             "team_name": team_name,
+            "team_id": team_name,
+            "project_id": team_name,
             "north_star": north_star,
             "success_criteria": success_criteria,
         }
@@ -5306,15 +5378,8 @@ def create_mesh_app(
             _archive_project(name)
         except ValueError as e:
             raise HTTPException(404, str(e))
-        if event_bus is not None:
-            try:
-                event_bus.emit(
-                    "project_archived", agent="operator",
-                    data={"project_id": name, "name": name},
-                )
-            except Exception as e:
-                logger.debug("project_archived emit failed: %s", e)
-        return {"archived": True, "project": name}
+        _emit_team_event(event_bus, "project_archived", agent="operator", name=name)
+        return {"archived": True, "project": name, "team": name, "team_id": name, "project_id": name}
 
     @app.post("/mesh/teams/{team_name}/archive")
     async def archive_team_endpoint(team_name: str, request: Request) -> dict:
@@ -5329,15 +5394,11 @@ def create_mesh_app(
             _archive_project(team_name)
         except ValueError as e:
             raise HTTPException(404, str(e))
-        if event_bus is not None:
-            try:
-                event_bus.emit(
-                    "project_archived", agent="operator",
-                    data={"project_id": team_name, "name": team_name},
-                )
-            except Exception as e:
-                logger.debug("project_archived emit failed: %s", e)
-        return {"archived": True, "project": team_name, "team_name": team_name}
+        _emit_team_event(event_bus, "project_archived", agent="operator", name=team_name)
+        return {
+            "archived": True, "project": team_name, "team": team_name,
+            "team_name": team_name, "team_id": team_name, "project_id": team_name,
+        }
 
     @app.post("/mesh/projects/{name}/unarchive")
     async def unarchive_project_endpoint(name: str, request: Request) -> dict:
@@ -5352,15 +5413,8 @@ def create_mesh_app(
             _unarchive_project(name)
         except ValueError as e:
             raise HTTPException(404, str(e))
-        if event_bus is not None:
-            try:
-                event_bus.emit(
-                    "project_unarchived", agent="operator",
-                    data={"project_id": name, "name": name},
-                )
-            except Exception as e:
-                logger.debug("project_unarchived emit failed: %s", e)
-        return {"archived": False, "project": name}
+        _emit_team_event(event_bus, "project_unarchived", agent="operator", name=name)
+        return {"archived": False, "project": name, "team": name, "team_id": name, "project_id": name}
 
     @app.post("/mesh/teams/{team_name}/unarchive")
     async def unarchive_team_endpoint(team_name: str, request: Request) -> dict:
@@ -5375,15 +5429,11 @@ def create_mesh_app(
             _unarchive_project(team_name)
         except ValueError as e:
             raise HTTPException(404, str(e))
-        if event_bus is not None:
-            try:
-                event_bus.emit(
-                    "project_unarchived", agent="operator",
-                    data={"project_id": team_name, "name": team_name},
-                )
-            except Exception as e:
-                logger.debug("project_unarchived emit failed: %s", e)
-        return {"archived": False, "project": team_name, "team_name": team_name}
+        _emit_team_event(event_bus, "project_unarchived", agent="operator", name=team_name)
+        return {
+            "archived": False, "project": team_name, "team": team_name,
+            "team_name": team_name, "team_id": team_name, "project_id": team_name,
+        }
 
     @app.post("/mesh/agents/{agent_id}/archive")
     async def archive_agent_endpoint(agent_id: str, request: Request) -> dict:
@@ -5482,6 +5532,16 @@ def create_mesh_app(
             )
         origin = _validated_origin(request, caller)
         origin_kind = origin.kind if origin is not None else None
+        # Cap pending rows to bound storage growth (mirrors propose_edit).
+        pending_actions.reap_expired()
+        existing = pending_actions.list_pending()
+        if len(existing) >= _MAX_PENDING:
+            oldest = min(existing, key=lambda r: r["expires_at"])
+            with pending_actions._conn() as _conn:
+                _conn.execute(
+                    "DELETE FROM pending_actions WHERE nonce=?",
+                    (oldest["nonce"],),
+                )
         nonce = str(_uuid.uuid4())
         members = projects[name].get("members", []) or []
         # Short headline shown in the inline chat card (max ~80 chars
@@ -5495,11 +5555,7 @@ def create_mesh_app(
             "summary": summary,
             "members": members,
         }
-        # Atomic reap+cap+insert — see PendingActions.store_with_cap.
-        # Replaces the legacy reap → list → manual evict → store sequence
-        # which raced under concurrent proposes.
-        record = pending_actions.store_with_cap(
-            max_pending=_MAX_PENDING,
+        record = pending_actions.store(
             nonce=nonce,
             actor="operator",
             target_kind="project",
@@ -5623,15 +5679,22 @@ def create_mesh_app(
             )
         origin = _validated_origin(request, caller)
         origin_kind = origin.kind if origin is not None else None
+        pending_actions.reap_expired()
+        existing = pending_actions.list_pending()
+        if len(existing) >= _MAX_PENDING:
+            oldest = min(existing, key=lambda r: r["expires_at"])
+            with pending_actions._conn() as _conn:
+                _conn.execute(
+                    "DELETE FROM pending_actions WHERE nonce=?",
+                    (oldest["nonce"],),
+                )
         nonce = str(_uuid.uuid4())
         summary = f"Delete agent {agent_id!r} permanently"
         payload = {
             "agent_id": agent_id,
             "summary": summary,
         }
-        # Atomic reap+cap+insert — see PendingActions.store_with_cap.
-        record = pending_actions.store_with_cap(
-            max_pending=_MAX_PENDING,
+        record = pending_actions.store(
             nonce=nonce,
             actor="operator",
             target_kind="agent",
@@ -5671,11 +5734,22 @@ def create_mesh_app(
                 _delete_project(target_id)
             except ValueError as e:
                 raise HTTPException(404, str(e))
+            # New audit rows use ``delete_team``; historical
+            # ``delete_project`` rows in archived audit data are
+            # untouched and still queryable (they retain the legacy
+            # action verb).
             blackboard.log_audit(
-                action="delete_project", target=target_id,
+                action="delete_team", target=target_id,
                 change_id=record["nonce"],
             )
-            return {"success": True, "deleted": "project", "name": target_id}
+            # ``deleted`` field name retained as ``"project"`` for
+            # back-compat with SDK callers / dashboards that switch on
+            # it; the canonical kind is also surfaced under
+            # ``deleted_kind`` so consumers can opt into the new name.
+            return {
+                "success": True, "deleted": "project", "deleted_kind": "team",
+                "name": target_id, "team_id": target_id, "project_id": target_id,
+            }
         if kind == "agent":
             from src.cli.config import _load_config, _remove_agent
             if target_id not in _load_config().get("agents", {}):
@@ -6036,6 +6110,18 @@ def create_mesh_app(
         origin = _validated_origin(request, caller)
         origin_kind = origin.kind if origin is not None else None
 
+        # Cap to ``_MAX_PENDING`` rows to bound storage growth -- mirrors
+        # the legacy in-memory eviction behavior.
+        pending_actions.reap_expired()
+        existing = pending_actions.list_pending()
+        if len(existing) >= _MAX_PENDING:
+            oldest = min(existing, key=lambda r: r["expires_at"])
+            with pending_actions._conn() as _conn:
+                _conn.execute(
+                    "DELETE FROM pending_actions WHERE nonce=?",
+                    (oldest["nonce"],),
+                )
+
         change_id = str(_uuid.uuid4())
         payload = {"old_value": old_value, "new_value": new_value}
 
@@ -6074,11 +6160,7 @@ def create_mesh_app(
                 f"from {_short(old_value)} to {_short(new_value)}"
             )
 
-        # Atomic reap+cap+insert — see PendingActions.store_with_cap.
-        # Caps to ``_MAX_PENDING`` rows to bound storage growth without
-        # racing under concurrent proposes.
-        record = pending_actions.store_with_cap(
-            max_pending=_MAX_PENDING,
+        record = pending_actions.store(
             nonce=change_id,
             actor="operator",
             target_kind="agent",
@@ -6873,20 +6955,14 @@ def create_mesh_app(
                 "Use /mesh/config/confirm for delete pending actions",
             )
 
-        record, reason = pending_actions.consume(
+        record = pending_actions.consume(
             change_id,
             confirmer="operator",
             require_origin_kind="human",
             expected_payload_digest=client_digest,
         )
         if not record:
-            raise HTTPException(
-                400,
-                detail={
-                    "code": reason,
-                    "message": _humanize_pending_reason(reason),
-                },
-            )
+            raise HTTPException(400, "Pending action invalid or expired")
 
         return await _apply_pending_change(
             change_id, _record_to_legacy_change(record),
@@ -6920,20 +6996,14 @@ def create_mesh_app(
         # Consume + apply. ``consume`` is atomic: same nonce can only
         # be applied once. If the apply raises, the row is already
         # gone — the caller must propose a new change.
-        record, reason = pending_actions.consume(
+        record = pending_actions.consume(
             change_id,
             confirmer="operator",
             require_origin_kind="human",
             expected_payload_digest=client_digest,
         )
         if not record:
-            raise HTTPException(
-                400,
-                detail={
-                    "code": reason,
-                    "message": _humanize_pending_reason(reason),
-                },
-            )
+            raise HTTPException(400, "Pending action invalid or expired")
 
         # Task 7: destructive deletes use ``action_kind="delete"`` plus
         # ``target_kind in {"project", "agent"}``. Everything else stays
@@ -7014,16 +7084,7 @@ def create_mesh_app(
             raise HTTPException(403, "Only the operator can cancel pending actions")
         record = pending_actions.cancel(nonce, actor=caller or "operator")
         if record is None:
-            # Structured detail mirrors the confirm path so dashboard
-            # error formatters (`_formatPendingError`) can route through
-            # one code path and surface the same {code, message} shape.
-            raise HTTPException(
-                404,
-                detail={
-                    "code": "not_found",
-                    "message": "Pending action not found or already expired",
-                },
-            )
+            raise HTTPException(404, "Pending action not found or already expired")
         return {
             "ok": True,
             "nonce": nonce,

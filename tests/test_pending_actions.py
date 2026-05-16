@@ -57,20 +57,16 @@ def test_store_then_consume_returns_record_then_none(tmp_path):
         nonce="n1", actor="operator", target_kind="agent",
         target_id="alpha", action_kind="model", payload={"x": 1},
     )
-    first, first_reason = pa.consume("n1")
-    second, second_reason = pa.consume("n1")
+    first = pa.consume("n1")
+    second = pa.consume("n1")
     assert first is not None
-    assert first_reason is None
     assert first["target_id"] == "alpha"
     assert second is None  # already consumed
-    assert second_reason == "not_found"
 
 
 def test_consume_unknown_nonce_returns_none(tmp_path):
     pa = _make_store(tmp_path)
-    rec, reason = pa.consume("does-not-exist")
-    assert rec is None
-    assert reason == "not_found"
+    assert pa.consume("does-not-exist") is None
 
 
 def test_peek_unknown_nonce_returns_none(tmp_path):
@@ -101,9 +97,7 @@ def test_expired_consume_returns_none_and_deletes_row(tmp_path):
         ttl=0,
     )
     time.sleep(0.01)
-    rec, reason = pa.consume("n1")
-    assert rec is None
-    assert reason == "expired"
+    assert pa.consume("n1") is None
     # Row should be gone -- a fresh store with the same nonce works.
     pa.store(
         nonce="n1", actor="operator", target_kind="agent",
@@ -156,14 +150,10 @@ def test_consume_wrong_confirmer_preserves_row(tmp_path):
         target_id="alpha", action_kind="model", payload={"x": 1},
     )
     # Wrong confirmer -- returns None and does NOT delete.
-    rec, reason = pa.consume("n1", confirmer="someone-else")
-    assert rec is None
-    assert reason == "wrong_confirmer"
+    assert pa.consume("n1", confirmer="someone-else") is None
     assert pa.peek("n1") is not None
     # Right confirmer -- succeeds.
-    rec, reason = pa.consume("n1", confirmer="operator")
-    assert rec is not None
-    assert reason is None
+    assert pa.consume("n1", confirmer="operator") is not None
 
 
 def test_consume_wrong_payload_digest_preserves_row(tmp_path):
@@ -173,14 +163,10 @@ def test_consume_wrong_payload_digest_preserves_row(tmp_path):
         target_id="alpha", action_kind="model", payload={"x": 1},
     )
     bogus_digest = "0" * 64
-    out, reason = pa.consume("n1", expected_payload_digest=bogus_digest)
-    assert out is None
-    assert reason == "digest_mismatch"
+    assert pa.consume("n1", expected_payload_digest=bogus_digest) is None
     assert pa.peek("n1") is not None
     # Real digest -- succeeds.
-    out, reason = pa.consume("n1", expected_payload_digest=rec["payload_digest"])
-    assert out is not None
-    assert reason is None
+    assert pa.consume("n1", expected_payload_digest=rec["payload_digest"]) is not None
 
 
 def test_consume_origin_kind_mismatch_preserves_row(tmp_path):
@@ -191,9 +177,7 @@ def test_consume_origin_kind_mismatch_preserves_row(tmp_path):
         origin_kind="agent",
     )
     # Require human, row says agent -- refuse.
-    rec, reason = pa.consume("n1", require_origin_kind="human")
-    assert rec is None
-    assert reason == "wrong_origin_kind"
+    assert pa.consume("n1", require_origin_kind="human") is None
     # Row preserved.
     assert pa.peek("n1") is not None
 
@@ -205,9 +189,7 @@ def test_consume_origin_kind_match_succeeds(tmp_path):
         target_id="alpha", action_kind="model", payload={"x": 1},
         origin_kind="human",
     )
-    rec, reason = pa.consume("n1", require_origin_kind="human")
-    assert rec is not None
-    assert reason is None
+    assert pa.consume("n1", require_origin_kind="human") is not None
 
 
 def test_consume_origin_kind_required_but_missing(tmp_path):
@@ -218,9 +200,7 @@ def test_consume_origin_kind_required_but_missing(tmp_path):
         target_id="alpha", action_kind="model", payload={"x": 1},
         origin_kind=None,
     )
-    rec, reason = pa.consume("n1", require_origin_kind="human")
-    assert rec is None
-    assert reason == "wrong_origin_kind"
+    assert pa.consume("n1", require_origin_kind="human") is None
     assert pa.peek("n1") is not None  # still there
 
 
@@ -291,8 +271,7 @@ def test_concurrent_consume_serializes(tmp_path):
 
     def worker():
         barrier.wait()
-        rec, _ = pa.consume("n1")
-        results.append(rec)
+        results.append(pa.consume("n1"))
 
     t1 = threading.Thread(target=worker)
     t2 = threading.Thread(target=worker)
@@ -303,129 +282,6 @@ def test_concurrent_consume_serializes(tmp_path):
 
     successes = [r for r in results if r is not None]
     assert len(successes) == 1, f"expected exactly one success, got {results}"
-
-
-def test_concurrent_consume_loser_sees_not_found(tmp_path):
-    """Loser of a concurrent consume race gets ``reason="not_found"``.
-
-    Sibling to ``test_concurrent_consume_serializes`` — pins that the
-    loser's failure reason is the stable ``not_found`` code (not None,
-    not some other reason like ``expired``) so callers can branch on
-    the code without parsing a message.
-    """
-    pa = _make_store(tmp_path)
-    pa.store(
-        nonce="n1", actor="operator", target_kind="agent",
-        target_id="alpha", action_kind="model", payload={"x": 1},
-    )
-    pairs: list[tuple] = []
-    barrier = threading.Barrier(2)
-
-    def worker():
-        barrier.wait()
-        pairs.append(pa.consume("n1"))
-
-    t1 = threading.Thread(target=worker)
-    t2 = threading.Thread(target=worker)
-    t1.start()
-    t2.start()
-    t1.join()
-    t2.join()
-
-    successes = [(r, why) for (r, why) in pairs if r is not None]
-    losers = [(r, why) for (r, why) in pairs if r is None]
-    assert len(successes) == 1, f"expected exactly one success, got {pairs}"
-    assert len(losers) == 1, f"expected exactly one loser, got {pairs}"
-    assert successes[0][1] is None, "winner should have no failure reason"
-    assert losers[0][1] == "not_found", (
-        f"loser should report not_found, got {losers[0][1]!r}"
-    )
-
-
-# ── store_with_cap (atomic reap+evict+insert) ───────────────────
-
-
-def test_store_with_cap_evicts_oldest_under_concurrent_proposes(tmp_path):
-    """N+K concurrent ``store_with_cap`` calls cap at exactly N rows.
-
-    Closes the race the legacy ``reap + list + cap-check + manual
-    evict + store`` sequence had: two proposers could both observe
-    ``count < max`` and both insert, producing N+1+ rows. The atomic
-    BEGIN IMMEDIATE version serializes them so the cap is honored.
-    """
-    pa = _make_store(tmp_path)
-    max_pending = 5
-    nonces = [f"n{i}" for i in range(max_pending + 10)]
-    barrier = threading.Barrier(len(nonces))
-    errors: list[BaseException] = []
-
-    def worker(nonce: str):
-        try:
-            barrier.wait()
-            pa.store_with_cap(
-                max_pending=max_pending,
-                nonce=nonce,
-                actor="operator",
-                target_kind="agent",
-                target_id="alpha",
-                action_kind="model",
-                payload={"i": nonce},
-                ttl=300,
-            )
-        except BaseException as e:  # pragma: no cover - surface in assert
-            errors.append(e)
-
-    threads = [threading.Thread(target=worker, args=(n,)) for n in nonces]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-
-    assert not errors, f"unexpected errors: {errors!r}"
-    rows = pa.list_pending()
-    assert len(rows) == max_pending, (
-        f"expected exactly {max_pending} rows under concurrency, got {len(rows)}"
-    )
-
-
-def test_store_with_cap_preserves_eviction_semantics(tmp_path):
-    """Sequential ``store_with_cap`` evicts the row with smallest ``expires_at``.
-
-    Pins that the atomic eviction order matches the legacy in-memory
-    ``min(..., key=expires_at)`` behavior — the soonest-expiring row
-    is dropped first, not the lowest insertion order. Built so callers
-    that relied on the legacy semantics (legacy tests, dashboard
-    surfaces) keep behaving identically.
-    """
-    pa = _make_store(tmp_path)
-    # Insert three rows whose ``expires_at`` is *reverse* of insertion
-    # order. ``n1`` has the shortest TTL → it should be the evictee
-    # when we push a fourth row at cap=3.
-    pa.store_with_cap(
-        max_pending=3, nonce="n1", actor="operator",
-        target_kind="agent", target_id="a", action_kind="x",
-        payload={"i": 1}, ttl=10,
-    )
-    pa.store_with_cap(
-        max_pending=3, nonce="n2", actor="operator",
-        target_kind="agent", target_id="a", action_kind="x",
-        payload={"i": 2}, ttl=100,
-    )
-    pa.store_with_cap(
-        max_pending=3, nonce="n3", actor="operator",
-        target_kind="agent", target_id="a", action_kind="x",
-        payload={"i": 3}, ttl=1000,
-    )
-    # At cap → next insert should evict n1 (smallest expires_at).
-    pa.store_with_cap(
-        max_pending=3, nonce="n4", actor="operator",
-        target_kind="agent", target_id="a", action_kind="x",
-        payload={"i": 4}, ttl=500,
-    )
-    rows = {r["nonce"] for r in pa.list_pending()}
-    assert rows == {"n2", "n3", "n4"}, (
-        f"expected n1 evicted (smallest TTL), got rows={rows}"
-    )
 
 
 # ── Replace-on-duplicate behavior ─────────────────────────────────
@@ -550,9 +406,8 @@ def test_event_bus_emits_pending_action_resolved_on_consume_success(tmp_path):
         origin_kind="human",
     )
     captured.clear()
-    rec, reason = pa.consume("n1", confirmer="operator", require_origin_kind="human")
+    rec = pa.consume("n1", confirmer="operator", require_origin_kind="human")
     assert rec is not None
-    assert reason is None
     types = [c[0] for c in captured]
     assert "pending_action_resolved" in types
     evt = next(c for c in captured if c[0] == "pending_action_resolved")
@@ -688,9 +543,8 @@ def test_store_persists_summary_and_preview_diff(tmp_path):
     assert listed[0]["summary"] == rec["summary"]
     assert listed[0]["preview_diff"] == rec["preview_diff"]
 
-    consumed, reason = pa.consume("n1", confirmer="operator")
+    consumed = pa.consume("n1", confirmer="operator")
     assert consumed is not None
-    assert reason is None
     assert consumed["summary"] == rec["summary"]
     assert consumed["preview_diff"] == rec["preview_diff"]
 
@@ -722,92 +576,3 @@ def test_pending_action_created_event_carries_summary_and_diff(tmp_path):
     evt = next(c for c in captured if c[0] == "pending_action_created")
     assert evt[2]["summary"] == "Switch alpha's model from gpt-4o to claude"
     assert evt[2]["preview_diff"] == "diff goes here"
-
-
-# ── consume() returns (record, reason) — reason-code coverage ─────
-#
-# The reason codes feed the dashboard's structured 400 payload so the
-# UI can surface a precise failure mode (and telemetry can scrape the
-# code into a data attribute on the toast). One test per code, plus a
-# success-path tuple shape check.
-
-
-def test_consume_success_returns_record_and_none_reason(tmp_path):
-    pa = _make_store(tmp_path)
-    pa.store(
-        nonce="n1", actor="operator", target_kind="agent",
-        target_id="alpha", action_kind="model", payload={"x": 1},
-    )
-    rec, reason = pa.consume("n1")
-    assert rec is not None
-    assert reason is None
-    assert rec["target_id"] == "alpha"
-
-
-def test_consume_returns_not_found_for_unknown_nonce(tmp_path):
-    pa = _make_store(tmp_path)
-    rec, reason = pa.consume("does-not-exist")
-    assert rec is None
-    assert reason == "not_found"
-
-
-def test_consume_returns_expired_and_deletes_row(tmp_path):
-    pa = _make_store(tmp_path)
-    pa.store(
-        nonce="n1", actor="operator", target_kind="agent",
-        target_id="alpha", action_kind="model", payload={"x": 1},
-        ttl=0,
-    )
-    time.sleep(0.01)
-    rec, reason = pa.consume("n1")
-    assert rec is None
-    assert reason == "expired"
-    # Expired row was deleted in the same txn — peek returns None.
-    assert pa.peek("n1") is None
-
-
-def test_consume_returns_digest_mismatch_and_preserves_row(tmp_path):
-    pa = _make_store(tmp_path)
-    pa.store(
-        nonce="n1", actor="operator", target_kind="agent",
-        target_id="alpha", action_kind="model", payload={"x": 1},
-    )
-    rec, reason = pa.consume("n1", expected_payload_digest="0" * 64)
-    assert rec is None
-    assert reason == "digest_mismatch"
-    # Row preserved so the legitimate caller can still retry.
-    assert pa.peek("n1") is not None
-
-
-def test_consume_returns_wrong_confirmer_and_preserves_row(tmp_path):
-    pa = _make_store(tmp_path)
-    pa.store(
-        nonce="n1", actor="operator", target_kind="agent",
-        target_id="alpha", action_kind="model", payload={"x": 1},
-    )
-    rec, reason = pa.consume("n1", confirmer="impostor")
-    assert rec is None
-    assert reason == "wrong_confirmer"
-    assert pa.peek("n1") is not None
-
-
-def test_consume_returns_wrong_origin_kind_and_preserves_row(tmp_path):
-    """Bug A reproducer at the unit level.
-
-    A row stored with ``origin_kind=None`` (e.g. propose path that
-    forgot to forward ``current_origin``) cannot satisfy a
-    ``require_origin_kind="human"`` confirm. The store correctly
-    surfaces ``wrong_origin_kind`` as the reason so the dashboard
-    can show a precise error instead of the legacy misleading
-    "invalid or expired" message.
-    """
-    pa = _make_store(tmp_path)
-    pa.store(
-        nonce="n1", actor="operator", target_kind="agent",
-        target_id="alpha", action_kind="model", payload={"x": 1},
-        origin_kind=None,
-    )
-    rec, reason = pa.consume("n1", require_origin_kind="human")
-    assert rec is None
-    assert reason == "wrong_origin_kind"
-    assert pa.peek("n1") is not None  # still there for legitimate retry

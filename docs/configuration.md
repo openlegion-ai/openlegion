@@ -10,7 +10,7 @@ OpenLegion uses YAML and JSON files in the `config/` directory. Config files are
 | `config/mesh.yaml` | YAML | Mesh host settings, LLM defaults, channel config |
 | `config/permissions.json` | JSON | Per-agent ACL matrix |
 | `config/cron.json` | JSON | Scheduled job state (auto-managed) |
-| `config/projects/` | Directory | Per-project data (project.md, members) |
+| `config/projects/` | Directory | Per-team data (`team.md` / legacy `project.md`, members). Directory name stays `projects/` through PR 2 of the project→team rename. |
 | `config/settings.json` | JSON | Dashboard-managed runtime settings: browser speed/delay/timeout, execution limits (`max_iterations`, `chat_max_tool_rounds`, etc.), default budgets, and a `browser_flags` dict that overrides any flag in [`src/browser/flags.py:KNOWN_FLAGS`](../src/browser/flags.py) (precedence sits between per-agent overrides and env vars). Read by the browser service via `src/browser/flags.py`. The dashboard also bridges the CAPTCHA solver provider/key fields into the host process env (via `os.environ[…]` in `src/host/runtime.py`) so the browser container picks them up. **The four `_ENV_ONLY_FLAGS` (`CAPTCHA_SOLVER_KEY`, `CAPTCHA_SOLVER_KEY_SECONDARY`, `CAPTCHA_SOLVER_PROXY_LOGIN`, `CAPTCHA_SOLVER_PROXY_PASSWORD`) are stripped from this file at load with a one-time warning that names the stripped keys** — settings.json is plaintext on disk with no chmod / encryption, so solver secrets must come from env vars only. See [Browser Flag Precedence](#browser-flag-precedence). |
 | `config/api_keys.json` | JSON | Named API keys for mesh authentication. Shape: `{"keys": {key_id: {name, key_hash, created_at, last_used_at}}}`. Key IDs are `"ak_" + token_hex(6)`; the raw key is returned **once** at creation (`POST /api/api-keys`) and never persisted — only the salted SHA-256 hash (`sha256(key_id + raw_key)`) is stored. Name capped at 128 chars. The legacy `OPENLEGION_API_KEY` env var (single key) is also accepted as a back-compat fallback. |
 | `data/captcha_costs.json` | JSON | Runtime CAPTCHA spend ledger (chmod `0o600`). Per-agent monthly buckets in millicents (1/100,000 USD); persisted as a periodic snapshot from in-memory state on the 60s metrics tick. Override path with `CAPTCHA_COST_COUNTER_PATH`. State is current-month only — older windows defer to the planned SQLite snapshots. Restart loses at most one tick of spend. |
@@ -21,7 +21,7 @@ OpenLegion uses YAML and JSON files in the `config/` directory. Config files are
 
 Defines every agent in the fleet.
 
-**Reserved agent IDs.** `mesh`, `operator`, and `canary-probe` are reserved (`src/shared/types.py:RESERVED_AGENT_IDS`). `mesh` and `operator` are internal trust-zone identifiers; `canary-probe` is the dedicated profile used by the stealth canary scanner (`src/browser/canary.py`). Attempts to create an agent with any of these IDs are rejected. The CLI also rejects `operator` from project membership (`src/cli/config.py`).
+**Reserved agent IDs.** `mesh`, `operator`, and `canary-probe` are reserved (`src/shared/types.py:RESERVED_AGENT_IDS`). `mesh` and `operator` are internal trust-zone identifiers; `canary-probe` is the dedicated profile used by the stealth canary scanner (`src/browser/canary.py`). Attempts to create an agent with any of these IDs are rejected. The CLI also rejects `operator` from team membership (`src/cli/config.py`).
 
 ```yaml
 agents:
@@ -173,7 +173,7 @@ Per-agent access control lists. Default policy is **deny** -- if not listed, it'
 }
 ```
 
-Blackboard patterns use the `projects/{name}/*` namespace. When an agent joins a project via `openlegion project add-agent`, it automatically receives read/write access to that project's namespace. Standalone agents (not in any project) get empty blackboard permissions. The `MeshClient` on the agent side transparently prefixes all blackboard keys with the project namespace, so agents use natural keys like `tasks/research_01` while data is stored under `projects/sales/tasks/research_01`.
+Blackboard patterns use the `projects/{name}/*` namespace (on-disk prefix retained through PR 2 of the project→team rename). When an agent joins a team via `openlegion team add-agent`, it automatically receives read/write access to that team's namespace. Solo agents (not on any team) get empty blackboard permissions. The `MeshClient` on the agent side transparently prefixes all blackboard keys with the team namespace, so agents use natural keys like `tasks/research_01` while data is stored under `projects/sales/tasks/research_01`.
 
 ### Permission Fields
 
@@ -197,7 +197,7 @@ Blackboard patterns use the `projects/{name}/*` namespace. When an agent joins a
 | `wallet_rate_limit_per_hour` | integer | Max transactions per hour. `0` uses the global default. |
 | `wallet_allowed_contracts` | list[string] | Contract addresses this agent can interact with. Empty list allows all. |
 | `can_manage_fleet` | boolean | Control-plane: create/register/deregister agents via mesh endpoints. Default: `false` for workers, `true` for the operator agent. |
-| `can_manage_projects` | boolean | Control-plane: create/archive projects and edit membership. Default: `false` for workers, `true` for operator. |
+| `can_manage_teams` (alias `can_manage_projects`) | boolean | Control-plane: create/archive teams and edit membership. Default: `false` for workers, `true` for operator. The legacy field name is mirrored via a model-validator through PR 3. |
 | `can_edit_agent_config` | boolean | Control-plane: propose/confirm edits to another agent's instructions/soul/model/etc. Default: `false` for workers, `true` for operator. |
 | `can_view_fleet_metrics` | boolean | Control-plane: access `/mesh/system/metrics` and `/mesh/agents/{id}/metrics`. Default: `false` for workers, `true` for operator. |
 | `can_route_tasks` | boolean | Control-plane: create durable orchestration task records (Task 6 surface). Default: `false` for workers, `true` for operator. |
@@ -206,11 +206,11 @@ Blackboard patterns use the `projects/{name}/*` namespace. When an agent joins a
 ### Glob Patterns
 
 - `*` matches everything
-- `projects/myproject/*` matches all keys under the `myproject` namespace
+- `projects/myteam/*` matches all keys under the `myteam` namespace
 - `tasks/*` matches `tasks/abc123`, `tasks/research_01`, etc.
 - `context/prospect_*` matches `context/prospect_acme`, etc.
 
-Note: Blackboard permissions are managed automatically when agents join/leave projects. You generally don't need to edit blackboard patterns by hand.
+Note: Blackboard permissions are managed automatically when agents join/leave teams. You generally don't need to edit blackboard patterns by hand.
 
 ## `.env` — Credentials
 
@@ -289,11 +289,11 @@ Beyond credentials, these environment variables affect runtime behavior:
 | `MESH_HOST` | -- | Mesh host URL (set automatically in containers) |
 | `AGENT_ID` | -- | Agent identifier (set automatically in containers) |
 | `THINKING` | `off` | Extended thinking/reasoning mode (set automatically from `thinking` in agents.yaml) |
-| `PROJECT_NAME` | -- | Project this agent belongs to (set automatically for project members) |
+| `PROJECT_NAME` | -- | Team this agent belongs to (set automatically for team members). Env-var name is retained through PR 2 of the project→team rename. |
 | `EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model for memory vector search (set automatically from `llm.embedding_model` in mesh.yaml). Set to `"none"` to disable vector search |
 | `OPENLEGION_MAX_AGENTS` | `0` | Plan limit: maximum agents to start. `0` means unlimited. If set to N > 0, only the first N agents are started. **Also drives plan-aware browser-service sizing** (`src/host/runtime.py:start_browser_service`) — the browser container's memory, SHM, CPU quota, and `MAX_BROWSERS` cap are selected by the `max_agents <= 1` / `<= 5` / `> 5` branches: ≤1 → Basic (2GB / 512m / 1.0 CPU / 1 browser), ≤5 → Growth (4GB / 1g / 1.5 CPU / N browsers), >5 → Pro (8GB / 2g / 2.0 CPU / `min(N, 10)` browsers). Note: `OPENLEGION_MAX_AGENTS=0` (the default, meaning "unlimited agents") falls into the `<= 1` branch and selects the **Basic** browser-service tier — counterintuitive but intentional for self-host installs that haven't declared a plan. |
-| `OPENLEGION_MAX_PROJECTS` | -- | Plan limit. Three-state semantics: **unset** (env var absent) → projects are unlimited; **set to `0`** → projects are disabled entirely, `POST /mesh/projects` returns HTTP 403; **set to N > 0** → only N projects are allowed. Distinction is `_max_projects_env is not None` in `src/host/server.py`. |
-| `OPENLEGION_PROJECT_SCOPE_MODE` | `enforce` | Project-scope rollout kill switch. Accepts `"warn"` or `"enforce"` (case-insensitive via `.lower()`). Invalid values default to `"enforce"` with a WARNING. **Read once at module import — restart the mesh to change.** |
+| `OPENLEGION_MAX_TEAMS` (alias `OPENLEGION_MAX_PROJECTS`) | -- | Plan limit. Three-state semantics: **unset** (env var absent) → teams are unlimited; **set to `0`** → teams are disabled entirely, `POST /mesh/projects` returns HTTP 403; **set to N > 0** → only N teams are allowed. The new var name is the canonical read; the legacy one is honoured as a fallback through PR 3. |
+| `OPENLEGION_TEAM_SCOPE_MODE` (alias `OPENLEGION_PROJECT_SCOPE_MODE`) | `enforce` | Team-scope rollout kill switch. Accepts `"warn"` or `"enforce"` (case-insensitive via `.lower()`). Invalid values default to `"enforce"` with a WARNING. **Read once at module import — restart the mesh to change.** Legacy var name still honoured as a fallback. |
 | `OPENLEGION_ORCHESTRATION_TASKS_V2` | `1` | Toggle the durable orchestration v2 tasks store. `"1"` enables; `"0"` falls back to the legacy blackboard task path. **Read once at module import — restart the mesh to flip.** |
 | `OPENLEGION_ORCHESTRATION_TASKS_DB` | `data/tasks.db` | Override the SQLite path for the orchestration v2 tasks store. |
 | `OPENLEGION_API_KEY` | -- | Legacy single API key for back-compat with the named-key system (`config/api_keys.json`). Compared with `hmac.compare_digest`. Prefer creating named keys via `POST /api/api-keys`. |
@@ -418,7 +418,7 @@ Cost caps are **opt-in** — unset = no cap. All amounts are USD; the runtime le
 | Variable | Default | Description |
 |---|---|---|
 | `CAPTCHA_COST_LIMIT_USD_PER_AGENT_MONTH` | -- (no cap when unset) | Per-agent monthly USD cap. When exceeded, solver short-circuits with `skipped="cost_cap"`. |
-| `CAPTCHA_COST_LIMIT_USD_PER_TENANT_MONTH` | -- (no cap when unset) | Per-tenant monthly USD cap (tenant = project membership from `config/projects/`). Drives 50/80/100% threshold alerts. |
+| `CAPTCHA_COST_LIMIT_USD_PER_TENANT_MONTH` | -- (no cap when unset) | Per-tenant monthly USD cap (tenant = team membership from `config/projects/`). Drives 50/80/100% threshold alerts. |
 | `CAPTCHA_COST_COUNTER_PATH` | `data/captcha_costs.json` | Path to the persisted cost counter snapshot. chmod `0o600`. |
 | `OPENLEGION_CAPTCHA_FORCE_SOLVE_DOMAINS` | -- | Comma-separated; force normal solver flow on hosts otherwise classified `unsolvable` by `src/browser/captcha_policy.py` (e.g. `challenges.cloudflare.com`, `humansecurity.com`, `captcha-delivery.com`). Read once at module import — restart browser service to apply changes. |
 | `OPENLEGION_CAPTCHA_SKIP_SOLVE_DOMAINS` | -- | Comma-separated; force escalation-only on hosts the solver would otherwise attempt. Read once at module import — restart browser service to apply changes. |

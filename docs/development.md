@@ -140,7 +140,7 @@ Sharding uses `pytest-split` (`--splits 3 --group N`). `--dist=loadfile` keeps a
 | `src/shared/models.py` | `tests/test_models.py` |
 | `src/templates/` | `tests/test_templates.py` |
 | `src/cli/` | `tests/test_cli_commands.py`, `tests/test_setup_wizard.py` |
-| `src/cli/config.py` (projects) | `tests/test_projects.py` |
+| `src/cli/config.py` (teams) | `tests/test_teams.py` |
 | `src/dashboard/auth.py` | `tests/test_dashboard_auth.py` |
 | `src/dashboard/events.py` | `tests/test_events.py` |
 | `src/agent/memory.py` (fallback) | `tests/test_embedding_fallback.py` |
