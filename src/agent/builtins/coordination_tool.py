@@ -824,10 +824,20 @@ async def _update_status_v2(
             return {"error": "task_not_found", "task_id": task_id}
 
     blocker_note = sanitize_for_prompt(summary) if state == "blocked" else None
+    # When the recipient transitions to ``done`` via update_status
+    # (instead of the dedicated complete_task tool), still forward
+    # the summary as ``result={"summary": ...}`` so the mesh back-edge
+    # writer can populate the originator's check_inbox event. Without
+    # this codex P2 r4: the parallel completion path silently drops
+    # summaries — originator sees an empty done event.
+    done_result: dict | None = None
+    if state == "done" and summary:
+        done_result = {"summary": sanitize_for_prompt(summary)[:500]}
     try:
-        await mesh_client.set_task_status(
-            target["id"], state, blocker_note=blocker_note,
-        )
+        kwargs: dict = {"blocker_note": blocker_note}
+        if done_result is not None:
+            kwargs["result"] = done_result
+        await mesh_client.set_task_status(target["id"], state, **kwargs)
     except Exception as e:
         return {"error": f"Failed to update status: {e}"}
     return {"updated": True, "state": state, "task_id": target["id"]}

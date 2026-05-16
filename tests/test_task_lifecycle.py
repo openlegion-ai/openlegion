@@ -299,6 +299,69 @@ async def test_explicit_complete_task_forwards_summary_to_back_edge():
 
 
 @pytest.mark.asyncio
+async def test_update_status_done_forwards_summary_to_back_edge():
+    """Parallel completion path: agents that call
+    ``update_status(state='done', summary='...')`` instead of the
+    dedicated ``complete_task`` tool must ALSO forward the summary
+    to ``set_task_status(result={"summary": ...})`` so the back-edge
+    writer can populate the originator's check_inbox event. Without
+    this codex P2 r4: this advertised path silently dropped summaries.
+    Non-done states leave ``result`` unset (only ``done`` uses it —
+    ``blocked`` uses ``blocker_note`` which is wired separately).
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from src.agent.builtins.coordination_tool import _update_status_v2
+
+    mesh_client = MagicMock()
+    mesh_client.agent_id = "recipient"
+    mesh_client.list_task_inbox = AsyncMock(
+        return_value=[{"id": "task_xyz", "status": "working"}],
+    )
+    mesh_client.set_task_status = AsyncMock(return_value={"id": "task_xyz"})
+
+    result = await _update_status_v2(
+        state="done", summary="shipped: artifacts/report.md",
+        task_id="task_xyz", mesh_client=mesh_client,
+    )
+
+    assert result["updated"] is True
+    call = mesh_client.set_task_status.await_args
+    assert call.args == ("task_xyz", "done")
+    assert call.kwargs["result"] == {
+        "summary": "shipped: artifacts/report.md",
+    }
+
+
+@pytest.mark.asyncio
+async def test_update_status_non_done_omits_summary_result():
+    """Sanity guard: only ``done`` populates ``result`` — for other
+    states the summary either has its own slot (``blocker_note`` for
+    blocked) or is ignored. Pin this so a future refactor doesn't
+    accidentally start forwarding summaries for ``working``/``accepted``
+    transitions."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from src.agent.builtins.coordination_tool import _update_status_v2
+
+    mesh_client = MagicMock()
+    mesh_client.agent_id = "recipient"
+    mesh_client.list_task_inbox = AsyncMock(
+        return_value=[{"id": "task_xyz", "status": "pending"}],
+    )
+    mesh_client.set_task_status = AsyncMock(return_value={"id": "task_xyz"})
+
+    await _update_status_v2(
+        state="working", summary="some text", task_id="task_xyz",
+        mesh_client=mesh_client,
+    )
+
+    call = mesh_client.set_task_status.await_args
+    # No ``result`` kwarg — only ``blocker_note=None`` for non-blocked.
+    assert "result" not in call.kwargs
+
+
+@pytest.mark.asyncio
 async def test_explicit_complete_task_truncates_long_summary():
     """A pathologically long summary gets capped at 500 chars so a
     misbehaving recipient can't bloat the back-edge payload."""
