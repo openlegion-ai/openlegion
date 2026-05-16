@@ -243,6 +243,10 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         """Streaming chat. Returns SSE events for tool use and text deltas."""
         _trace_id = request.headers.get("x-trace-id")
         _origin = _origin_from_mesh_request(request)
+        # Mirrors the non-streaming /chat path (PR #903): when a
+        # wake rides ``x-task-id``, plumb it so the streaming loop
+        # auto-closes the originating handoff task on completion.
+        _task_id = request.headers.get("x-task-id") or None
 
         async def event_generator():
             # Set current_origin / current_trace_id in THIS task's
@@ -265,7 +269,7 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
 
             stream = loop.chat_stream(
                 sanitize_for_prompt(msg.message), trace_id=_trace_id,
-                origin=_origin,
+                origin=_origin, task_id=_task_id,
             )
             stream_iter = stream.__aiter__()
             # Use asyncio.wait (not wait_for) so the pending __anext__

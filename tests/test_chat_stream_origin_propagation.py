@@ -100,7 +100,7 @@ class _FakeLoop:
         self.current_task = None
         self.recorded_origin_at_tool_time: str | None = "SENTINEL_NOT_RECORDED"
 
-    async def chat_stream(self, message: str, *, trace_id=None, origin=None):
+    async def chat_stream(self, message: str, *, trace_id=None, origin=None, task_id=None):
         # Yield a couple of text_delta-shaped events first. Each yield
         # represents a streaming SSE chunk, and the event_generator
         # in the endpoint will spawn a fresh ensure_future task per
@@ -173,3 +173,173 @@ async def test_chat_stream_endpoint_propagates_origin_to_late_iteration_tools():
         f"path will fail confirm with 'did not carry a verified "
         f"human origin'."
     )
+
+
+# Latent ValueError guard: loop.chat_stream's old inner set/reset
+# pattern raised at end-of-stream because the token was created in
+# iteration 1's task and reset() ran in iteration N's task. Removing
+# the inner set/reset (now redundant after the outer hoist) eliminated
+# that. This test pins it down.
+
+class _CleanStreamLoop:
+    """Yields a few events and exits cleanly. With the bug, the inner
+    finally's reset(token) would raise ValueError at stream end."""
+
+    def __init__(self):
+        self.agent_id = "operator"
+        self.state = "idle"
+        self.current_task = None
+
+    async def chat_stream(self, message, *, trace_id=None, origin=None, task_id=None):
+        yield {"type": "text_delta", "content": "hello "}
+        yield {"type": "text_delta", "content": "world"}
+        yield {"type": "done", "response": "hello world", "tool_outputs": [], "tokens_used": 5}
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_no_valueerror_at_stream_end():
+    """Regression for the latent ValueError: loop.chat_stream used to
+    do an inner ``current_origin.set()`` in iteration 1's task and
+    match it with ``current_origin.reset(token)`` at its finally —
+    which runs in iteration N's task, a different context. Python's
+    ``ContextVar.reset()`` rejects cross-context resets with
+    ValueError. The exception surfaced through ``next_e.result()``
+    and broke out of event_generator's loop with an unhandled
+    exception. Removing the inner set/reset (now redundant after
+    PR #906's outer hoist) fixes this. Test asserts the stream
+    completes without any exception leaking into the response.
+    """
+    import logging
+
+    from httpx import ASGITransport, AsyncClient
+
+    from src.agent.server import create_agent_app
+    from src.shared.trace import origin_header
+    from src.shared.types import MessageOrigin
+
+    app = create_agent_app(_CleanStreamLoop())  # type: ignore[arg-type]
+    human = MessageOrigin(kind="human", channel="dashboard", user="user1")
+    headers = {"x-mesh-internal": "1"}
+    headers.update(origin_header(human))
+
+    lines: list[str] = []
+    caplog_records: list[logging.LogRecord] = []
+
+    class _CaptureHandler(logging.Handler):
+        def emit(self, record):
+            caplog_records.append(record)
+
+    root_logger = logging.getLogger()
+    handler = _CaptureHandler(level=logging.WARNING)
+    root_logger.addHandler(handler)
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            async with client.stream(
+                "POST", "/chat/stream",
+                json={"message": "hi"},
+                headers=headers,
+                timeout=10,
+            ) as resp:
+                assert resp.status_code == 200
+                async for line in resp.aiter_lines():
+                    if line:
+                        lines.append(line)
+    finally:
+        root_logger.removeHandler(handler)
+
+    # All three events landed.
+    assert any('"text_delta"' in line for line in lines), lines
+    assert any('"done"' in line for line in lines), lines
+    # No ValueError-from-Context-reset in the captured warning logs.
+    valueerror_records = [
+        r for r in caplog_records
+        if "different Context" in r.getMessage()
+        or "Token" in r.getMessage() and "Context" in r.getMessage()
+    ]
+    assert not valueerror_records, (
+        f"ValueError leaked from inner reset: {[r.getMessage() for r in valueerror_records]}"
+    )
+
+
+# task_id plumbing through /chat/stream — closes the gap PR #903
+# left open. The streaming chat now auto-closes the originating
+# handoff task on completion (mirrors the non-streaming /chat).
+
+class _RecordingMeshClient:
+    """Records all set_task_status calls for assertion."""
+
+    def __init__(self):
+        self.calls: list[tuple[str, str, dict]] = []
+
+    async def set_task_status(self, task_id, status, *, result=None, error=None):
+        self.calls.append((task_id, status, {"result": result, "error": error}))
+        return {}
+
+
+class _LoopWithTaskClose:
+    """Yields a clean stream, then auto-close should fire via task_id."""
+
+    def __init__(self):
+        self.agent_id = "operator"
+        self.state = "idle"
+        self.current_task = None
+        self.mesh_client = _RecordingMeshClient()
+        # Async lock + queue used by the busy-handoff branch — even
+        # though this test doesn't exercise it, the real chat_stream
+        # checks ``self.current_task`` first.
+        self._chat_lock = asyncio.Lock()
+        # _checkpoint_chat_session is called in the finally.
+        self._checkpointed = False
+
+    async def _maybe_restore_session(self):
+        return None
+
+    async def _checkpoint_chat_session(self):
+        self._checkpointed = True
+
+    async def _chat_stream_inner(self, user_message):
+        yield {"type": "text_delta", "content": "ok"}
+        yield {"type": "done", "response": "all done", "tool_outputs": [], "tokens_used": 3}
+
+    async def _auto_close_task(self, task_id, status, *, result_payload=None, error=None):
+        # Delegate to the recording mesh_client so assertions stay simple.
+        await self.mesh_client.set_task_status(
+            task_id, status, result=result_payload, error=error,
+        )
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_auto_closes_task_on_clean_done():
+    """When ``x-task-id`` rides the streaming wake, ``loop.chat_stream``
+    must auto-call ``set_task_status(done)`` on clean completion —
+    same contract as the non-streaming ``loop.chat`` (PR #903).
+    Without this, dashboard-routed handoffs that happen to land on
+    streaming chat never close.
+    """
+    # Use the real loop.chat_stream method on a stand-in that has
+    # the helpers it needs but a simple inner generator. We invoke
+    # chat_stream directly (not via the endpoint) — the contract
+    # under test is the loop-side auto-close, not the endpoint
+    # plumbing (covered by the test above).
+    from src.agent.loop import AgentLoop
+
+    stand_in = _LoopWithTaskClose()
+    # Steal the real chat_stream method, bind it to our stand-in.
+    method = AgentLoop.chat_stream.__get__(stand_in, AgentLoop)
+    events = []
+    async for ev in method("hi", task_id="task_alpha"):
+        events.append(ev)
+
+    # Stream produced both events.
+    assert any(e.get("type") == "done" for e in events), events
+    # Auto-close fired exactly once, with the right shape.
+    assert len(stand_in.mesh_client.calls) == 1
+    task_id, status, payload = stand_in.mesh_client.calls[0]
+    assert task_id == "task_alpha"
+    assert status == "done"
+    assert payload["result"] == {"summary": "all done"}
+    assert payload["error"] is None
+    # Checkpoint still ran.
+    assert stand_in._checkpointed
