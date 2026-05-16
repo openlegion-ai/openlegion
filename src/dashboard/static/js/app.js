@@ -8060,14 +8060,35 @@ function dashboard() {
     _scrollTimers: {},
 
     _scrollChat(agentId, force) {
-      if (this._scrollTimers[agentId]) return;
-      this._scrollTimers[agentId] = setTimeout(() => {
-        delete this._scrollTimers[agentId];
+      if (!agentId) return;
+      // The previous dedup silently dropped subsequent triggers — if the
+      // first scroll fired before the chat-messages container had mounted
+      // (Alpine x-for / x-show / async _loadChatHistory), no later attempt
+      // would catch up. Cancel and reschedule so the newest caller wins.
+      if (this._scrollTimers[agentId]) clearTimeout(this._scrollTimers[agentId]);
+      let lastSet = null;
+      const tryScroll = (allowForce) => {
         const el = document.getElementById('chat-messages-' + agentId);
         if (!el) return;
-        // Only auto-scroll if user is near the bottom (within 150px) or forced
-        const nearBottom = force || (el.scrollHeight - el.scrollTop - el.clientHeight < 150);
-        if (nearBottom) el.scrollTop = el.scrollHeight;
+        const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+        // If we set scrollTop on a prior attempt and it has since drifted,
+        // the user scrolled manually — respect that and stop chasing.
+        const userMoved = lastSet !== null && Math.abs(el.scrollTop - lastSet) > 4;
+        if ((allowForce && force) || (distance < 150 && !userMoved)) {
+          el.scrollTop = el.scrollHeight;
+          lastSet = el.scrollTop;
+        }
+      };
+      this._scrollTimers[agentId] = setTimeout(() => {
+        delete this._scrollTimers[agentId];
+        tryScroll(true);
+        // Late-render safety net — covers (a) Alpine x-for renders that
+        // land after the 50ms timer, (b) async _loadChatHistory replacing
+        // the message array, (c) avatar image-load reflows that grow
+        // scrollHeight after the initial paint. The retries respect
+        // manual user scrolling (force is one-shot via allowForce).
+        setTimeout(() => tryScroll(false), 250);
+        setTimeout(() => tryScroll(false), 800);
       }, 50);
     },
 
