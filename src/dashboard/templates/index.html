@@ -1528,29 +1528,29 @@
 
       <!-- Fleet Overview (merged: Fleet + Agents + Queues) -->
       <div x-show="activeTab === 'fleet' && !detailAgent" x-cloak>
-        <!-- Project switcher + Add Agent row -->
+        <!-- Team switcher + Add Agent row -->
         <div x-show="agents.length > 0" class="flex items-center gap-2 mb-3 min-w-0" x-cloak>
           <div class="flex items-center gap-2 flex-1 min-w-0">
-            <!-- Scrollable project tabs -->
-            <div x-show="projects.length > 0" class="project-tabs-scroll">
-              <button @click="switchProject(null)"
+            <!-- Scrollable team tabs -->
+            <div x-show="teams.length > 0" class="project-tabs-scroll">
+              <button @click="switchTeam(null)"
                 class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
-                :class="!activeProject
+                :class="!activeTeam
                   ? 'bg-gray-700 text-white shadow-sm'
                   : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'">
-                Standalone
-                <span class="opacity-60 ml-0.5" x-text="'(' + unassignedAgents.length + ')'"></span>
+                Solo
+                <span class="opacity-60 ml-0.5" x-text="'(' + soloAgents.length + ')'"></span>
               </button>
-              <template x-for="proj in projects" :key="proj.name">
-                <button @click="switchProject(proj.name)"
+              <template x-for="proj in teams" :key="proj.name">
+                <button @click="switchTeam(proj.name)"
                   class="px-2.5 py-1 rounded-md text-xs font-medium transition-all inline-flex items-center gap-1"
                   :class="[
-                    activeProject === proj.name
+                    activeTeam === proj.name
                       ? 'bg-gray-700 text-white shadow-sm'
                       : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70',
                     proj.over_limit ? 'opacity-50' : ''
                   ].join(' ')"
-                  :title="proj.over_limit ? 'Project over plan limit' : (proj.members || []).length + ' member' + ((proj.members || []).length !== 1 ? 's' : '')">
+                  :title="proj.over_limit ? 'Team over plan limit' : (proj.members || []).length + ' member' + ((proj.members || []).length !== 1 ? 's' : '')">
                   <span x-text="proj.name"></span>
                   <svg x-show="proj.over_limit" x-cloak class="w-3 h-3 text-gray-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
                   <span class="opacity-60 ml-0.5" x-text="'(' + agents.filter(a => a.project === proj.name).length + ')'"></span>
@@ -1558,17 +1558,17 @@
               </template>
             </div>
             <div class="relative group/proj flex-shrink-0">
-              <button @click="openProjectModal()"
-                :disabled="atProjectLimit"
-                :class="atProjectLimit ? 'opacity-50 cursor-not-allowed' : ''"
+              <button @click="openTeamModal()"
+                :disabled="atTeamLimit"
+                :class="atTeamLimit ? 'opacity-50 cursor-not-allowed' : ''"
                 class="px-2.5 py-1 rounded-md text-xs text-gray-500 hover:text-white hover:bg-gray-700 transition-colors flex items-center gap-1 whitespace-nowrap"
-                :title="atProjectLimit ? '' : 'Create project'">
+                :title="atTeamLimit ? '' : 'Create team'">
                 <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-                New Project
+                New Team
               </button>
-              <div x-show="atProjectLimit" x-cloak
+              <div x-show="atTeamLimit" x-cloak
                 class="hidden group-hover/proj:block absolute top-full mt-1.5 left-0 z-50 w-52 max-w-[calc(100vw-2rem)] px-3 py-2 rounded-lg bg-gray-900 border border-gray-700 shadow-xl text-xs text-gray-300 whitespace-normal pointer-events-none">
-                <span x-text="!projectsEnabled ? 'Projects aren\'t available on your current plan.' : 'Project limit reached.'"></span>
+                <span x-text="!teamsEnabled ? 'Teams aren\'t available on your current plan.' : 'Team limit reached.'"></span>
                 <span class="text-indigo-400 ml-0.5">Upgrade to add more.</span>
                 <div class="absolute -top-1 left-4 w-2 h-2 bg-gray-900 border-l border-t border-gray-700 rotate-45"></div>
               </div>
@@ -1628,144 +1628,144 @@
           </template>
         </div>
         <!-- ═══ PROJECT HUB (unified: Context · Activity · State · Files · Broadcast) ═══ -->
-        <div x-show="activeProject && agents.length > 0" x-cloak class="mb-4">
+        <div x-show="activeTeam && agents.length > 0" x-cloak class="mb-4">
           <div class="bg-gray-900 border border-gray-800 rounded-xl">
             <!-- Hub header — always visible -->
             <div class="flex items-center gap-2 px-3 sm:px-4 py-2.5 cursor-pointer select-none min-w-0"
-              @click="projectHubExpanded = !projectHubExpanded">
+              @click="teamHubExpanded = !teamHubExpanded">
               <svg class="w-3 h-3 text-gray-600 transition-transform duration-200 flex-shrink-0"
-                :class="projectHubExpanded && 'rotate-90'"
+                :class="teamHubExpanded && 'rotate-90'"
                 fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
               </svg>
-              <span class="text-xs font-medium text-gray-400 flex-shrink-0">Project</span>
+              <span class="text-xs font-medium text-gray-400 flex-shrink-0">Team</span>
               <span class="text-[10px] px-1.5 py-0.5 rounded-full bg-indigo-900/30 text-indigo-400 border border-indigo-800/30 truncate max-w-[7rem] sm:max-w-[12rem] flex-shrink-0"
-                x-text="activeProject"></span>
+                x-text="activeTeam"></span>
               <span class="text-[10px] text-gray-600 flex-shrink-0 hidden sm:block"
-                x-text="(activeProjectData?.members || []).length + ' member' + ((activeProjectData?.members || []).length !== 1 ? 's' : '')"></span>
-              <span x-show="activeProjectData?.description" class="text-[10px] text-gray-600 truncate hidden sm:block"
-                :title="activeProjectData?.description" x-text="activeProjectData?.description"></span>
+                x-text="(activeTeamData?.members || []).length + ' member' + ((activeTeamData?.members || []).length !== 1 ? 's' : '')"></span>
+              <span x-show="activeTeamData?.description" class="text-[10px] text-gray-600 truncate hidden sm:block"
+                :title="activeTeamData?.description" x-text="activeTeamData?.description"></span>
               <!-- Tab pills — desktop only, click stops propagation to header toggle -->
-              <div class="project-hub-desktop-tabs hidden md:flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5 ml-auto flex-shrink-0" @click.stop role="tablist" aria-label="Project sections">
-                <button @click="projectHubExpanded = true; projectHubTab = 'docs'"
+              <div class="project-hub-desktop-tabs hidden md:flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5 ml-auto flex-shrink-0" @click.stop role="tablist" aria-label="Team sections">
+                <button @click="teamHubExpanded = true; teamHubTab = 'docs'"
                   class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
-                  :class="projectHubExpanded && projectHubTab === 'docs' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
-                  role="tab" :aria-selected="projectHubExpanded && projectHubTab === 'docs'">
-                  <span>Context</span><span class="setting-hint setting-hint-sm ml-0.5" tabindex="0">?<span class="setting-hint-text">The shared PROJECT.md file visible to all agents. Use it for project-wide instructions, goals, and context.</span></span>
+                  :class="teamHubExpanded && teamHubTab === 'docs' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
+                  role="tab" :aria-selected="teamHubExpanded && teamHubTab === 'docs'">
+                  <span>Context</span><span class="setting-hint setting-hint-sm ml-0.5" tabindex="0">?<span class="setting-hint-text">The shared TEAM.md file visible to all agents. Use it for team-wide instructions, goals, and context.</span></span>
                 </button>
-                <button @click="projectHubExpanded = true; projectHubTab = 'activity'; if (commsActivity.length === 0 && !commsActivityLoading) fetchCommsActivity()"
+                <button @click="teamHubExpanded = true; teamHubTab = 'activity'; if (commsActivity.length === 0 && !commsActivityLoading) fetchCommsActivity()"
                   class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
-                  :class="projectHubExpanded && projectHubTab === 'activity' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
-                  role="tab" :aria-selected="projectHubExpanded && projectHubTab === 'activity'">
+                  :class="teamHubExpanded && teamHubTab === 'activity' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
+                  role="tab" :aria-selected="teamHubExpanded && teamHubTab === 'activity'">
                   <span>Activity</span><span x-show="commsActivity.length > 0" class="ml-1 opacity-50 font-mono text-[10px]" x-text="'(' + commsActivity.length + ')'"></span><span class="setting-hint setting-hint-sm ml-0.5" tabindex="0">?<span class="setting-hint-text">Real-time feed of blackboard writes and pub/sub events between agents. Shows how agents are coordinating.</span></span>
                 </button>
-                <button @click="projectHubExpanded = true; projectHubTab = 'state'; fetchBlackboard(); if (Object.keys(commsSubs).length === 0) fetchCommsActivity()"
+                <button @click="teamHubExpanded = true; teamHubTab = 'state'; fetchBlackboard(); if (Object.keys(commsSubs).length === 0) fetchCommsActivity()"
                   class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
-                  :class="projectHubExpanded && projectHubTab === 'state' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
-                  role="tab" :aria-selected="projectHubExpanded && projectHubTab === 'state'">
+                  :class="teamHubExpanded && teamHubTab === 'state' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
+                  role="tab" :aria-selected="teamHubExpanded && teamHubTab === 'state'">
                   <span>State</span><span class="setting-hint setting-hint-sm ml-0.5" tabindex="0">?<span class="setting-hint-text">The shared blackboard — a key-value store where agents read and write data to coordinate. Browse, edit, or delete entries.</span></span>
                 </button>
-                <button @click="projectHubExpanded = true; projectHubTab = 'artifacts'; fetchArtifacts()"
+                <button @click="teamHubExpanded = true; teamHubTab = 'artifacts'; fetchArtifacts()"
                   class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
-                  :class="projectHubExpanded && projectHubTab === 'artifacts' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
-                  role="tab" :aria-selected="projectHubExpanded && projectHubTab === 'artifacts'">
+                  :class="teamHubExpanded && teamHubTab === 'artifacts' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
+                  role="tab" :aria-selected="teamHubExpanded && teamHubTab === 'artifacts'">
                   Files
                 </button>
-                <button @click="projectHubExpanded = true; projectHubTab = 'broadcast'"
+                <button @click="teamHubExpanded = true; teamHubTab = 'broadcast'"
                   class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
-                  :class="projectHubExpanded && projectHubTab === 'broadcast' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
-                  role="tab" :aria-selected="projectHubExpanded && projectHubTab === 'broadcast'">
+                  :class="teamHubExpanded && teamHubTab === 'broadcast' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
+                  role="tab" :aria-selected="teamHubExpanded && teamHubTab === 'broadcast'">
                   <span>Broadcast</span><span class="setting-hint setting-hint-sm ml-0.5" tabindex="0">?<span class="setting-hint-text">Send a message to all agents at once. Useful for fleet-wide instructions or status requests.</span></span>
                 </button>
-                <button @click="projectHubExpanded = true; projectHubTab = 'members'"
+                <button @click="teamHubExpanded = true; teamHubTab = 'members'"
                   class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
-                  :class="projectHubExpanded && projectHubTab === 'members' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
-                  role="tab" :aria-selected="projectHubExpanded && projectHubTab === 'members'">
-                  Members<span class="ml-1 opacity-50 font-mono text-[10px]" x-text="'(' + (activeProjectData?.members || []).length + ')'"></span>
+                  :class="teamHubExpanded && teamHubTab === 'members' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
+                  role="tab" :aria-selected="teamHubExpanded && teamHubTab === 'members'">
+                  Members<span class="ml-1 opacity-50 font-mono text-[10px]" x-text="'(' + (activeTeamData?.members || []).length + ')'"></span>
                 </button>
               </div>
-              <!-- Project options kebab menu -->
+              <!-- Team options kebab menu -->
               <div class="project-hub-kebab relative flex-shrink-0 ml-auto md:ml-0" x-data="{ open: false }" @click.stop @keydown.escape.window="open = false">
                 <button @click="open = !open"
                   class="p-1.5 rounded-md text-gray-600 hover:text-gray-300 hover:bg-gray-800 transition-colors"
-                  aria-label="Project options">
+                  aria-label="Team options">
                   <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20">
                     <circle cx="10" cy="5" r="1.25"/><circle cx="10" cy="10" r="1.25"/><circle cx="10" cy="15" r="1.25"/>
                   </svg>
                 </button>
                 <div x-show="open" @click.outside="open = false" x-cloak
                   class="absolute right-0 top-8 z-50 bg-gray-800 border border-gray-700 rounded-xl shadow-2xl py-1 min-w-[160px] max-w-[calc(100vw-2rem)]">
-                  <button @click="deleteProject(activeProject); open = false"
+                  <button @click="deleteTeam(activeTeam); open = false"
                     class="w-full text-left px-3 py-2 text-xs text-red-400 hover:bg-red-900/20 transition-colors rounded-xl flex items-center gap-2">
                     <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
-                    Delete project
+                    Delete team
                   </button>
                 </div>
               </div>
             </div>
 
             <!-- Hub body — collapsible -->
-            <div x-show="projectHubExpanded" x-transition class="border-t border-gray-800/60">
+            <div x-show="teamHubExpanded" x-transition class="border-t border-gray-800/60">
               <!-- Mobile tab strip (sm:hidden) -->
-              <div class="project-hub-tabs project-hub-mobile-tabs md:hidden" role="tablist" aria-label="Project sections">
-                <button @click="projectHubTab = 'docs'"
+              <div class="project-hub-tabs project-hub-mobile-tabs md:hidden" role="tablist" aria-label="Team sections">
+                <button @click="teamHubTab = 'docs'"
                   class="px-4 py-2.5 text-xs font-medium transition-colors border-b-2"
-                  :class="projectHubTab === 'docs' ? 'text-white border-indigo-500' : 'text-gray-500 border-transparent hover:text-gray-300'"
-                  role="tab" :aria-selected="projectHubTab === 'docs'">
+                  :class="teamHubTab === 'docs' ? 'text-white border-indigo-500' : 'text-gray-500 border-transparent hover:text-gray-300'"
+                  role="tab" :aria-selected="teamHubTab === 'docs'">
                   Context
                 </button>
-                <button @click="projectHubTab = 'activity'; if (commsActivity.length === 0 && !commsActivityLoading) fetchCommsActivity()"
+                <button @click="teamHubTab = 'activity'; if (commsActivity.length === 0 && !commsActivityLoading) fetchCommsActivity()"
                   class="px-4 py-2.5 text-xs font-medium transition-colors border-b-2"
-                  :class="projectHubTab === 'activity' ? 'text-white border-indigo-500' : 'text-gray-500 border-transparent hover:text-gray-300'"
-                  role="tab" :aria-selected="projectHubTab === 'activity'">
+                  :class="teamHubTab === 'activity' ? 'text-white border-indigo-500' : 'text-gray-500 border-transparent hover:text-gray-300'"
+                  role="tab" :aria-selected="teamHubTab === 'activity'">
                   Activity
                 </button>
-                <button @click="projectHubTab = 'state'; fetchBlackboard(); if (Object.keys(commsSubs).length === 0) fetchCommsActivity()"
+                <button @click="teamHubTab = 'state'; fetchBlackboard(); if (Object.keys(commsSubs).length === 0) fetchCommsActivity()"
                   class="px-4 py-2.5 text-xs font-medium transition-colors border-b-2"
-                  :class="projectHubTab === 'state' ? 'text-white border-indigo-500' : 'text-gray-500 border-transparent hover:text-gray-300'"
-                  role="tab" :aria-selected="projectHubTab === 'state'">
+                  :class="teamHubTab === 'state' ? 'text-white border-indigo-500' : 'text-gray-500 border-transparent hover:text-gray-300'"
+                  role="tab" :aria-selected="teamHubTab === 'state'">
                   State
                 </button>
-                <button @click="projectHubTab = 'artifacts'; fetchArtifacts()"
+                <button @click="teamHubTab = 'artifacts'; fetchArtifacts()"
                   class="px-4 py-2.5 text-xs font-medium transition-colors border-b-2"
-                  :class="projectHubTab === 'artifacts' ? 'text-white border-indigo-500' : 'text-gray-500 border-transparent hover:text-gray-300'"
-                  role="tab" :aria-selected="projectHubTab === 'artifacts'">
+                  :class="teamHubTab === 'artifacts' ? 'text-white border-indigo-500' : 'text-gray-500 border-transparent hover:text-gray-300'"
+                  role="tab" :aria-selected="teamHubTab === 'artifacts'">
                   Files
                 </button>
-                <button @click="projectHubTab = 'broadcast'"
+                <button @click="teamHubTab = 'broadcast'"
                   class="px-4 py-2.5 text-xs font-medium transition-colors border-b-2"
-                  :class="projectHubTab === 'broadcast' ? 'text-white border-indigo-500' : 'text-gray-500 border-transparent hover:text-gray-300'"
-                  role="tab" :aria-selected="projectHubTab === 'broadcast'">
+                  :class="teamHubTab === 'broadcast' ? 'text-white border-indigo-500' : 'text-gray-500 border-transparent hover:text-gray-300'"
+                  role="tab" :aria-selected="teamHubTab === 'broadcast'">
                   Broadcast
                 </button>
-                <button @click="projectHubTab = 'members'"
+                <button @click="teamHubTab = 'members'"
                   class="px-4 py-2.5 text-xs font-medium transition-colors border-b-2"
-                  :class="projectHubTab === 'members' ? 'text-white border-indigo-500' : 'text-gray-500 border-transparent hover:text-gray-300'"
-                  role="tab" :aria-selected="projectHubTab === 'members'">
+                  :class="teamHubTab === 'members' ? 'text-white border-indigo-500' : 'text-gray-500 border-transparent hover:text-gray-300'"
+                  role="tab" :aria-selected="teamHubTab === 'members'">
                   Members
                 </button>
               </div>
 
-              <!-- ── CONTEXT (PROJECT.md) ── -->
-              <div x-show="projectHubTab === 'docs'" class="px-4 py-3">
+              <!-- ── CONTEXT (TEAM.md) ── -->
+              <div x-show="teamHubTab === 'docs'" class="px-4 py-3">
                 <p class="text-xs text-gray-600 mb-3"
-                  x-text="'Shared context pushed to all ' + activeProject + ' members automatically.'"></p>
+                  x-text="'Shared context pushed to all ' + activeTeam + ' members automatically.'"></p>
                 <!-- Read-only view -->
-                <div x-show="!projectEditing && !projectLoading">
-                  <div x-show="!projectContent && !projectExists" class="text-gray-600 text-sm py-4 text-center">
-                    No PROJECT.md yet.
-                    <button @click="startProjectEdit()" class="text-indigo-400 hover:text-indigo-300 transition-colors ml-1">Create one</button>
+                <div x-show="!teamEditing && !teamLoading">
+                  <div x-show="!teamContent && !teamExists" class="text-gray-600 text-sm py-4 text-center">
+                    No TEAM.md yet.
+                    <button @click="startTeamEdit()" class="text-indigo-400 hover:text-indigo-300 transition-colors ml-1">Create one</button>
                   </div>
-                  <div x-show="!projectContent && projectExists" class="text-gray-600 text-sm py-4 text-center">
-                    PROJECT.md is empty.
-                    <button @click="startProjectEdit()" class="text-indigo-400 hover:text-indigo-300 transition-colors ml-1">Add content</button>
+                  <div x-show="!teamContent && teamExists" class="text-gray-600 text-sm py-4 text-center">
+                    TEAM.md is empty.
+                    <button @click="startTeamEdit()" class="text-indigo-400 hover:text-indigo-300 transition-colors ml-1">Add content</button>
                   </div>
-                  <div x-show="projectContent" class="relative">
+                  <div x-show="teamContent" class="relative">
                     <pre class="bg-gray-800/50 border border-gray-700/50 rounded-lg p-3 text-sm text-gray-300 font-mono whitespace-pre-wrap break-words max-h-40 sm:max-h-52 overflow-y-auto custom-scrollbar"
-                      x-text="projectContent"></pre>
+                      x-text="teamContent"></pre>
                     <div class="flex items-center justify-between mt-2">
-                      <span class="text-[10px] text-gray-600" x-text="projectContent.length.toLocaleString() + ' chars'"></span>
-                      <button @click="startProjectEdit()"
+                      <span class="text-[10px] text-gray-600" x-text="teamContent.length.toLocaleString() + ' chars'"></span>
+                      <button @click="startTeamEdit()"
                         class="text-xs px-3 py-1 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors">
                         Edit
                       </button>
@@ -1773,26 +1773,26 @@
                   </div>
                 </div>
                 <!-- Loading spinner -->
-                <div x-show="projectLoading" class="flex items-center gap-2 text-gray-600 py-4">
+                <div x-show="teamLoading" class="flex items-center gap-2 text-gray-600 py-4">
                   <svg class="animate-spin h-4 w-4 flex-shrink-0" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
                   <span class="text-xs">Loading…</span>
                 </div>
                 <!-- Edit mode -->
-                <div x-show="projectEditing">
-                  <textarea x-model="projectEditBuffer"
-                    @keydown.ctrl.s.prevent="saveProject()"
-                    @keydown.meta.s.prevent="saveProject()"
+                <div x-show="teamEditing">
+                  <textarea x-model="teamEditBuffer"
+                    @keydown.ctrl.s.prevent="saveTeamContent()"
+                    @keydown.meta.s.prevent="saveTeamContent()"
                     class="w-full bg-gray-800 border border-gray-700 rounded-lg p-3 text-sm text-gray-200 font-mono resize-y focus:border-indigo-500 focus:outline-none min-h-[8rem] sm:min-h-[14rem]"
                     rows="6" spellcheck="false"
-                    placeholder="# Project Context&#10;&#10;Describe your project goals, architecture, team conventions..."></textarea>
+                    placeholder="# Team Context&#10;&#10;Describe your team goals, architecture, conventions..."></textarea>
                   <div class="flex items-center justify-between mt-2">
-                    <span class="text-xs text-gray-600" x-text="projectEditBuffer.length.toLocaleString() + ' chars'"></span>
+                    <span class="text-xs text-gray-600" x-text="teamEditBuffer.length.toLocaleString() + ' chars'"></span>
                     <div class="flex gap-2">
-                      <button @click="saveProject()" :disabled="projectSaving"
+                      <button @click="saveTeamContent()" :disabled="teamSaving"
                         class="px-3 py-1 text-xs bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg disabled:opacity-50 transition-colors">
-                        <span x-text="projectSaving ? 'Saving…' : 'Save'"></span>
+                        <span x-text="teamSaving ? 'Saving…' : 'Save'"></span>
                       </button>
-                      <button @click="cancelProjectEdit()" :disabled="projectSaving"
+                      <button @click="cancelTeamEdit()" :disabled="teamSaving"
                         class="px-3 py-1 text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-lg disabled:opacity-50 transition-colors">
                         Cancel
                       </button>
@@ -1802,7 +1802,7 @@
               </div>
 
               <!-- ── ACTIVITY ── -->
-              <div x-show="projectHubTab === 'activity'" x-cloak>
+              <div x-show="teamHubTab === 'activity'" x-cloak>
                 <!-- Activity header row: subs + refresh -->
                 <div class="flex items-center gap-2 px-4 pt-3 pb-2">
                   <div x-show="Object.keys(commsSubs).length > 0" class="flex items-center gap-1.5 flex-wrap flex-1 min-w-0" x-cloak>
@@ -1861,7 +1861,7 @@
               </div>
 
               <!-- ── SHARED STATE (Blackboard) ── -->
-              <div x-show="projectHubTab === 'state'" x-cloak class="p-4">
+              <div x-show="teamHubTab === 'state'" x-cloak class="p-4">
                 <div class="mb-3 flex gap-2">
                   <input type="text" x-model="bbPrefix" @keyup.enter="fetchBlackboard()"
                     placeholder="Filter by prefix…"
@@ -1983,7 +1983,7 @@
               </div>
 
               <!-- ── FILES (Artifacts) ── -->
-              <div x-show="projectHubTab === 'artifacts'" x-cloak>
+              <div x-show="teamHubTab === 'artifacts'" x-cloak>
                 <!-- Files header row -->
                 <div class="flex items-center justify-between px-4 pt-3 pb-2">
                   <span class="text-[10px] text-gray-600 font-mono" x-show="artifactsList.length > 0" x-text="artifactsList.length + ' file' + (artifactsList.length !== 1 ? 's' : '')"></span>
@@ -2045,11 +2045,11 @@
               </div>
 
               <!-- ── MEMBERS ── -->
-              <div x-show="projectHubTab === 'members'" x-cloak class="px-4 py-3">
-                <p class="text-xs text-gray-600 mb-3">Agents assigned to this project. Members share context and can communicate through the project blackboard.</p>
+              <div x-show="teamHubTab === 'members'" x-cloak class="px-4 py-3">
+                <p class="text-xs text-gray-600 mb-3">Agents assigned to this team. Members share context and can communicate through the team blackboard.</p>
                 <!-- Current members -->
                 <div class="space-y-1.5 mb-4">
-                  <template x-for="m in (activeProjectData?.members || [])" :key="m">
+                  <template x-for="m in (activeTeamData?.members || [])" :key="m">
                     <div class="flex items-center justify-between py-2 px-3 rounded-lg bg-gray-800/40 border border-gray-800/60">
                       <div class="flex items-center gap-2.5 min-w-0">
                         <div class="agent-avatar agent-avatar-sm" :class="'agent-color-' + agentColorIndex(m)">
@@ -2057,21 +2057,21 @@
                         </div>
                         <span class="text-xs text-gray-300 truncate" x-text="m"></span>
                       </div>
-                      <button @click="removeMember(activeProject, m)"
+                      <button @click="removeMember(activeTeam, m)"
                         class="text-xs text-gray-600 hover:text-red-400 transition-colors flex-shrink-0 px-2 py-1 rounded hover:bg-red-900/20"
-                        title="Remove from project">Remove</button>
+                        title="Remove from team">Remove</button>
                     </div>
                   </template>
-                  <div x-show="(activeProjectData?.members || []).length === 0" class="text-center py-6">
+                  <div x-show="(activeTeamData?.members || []).length === 0" class="text-center py-6">
                     <div class="text-gray-600 text-xs">No members yet.</div>
                   </div>
                 </div>
                 <!-- Add member -->
-                <div x-show="unassignedAgents.length > 0 && !activeProjectData?.over_limit" x-cloak>
+                <div x-show="soloAgents.length > 0 && !activeTeamData?.over_limit" x-cloak>
                   <div class="text-[10px] text-gray-500 uppercase tracking-wider mb-2">Add teammate</div>
                   <div class="grid grid-cols-1 sm:grid-cols-2 gap-1.5 chat-grid">
-                    <template x-for="a in unassignedAgents" :key="a.id">
-                      <button @click="addMember(activeProject, a.id)"
+                    <template x-for="a in soloAgents" :key="a.id">
+                      <button @click="addMember(activeTeam, a.id)"
                         class="flex items-center gap-2.5 py-2 px-3 rounded-lg border border-dashed border-gray-700/60 hover:border-indigo-500/40 hover:bg-indigo-900/10 transition-all text-left">
                         <div class="agent-avatar agent-avatar-sm" :class="'agent-color-' + agentColorIndex(a.id)">
                           <img :src="agentAvatarUrl(a.id)" :alt="a.id">
@@ -2084,21 +2084,21 @@
                     </template>
                   </div>
                 </div>
-                <div x-show="unassignedAgents.length === 0 && !activeProjectData?.over_limit" x-cloak class="text-xs text-gray-600 mt-2">All agents are assigned to projects.</div>
-                <div x-show="activeProjectData?.over_limit" x-cloak class="text-xs text-amber-500 mt-2">Project is at member limit. Upgrade your plan to add more.</div>
+                <div x-show="soloAgents.length === 0 && !activeTeamData?.over_limit" x-cloak class="text-xs text-gray-600 mt-2">All agents are assigned to teams.</div>
+                <div x-show="activeTeamData?.over_limit" x-cloak class="text-xs text-amber-500 mt-2">Team is at member limit. Upgrade your plan to add more.</div>
               </div>
 
               <!-- ── BROADCAST ── -->
-              <div x-show="projectHubTab === 'broadcast'" class="px-4 py-3">
+              <div x-show="teamHubTab === 'broadcast'" class="px-4 py-3">
                 <!-- No eligible targets -->
                 <div x-show="broadcastTargets.length === 0" x-cloak class="text-center py-6">
                   <p class="text-xs text-gray-600">No running agents to broadcast to.</p>
-                  <p class="text-[10px] text-gray-600 mt-1">Add agents to this project or wait for them to start.</p>
+                  <p class="text-[10px] text-gray-600 mt-1">Add agents to this team or wait for them to start.</p>
                 </div>
                 <!-- Has targets -->
                 <div x-show="broadcastTargets.length > 0" x-cloak>
                   <p class="text-xs text-gray-500 mb-3"
-                    x-text="'Send a message to all ' + broadcastTargets.length + ' agent' + (broadcastTargets.length !== 1 ? 's' : '') + ' in ' + activeProject + '.'">
+                    x-text="'Send a message to all ' + broadcastTargets.length + ' agent' + (broadcastTargets.length !== 1 ? 's' : '') + ' in ' + activeTeam + '.'">
                   </p>
                   <div class="flex gap-2">
                     <input id="broadcast-input" type="text" x-model="broadcastMessage" @keydown.enter="sendBroadcast()"
@@ -2118,11 +2118,11 @@
             </div>
           </div>
         </div>
-        <!-- Standalone broadcast bar (no active project, 2+ agents) -->
-        <div x-show="!activeProject && broadcastTargets.length >= 2" x-cloak class="bg-gray-900 border border-gray-800 rounded-xl p-3 mb-4">
+        <!-- Solo broadcast bar (no active team, 2+ agents) -->
+        <div x-show="!activeTeam && broadcastTargets.length >= 2" x-cloak class="bg-gray-900 border border-gray-800 rounded-xl p-3 mb-4">
           <div class="flex items-center gap-3">
             <svg class="w-3.5 h-3.5 text-gray-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
-            <input id="broadcast-standalone-input" type="text" x-model="broadcastMessage" @keydown.enter="sendBroadcast()"
+            <input id="broadcast-solo-input" type="text" x-model="broadcastMessage" @keydown.enter="sendBroadcast()"
               :disabled="broadcastSending"
               class="dash-input flex-1 min-w-0 text-sm"
               :placeholder="'Broadcast to all ' + broadcastTargets.length + ' agents…'">
@@ -2218,7 +2218,7 @@
                   </div>
                   <div class="text-xs text-gray-500 truncate mt-0.5" x-show="agent.model"
                     x-text="formatModelName(agent.model)"></div>
-                  <div class="flex items-center gap-1.5 flex-wrap mt-1" x-show="agent.project && !activeProject">
+                  <div class="flex items-center gap-1.5 flex-wrap mt-1" x-show="agent.project && !activeTeam">
                     <span class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800/80 text-gray-500 border border-gray-700/40"
                       x-text="agent.project"></span>
                   </div>
@@ -2340,15 +2340,15 @@
             </div>
           </template>
         </div>
-        <!-- Empty state for project filter with no matching agents -->
-        <div x-show="activeProject && filteredAgents.length === 0 && agents.length > 0 && !loading" class="text-center py-12" x-cloak>
-          <div class="text-gray-500 text-sm mb-1">No running agents in <span class="text-gray-300 font-medium" x-text="activeProject"></span></div>
-          <div class="text-gray-600 text-xs">Project members may not be started yet</div>
+        <!-- Empty state for team filter with no matching agents -->
+        <div x-show="activeTeam && filteredAgents.length === 0 && agents.length > 0 && !loading" class="text-center py-12" x-cloak>
+          <div class="text-gray-500 text-sm mb-1">No running agents in <span class="text-gray-300 font-medium" x-text="activeTeam"></span></div>
+          <div class="text-gray-600 text-xs">Team members may not be started yet</div>
         </div>
-        <!-- Empty state for standalone view when all agents are in projects -->
-        <div x-show="!activeProject && projects.length > 0 && filteredAgents.length === 0 && agents.length > 0 && !loading" class="text-center py-12" x-cloak>
-          <div class="text-gray-500 text-sm mb-1">All agents are assigned to projects</div>
-          <div class="text-gray-600 text-xs">Select a project tab above, or add a new standalone agent</div>
+        <!-- Empty state for solo view when all agents are in teams -->
+        <div x-show="!activeTeam && teams.length > 0 && filteredAgents.length === 0 && agents.length > 0 && !loading" class="text-center py-12" x-cloak>
+          <div class="text-gray-500 text-sm mb-1">All agents are assigned to teams</div>
+          <div class="text-gray-600 text-xs">Select a team tab above, or add a new solo agent</div>
         </div>
         <!-- Loading state -->
         <div x-show="agents.length === 0 && loading" x-cloak>
@@ -2511,10 +2511,10 @@
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
             Team
           </button>
-          <template x-if="_detailReturnProject">
+          <template x-if="_detailReturnTeam">
             <span class="flex items-center gap-1">
               <span class="text-gray-600 mx-1">&rsaquo;</span>
-              <span class="text-gray-500" x-text="_detailReturnProject"></span>
+              <span class="text-gray-500" x-text="_detailReturnTeam"></span>
             </span>
           </template>
           <span class="text-gray-600 mx-1">&rsaquo;</span>
@@ -4039,27 +4039,27 @@
               </div>
             </template>
             <!-- Phase 2 vocab: explicit "team starts working" empty
-                 state is preserved here for the workplaceProjects-but-no-
+                 state is preserved here for the workplaceTeams-but-no-
                  feed case. Phase 3's idle empty state above only fires
                  when every section is empty; this one stays so users with
-                 active projects but no fresh activity still see the
+                 active teams but no fresh activity still see the
                  reassurance copy that Phase 2 promised. -->
-            <template x-if="!workplaceSectionLoading.feed && !workplaceErrors.feed && !workplaceFeedVisible.length && workplaceProjects.length">
+            <template x-if="!workplaceSectionLoading.feed && !workplaceErrors.feed && !workplaceFeedVisible.length && workplaceTeams.length">
               <div class="text-sm text-gray-500 py-4">Once your team starts working, you'll see updates here.</div>
             </template>
           </div>
         </template>
 
-        <!-- Project status — hidden in the Phase 3 layout. The legacy
+        <!-- Team status — hidden in the Phase 3 layout. The legacy
              render is kept in markup for back-compat with deep-links
-             that set ``workplaceTab === 'project-status'`` directly via
+             that set ``workplaceTab === 'team-status'`` directly via
              URL hash, but the new Home single-scroll surface routes
-             project detail through the task drill-in modal instead. -->
-        <template x-if="false && workplaceEnabled && workplaceTab === 'project-status'">
+             team detail through the task drill-in modal instead. -->
+        <template x-if="false && workplaceEnabled && workplaceTab === 'team-status'">
           <div class="space-y-3">
-            <!-- Skeleton while /workplace/projects is in flight -->
-            <template x-if="workplaceSectionLoading.projects && !workplaceProjects.length && !workplaceErrors.projects">
-              <div class="space-y-3" data-testid="workplace-projects-skeleton">
+            <!-- Skeleton while /workplace/teams is in flight -->
+            <template x-if="workplaceSectionLoading.teams && !workplaceTeams.length && !workplaceErrors.teams">
+              <div class="space-y-3" data-testid="workplace-teams-skeleton">
                 <div class="bg-gray-800/40 border border-gray-700/50 rounded-lg p-4">
                   <div class="h-4 w-1/3 bg-gray-800 rounded animate-pulse"></div>
                   <div class="h-3 w-2/3 bg-gray-800 rounded animate-pulse mt-2"></div>
@@ -4071,19 +4071,19 @@
                 </div>
               </div>
             </template>
-            <!-- Error banner for /workplace/projects -->
-            <template x-if="workplaceErrors.projects">
+            <!-- Error banner for /workplace/teams -->
+            <template x-if="workplaceErrors.teams">
               <div class="bg-red-900/20 border border-red-800/40 rounded-lg p-3 flex flex-wrap items-center gap-2"
-                   role="alert" data-testid="workplace-projects-error">
-                <span class="text-xs text-red-200 flex-1" x-text="workplaceErrors.projects"></span>
-                <button type="button" @click="retryWorkplaceSection('projects')"
+                   role="alert" data-testid="workplace-teams-error">
+                <span class="text-xs text-red-200 flex-1" x-text="workplaceErrors.teams"></span>
+                <button type="button" @click="retryWorkplaceSection('teams')"
                   class="text-[11px] font-medium px-2.5 py-1 rounded bg-red-800/40 hover:bg-red-700/50 text-red-100 transition-colors">Retry</button>
               </div>
             </template>
-            <template x-if="!workplaceSectionLoading.projects && !workplaceErrors.projects && !workplaceProjects.length">
-              <div class="text-sm text-gray-500 py-4">No active projects.</div>
+            <template x-if="!workplaceSectionLoading.teams && !workplaceErrors.teams && !workplaceTeams.length">
+              <div class="text-sm text-gray-500 py-4">No active teams.</div>
             </template>
-            <template x-for="p in workplaceProjects" :key="p.name">
+            <template x-for="p in workplaceTeams" :key="p.name">
               <div class="bg-gray-800/40 border border-gray-700/50 rounded-lg p-4">
                 <div class="flex items-center justify-between mb-2">
                   <div>
@@ -4095,7 +4095,7 @@
                     <span class="ml-2 px-1.5 py-0.5 rounded bg-gray-900/60 text-gray-300" x-text="p.status"></span>
                   </div>
                 </div>
-                <!-- North star + success criteria — the project's goal as a first-class artifact. -->
+                <!-- North star + success criteria — the team's goal as a first-class artifact. -->
                 <div class="mb-3 pb-2 border-b border-gray-700/40">
                   <template x-if="p.north_star">
                     <div>
@@ -7577,44 +7577,44 @@
         </div>
       </template>
 
-      <!-- Create project modal -->
-      <div x-show="showProjectForm" x-cloak
+      <!-- Create team modal -->
+      <div x-show="showTeamForm" x-cloak
         class="fixed inset-0 z-[60] flex items-center justify-center p-4"
-        @click.self="closeProjectModal()"
-        @keydown.escape.window="closeProjectModal()"
+        @click.self="closeTeamModal()"
+        @keydown.escape.window="closeTeamModal()"
         x-transition:enter="transition ease-out duration-150"
         x-transition:enter-start="opacity-0"
         x-transition:enter-end="opacity-100"
         x-transition:leave="transition ease-in duration-100"
         x-transition:leave-start="opacity-100"
         x-transition:leave-end="opacity-0">
-        <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" @click="closeProjectModal()"></div>
+        <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" @click="closeTeamModal()"></div>
         <div class="relative w-full max-w-md bg-gray-900 border border-gray-700 rounded-xl shadow-2xl p-4 sm:p-5">
           <div class="flex items-center justify-between mb-4">
-            <h3 class="text-sm font-medium text-gray-200">New Project</h3>
-            <button @click="closeProjectModal()" class="text-gray-500 hover:text-gray-300 text-lg leading-none">&times;</button>
+            <h3 class="text-sm font-medium text-gray-200">New Team</h3>
+            <button @click="closeTeamModal()" class="text-gray-500 hover:text-gray-300 text-lg leading-none">&times;</button>
           </div>
           <div class="space-y-3">
             <div>
               <label class="text-xs text-gray-500 mb-1 block">Name</label>
-              <input id="project-name-input" type="text" x-model="newProjectName" :disabled="projectFormLoading" class="dash-input w-full"
-                placeholder="my-project" @keydown.enter="createProject()" pattern="[a-zA-Z0-9_-]+">
+              <input id="team-name-input" type="text" x-model="newTeamName" :disabled="teamFormLoading" class="dash-input w-full"
+                placeholder="my-team" @keydown.enter="createTeam()" pattern="[a-zA-Z0-9_-]+">
               <div class="text-[10px] mt-1 text-gray-600">Letters, numbers, hyphens, underscores.</div>
             </div>
             <div>
               <label class="text-xs text-gray-500 mb-1 block">Description</label>
-              <input type="text" x-model="newProjectDesc" :disabled="projectFormLoading" class="dash-input w-full"
-                placeholder="Optional description" @keydown.enter="createProject()">
+              <input type="text" x-model="newTeamDesc" :disabled="teamFormLoading" class="dash-input w-full"
+                placeholder="Optional description" @keydown.enter="createTeam()">
             </div>
           </div>
           <div class="flex gap-2 mt-4">
-            <button @click="createProject()" :disabled="projectFormLoading || !newProjectName.trim()"
+            <button @click="createTeam()" :disabled="teamFormLoading || !newTeamName.trim()"
               class="text-xs px-4 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors inline-flex items-center gap-1.5">
-              <svg x-show="projectFormLoading" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-              <span x-show="!projectFormLoading">Create Project</span>
-              <span x-show="projectFormLoading">Creating...</span>
+              <svg x-show="teamFormLoading" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+              <span x-show="!teamFormLoading">Create Team</span>
+              <span x-show="teamFormLoading">Creating...</span>
             </button>
-            <button @click="closeProjectModal()" :disabled="projectFormLoading"
+            <button @click="closeTeamModal()" :disabled="teamFormLoading"
               class="text-xs px-3 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 disabled:opacity-50 transition-colors">Cancel</button>
           </div>
         </div>
@@ -7791,7 +7791,7 @@
               </div>
             </div>
           </div>
-          <!-- Color + Project row -->
+          <!-- Color + Team row -->
           <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
             <!-- Color picker -->
             <div class="relative" @click.stop>
@@ -7833,12 +7833,12 @@
                 </button>
               </div>
             </div>
-            <!-- Project picker (only shown when projects exist) -->
-            <div x-show="projects.length > 0">
-              <label class="text-xs text-gray-500 mb-1 block">Project</label>
-              <select x-model="addAgentForm.project" :disabled="addAgentLoading" class="dash-select w-full">
-                <option value="">None (standalone)</option>
-                <template x-for="p in projects" :key="p.name">
+            <!-- Team picker (only shown when teams exist) -->
+            <div x-show="teams.length > 0">
+              <label class="text-xs text-gray-500 mb-1 block">Team</label>
+              <select x-model="addAgentForm.team" :disabled="addAgentLoading" class="dash-select w-full">
+                <option value="">None (solo)</option>
+                <template x-for="p in teams" :key="p.name">
                   <option :value="p.name" x-text="p.name"></option>
                 </template>
               </select>

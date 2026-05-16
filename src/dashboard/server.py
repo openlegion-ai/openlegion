@@ -2127,7 +2127,10 @@ def create_dashboard_router(
         avatar = body.get("avatar", 1)
         color = body.get("color")
         template = body.get("template", "").strip()
-        project = body.get("project", "").strip()
+        # Accept ``team`` (canonical) and fall back to ``project`` for
+        # back-compat with pre-PR-3 clients. Either keyword maps to the
+        # same per-agent membership write under config/teams/.
+        project = (body.get("team") or body.get("project") or "").strip()
 
         if not name:
             raise HTTPException(status_code=400, detail="name is required")
@@ -2260,7 +2263,13 @@ def create_dashboard_router(
             if event_bus is not None:
                 event_bus.emit("agent_state", agent=name,
                     data={"state": "added", "role": role, "ready": ready})
-            return {"created": True, "agent": name, "ready": ready, "project": project or None}
+            return {
+                "created": True,
+                "agent": name,
+                "ready": ready,
+                "team": project or None,
+                "project": project or None,  # legacy alias — drop next major
+            }
         except HTTPException:
             raise
         except Exception as e:
