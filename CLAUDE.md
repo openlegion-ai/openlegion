@@ -331,3 +331,7 @@ pytest tests/test_loop.py -x -v
 2. Define agents with `role`, `model`, `instructions`, `soul`, `resources`
 3. Optionally include `heartbeat_rules`, `permissions`, `budget`
 4. Templates auto-discovered by `_load_templates()` in `src/cli/config.py`
+
+## Review State
+
+2026-05-16 — Added /mesh/teams/* and /api/teams/* route aliases as scaffold for the upcoming project→team rename. No behavior change; pure addition.
