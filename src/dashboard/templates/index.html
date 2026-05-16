@@ -233,7 +233,7 @@
         <button
           x-show="needsYouItems.length > 0"
           x-cloak
-          @click="switchTab('chat'); $nextTick(() => { const el = document.querySelector('[data-pending-cards]'); if (el) el.scrollIntoView({behavior: 'smooth', block: 'start'}); })"
+          @click="_routeNeedsYouBadge()"
           class="needs-you-badge flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold bg-red-900/40 text-red-300 border border-red-700/60 hover:bg-red-900/60 hover:border-red-600/80 transition-colors cursor-pointer"
           aria-live="polite"
           :aria-label="needsYouItems.length + ' items need you. Click to review.'"
@@ -3713,6 +3713,7 @@
         <section x-show="needsYouItems.length > 0" x-cloak
           x-data="{ needsYouExpanded: false, needsYouCollapsedCap: 5 }"
           role="region" aria-label="Pending items that need you"
+          data-needs-you-panel
           class="mb-4 bg-amber-900/15 border border-amber-700/30 rounded-xl p-3 sm:p-4 sticky top-0 z-10 backdrop-blur-sm">
           <div class="flex items-center gap-2 mb-3">
             <svg class="w-4 h-4 text-amber-300 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">

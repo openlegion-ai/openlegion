@@ -19,6 +19,30 @@ window.fetch = function(input, init) {
   }
   return _origFetch.call(this, input, init);
 };
+// Client-side-only chat roles — pushed into `chatHistories[agentId]`
+// but NEVER stored server-side. Used by `_loadChatHistory` to keep
+// these cards across a history reload (the server transcript filter
+// would otherwise drop anything not in {user, agent, notification}).
+// If you push a new role into chatHistories anywhere in this file,
+// add it here so it survives reloads. Origin: PR #902 follow-up
+// (operator-confirm-flow review gaps).
+const OVERLAY_CHAT_ROLES = new Set([
+  'pending_action_card',
+  'credential_request',
+  'browser_login_request',
+  'browser_captcha_help_request',
+  'operator_action_receipt',
+  'credit_exhausted',
+]);
+
+// Needs-You item kinds whose "open" action belongs on the Work tab
+// (rather than Chat). `pending` and `blocker` live in the Work tab's
+// sticky panel / task drawer; `unrated` jumps to Work > Activity for
+// the rating buttons. Everything else (credential / browser_login /
+// captcha / worker_dm) routes to Chat where the overlay card lives.
+// Origin: PR #902 follow-up.
+const _BADGE_WORK_TAB_KINDS = new Set(['pending', 'blocker', 'unrated']);
+
 const _IDENTITY_TABS = [
   { id: 'config', label: 'Config', file: null, access: 'user' },
   { id: 'identity', label: 'Identity', file: null, access: 'user' },
@@ -2049,6 +2073,41 @@ function dashboard() {
       }
     },
 
+    // Top-nav Needs-You badge click handler. Routes to the Work tab when
+    // any item is a durable pending action (the Work tab's unified panel
+    // renders confirm/cancel inline), otherwise falls back to chat where
+    // the credential/browser/captcha overlay cards live. The kind-aware
+    // routing replaces the legacy "always chat" handler that buried
+    // destructive operator confirms behind a tab switch.
+    _routeNeedsYouBadge() {
+      try {
+        const itemCount = (this.needsYouItems || []).length;
+        this.track('needs_you_click', {
+          item_count: itemCount,
+          item_kind: 'badge',
+          action_label: 'badge',
+        });
+        this._trackFirstAction('needs_you_click');
+      } catch (_) { /* ignore */ }
+      // kind → tab mapping:
+      //   pending / blocker / unrated → Work tab (sticky Needs-You panel
+      //     for pending+blocker; Activity feed with rating buttons for
+      //     unrated). No chat surface for these.
+      //   credential / browser_login / captcha / worker_dm → Chat tab
+      //     where the overlay card lives in operator chat (or the
+      //     worker's own chat for worker_dm).
+      // See _BADGE_WORK_TAB_KINDS at the top of this file.
+      const hasWorkKind = (this.needsYouItems || []).some(
+        i => _BADGE_WORK_TAB_KINDS.has(i.kind),
+      );
+      this.switchTab(hasWorkKind ? 'workplace' : 'chat');
+      this.$nextTick(() => {
+        const selector = hasWorkKind ? '[data-needs-you-panel]' : '[data-pending-cards]';
+        const el = document.querySelector(selector);
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    },
+
     trackEmptyStateCta(sectionId) {
       // Wired from any empty-state CTA button in the template. Caller
       // passes a stable ``section_id`` so we can compare CTA traction
@@ -3940,6 +3999,18 @@ function dashboard() {
       }
     },
 
+    // Normalises the FastAPI ``detail`` field on a pending-action confirm/cancel
+    // error. The mesh now returns ``{code, message}`` on consume() failures so
+    // the dashboard can show a precise reason; older endpoints (cancel) still
+    // return a bare string. Returns ``{text, code}`` for the toast + telemetry.
+    _formatPendingError(detail, fallback) {
+      if (!detail) return { text: String(fallback ?? ''), code: '' };
+      if (typeof detail === 'string') return { text: detail, code: '' };
+      const text = detail.message || String(fallback ?? '');
+      const code = typeof detail.code === 'string' ? detail.code : '';
+      return { text, code };
+    },
+
     async confirmPendingAction(nonce) {
       try {
         // Route via the dashboard's loopback proxy so the mesh sees
@@ -3959,7 +4030,9 @@ function dashboard() {
         );
         if (!resp.ok) {
           const data = await resp.json().catch(() => ({}));
-          this.showToast(`Confirm failed: ${data.detail || resp.status}`);
+          const { text, code } = this._formatPendingError(data.detail, resp.status);
+          this.track('pending_confirm_failed', { code: code || 'unknown', nonce });
+          this.showToast(`Confirm failed: ${text || resp.status}`);
           return;
         }
         this.workplacePending = this.workplacePending.filter(p => p.nonce !== nonce);
@@ -3978,7 +4051,11 @@ function dashboard() {
         });
         if (!resp.ok) {
           const data = await resp.json().catch(() => ({}));
-          this.showToast(`Cancel failed: ${data.detail || resp.status}`);
+          // detail is now {code, message} (matches confirm) — route
+          // through the shared formatter so `[object Object]` can't
+          // leak into the toast.
+          const { text } = this._formatPendingError(data.detail, resp.status);
+          this.showToast(`Cancel failed: ${text || resp.status}`);
           return;
         }
         this.workplacePending = this.workplacePending.filter(p => p.nonce !== nonce);
@@ -4028,7 +4105,13 @@ function dashboard() {
         );
         if (!resp.ok) {
           const data = await resp.json().catch(() => ({}));
-          this.showToast(`Confirm failed: ${data.detail || resp.status}`);
+          const { text, code } = this._formatPendingError(data.detail, resp.status);
+          this.track('pending_confirm_failed', {
+            code: code || 'unknown',
+            nonce: msg.event_id || '',
+            via: 'card',
+          });
+          this.showToast(`Confirm failed: ${text || resp.status}`);
           return;
         }
       } catch (e) {
@@ -4054,7 +4137,10 @@ function dashboard() {
         );
         if (!resp.ok) {
           const data = await resp.json().catch(() => ({}));
-          this.showToast(`Cancel failed: ${data.detail || resp.status}`);
+          // detail is structured {code, message} on 404 — see comment
+          // on cancelPendingAction.
+          const { text } = this._formatPendingError(data.detail, resp.status);
+          this.showToast(`Cancel failed: ${text || resp.status}`);
           return;
         }
       } catch (e) {
@@ -7627,7 +7713,13 @@ function dashboard() {
         // 1. User messages sent after the last server timestamp
         // 2. Agent messages from just-completed streams not yet persisted
         // 3. Notifications injected via WebSocket not yet in the server transcript
+        // 4. Client-side overlay cards (pending actions, credential/browser/captcha
+        //    requests, operator-action receipts, credit-exhausted toasts) — these
+        //    are NEVER part of the server-side transcript, so the role-allowlist
+        //    filter must keep them or they vanish on every refresh. Roles live in
+        //    OVERLAY_CHAT_ROLES at the top of this file.
         const trailing = localMsgs.filter(m => {
+          if (OVERLAY_CHAT_ROLES.has(m.role)) return true;
           if (m.role === 'notification') {
             if ((m.ts || 0) <= lastServerTs) return false;
             return !serverMsgs.some(s =>

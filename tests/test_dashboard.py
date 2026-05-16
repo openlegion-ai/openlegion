@@ -4967,8 +4967,16 @@ class TestWorkplaceTabRoutes:
                 nonce = url.rstrip("/").split("/")[-2]
                 record = store.cancel(nonce, actor="operator")
                 if record is None:
+                    # Match the real mesh shape — structured
+                    # {code, message} on 404 so callers can branch on
+                    # ``detail.code`` without parsing a free-form string.
                     return _StubResp(404, {
-                        "detail": "Pending action not found or already expired",
+                        "detail": {
+                            "code": "not_found",
+                            "message": (
+                                "Pending action not found or already expired"
+                            ),
+                        },
                     })
                 return _StubResp(200, {
                     "ok": True,

@@ -35,7 +35,12 @@ from src.host.orchestration import (
     TaskNotFound,
     Tasks,
 )
-from src.host.pending_actions import PendingActions
+from src.host.pending_actions import (
+    PendingActions,
+)
+from src.host.pending_actions import (
+    format_pending_reason as _humanize_pending_reason,
+)
 from src.shared.redaction import redact_url
 from src.shared.types import (
     AGENT_ID_RE_PATTERN,
@@ -177,21 +182,16 @@ def _store_pending_change(agent_id: str, field: str, old_value: object, new_valu
 
     Backed by ``PendingActions`` (SQLite). Capped at ``_MAX_PENDING``
     rows per process; oldest expires-first row is evicted to make room.
+    The reap + cap-check + evict + insert sequence runs inside a single
+    ``BEGIN IMMEDIATE`` via :meth:`PendingActions.store_with_cap` so
+    concurrent proposers can't both observe ``count < max`` and double-
+    insert.
     """
     store = _get_pending_actions_store()
-    store.reap_expired()
-    pending = store.list_pending()
-    if len(pending) >= _MAX_PENDING:
-        # Evict the row whose ``expires_at`` is soonest -- matches the
-        # legacy behavior (``min(...)`` over ``expires_at``).
-        oldest = min(pending, key=lambda r: r["expires_at"])
-        with store._conn() as conn:
-            conn.execute(
-                "DELETE FROM pending_actions WHERE nonce=?", (oldest["nonce"],),
-            )
     change_id = str(_uuid.uuid4())
     payload = {"old_value": old_value, "new_value": new_value}
-    store.store(
+    store.store_with_cap(
+        max_pending=_MAX_PENDING,
         nonce=change_id,
         actor="operator",
         target_kind="agent",
@@ -222,7 +222,7 @@ def _get_pending_change(change_id: str) -> dict | None:
 def _consume_pending_change(change_id: str) -> dict | None:
     """Atomically consume a pending change. Returns legacy dict shape or None."""
     store = _get_pending_actions_store()
-    rec = store.consume(change_id)
+    rec, _ = store.consume(change_id)
     if rec is None:
         return None
     payload = rec.get("payload") or {}
@@ -4969,16 +4969,6 @@ def create_mesh_app(
             )
         origin = _validated_origin(request, caller)
         origin_kind = origin.kind if origin is not None else None
-        # Cap pending rows to bound storage growth (mirrors propose_edit).
-        pending_actions.reap_expired()
-        existing = pending_actions.list_pending()
-        if len(existing) >= _MAX_PENDING:
-            oldest = min(existing, key=lambda r: r["expires_at"])
-            with pending_actions._conn() as _conn:
-                _conn.execute(
-                    "DELETE FROM pending_actions WHERE nonce=?",
-                    (oldest["nonce"],),
-                )
         nonce = str(_uuid.uuid4())
         members = projects[name].get("members", []) or []
         # Short headline shown in the inline chat card (max ~80 chars
@@ -4992,7 +4982,11 @@ def create_mesh_app(
             "summary": summary,
             "members": members,
         }
-        record = pending_actions.store(
+        # Atomic reap+cap+insert — see PendingActions.store_with_cap.
+        # Replaces the legacy reap → list → manual evict → store sequence
+        # which raced under concurrent proposes.
+        record = pending_actions.store_with_cap(
+            max_pending=_MAX_PENDING,
             nonce=nonce,
             actor="operator",
             target_kind="project",
@@ -5041,22 +5035,15 @@ def create_mesh_app(
             )
         origin = _validated_origin(request, caller)
         origin_kind = origin.kind if origin is not None else None
-        pending_actions.reap_expired()
-        existing = pending_actions.list_pending()
-        if len(existing) >= _MAX_PENDING:
-            oldest = min(existing, key=lambda r: r["expires_at"])
-            with pending_actions._conn() as _conn:
-                _conn.execute(
-                    "DELETE FROM pending_actions WHERE nonce=?",
-                    (oldest["nonce"],),
-                )
         nonce = str(_uuid.uuid4())
         summary = f"Delete agent {agent_id!r} permanently"
         payload = {
             "agent_id": agent_id,
             "summary": summary,
         }
-        record = pending_actions.store(
+        # Atomic reap+cap+insert — see PendingActions.store_with_cap.
+        record = pending_actions.store_with_cap(
+            max_pending=_MAX_PENDING,
             nonce=nonce,
             actor="operator",
             target_kind="agent",
@@ -5461,18 +5448,6 @@ def create_mesh_app(
         origin = _validated_origin(request, caller)
         origin_kind = origin.kind if origin is not None else None
 
-        # Cap to ``_MAX_PENDING`` rows to bound storage growth -- mirrors
-        # the legacy in-memory eviction behavior.
-        pending_actions.reap_expired()
-        existing = pending_actions.list_pending()
-        if len(existing) >= _MAX_PENDING:
-            oldest = min(existing, key=lambda r: r["expires_at"])
-            with pending_actions._conn() as _conn:
-                _conn.execute(
-                    "DELETE FROM pending_actions WHERE nonce=?",
-                    (oldest["nonce"],),
-                )
-
         change_id = str(_uuid.uuid4())
         payload = {"old_value": old_value, "new_value": new_value}
 
@@ -5511,7 +5486,11 @@ def create_mesh_app(
                 f"from {_short(old_value)} to {_short(new_value)}"
             )
 
-        record = pending_actions.store(
+        # Atomic reap+cap+insert — see PendingActions.store_with_cap.
+        # Caps to ``_MAX_PENDING`` rows to bound storage growth without
+        # racing under concurrent proposes.
+        record = pending_actions.store_with_cap(
+            max_pending=_MAX_PENDING,
             nonce=change_id,
             actor="operator",
             target_kind="agent",
@@ -6306,14 +6285,20 @@ def create_mesh_app(
                 "Use /mesh/config/confirm for delete pending actions",
             )
 
-        record = pending_actions.consume(
+        record, reason = pending_actions.consume(
             change_id,
             confirmer="operator",
             require_origin_kind="human",
             expected_payload_digest=client_digest,
         )
         if not record:
-            raise HTTPException(400, "Pending action invalid or expired")
+            raise HTTPException(
+                400,
+                detail={
+                    "code": reason,
+                    "message": _humanize_pending_reason(reason),
+                },
+            )
 
         return await _apply_pending_change(
             change_id, _record_to_legacy_change(record),
@@ -6347,14 +6332,20 @@ def create_mesh_app(
         # Consume + apply. ``consume`` is atomic: same nonce can only
         # be applied once. If the apply raises, the row is already
         # gone — the caller must propose a new change.
-        record = pending_actions.consume(
+        record, reason = pending_actions.consume(
             change_id,
             confirmer="operator",
             require_origin_kind="human",
             expected_payload_digest=client_digest,
         )
         if not record:
-            raise HTTPException(400, "Pending action invalid or expired")
+            raise HTTPException(
+                400,
+                detail={
+                    "code": reason,
+                    "message": _humanize_pending_reason(reason),
+                },
+            )
 
         # Task 7: destructive deletes use ``action_kind="delete"`` plus
         # ``target_kind in {"project", "agent"}``. Everything else stays
@@ -6435,7 +6426,16 @@ def create_mesh_app(
             raise HTTPException(403, "Only the operator can cancel pending actions")
         record = pending_actions.cancel(nonce, actor=caller or "operator")
         if record is None:
-            raise HTTPException(404, "Pending action not found or already expired")
+            # Structured detail mirrors the confirm path so dashboard
+            # error formatters (`_formatPendingError`) can route through
+            # one code path and surface the same {code, message} shape.
+            raise HTTPException(
+                404,
+                detail={
+                    "code": "not_found",
+                    "message": "Pending action not found or already expired",
+                },
+            )
         return {
             "ok": True,
             "nonce": nonce,

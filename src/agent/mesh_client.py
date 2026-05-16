@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
-from src.shared.trace import origin_header
+from src.shared.trace import current_origin, origin_header
 from src.shared.types import MeshEvent
 from src.shared.utils import setup_logging
 
@@ -79,6 +79,26 @@ class MeshClient:
         """Return current trace headers for per-request injection."""
         from src.shared.trace import trace_headers
         return trace_headers()
+
+    def _trace_and_origin_headers(self) -> dict[str, str]:
+        """Trace headers + ``X-Origin`` when a current origin is set.
+
+        Used by state-mutating *propose* paths where the mesh stores the
+        proposer's origin kind on the pending row and the subsequent
+        confirm gates on ``origin_kind="human"``. Reads from the
+        ``current_origin`` ContextVar so the pattern works transparently
+        for any code that already runs under an origin-stamped task.
+
+        Kept separate from :meth:`_trace_headers` so non-propose paths
+        (blackboard reads, status updates, etc.) don't get
+        origin-stamped — origin only carries meaning for proposes /
+        confirms that the mesh gates against.
+        """
+        headers = dict(self._trace_headers())
+        origin = current_origin.get()
+        if origin is not None:
+            headers.update(origin_header(origin))
+        return headers
 
     # Retry config for idempotent reads — resilience to transient mesh errors
     _GET_MAX_RETRIES = 2
@@ -743,12 +763,22 @@ class MeshClient:
     # === Operator agent config management ===
 
     async def propose_config_change(self, agent_id: str, field: str, value) -> dict:
-        """Propose a config change for an agent. Returns preview + change_id."""
+        """Propose a config change for an agent. Returns preview + change_id.
+
+        Forwards ``current_origin`` via :meth:`_trace_and_origin_headers`
+        so the mesh stores the pending row with ``origin_kind="human"``
+        when the caller is handling a human-originated message. Defensive
+        against the same Bug A pattern that bit the destructive-confirm
+        flow: this path is unreachable in production today (operator
+        routes through ``edit_agent``), but the mesh endpoint is still
+        wired and any future caller would silently reproduce the bug
+        without this forwarding.
+        """
         client = await self._get_client()
         response = await client.post(
             f"{self.mesh_url}/mesh/agents/{agent_id}/propose",
             json={"field": field, "value": value, "proposed_by": self.agent_id},
-            headers=self._trace_headers(),
+            headers=self._trace_and_origin_headers(),
         )
         response.raise_for_status()
         return response.json()
@@ -757,13 +787,16 @@ class MeshClient:
         """Confirm and apply a previously proposed config change.
 
         Uses the dedicated /mesh/config/confirm endpoint which resolves
-        the target agent_id from the pending change internally.
+        the target agent_id from the pending change internally. Forwards
+        ``current_origin`` so the mesh's confirm-side ``X-Origin`` re-
+        check sees a human origin (see Bug A note on
+        :meth:`propose_config_change`).
         """
         client = await self._get_client()
         response = await client.post(
             f"{self.mesh_url}/mesh/config/confirm",
             json={"change_id": change_id, "confirmed_by": self.agent_id},
-            headers=self._trace_headers(),
+            headers=self._trace_and_origin_headers(),
         )
         response.raise_for_status()
         return response.json()
@@ -1349,21 +1382,35 @@ class MeshClient:
         return response.json()
 
     async def propose_delete_project(self, name: str) -> dict:
-        """Propose deletion of an archived project. Returns nonce for human confirm."""
+        """Propose deletion of an archived project. Returns nonce for human confirm.
+
+        Forwards ``current_origin`` via :meth:`_trace_and_origin_headers`
+        so the mesh stores the pending row with ``origin_kind="human"``
+        when the caller is handling a human-originated message. Without
+        this the subsequent confirm fails the
+        ``require_origin_kind="human"`` gate (Bug A).
+        """
         client = await self._get_client()
         response = await client.post(
             f"{self.mesh_url}/mesh/projects/{name}/propose-delete",
-            headers=self._trace_headers(),
+            headers=self._trace_and_origin_headers(),
         )
         response.raise_for_status()
         return response.json()
 
     async def propose_delete_agent(self, agent_id: str) -> dict:
-        """Propose deletion of an archived agent. Returns nonce for human confirm."""
+        """Propose deletion of an archived agent. Returns nonce for human confirm.
+
+        Forwards ``current_origin`` via :meth:`_trace_and_origin_headers`
+        so the mesh stores the pending row with ``origin_kind="human"``
+        when the caller is handling a human-originated message. Without
+        this the subsequent confirm fails the
+        ``require_origin_kind="human"`` gate (Bug A).
+        """
         client = await self._get_client()
         response = await client.post(
             f"{self.mesh_url}/mesh/agents/{agent_id}/propose-delete",
-            headers=self._trace_headers(),
+            headers=self._trace_and_origin_headers(),
         )
         response.raise_for_status()
         return response.json()
