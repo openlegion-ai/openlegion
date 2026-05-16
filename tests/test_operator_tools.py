@@ -857,8 +857,6 @@ async def test_create_agent_conflict():
 # preserved on the ``*_team`` siblings; here we assert only the stub
 # shape so future regressions on the redirect surface are caught.
 
-import pytest
-
 
 _LEGACY_REDIRECTS = [
     ("inspect_projects", "inspect_teams"),

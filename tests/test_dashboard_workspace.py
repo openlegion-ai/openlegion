@@ -459,7 +459,7 @@ class TestProjectProxy:
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test",
         ) as client:
-            resp = await client.get("/dashboard/api/project")
+            resp = await client.get("/dashboard/api/team")
             assert resp.status_code == 400
 
     @pytest.mark.asyncio
@@ -474,7 +474,7 @@ class TestProjectProxy:
             transport=ASGITransport(app=app), base_url="http://test",
         ) as client:
             with patch("src.cli.config.PROJECTS_DIR", projects_dir):
-                resp = await client.get("/dashboard/api/project", params={"project": "testproj"})
+                resp = await client.get("/dashboard/api/team", params={"team": "testproj"})
             assert resp.status_code == 200
             data = resp.json()
             assert data["content"] == ""
@@ -492,7 +492,7 @@ class TestProjectProxy:
             transport=ASGITransport(app=app), base_url="http://test",
         ) as client:
             with patch("src.cli.config.PROJECTS_DIR", projects_dir):
-                resp = await client.get("/dashboard/api/project", params={"project": "testproj"})
+                resp = await client.get("/dashboard/api/team", params={"team": "testproj"})
             assert resp.status_code == 200
             data = resp.json()
             assert "My Project" in data["content"]
@@ -505,7 +505,7 @@ class TestProjectProxy:
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test",
         ) as client:
-            resp = await client.get("/dashboard/api/project", params={"project": "testproj"})
+            resp = await client.get("/dashboard/api/team", params={"team": "testproj"})
             assert resp.status_code == 503
 
     @pytest.mark.asyncio
@@ -517,7 +517,7 @@ class TestProjectProxy:
             transport=ASGITransport(app=app), base_url="http://test",
         ) as client:
             resp = await client.put(
-                "/dashboard/api/project",
+                "/dashboard/api/team",
                 json={"content": "anything"},
                 headers=_CSRF_HEADERS,
             )
@@ -540,8 +540,8 @@ class TestProjectProxy:
         ) as client:
             with patch("src.cli.config.PROJECTS_DIR", projects_dir):
                 resp = await client.put(
-                    "/dashboard/api/project",
-                    params={"project": "testproj"},
+                    "/dashboard/api/team",
+                    params={"team": "testproj"},
                     json={"content": "# Updated Project"},
                     headers=_CSRF_HEADERS,
                 )
@@ -560,7 +560,7 @@ class TestProjectProxy:
             call_args = transport_mock.request.call_args
             assert call_args[0][0] == "test_agent"
             assert call_args[0][1] == "PUT"
-            assert call_args[0][2] == "/project"
+            assert call_args[0][2] == "/team"
 
     @pytest.mark.asyncio
     async def test_write_project_no_runtime(self):
@@ -570,8 +570,8 @@ class TestProjectProxy:
             transport=ASGITransport(app=app), base_url="http://test",
         ) as client:
             resp = await client.put(
-                "/dashboard/api/project",
-                params={"project": "testproj"},
+                "/dashboard/api/team",
+                params={"team": "testproj"},
                 json={"content": "anything"},
                 headers=_CSRF_HEADERS,
             )
@@ -590,8 +590,8 @@ class TestProjectProxy:
         ) as client:
             with patch("src.cli.config.PROJECTS_DIR", projects_dir):
                 resp = await client.put(
-                    "/dashboard/api/project",
-                    params={"project": "testproj"},
+                    "/dashboard/api/team",
+                    params={"team": "testproj"},
                     json={"content": "clean\u200Btext\u202Ehere"},
                     headers=_CSRF_HEADERS,
                 )

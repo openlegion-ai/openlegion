@@ -1488,7 +1488,10 @@ class TestWorkplaceCLICommands:
 
     def test_projects_command_renders_table(self):
         runner = CliRunner()
-        with self._patched_get({"projects": [
+        # The canonical response shape is ``{"teams": [...]}``; the
+        # CLI still accepts the ``projects`` command as a back-compat
+        # alias.
+        with self._patched_get({"teams": [
             {"name": "research", "status": "active", "total": 3,
              "members": ["alpha", "beta"], "counts": {"working": 2}},
         ]}):
@@ -1499,15 +1502,18 @@ class TestWorkplaceCLICommands:
 
     def test_projects_command_json_mode(self):
         runner = CliRunner()
-        with self._patched_get({"projects": [{"name": "research", "status": "active", "total": 0}]}):
+        with self._patched_get({"teams": [{"name": "research", "status": "active", "total": 0}]}):
             result = runner.invoke(cli, ["--json", "projects"])
         assert result.exit_code == 0
         payload = json.loads(result.output)
+        # JSON mode emits both keys for back-compat with downstream
+        # consumers that parse either name.
+        assert payload["teams"][0]["name"] == "research"
         assert payload["projects"][0]["name"] == "research"
 
     def test_project_command_shows_one(self):
         runner = CliRunner()
-        body = {"projects": [
+        body = {"teams": [
             {"name": "research", "status": "active", "total": 1,
              "description": "deep dive", "members": ["alpha"],
              "counts": {"pending": 1}, "blockers": []},
@@ -1520,7 +1526,7 @@ class TestWorkplaceCLICommands:
 
     def test_project_command_unknown_exits_1(self):
         runner = CliRunner()
-        with self._patched_get({"projects": []}):
+        with self._patched_get({"teams": []}):
             result = runner.invoke(cli, ["project", "missing"])
         assert result.exit_code == 1
         assert "not found" in result.output.lower()

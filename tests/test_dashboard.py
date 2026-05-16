@@ -2564,7 +2564,7 @@ class TestBoardLoadingAndErrorStates:
         assert "workplaceSectionLoading" in body
         assert "workplaceErrors" in body
         # Sections covered (matches the loadWorkplace* surface).
-        for key in ("projects", "tasks", "blockers", "outputs", "pending", "feed"):
+        for key in ("teams", "tasks", "blockers", "outputs", "pending", "feed"):
             assert f"{key}: false" in body or f"'{key}'" in body or f'"{key}"' in body, \
                 f"app.js missing per-section bucket for {key}"
 
@@ -2574,7 +2574,7 @@ class TestBoardLoadingAndErrorStates:
         # Error path replaces silent console.error: each loader sets
         # its bucket so the banner renders.
         assert "workplaceErrors.feed" in body
-        assert "workplaceErrors.projects" in body
+        assert "workplaceErrors.teams" in body
         assert "workplaceErrors.tasks" in body
         assert "workplaceErrors.outputs" in body
 
@@ -2592,13 +2592,13 @@ class TestBoardLoadingAndErrorStates:
         # use the existing animate-pulse + bg-gray-800 classes for
         # visual consistency with the drill-in modal skeleton.
         assert 'data-testid="workplace-feed-skeleton"' in body
-        assert 'data-testid="workplace-projects-skeleton"' in body
+        assert 'data-testid="workplace-teams-skeleton"' in body
         assert 'data-testid="workplace-tasks-skeleton"' in body
         assert 'data-testid="workplace-outputs-skeleton"' in body
         # Each skeleton is gated on workplaceSectionLoading.<section>
         # so it disappears when the load resolves.
         assert "workplaceSectionLoading.feed" in body
-        assert "workplaceSectionLoading.projects" in body
+        assert "workplaceSectionLoading.teams" in body
         assert "workplaceSectionLoading.tasks" in body
         assert "workplaceSectionLoading.outputs" in body
 
@@ -2607,14 +2607,14 @@ class TestBoardLoadingAndErrorStates:
         body = resp.text
         # Error banner testid hooks per sub-tab.
         assert 'data-testid="workplace-feed-error"' in body
-        assert 'data-testid="workplace-projects-error"' in body
+        assert 'data-testid="workplace-teams-error"' in body
         assert 'data-testid="workplace-tasks-error"' in body
         assert 'data-testid="workplace-outputs-error"' in body
         # Each banner has a "Retry" button bound to
         # retryWorkplaceSection so the user can recover with one
         # click without reloading.
         assert "retryWorkplaceSection('feed')" in body
-        assert "retryWorkplaceSection('projects')" in body
+        assert "retryWorkplaceSection('teams')" in body
         assert "retryWorkplaceSection('tasks')" in body
         assert "retryWorkplaceSection('outputs')" in body
 
@@ -3128,7 +3128,7 @@ class TestDashboardProjectAPI:
             resp = self.client.get("/dashboard/api/teams")
         assert resp.status_code == 200
         data = resp.json()
-        assert "projects" in data
+        assert "teams" in data
 
     def test_project_read_path_traversal_blocked(self):
         """Path traversal in project name is rejected."""
@@ -5012,13 +5012,13 @@ class TestWorkplaceTabRoutes:
         rows = resp.json()["tasks"]
         assert all(r["assignee"] == "alpha" for r in rows)
 
-    def test_workplace_projects_empty_state(self):
+    def test_workplace_teams_empty_state(self):
         client = self._client_with_v2(False)
-        resp = client.get("/dashboard/api/workplace/projects")
+        resp = client.get("/dashboard/api/workplace/teams")
         assert resp.status_code == 200
         data = resp.json()
         assert data["enabled"] is False
-        assert data["projects"] == []
+        assert data["teams"] == []
 
     def test_workplace_blockers_empty_state(self):
         client = self._client_with_v2(False)

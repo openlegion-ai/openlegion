@@ -128,7 +128,7 @@ async def test_manage_team_archive_works_without_v2_flag(monkeypatch):
     mc = MagicMock()
     mc.archive_team = AsyncMock(return_value={"archived": True, "team": "growth"})
     messages = [{"role": "user", "content": "yes", "_origin": "user"}]
-    result = await manage_team("growth", "archive",
+    result = await manage_team("archive", team_name="growth",
                                 mesh_client=mc, _messages=messages)
     assert result["archived"] is True
 
@@ -765,7 +765,7 @@ async def test_endpoint_delete_project_happy_path(v2_app):
         # PR #2: response carries the human-readable summary so the
         # inline pending-action card can render without a follow-up
         # round-trip.
-        assert "delete project" in body["summary"].lower()
+        assert "delete team" in body["summary"].lower()
         assert "'research'" in body["summary"]
         # Confirm with human origin succeeds
         r = await c.post("/mesh/config/confirm",
@@ -773,6 +773,9 @@ async def test_endpoint_delete_project_happy_path(v2_app):
                          headers=_human_origin_headers())
     assert r.status_code == 200
     body = r.json()
+    # ``target_kind`` stays as ``"project"`` on pending_actions rows
+    # (backend schema value, not a domain term); the confirm response
+    # echoes that.
     assert body["deleted"] == "project"
     assert body["name"] == "research"
 
