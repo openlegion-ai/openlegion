@@ -23,9 +23,12 @@ from src.agent.skills import skill
         "section": {
             "type": "string",
             "description": (
-                "What to query: permissions, budget, fleet, cron, health, or all"
+                "What to query: permissions, budget, fleet, cron, health, "
+                "llm (available LLM providers), or all"
             ),
-            "enum": ["permissions", "budget", "fleet", "cron", "health", "all"],
+            "enum": [
+                "permissions", "budget", "fleet", "cron", "health", "llm", "all",
+            ],
             "default": "all",
         },
     },

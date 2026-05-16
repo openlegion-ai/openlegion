@@ -11,10 +11,13 @@ Public API:
     get_all_model_costs()         -> dict[str, tuple[float, float]]
     get_all_providers()           -> list[dict[str, str]]
     get_known_provider_names()    -> frozenset[str]
+    resolve_provider_for_model(m) -> str | None
+    get_available_providers()     -> set[str]
 """
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 
 # ── Provider registry ─────────────────────────────────────
@@ -484,3 +487,78 @@ def estimate_cost(
     pt = input_tokens if input_tokens is not None and input_tokens > 0 else int(total_tokens * 0.7)
     ct = output_tokens if output_tokens is not None and output_tokens > 0 else (total_tokens - pt)
     return round((pt / 1000 * ir) + (ct / 1000 * or_), 6)
+
+
+# ── Provider resolution / availability ─────────────────────
+# Bare-name prefixes (e.g. ``gpt-``, ``o1``) that map to known
+# providers without a ``provider/model`` slash. Mirrors the override
+# table in ``src/host/credentials.py:_PROVIDER_PREFIX_OVERRIDES`` so
+# CLI-side validators and the mesh agree on provider resolution.
+_BARE_PROVIDER_PREFIXES: dict[str, str] = {
+    "gpt-": "openai",
+    "o1": "openai",
+    "o3": "openai",
+    "o4": "openai",
+    "ollama_chat/": "ollama",
+    "text-embedding-": "openai",
+}
+
+
+def resolve_provider_for_model(model: str) -> str | None:
+    """Extract the provider prefix from a litellm-format model string.
+
+    Returns ``None`` for empty strings or names that lack a slash and
+    don't match a known bare-name prefix. For namespaced names like
+    ``openrouter/anthropic/claude-...`` the FIRST segment (``openrouter``)
+    is returned — the outer provider is what determines which API key /
+    routing path is used at call time.
+
+    Used by ``create_agent`` / ``apply_template`` to validate up front
+    that the chosen model's provider has credentials configured.
+    """
+    if not model or not isinstance(model, str):
+        return None
+    for prefix, provider in _BARE_PROVIDER_PREFIXES.items():
+        if model.startswith(prefix):
+            return provider
+    if "/" in model:
+        return model.split("/", 1)[0]
+    return None
+
+
+def get_available_providers() -> set[str]:
+    """Return the set of lowercase provider names with credentials in env.
+
+    Pure ``os.environ`` inspection so it works from CLI / dashboard
+    paths that don't hold a live ``CredentialVault``. The mesh-side
+    equivalent ``CredentialVault.get_providers_with_credentials()``
+    additionally consults loaded OAuth state and the ``api_bases`` map;
+    callers that need that richer picture should prefer the vault method.
+
+    Detection rules (mirrors ``credentials.py`` loading):
+
+    * ``OPENLEGION_SYSTEM_<PROVIDER>_API_KEY`` → provider with key
+    * ``OPENLEGION_SYSTEM_<PROVIDER>_API_BASE`` → keyless provider
+      (e.g. ``ollama``) reachable
+    * ``OPENLEGION_SYSTEM_OPENAI_OAUTH`` → openai
+    * ``OPENLEGION_SYSTEM_ANTHROPIC_OAUTH`` → anthropic
+    """
+    providers: set[str] = set()
+    sys_prefix = "OPENLEGION_SYSTEM_"
+    for key, value in os.environ.items():
+        if not key.startswith(sys_prefix) or not value:
+            continue
+        tail = key[len(sys_prefix):]
+        if tail.endswith("_API_KEY"):
+            provider = tail[: -len("_API_KEY")].lower()
+            if provider:
+                providers.add(provider)
+        elif tail.endswith("_API_BASE"):
+            provider = tail[: -len("_API_BASE")].lower()
+            if provider in KEYLESS_PROVIDERS:
+                providers.add(provider)
+        elif tail == "OPENAI_OAUTH":
+            providers.add("openai")
+        elif tail == "ANTHROPIC_OAUTH":
+            providers.add("anthropic")
+    return providers

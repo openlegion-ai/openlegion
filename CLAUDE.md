@@ -180,7 +180,7 @@ Provisioner manages engine instances via Docker/systemd on Hetzner VPS:
 
 ### Config & Environment
 - `.env` file loaded via python-dotenv at CLI startup
-- `OPENLEGION_SYSTEM_<PROVIDER>_API_KEY` env vars for LLM provider keys (mesh-only)
+- `OPENLEGION_SYSTEM_<PROVIDER>_API_KEY` env vars for LLM provider keys (mesh-only). **Agent creation validates that the chosen model's provider has credentials configured** — `create_agent` / `apply_template` reject with HTTP 400 (or `ValueError` on the CLI path) if e.g. you ask for `openai/gpt-4o-mini` but only `OPENLEGION_SYSTEM_ANTHROPIC_API_KEY` is set. `available_providers` is surfaced on `/mesh/introspect?section=llm` and `/mesh/system/metrics` so the operator can pick a reachable model up front. Helpers `resolve_provider_for_model()` and `get_available_providers()` live in `src/shared/models.py`.
 - `OPENLEGION_CRED_<NAME>` env vars for agent-tier credentials
 - `OPENLEGION_MAX_AGENTS`, `OPENLEGION_MAX_PROJECTS` for plan limits
 - `OPENLEGION_LOG_FORMAT=json` for production

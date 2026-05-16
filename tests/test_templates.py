@@ -42,12 +42,23 @@ class _TempConfigMixin:
         cfg_mod.PROJECT_ROOT = Path(self._tmpdir)
         # Initialize empty permissions
         self._perms_path.write_text(json.dumps({"permissions": {}}, indent=2))
+        # _create_agent_from_template now validates the chosen model's
+        # provider has a key in env (Bug 5). These tests use
+        # ``openai/gpt-4o*`` models — give them a placeholder key.
+        import os
+        self._orig_openai_key = os.environ.get("OPENLEGION_SYSTEM_OPENAI_API_KEY")
+        os.environ["OPENLEGION_SYSTEM_OPENAI_API_KEY"] = "sk-test-templates"
 
     def teardown_method(self):
         import src.cli.config as cfg_mod
         cfg_mod.AGENTS_FILE = self._orig_agents
         cfg_mod.PERMISSIONS_FILE = self._orig_perms
         cfg_mod.PROJECT_ROOT = self._orig_root
+        import os
+        if self._orig_openai_key is None:
+            os.environ.pop("OPENLEGION_SYSTEM_OPENAI_API_KEY", None)
+        else:
+            os.environ["OPENLEGION_SYSTEM_OPENAI_API_KEY"] = self._orig_openai_key
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _mock_config(self, *, collab=True):
