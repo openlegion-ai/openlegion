@@ -381,6 +381,37 @@ async def test_explicit_complete_task_truncates_long_summary():
     assert len(call.kwargs["result"]["summary"]) == 500
 
 
+@pytest.mark.asyncio
+async def test_explicit_complete_task_sanitizes_summary():
+    """The summary flows into another agent's LLM context via the
+    originator's check_inbox back-edge event. Invisible/control
+    Unicode (zero-width spaces, BOMs, etc.) must be stripped via
+    ``sanitize_for_prompt`` before forwarding — same boundary the
+    parallel update_status(done) path enforces. Codex P2 r5 caught
+    that this path was sending raw user-controlled summary text."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from src.agent.builtins.coordination_tool import _complete_task_v2
+
+    mesh_client = MagicMock()
+    mesh_client.set_task_status = AsyncMock(return_value={"id": "task_xyz"})
+
+    # Mix visible text with a zero-width space (​) and a BOM
+    # (﻿) — both stripped by sanitize_for_prompt.
+    leaky_summary = "wrote​ design﻿ doc"
+    await _complete_task_v2(
+        task_key="task_xyz", summary=leaky_summary, mesh_client=mesh_client,
+    )
+
+    call = mesh_client.set_task_status.await_args
+    forwarded = call.kwargs["result"]["summary"]
+    assert "​" not in forwarded
+    assert "﻿" not in forwarded
+    # Visible content survives.
+    assert "wrote" in forwarded
+    assert "design" in forwarded
+
+
 # ── 4. legacy path (no task_id) skips auto-close ─────────────────
 
 @pytest.mark.asyncio

@@ -862,9 +862,15 @@ async def _complete_task_v2(
     task_id = task_key.rsplit("/", 1)[-1] if "/" in task_key else task_key
     try:
         if summary:
+            # Sanitize invisible/control Unicode BEFORE forwarding —
+            # the back-edge writer copies this into the originator's
+            # check_inbox event which feeds back into another agent's
+            # LLM context. Same sanitization the parallel
+            # update_status(done) path already applies (codex P2 r5).
+            clean = sanitize_for_prompt(summary)[:500]
             record = await mesh_client.set_task_status(
                 task_id, "done",
-                result={"summary": summary[:500]},
+                result={"summary": clean},
             )
         else:
             record = await mesh_client.set_task_status(task_id, "done")
