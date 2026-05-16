@@ -1804,3 +1804,87 @@ async def test_operator_propose_delete_without_origin_fails_confirm(
     detail = body.get("detail")
     assert isinstance(detail, dict), f"expected structured detail, got {detail!r}"
     assert detail.get("code") == "wrong_origin_kind"
+
+
+@pytest.mark.asyncio
+async def test_legacy_propose_config_change_propagates_human_origin(
+    v2_app_with_bus_and_transport,
+):
+    """Defensive Bug A coverage for the legacy config-edit propose path.
+
+    ``MeshClient.propose_config_change`` / ``confirm_config_change`` are
+    dead in production today (operator routes through ``edit_agent`` for
+    soft + hard edits), but the mesh endpoints ``/mesh/agents/{id}/propose``
+    + ``/mesh/config/confirm`` are still wired and SDK-back-compat. A
+    future caller that re-hydrates them must not silently reproduce Bug A
+    where the stored row carries ``origin_kind=None`` and the confirm
+    fails the ``require_origin_kind="human"`` gate.
+
+    Uses the auth-token v2 fixture because the propose endpoint routes
+    through ``_resolve_agent_id``, which only consults headers when
+    ``_auth_tokens`` is configured.
+    """
+    app, _, _, _, _ = v2_app_with_bus_and_transport
+
+    from src.agent.mesh_client import MeshClient
+    from src.shared.trace import current_origin
+    from src.shared.types import MessageOrigin
+
+    # Build a MeshClient whose underlying httpx.AsyncClient hits the test
+    # app via ASGITransport. Stamps ``x-mesh-internal: 1`` + ``X-Agent-ID``
+    # so the propose/confirm endpoints' ``_resolve_agent_id`` path sees
+    # the operator identity (see _internal_operator_headers comment).
+    captured_headers: list[dict] = []
+    real_post = AsyncClient.post
+
+    async def _spying_post(self, url, **kwargs):
+        captured_headers.append(dict(kwargs.get("headers") or {}))
+        return await real_post(self, url, **kwargs)
+
+    async def _make_client(self):
+        c = AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://t",
+            headers={
+                "X-Agent-ID": "operator",
+                "x-mesh-internal": "1",
+            },
+        )
+        return c
+
+    # We don't monkeypatch _get_client into MeshClient because pytest-
+    # asyncio doesn't expose monkeypatch in the auth_tokens fixture —
+    # construct the client and replace the bound method directly.
+    mc = MeshClient(mesh_url="http://t", agent_id="operator")
+    mc._get_client = _make_client.__get__(mc, MeshClient)  # type: ignore[method-assign]
+
+    # Patch AsyncClient.post to capture headers so we can pin that the
+    # legacy stub forwards X-Origin (the actual regression).
+    import unittest.mock as _mock
+    with _mock.patch.object(AsyncClient, "post", _spying_post):
+        human = MessageOrigin(kind="human", channel="cli", user="u1")
+        token = current_origin.set(human)
+        try:
+            propose_resp = await mc.propose_config_change(
+                "scout", "instructions", "Updated instructions.",
+            )
+            # ``confirm_config_change`` MUST also forward the human
+            # origin — the confirm endpoint re-checks the *current*
+            # request's X-Origin in addition to the stored
+            # origin_kind, so a missing X-Origin on confirm fails with
+            # 403 even if the stored row is correct.
+            confirm_resp = await mc.confirm_config_change(
+                propose_resp["change_id"],
+            )
+        finally:
+            current_origin.reset(token)
+
+    assert confirm_resp.get("success") is True, confirm_resp
+    # Both calls must have carried X-Origin (lowercase or canonical
+    # depending on httpx's Header normalization).
+    for hdrs in captured_headers:
+        lower = {k.lower(): v for k, v in hdrs.items()}
+        assert "x-origin" in lower, (
+            f"propose/confirm call missing X-Origin: {hdrs!r}"
+        )
+

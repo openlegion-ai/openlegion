@@ -305,6 +305,129 @@ def test_concurrent_consume_serializes(tmp_path):
     assert len(successes) == 1, f"expected exactly one success, got {results}"
 
 
+def test_concurrent_consume_loser_sees_not_found(tmp_path):
+    """Loser of a concurrent consume race gets ``reason="not_found"``.
+
+    Sibling to ``test_concurrent_consume_serializes`` — pins that the
+    loser's failure reason is the stable ``not_found`` code (not None,
+    not some other reason like ``expired``) so callers can branch on
+    the code without parsing a message.
+    """
+    pa = _make_store(tmp_path)
+    pa.store(
+        nonce="n1", actor="operator", target_kind="agent",
+        target_id="alpha", action_kind="model", payload={"x": 1},
+    )
+    pairs: list[tuple] = []
+    barrier = threading.Barrier(2)
+
+    def worker():
+        barrier.wait()
+        pairs.append(pa.consume("n1"))
+
+    t1 = threading.Thread(target=worker)
+    t2 = threading.Thread(target=worker)
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    successes = [(r, why) for (r, why) in pairs if r is not None]
+    losers = [(r, why) for (r, why) in pairs if r is None]
+    assert len(successes) == 1, f"expected exactly one success, got {pairs}"
+    assert len(losers) == 1, f"expected exactly one loser, got {pairs}"
+    assert successes[0][1] is None, "winner should have no failure reason"
+    assert losers[0][1] == "not_found", (
+        f"loser should report not_found, got {losers[0][1]!r}"
+    )
+
+
+# ── store_with_cap (atomic reap+evict+insert) ───────────────────
+
+
+def test_store_with_cap_evicts_oldest_under_concurrent_proposes(tmp_path):
+    """N+K concurrent ``store_with_cap`` calls cap at exactly N rows.
+
+    Closes the race the legacy ``reap + list + cap-check + manual
+    evict + store`` sequence had: two proposers could both observe
+    ``count < max`` and both insert, producing N+1+ rows. The atomic
+    BEGIN IMMEDIATE version serializes them so the cap is honored.
+    """
+    pa = _make_store(tmp_path)
+    max_pending = 5
+    nonces = [f"n{i}" for i in range(max_pending + 10)]
+    barrier = threading.Barrier(len(nonces))
+    errors: list[BaseException] = []
+
+    def worker(nonce: str):
+        try:
+            barrier.wait()
+            pa.store_with_cap(
+                max_pending=max_pending,
+                nonce=nonce,
+                actor="operator",
+                target_kind="agent",
+                target_id="alpha",
+                action_kind="model",
+                payload={"i": nonce},
+                ttl=300,
+            )
+        except BaseException as e:  # pragma: no cover - surface in assert
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker, args=(n,)) for n in nonces]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"unexpected errors: {errors!r}"
+    rows = pa.list_pending()
+    assert len(rows) == max_pending, (
+        f"expected exactly {max_pending} rows under concurrency, got {len(rows)}"
+    )
+
+
+def test_store_with_cap_preserves_eviction_semantics(tmp_path):
+    """Sequential ``store_with_cap`` evicts the row with smallest ``expires_at``.
+
+    Pins that the atomic eviction order matches the legacy in-memory
+    ``min(..., key=expires_at)`` behavior — the soonest-expiring row
+    is dropped first, not the lowest insertion order. Built so callers
+    that relied on the legacy semantics (legacy tests, dashboard
+    surfaces) keep behaving identically.
+    """
+    pa = _make_store(tmp_path)
+    # Insert three rows whose ``expires_at`` is *reverse* of insertion
+    # order. ``n1`` has the shortest TTL → it should be the evictee
+    # when we push a fourth row at cap=3.
+    pa.store_with_cap(
+        max_pending=3, nonce="n1", actor="operator",
+        target_kind="agent", target_id="a", action_kind="x",
+        payload={"i": 1}, ttl=10,
+    )
+    pa.store_with_cap(
+        max_pending=3, nonce="n2", actor="operator",
+        target_kind="agent", target_id="a", action_kind="x",
+        payload={"i": 2}, ttl=100,
+    )
+    pa.store_with_cap(
+        max_pending=3, nonce="n3", actor="operator",
+        target_kind="agent", target_id="a", action_kind="x",
+        payload={"i": 3}, ttl=1000,
+    )
+    # At cap → next insert should evict n1 (smallest expires_at).
+    pa.store_with_cap(
+        max_pending=3, nonce="n4", actor="operator",
+        target_kind="agent", target_id="a", action_kind="x",
+        payload={"i": 4}, ttl=500,
+    )
+    rows = {r["nonce"] for r in pa.list_pending()}
+    assert rows == {"n2", "n3", "n4"}, (
+        f"expected n1 evicted (smallest TTL), got rows={rows}"
+    )
+
+
 # ── Replace-on-duplicate behavior ─────────────────────────────────
 
 

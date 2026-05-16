@@ -35,7 +35,12 @@ from src.host.orchestration import (
     TaskNotFound,
     Tasks,
 )
-from src.host.pending_actions import PendingActions
+from src.host.pending_actions import (
+    PendingActions,
+)
+from src.host.pending_actions import (
+    format_pending_reason as _humanize_pending_reason,
+)
 from src.shared.redaction import redact_url
 from src.shared.types import (
     AGENT_ID_RE_PATTERN,
@@ -177,21 +182,16 @@ def _store_pending_change(agent_id: str, field: str, old_value: object, new_valu
 
     Backed by ``PendingActions`` (SQLite). Capped at ``_MAX_PENDING``
     rows per process; oldest expires-first row is evicted to make room.
+    The reap + cap-check + evict + insert sequence runs inside a single
+    ``BEGIN IMMEDIATE`` via :meth:`PendingActions.store_with_cap` so
+    concurrent proposers can't both observe ``count < max`` and double-
+    insert.
     """
     store = _get_pending_actions_store()
-    store.reap_expired()
-    pending = store.list_pending()
-    if len(pending) >= _MAX_PENDING:
-        # Evict the row whose ``expires_at`` is soonest -- matches the
-        # legacy behavior (``min(...)`` over ``expires_at``).
-        oldest = min(pending, key=lambda r: r["expires_at"])
-        with store._conn() as conn:
-            conn.execute(
-                "DELETE FROM pending_actions WHERE nonce=?", (oldest["nonce"],),
-            )
     change_id = str(_uuid.uuid4())
     payload = {"old_value": old_value, "new_value": new_value}
-    store.store(
+    store.store_with_cap(
+        max_pending=_MAX_PENDING,
         nonce=change_id,
         actor="operator",
         target_kind="agent",
@@ -217,30 +217,6 @@ def _get_pending_change(change_id: str) -> dict | None:
         "new_value": payload.get("new_value", ""),
         "expires_at": datetime.fromtimestamp(rec["expires_at"], tz=timezone.utc),
     }
-
-
-# Map ``PendingActions.consume()`` reason codes to human-readable
-# messages for the structured 400 detail. ``not_found`` keeps the legacy
-# "invalid or expired" phrasing so tests that grep on that substring keep
-# passing and dashboards built before the structured-code change continue
-# to render a sensible message.
-_PENDING_REASON_MESSAGES = {
-    "not_found": "Pending action invalid or expired",
-    "expired": "Pending action expired",
-    "digest_mismatch": "Payload changed since proposal — propose again",
-    "wrong_confirmer": "Wrong confirmer for this pending action",
-    "wrong_origin_kind": (
-        "This action requires a human-origin confirm; the original "
-        "proposal did not carry a verified human origin"
-    ),
-}
-
-
-def _humanize_pending_reason(reason: str | None) -> str:
-    """Translate a ``consume()`` reason code into a human-readable message."""
-    if not reason:
-        return "Pending action invalid or expired"
-    return _PENDING_REASON_MESSAGES.get(reason, "Pending action invalid or expired")
 
 
 def _consume_pending_change(change_id: str) -> dict | None:
@@ -4920,16 +4896,6 @@ def create_mesh_app(
             )
         origin = _validated_origin(request, caller)
         origin_kind = origin.kind if origin is not None else None
-        # Cap pending rows to bound storage growth (mirrors propose_edit).
-        pending_actions.reap_expired()
-        existing = pending_actions.list_pending()
-        if len(existing) >= _MAX_PENDING:
-            oldest = min(existing, key=lambda r: r["expires_at"])
-            with pending_actions._conn() as _conn:
-                _conn.execute(
-                    "DELETE FROM pending_actions WHERE nonce=?",
-                    (oldest["nonce"],),
-                )
         nonce = str(_uuid.uuid4())
         members = projects[name].get("members", []) or []
         # Short headline shown in the inline chat card (max ~80 chars
@@ -4943,7 +4909,11 @@ def create_mesh_app(
             "summary": summary,
             "members": members,
         }
-        record = pending_actions.store(
+        # Atomic reap+cap+insert — see PendingActions.store_with_cap.
+        # Replaces the legacy reap → list → manual evict → store sequence
+        # which raced under concurrent proposes.
+        record = pending_actions.store_with_cap(
+            max_pending=_MAX_PENDING,
             nonce=nonce,
             actor="operator",
             target_kind="project",
@@ -4992,22 +4962,15 @@ def create_mesh_app(
             )
         origin = _validated_origin(request, caller)
         origin_kind = origin.kind if origin is not None else None
-        pending_actions.reap_expired()
-        existing = pending_actions.list_pending()
-        if len(existing) >= _MAX_PENDING:
-            oldest = min(existing, key=lambda r: r["expires_at"])
-            with pending_actions._conn() as _conn:
-                _conn.execute(
-                    "DELETE FROM pending_actions WHERE nonce=?",
-                    (oldest["nonce"],),
-                )
         nonce = str(_uuid.uuid4())
         summary = f"Delete agent {agent_id!r} permanently"
         payload = {
             "agent_id": agent_id,
             "summary": summary,
         }
-        record = pending_actions.store(
+        # Atomic reap+cap+insert — see PendingActions.store_with_cap.
+        record = pending_actions.store_with_cap(
+            max_pending=_MAX_PENDING,
             nonce=nonce,
             actor="operator",
             target_kind="agent",
@@ -5391,18 +5354,6 @@ def create_mesh_app(
         origin = _validated_origin(request, caller)
         origin_kind = origin.kind if origin is not None else None
 
-        # Cap to ``_MAX_PENDING`` rows to bound storage growth -- mirrors
-        # the legacy in-memory eviction behavior.
-        pending_actions.reap_expired()
-        existing = pending_actions.list_pending()
-        if len(existing) >= _MAX_PENDING:
-            oldest = min(existing, key=lambda r: r["expires_at"])
-            with pending_actions._conn() as _conn:
-                _conn.execute(
-                    "DELETE FROM pending_actions WHERE nonce=?",
-                    (oldest["nonce"],),
-                )
-
         change_id = str(_uuid.uuid4())
         payload = {"old_value": old_value, "new_value": new_value}
 
@@ -5441,7 +5392,11 @@ def create_mesh_app(
                 f"from {_short(old_value)} to {_short(new_value)}"
             )
 
-        record = pending_actions.store(
+        # Atomic reap+cap+insert — see PendingActions.store_with_cap.
+        # Caps to ``_MAX_PENDING`` rows to bound storage growth without
+        # racing under concurrent proposes.
+        record = pending_actions.store_with_cap(
+            max_pending=_MAX_PENDING,
             nonce=change_id,
             actor="operator",
             target_kind="agent",
@@ -6357,7 +6312,16 @@ def create_mesh_app(
             raise HTTPException(403, "Only the operator can cancel pending actions")
         record = pending_actions.cancel(nonce, actor=caller or "operator")
         if record is None:
-            raise HTTPException(404, "Pending action not found or already expired")
+            # Structured detail mirrors the confirm path so dashboard
+            # error formatters (`_formatPendingError`) can route through
+            # one code path and surface the same {code, message} shape.
+            raise HTTPException(
+                404,
+                detail={
+                    "code": "not_found",
+                    "message": "Pending action not found or already expired",
+                },
+            )
         return {
             "ok": True,
             "nonce": nonce,

@@ -39,6 +39,33 @@ logger = setup_logging("host.pending_actions")
 _DEFAULT_TTL_SEC = 300
 
 
+# Map ``PendingActions.consume()`` reason codes to human-readable
+# messages for the structured 400 detail. Colocated with ``consume()``
+# itself so the producer (reason codes) and consumer (humanizer) can't
+# drift apart. ``not_found`` keeps the legacy "invalid or expired"
+# phrasing so tests / dashboards that grep on that substring keep
+# passing. Exposed as a module-level public mapping so ``server.py``
+# (and any future caller) can re-use the same wording.
+PENDING_REASON_MESSAGES: dict[str, str] = {
+    "not_found": "Pending action invalid or expired",
+    "expired": "Pending action expired",
+    "digest_mismatch": "Payload changed since proposal — propose again",
+    "wrong_confirmer": "Wrong confirmer for this pending action",
+    "wrong_origin_kind": (
+        "This action requires a human-origin confirm; the original "
+        "proposal did not carry a verified human origin. "
+        "Re-issue the request from the dashboard or a paired channel."
+    ),
+}
+
+
+def format_pending_reason(reason: str | None) -> str:
+    """Translate a ``consume()`` reason code into a human-readable message."""
+    if not reason:
+        return "Pending action invalid or expired"
+    return PENDING_REASON_MESSAGES.get(reason, "Pending action invalid or expired")
+
+
 def _payload_digest(payload: Any) -> str:
     """Stable digest of the proposed payload for replay protection.
 
@@ -174,6 +201,75 @@ class PendingActions:
 
     # ── Core API ────────────────────────────────────────────────────
 
+    def _insert_row(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        nonce: str,
+        actor: str,
+        target_kind: str,
+        target_id: str,
+        action_kind: str,
+        payload: Any,
+        digest: str,
+        origin_kind: str | None,
+        now: float,
+        expires_at: float,
+        summary: str | None,
+        preview_diff: str | None,
+    ) -> dict:
+        """Insert a pending row and return the record dict.
+
+        Shared INSERT + record-assembly used by :meth:`store` and
+        :meth:`store_with_cap`. Caller owns transaction boundaries
+        (``store`` runs auto-commit; ``store_with_cap`` wraps this in
+        ``BEGIN IMMEDIATE``).
+        """
+        conn.execute(
+            "INSERT OR REPLACE INTO pending_actions "
+            "(nonce, actor, target_kind, target_id, action_kind, "
+            "payload_json, payload_digest, origin_kind, created_at, "
+            "expires_at, status, summary, preview_diff) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
+            (
+                nonce, actor, target_kind, target_id, action_kind,
+                json.dumps(payload, default=str), digest, origin_kind,
+                now, expires_at, summary, preview_diff,
+            ),
+        )
+        return {
+            "nonce": nonce,
+            "actor": actor,
+            "target_kind": target_kind,
+            "target_id": target_id,
+            "action_kind": action_kind,
+            "payload": payload,
+            "payload_digest": digest,
+            "origin_kind": origin_kind,
+            "created_at": now,
+            "expires_at": expires_at,
+            "status": "pending",
+            "summary": summary,
+            "preview_diff": preview_diff,
+        }
+
+    def _emit_created(self, record: dict) -> None:
+        """Emit ``pending_action_created`` for a freshly-stored row."""
+        self._safe_emit(
+            "pending_action_created",
+            agent=record["actor"],
+            data={
+                "nonce": record["nonce"],
+                "actor": record["actor"],
+                "target_kind": record["target_kind"],
+                "target_id": record["target_id"],
+                "action_kind": record["action_kind"],
+                "expires_at": record["expires_at"],
+                "summary": record["summary"],
+                "preview_diff": record["preview_diff"],
+            },
+        )
+
     def store(
         self,
         *,
@@ -210,49 +306,94 @@ class PendingActions:
         # so a corrupt-row sweep never blocks a legitimate store.
         self._safe_reap()
         with self._conn() as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO pending_actions "
-                "(nonce, actor, target_kind, target_id, action_kind, "
-                "payload_json, payload_digest, origin_kind, created_at, "
-                "expires_at, status, summary, preview_diff) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
-                (
-                    nonce, actor, target_kind, target_id, action_kind,
-                    json.dumps(payload, default=str), digest, origin_kind,
-                    now, expires_at, summary, preview_diff,
-                ),
+            record = self._insert_row(
+                conn,
+                nonce=nonce, actor=actor,
+                target_kind=target_kind, target_id=target_id,
+                action_kind=action_kind, payload=payload, digest=digest,
+                origin_kind=origin_kind, now=now, expires_at=expires_at,
+                summary=summary, preview_diff=preview_diff,
             )
         # Task 9 — surface to the dashboard so the System > Operator
         # panel and the inline chat bubble render the new pending nonce.
-        self._safe_emit(
-            "pending_action_created",
-            agent=actor,
-            data={
-                "nonce": nonce,
-                "actor": actor,
-                "target_kind": target_kind,
-                "target_id": target_id,
-                "action_kind": action_kind,
-                "expires_at": expires_at,
-                "summary": summary,
-                "preview_diff": preview_diff,
-            },
-        )
-        return {
-            "nonce": nonce,
-            "actor": actor,
-            "target_kind": target_kind,
-            "target_id": target_id,
-            "action_kind": action_kind,
-            "payload": payload,
-            "payload_digest": digest,
-            "origin_kind": origin_kind,
-            "created_at": now,
-            "expires_at": expires_at,
-            "status": "pending",
-            "summary": summary,
-            "preview_diff": preview_diff,
-        }
+        self._emit_created(record)
+        return record
+
+    def store_with_cap(
+        self,
+        *,
+        max_pending: int,
+        nonce: str,
+        actor: str,
+        target_kind: str,
+        target_id: str,
+        action_kind: str,
+        payload: Any,
+        origin_kind: str | None = None,
+        ttl: int = _DEFAULT_TTL_SEC,
+        summary: str | None = None,
+        preview_diff: str | None = None,
+    ) -> dict:
+        """Atomic reap + cap-check + evict + insert under one txn.
+
+        Replaces the prior call-site pattern of
+        ``reap_expired`` → ``list_pending`` → cap check → manual delete
+        → ``store`` that left a race window where two concurrent
+        proposes could both observe ``count < max`` and both insert,
+        producing ``max + N`` rows. Wrapping the sequence in a single
+        ``BEGIN IMMEDIATE`` serializes concurrent proposers so the cap
+        is honored exactly.
+
+        Eviction picks the row whose ``expires_at`` is soonest among
+        non-expired rows — matches the legacy behavior the propose
+        endpoints implemented (``min(..., key=expires_at)``).
+
+        Same return shape and same ``pending_action_created`` emit as
+        :meth:`store` so callers can swap in without other changes.
+        """
+        now = time.time()
+        digest = _payload_digest(payload)
+        expires_at = now + ttl
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                # Reap expired in-txn so the count below reflects only
+                # rows that still count against the cap.
+                conn.execute(
+                    "DELETE FROM pending_actions WHERE expires_at < ?",
+                    (now,),
+                )
+                cur = conn.execute(
+                    "SELECT COUNT(*) FROM pending_actions",
+                ).fetchone()
+                count = int(cur[0]) if cur else 0
+                if count >= max_pending:
+                    # Evict the soonest-expiring non-expired row.
+                    oldest = conn.execute(
+                        "SELECT nonce FROM pending_actions "
+                        "ORDER BY expires_at ASC LIMIT 1",
+                    ).fetchone()
+                    if oldest is not None:
+                        conn.execute(
+                            "DELETE FROM pending_actions WHERE nonce=?",
+                            (oldest[0],),
+                        )
+                record = self._insert_row(
+                    conn,
+                    nonce=nonce, actor=actor,
+                    target_kind=target_kind, target_id=target_id,
+                    action_kind=action_kind, payload=payload, digest=digest,
+                    origin_kind=origin_kind, now=now, expires_at=expires_at,
+                    summary=summary, preview_diff=preview_diff,
+                )
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+        # Emit outside the txn so a slow subscriber doesn't hold the
+        # connection; mirrors :meth:`store` and :meth:`reap_expired`.
+        self._emit_created(record)
+        return record
 
     def peek(self, nonce: str) -> dict | None:
         """Read a pending action without consuming it.

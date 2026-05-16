@@ -19,6 +19,30 @@ window.fetch = function(input, init) {
   }
   return _origFetch.call(this, input, init);
 };
+// Client-side-only chat roles — pushed into `chatHistories[agentId]`
+// but NEVER stored server-side. Used by `_loadChatHistory` to keep
+// these cards across a history reload (the server transcript filter
+// would otherwise drop anything not in {user, agent, notification}).
+// If you push a new role into chatHistories anywhere in this file,
+// add it here so it survives reloads. Origin: PR #902 follow-up
+// (operator-confirm-flow review gaps).
+const OVERLAY_CHAT_ROLES = new Set([
+  'pending_action_card',
+  'credential_request',
+  'browser_login_request',
+  'browser_captcha_help_request',
+  'operator_action_receipt',
+  'credit_exhausted',
+]);
+
+// Needs-You item kinds whose "open" action belongs on the Work tab
+// (rather than Chat). `pending` and `blocker` live in the Work tab's
+// sticky panel / task drawer; `unrated` jumps to Work > Activity for
+// the rating buttons. Everything else (credential / browser_login /
+// captcha / worker_dm) routes to Chat where the overlay card lives.
+// Origin: PR #902 follow-up.
+const _BADGE_WORK_TAB_KINDS = new Set(['pending', 'blocker', 'unrated']);
+
 const _IDENTITY_TABS = [
   { id: 'config', label: 'Config', file: null, access: 'user' },
   { id: 'identity', label: 'Identity', file: null, access: 'user' },
@@ -2065,10 +2089,20 @@ function dashboard() {
         });
         this._trackFirstAction('needs_you_click');
       } catch (_) { /* ignore */ }
-      const hasPending = (this.needsYouItems || []).some(i => i.kind === 'pending');
-      this.switchTab(hasPending ? 'workplace' : 'chat');
+      // kind → tab mapping:
+      //   pending / blocker / unrated → Work tab (sticky Needs-You panel
+      //     for pending+blocker; Activity feed with rating buttons for
+      //     unrated). No chat surface for these.
+      //   credential / browser_login / captcha / worker_dm → Chat tab
+      //     where the overlay card lives in operator chat (or the
+      //     worker's own chat for worker_dm).
+      // See _BADGE_WORK_TAB_KINDS at the top of this file.
+      const hasWorkKind = (this.needsYouItems || []).some(
+        i => _BADGE_WORK_TAB_KINDS.has(i.kind),
+      );
+      this.switchTab(hasWorkKind ? 'workplace' : 'chat');
       this.$nextTick(() => {
-        const selector = hasPending ? '[data-needs-you-panel]' : '[data-pending-cards]';
+        const selector = hasWorkKind ? '[data-needs-you-panel]' : '[data-pending-cards]';
         const el = document.querySelector(selector);
         if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
       });
@@ -4017,7 +4051,11 @@ function dashboard() {
         });
         if (!resp.ok) {
           const data = await resp.json().catch(() => ({}));
-          this.showToast(`Cancel failed: ${data.detail || resp.status}`);
+          // detail is now {code, message} (matches confirm) — route
+          // through the shared formatter so `[object Object]` can't
+          // leak into the toast.
+          const { text } = this._formatPendingError(data.detail, resp.status);
+          this.showToast(`Cancel failed: ${text || resp.status}`);
           return;
         }
         this.workplacePending = this.workplacePending.filter(p => p.nonce !== nonce);
@@ -4099,7 +4137,10 @@ function dashboard() {
         );
         if (!resp.ok) {
           const data = await resp.json().catch(() => ({}));
-          this.showToast(`Cancel failed: ${data.detail || resp.status}`);
+          // detail is structured {code, message} on 404 — see comment
+          // on cancelPendingAction.
+          const { text } = this._formatPendingError(data.detail, resp.status);
+          this.showToast(`Cancel failed: ${text || resp.status}`);
           return;
         }
       } catch (e) {
@@ -7673,16 +7714,12 @@ function dashboard() {
         // 2. Agent messages from just-completed streams not yet persisted
         // 3. Notifications injected via WebSocket not yet in the server transcript
         // 4. Client-side overlay cards (pending actions, credential/browser/captcha
-        //    requests) — these are NEVER part of the server-side transcript, so the
-        //    role-allowlist filter must keep them or they vanish on every refresh.
-        const overlayRoles = new Set([
-          'pending_action_card',
-          'credential_request',
-          'browser_login_request',
-          'browser_captcha_help_request',
-        ]);
+        //    requests, operator-action receipts, credit-exhausted toasts) — these
+        //    are NEVER part of the server-side transcript, so the role-allowlist
+        //    filter must keep them or they vanish on every refresh. Roles live in
+        //    OVERLAY_CHAT_ROLES at the top of this file.
         const trailing = localMsgs.filter(m => {
-          if (overlayRoles.has(m.role)) return true;
+          if (OVERLAY_CHAT_ROLES.has(m.role)) return true;
           if (m.role === 'notification') {
             if ((m.ts || 0) <= lastServerTs) return false;
             return !serverMsgs.some(s =>
