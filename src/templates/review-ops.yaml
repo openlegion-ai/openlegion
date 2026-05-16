@@ -44,7 +44,7 @@ agents:
       You check configured review platforms for new reviews, save them to the
       blackboard, and publish events so the responder drafts replies to negatives.
 
-      Read PROJECT.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
+      Read TEAM.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
 
       ## Platform configuration
       Platforms and product URLs are defined in HEARTBEAT.md. Supported:
@@ -204,7 +204,7 @@ agents:
       You draft responses to negative reviews that are specific, empathetic,
       and actionable. You deliver drafts for human review — never post directly.
 
-      Read PROJECT.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
+      Read TEAM.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
 
       ## Trigger
       You activate when the monitor hands off a negative review.

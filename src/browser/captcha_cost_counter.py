@@ -575,12 +575,15 @@ async def restore(path: Path | str | None = None) -> int:
 
 @functools.lru_cache(maxsize=256)
 def _tenant_for(agent_id: str) -> str | None:
-    """Resolve an agent ID to its tenant ID (project name).
+    """Resolve an agent ID to its tenant ID (team name).
 
-    Reads ``config/projects/`` via :func:`src.cli.config._load_config`
-    (which builds the reverse ``agent → project`` map at load time) and
-    returns the project name for ``agent_id``, or ``None`` when the
-    agent isn't in any project.
+    Reads ``config/teams/`` (canonical) — falls back to
+    ``config/projects/`` for pre-migration deployments where the
+    startup migrator (:mod:`src.host.team_migration`) hasn't yet
+    renamed the directory. Both paths funnel through
+    :func:`src.cli.config._load_config` which builds the reverse
+    ``agent → team`` map at load time. Returns the team name for
+    ``agent_id``, or ``None`` when the agent isn't in any team.
 
     LRU(256) cached because the CSV export and threshold-alert paths can
     each call it once per agent in the tenant's fleet — a 50-agent tenant

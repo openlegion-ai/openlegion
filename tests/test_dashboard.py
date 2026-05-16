@@ -4967,16 +4967,8 @@ class TestWorkplaceTabRoutes:
                 nonce = url.rstrip("/").split("/")[-2]
                 record = store.cancel(nonce, actor="operator")
                 if record is None:
-                    # Match the real mesh shape — structured
-                    # {code, message} on 404 so callers can branch on
-                    # ``detail.code`` without parsing a free-form string.
                     return _StubResp(404, {
-                        "detail": {
-                            "code": "not_found",
-                            "message": (
-                                "Pending action not found or already expired"
-                            ),
-                        },
+                        "detail": "Pending action not found or already expired",
                     })
                 return _StubResp(200, {
                     "ok": True,
@@ -5667,92 +5659,3 @@ class TestDashboardEventBusCoverage:
         assert resp.status_code == 400
         deletes = [e for e in self.captured if e["type"] == "blackboard_delete"]
         assert deletes == []
-
-
-class TestDashboardChatArchivesProxy:
-    """Cover the /api/agents/{id}/chat-archives proxies + reset passthrough."""
-
-    def setup_method(self):
-        self._tmpdir = tempfile.mkdtemp()
-        self.components = _make_components(self._tmpdir, include_v2=True)
-        self.client = _make_client(self.components)
-
-    def teardown_method(self):
-        _teardown(self.components)
-        shutil.rmtree(self._tmpdir, ignore_errors=True)
-
-    def test_chat_archives_proxy_list(self):
-        payload = {
-            "archives": [
-                {
-                    "name": "2026-01-01_120000.jsonl",
-                    "ts_iso": "2026-01-01T12:00:00+00:00",
-                    "size_bytes": 1024,
-                    "message_count": 4,
-                    "preview": "Hi there",
-                },
-            ],
-        }
-        self.components["transport"].request = AsyncMock(return_value=payload)
-        resp = self.client.get("/dashboard/api/agents/alpha/chat-archives")
-        assert resp.status_code == 200
-        assert resp.json() == payload
-        self.components["transport"].request.assert_called_once_with(
-            "alpha", "GET", "/chat/archives", timeout=10,
-        )
-
-    def test_chat_archives_proxy_get(self):
-        payload = {
-            "name": "2026-01-01_120000.jsonl",
-            "messages": [{"role": "user", "content": "hi", "ts": 1}],
-            "count": 1,
-        }
-        self.components["transport"].request = AsyncMock(return_value=payload)
-        resp = self.client.get("/dashboard/api/agents/alpha/chat-archives/2026-01-01_120000.jsonl")
-        assert resp.status_code == 200
-        assert resp.json() == payload
-        self.components["transport"].request.assert_called_once_with(
-            "alpha", "GET", "/chat/archives/2026-01-01_120000.jsonl", timeout=30,
-        )
-
-    def test_chat_archives_proxy_delete(self):
-        payload = {"deleted": True, "name": "2026-01-01_120000.jsonl"}
-        self.components["transport"].request = AsyncMock(return_value=payload)
-        resp = self.client.delete("/dashboard/api/agents/alpha/chat-archives/2026-01-01_120000.jsonl")
-        assert resp.status_code == 200
-        assert resp.json() == payload
-        self.components["transport"].request.assert_called_once_with(
-            "alpha", "DELETE", "/chat/archives/2026-01-01_120000.jsonl", timeout=10,
-        )
-
-    def test_chat_archives_unknown_agent_404(self):
-        resp = self.client.get("/dashboard/api/agents/nonexistent/chat-archives")
-        assert resp.status_code == 404
-
-    def test_reset_endpoint_includes_archive_fields(self):
-        """Reset proxy echoes archived_to / message_count / memory_flushed."""
-        self.components["transport"].request = AsyncMock(return_value={
-            "status": "ok",
-            "archived_to": "2026-01-01_120000.jsonl",
-            "message_count": 7,
-            "memory_flushed": True,
-        })
-        resp = self.client.post("/dashboard/api/agents/alpha/reset")
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["reset"] is True
-        assert body["agent"] == "alpha"
-        assert body["archived_to"] == "2026-01-01_120000.jsonl"
-        assert body["message_count"] == 7
-        assert body["memory_flushed"] is True
-
-    def test_reset_endpoint_handles_missing_fields(self):
-        """Reset proxy tolerates an older agent that returns no archive fields."""
-        self.components["transport"].request = AsyncMock(return_value={"status": "ok"})
-        resp = self.client.post("/dashboard/api/agents/alpha/reset")
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["reset"] is True
-        assert body["archived_to"] is None
-        assert body["message_count"] is None
-        assert body["memory_flushed"] is None

@@ -300,6 +300,8 @@ class TestTabLabelVocabulary:
     def test_tabs_array_uses_user_speak(self):
         # The Alpine ``tabs`` array maps internal IDs to display labels.
         # Phase 2 renames Agents → Team, Board → Work, System → Settings.
+        # The project→team rename (PR 2) flipped "Team" → "Teams" on the
+        # ``fleet`` tab label; the tab ID stays frozen (Constraint #14).
         # Work sits 2nd: it's the second-most-visited tab after Chat.
         m = re.search(
             r"tabs:\s*\[(.*?)\],",
@@ -308,16 +310,16 @@ class TestTabLabelVocabulary:
         )
         assert m, "Could not locate the tabs array in app.js"
         block = m.group(1)
-        assert "id: 'fleet'" in block and "label: 'Team'" in block
+        assert "id: 'fleet'" in block and "label: 'Teams'" in block
         assert "id: 'workplace'" in block and "label: 'Work'" in block
         assert "id: 'system'" in block and "label: 'Settings'" in block
-        # Order: Chat | Work | Team | Settings (Work is 2nd, Team 3rd).
+        # Order: Chat | Work | Teams | Settings (Work is 2nd, Teams 3rd).
         chat_idx = block.find("id: 'chat'")
         work_idx = block.find("id: 'workplace'")
         team_idx = block.find("id: 'fleet'")
         system_idx = block.find("id: 'system'")
         assert chat_idx < work_idx < team_idx < system_idx, (
-            "tabs must be ordered Chat | Work | Team | Settings"
+            "tabs must be ordered Chat | Work | Teams | Settings"
         )
 
     def test_fleet_running_count_uses_team_word(self):
@@ -2214,13 +2216,21 @@ _VERB_FOR_TOOL_FALLBACK_OK = frozenset({
     "undo_change",
     "manage_agent",
     "manage_project",
+    "manage_team",
     "manage_task",
     "create_project",
+    "create_team",
     "add_agents_to_project",
+    "add_agents_to_team",
     "remove_agents_from_project",
+    "remove_agents_from_team",
     "set_project_goal",
+    "set_team_goal",
     "update_project_context",
+    "update_team_context",
     "inspect_projects",
+    "inspect_teams",
+    "summarize_team_progress",
     # Vault / credentials.
     "vault_generate_secret",
     "vault_list",

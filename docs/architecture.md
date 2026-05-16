@@ -50,7 +50,7 @@ OpenLegion uses a **fleet model, not hierarchy**. There is no CEO agent that rou
 
 ### Operator agent
 
-A reserved agent named `operator` is auto-created at startup (`_ensure_operator_agent` in `src/cli/runtime.py`). It runs at lower resource caps (128MB RAM, 0.05 CPU) and carries fleet-management tools (`fleet_tool.py`, `operator_tools.py`). The operator owns `OBSERVATIONS.md` (written via `save_observations`), surfaces the Fleet pulse card on the dashboard, and is the only agent that can apply fleet templates, archive projects, or confirm hard config edits.
+A reserved agent named `operator` is auto-created at startup (`_ensure_operator_agent` in `src/cli/runtime.py`). It runs at lower resource caps (128MB RAM, 0.05 CPU) and carries fleet-management tools (`fleet_tool.py`, `operator_tools.py`). The operator owns `OBSERVATIONS.md` (written via `save_observations`), surfaces the Fleet pulse card on the dashboard, and is the only agent that can apply fleet templates, archive teams, or confirm hard config edits.
 
 ### Reserved agent IDs
 
@@ -68,7 +68,7 @@ The mesh host runs on the user's machine as a single FastAPI process. It is the 
 
 | Module | Responsibility |
 |--------|---------------|
-| `mesh.py` | Blackboard (SQLite WAL, atomic CAS, audit log with undo/archive), PubSub, MessageRouter (with cross-project block + capability-based addressing) |
+| `mesh.py` | Blackboard (SQLite WAL, atomic CAS, audit log with undo/archive), PubSub, MessageRouter (with cross-team block + capability-based addressing) |
 | `server.py` | FastAPI app factory — 98 `@app.*` endpoints, all permission-checked. Three auth tiers (any-auth / operator-or-internal / loopback). |
 | `runtime.py` | `RuntimeBackend` ABC → `DockerBackend` / `SandboxBackend`; the browser-service container lives here too. SandboxBackend falls back to DockerBackend on init failure. |
 | `transport.py` | `Transport` ABC → `HttpTransport` / `SandboxTransport` |
@@ -100,7 +100,7 @@ Each agent runs in an isolated Docker container with its own FastAPI server (28 
 | `skills.py` | Skill discovery and registry; `@skill` decorator system. |
 | `mcp_client.py` | MCP server lifecycle management and tool routing. |
 | `memory.py` | SQLite + sqlite-vec + FTS5 hierarchical memory (`EMBEDDING_DIM=1536`, weighted 0.7 vector / 0.3 keyword with salience decay). |
-| `workspace.py` | Persistent markdown workspace. Scaffold files (`_SCAFFOLD_FILES`): `INSTRUCTIONS.md`, `SOUL.md`, `USER.md`, `MEMORY.md`, `HEARTBEAT.md`, `INTERFACE.md`. `PROJECT.md` / `SYSTEM.md` are read-only bootstrap inclusions, not writable scaffolds. Operator's `OBSERVATIONS.md` is written by the `save_observations` tool, not a generic scaffold. |
+| `workspace.py` | Persistent markdown workspace. Scaffold files (`_SCAFFOLD_FILES`): `INSTRUCTIONS.md`, `SOUL.md`, `USER.md`, `MEMORY.md`, `HEARTBEAT.md`, `INTERFACE.md`. `TEAM.md` / `SYSTEM.md` are read-only bootstrap inclusions, not writable scaffolds (legacy `PROJECT.md` is recognised as a fallback through PR 2 of the project→team rename). Operator's `OBSERVATIONS.md` is written by the `save_observations` tool, not a generic scaffold. |
 | `context.py` | Context window management. Flush facts at 60%, summarize-and-replace at 70%, warn at 80%. Empty summary falls back to hard prune. Write-then-compact flushes facts to `MEMORY.md` before discarding context. |
 | `llm.py` | LLM client (`chat_stream()` and `chat()`) — routes through mesh proxy, never holds keys. |
 | `mesh_client.py` | HTTP client for agent-to-mesh communication; merges `origin_header()` into `wake_agent` / `create_task`. |
@@ -126,7 +126,7 @@ Each agent runs in an isolated Docker container with its own FastAPI server (28 
 | `introspect_tool.py` | Runtime state query — permissions, budget, fleet, cron, health. |
 | `skill_tool.py` | Self-authoring with AST validation. Forbidden imports/calls/attrs prevent `eval`, `exec`, `open`, `__subclasses__`, etc. |
 | `fleet_tool.py` | Operator-only fleet management — `list_templates`, `apply_template` (per-slot creation, not atomic across slots). |
-| `operator_tools.py` | Operator-only orchestration — `edit_agent` (collapses soft/hard branches), `undo_change`, `propose_edit` / `confirm_edit`, `save_observations`, `inspect_agents`, `inspect_projects`, project/agent CRUD. |
+| `operator_tools.py` | Operator-only orchestration — `edit_agent` (collapses soft/hard branches), `undo_change`, `propose_edit` / `confirm_edit`, `save_observations`, `inspect_agents`, `inspect_teams` (alias `inspect_projects`), team/agent CRUD via `create_team` / `add_agents_to_team` / … (legacy `*_project` names still callable). |
 | `wallet_tool.py` | Wallet operations — get address, get balance, read contract, transfer, execute (Ethereum + Solana). |
 
 ### Browser Service (`src/browser/`)
@@ -193,7 +193,7 @@ The SSO callback (`/__auth/callback`) is **not implemented in this repo** — it
 
 | Module | Purpose |
 |--------|---------|
-| `main.py` | Click commands and entry point (`start`, `stop`, `status`, `chat`, `version`, `wallet`, `projects`, `tasks`, `pending`, `confirm`, `cancel`, `reset`). |
+| `main.py` | Click commands and entry point (`start`, `stop`, `status`, `chat`, `version`, `wallet`, `teams` (alias `projects`), `team` (alias `project`), `tasks`, `pending`, `confirm`, `cancel`, `reset`). |
 | `config.py` | Config loading, Docker helpers, fleet template system (`_load_templates()`, `_create_agent_from_template()`, `_apply_template()`). |
 | `runtime.py` | `RuntimeContext` — full lifecycle management. Auto-creates the `operator` agent, enforces `RESERVED_AGENT_IDS`, falls back from `SandboxBackend` to `DockerBackend` on init failure. |
 | `repl.py` | `REPLSession` — interactive command dispatch. **Talks directly to agent endpoints** (`/chat`, `/chat/stream`), not through a mesh router hop. |
@@ -221,7 +221,7 @@ All persistent state is SQLite (WAL mode, `busy_timeout=30000` except `traces` w
 
 | Location | What | Owner |
 |---|---|---|
-| `data/costs.db` | Per-agent + per-project LLM cost ledger | `src/host/costs.py` |
+| `data/costs.db` | Per-agent + per-team LLM cost ledger | `src/host/costs.py` |
 | `data/wallet.db` | Agent wallet index, addresses, derivation metadata | `src/host/wallet.py` |
 | `data/captcha_costs.json` | CAPTCHA cost ledger in millicents (1/100,000 USD) | `src/browser/captcha_cost_counter.py` |
 | Mesh-side blackboard / pubsub / audit-log SQLite | Inter-agent state, atomic CAS, undo/archive | `src/host/mesh.py` |
@@ -233,27 +233,33 @@ All persistent state is SQLite (WAL mode, `busy_timeout=30000` except `traces` w
 | `config/cron.json` | Cron + heartbeat job definitions (atomic temp+rename) | `src/host/cron.py` |
 | `config/api_keys.json` | Named API key hashes — `sha256(key_id + raw_key)` | `src/host/api_keys.py` |
 | `config/mesh.yaml` | Mesh + LLM default config | `src/cli/config.py` |
-| `config/projects/{name}/` | Project metadata + `project.md` (read-only mount into member containers) | `src/cli/config.py` |
+| `config/projects/{name}/` | Team metadata + `team.md` / legacy `project.md` (read-only mount into member containers). Legacy directory name; PR 3 will flip to `config/teams/`. | `src/cli/config.py` |
 | `config/settings.json` | Dashboard / browser flag overrides (CAPTCHA solver creds STRIPPED here at load) | `src/browser/flags.py` |
 | `.env` | API keys and config — written atomically with `chmod(0o600)` | `src/host/credentials.py` |
 
-## Project Isolation
+## Team Isolation
 
-Agents can be organized into **projects** — isolated namespaces that scope blackboard access, agent visibility, and shared context.
+Agents can be organized into **teams** — isolated namespaces that scope
+blackboard access, agent visibility, and shared context. (Internally
+the storage prefix and config directory are still `projects/...`
+through PR 2 of the project→team rename.)
 
 ### How It Works
 
-- **Blackboard scoping**: The `MeshClient` auto-prefixes all blackboard keys with `projects/{name}/`. An agent writing to `tasks/research_01` in project "sales" actually writes to `projects/sales/tasks/research_01`. Agents see natural keys — the prefix is stripped on read. This is enforced at both the client (auto-namespacing) and server (permission matrix) layers.
-- **Agent visibility**: `list_agents` returns only project peers for project agents, or only the agent itself for standalone agents.
-- **PROJECT.md**: Only project members receive a `PROJECT.md` mounted read-only into their container at `/app/PROJECT.md`. Standalone agents get none.
-- **Permission management on agent create**: `POST /mesh/agents/create` writes defaults of `blackboard_read=["*"]`, `blackboard_write=["tasks/*","context/*","status/*","output/*","artifacts/*"]`, `can_publish=["*"]`, `can_subscribe=["*"]` (`src/host/server.py:2958-2965`). The effective per-project scope comes from the MeshClient's auto-prefix at runtime, not from the on-disk permission file.
-- **Remove from project**: When an agent is removed from a project, `blackboard_read` and `blackboard_write` are cleared to `[]`.
-- **Standalone agents**: Agents not assigned to any project have no scoped blackboard prefix, see only themselves in `list_agents`, and receive no `PROJECT.md`.
-- **Cross-project blackboard counter**: `_blackboard_xproject_count` is a process-lifetime observability counter (no enforcement) surfaced on `/mesh/system/metrics` as `blackboard_cross_project_total`.
+- **Blackboard scoping**: The `MeshClient` auto-prefixes all blackboard keys with `projects/{name}/`. An agent writing to `tasks/research_01` on the "sales" team actually writes to `projects/sales/tasks/research_01`. Agents see natural keys — the prefix is stripped on read. This is enforced at both the client (auto-namespacing) and server (permission matrix) layers.
+- **Agent visibility**: `list_agents` returns only team peers for team agents, or only the agent itself for solo agents.
+- **TEAM.md**: Only team members receive a `TEAM.md` mounted read-only into their container at `/app/TEAM.md`. Solo agents get none. (The legacy `PROJECT.md` filename still resolves through PR 2.)
+- **Permission management on agent create**: `POST /mesh/agents/create` writes defaults of `blackboard_read=["*"]`, `blackboard_write=["tasks/*","context/*","status/*","output/*","artifacts/*"]`, `can_publish=["*"]`, `can_subscribe=["*"]` (`src/host/server.py:2958-2965`). The effective per-team scope comes from the MeshClient's auto-prefix at runtime, not from the on-disk permission file.
+- **Remove from team**: When an agent is removed from a team, `blackboard_read` and `blackboard_write` are cleared to `[]`.
+- **Solo agents**: Agents not assigned to any team have no scoped blackboard prefix, see only themselves in `list_agents`, and receive no `TEAM.md`.
+- **Cross-team blackboard counter**: `_blackboard_xproject_count` is a process-lifetime observability counter (no enforcement) surfaced on `/mesh/system/metrics` as `blackboard_cross_project_total`.
 
-### Project Data
+### Team Data
 
-Project configuration is stored in `config/projects/{name}/`. Each project directory contains `metadata.yaml` (name, description, created_at, members list) and `project.md` (shared context mounted read-only into member containers).
+Team configuration is stored in `config/projects/{name}/`. Each team
+directory contains `metadata.yaml` (name, description, created_at,
+members list) and `team.md` / legacy `project.md` (shared context
+mounted read-only into member containers).
 
 ## Data Flow
 
@@ -303,5 +309,5 @@ Dockerfiles live at the repo root: `Dockerfile.agent` (python:3.12-slim, non-roo
 6. **Write-then-compact** — facts are flushed to `MEMORY.md` before discarding context.
 7. **Tool-call message grouping** — `assistant(tool_calls)` and `tool(results)` are never separated in context trimming.
 8. **Unicode sanitization** — all untrusted text passes through `sanitize_for_prompt()` before reaching LLM context (user input, tool results, system prompt context).
-9. **Project isolation** — blackboard keys are auto-namespaced under `projects/{name}/`, agent visibility is scoped to project peers, and standalone agents have no scoped blackboard prefix.
+9. **Team isolation** — blackboard keys are auto-namespaced under `projects/{name}/`, agent visibility is scoped to team peers, and solo agents have no scoped blackboard prefix.
 10. **MessageOrigin propagation** — every cross-agent path that produces work reads `current_origin` once and forwards it to both `wake_agent` and `create_task` so completion notifications reach the originating channel/user.

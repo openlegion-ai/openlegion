@@ -1000,7 +1000,7 @@ class RuntimeContext:
                     click.echo(f"\n  Project [{pname}]: {', '.join(members)}")
 
             if standalone:
-                click.echo(f"\n  Standalone: {', '.join(standalone)}")
+                click.echo(f"\n  Solo: {', '.join(standalone)}")
 
         # ── Footer ──
         if active_agents:

@@ -30,32 +30,45 @@ A command palette (**Cmd+K** / **Ctrl+K**) provides quick access to agents, acti
 - **Notifications bell** (top-right) — driven by `/api/notifications`. Subtle gray dot when unread items exist; click to open the dropdown. See [Notifications](#notifications-system).
 - **"N agents need attention" badge** — wired to `fleetDigest?.agents_attention?.length`, populated from the operator's `OBSERVATIONS.md` aggregation. Renders only when the count is non-zero.
 
-## Project Management
+## Team Management
 
-The dashboard supports multi-project namespaces for organizing agents into isolated groups.
+The dashboard supports multi-team namespaces for organizing agents into
+isolated groups. The tab ID is still `fleet` (frozen for URL stability)
+but the user-facing label is **Teams**.
 
-### Project Switcher
+### Team Switcher
 
-A tab bar at the top of the Team view shows all projects plus an "All Agents" view. Click a project tab to filter the agent grid to that project's members. The "All Agents" tab shows every agent with project badges. Each tab displays a member count.
+A tab bar at the top of the Teams view shows all teams plus an "All
+Agents" view. Click a team tab to filter the agent grid to that team's
+members. The "All Agents" tab shows every agent with team badges. Each
+tab displays a member count.
 
-### Create Project
+### Create Team
 
-Click the **+** button next to the project tabs to create a new project. Enter a name and optional description. Projects are stored in `config/projects/{name}/`.
+Click the **+** button next to the team tabs to create a new team. Enter
+a name and optional description. Teams are stored on disk under
+`config/projects/{name}/` (legacy directory name retained through PR 2;
+PR 3 will flip it to `config/teams/`).
 
-### Project Members
+### Team Members
 
-When a project is selected:
+When a team is selected:
 - An "Add member" dropdown lists unassigned agents
 - Each member card shows a "Remove" button
 - Adding/removing a member auto-restarts the agent so the new scope takes effect
 
-### Delete Project
+### Delete Team
 
-Click the **Delete Project** button (requires confirmation). Members become standalone agents.
+Click the **Delete Team** button (requires confirmation). Members
+become solo agents.
 
-### PROJECT.md
+### TEAM.md
 
-When a project is selected, a PROJECT.md banner appears above the agent grid. Edit it to set shared context for all project members. The content is pushed to running member agents on save. When no project is selected (All Agents view), the banner is hidden.
+When a team is selected, a TEAM.md banner appears above the agent grid.
+Edit it to set shared context for all team members. The content is
+pushed to running member agents on save. When no team is selected (All
+Agents view), the banner is hidden. (Legacy `PROJECT.md` is still
+recognised as a fallback filename through PR 2.)
 
 ## Team Tab
 
@@ -67,8 +80,8 @@ When the shared browser service is running, an embedded KasmVNC viewer appears i
 
 The operator is a system agent that builds and manages your workforce. It is rendered differently from regular agents:
 
-- In the **standalone fleet view** (no project selected), the operator card is **prepended** to the grid as the first card with a `system` badge.
-- Inside a project view, the operator card is **not** rendered — operator is never a project member. The backend rejects `POST /api/projects` and `POST /api/projects/{name}/members` requests that include the operator (`ValueError → HTTP 400`).
+- In the **standalone fleet view** (no team selected), the operator card is **prepended** to the grid as the first card with a `system` badge.
+- Inside a team view, the operator card is **not** rendered — operator is never a team member. The backend rejects `POST /api/projects` and `POST /api/projects/{name}/members` requests that include the operator (`ValueError → HTTP 400`). (The legacy `/api/projects` route is the canonical surface during PR 2; `/api/teams` aliases land it for forward-compat.)
 - Clicking the operator card routes to **Settings → Operator** (not the standard agent detail panel).
 - The operator is **excluded from quota math, fleet cost/token totals, and broadcasts** — only "real" agents count against `OPENLEGION_MAX_AGENTS` and receive broadcast messages.
 - The standard agent detail panel for operator (if reached via deep link) shows a banner directing the user to the Operator system sub-tab; **Heartbeat Pause** is hidden.
@@ -367,7 +380,7 @@ Proxy changes auto-restart the agent and reset the browser session. In the Syste
 
 ## Broadcast
 
-Send a message to multiple agents simultaneously using the broadcast bar below the agent grid. When a project is selected, the broadcast targets only that project's members. When viewing "All Agents", it targets every agent. Standalone agents (not in any project) are included only in the "All Agents" broadcast. The operator is always excluded from broadcasts. Each agent processes the message independently. Responses display inline with expand/collapse for long replies (200+ characters).
+Send a message to multiple agents simultaneously using the broadcast bar below the agent grid. When a team is selected, the broadcast targets only that team's members. When viewing "All Agents", it targets every agent. Solo agents (not on any team) are included only in the "All Agents" broadcast. The operator is always excluded from broadcasts. Each agent processes the message independently. Responses display inline with expand/collapse for long replies (200+ characters).
 
 ## Blackboard Operations
 
@@ -432,11 +445,11 @@ The dashboard connects to the mesh via WebSocket at `/ws/events`. Events are str
 | **Pending actions** | `pending_action_created`, `pending_action_resolved`, `pending_action_expired` |
 | **Operator action receipts** | `operator_action_receipt`, `operator_action_receipt_undone`, `operator_action_receipt_superseded` |
 | **Agent lifecycle** | `agent_archived`, `agent_unarchived`, `agent_restarting`, `agent_restarted`, `agent_config_updated` |
-| **Project CRUD** | `project_created`, `project_updated`, `project_deleted`, `project_archived`, `project_unarchived` |
+| **Team / project CRUD** | `team_created`, `team_updated`, `team_deleted`, `team_archived`, `team_unarchived` (each event is also emitted under its legacy `project_*` name through PR 3) |
 
 Adding a new event-name string anywhere in `src/` without adding the matching `Literal` value will cause `DashboardEvent` to raise `ValidationError`, which the emit-site `try/except` swallows at debug level — the event silently disappears. `tests/test_types.py::test_every_emit_string_in_src_matches_a_dashboard_event_literal` is the regex-sweep guard against that drift.
 
-The **WebSocket subscription is unfiltered on the wire** — the server pushes every event and the SPA filters in JavaScript. The Live Events filter chips operate over a subset (the agent-runtime / chat / notifications / blackboard / credentials families); other families (browser metrics, lifecycle, project CRUD) still arrive on the same socket and are routed to their respective panels.
+The **WebSocket subscription is unfiltered on the wire** — the server pushes every event and the SPA filters in JavaScript. The Live Events filter chips operate over a subset (the agent-runtime / chat / notifications / blackboard / credentials families); other families (browser metrics, lifecycle, team CRUD) still arrive on the same socket and are routed to their respective panels.
 
 ### `tenant_spend_threshold` Discriminator
 
@@ -508,7 +521,7 @@ The per-agent VNC reverse proxy lives at **`/agent-vnc/{agent_id}/{path}`** on t
 
 ## CAPTCHA Rollup CSV
 
-The `/api/billing/captcha-rollup` endpoint exports per-tenant CAPTCHA-solver spend as CSV. It has **no UI** — operators reach it directly via curl. Required query params: `tenant` (project slug) and `period` (`daily` | `weekly` | `monthly`, default `monthly`).
+The `/api/billing/captcha-rollup` endpoint exports per-tenant CAPTCHA-solver spend as CSV. It has **no UI** — operators reach it directly via curl. Required query params: `tenant` (team slug) and `period` (`daily` | `weekly` | `monthly`, default `monthly`).
 
 Column schema (one header row, then per-agent rows sorted by agent_id, then a synthetic tenant-total row):
 
@@ -571,7 +584,7 @@ The tables below are not exhaustive — they cover the user-facing surface area 
 | `GET` | `/dashboard/api/conversations` | List active conversations (open chat panels) |
 | `POST` | `/dashboard/api/conversations/{agent_id}/open` | Mark a conversation open |
 | `POST` | `/dashboard/api/conversations/{agent_id}/close` | Mark a conversation closed |
-| `POST` | `/dashboard/api/broadcast` | Send message to all agents (request body filters by `project` name or `standalone: true`; operator excluded) |
+| `POST` | `/dashboard/api/broadcast` | Send message to all agents (request body filters by `project` name — alias `team` accepted — or `standalone: true`; operator excluded) |
 | `POST` | `/dashboard/api/broadcast/stream` | SSE streaming broadcast (same filters as above) |
 
 **Workspace**
@@ -590,7 +603,7 @@ The tables below are not exhaustive — they cover the user-facing surface area 
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/dashboard/api/workplace/projects` | Projects with rollup status for the Project Status panel |
+| `GET` | `/dashboard/api/workplace/projects` | Teams with rollup status for the Team Status panel (response payload includes both `team_id` and `project_id` keys per item) |
 | `GET` | `/dashboard/api/workplace/tasks` | All tasks (kanban columns: Pending / Working / Blocked / Done) |
 | `GET` | `/dashboard/api/workplace/tasks/{task_id}` | Single task detail with artifacts (powers "Read full" toggle) |
 | `GET` | `/dashboard/api/workplace/tasks/{task_id}/events` | Per-task event timeline |
@@ -666,17 +679,22 @@ The tables below are not exhaustive — they cover the user-facing surface area 
 | `GET` | `/dashboard/api/costs/{agent_id}` | Cost data for a specific agent |
 | `GET` | `/dashboard/api/costs` | Cost data with optional period |
 
-**Projects**
+**Teams**
+
+The legacy `*/projects/*` paths remain the canonical surface through
+PR 2; matching `*/teams/*` aliases land on the same handlers for
+forward-compat. JSON responses carry both `team_id` and `project_id`
+keys per item.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/dashboard/api/projects` | List all projects with members |
-| `POST` | `/dashboard/api/projects` | Create a new project |
-| `DELETE` | `/dashboard/api/projects/{name}` | Delete a project |
-| `POST` | `/dashboard/api/projects/{name}/members` | Add agent to project (auto-restarts agent) |
-| `DELETE` | `/dashboard/api/projects/{name}/members/{agent}` | Remove agent from project (auto-restarts agent) |
-| `GET` | `/dashboard/api/project?project={name}` | Read project's PROJECT.md |
-| `PUT` | `/dashboard/api/project?project={name}` | Update project's PROJECT.md |
+| `GET` | `/dashboard/api/projects` | List all teams with members |
+| `POST` | `/dashboard/api/projects` | Create a new team |
+| `DELETE` | `/dashboard/api/projects/{name}` | Delete a team |
+| `POST` | `/dashboard/api/projects/{name}/members` | Add agent to team (auto-restarts agent) |
+| `DELETE` | `/dashboard/api/projects/{name}/members/{agent}` | Remove agent from team (auto-restarts agent) |
+| `GET` | `/dashboard/api/project?project={name}` | Read team's TEAM.md (legacy `PROJECT.md` accepted) |
+| `PUT` | `/dashboard/api/project?project={name}` | Update team's TEAM.md |
 
 **Automation (Cron)**
 

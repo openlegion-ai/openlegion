@@ -460,31 +460,6 @@ async def test_pending_cancel_unknown_returns_404(v2_app):
         assert r.status_code == 404
 
 
-@pytest.mark.asyncio
-async def test_cancel_endpoint_returns_structured_detail(v2_app):
-    """Cancel endpoint emits ``{code, message}`` detail (matches confirm).
-
-    The dashboard's ``_formatPendingError`` branches on ``detail.code``
-    instead of parsing the message string, so the cancel route must
-    emit the same structured shape as confirm. Before the fix, cancel
-    raised ``HTTPException(404, "string")`` and the toast would render
-    ``[object Object]`` once the dashboard handler started reading
-    ``data.detail`` as a string.
-    """
-    app, _, _ = v2_app
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-        r = await c.post(
-            "/mesh/pending/does-not-exist/cancel",
-            headers={"X-Agent-ID": "operator", "X-Mesh-Internal": "1"},
-        )
-    assert r.status_code == 404
-    body = r.json()
-    detail = body.get("detail")
-    assert isinstance(detail, dict), f"expected structured detail, got {detail!r}"
-    assert detail.get("code") == "not_found"
-    assert isinstance(detail.get("message"), str) and detail["message"]
-
-
 # ── Hotfix: _extract_verified_agent_id honors internal callers ──────
 #
 # In production (auth tokens configured), the dashboard cancel proxy

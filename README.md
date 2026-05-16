@@ -247,10 +247,14 @@ as a single FastAPI process.
 ### Blackboard (Shared State Store)
 
 SQLite-backed key-value store with versioning, TTL, and garbage collection.
-Project agents' blackboard access is automatically scoped to `projects/{name}/*` —
+Team agents' blackboard access is automatically scoped to `projects/{name}/*` —
 agents use natural keys (e.g. `tasks/research_abc123`) while the MeshClient
-transparently namespaces them under the project. Standalone agents have no
+transparently namespaces them under the team. Solo agents have no
 blackboard access.
+
+The on-disk prefix is still `projects/{name}/*` during PR 2 of the
+project→team rename; PR 3 will flip the prefix once the alias surface
+is sunset.
 
 | Namespace | Purpose | Example |
 |-----------|---------|---------|
@@ -278,7 +282,7 @@ the next model in the chain retries the full request from the start.
 
 ### Permission Matrix
 
-Every inter-agent operation is checked against per-agent ACLs. The shape — agents call the blackboard with **natural keys** (e.g. `read_blackboard("tasks/foo")`) and `MeshClient` transparently namespaces them under the active project, so the patterns below are matched against the resolved key (`projects/myproject/tasks/foo`):
+Every inter-agent operation is checked against per-agent ACLs. The shape — agents call the blackboard with **natural keys** (e.g. `read_blackboard("tasks/foo")`) and `MeshClient` transparently namespaces them under the active team, so the patterns below are matched against the resolved key (`projects/myteam/tasks/foo`):
 
 ```json
 {
@@ -300,7 +304,7 @@ Matching is **exact match (or `*`)** for `can_message`, `can_publish`, and `can_
 `browser_actions` semantics: `null` (default) = all known actions allowed; `["*"]` = explicit allow-all; specific list (e.g. `["browser_navigate", "browser_screenshot"]`) = narrow allowlist; `[]` = deny all browser use even when `can_use_browser` is true.
 
 Blackboard patterns use the `projects/{name}/*` namespace. When an agent joins a
-project, it receives read/write access to that namespace. Standalone agents get
+team, it receives read/write access to that namespace. Solo agents get
 empty blackboard permissions.
 
 ### Container Manager
@@ -378,7 +382,8 @@ structured output and optional blackboard promotions.
 ### Chat Mode (`POST /chat`)
 
 Accepts a user message. On the first message, loads bootstrap workspace files
-into the system prompt — PROJECT.md (project members only), SYSTEM.md,
+into the system prompt — TEAM.md (team members only; legacy
+`PROJECT.md` still resolves as a fallback), SYSTEM.md,
 INSTRUCTIONS.md, SOUL.md, USER.md, MEMORY.md — injects a live Runtime Context
 block (permissions, budget, fleet, cron), and searches memory for relevant facts.
 Executes tool calls in a bounded loop with three caps from `loop.py`:
@@ -438,7 +443,7 @@ canonicalized parameters and results over a 15-call sliding window.
 | `memory_save` | Save fact to workspace and structured memory DB |
 | `web_search` | Search the web via DuckDuckGo (HTML scrape — no API key, but subject to occasional rate limits / CAPTCHAs) |
 | `notify_user` | Send notification to user across all connected channels |
-| `list_agents` | Discover agents in your project (standalone agents see only themselves) |
+| `list_agents` | Discover agents on your team (solo agents see only themselves) |
 | `read_blackboard` | Read from the shared blackboard |
 | `write_blackboard` | Write to the shared blackboard |
 | `list_blackboard` | Browse blackboard entries by prefix |
@@ -498,7 +503,7 @@ Layer 4: Learnings                ← Self-improvement through failure tracking
   │
 Layer 3: Workspace Files          ← Durable, human-readable storage
   │  Bootstrap files loaded into the first-message system prompt:
-  │    PROJECT.md (project members only), SYSTEM.md, INSTRUCTIONS.md,
+  │    TEAM.md (team members only; `PROJECT.md` fallback), SYSTEM.md, INSTRUCTIONS.md,
   │    SOUL.md, USER.md, MEMORY.md
   │  Other workspace files:
   │    HEARTBEAT.md             (autonomous monitoring rules)
@@ -671,9 +676,9 @@ openlegion [--verbose/-v] [--quiet/-q] [--json]
 ├── stop                                                   # Stop the runtime + agent containers
 ├── chat [name] [--port PORT]                              # Connect to a running agent
 ├── status [--port PORT] [--wide/-w] [--watch N] [--json]  # Show agent status
-├── projects [--port PORT] [--json]                        # List active projects
-├── project <project_id> [--port PORT] [--json]            # Show one project (members, blockers, task counts)
-├── tasks [--agent X] [--project Y] [--status S] [--port PORT] [--json]   # List durable task records
+├── teams [--port PORT] [--json]                           # List active teams (alias: ``projects``)
+├── team <team_id> [--port PORT] [--json]                  # Show one team (members, blockers, task counts) (alias: ``project``)
+├── tasks [--agent X] [--team Y | --project Y] [--status S] [--port PORT] [--json]   # List durable task records
 ├── pending [--port PORT] [--json]                         # List pending actions awaiting confirmation
 ├── confirm <nonce> [--port PORT]                          # Confirm a pending action
 ├── cancel <nonce> [--port PORT]                           # Cancel a pending action
@@ -707,7 +712,7 @@ openlegion [--verbose/-v] [--quiet/-q] [--json]
 /blackboard [list|get|set|del]       View/edit shared blackboard entries
 /queue                               Show agent task queue status
 /cron [list|del|pause|resume|run]    Manage cron jobs
-/project [list|use|info]              Manage multi-project namespaces
+/project [list|use|info]              Manage multi-team namespaces
 /credential [add|list|remove]        Manage API credentials
 /traces [id]                         Show recent request traces
 /logs [--level LEVEL]                Show recent runtime logs
@@ -743,14 +748,18 @@ Templates are offered during first-run setup (via `openlegion start`):
 
 ## Configuration
 
-### `PROJECT.md` — Per-Project Context
+### `TEAM.md` — Per-Team Context
 
-Each project has its own `PROJECT.md` stored in `config/projects/{name}/project.md`.
-It is mounted into project member agents' containers and loaded into their system
-prompts. Standalone agents (not in a project) do not receive any PROJECT.md.
+Each team has its own `TEAM.md` stored in
+`config/projects/{name}/team.md`. (The on-disk dir stays
+`config/projects/` during PR 2 of the project→team rename;
+the legacy filename `project.md` still resolves as a fallback.)
+The file is mounted into team member agents' containers and loaded into
+their system prompts. Solo agents (not on a team) do not receive any
+TEAM.md.
 
 ```markdown
-# PROJECT.md
+# TEAM.md
 
 ## What We're Building
 SaaS platform for automated lead qualification
@@ -827,7 +836,7 @@ OPENLEGION_LOG_FORMAT=text
 
 # Plan limits (0 = unlimited). HTTP 403 once exceeded.
 # OPENLEGION_MAX_AGENTS=0
-# OPENLEGION_MAX_PROJECTS=0
+# OPENLEGION_MAX_TEAMS=0   # legacy alias: OPENLEGION_MAX_PROJECTS
 ```
 
 ### Connecting Channels
@@ -1071,9 +1080,9 @@ src/
 
 config/
 ├── mesh.yaml                           # Framework settings
-├── agents.yaml                         # Agent definitions (per-project)
+├── agents.yaml                         # Agent definitions (per-team)
 ├── permissions.json                    # Per-agent ACLs
-└── projects/                           # Multi-project namespaces
+└── projects/                           # Multi-team namespaces (legacy dir name; PR 3 will flip to ``teams/``)
 ```
 
 ---

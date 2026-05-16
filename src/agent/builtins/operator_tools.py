@@ -797,6 +797,7 @@ async def create_agent(
 @skill(
     name="inspect_projects",
     description=(
+        "[DEPRECATED — use inspect_teams] "
         "Read project info. detail='names' lists name+description; "
         "detail='status' adds task-count rollups (requires v2). "
         "Setting project_name returns full detail for that project."
@@ -859,6 +860,7 @@ async def inspect_projects(
 @skill(
     name="create_project",
     description=(
+        "[DEPRECATED — use create_team] "
         "Create a new project and optionally assign agents to it. "
         "Requires user confirmation."
     ),
@@ -909,7 +911,10 @@ async def create_project(
 
 @skill(
     name="add_agents_to_project",
-    description="Add one or more agents to an existing project. Requires user confirmation.",
+    description=(
+        "[DEPRECATED — use add_agents_to_team] "
+        "Add one or more agents to an existing project. Requires user confirmation."
+    ),
     parameters={
         "project_name": {
             "type": "string",
@@ -948,7 +953,10 @@ async def add_agents_to_project(
 
 @skill(
     name="remove_agents_from_project",
-    description="Remove one or more agents from a project. Requires user confirmation.",
+    description=(
+        "[DEPRECATED — use remove_agents_from_team] "
+        "Remove one or more agents from a project. Requires user confirmation."
+    ),
     parameters={
         "project_name": {
             "type": "string",
@@ -988,6 +996,7 @@ async def remove_agents_from_project(
 @skill(
     name="update_project_context",
     description=(
+        "[DEPRECATED — use update_team_context] "
         "Update a project's description / context. "
         "Requires user confirmation."
     ),
@@ -1025,6 +1034,7 @@ async def update_project_context(
 @skill(
     name="set_project_goal",
     description=(
+        "[DEPRECATED — use set_team_goal] "
         "Set or update a project's north star (vision statement) and "
         "success criteria (measurable outcomes). The north star answers "
         "'what are we moving toward'; success criteria are the concrete "
@@ -1237,6 +1247,7 @@ async def get_team_outputs(
 @skill(
     name="summarize_project_progress",
     description=(
+        "[DEPRECATED — use summarize_team_progress] "
         "Synthesized status summary for a project: structured counts + "
         "narrative status_text + top blockers + recent completions + "
         "ask_for_user list."
@@ -1528,6 +1539,7 @@ async def manage_task(
 @skill(
     name="manage_project",
     description=(
+        "[DEPRECATED — use manage_team] "
         "Archive or delete a project. action='archive' is reversible and "
         "stops scheduling. action='delete' returns a confirmation nonce; "
         "the project must already be archived."
@@ -1796,4 +1808,303 @@ async def archive_audit_before(
         "truncated": truncated,
         "before_date": result.get("before_date", before_date),
         "message": msg,
+    }
+
+
+# ── Team-named canonical aliases (PR 2 of the project→team rename) ────
+#
+# These register the new ``*_team`` tool names on top of the existing
+# ``*_project`` skills. Each canonical tool accepts BOTH ``team_name``
+# and ``project_name`` kwargs and forwards to the legacy implementation
+# unchanged. The legacy tool names remain registered with their original
+# descriptions so SDK consumers that grep for ``create_project`` still
+# match — only the docstring on each legacy tool gets a soft deprecation
+# nudge. PR 3 will retire the aliases.
+
+
+@skill(
+    name="inspect_teams",
+    description=(
+        "Read team info. detail='names' lists name+description; "
+        "detail='status' adds task-count rollups (requires v2). "
+        "Setting team_name returns full detail for that team."
+    ),
+    parameters={
+        "detail": {
+            "type": "string",
+            "description": "names | status | full",
+            "enum": ["names", "status", "full"],
+            "default": "names",
+        },
+        "team_name": {
+            "type": "string",
+            "description": "Optional — return full detail for this team only",
+            "default": "",
+        },
+    },
+)
+async def inspect_teams(
+    detail: str = "names",
+    team_name: str = "",
+    project_name: str = "",
+    *,
+    mesh_client=None,
+    **_kw,
+) -> dict:
+    """Canonical name for :func:`inspect_projects`."""
+    return await inspect_projects(
+        detail=detail,
+        project_name=team_name or project_name,
+        mesh_client=mesh_client,
+    )
+
+
+@skill(
+    name="create_team",
+    description=(
+        "Create a new team and optionally assign agents to it. "
+        "Requires user confirmation."
+    ),
+    parameters={
+        "name": {"type": "string", "description": "Team name"},
+        "description": {"type": "string", "description": "Team brief / description"},
+        "agent_ids": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Agent IDs to assign to the team",
+            "default": [],
+        },
+    },
+)
+async def create_team(
+    name: str,
+    description: str = "",
+    agent_ids: list[str] | None = None,
+    *,
+    mesh_client=None,
+    _messages=None,
+    **_kw,
+) -> dict:
+    """Canonical name for :func:`create_project`."""
+    return await create_project(
+        name=name,
+        description=description,
+        agent_ids=agent_ids or [],
+        mesh_client=mesh_client,
+        _messages=_messages,
+    )
+
+
+@skill(
+    name="add_agents_to_team",
+    description="Add one or more agents to a team. Requires user confirmation.",
+    parameters={
+        "team_name": {"type": "string", "description": "Team name"},
+        "agent_ids": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Agent IDs to add",
+        },
+    },
+)
+async def add_agents_to_team(
+    team_name: str = "",
+    project_name: str = "",
+    agent_ids: list[str] | None = None,
+    *,
+    mesh_client=None,
+    _messages=None,
+    **_kw,
+) -> dict:
+    """Canonical name for :func:`add_agents_to_project`."""
+    return await add_agents_to_project(
+        project_name=team_name or project_name,
+        agent_ids=agent_ids or [],
+        mesh_client=mesh_client,
+        _messages=_messages,
+    )
+
+
+@skill(
+    name="remove_agents_from_team",
+    description="Remove one or more agents from a team. Requires user confirmation.",
+    parameters={
+        "team_name": {"type": "string", "description": "Team name"},
+        "agent_ids": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Agent IDs to remove",
+        },
+    },
+)
+async def remove_agents_from_team(
+    team_name: str = "",
+    project_name: str = "",
+    agent_ids: list[str] | None = None,
+    *,
+    mesh_client=None,
+    _messages=None,
+    **_kw,
+) -> dict:
+    """Canonical name for :func:`remove_agents_from_project`."""
+    return await remove_agents_from_project(
+        project_name=team_name or project_name,
+        agent_ids=agent_ids or [],
+        mesh_client=mesh_client,
+        _messages=_messages,
+    )
+
+
+@skill(
+    name="update_team_context",
+    description="Update a team's description / shared context.",
+    parameters={
+        "team_name": {"type": "string", "description": "Team name"},
+        "context": {"type": "string", "description": "New context text"},
+    },
+)
+async def update_team_context(
+    team_name: str = "",
+    project_name: str = "",
+    context: str = "",
+    *,
+    mesh_client=None,
+    _messages=None,
+    **_kw,
+) -> dict:
+    """Canonical name for :func:`update_project_context`."""
+    return await update_project_context(
+        project_name=team_name or project_name,
+        context=context,
+        mesh_client=mesh_client,
+        _messages=_messages,
+    )
+
+
+@skill(
+    name="set_team_goal",
+    description="Set a team's north star + success criteria.",
+    parameters={
+        "team_name": {"type": "string", "description": "Team name"},
+        "north_star": {
+            "type": "string",
+            "description": "Single-sentence north-star goal",
+            "default": "",
+        },
+        "success_criteria": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "List of measurable success criteria",
+            "default": [],
+        },
+    },
+)
+async def set_team_goal(
+    team_name: str = "",
+    project_name: str = "",
+    north_star: str = "",
+    success_criteria: list[str] | None = None,
+    *,
+    mesh_client=None,
+    **_kw,
+) -> dict:
+    """Canonical name for :func:`set_project_goal`."""
+    return await set_project_goal(
+        project_name=team_name or project_name,
+        north_star=north_star,
+        success_criteria=success_criteria,
+        mesh_client=mesh_client,
+    )
+
+
+@skill(
+    name="summarize_team_progress",
+    description="Synthesised progress summary for a team.",
+    parameters={
+        "team_id": {"type": "string", "description": "Team id"},
+    },
+)
+async def summarize_team_progress(
+    team_id: str = "",
+    project_id: str = "",
+    *,
+    mesh_client=None,
+    **_kw,
+) -> dict:
+    """Canonical name for :func:`summarize_project_progress`."""
+    return await summarize_project_progress(
+        project_id=team_id or project_id,
+        mesh_client=mesh_client,
+    )
+
+
+@skill(
+    name="manage_team",
+    description=(
+        "Team lifecycle action (archive / unarchive / propose-delete). "
+        "Destructive actions require user confirmation."
+    ),
+    parameters={
+        "action": {
+            "type": "string",
+            "enum": ["archive", "unarchive", "propose_delete"],
+        },
+        "team_name": {"type": "string", "description": "Team name"},
+    },
+)
+async def manage_team(
+    action: str,
+    team_name: str = "",
+    project_name: str = "",
+    *,
+    mesh_client=None,
+    _messages=None,
+    **_kw,
+) -> dict:
+    """Team lifecycle dispatcher — archive, unarchive, or propose deletion.
+
+    Dispatches each action to the matching mesh endpoint rather than
+    delegating to :func:`manage_project`, whose action surface predates
+    the rename and only covers ``archive``/``delete``.
+    """
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+
+    name = team_name or project_name
+    if not name:
+        return {"error": "team_name is required"}
+
+    if action == "archive":
+        try:
+            return await mesh_client.archive_team(name)
+        except Exception as e:
+            return {"error": f"Failed to archive team: {e}"}
+
+    if action == "unarchive":
+        try:
+            return await mesh_client.unarchive_team(name)
+        except Exception as e:
+            return {"error": f"Failed to unarchive team: {e}"}
+
+    if action == "propose_delete":
+        try:
+            result = await mesh_client.propose_delete_team(name)
+            result.setdefault("requires_confirmation", True)
+            return result
+        except Exception as e:
+            msg = str(e)
+            if "must be archived" in msg.lower() or "400" in msg:
+                return {
+                    "error": "archive_required",
+                    "detail": (
+                        f"Team {name!r} must be archived first. "
+                        "Call manage_team(action='archive') first."
+                    ),
+                }
+            return {"error": f"Failed to propose delete: {e}"}
+
+    return {
+        "error": f"Unknown action {action!r}; use archive|unarchive|propose_delete"
     }

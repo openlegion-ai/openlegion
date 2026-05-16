@@ -642,23 +642,20 @@ def _mesh_post(port: int, path: str, body: dict | None = None) -> dict:
         return {}
 
 
-@cli.command("projects")
-@click.option("--port", default=8420, type=int, help="Mesh host port")
-@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def projects_cmd(port: int, as_json: bool):
-    """List active projects (Task 9)."""
-    as_json = as_json or _json_mode
+def _run_teams_list(port: int, as_json: bool) -> None:
+    """List active teams. Shared implementation for ``teams`` / ``projects``."""
     data = _mesh_get(port, "/dashboard/api/workplace/projects")
-    projects = data.get("projects", []) if isinstance(data, dict) else []
+    teams = data.get("projects", []) if isinstance(data, dict) else []
     if as_json:
-        click.echo(_json.dumps({"projects": projects}, default=str))
+        # Emit both keys for back-compat with downstream JSON consumers.
+        click.echo(_json.dumps({"teams": teams, "projects": teams}, default=str))
         return
-    if not projects:
-        click.echo("No active projects.")
+    if not teams:
+        click.echo("No active teams.")
         return
-    click.echo(f"{'Project':<24} {'Status':<10} {'Tasks':<8} {'Members'}")
+    click.echo(f"{'Team':<24} {'Status':<10} {'Tasks':<8} {'Members'}")
     click.echo("-" * 70)
-    for p in projects:
+    for p in teams:
         members = ", ".join(p.get("members", [])) or "-"
         if len(members) > 30:
             members = members[:27] + "..."
@@ -668,22 +665,17 @@ def projects_cmd(port: int, as_json: bool):
         )
 
 
-@cli.command("project")
-@click.argument("project_id")
-@click.option("--port", default=8420, type=int, help="Mesh host port")
-@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def project_cmd(project_id: str, port: int, as_json: bool):
-    """Show status for a single project."""
-    as_json = as_json or _json_mode
+def _run_team_show(team_id: str, port: int, as_json: bool) -> None:
+    """Show a single team. Shared implementation for ``team`` / ``project``."""
     data = _mesh_get(port, "/dashboard/api/workplace/projects")
-    projects = data.get("projects", []) if isinstance(data, dict) else []
-    match = next((p for p in projects if p.get("name") == project_id), None)
+    teams = data.get("projects", []) if isinstance(data, dict) else []
+    match = next((p for p in teams if p.get("name") == team_id), None)
     if match is None:
-        _fail(f"Project '{project_id}' not found")
+        _fail(f"Team '{team_id}' not found")
     if as_json:
         click.echo(_json.dumps(match, default=str))
         return
-    click.echo(f"Project: {match.get('name')}")
+    click.echo(f"Team: {match.get('name')}")
     click.echo(f"  Status:      {match.get('status', 'active')}")
     click.echo(f"  Description: {match.get('description', '') or '-'}")
     click.echo(f"  Members:     {', '.join(match.get('members', []) or ['-'])}")
@@ -703,23 +695,75 @@ def project_cmd(project_id: str, port: int, as_json: bool):
             )
 
 
+@cli.command("teams")
+@click.option("--port", default=8420, type=int, help="Mesh host port")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def teams_cmd(port: int, as_json: bool):
+    """List active teams."""
+    as_json = as_json or _json_mode
+    _run_teams_list(port, as_json)
+
+
+@cli.command("projects")
+@click.option("--port", default=8420, type=int, help="Mesh host port")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def projects_cmd(port: int, as_json: bool):
+    """[deprecated] List active teams. Use ``teams`` instead."""
+    as_json = as_json or _json_mode
+    # Suppress the deprecation hint in JSON mode so downstream consumers
+    # get clean parseable output.
+    if not as_json:
+        click.echo("ℹ️ 'projects' is now 'teams'", err=True)
+    _run_teams_list(port, as_json)
+
+
+@cli.command("team")
+@click.argument("team_id")
+@click.option("--port", default=8420, type=int, help="Mesh host port")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def team_cmd(team_id: str, port: int, as_json: bool):
+    """Show status for a single team."""
+    as_json = as_json or _json_mode
+    _run_team_show(team_id, port, as_json)
+
+
+@cli.command("project")
+@click.argument("project_id")
+@click.option("--port", default=8420, type=int, help="Mesh host port")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def project_cmd(project_id: str, port: int, as_json: bool):
+    """[deprecated] Show status for a single team. Use ``team`` instead."""
+    as_json = as_json or _json_mode
+    # Suppress the deprecation hint in JSON mode so downstream consumers
+    # get clean parseable output.
+    if not as_json:
+        click.echo("ℹ️ 'project' is now 'team'", err=True)
+    _run_team_show(project_id, port, as_json)
+
+
 @cli.command("tasks")
 @click.option("--agent", default=None, help="Filter by assignee")
-@click.option("--project", default=None, help="Filter by project ID")
+@click.option("--team", default=None, help="Filter by team ID")
+@click.option(
+    "--project", default=None,
+    help="[deprecated] alias for --team",
+)
 @click.option(
     "--status", default=None,
     help="Filter by status (pending/accepted/working/blocked/done/failed/cancelled)",
 )
 @click.option("--port", default=8420, type=int, help="Mesh host port")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def tasks_cmd(agent, project, status, port, as_json):
-    """List/filter durable task records (Task 9)."""
+def tasks_cmd(agent, team, project, status, port, as_json):
+    """List/filter durable task records."""
     as_json = as_json or _json_mode
+    # ``--team`` wins when both are supplied; fall back to legacy ``--project``.
+    team_filter = team if team is not None else project
     qs = []
     if agent:
         qs.append(f"assignee={agent}")
-    if project:
-        qs.append(f"project_id={project}")
+    if team_filter:
+        qs.append(f"project_id={team_filter}")
     if status:
         qs.append(f"status={status}")
     suffix = ("?" + "&".join(qs)) if qs else ""
@@ -739,7 +783,7 @@ def tasks_cmd(agent, project, status, port, as_json):
     if not tasks:
         click.echo("No tasks.")
         return
-    click.echo(f"{'ID':<22} {'Status':<10} {'Assignee':<14} {'Project':<14} {'Title'}")
+    click.echo(f"{'ID':<22} {'Status':<10} {'Assignee':<14} {'Team':<14} {'Title'}")
     click.echo("-" * 90)
     for t in tasks:
         title = (t.get("title") or "")[:30]
@@ -865,13 +909,13 @@ def stop():
 @cli.command()
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
 def reset(yes: bool):
-    """Stop everything and wipe all agents, projects, and state. Keeps .env."""
+    """Stop everything and wipe all agents, teams, and state. Keeps .env."""
     import shutil
 
     if not yes:
         click.echo("This will stop all containers and delete:")
         click.echo("  - All agent configs and permissions")
-        click.echo("  - All projects")
+        click.echo("  - All teams")
         click.echo("  - All skills (except _marketplace)")
         click.echo("  - All runtime data (memory, blackboard, costs, etc.)")
         click.echo("  - All channel pairings, webhooks, cron jobs, API keys")

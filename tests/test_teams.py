@@ -1,4 +1,12 @@
-"""Tests for multi-project support: CRUD, config loading, permissions wiring."""
+"""Tests for multi-team support: CRUD, config loading, permissions wiring.
+
+These tests exercise the underlying ``_create_project`` / ``_load_projects``
+helpers in ``src/cli/config.py``, which still carry their legacy names as
+the back-compat surface for the project→team rename. The behaviour they
+verify IS the team-domain logic; only the Python identifiers and the
+filesystem layout (``config/projects/``) stay project-named for one more
+release. PR 3 will sunset both.
+"""
 
 import json
 from unittest.mock import patch

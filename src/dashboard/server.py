@@ -710,8 +710,61 @@ def create_dashboard_router(
     # Plan limits — read once at startup; provisioner restarts engine after updating .env
     # 0 = unlimited (self-hosted / open-source) unless env var is explicitly set to 0
     _max_agents = int(os.environ.get("OPENLEGION_MAX_AGENTS", "0"))
-    _max_projects = int(os.environ.get("OPENLEGION_MAX_PROJECTS", "0"))
-    _projects_disabled = _max_projects == 0 and "OPENLEGION_MAX_PROJECTS" in os.environ
+    # Plan-tier cap honors both OPENLEGION_MAX_TEAMS (canonical) and
+    # OPENLEGION_MAX_PROJECTS (legacy alias). Either env var being set
+    # disables team/project creation when its value is 0 — otherwise the
+    # caller could bypass the disabled state by setting only one name.
+    _max_projects = int(
+        os.environ.get(
+            "OPENLEGION_MAX_TEAMS",
+            os.environ.get("OPENLEGION_MAX_PROJECTS", "0"),
+        )
+    )
+    _projects_disabled = _max_projects == 0 and (
+        "OPENLEGION_MAX_TEAMS" in os.environ
+        or "OPENLEGION_MAX_PROJECTS" in os.environ
+    )
+
+    # Project-lifecycle WebSocket events are dual-emitted under both the
+    # legacy ``project_*`` name and the canonical ``team_*`` name during
+    # the rename's deprecation window. Mirrors ``_emit_team_event`` in
+    # ``src/host/server.py`` so dashboard-initiated mutations look
+    # identical to mesh-initiated mutations on the wire. PR 3 will drop
+    # the legacy emit once subscribers have migrated.
+    _PROJECT_TO_TEAM_EVENT = {
+        "project_created": "team_created",
+        "project_updated": "team_updated",
+        "project_deleted": "team_deleted",
+        "project_archived": "team_archived",
+        "project_unarchived": "team_unarchived",
+    }
+
+    def _emit_project_event(event_type: str, agent: str, data: dict) -> None:
+        """Emit a project lifecycle event under legacy + canonical names.
+
+        Augments the payload with ``team_id`` / ``team_name`` keys mirroring
+        ``project_id`` / ``name`` so a subscriber bound to either event name
+        sees the same shape.
+        """
+        if event_bus is None:
+            return
+        payload = dict(data)
+        if "project_id" in payload and "team_id" not in payload:
+            payload["team_id"] = payload["project_id"]
+        name_value = payload.get("name") or payload.get("project_id")
+        if name_value and "team_name" not in payload:
+            payload["team_name"] = name_value
+        try:
+            event_bus.emit(event_type, agent=agent, data=payload)
+        except Exception as e:
+            logger.debug("%s emit failed: %s", event_type, e)
+        team_event = _PROJECT_TO_TEAM_EVENT.get(event_type)
+        if team_event is None:
+            return
+        try:
+            event_bus.emit(team_event, agent=agent, data=payload)
+        except Exception as e:
+            logger.debug("%s emit failed: %s", team_event, e)
 
     async def _csrf_check(request: Request) -> None:
         """Require X-Requested-With header on state-changing requests.
@@ -3328,71 +3381,10 @@ def create_dashboard_router(
         if transport is None:
             raise HTTPException(status_code=503, detail="Transport not available")
         try:
-            result = await transport.request(agent_id, "POST", "/chat/reset", timeout=10)
+            await transport.request(agent_id, "POST", "/chat/reset", timeout=10)
             if event_bus:
                 event_bus.emit("chat_reset", agent=agent_id)
-            if not isinstance(result, dict):
-                result = {}
-            return {
-                "reset": True,
-                "agent": agent_id,
-                **{
-                    k: result.get(k)
-                    for k in ("archived_to", "message_count", "memory_flushed")
-                },
-            }
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=str(e))
-
-    @api_router.get("/api/agents/{agent_id}/chat-archives")
-    async def api_chat_archives_list(agent_id: str) -> dict:
-        """List archived conversations for an agent (newest first, cap 100)."""
-        if agent_id not in agent_registry:
-            raise HTTPException(status_code=404, detail="Agent not found")
-        if transport is None:
-            raise HTTPException(status_code=503, detail="Transport not available")
-        try:
-            return await transport.request(agent_id, "GET", "/chat/archives", timeout=10)
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=str(e))
-
-    @api_router.get("/api/agents/{agent_id}/chat-archives/{name}")
-    async def api_chat_archive_get(agent_id: str, name: str) -> dict:
-        """Fetch one archived transcript by filename."""
-        if agent_id not in agent_registry:
-            raise HTTPException(status_code=404, detail="Agent not found")
-        if transport is None:
-            raise HTTPException(status_code=503, detail="Transport not available")
-        try:
-            result = await transport.request(
-                agent_id, "GET", f"/chat/archives/{name}", timeout=30,
-            )
-            if isinstance(result, dict) and "error" in result:
-                status = result.get("status_code", 502)
-                raise HTTPException(status_code=status, detail=result["error"])
-            return result
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=str(e))
-
-    @api_router.delete("/api/agents/{agent_id}/chat-archives/{name}")
-    async def api_chat_archive_delete(agent_id: str, name: str) -> dict:
-        """Delete an archived transcript. Router-level CSRF check applies."""
-        if agent_id not in agent_registry:
-            raise HTTPException(status_code=404, detail="Agent not found")
-        if transport is None:
-            raise HTTPException(status_code=503, detail="Transport not available")
-        try:
-            result = await transport.request(
-                agent_id, "DELETE", f"/chat/archives/{name}", timeout=10,
-            )
-            if isinstance(result, dict) and "error" in result:
-                status = result.get("status_code", 502)
-                raise HTTPException(status_code=status, detail=result["error"])
-            return result
-        except HTTPException:
-            raise
+            return {"reset": True, "agent": agent_id}
         except Exception as e:
             raise HTTPException(status_code=502, detail=str(e))
 
@@ -4506,19 +4498,15 @@ def create_dashboard_router(
             _create_project(name, description=description, members=members)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
-        if event_bus is not None:
-            try:
-                event_bus.emit(
-                    "project_created", agent="operator",
-                    data={
-                        "project_id": name,
-                        "name": name,
-                        "description": description,
-                        "members": list(members),
-                    },
-                )
-            except Exception as e:
-                logger.debug("project_created emit failed: %s", e)
+        _emit_project_event(
+            "project_created", agent="operator",
+            data={
+                "project_id": name,
+                "name": name,
+                "description": description,
+                "members": list(members),
+            },
+        )
         return {"created": True, "name": name}
 
     @api_router.post("/api/teams")
@@ -4556,19 +4544,15 @@ def create_dashboard_router(
             _create_project(name, description=description, members=members)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
-        if event_bus is not None:
-            try:
-                event_bus.emit(
-                    "project_created", agent="operator",
-                    data={
-                        "project_id": name,
-                        "name": name,
-                        "description": description,
-                        "members": list(members),
-                    },
-                )
-            except Exception as e:
-                logger.debug("project_created emit failed: %s", e)
+        _emit_project_event(
+            "project_created", agent="operator",
+            data={
+                "project_id": name,
+                "name": name,
+                "description": description,
+                "members": list(members),
+            },
+        )
         return {"created": True, "name": name, "team_name": name}
 
     @api_router.delete("/api/projects/{name}")
@@ -4579,14 +4563,10 @@ def create_dashboard_router(
             _delete_project(name)
         except ValueError as e:
             raise HTTPException(status_code=404, detail=str(e))
-        if event_bus is not None:
-            try:
-                event_bus.emit(
-                    "project_deleted", agent="operator",
-                    data={"project_id": name, "name": name},
-                )
-            except Exception as e:
-                logger.debug("project_deleted emit failed: %s", e)
+        _emit_project_event(
+            "project_deleted", agent="operator",
+            data={"project_id": name, "name": name},
+        )
         return {"deleted": True, "name": name}
 
     @api_router.delete("/api/teams/{team_name}")
@@ -4597,14 +4577,10 @@ def create_dashboard_router(
             _delete_project(team_name)
         except ValueError as e:
             raise HTTPException(status_code=404, detail=str(e))
-        if event_bus is not None:
-            try:
-                event_bus.emit(
-                    "project_deleted", agent="operator",
-                    data={"project_id": team_name, "name": team_name},
-                )
-            except Exception as e:
-                logger.debug("project_deleted emit failed: %s", e)
+        _emit_project_event(
+            "project_deleted", agent="operator",
+            data={"project_id": team_name, "name": team_name},
+        )
         return {"deleted": True, "name": team_name, "team_name": team_name}
 
     @api_router.post("/api/projects/{name}/members")
@@ -4627,19 +4603,15 @@ def create_dashboard_router(
                 restarted = True
             except Exception as e:
                 logger.warning("Failed to restart agent %s after project change: %s", agent, e)
-        if event_bus is not None:
-            try:
-                event_bus.emit(
-                    "project_updated", agent="operator",
-                    data={
-                        "project_id": name,
-                        "name": name,
-                        "field": "members",
-                        "added": agent,
-                    },
-                )
-            except Exception as e:
-                logger.debug("project_updated emit failed: %s", e)
+        _emit_project_event(
+            "project_updated", agent="operator",
+            data={
+                "project_id": name,
+                "name": name,
+                "field": "members",
+                "added": agent,
+            },
+        )
         return {"added": True, "project": name, "agent": agent, "restarted": restarted}
 
     @api_router.post("/api/teams/{team_name}/members")
@@ -4662,19 +4634,15 @@ def create_dashboard_router(
                 restarted = True
             except Exception as e:
                 logger.warning("Failed to restart agent %s after team change: %s", agent, e)
-        if event_bus is not None:
-            try:
-                event_bus.emit(
-                    "project_updated", agent="operator",
-                    data={
-                        "project_id": team_name,
-                        "name": team_name,
-                        "field": "members",
-                        "added": agent,
-                    },
-                )
-            except Exception as e:
-                logger.debug("project_updated emit failed: %s", e)
+        _emit_project_event(
+            "project_updated", agent="operator",
+            data={
+                "project_id": team_name,
+                "name": team_name,
+                "field": "members",
+                "added": agent,
+            },
+        )
         return {
             "added": True,
             "project": team_name,
@@ -4699,19 +4667,15 @@ def create_dashboard_router(
                 restarted = True
             except Exception as e:
                 logger.warning("Failed to restart agent %s after project change: %s", agent, e)
-        if event_bus is not None:
-            try:
-                event_bus.emit(
-                    "project_updated", agent="operator",
-                    data={
-                        "project_id": name,
-                        "name": name,
-                        "field": "members",
-                        "removed": agent,
-                    },
-                )
-            except Exception as e:
-                logger.debug("project_updated emit failed: %s", e)
+        _emit_project_event(
+            "project_updated", agent="operator",
+            data={
+                "project_id": name,
+                "name": name,
+                "field": "members",
+                "removed": agent,
+            },
+        )
         return {"removed": True, "project": name, "agent": agent, "restarted": restarted}
 
     @api_router.delete("/api/teams/{team_name}/members/{agent}")
@@ -4730,19 +4694,15 @@ def create_dashboard_router(
                 restarted = True
             except Exception as e:
                 logger.warning("Failed to restart agent %s after team change: %s", agent, e)
-        if event_bus is not None:
-            try:
-                event_bus.emit(
-                    "project_updated", agent="operator",
-                    data={
-                        "project_id": team_name,
-                        "name": team_name,
-                        "field": "members",
-                        "removed": agent,
-                    },
-                )
-            except Exception as e:
-                logger.debug("project_updated emit failed: %s", e)
+        _emit_project_event(
+            "project_updated", agent="operator",
+            data={
+                "project_id": team_name,
+                "name": team_name,
+                "field": "members",
+                "removed": agent,
+            },
+        )
         return {
             "removed": True,
             "project": team_name,
@@ -4840,18 +4800,14 @@ def create_dashboard_router(
                 aid, ok = await coro
                 push_results[aid] = ok
 
-        if event_bus is not None:
-            try:
-                event_bus.emit(
-                    "project_updated", agent="operator",
-                    data={
-                        "project_id": project,
-                        "name": project,
-                        "field": "project_md",
-                    },
-                )
-            except Exception as e:
-                logger.debug("project_updated emit failed: %s", e)
+        _emit_project_event(
+            "project_updated", agent="operator",
+            data={
+                "project_id": project,
+                "name": project,
+                "field": "project_md",
+            },
+        )
 
         return {
             "saved": True,
@@ -4904,18 +4860,14 @@ def create_dashboard_router(
                 aid, ok = await coro
                 push_results[aid] = ok
 
-        if event_bus is not None:
-            try:
-                event_bus.emit(
-                    "project_updated", agent="operator",
-                    data={
-                        "project_id": team,
-                        "name": team,
-                        "field": "project_md",
-                    },
-                )
-            except Exception as e:
-                logger.debug("project_updated emit failed: %s", e)
+        _emit_project_event(
+            "project_updated", agent="operator",
+            data={
+                "project_id": team,
+                "name": team,
+                "field": "project_md",
+            },
+        )
 
         return {
             "saved": True,

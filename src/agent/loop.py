@@ -116,7 +116,7 @@ def _last_message_is_user_origin(messages: list[dict]) -> bool:
 # Files already injected via bootstrap — skip in first-message auto-search
 # to avoid duplicate content.  Matches WorkspaceManager._BOOTSTRAP_FILES.
 _BOOTSTRAP_SEARCH_EXCLUDE = frozenset({
-    "PROJECT.md", "SYSTEM.md", "INSTRUCTIONS.md",
+    "TEAM.md", "PROJECT.md", "SYSTEM.md", "INSTRUCTIONS.md",
     "SOUL.md", "USER.md", "MEMORY.md",
 })
 _MAX_STEER_INTERRUPTS = 3  # max times a steer can interrupt a final answer per turn
@@ -1776,36 +1776,23 @@ class AgentLoop:
                                 error=str(e)[:500],
                             )
                         raise
-                    # Terminal auto-close ONLY for failure modes the
-                    # agent cannot declare itself:
-                    #   - swallowed internal error — ``_chat_inner``
-                    #     catches Exception and returns a dict with
-                    #     ``error: str``. Mirror the streaming
-                    #     wrapper's contract so we don't leave the
-                    #     task stuck in working (codex P2).
-                    #   - ``tool_limit_reached`` — loop hit the cap.
-                    # We deliberately do NOT auto-close as ``done`` on
-                    # clean chat completion. The chat handler runs
-                    # whether the LLM did real work or just emitted a
-                    # one-line ack ("Got it, I'll start on that") — so
-                    # treating chat-end as task-completion was lying:
-                    # operators saw ``task_completed`` for work that
-                    # was only acknowledged. Agents must call
-                    # ``complete_task(task_id)`` explicitly to declare
-                    # done. Tasks left in ``working`` correctly reflect
-                    # "agent received but hasn't finished" — a stale
-                    # reaper (separate scope) handles forgetful agents.
+                    # Auto-close on success (and special-case the
+                    # ``tool_limit_reached`` exit, which _chat_inner returns
+                    # as a normal dict — we treat that as ``failed`` with a
+                    # canonical ``max_iterations_reached`` error so the
+                    # originating agent can distinguish exhaustion from
+                    # successful completion).
                     if task_id:
-                        inner_error = result.get("error")
-                        if inner_error:
-                            await self._auto_close_task(
-                                task_id, "failed",
-                                error=str(inner_error)[:500],
-                            )
-                        elif result.get("tool_limit_reached"):
+                        if result.get("tool_limit_reached"):
                             await self._auto_close_task(
                                 task_id, "failed",
                                 error="max_iterations_reached",
+                            )
+                        else:
+                            summary = (result.get("response") or "")[:500]
+                            await self._auto_close_task(
+                                task_id, "done",
+                                result_payload={"summary": summary},
                             )
                     return result
                 finally:
@@ -1839,33 +1826,10 @@ class AgentLoop:
             resp = getattr(e, "response", None)
             http_status = getattr(resp, "status_code", None)
             if isinstance(http_status, int) and 400 <= http_status < 500:
-                # Sub-case: the rejection is "task is already terminal"
-                # — exactly what happens when the LLM explicitly called
-                # ``complete_task`` mid-chat and then the chat also hit
-                # ``tool_limit_reached`` or an exception. This is the
-                # COMMON production path (PR #912 made it so), not an
-                # anomaly. Log at DEBUG so ops aren't paged for it.
-                # Detect by parsing the mesh's InvalidStatusTransition
-                # message ("cannot move … from 'done'/'failed'/...").
-                err_text = ""
-                try:
-                    err_text = (getattr(resp, "text", "") or str(e)).lower()
-                except Exception:
-                    err_text = str(e).lower()
-                if any(
-                    f"from '{terminal}'" in err_text
-                    for terminal in ("done", "failed", "cancelled")
-                ):
-                    logger.debug(
-                        "Auto-close %s → %s noop: task already terminal "
-                        "(agent declared completion explicitly): %s",
-                        task_id, status, err_text[:200],
-                    )
-                else:
-                    logger.warning(
-                        "Auto-close %s → %s rejected by state machine (%s): %s",
-                        task_id, status, http_status, e,
-                    )
+                logger.warning(
+                    "Auto-close %s → %s rejected by state machine (%s): %s",
+                    task_id, status, http_status, e,
+                )
             else:
                 # No HTTP response or 5xx → the originating agent will
                 # never see this task close. Surface loudly so operators
@@ -2225,12 +2189,7 @@ class AgentLoop:
                     )
                     if self.workspace:
                         self.workspace.append_chat_message("assistant", msg)
-                    return {
-                        "response": msg,
-                        "tool_outputs": [],
-                        "tokens_used": 0,
-                        "error": "chat_session_limit_reached",
-                    }
+                    return {"response": msg, "tool_outputs": [], "tokens_used": 0}
                 await self._auto_continue_session(system)
 
             steer_interrupts = 0
@@ -2295,7 +2254,6 @@ class AgentLoop:
                         "response": msg,
                         "tool_outputs": tool_outputs,
                         "tokens_used": total_tokens,
-                        "error": f"tool_loop_terminated: {terminate_msg}",
                     }
 
                 entries = self._build_tool_call_entries(llm_response)
@@ -2388,20 +2346,7 @@ class AgentLoop:
             msg = f"Error: {e}"
             if self.workspace:
                 self.workspace.append_chat_message("assistant", msg)
-            # ``error`` flag mirrors _chat_stream_inner's contract so the
-            # outer chat() wrapper can auto-fail the originating task
-            # on swallowed exceptions. Without this, a non-streaming
-            # handoff that hits an LLM/tool/runtime error after being
-            # marked ``working`` would have neither tool_limit_reached
-            # nor a raised exception in the wrapper, and the task
-            # would stay stuck in working forever (codex P2 from
-            # the false-done-auto-close PR review).
-            return {
-                "response": msg,
-                "tool_outputs": tool_outputs,
-                "tokens_used": total_tokens,
-                "error": str(e),
-            }
+            return {"response": msg, "tool_outputs": tool_outputs, "tokens_used": total_tokens}
 
     def _log_chat_turn(
         self, user_msg: str, assistant_msg: str,
@@ -2496,19 +2441,12 @@ class AgentLoop:
             result.append({"role": role, "content": content})
         return result
 
-    async def reset_chat(self) -> dict:
+    async def reset_chat(self) -> None:
         """Clear conversation history. Flushes important facts to memory
         before clearing (unless the conversation was mostly errors).
         Acquires the chat lock to avoid corrupting state during an active
-        chat turn.
-
-        Returns ``{archived_to, message_count, memory_flushed}`` so the
-        dashboard reset toast can tell the user exactly what was preserved
-        (now discoverable via the per-agent Archives tab).
-        """
+        chat turn."""
         async with self._chat_lock:
-            message_count_at_reset = len(self._chat_messages)
-            memory_flushed = False
             if self._chat_messages and self.context_manager:
                 # Skip flush if the conversation is dominated by tool errors
                 # — extracting "facts" from error messages poisons memory.
@@ -2525,7 +2463,6 @@ class AgentLoop:
                         await self.context_manager._flush_to_memory(
                             "", self._chat_messages,
                         )
-                        memory_flushed = True
                     except Exception as e:
                         logger.warning("Failed to flush memory on chat reset: %s", e)
                 else:
@@ -2534,9 +2471,8 @@ class AgentLoop:
                         "%d/%d tool errors", error_count, tool_count,
                     )
             # Archive transcript before clearing in-memory state
-            archived_to: str | None = None
             if self.workspace:
-                archived_to = self.workspace.archive_chat_transcript()
+                self.workspace.archive_chat_transcript()
             self._chat_messages = []
             self._chat_total_rounds = 0
             self._chat_auto_continues = 0
@@ -2548,11 +2484,6 @@ class AgentLoop:
             self._last_active_playbooks = []
             self._operator_playbook_scan_idx = 0
             await self._checkpoint_chat_session()
-            return {
-                "archived_to": archived_to,
-                "message_count": message_count_at_reset,
-                "memory_flushed": memory_flushed,
-            }
 
     def _build_chat_system_prompt(
         self,
@@ -2692,7 +2623,6 @@ class AgentLoop:
     async def chat_stream(
         self, user_message: str, *, trace_id: str | None = None,
         origin: "MessageOrigin | None" = None,
-        task_id: str | None = None,
     ):
         """Streaming chat that yields SSE events as they happen.
 
@@ -2701,43 +2631,9 @@ class AgentLoop:
           {"type": "tool_result", "name": str, "output": any}
           {"type": "text_delta", "content": str}
           {"type": "done", "response": str, "tool_outputs": list, "tokens_used": int}
-
-        ``task_id`` mirrors :meth:`chat` — when set, the streaming turn
-        is treated as the execution of that specific task. On clean
-        completion we call ``set_task_status(done)`` with the
-        accumulated response as summary; on exception we call
-        ``set_task_status(failed)`` before re-raising. Without
-        ``task_id`` (legacy callers, free-form chat) the auto-close
-        is skipped. Closes the streaming-path gap left by PR #903
-        which only plumbed task_id through the non-streaming
-        :meth:`chat`.
         """
-        # Redirect to steer queue if a task is running. Mirrors the
-        # non-streaming path's split: a task_id handoff arriving on
-        # a busy agent gets cleanly rejected (no steer queue, clear
-        # back-edge) so the originator doesn't redirect work while
-        # we silently queue and re-execute it later. Free-form
-        # chat (no task_id) keeps the legacy steer-queue UX.
+        # Redirect to steer queue if a task is running.
         if self.current_task is not None:
-            if task_id:
-                await self._auto_close_task(
-                    task_id, "failed",
-                    error="agent_busy_handoff_rejected",
-                )
-                yield {
-                    "type": "text_delta",
-                    "content": (
-                        "Agent is working on another task — handoff "
-                        "rejected. Originator notified via back-edge."
-                    ),
-                }
-                yield {
-                    "type": "done",
-                    "response": "",
-                    "tool_outputs": [],
-                    "tokens_used": 0,
-                }
-                return
             await self._steer_queue.put(user_message)
             yield {
                 "type": "text_delta",
@@ -2754,105 +2650,19 @@ class AgentLoop:
             }
             return
 
-        # NOTE: ``current_origin`` / ``current_trace_id`` are intentionally
-        # NOT set here. The /chat/stream endpoint's ``event_generator``
-        # sets them in the OUTER task before the per-iteration
-        # ``asyncio.ensure_future`` loop spawns child tasks — that way
-        # every iteration's task inherits them via context copy.
-        # Setting here would be both redundant AND broken: the
-        # ``set()`` runs in iteration 1's task, the matching
-        # ``reset(token)`` at the finally runs in iteration N's task,
-        # and Python's ``ContextVar.reset()`` raises ValueError when
-        # the token was created in a different context.
-        async with self._chat_lock:
-            await self._maybe_restore_session()
-            # State machine requires pending → working before → done
-            # (same as the non-streaming chat path — codex P1 from
-            # PR R2 review caught this gap). Without it, every
-            # streaming handoff would be a no-op pending → done
-            # which 4xx's and leaves the task pending forever.
-            # Best-effort: _auto_close_task is exception-safe.
-            if task_id:
-                await self._auto_close_task(task_id, "working")
-            # Capture the final response for task auto-close. The
-            # We only need to inspect ``done`` events for failure flags
-            # now — auto-close as ``done`` was removed because chat-end
-            # ≠ task-end. ``final_response`` summary capture is gone
-            # for the same reason: the agent declares completion via
-            # ``complete_task`` and supplies its own summary there.
-            tool_limit_hit = False
-            internal_error: str | None = None
-            try:
+        from src.shared.trace import current_origin, current_trace_id
+        current_trace_id.set(trace_id)
+        origin_token = current_origin.set(origin)
+        try:
+            async with self._chat_lock:
+                await self._maybe_restore_session()
                 try:
                     async for event in self._chat_stream_inner(user_message):
-                        if isinstance(event, dict) and event.get("type") == "done":
-                            if event.get("tool_limit_reached"):
-                                tool_limit_hit = True
-                            # _chat_stream_inner catches Exception
-                            # internally and yields a ``done`` event
-                            # with ``error: str``. Detect it so we
-                            # don't misclassify a swallowed failure
-                            # as a successful close (codex P2 from
-                            # PR R2 review).
-                            err = event.get("error")
-                            if err:
-                                internal_error = str(err)
                         yield event
-                except asyncio.CancelledError:
-                    # Client disconnect / server cancel after the
-                    # task was marked ``working``. ``CancelledError``
-                    # is NOT an ``Exception`` subclass in Python
-                    # 3.8+, so the broader except below doesn't see
-                    # it. Without this branch the task stays stuck
-                    # in ``working`` forever (codex P2 from PR R2
-                    # round 2). Best-effort close via shield so our
-                    # cancellation can't kill the close mid-flight;
-                    # suppress the propagated CancelledError from
-                    # the awaited shield so we always re-raise the
-                    # original cancellation cleanly.
-                    if task_id:
-                        import contextlib
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await asyncio.shield(
-                                self._auto_close_task(
-                                    task_id, "cancelled",
-                                    error="agent_chat_cancelled",
-                                )
-                            )
-                    raise
-                except Exception as e:
-                    # Auto-fail the originating task before propagating
-                    # (mirrors the non-streaming chat() path). Re-raise
-                    # so the existing error handling above can surface
-                    # the failure to the caller.
-                    if task_id:
-                        await self._auto_close_task(
-                            task_id, "failed",
-                            error=str(e)[:500],
-                        )
-                    raise
-                # Terminal auto-close ONLY for failure modes the agent
-                # cannot declare itself (mirrors loop.chat — see the
-                # rationale there for why we no longer auto-close as
-                # ``done`` on clean chat completion). The chat handler
-                # runs whether the LLM did real work or just emitted
-                # a one-line ack, so treating chat-end as
-                # task-completion was lying to operators about
-                # completion. Agents must call ``complete_task``
-                # explicitly to declare done.
-                if task_id:
-                    if internal_error is not None:
-                        await self._auto_close_task(
-                            task_id, "failed",
-                            error=internal_error[:500],
-                        )
-                    elif tool_limit_hit:
-                        await self._auto_close_task(
-                            task_id, "failed",
-                            error="max_iterations_reached",
-                        )
-            finally:
-                await self._checkpoint_chat_session()
+                finally:
+                    await self._checkpoint_chat_session()
+        finally:
+            current_origin.reset(origin_token)
 
     async def _chat_stream_inner(self, user_message: str):
         self.state = "working"
@@ -2874,13 +2684,7 @@ class AgentLoop:
                     if self.workspace:
                         self.workspace.append_chat_message("assistant", msg)
                     yield {"type": "text_delta", "content": msg}
-                    yield {
-                        "type": "done",
-                        "response": msg,
-                        "tool_outputs": [],
-                        "tokens_used": 0,
-                        "error": "chat_session_limit_reached",
-                    }
+                    yield {"type": "done", "response": msg, "tool_outputs": [], "tokens_used": 0}
                     return
                 await self._auto_continue_session(system)
 
@@ -2975,7 +2779,6 @@ class AgentLoop:
                         "response": msg,
                         "tool_outputs": tool_outputs,
                         "tokens_used": total_tokens,
-                        "error": f"tool_loop_terminated: {terminate_msg}",
                     }
                     return
 
@@ -3080,18 +2883,11 @@ class AgentLoop:
             msg = f"Error: {e}"
             if self.workspace:
                 self.workspace.append_chat_message("assistant", msg)
-            # ``error`` field flags this as a swallowed internal
-            # failure so the outer ``chat_stream`` wrapper can
-            # auto-close the originating task as ``failed`` instead
-            # of misclassifying it as ``done`` (the response text
-            # "Error: ..." is human-readable but not parseable
-            # reliably as a failure signal — codex P2 from PR R2).
             yield {
                 "type": "done",
                 "response": msg,
                 "tool_outputs": tool_outputs,
                 "tokens_used": total_tokens,
-                "error": str(e),
             }
         finally:
             self.state = "idle"

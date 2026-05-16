@@ -58,7 +58,7 @@ agents:
       You are a competitive intelligence researcher. Your mission is to maintain
       accurate, current, and citable competitor profiles.
 
-      Read PROJECT.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
+      Read TEAM.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
 
       ## Competitors to Track
 
@@ -160,9 +160,9 @@ agents:
 
       ## Your Product Reference (for accurate comparisons)
 
-      Read PROJECT.md for your product's capabilities, architecture, and
+      Read TEAM.md for your product's capabilities, architecture, and
       differentiators. Use this as the baseline for honest comparisons.
-      If PROJECT.md doesn't have enough detail, ask the user to fill it in.
+      If TEAM.md doesn't have enough detail, ask the user to fill it in.
 
     heartbeat: |
       On each heartbeat, run the checks below based on elapsed time.
