@@ -48,6 +48,7 @@ const _IDENTITY_TABS = [
   { id: 'identity', label: 'Identity', file: null, access: 'user' },
   { id: 'memory', label: 'Memory', file: null, access: 'agent' },
   { id: 'activity', label: 'Activity', file: null, access: 'auto' },
+  { id: 'archives', label: 'Archives', file: null, access: 'user' },
   { id: 'logs', label: 'Logs', file: null, access: 'auto' },
   { id: 'capabilities', label: 'Tools', file: null, access: 'auto' },
   { id: 'files', label: 'Files', file: null, access: 'auto' },
@@ -363,6 +364,14 @@ function dashboard() {
     agentCapabilities: null,
     agentActivity: [],
     agentActivityLoading: false,
+
+    // Archives identity tab — list of {name, ts_iso, size_bytes,
+    // message_count, preview} entries plus a lazy per-archive cache.
+    agentArchives: [],
+    agentArchivesLoading: false,
+    agentArchivesError: '',
+    _agentArchiveContent: {},     // name -> {messages, count, loading, error}
+    agentArchiveExpanded: {},     // name -> bool
 
     // Credit exhausted state
     creditExhausted: false,
@@ -5665,6 +5674,9 @@ function dashboard() {
       if (tab.id === 'activity') {
         await this.fetchAgentActivity(agentId);
       }
+      if (tab.id === 'archives') {
+        await this.loadAgentArchives(agentId);
+      }
       if (tab.id === 'logs') {
         await this.fetchIdentityLogs(agentId);
         await this.fetchIdentityLearnings(agentId);
@@ -5675,6 +5687,83 @@ function dashboard() {
       if (tab.id === 'files') {
         await this.fetchAgentFiles(agentId, '.');
       }
+    },
+
+    async loadAgentArchives(agentId) {
+      if (!agentId) return;
+      this.agentArchivesLoading = true;
+      this.agentArchivesError = '';
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/agents/${encodeURIComponent(agentId)}/chat-archives`);
+        if (!resp.ok) {
+          this.agentArchivesError = `Couldn't load archives (HTTP ${resp.status})`;
+          this.agentArchives = [];
+          return;
+        }
+        const data = await resp.json();
+        this.agentArchives = data.archives || [];
+      } catch (e) {
+        this.agentArchivesError = (e && e.message) ? `Couldn't load archives: ${e.message}` : "Couldn't load archives";
+        this.agentArchives = [];
+      } finally {
+        this.agentArchivesLoading = false;
+      }
+    },
+
+    async openAgentArchive(agentId, name) {
+      const wasExpanded = !!this.agentArchiveExpanded[name];
+      this.agentArchiveExpanded = { ...this.agentArchiveExpanded, [name]: !wasExpanded };
+      if (wasExpanded) return;
+      if (this._agentArchiveContent[name] && !this._agentArchiveContent[name].error) return;
+      this._agentArchiveContent = {
+        ...this._agentArchiveContent,
+        [name]: { messages: [], count: 0, loading: true, error: '' },
+      };
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/agents/${encodeURIComponent(agentId)}/chat-archives/${encodeURIComponent(name)}`);
+        if (!resp.ok) {
+          this._agentArchiveContent = {
+            ...this._agentArchiveContent,
+            [name]: { messages: [], count: 0, loading: false, error: `HTTP ${resp.status}` },
+          };
+          return;
+        }
+        const data = await resp.json();
+        this._agentArchiveContent = {
+          ...this._agentArchiveContent,
+          [name]: { messages: data.messages || [], count: data.count || 0, loading: false, error: '' },
+        };
+      } catch (e) {
+        this._agentArchiveContent = {
+          ...this._agentArchiveContent,
+          [name]: { messages: [], count: 0, loading: false, error: (e && e.message) || 'fetch failed' },
+        };
+      }
+    },
+
+    async deleteAgentArchive(agentId, name) {
+      this.showConfirm('Delete archive', 'Permanently delete this archived conversation? This cannot be undone.', async () => {
+        try {
+          const resp = await fetch(`${window.__config.apiBase}/agents/${encodeURIComponent(agentId)}/chat-archives/${encodeURIComponent(name)}`, {
+            method: 'DELETE',
+            headers: { 'X-Requested-With': 'XMLHttpRequest' },
+          });
+          if (!resp.ok) {
+            this.showToast(`Delete failed: HTTP ${resp.status}`);
+            return;
+          }
+          this.agentArchives = this.agentArchives.filter(a => a.name !== name);
+          const next = { ...this._agentArchiveContent };
+          delete next[name];
+          this._agentArchiveContent = next;
+          const expanded = { ...this.agentArchiveExpanded };
+          delete expanded[name];
+          this.agentArchiveExpanded = expanded;
+          this.showToast('Archive deleted');
+        } catch (e) {
+          this.showToast(`Delete error: ${e.message || e}`);
+        }
+      }, true);
     },
 
     async fetchAgentCapabilities(agentId) {
@@ -8527,10 +8616,19 @@ function dashboard() {
           this._stopChatRecovery(agentId);
           const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/reset`, { method: 'POST' });
           if (resp.ok) {
-            this.showToast(`${agentId} conversation reset`);
+            const data = await resp.json().catch(() => ({}));
             this.chatHistories[agentId] = [];
             delete this._chatFetchedAt[agentId];
             this._saveChatToSession();
+            // Toast names what was preserved so users discover the new
+            // Archives tab without having to read release notes.
+            const parts = [`${agentId} conversation reset`];
+            if (data.message_count) parts.push(`${data.message_count} messages archived`);
+            if (data.memory_flushed) parts.push('memory updated');
+            this.showToast(parts.join(' — '));
+            if (this.detailAgent === agentId && this.identityTab === 'archives') {
+              this.loadAgentArchives(agentId);
+            }
           } else {
             this.showToast('Reset failed');
           }

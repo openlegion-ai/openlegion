@@ -1172,3 +1172,153 @@ class TestDeriveCapabilitiesFromInterface:
         (Path(self._tmpdir) / "INTERFACE.md").mkdir()
         result = _derive_capabilities_from_interface(self._tmpdir)
         assert result["capabilities"] == []
+
+
+class TestChatArchiveSurface:
+    """Cover the list / load / delete surface added for the Archives tab."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.ws = WorkspaceManager(workspace_dir=self._tmpdir)
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _write_archive(self, name: str, lines: list[str] | None = None) -> Path:
+        archive_dir = Path(self._tmpdir) / "chat_archive"
+        archive_dir.mkdir(exist_ok=True)
+        path = archive_dir / name
+        if lines is None:
+            lines = ['{"role":"user","content":"hi","ts":1}']
+        path.write_text("\n".join(lines) + "\n")
+        return path
+
+    def test_list_chat_archives_empty_dir(self):
+        assert self.ws.list_chat_archives() == []
+
+    def test_list_chat_archives_returns_newest_first(self):
+        import os
+
+        a = self._write_archive("2026-01-01_120000.jsonl")
+        b = self._write_archive("2026-01-02_120000.jsonl")
+        c = self._write_archive("2026-01-03_120000.jsonl")
+        # Force distinct mtimes regardless of write order.
+        now = 1_700_000_000
+        os.utime(a, (now, now))
+        os.utime(b, (now + 100, now + 100))
+        os.utime(c, (now + 200, now + 200))
+
+        entries = self.ws.list_chat_archives()
+        names = [e["name"] for e in entries]
+        assert names == [
+            "2026-01-03_120000.jsonl",
+            "2026-01-02_120000.jsonl",
+            "2026-01-01_120000.jsonl",
+        ]
+
+    def test_list_chat_archives_skips_empty_files(self):
+        archive_dir = Path(self._tmpdir) / "chat_archive"
+        archive_dir.mkdir(exist_ok=True)
+        (archive_dir / "2026-01-01_120000.jsonl").write_text("")
+        self._write_archive("2026-01-02_120000.jsonl")
+
+        entries = self.ws.list_chat_archives()
+        names = [e["name"] for e in entries]
+        assert names == ["2026-01-02_120000.jsonl"]
+
+    def test_list_chat_archives_skips_bad_names(self):
+        archive_dir = Path(self._tmpdir) / "chat_archive"
+        archive_dir.mkdir(exist_ok=True)
+        (archive_dir / "garbage.txt").write_text('{"role":"user","content":"x","ts":1}\n')
+        (archive_dir / "evil.jsonl.bak").write_text('{"role":"user","content":"x","ts":1}\n')
+        self._write_archive("2026-01-02_120000.jsonl")
+
+        entries = self.ws.list_chat_archives()
+        names = [e["name"] for e in entries]
+        assert names == ["2026-01-02_120000.jsonl"]
+
+    def test_list_chat_archives_preview_first_user_message(self):
+        self._write_archive(
+            "2026-01-01_120000.jsonl",
+            lines=[
+                '{"role":"assistant","content":"greetings","ts":1}',
+                '{"role":"user","content":"Hello there, how does this work?","ts":2}',
+                '{"role":"assistant","content":"like so","ts":3}',
+            ],
+        )
+        entries = self.ws.list_chat_archives()
+        assert entries[0]["preview"].startswith("Hello there")
+        assert entries[0]["message_count"] == 3
+
+    def test_load_chat_archive_valid(self):
+        self._write_archive(
+            "2026-01-01_120000.jsonl",
+            lines=[
+                '{"role":"user","content":"a","ts":1}',
+                '{"role":"assistant","content":"b","ts":2}',
+            ],
+        )
+        msgs = self.ws.load_chat_archive("2026-01-01_120000.jsonl")
+        assert msgs is not None
+        assert len(msgs) == 2
+        assert msgs[0]["content"] == "a"
+
+    def test_load_chat_archive_rejects_traversal(self):
+        assert self.ws.load_chat_archive("../../etc/passwd") is None
+        assert self.ws.load_chat_archive("..") is None
+        assert self.ws.load_chat_archive("../2026-01-01_120000.jsonl") is None
+
+    def test_load_chat_archive_missing(self):
+        assert self.ws.load_chat_archive("2026-01-01_120000.jsonl") is None
+
+    def test_load_chat_archive_rejects_unknown_extension(self):
+        archive_dir = Path(self._tmpdir) / "chat_archive"
+        archive_dir.mkdir(exist_ok=True)
+        (archive_dir / "garbage.txt").write_text('{"role":"user","content":"x","ts":1}\n')
+        assert self.ws.load_chat_archive("garbage.txt") is None
+
+    def test_delete_chat_archive_valid(self):
+        path = self._write_archive("2026-01-01_120000.jsonl")
+        assert self.ws.delete_chat_archive("2026-01-01_120000.jsonl") is True
+        assert not path.exists()
+
+    def test_delete_chat_archive_rejects_bad_name(self):
+        assert self.ws.delete_chat_archive("..") is False
+        assert self.ws.delete_chat_archive("../foo.jsonl") is False
+        assert self.ws.delete_chat_archive("garbage.txt") is False
+
+    def test_delete_chat_archive_missing_returns_false(self):
+        assert self.ws.delete_chat_archive("2026-01-01_120000.jsonl") is False
+
+    def test_archive_chat_transcript_returns_filename(self):
+        self.ws.append_chat_message("user", "Hello")
+        name = self.ws.archive_chat_transcript()
+        assert isinstance(name, str)
+        assert name.endswith(".jsonl")
+        archive_dir = Path(self._tmpdir) / "chat_archive"
+        assert (archive_dir / name).exists()
+
+    def test_archive_chat_transcript_collision_recovery(self, monkeypatch):
+        """Two resets in the same wall-clock second keep both archives."""
+        from src.agent import workspace as workspace_mod
+
+        class _FixedClock:
+            @classmethod
+            def now(cls, tz=None):
+                # Pin to a single instant so strftime returns the same ts.
+                from datetime import datetime as _dt, timezone as _tz
+                return _dt(2026, 1, 1, 12, 0, 0, tzinfo=tz or _tz.utc)
+
+        monkeypatch.setattr(workspace_mod, "datetime", _FixedClock)
+
+        self.ws.append_chat_message("user", "first")
+        first = self.ws.archive_chat_transcript()
+        assert first == "2026-01-01_120000.jsonl"
+
+        self.ws.append_chat_message("user", "second")
+        second = self.ws.archive_chat_transcript()
+        assert second == "2026-01-01_120000_2.jsonl"
+
+        archive_dir = Path(self._tmpdir) / "chat_archive"
+        assert (archive_dir / first).exists()
+        assert (archive_dir / second).exists()

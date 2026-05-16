@@ -2350,3 +2350,28 @@ async def test_skills_reload_rebuilds_system_prompt():
     assert len(systems_seen) >= 2
     # The flag should be consumed (not stuck True)
     assert loop._skills_reloaded is False
+
+
+@pytest.mark.asyncio
+async def test_reset_chat_returns_status_dict(tmp_path):
+    """reset_chat returns archived_to / message_count / memory_flushed."""
+    from src.agent.workspace import WorkspaceManager
+
+    loop = _make_loop()
+    loop.workspace = WorkspaceManager(workspace_dir=str(tmp_path))
+    # Inject a tiny conversation; flush is best-effort and may no-op when
+    # the mock context_manager isn't configured, so we just verify shape.
+    loop._chat_messages = [
+        {"role": "user", "content": "hello", "_origin": "user"},
+        {"role": "assistant", "content": "hi"},
+    ]
+    # Persist the transcript so archive_chat_transcript has something to move.
+    loop.workspace.append_chat_message("user", "hello")
+    loop.workspace.append_chat_message("assistant", "hi")
+
+    result = await loop.reset_chat()
+    assert isinstance(result, dict)
+    assert set(result.keys()) == {"archived_to", "message_count", "memory_flushed"}
+    assert result["message_count"] == 2
+    assert isinstance(result["memory_flushed"], bool)
+    assert result["archived_to"] is None or result["archived_to"].endswith(".jsonl")

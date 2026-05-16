@@ -2817,6 +2817,89 @@
                     <svg class="animate-spin h-4 w-4 inline mr-1" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
                     Loading...
                   </div>
+                  <!-- ═══ Archives tab: snapshots saved on Reset Conversation ═══ -->
+                  <!-- DUPLICATED below in System > operator panel — keep the two
+                       layouts in sync. The operator surface pins ``agentId='operator'``
+                       and loads on tab activation; otherwise the markup is identical.
+                       Backend + JS helpers are shared. -->
+                  <div x-show="identityTab === 'archives' && !identityLoading" class="space-y-3">
+                    <div class="flex items-center justify-between mb-1">
+                      <div>
+                        <div class="text-xs font-medium text-gray-300">Conversation archives</div>
+                        <div class="text-[10px] text-gray-500 mt-0.5">
+                          Snapshots saved when you reset a conversation.
+                          Memory facts are preserved separately in the Memory tab.
+                          <span x-show="agentArchives.length" x-text="'· ' + agentArchives.length + (agentArchives.length === 1 ? ' archive' : ' archives')"></span>
+                        </div>
+                      </div>
+                      <button @click="loadAgentArchives(selectedAgent)"
+                        class="text-xs px-2.5 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors">Refresh</button>
+                    </div>
+                    <div x-show="agentArchivesLoading" class="py-6 text-center text-gray-600 text-sm">
+                      <svg class="animate-spin h-4 w-4 inline mr-1" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                      Loading archives…
+                    </div>
+                    <div x-show="!agentArchivesLoading && agentArchivesError"
+                      class="border border-amber-800/40 bg-amber-900/10 text-amber-300 text-xs rounded-lg px-3 py-2 flex items-center justify-between gap-2">
+                      <span x-text="agentArchivesError"></span>
+                      <button @click="loadAgentArchives(selectedAgent)"
+                        class="text-[10px] px-2 py-0.5 rounded bg-amber-800/40 hover:bg-amber-800/60 text-amber-200 transition-colors">Retry</button>
+                    </div>
+                    <div x-show="!agentArchivesLoading && !agentArchivesError && agentArchives.length === 0"
+                      class="text-gray-600 text-sm py-6 text-center">
+                      No archives yet — they appear here when you reset a conversation.
+                    </div>
+                    <template x-for="archive in agentArchives" :key="archive.name">
+                      <div class="border border-gray-800 rounded-lg">
+                        <div class="flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-gray-800/40 transition-colors"
+                          @click="openAgentArchive(selectedAgent, archive.name)">
+                          <svg class="w-3 h-3 text-gray-600 transition-transform shrink-0"
+                            :class="agentArchiveExpanded[archive.name] && 'rotate-90'"
+                            fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+                          <div class="flex-1 min-w-0">
+                            <div class="flex items-center gap-2">
+                              <span class="text-xs text-gray-300" x-text="archive.ts_iso ? new Date(archive.ts_iso).toLocaleString() : archive.name"></span>
+                              <span class="text-[10px] px-1.5 py-0 rounded-full bg-gray-700/50 text-gray-400 border border-gray-600/30"
+                                x-text="archive.message_count + (archive.message_count === 1 ? ' msg' : ' msgs')"></span>
+                              <span class="text-[10px] text-gray-600"
+                                x-text="(archive.size_bytes / 1024).toFixed(1) + ' KB'"></span>
+                            </div>
+                            <div x-show="archive.preview" class="text-[11px] text-gray-500 mt-0.5 truncate" x-text="archive.preview"></div>
+                          </div>
+                          <button type="button" @click.stop="deleteAgentArchive(selectedAgent, archive.name)"
+                            class="text-[10px] px-2 py-0.5 rounded bg-gray-800 hover:bg-red-900/40 text-gray-500 hover:text-red-300 border border-gray-700 transition-colors shrink-0">
+                            Delete
+                          </button>
+                        </div>
+                        <div x-show="agentArchiveExpanded[archive.name]" x-cloak class="border-t border-gray-800/60 px-3 py-2 space-y-1.5">
+                          <template x-if="_agentArchiveContent[archive.name] && _agentArchiveContent[archive.name].loading">
+                            <div class="text-xs text-gray-500 py-2">Loading transcript…</div>
+                          </template>
+                          <template x-if="_agentArchiveContent[archive.name] && _agentArchiveContent[archive.name].error">
+                            <div class="text-xs text-amber-400 py-2" x-text="'Failed to load: ' + _agentArchiveContent[archive.name].error"></div>
+                          </template>
+                          <template x-if="_agentArchiveContent[archive.name] && !_agentArchiveContent[archive.name].loading && !_agentArchiveContent[archive.name].error">
+                            <div class="space-y-1.5 max-h-72 overflow-y-auto custom-scrollbar">
+                              <template x-for="(msg, mi) in _agentArchiveContent[archive.name].messages" :key="mi">
+                                <div class="flex items-start gap-2">
+                                  <span class="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0"
+                                    :class="msg.role === 'user' ? 'bg-indigo-900/40 text-indigo-300 border border-indigo-800/40'
+                                          : msg.role === 'assistant' ? 'bg-emerald-900/40 text-emerald-300 border border-emerald-800/40'
+                                          : msg.role === 'notification' ? 'bg-amber-900/40 text-amber-300 border border-amber-800/40'
+                                          : 'bg-gray-800 text-gray-400 border border-gray-700'"
+                                    x-text="msg.role || '?'"></span>
+                                  <div class="flex-1 min-w-0 text-xs text-gray-300 whitespace-pre-wrap break-words"
+                                    x-text="typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)"></div>
+                                </div>
+                              </template>
+                              <div x-show="!_agentArchiveContent[archive.name].messages.length" class="text-xs text-gray-600 py-1">(empty transcript)</div>
+                            </div>
+                          </template>
+                        </div>
+                      </div>
+                    </template>
+                  </div>
+
                   <!-- ═══ Logs tab: Activity + Learnings combined ═══ -->
                   <div x-show="identityTab === 'logs' && !identityLogsLoading && !identityLearningsLoading && !identityLoading" class="space-y-4">
                     <!-- Activity section -->
@@ -6841,6 +6924,85 @@
               <span class="text-gray-500" x-text="'Page ' + auditPage + ' of ' + Math.ceil(auditTotal / 20)"></span>
               <button @click="auditPage++; fetchAuditLog()" :disabled="auditPage >= Math.ceil(auditTotal / 20)"
                 class="px-2 py-0.5 rounded bg-gray-800 text-gray-400 disabled:opacity-30">Next</button>
+            </div>
+          </div>
+
+          <!-- Conversation history (operator) — same backend + JS helpers
+               as the per-agent Archives tab, pinned to agentId='operator'.
+               Refreshes on tab activation via the $watch in x-init. -->
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-5"
+            x-init="loadAgentArchives('operator'); $watch('systemTab', v => { if (v === 'operator') loadAgentArchives('operator'); })">
+            <div class="flex items-center justify-between mb-4 gap-3 flex-wrap">
+              <div>
+                <h3 class="text-sm font-medium text-gray-200">Conversation history</h3>
+                <p class="text-[10px] text-gray-500 mt-0.5">Snapshots of past conversations with the operator.</p>
+              </div>
+              <button @click="loadAgentArchives('operator')"
+                class="text-xs px-2.5 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors">Refresh</button>
+            </div>
+            <div x-show="agentArchivesLoading" class="flex items-center gap-2 text-gray-500 text-xs py-6 justify-center">
+              <svg class="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+              Loading…
+            </div>
+            <div x-show="!agentArchivesLoading && agentArchivesError"
+              class="border border-amber-800/40 bg-amber-900/10 text-amber-300 text-xs rounded-lg px-3 py-2 flex items-center justify-between gap-2 mb-2">
+              <span x-text="agentArchivesError"></span>
+              <button @click="loadAgentArchives('operator')"
+                class="text-[10px] px-2 py-0.5 rounded bg-amber-800/40 hover:bg-amber-800/60 text-amber-200 transition-colors">Retry</button>
+            </div>
+            <div x-show="!agentArchivesLoading && !agentArchivesError && agentArchives.length === 0"
+              class="text-center py-8 text-gray-600 text-xs">
+              No archives yet. They appear here after you reset an operator conversation.
+            </div>
+            <div x-show="!agentArchivesLoading && agentArchives.length > 0" class="space-y-1.5">
+              <template x-for="archive in agentArchives" :key="archive.name">
+                <div class="rounded-lg border border-gray-800/50 bg-gray-800/30">
+                  <div class="flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-gray-800/40 transition-colors"
+                    @click="openAgentArchive('operator', archive.name)">
+                    <svg class="w-3 h-3 text-gray-600 transition-transform shrink-0"
+                      :class="agentArchiveExpanded[archive.name] && 'rotate-90'"
+                      fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+                    <div class="flex-1 min-w-0">
+                      <div class="flex items-center gap-2">
+                        <span class="text-xs text-white font-medium" x-text="archive.ts_iso ? new Date(archive.ts_iso).toLocaleString() : archive.name"></span>
+                        <span class="text-[10px] px-1.5 py-0 rounded-full bg-gray-700/50 text-gray-400 border border-gray-600/30"
+                          x-text="archive.message_count + (archive.message_count === 1 ? ' msg' : ' msgs')"></span>
+                        <span class="text-[10px] text-gray-600" x-text="(archive.size_bytes / 1024).toFixed(1) + ' KB'"></span>
+                      </div>
+                      <div x-show="archive.preview" class="text-[11px] text-gray-500 mt-0.5 truncate" x-text="archive.preview"></div>
+                    </div>
+                    <button type="button" @click.stop="deleteAgentArchive('operator', archive.name)"
+                      class="text-[10px] px-2 py-0.5 rounded bg-gray-700 hover:bg-red-900/40 text-gray-200 hover:text-red-300 disabled:opacity-50 transition-colors shrink-0">
+                      Delete
+                    </button>
+                  </div>
+                  <div x-show="agentArchiveExpanded[archive.name]" x-cloak class="border-t border-gray-800/40 px-3 pb-2.5 pt-2 space-y-1.5">
+                    <template x-if="_agentArchiveContent[archive.name] && _agentArchiveContent[archive.name].loading">
+                      <div class="text-xs text-gray-500 py-2">Loading transcript…</div>
+                    </template>
+                    <template x-if="_agentArchiveContent[archive.name] && _agentArchiveContent[archive.name].error">
+                      <div class="text-xs text-amber-400 py-2" x-text="'Failed to load: ' + _agentArchiveContent[archive.name].error"></div>
+                    </template>
+                    <template x-if="_agentArchiveContent[archive.name] && !_agentArchiveContent[archive.name].loading && !_agentArchiveContent[archive.name].error">
+                      <div class="space-y-1.5 max-h-72 overflow-y-auto custom-scrollbar">
+                        <template x-for="(msg, mi) in _agentArchiveContent[archive.name].messages" :key="mi">
+                          <div class="flex items-start gap-2">
+                            <span class="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0"
+                              :class="msg.role === 'user' ? 'bg-indigo-900/40 text-indigo-300 border border-indigo-800/40'
+                                    : msg.role === 'assistant' ? 'bg-emerald-900/40 text-emerald-300 border border-emerald-800/40'
+                                    : msg.role === 'notification' ? 'bg-amber-900/40 text-amber-300 border border-amber-800/40'
+                                    : 'bg-gray-800 text-gray-400 border border-gray-700'"
+                              x-text="msg.role || '?'"></span>
+                            <div class="flex-1 min-w-0 text-xs text-gray-300 whitespace-pre-wrap break-words"
+                              x-text="typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)"></div>
+                          </div>
+                        </template>
+                        <div x-show="!_agentArchiveContent[archive.name].messages.length" class="text-xs text-gray-600 py-1">(empty transcript)</div>
+                      </div>
+                    </template>
+                  </div>
+                </div>
+              </template>
             </div>
           </div>
         </div><!-- /operator sub-tab -->

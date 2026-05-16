@@ -118,6 +118,12 @@ _MAX_LEARNINGS_SIZE = 50_000
 _HEADING_RE = re.compile(r"^\s*##+\s+(.+?)\s*$")
 _BULLET_RE = re.compile(r"^\s*[-*]\s+(.+?)\s*$")
 
+# Strict filename gate for chat-archive entries — used by both list and
+# load/delete paths as defense-in-depth against traversal. The optional
+# ``_\d+`` suffix is the collision-recovery slot suffix written by
+# ``archive_chat_transcript`` when two resets land in the same second.
+_ARCHIVE_NAME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{6}(?:_\d+)?\.jsonl$")
+
 # Heading aliases — case-insensitive. Same header may have alternate
 # phrasings across templates.
 _INTERFACE_SECTIONS: dict[str, tuple[str, ...]] = {
@@ -728,24 +734,166 @@ class WorkspaceManager:
             logger.debug("Failed to read chat transcript: %s", e)
             return []
 
-    def archive_chat_transcript(self) -> None:
-        """Archive the current transcript on chat reset."""
+    def archive_chat_transcript(self) -> str | None:
+        """Archive the current transcript on chat reset.
+
+        Returns the archive filename on success, or ``None`` on no-op /
+        failure. ``rename`` on POSIX silently overwrites the target, so
+        when two resets land in the same wall-clock second we fall back
+        to a ``_2``..``_99`` suffix to keep both archives.
+        """
         path = self.root / self.CHAT_TRANSCRIPT
         if not path.exists():
-            return
+            return None
         try:
             if path.stat().st_size == 0:
                 path.unlink(missing_ok=True)
-                return
+                return None
         except OSError:
-            return
+            return None
         archive_dir = self.root / self.CHAT_ARCHIVE_DIR
         archive_dir.mkdir(exist_ok=True)
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M%S")
+        target = archive_dir / f"{ts}.jsonl"
+        if target.exists():
+            target = None
+            for n in range(2, 100):
+                candidate = archive_dir / f"{ts}_{n}.jsonl"
+                if not candidate.exists():
+                    target = candidate
+                    break
+            if target is None:
+                logger.warning(
+                    "Failed to archive chat transcript: more than 99 archives "
+                    "in same second (%s)", ts,
+                )
+                return None
         try:
-            path.rename(archive_dir / f"{ts}.jsonl")
+            path.rename(target)
         except Exception as e:
             logger.debug("Failed to archive chat transcript: %s", e)
+            return None
+        logger.info("Archived chat transcript to %s", target.name)
+        return target.name
+
+    def list_chat_archives(self) -> list[dict]:
+        """Return up to 100 chat archives, newest first.
+
+        Each entry surfaces enough metadata for the dashboard to render
+        a card without opening the file. Per-file errors are swallowed
+        so one bad archive can't break the list.
+        """
+        archive_dir = self.root / self.CHAT_ARCHIVE_DIR
+        if not archive_dir.exists():
+            return []
+        entries: list[tuple[float, dict]] = []
+        try:
+            children = list(archive_dir.iterdir())
+        except OSError as e:
+            logger.debug("Failed to list chat archives: %s", e)
+            return []
+        for child in children:
+            if not child.is_file():
+                continue
+            if not _ARCHIVE_NAME_RE.match(child.name):
+                continue
+            try:
+                stat = child.stat()
+            except OSError:
+                continue
+            size = stat.st_size
+            if size == 0:
+                continue
+            ts_iso = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
+            message_count = 0
+            preview = ""
+            try:
+                with child.open("r") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        message_count += 1
+                        if not preview:
+                            try:
+                                msg = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
+                            if msg.get("role") == "user":
+                                content = msg.get("content", "")
+                                if isinstance(content, str) and content:
+                                    cleaned = sanitize_for_prompt(content)
+                                    preview = (cleaned[:120] + "…") if len(cleaned) > 120 else cleaned
+            except OSError as e:
+                logger.debug("Skipping unreadable chat archive %s: %s", child.name, e)
+                continue
+            entries.append((stat.st_mtime, {
+                "name": child.name,
+                "ts_iso": ts_iso,
+                "size_bytes": size,
+                "message_count": message_count,
+                "preview": preview,
+            }))
+        entries.sort(key=lambda kv: kv[0], reverse=True)
+        return [e[1] for e in entries[:100]]
+
+    def load_chat_archive(self, name: str, limit: int = 500) -> list[dict] | None:
+        """Load a single chat archive, returning the most-recent ``limit`` entries.
+
+        Returns ``None`` for bad names, traversal attempts, or missing
+        files — endpoint maps that to HTTP 404.
+        """
+        if not _ARCHIVE_NAME_RE.match(name or ""):
+            return None
+        archive_dir = self.root / self.CHAT_ARCHIVE_DIR
+        try:
+            path = (archive_dir / name).resolve()
+            archive_root = archive_dir.resolve()
+        except OSError:
+            return None
+        if not path.is_relative_to(archive_root):
+            return None
+        if not path.exists():
+            return None
+        try:
+            text = path.read_text(errors="replace").strip()
+        except OSError as e:
+            logger.debug("Failed to read chat archive %s: %s", name, e)
+            return None
+        if not text:
+            return []
+        lines = text.split("\n")
+        messages: list[dict] = []
+        for line in lines[-limit:]:
+            if not line.strip():
+                continue
+            try:
+                messages.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        return messages
+
+    def delete_chat_archive(self, name: str) -> bool:
+        """Delete a chat archive by name. Returns ``True`` only when a
+        matching file was removed."""
+        if not _ARCHIVE_NAME_RE.match(name or ""):
+            return False
+        archive_dir = self.root / self.CHAT_ARCHIVE_DIR
+        try:
+            path = (archive_dir / name).resolve()
+            archive_root = archive_dir.resolve()
+        except OSError:
+            return False
+        if not path.is_relative_to(archive_root):
+            return False
+        if not path.exists():
+            return False
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as e:
+            logger.debug("Failed to delete chat archive %s: %s", name, e)
+            return False
+        return True
 
     # ── Activity log ────────────────────────────────────────
 

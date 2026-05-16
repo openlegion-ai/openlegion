@@ -888,3 +888,69 @@ class TestHeartbeatOriginContextVar:
             resp = await client.post("/heartbeat", json={"message": "tick"})
         assert resp.status_code == 200
         assert captured == [None]
+
+
+class TestChatArchives:
+    """Cover the /chat/archives list / get / delete endpoints."""
+
+    @pytest.mark.asyncio
+    async def test_chat_archives_list_endpoint(self, tmp_workspace):
+        app, loop = _make_app(tmp_workspace)
+        loop.workspace.append_chat_message("user", "session one")
+        loop.workspace.archive_chat_transcript()
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/chat/archives")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "archives" in data
+        assert len(data["archives"]) == 1
+        archive = data["archives"][0]
+        assert archive["name"].endswith(".jsonl")
+        assert archive["message_count"] == 1
+        assert "ts_iso" in archive
+        assert "size_bytes" in archive
+
+    @pytest.mark.asyncio
+    async def test_chat_archives_list_no_workspace(self):
+        app, _ = _make_app(None)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/chat/archives")
+        assert resp.status_code == 200
+        assert resp.json() == {"archives": []}
+
+    @pytest.mark.asyncio
+    async def test_chat_archive_get_endpoint(self, tmp_workspace):
+        app, loop = _make_app(tmp_workspace)
+        loop.workspace.append_chat_message("user", "hello")
+        loop.workspace.append_chat_message("assistant", "hi")
+        name = loop.workspace.archive_chat_transcript()
+        assert name is not None
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            ok = await client.get(f"/chat/archives/{name}")
+            bad = await client.get("/chat/archives/does-not-exist.jsonl")
+            traversal = await client.get("/chat/archives/..%2F..%2Fpasswd")
+
+        assert ok.status_code == 200
+        body = ok.json()
+        assert body["name"] == name
+        assert body["count"] == 2
+        assert body["messages"][0]["role"] == "user"
+        assert bad.status_code == 404
+        assert traversal.status_code in (404, 422)
+
+    @pytest.mark.asyncio
+    async def test_chat_archive_delete_endpoint(self, tmp_workspace):
+        app, loop = _make_app(tmp_workspace)
+        loop.workspace.append_chat_message("user", "to delete")
+        name = loop.workspace.archive_chat_transcript()
+        assert name is not None
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            first = await client.delete(f"/chat/archives/{name}")
+            second = await client.delete(f"/chat/archives/{name}")
+
+        assert first.status_code == 200
+        assert first.json() == {"deleted": True, "name": name}
+        assert second.status_code == 404

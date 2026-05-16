@@ -3328,10 +3328,71 @@ def create_dashboard_router(
         if transport is None:
             raise HTTPException(status_code=503, detail="Transport not available")
         try:
-            await transport.request(agent_id, "POST", "/chat/reset", timeout=10)
+            result = await transport.request(agent_id, "POST", "/chat/reset", timeout=10)
             if event_bus:
                 event_bus.emit("chat_reset", agent=agent_id)
-            return {"reset": True, "agent": agent_id}
+            if not isinstance(result, dict):
+                result = {}
+            return {
+                "reset": True,
+                "agent": agent_id,
+                **{
+                    k: result.get(k)
+                    for k in ("archived_to", "message_count", "memory_flushed")
+                },
+            }
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=str(e))
+
+    @api_router.get("/api/agents/{agent_id}/chat-archives")
+    async def api_chat_archives_list(agent_id: str) -> dict:
+        """List archived conversations for an agent (newest first, cap 100)."""
+        if agent_id not in agent_registry:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        if transport is None:
+            raise HTTPException(status_code=503, detail="Transport not available")
+        try:
+            return await transport.request(agent_id, "GET", "/chat/archives", timeout=10)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=str(e))
+
+    @api_router.get("/api/agents/{agent_id}/chat-archives/{name}")
+    async def api_chat_archive_get(agent_id: str, name: str) -> dict:
+        """Fetch one archived transcript by filename."""
+        if agent_id not in agent_registry:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        if transport is None:
+            raise HTTPException(status_code=503, detail="Transport not available")
+        try:
+            result = await transport.request(
+                agent_id, "GET", f"/chat/archives/{name}", timeout=30,
+            )
+            if isinstance(result, dict) and "error" in result:
+                status = result.get("status_code", 502)
+                raise HTTPException(status_code=status, detail=result["error"])
+            return result
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=str(e))
+
+    @api_router.delete("/api/agents/{agent_id}/chat-archives/{name}")
+    async def api_chat_archive_delete(agent_id: str, name: str) -> dict:
+        """Delete an archived transcript. Router-level CSRF check applies."""
+        if agent_id not in agent_registry:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        if transport is None:
+            raise HTTPException(status_code=503, detail="Transport not available")
+        try:
+            result = await transport.request(
+                agent_id, "DELETE", f"/chat/archives/{name}", timeout=10,
+            )
+            if isinstance(result, dict) and "error" in result:
+                status = result.get("status_code", 502)
+                raise HTTPException(status_code=status, detail=result["error"])
+            return result
+        except HTTPException:
+            raise
         except Exception as e:
             raise HTTPException(status_code=502, detail=str(e))
 

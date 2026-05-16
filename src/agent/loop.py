@@ -2441,12 +2441,19 @@ class AgentLoop:
             result.append({"role": role, "content": content})
         return result
 
-    async def reset_chat(self) -> None:
+    async def reset_chat(self) -> dict:
         """Clear conversation history. Flushes important facts to memory
         before clearing (unless the conversation was mostly errors).
         Acquires the chat lock to avoid corrupting state during an active
-        chat turn."""
+        chat turn.
+
+        Returns ``{archived_to, message_count, memory_flushed}`` so the
+        dashboard reset toast can tell the user exactly what was preserved
+        (now discoverable via the per-agent Archives tab).
+        """
         async with self._chat_lock:
+            message_count_at_reset = len(self._chat_messages)
+            memory_flushed = False
             if self._chat_messages and self.context_manager:
                 # Skip flush if the conversation is dominated by tool errors
                 # — extracting "facts" from error messages poisons memory.
@@ -2463,6 +2470,7 @@ class AgentLoop:
                         await self.context_manager._flush_to_memory(
                             "", self._chat_messages,
                         )
+                        memory_flushed = True
                     except Exception as e:
                         logger.warning("Failed to flush memory on chat reset: %s", e)
                 else:
@@ -2471,8 +2479,9 @@ class AgentLoop:
                         "%d/%d tool errors", error_count, tool_count,
                     )
             # Archive transcript before clearing in-memory state
+            archived_to: str | None = None
             if self.workspace:
-                self.workspace.archive_chat_transcript()
+                archived_to = self.workspace.archive_chat_transcript()
             self._chat_messages = []
             self._chat_total_rounds = 0
             self._chat_auto_continues = 0
@@ -2484,6 +2493,11 @@ class AgentLoop:
             self._last_active_playbooks = []
             self._operator_playbook_scan_idx = 0
             await self._checkpoint_chat_session()
+            return {
+                "archived_to": archived_to,
+                "message_count": message_count_at_reset,
+                "memory_flushed": memory_flushed,
+            }
 
     def _build_chat_system_prompt(
         self,

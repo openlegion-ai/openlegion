@@ -300,8 +300,36 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
     @app.post("/chat/reset")
     async def chat_reset() -> dict:
         """Clear conversation history."""
-        await loop.reset_chat()
-        return {"status": "ok"}
+        result = await loop.reset_chat()
+        if not isinstance(result, dict):
+            result = {}
+        return {"status": "ok", **result}
+
+    @app.get("/chat/archives")
+    async def chat_archives_list() -> dict:
+        """List archived conversation transcripts (newest first, cap 100)."""
+        if not loop.workspace:
+            return {"archives": []}
+        return {"archives": loop.workspace.list_chat_archives()}
+
+    @app.get("/chat/archives/{name}")
+    async def chat_archive_get(name: str) -> dict:
+        """Return a single archived transcript by filename."""
+        if not loop.workspace:
+            raise HTTPException(404, "No workspace")
+        messages = loop.workspace.load_chat_archive(name)
+        if messages is None:
+            raise HTTPException(404, "Archive not found")
+        return {"name": name, "messages": messages, "count": len(messages)}
+
+    @app.delete("/chat/archives/{name}")
+    async def chat_archive_delete(name: str) -> dict:
+        if not loop.workspace:
+            raise HTTPException(404, "No workspace")
+        ok = loop.workspace.delete_chat_archive(name)
+        if not ok:
+            raise HTTPException(404, "Archive not found")
+        return {"deleted": True, "name": name}
 
     @app.get("/chat/history")
     async def chat_history() -> dict:
