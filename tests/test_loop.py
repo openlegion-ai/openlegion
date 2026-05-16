@@ -2375,3 +2375,21 @@ async def test_reset_chat_returns_status_dict(tmp_path):
     assert result["message_count"] == 2
     assert isinstance(result["memory_flushed"], bool)
     assert result["archived_to"] is None or result["archived_to"].endswith(".jsonl")
+
+
+@pytest.mark.asyncio
+async def test_reset_chat_archived_to_none_when_no_transcript(tmp_path):
+    """No on-disk transcript → archived_to=None. The dashboard toast
+    branches on this and falls back to 'Conversation cleared' instead of
+    misleading users with a 'saved to Archives' line that never happened.
+    """
+    from src.agent.workspace import WorkspaceManager
+
+    loop = _make_loop()
+    loop.workspace = WorkspaceManager(workspace_dir=str(tmp_path))
+    # No messages, no transcript file on disk.
+    loop._chat_messages = []
+
+    result = await loop.reset_chat()
+    assert result["archived_to"] is None
+    assert result["message_count"] == 0

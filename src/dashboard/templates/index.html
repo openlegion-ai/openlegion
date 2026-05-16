@@ -67,6 +67,10 @@
       <template x-for="t in toastQueue" :key="t.id">
         <div class="toast text-gray-200 flex items-center gap-2 pointer-events-auto" x-transition>
           <span class="flex-1" x-text="t.msg"></span>
+          <button x-show="t.action" x-cloak
+            @click="t.action.handler(); dismissToast(t.id)"
+            class="shrink-0 underline text-indigo-300 hover:text-indigo-200 text-xs"
+            x-text="t.action && t.action.label"></button>
           <button @click="dismissToast(t.id)" aria-label="Dismiss notification" class="shrink-0 text-gray-400 hover:text-white transition-colors text-sm leading-none">&times;</button>
         </div>
       </template>

@@ -1459,3 +1459,73 @@ class TestChatArchiveSurface:
         entries = self.ws.list_chat_archives()
         assert len(entries) == 1
         assert entries[0]["message_count"] == 3
+
+    def test_evict_old_archives_mtime_tie_preserves_newest(self, monkeypatch):
+        """On 1-second-resolution FS / tied mtimes, the lexicographically
+        largest filename (= newest timestamp prefix) survives. Pre-fix
+        the sort was unstable on ties — the just-written archive could be
+        evicted.
+        """
+        import os
+        from src.agent import workspace as workspace_mod
+
+        monkeypatch.setattr(workspace_mod, "_MAX_ARCHIVES_PER_AGENT", 2)
+
+        archive_dir = Path(self._tmpdir) / "chat_archive"
+        archive_dir.mkdir(exist_ok=True)
+        names = [
+            "2026-01-01_120000.jsonl",
+            "2026-01-01_120001.jsonl",
+            "2026-01-01_120002.jsonl",
+        ]
+        now = 1_700_000_000
+        for n in names:
+            p = archive_dir / n
+            p.write_text('{"role":"user","content":"x","ts":1}\n')
+            os.utime(p, (now, now))
+
+        self.ws._evict_old_archives(archive_dir)
+
+        survivors = sorted(p.name for p in archive_dir.iterdir())
+        # cap=2 → drop one; lexicographically-largest must survive (it's
+        # the newest by timestamp prefix).
+        assert len(survivors) == 2
+        assert names[-1] in survivors, (
+            f"newest archive ({names[-1]}) was evicted on tied mtimes; "
+            f"survivors={survivors!r}"
+        )
+
+    def test_load_chat_archive_filters_non_dict_lines(self):
+        """load_chat_archive surfaces only dict messages — matches
+        list_chat_archives behavior. Pre-fix it accepted any JSON value
+        (lists, scalars) and handed them to the dashboard renderer."""
+        self._write_archive(
+            "2026-01-01_120000.jsonl",
+            lines=[
+                '{"role":"user","content":"hi"}',
+                '42',
+                '["list"]',
+                '{"role":"assistant","content":"hello"}',
+            ],
+        )
+        msgs = self.ws.load_chat_archive("2026-01-01_120000.jsonl")
+        assert msgs is not None
+        assert len(msgs) == 2
+        assert all(isinstance(m, dict) for m in msgs)
+        assert msgs[0]["content"] == "hi"
+        assert msgs[1]["content"] == "hello"
+
+    def test_archive_chat_transcript_returns_none_when_missing(self):
+        """No transcript on disk → archive is a no-op, returns None."""
+        # Don't write a transcript at all.
+        assert self.ws.archive_chat_transcript() is None
+
+    def test_archive_chat_transcript_returns_none_on_empty(self):
+        """Zero-byte transcript → archive is a no-op AND cleans up the
+        empty file so it doesn't masquerade as content next time."""
+        path = Path(self._tmpdir) / "chat_transcript.jsonl"
+        path.write_text("")
+        assert path.stat().st_size == 0
+
+        assert self.ws.archive_chat_transcript() is None
+        assert not path.exists(), "empty transcript should be removed"

@@ -4538,12 +4538,25 @@ function dashboard() {
 
     _toastId: 0,
 
-    showToast(msg, duration) {
+    showToast(msg, opts) {
+      // Back-compat: `opts` accepts either a number (legacy duration ms)
+      // or an object `{ action: {label, handler} | null, durationMs }`.
+      // Older callers passing `showToast('...', 2000)` keep working.
       const id = ++this._toastId;
-      this.toastQueue.push({ id, msg });
+      let duration = 4000;
+      let action = null;
+      if (typeof opts === 'number') {
+        duration = opts;
+      } else if (opts && typeof opts === 'object') {
+        if (typeof opts.durationMs === 'number') duration = opts.durationMs;
+        if (opts.action && typeof opts.action.handler === 'function') {
+          action = opts.action;
+        }
+      }
+      this.toastQueue.push({ id, msg, action });
       setTimeout(() => {
         this.toastQueue = this.toastQueue.filter(t => t.id !== id);
-      }, duration || 4000);
+      }, duration);
     },
 
     dismissToast(id) {
@@ -5705,6 +5718,21 @@ function dashboard() {
       return `${agentId || ''}/${name || ''}`;
     },
 
+    // Deep-link the user to the Archives tab for the given agent. Used
+    // by the reset toast's "View" action so a confirmation can become a
+    // navigation in one click. drillDown switches activeTab='fleet' and
+    // sets detailAgent; we then flip the identityTab and kick the fetch.
+    _openArchivesForAgent(agentId) {
+      if (!agentId) return;
+      this.drillDown(agentId);
+      this.identityTab = 'archives';
+      this.$nextTick(() => {
+        if (typeof this.loadAgentArchives === 'function') {
+          this.loadAgentArchives(agentId);
+        }
+      });
+    },
+
     async loadAgentArchives(agentId) {
       if (!agentId) return;
       // Pin the in-flight agent so stale responses (user switched agent
@@ -5712,6 +5740,9 @@ function dashboard() {
       this.agentArchivesAgentId = agentId;
       this.agentArchivesLoading = true;
       this.agentArchivesError = '';
+      // Clear stale list before fetching so the prior agent's archives
+      // don't flash while the new fetch is in flight.
+      this.agentArchives = [];
       try {
         const resp = await fetch(`${window.__config.apiBase}/agents/${encodeURIComponent(agentId)}/chat-archives`);
         if (this.agentArchivesAgentId !== agentId) return;
@@ -8648,13 +8679,21 @@ function dashboard() {
             this._saveChatToSession();
             // Friendly toast points users at Archives without alarm-shape
             // language. The confirm dialog already promises memory is
-            // preserved, so no need to restate that here. Message count
-            // appended only when meaningfully non-zero.
-            const parts = ['Fresh chat started — previous conversation saved to Archives'];
-            if (data.message_count && data.message_count > 0) {
-              parts.push(`(${data.message_count} message${data.message_count === 1 ? '' : 's'})`);
+            // preserved, so no need to restate that here. Branch on
+            // archived_to so we don't lie when no archive was written
+            // (empty transcript, write failure, 100-collision).
+            let toast;
+            let action = null;
+            if (data.archived_to) {
+              toast = 'Fresh chat started — previous conversation saved to Archives';
+              if (data.message_count && data.message_count > 0) {
+                toast += ` (${data.message_count} message${data.message_count === 1 ? '' : 's'})`;
+              }
+              action = { label: 'View', handler: () => this._openArchivesForAgent(agentId) };
+            } else {
+              toast = 'Conversation cleared';
             }
-            this.showToast(parts.join(' '));
+            this.showToast(toast, { action });
             if (this.detailAgent === agentId && this.identityTab === 'archives') {
               this.loadAgentArchives(agentId);
             }

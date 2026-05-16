@@ -789,9 +789,14 @@ class WorkspaceManager:
             return
         if len(children) <= cap:
             return
-        # Sort oldest-first by mtime so the head is what we drop.
+        # Sort oldest-first by (mtime, name) so the head is what we drop.
+        # Secondary sort by filename matters when the FS has 1-second mtime
+        # resolution (or two archives land in the same wall-clock second):
+        # the archive name is timestamp-prefixed
+        # (``YYYY-MM-DD_HHMMSS[_N].jsonl``) so name order resolves ties
+        # deterministically — oldest first, newest survives.
         try:
-            children.sort(key=lambda p: p.stat().st_mtime)
+            children.sort(key=lambda p: (p.stat().st_mtime, p.name))
         except OSError:
             return
         excess = len(children) - cap
@@ -800,7 +805,12 @@ class WorkspaceManager:
                 victim.unlink()
                 logger.info("Evicted old chat archive %s (cap=%d)", victim.name, cap)
             except OSError as e:
-                logger.debug("Failed to evict chat archive %s: %s", victim.name, e)
+                # Surface as WARN so silent disk-overflow isn't invisible
+                # in operator logs — eviction failures mean the cap isn't
+                # being honored.
+                logger.warning(
+                    "Failed to evict chat archive %s: %s", victim.name, e,
+                )
 
     def archive_chat_transcript(self) -> str | None:
         """Archive the current transcript on chat reset.
@@ -953,9 +963,14 @@ class WorkspaceManager:
             if not line.strip():
                 continue
             try:
-                messages.append(json.loads(line))
+                obj = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            # Mirror list_chat_archives — only surface dict entries so the
+            # dashboard renderer doesn't get scalars / lists.
+            if not isinstance(obj, dict):
+                continue
+            messages.append(obj)
         return messages
 
     def delete_chat_archive(self, name: str) -> bool:
