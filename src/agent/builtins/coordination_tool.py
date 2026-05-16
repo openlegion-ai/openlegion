@@ -617,11 +617,16 @@ async def _hand_off_v2(
     # is queued in SQLite either way; wake failures are surfaced to the
     # caller via ``wake_failed`` + ``wake_error`` so they can decide
     # whether to retry the wake or wait for the recipient's next cron.
+    #
+    # Bug 2 fix: forward the task_id on the wake so the recipient's lane
+    # → /chat → loop chain auto-closes the task on completion. Without
+    # this, the Task row would sit at pending forever.
     wake_error: str | None = None
     try:
         await mesh_client.wake_agent(
             to, f"New task from {mesh_client.agent_id}: {summary[:200]}",
             origin=origin,
+            task_id=task_id or None,
         )
     except Exception as e:
         wake_error = str(e)[:200]
@@ -643,13 +648,50 @@ async def _hand_off_v2(
 
 
 async def _check_inbox_v2(*, mesh_client) -> dict:
-    """Task 6 check_inbox path — reads the durable tasks table."""
+    """Task 6 check_inbox path — reads the durable tasks table.
+
+    Bug 3 fix: also fetches back-edge events from the blackboard at
+    ``inbox/{agent_id}/task_event/`` so an originating agent learns when
+    a handed-off task reached a terminal state. The event fetch is
+    best-effort — a blackboard hiccup degrades to an empty event list
+    rather than failing the whole check_inbox call.
+    """
     try:
         rows = await mesh_client.list_task_inbox(mesh_client.agent_id)
     except Exception as e:
         return {"error": f"Failed to check inbox: {e}"}
     tasks = [_v2_task_to_legacy_dict(r) for r in rows]
-    return {"tasks": tasks, "count": len(tasks)}
+
+    events: list[dict] = []
+    try:
+        prefix = f"inbox/{mesh_client.agent_id}/task_event/"
+        entries = await mesh_client.list_blackboard(prefix, global_scope=True)
+        for entry in entries:
+            value = entry.get("value") or {}
+            events.append({
+                "key": entry.get("key", ""),
+                "kind": value.get("kind", ""),
+                "task_id": value.get("task_id", ""),
+                "recipient": value.get("recipient", ""),
+                "title": value.get("title", ""),
+                "status": value.get("status", ""),
+                "ts": value.get("ts"),
+                "summary": value.get("summary", ""),
+                "error": value.get("error", ""),
+                "blocker_note": value.get("blocker_note", ""),
+            })
+    except Exception as e:
+        logger.warning(
+            "check_inbox event fetch failed for %s: %s",
+            mesh_client.agent_id, e,
+        )
+
+    return {
+        "tasks": tasks,
+        "count": len(tasks),
+        "events": events,
+        "event_count": len(events),
+    }
 
 
 async def _update_status_v2(

@@ -499,6 +499,7 @@ class RuntimeContext:
         async def _direct_dispatch(
             agent_name: str, message: str,
             origin: "MessageOrigin | None" = None,
+            task_id: str | None = None,
             **_kwargs,
         ) -> str:
             from src.shared.trace import current_trace_id, origin_header
@@ -516,6 +517,11 @@ class RuntimeContext:
             if tid:
                 extra_headers["x-trace-id"] = tid
             extra_headers.update(origin_header(origin))
+            # Bug 2/3 fix: when the wake carried an originating task_id,
+            # forward it so the agent's /chat handler can auto-close that
+            # specific task once its loop returns.
+            if task_id:
+                extra_headers["x-task-id"] = task_id
             try:
                 result = await self.transport.request(
                     agent_name, "POST", "/chat", json={"message": message},

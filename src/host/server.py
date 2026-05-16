@@ -1066,12 +1066,18 @@ def create_mesh_app(
         if origin is None:
             origin = MessageOrigin(kind="agent", channel="", user="")
 
+        # Bug 2/3 fix: thread the originating task_id through the lane so
+        # the recipient's /chat call auto-closes the task when its loop
+        # returns. Missing header preserves legacy fire-and-forget wakes.
+        task_id = request.headers.get("x-task-id") or None
+
         if lane_manager is not None and dispatch_loop is not None:
             try:
                 asyncio.run_coroutine_threadsafe(
                     lane_manager.enqueue(
                         target, wake_msg, mode="followup",
                         origin=origin, auto_notify=had_origin,
+                        task_id=task_id,
                     ),
                     dispatch_loop,
                 )
@@ -4224,6 +4230,15 @@ def create_mesh_app(
         Caller must be the assignee, the creator, or the operator/internal.
         Status transitions are validated by the storage layer; an invalid
         transition becomes HTTP 400.
+
+        Bug 3 fix: on terminal transitions (``done`` / ``failed`` /
+        ``cancelled`` / ``blocked``) where the originating ``origin_kind``
+        is ``agent`` or ``operator``, write a back-edge to the
+        originator's blackboard at ``inbox/{origin_user}/task_event/{id}``
+        with a 7-day TTL. Humans are excluded (they get auto-notified via
+        the lane worker forward path) and self-handoffs are dropped to
+        keep an originator's inbox clean. Failures are logged, never
+        raised — the status update itself stays authoritative.
         """
         store = _require_tasks_v2()
         caller = _extract_verified_agent_id(request)
@@ -4255,6 +4270,60 @@ def create_mesh_app(
             raise HTTPException(400, str(e))
         except TaskNotFound:
             raise HTTPException(404, f"Task '{task_id}' not found")
+
+        # Bug 3: back-edge to originating agent on terminal transitions.
+        _BACK_EDGE_STATUSES = {"done", "failed", "cancelled", "blocked"}
+        if status in _BACK_EDGE_STATUSES:
+            try:
+                fresh = store.get(task_id) or record
+                # ``Tasks._row_to_dict`` returns origin as a nested dict
+                # (``origin`` or ``None``), not flat ``origin_kind`` /
+                # ``origin_user`` columns. Read defensively.
+                origin_dict = fresh.get("origin") or {}
+                origin_kind = origin_dict.get("kind") if origin_dict else None
+                origin_user = origin_dict.get("user") if origin_dict else None
+                assignee = fresh.get("assignee")
+                if (
+                    origin_kind in {"agent", "operator"}
+                    and origin_user
+                    and origin_user != assignee
+                ):
+                    event_kind_map = {
+                        "done": "task_completed",
+                        "failed": "task_failed",
+                        "blocked": "task_blocked",
+                        "cancelled": "task_cancelled",
+                    }
+                    payload: dict = {
+                        "kind": event_kind_map[status],
+                        "task_id": task_id,
+                        "recipient": assignee,
+                        "title": fresh.get("title"),
+                        "status": status,
+                        "ts": int(time.time()),
+                    }
+                    if status == "blocked":
+                        payload["blocker_note"] = blocker_note or ""
+                    if status == "failed":
+                        payload["error"] = (
+                            body.get("error")
+                            or (body.get("result") or {}).get("error", "")
+                            or ""
+                        )
+                    if status == "done":
+                        payload["summary"] = (
+                            (body.get("result") or {}).get("summary", "")
+                        )
+                    blackboard.write(
+                        f"inbox/{origin_user}/task_event/{task_id}",
+                        payload,
+                        written_by="mesh",
+                        ttl=604800,  # 7 days
+                    )
+            except Exception as e:
+                logger.warning(
+                    "Back-edge write failed for task %s: %s", task_id, e,
+                )
         return updated
 
     def _check_can_schedule(target_agent: str) -> tuple[bool, dict | None]:

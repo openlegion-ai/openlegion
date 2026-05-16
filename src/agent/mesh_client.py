@@ -262,11 +262,20 @@ class MeshClient:
     async def wake_agent(
         self, target: str, message: str = "",
         origin: "MessageOrigin | None" = None,
+        task_id: str | None = None,
     ) -> dict:
-        """Wake a target agent so it processes work immediately."""
+        """Wake a target agent so it processes work immediately.
+
+        ``task_id`` plumbs through as the ``x-task-id`` header so the
+        recipient's lane worker can pass it to ``/chat``; the agent then
+        auto-closes that task when its loop returns. Omitting ``task_id``
+        preserves legacy wake semantics — no auto-close fires.
+        """
         client = await self._get_client()
         headers = self._trace_headers()
         headers.update(origin_header(origin))
+        if task_id:
+            headers["x-task-id"] = task_id
         response = await client.post(
             f"{self.mesh_url}/mesh/wake",
             params={"target": target, "message": message},
@@ -1201,12 +1210,24 @@ class MeshClient:
     async def set_task_status(
         self, task_id: str, status: str,
         blocker_note: str | None = None,
+        result: dict | None = None,
+        error: str | None = None,
     ) -> dict:
-        """Transition a task to ``status``."""
+        """Transition a task to ``status``.
+
+        ``result`` (typically ``{"summary": "..."}``) and ``error`` are
+        forwarded to the mesh status endpoint so terminal transitions can
+        carry payload data into the back-edge inbox event written for the
+        originating agent.
+        """
         client = await self._get_client()
         body: dict = {"status": status}
         if blocker_note is not None:
             body["blocker_note"] = blocker_note
+        if result is not None:
+            body["result"] = result
+        if error is not None:
+            body["error"] = error
         response = await client.post(
             f"{self.mesh_url}/mesh/tasks/{task_id}/status",
             json=body,
