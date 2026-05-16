@@ -1372,7 +1372,7 @@ def test_project_cost_endpoint(tmp_path):
     app = create_mesh_app(bb, pubsub, router, perms, cost_tracker=tracker)
     client = TestClient(app)
 
-    resp = client.get("/mesh/costs/project/teamA", params={"period": "today"})
+    resp = client.get("/mesh/costs/team/teamA", params={"period": "today"})
     assert resp.status_code == 200
     data = resp.json()
     assert data["project"] == "teamA"

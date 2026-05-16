@@ -28,7 +28,7 @@ from src.shared.types import AgentPermissions, MessageOrigin
 
 @pytest.fixture(autouse=True)
 def _set_operator_env(monkeypatch):
-    monkeypatch.setenv("ALLOWED_TOOLS", "inspect_projects,list_agent_queue")
+    monkeypatch.setenv("ALLOWED_TOOLS", "inspect_teams,list_agent_queue")
 
 
 # ── Helper: simulate an HTTP error wrapping an over_budget body ────
@@ -56,7 +56,7 @@ def _fake_budget_http_error(agent: str, monthly_used: float = 50.0) -> httpx.HTT
 
 
 @pytest.mark.asyncio
-async def test_inspect_projects_status_requires_v2_flag(monkeypatch):
+async def test_inspect_teams_status_requires_v2_flag(monkeypatch):
     """Read tools that consume tasks return a clean error when v2 off.
 
     The flag now defaults to ``1`` (rollout) so the off path must
@@ -64,8 +64,8 @@ async def test_inspect_projects_status_requires_v2_flag(monkeypatch):
     relying on the env var being unset.
     """
     monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "0")
-    from src.agent.builtins.operator_tools import inspect_projects
-    result = await inspect_projects(detail="status", mesh_client=MagicMock())
+    from src.agent.builtins.operator_tools import inspect_teams
+    result = await inspect_teams(detail="status", mesh_client=MagicMock())
     assert "error" in result
     assert "OPENLEGION_ORCHESTRATION_TASKS_V2" in result["error"]
 
@@ -88,10 +88,10 @@ async def test_get_team_outputs_requires_v2_flag(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_summarize_project_progress_requires_v2_flag(monkeypatch):
-    monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_V2", raising=False)
-    from src.agent.builtins.operator_tools import summarize_project_progress
-    result = await summarize_project_progress("p1", mesh_client=MagicMock())
+async def test_summarize_team_progress_requires_v2_flag(monkeypatch):
+    monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "0")
+    from src.agent.builtins.operator_tools import summarize_team_progress
+    result = await summarize_team_progress("p1", mesh_client=MagicMock())
     assert "error" in result
 
 
@@ -121,15 +121,15 @@ async def test_manage_task_retry_requires_v2_flag(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_manage_project_archive_works_without_v2_flag(monkeypatch):
-    """Archive/delete project tools work regardless of the v2 flag."""
+async def test_manage_team_archive_works_without_v2_flag(monkeypatch):
+    """Archive/delete team tools work regardless of the v2 flag."""
     monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_V2", raising=False)
-    from src.agent.builtins.operator_tools import manage_project
+    from src.agent.builtins.operator_tools import manage_team
     mc = MagicMock()
-    mc.archive_project = AsyncMock(return_value={"archived": True, "project": "growth"})
+    mc.archive_team = AsyncMock(return_value={"archived": True, "team": "growth"})
     messages = [{"role": "user", "content": "yes", "_origin": "user"}]
-    result = await manage_project("growth", "archive",
-                                   mesh_client=mc, _messages=messages)
+    result = await manage_team("archive", team_name="growth",
+                                mesh_client=mc, _messages=messages)
     assert result["archived"] is True
 
 
@@ -137,18 +137,18 @@ async def test_manage_project_archive_works_without_v2_flag(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_inspect_projects_status_all_projects(monkeypatch):
+async def test_inspect_teams_status_all_teams(monkeypatch):
     monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "1")
-    from src.agent.builtins.operator_tools import inspect_projects
+    from src.agent.builtins.operator_tools import inspect_teams
     mc = MagicMock()
-    mc.all_projects_status = AsyncMock(
-        return_value={"projects": [
-            {"project": {"name": "p1"}, "counts": {"active": 2}},
+    mc.all_teams_status = AsyncMock(
+        return_value={"teams": [
+            {"team": {"name": "p1"}, "counts": {"active": 2}},
         ]},
     )
-    result = await inspect_projects(detail="status", mesh_client=mc)
-    assert "projects" in result
-    mc.all_projects_status.assert_awaited_once()
+    result = await inspect_teams(detail="status", mesh_client=mc)
+    assert "teams" in result
+    mc.all_teams_status.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -175,14 +175,14 @@ async def test_get_team_outputs_passes_since(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_summarize_project_progress_calls_mesh(monkeypatch):
+async def test_summarize_team_progress_calls_mesh(monkeypatch):
     monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "1")
-    from src.agent.builtins.operator_tools import summarize_project_progress
+    from src.agent.builtins.operator_tools import summarize_team_progress
     mc = MagicMock()
-    mc.project_summary = AsyncMock(
+    mc.team_summary = AsyncMock(
         return_value={"status_text": "all good", "counts": {"active": 0}},
     )
-    result = await summarize_project_progress("p1", mesh_client=mc)
+    result = await summarize_team_progress("p1", mesh_client=mc)
     assert "status_text" in result
 
 
@@ -309,27 +309,27 @@ async def test_manage_task_retry_over_budget(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_manage_project_archive_autonomous_allowed():
-    """The provenance gate was dropped — operator can archive a project
+async def test_manage_team_archive_autonomous_allowed():
+    """The provenance gate was dropped — operator can archive a team
     autonomously (e.g. during heartbeat). The "undo" comes from
     archive being reversible via the dedicated unarchive endpoint."""
-    from src.agent.builtins.operator_tools import manage_project
+    from src.agent.builtins.operator_tools import manage_team
     mc = MagicMock()
-    mc.archive_project = AsyncMock(return_value={"archived": True, "project": "p1"})
+    mc.archive_team = AsyncMock(return_value={"archived": True, "team": "p1"})
     messages = [{"role": "user", "content": "x", "_origin": "system:heartbeat"}]
-    result = await manage_project("p1", "archive",
-                                    mesh_client=mc, _messages=messages)
+    result = await manage_team("archive", team_name="p1",
+                                mesh_client=mc, _messages=messages)
     assert result["archived"] is True
 
 
 @pytest.mark.asyncio
-async def test_manage_project_archive_success():
-    from src.agent.builtins.operator_tools import manage_project
+async def test_manage_team_archive_success():
+    from src.agent.builtins.operator_tools import manage_team
     mc = MagicMock()
-    mc.archive_project = AsyncMock(return_value={"archived": True, "project": "p1"})
+    mc.archive_team = AsyncMock(return_value={"archived": True, "team": "p1"})
     messages = [{"role": "user", "content": "yes", "_origin": "user"}]
-    result = await manage_project("p1", "archive",
-                                    mesh_client=mc, _messages=messages)
+    result = await manage_team("archive", team_name="p1",
+                                mesh_client=mc, _messages=messages)
     assert result["archived"] is True
 
 
@@ -354,54 +354,54 @@ async def test_manage_agent_archive_success():
 
 
 @pytest.mark.asyncio
-async def test_manage_project_delete_returns_nonce_for_confirmation():
-    from src.agent.builtins.operator_tools import manage_project
+async def test_manage_team_propose_delete_returns_nonce_for_confirmation():
+    from src.agent.builtins.operator_tools import manage_team
     mc = MagicMock()
-    mc.propose_delete_project = AsyncMock(return_value={
+    mc.propose_delete_team = AsyncMock(return_value={
         "change_id": "abc-123",
-        "summary": "Delete project 'growth' and 2 agent(s).",
+        "summary": "Delete team 'growth' and 2 agent(s).",
         "expires_at": "2026-05-02T00:15:00+00:00",
         "payload_digest": "deadbeef",
         "requires_confirmation": True,
     })
     messages = [{"role": "user", "content": "yes", "_origin": "user"}]
-    result = await manage_project("growth", "delete",
-                                    mesh_client=mc, _messages=messages)
+    result = await manage_team("propose_delete", team_name="growth",
+                                mesh_client=mc, _messages=messages)
     assert result["requires_confirmation"] is True
     assert result["change_id"] == "abc-123"
     assert "summary" in result
 
 
 @pytest.mark.asyncio
-async def test_manage_project_delete_autonomous_allowed():
+async def test_manage_team_propose_delete_autonomous_allowed():
     """Delete provenance gate was dropped at the operator-tool layer.
     Delete still has a mesh-side confirmation TTL window so the brief
     Confirm step in the dashboard remains; that's tested separately by
     the propose-delete endpoint tests. The operator-tool itself just
     forwards the call without checking message origin."""
-    from src.agent.builtins.operator_tools import manage_project
+    from src.agent.builtins.operator_tools import manage_team
     mc = MagicMock()
-    mc.propose_delete_project = AsyncMock(return_value={
+    mc.propose_delete_team = AsyncMock(return_value={
         "change_id": "n1",
-        "summary": "Delete project 'growth'",
+        "summary": "Delete team 'growth'",
         "requires_confirmation": True,
     })
     messages = [{"role": "user", "content": "hb", "_origin": "system:heartbeat"}]
-    result = await manage_project("growth", "delete",
-                                    mesh_client=mc, _messages=messages)
+    result = await manage_team("propose_delete", team_name="growth",
+                                mesh_client=mc, _messages=messages)
     assert result["change_id"] == "n1"
     assert result["requires_confirmation"] is True
 
 
 @pytest.mark.asyncio
-async def test_manage_project_delete_archive_required():
+async def test_manage_team_propose_delete_archive_required():
     """If the mesh rejects with 400, the tool surfaces a friendly hint."""
-    from src.agent.builtins.operator_tools import manage_project
+    from src.agent.builtins.operator_tools import manage_team
     mc = MagicMock()
-    mc.propose_delete_project = AsyncMock(side_effect=RuntimeError("400: Project must be archived"))
+    mc.propose_delete_team = AsyncMock(side_effect=RuntimeError("400: Team must be archived"))
     messages = [{"role": "user", "content": "yes", "_origin": "user"}]
-    result = await manage_project("growth", "delete",
-                                    mesh_client=mc, _messages=messages)
+    result = await manage_team("propose_delete", team_name="growth",
+                                mesh_client=mc, _messages=messages)
     assert result["error"] == "archive_required"
 
 
@@ -571,7 +571,7 @@ async def test_endpoint_project_status_returns_counts(v2_app):
         await c.post("/mesh/tasks",
                      json={"assignee": "scout", "title": "t2", "project": "research"},
                      headers={"X-Agent-ID": "operator"})
-        r = await c.get("/mesh/projects/research/status",
+        r = await c.get("/mesh/teams/research/status",
                         headers={"X-Agent-ID": "operator"})
     assert r.status_code == 200, r.text
     body = r.json()
@@ -584,7 +584,7 @@ async def test_endpoint_project_status_returns_counts(v2_app):
 async def test_endpoint_project_status_403_for_non_member(v2_app):
     app, _, _ = v2_app
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-        r = await c.get("/mesh/projects/research/status",
+        r = await c.get("/mesh/teams/research/status",
                         headers={"X-Agent-ID": "tracker"})
     assert r.status_code == 403
 
@@ -593,10 +593,10 @@ async def test_endpoint_project_status_403_for_non_member(v2_app):
 async def test_endpoint_all_projects_status_operator_sees_all(v2_app):
     app, _, _ = v2_app
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-        r = await c.get("/mesh/projects/status",
+        r = await c.get("/mesh/teams/status",
                         headers={"X-Agent-ID": "operator"})
     assert r.status_code == 200
-    names = {p["project"]["name"] for p in r.json()["projects"]}
+    names = {t["team"]["name"] for t in r.json()["teams"]}
     assert names == {"research", "ops"}
 
 
@@ -639,7 +639,7 @@ async def test_endpoint_project_outputs_filters_by_since(v2_app):
                      json={"status": "done"},
                      headers={"X-Agent-ID": "analyst"})
         # Last 24h includes the task
-        r = await c.get("/mesh/projects/research/outputs",
+        r = await c.get("/mesh/teams/research/outputs",
                         params={"since": "24h"},
                         headers={"X-Agent-ID": "operator"})
     assert r.status_code == 200
@@ -650,7 +650,7 @@ async def test_endpoint_project_outputs_filters_by_since(v2_app):
 async def test_endpoint_project_summary(v2_app):
     app, _, _ = v2_app
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-        r = await c.get("/mesh/projects/research/summary",
+        r = await c.get("/mesh/teams/research/summary",
                         headers={"X-Agent-ID": "operator"})
     assert r.status_code == 200
     body = r.json()
@@ -723,15 +723,15 @@ async def test_endpoint_retry_only_failed(v2_app):
 async def test_endpoint_archive_project(v2_app):
     app, _, tmp_path = v2_app
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-        r = await c.post("/mesh/projects/research/archive",
+        r = await c.post("/mesh/teams/research/archive",
                          headers={"X-Agent-ID": "operator"})
     assert r.status_code == 200
     # Default list should now exclude archived
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-        r = await c.get("/mesh/projects",
+        r = await c.get("/mesh/teams",
                         headers={"X-Agent-ID": "operator"})
     body = r.json()
-    names = {p["name"] for p in body["projects"]}
+    names = {t["name"] for t in body["teams"]}
     assert "research" not in names
     assert "ops" in names
 
@@ -741,7 +741,7 @@ async def test_endpoint_delete_project_requires_archive(v2_app):
     """Delete on a live project must be rejected with 400."""
     app, _, _ = v2_app
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-        r = await c.post("/mesh/projects/research/propose-delete",
+        r = await c.post("/mesh/teams/research/propose-delete",
                          headers=_human_origin_headers())
     assert r.status_code == 400
     assert "archived" in r.text.lower()
@@ -752,11 +752,11 @@ async def test_endpoint_delete_project_happy_path(v2_app):
     app, _, _ = v2_app
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         # Archive first
-        r = await c.post("/mesh/projects/research/archive",
+        r = await c.post("/mesh/teams/research/archive",
                          headers={"X-Agent-ID": "operator"})
         assert r.status_code == 200
         # Propose delete
-        r = await c.post("/mesh/projects/research/propose-delete",
+        r = await c.post("/mesh/teams/research/propose-delete",
                          headers=_human_origin_headers())
         assert r.status_code == 200, r.text
         body = r.json()
@@ -765,7 +765,7 @@ async def test_endpoint_delete_project_happy_path(v2_app):
         # PR #2: response carries the human-readable summary so the
         # inline pending-action card can render without a follow-up
         # round-trip.
-        assert "delete project" in body["summary"].lower()
+        assert "delete team" in body["summary"].lower()
         assert "'research'" in body["summary"]
         # Confirm with human origin succeeds
         r = await c.post("/mesh/config/confirm",
@@ -773,6 +773,9 @@ async def test_endpoint_delete_project_happy_path(v2_app):
                          headers=_human_origin_headers())
     assert r.status_code == 200
     body = r.json()
+    # ``target_kind`` stays as ``"project"`` on pending_actions rows
+    # (backend schema value, not a domain term); the confirm response
+    # echoes that.
     assert body["deleted"] == "project"
     assert body["name"] == "research"
 
@@ -781,9 +784,9 @@ async def test_endpoint_delete_project_happy_path(v2_app):
 async def test_endpoint_delete_project_confirm_with_agent_origin_403(v2_app):
     app, _, _ = v2_app
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-        await c.post("/mesh/projects/research/archive",
+        await c.post("/mesh/teams/research/archive",
                      headers={"X-Agent-ID": "operator"})
-        r = await c.post("/mesh/projects/research/propose-delete",
+        r = await c.post("/mesh/teams/research/propose-delete",
                          headers=_human_origin_headers())
         nonce = r.json()["change_id"]
         digest = r.json()["payload_digest"]
@@ -865,13 +868,13 @@ async def test_endpoint_archive_agent_blocks_operator(v2_app):
 async def test_endpoint_list_projects_includes_archived_when_flagged(v2_app):
     app, _, _ = v2_app
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-        await c.post("/mesh/projects/research/archive",
+        await c.post("/mesh/teams/research/archive",
                      headers={"X-Agent-ID": "operator"})
-        r = await c.get("/mesh/projects",
+        r = await c.get("/mesh/teams",
                         params={"include_archived": True},
                         headers={"X-Agent-ID": "operator"})
     body = r.json()
-    names = {p["name"] for p in body["projects"]}
+    names = {t["name"] for t in body["teams"]}
     assert "research" in names
 
 
@@ -974,10 +977,10 @@ async def test_archive_project_emits_project_archived(v2_app_with_bus):
     app, _, _, bus = v2_app_with_bus
     captured = _capture(bus)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-        r = await c.post("/mesh/projects/research/archive",
+        r = await c.post("/mesh/teams/research/archive",
                          headers={"X-Agent-ID": "operator"})
     assert r.status_code == 200
-    arch = [e for e in captured if e["type"] == "project_archived"]
+    arch = [e for e in captured if e["type"] == "team_archived"]
     assert len(arch) == 1
     assert arch[0]["data"]["project_id"] == "research"
 
@@ -986,13 +989,13 @@ async def test_archive_project_emits_project_archived(v2_app_with_bus):
 async def test_unarchive_project_emits_project_unarchived(v2_app_with_bus):
     app, _, _, bus = v2_app_with_bus
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-        await c.post("/mesh/projects/research/archive",
+        await c.post("/mesh/teams/research/archive",
                      headers={"X-Agent-ID": "operator"})
         captured = _capture(bus)
-        r = await c.post("/mesh/projects/research/unarchive",
+        r = await c.post("/mesh/teams/research/unarchive",
                          headers={"X-Agent-ID": "operator"})
     assert r.status_code == 200
-    unarch = [e for e in captured if e["type"] == "project_unarchived"]
+    unarch = [e for e in captured if e["type"] == "team_unarchived"]
     assert len(unarch) == 1
     assert unarch[0]["data"]["project_id"] == "research"
 
@@ -1015,12 +1018,12 @@ async def test_mesh_set_project_goal_emits_project_updated(v2_app_with_bus):
     captured = _capture(bus)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         r = await c.post(
-            "/mesh/projects/research/goal",
+            "/mesh/teams/research/goal",
             json={"north_star": "Win this quarter", "success_criteria": ["x"]},
             headers={"X-Agent-ID": "operator"},
         )
     assert r.status_code == 200, r.text
-    updated = [e for e in captured if e["type"] == "project_updated"]
+    updated = [e for e in captured if e["type"] == "team_updated"]
     assert len(updated) == 1
     assert updated[0]["data"]["field"] == "goal"
     assert updated[0]["data"]["project_id"] == "research"

@@ -864,11 +864,11 @@ class TestHomeSingleScrollLayout:
         assert "switchHomeTab('kanban')" in index_html
 
     def test_legacy_subtabs_hidden_with_back_compat_gate(self, index_html: str):
-        # The old project-status / team-outputs renders are kept in
+        # The old team-status / team-outputs renders are kept in
         # markup behind a ``false &&`` short-circuit so nothing visible
         # depends on ``workplaceTab`` while deep-link callers still
         # don't NPE on the missing template.
-        assert "false && workplaceEnabled && workplaceTab === 'project-status'" in index_html
+        assert "false && workplaceEnabled && workplaceTab === 'team-status'" in index_html
         assert "false && workplaceEnabled && workplaceTab === 'team-outputs'" in index_html
 
 
@@ -2892,8 +2892,8 @@ class TestOnWsEventHandlersForLiveCoverage:
     def test_project_crud_handlers_present(self):
         # All five project events route to a single fetchProjects path.
         for ev in (
-            "project_created", "project_updated", "project_deleted",
-            "project_archived", "project_unarchived",
+            "team_created", "team_updated", "team_deleted",
+            "team_archived", "team_unarchived",
         ):
             assert f"'{ev}'" in _APP_JS_TEXT, f"handler for {ev} missing"
 

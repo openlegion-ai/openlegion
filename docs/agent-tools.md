@@ -96,7 +96,7 @@ An OS-level device profile is selected by `BROWSER_DEVICE_PROFILE` (`desktop-win
 
 **Team isolation:** Blackboard tools (`read_blackboard`, `write_blackboard`, `list_blackboard`, `save_artifact`) are only available to agents assigned to a team. Solo agents cannot access the blackboard — calls return an error explaining they must be added to a team first.
 
-**Team context:** Agents assigned to a team automatically receive a `TEAM.md` file mounted read-only in their workspace (legacy `PROJECT.md` filename still recognised through PR 2). This file contains the team description and shared context, visible to the agent from its first turn without any tool call.
+**Team context:** Agents assigned to a team automatically receive a `TEAM.md` file mounted read-only in their workspace. This file contains the team description and shared context, visible to the agent from its first turn without any tool call. (The workspace bootstrap loader retains a read-only fallback for stray `PROJECT.md` files left behind by an old migration.)
 
 ### Workspace
 
@@ -211,17 +211,17 @@ The following tools are only available to the **operator agent** (when `ALLOWED_
 
 #### Fleet & Team Management (`operator_tools.py`)
 
-The operator exposes both team-named canonical tools (`inspect_teams`,
-`manage_team`, `create_team`, `add_agents_to_team`, …) and the legacy
-`*_project` names as aliases — both invocations land on the same
-implementation. The legacy names stay through PR 3 of the
-project→team rename.
+The operator exposes the canonical team-named tools (`inspect_teams`,
+`manage_team`, `create_team`, `add_agents_to_team`, …). The eight
+legacy `*_project` names are preserved as recoverable error stubs
+that return `{"error": "renamed", "new_tool": "*_team", ...}` so a
+stale LLM prompt fails fast and retries on the canonical name.
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
 | `inspect_agents` | `agent_id` (default ""), `depth` (default `"summary"`; values: `summary` / `profile` / `history`), `stale_threshold_hours` (default 0, range 1–168; 0/None = skip) | Look up agents. Empty `agent_id` lists the fleet at `summary` depth; passing an `agent_id` with `profile` returns the collaboration interface, or with `history` returns recent conversation history. Pass `stale_threshold_hours=N` to annotate each roster entry with `stale_task_count` + up to 5 oldest stale task IDs. Replaces `list_agents` / `get_agent_profile` / `read_agent_history` for the operator. |
-| `inspect_teams` (alias `inspect_projects`) | `detail` (default `"names"`; values: `names` / `status` / `full`), `team_name` (default "") | Look up teams. With no `team_name`, `names` returns name+description, `status` returns task-count rollups. Passing a `team_name` returns the full record. |
-| `manage_team` (alias `manage_project`) | `team_name`, `action` (enum: `archive` / `delete`) | Lifecycle for a team. `delete` requires the team to already be archived (returns a confirmation nonce). |
+| `inspect_teams` | `detail` (default `"names"`; values: `names` / `status` / `full`), `team_name` (default "") | Look up teams. With no `team_name`, `names` returns name+description, `status` returns task-count rollups. Passing a `team_name` returns the full record. |
+| `manage_team` | `action` (enum: `archive` / `unarchive` / `propose_delete`), `team_name` | Lifecycle for a team. `propose_delete` requires the team to already be archived (returns a confirmation nonce). |
 | `manage_agent` | `agent_id`, `action` (enum: `archive` / `delete`) | Lifecycle for an agent. Same archive-then-delete contract as `manage_team`. Replaces `archive_agent` / `delete_agent`. |
 | `manage_task` | `task_id`, `action` (enum: `cancel` / `reroute` / `retry`), `new_assignee` (default "", required for `reroute`, optional override for `retry`), `reason` (default ""), `with_changes` (default {}, `retry` only — optional override for assignee/title/description) | Single entry point for task ops. Reroute and retry refuse if the target agent is over budget. `reason` is recorded on the audit trail. Replaces `cancel_task` / `reroute_task` / `retry_failed_task`. |
 | `edit_agent` | `agent_id`, `field` (enum: `instructions` / `soul` / `role` / `heartbeat` / `heartbeat_schedule` / `interface` / `model` / `thinking` / `budget` / `permissions`), `value`, `reason` (default `"user_asked"`; values: `user_asked` / `operator_proactive`) | Single entry point for agent config changes. Soft fields (`instructions`, `soul`, `role`, `heartbeat`, `heartbeat_schedule`, `interface`) apply immediately and surface as a receipt with 5-minute Undo. Hard fields (`model`, `thinking`, `budget`, `permissions`) return a preview + `change_id` (expires in 30 minutes) that must be confirmed via `confirm_edit`. `heartbeat_schedule` also retargets the live cron job in lockstep with the YAML write. |
@@ -230,11 +230,11 @@ project→team rename.
 | `confirm_edit` | `change_id` | Apply a previously proposed hard-field edit (model/thinking/budget/permissions). |
 | `save_observations` | `fleet_summary`, `agents_attention` (default `[]`, items: `{agent_id, issue, severity}`), `cost_trend`, `notes` (default "") | Persist fleet health observations to `OBSERVATIONS.md` for the Fleet Digest display. Char cap 1500; history retains last 50 entries. |
 | `create_agent` | `name` (lowercase, alphanumeric + hyphens, 1–32 chars), `role`, `model` (default ""), `instructions`, `soul` (default "") | Create a new custom agent. Requires user confirmation. |
-| `create_team` (alias `create_project`) | `name`, `description`, `agent_ids` (default []) | Create a new team and optionally assign agents. Requires user confirmation. |
-| `add_agents_to_team` (alias `add_agents_to_project`) | `team_name`, `agent_ids` | Add one or more agents to a team. Requires user confirmation. |
-| `remove_agents_from_team` (alias `remove_agents_from_project`) | `team_name`, `agent_ids` | Remove one or more agents from a team. Requires user confirmation. |
-| `update_team_context` (alias `update_project_context`) | `team_name`, `context` | Update the shared context text (`TEAM.md`, legacy `PROJECT.md` filename accepted) for a team. Requires user confirmation. |
-| `set_team_goal` (alias `set_project_goal`) | `team_name`, `north_star`, `success_criteria` (default []) | Save the team's vision (≤2000 chars) and up to 10 success criteria (each ≤200 chars). Rendered prominently on every team card in the Board tab. Pass empty values to clear. No confirmation required — call proactively whenever the user describes a team goal. |
+| `create_team` | `name`, `description`, `agent_ids` (default []) | Create a new team and optionally assign agents. Requires user confirmation. |
+| `add_agents_to_team` | `team_name`, `agent_ids` | Add one or more agents to a team. Requires user confirmation. |
+| `remove_agents_from_team` | `team_name`, `agent_ids` | Remove one or more agents from a team. Requires user confirmation. |
+| `update_team_context` | `team_name`, `context` | Update the shared `TEAM.md` context for a team. |
+| `set_team_goal` | `team_name`, `north_star`, `success_criteria` (default []) | Save the team's vision (≤2000 chars) and up to 10 success criteria (each ≤200 chars). Rendered prominently on every team card in the Board tab. Pass empty values to clear. No confirmation required — call proactively whenever the user describes a team goal. |
 | `list_agent_queue` | `agent_id`, `limit` (default 10, max 100) | Read an agent's task queue: current and recent tasks grouped by status (`active` / `blocked` / `done` / `failed` / `cancelled`), up to `limit` rows per bucket. Requires `OPENLEGION_ORCHESTRATION_TASKS_V2=1`. |
 | `get_team_outputs` | `team_id` (alias `project_id` accepted), `since` (default ""; ISO timestamp or duration like `"24h"`/`"7d"`) | Completed task artifacts for a team in a time window. Default window is the last 7 days. |
 | `summarize_team_progress` (alias `summarize_project_progress`) | `team_id` (alias `project_id` accepted) | Synthesized status summary for a team: structured counts + narrative `status_text` + top blockers + recent completions + `ask_for_user` list. |

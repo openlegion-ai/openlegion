@@ -2,7 +2,7 @@
 
 Layout:
   /data/workspace/
-  ├── PROJECT.md        # Shared fleet context (mounted read-only from host)
+  ├── TEAM.md           # Shared fleet context (mounted read-only from host)
   ├── INSTRUCTIONS.md   # Operating procedures, workflow rules, domain knowledge
   ├── SOUL.md           # Per-agent identity, personality, tone
   ├── USER.md           # User context, preferences
@@ -17,9 +17,12 @@ Layout:
       └── corrections.md  # User corrections and preferences
 
 All files are plain Markdown. Human-readable, git-versionable.
-PROJECT.md is shared across all agents — it defines what the fleet
+TEAM.md is shared across all team members — it defines what the team
 is building, the current priority, and hard constraints. Identity
-files (SOUL.md, INSTRUCTIONS.md, USER.md) are per-agent.
+files (SOUL.md, INSTRUCTIONS.md, USER.md) are per-agent. PR 3 of the
+project→team rename dropped the legacy ``PROJECT.md`` write path; a
+read-only fallback in the bootstrap loader still resolves stray files
+left behind by an old migration.
 """
 
 from __future__ import annotations
@@ -342,9 +345,11 @@ class WorkspaceManager:
         return "\n\n".join(parts) if parts else ""
 
     # Bootstrap files searched in order. ``TEAM.md`` / ``team.md`` are
-    # the canonical names; ``PROJECT.md`` / ``project.md`` are kept
-    # through PR 3 so workspaces that haven't been touched by the
-    # startup migrator yet still load their shared-context content.
+    # the canonical names; ``PROJECT.md`` / ``project.md`` survive as
+    # read-only fallbacks so workspaces that pre-date the migration
+    # still load their shared-context content. PR 3 dropped every
+    # *write* path to the legacy names — the read fallback is the only
+    # remaining concession.
     _BOOTSTRAP_FILES = (
         "TEAM.md", "team.md",
         "PROJECT.md", "project.md",
@@ -398,9 +403,10 @@ class WorkspaceManager:
         parts: list[str] = []
 
         # TEAM.md (canonical) / team.md (dashboard-pushed) come first;
-        # PROJECT.md / project.md remain as a back-compat fallback for
-        # workspaces that pre-date the PR 2 rename and haven't been
-        # touched by the startup migrator yet.
+        # PROJECT.md / project.md remain as a read-only fallback for
+        # workspaces that pre-date the rename and haven't been touched
+        # by the startup migrator yet. Every write path was dropped in
+        # PR 3 — only the read shim remains.
         team = (
             self._read_file("TEAM.md")
             or self._read_file("team.md")

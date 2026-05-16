@@ -146,7 +146,7 @@ function dashboard() {
 
     // Add agent
     addAgentMode: false,
-    addAgentForm: { name: '', role: '', model: '', avatar: 1, color: null, project: '', template: '', _showPicker: false, _showColorPicker: false, _templateSearch: '', _templateDropdownOpen: false, _modelSearch: '', _modelDropdownOpen: false },
+    addAgentForm: { name: '', role: '', model: '', avatar: 1, color: null, team: '', template: '', _showPicker: false, _showColorPicker: false, _templateSearch: '', _templateDropdownOpen: false, _modelSearch: '', _modelDropdownOpen: false },
     addAgentLoading: false,
     agentTemplates: [],
 
@@ -173,24 +173,24 @@ function dashboard() {
     artifactPreviewContent: null,
     artifactPreviewLoading: false,
 
-    // PROJECT.md (per-project only)
-    projectContent: '',
-    projectExists: false,
-    projectLoading: false,
-    projectEditing: false,
-    projectEditBuffer: '',
-    projectSaving: false,
+    // TEAM.md (per-team only)
+    teamContent: '',
+    teamExists: false,
+    teamLoading: false,
+    teamEditing: false,
+    teamEditBuffer: '',
+    teamSaving: false,
 
-    // Multi-project support
-    projects: [],
-    activeProject: null,
-    projectsLoaded: false,
+    // Multi-team support
+    teams: [],
+    activeTeam: null,
+    teamsLoaded: false,
 
-    // Project management
-    showProjectForm: false,
-    newProjectName: '',
-    newProjectDesc: '',
-    projectFormLoading: false,
+    // Team management
+    showTeamForm: false,
+    newTeamName: '',
+    newTeamDesc: '',
+    teamFormLoading: false,
 
     // Costs
     costData: {},
@@ -368,7 +368,7 @@ function dashboard() {
     _broadcastPending: null,
 
     // Breadcrumb project context
-    _detailReturnProject: null,
+    _detailReturnTeam: null,
 
     // Identity file save flash
     identitySavedFile: null,
@@ -394,7 +394,7 @@ function dashboard() {
     workplaceTab: 'feed',
     workplaceTabs: [
       { id: 'feed', label: 'Activity' },
-      { id: 'project-status', label: 'Projects' },
+      { id: 'project-status', label: 'Teams' },
       { id: 'task-board', label: 'Tasks' },
       { id: 'team-outputs', label: 'Outputs' },
     ],
@@ -416,7 +416,7 @@ function dashboard() {
     // that still toggle it.
     homeTab: 'kanban',
     workplaceEnabled: true,
-    workplaceProjects: [],
+    workplaceTeams: [],
     workplaceTasks: [],
     workplaceBlockers: [],
     workplaceOutputs: [],
@@ -437,7 +437,7 @@ function dashboard() {
     // failure. Banner click handlers clear the error and re-run the
     // load, keeping the recovery path one click away.
     workplaceSectionLoading: {
-      projects: false,
+      teams: false,
       tasks: false,
       blockers: false,
       outputs: false,
@@ -445,7 +445,7 @@ function dashboard() {
       feed: false,
     },
     workplaceErrors: {
-      projects: '',
+      teams: '',
       tasks: '',
       blockers: '',
       outputs: '',
@@ -475,7 +475,7 @@ function dashboard() {
     // user from double-firing rateDelivery while the POST is still
     // round-tripping. Cleared in the finally block of ``rateDelivery``.
     _rateDeliveryInflight: {},
-    workplaceProjectFilter: '',
+    workplaceTeamFilter: '',
     // Per-column flag: when true, the kanban column ignores the 14-day
     // archive cutoff and shows old pending/blocked rows. Keyed by status
     // so toggling one column doesn't expand the others.
@@ -530,12 +530,12 @@ function dashboard() {
     auditArchiveDays: 30,
     auditArchiving: false,
 
-    // Unified Project Hub (replaces separate PROJECT.md + Comms + Broadcast panels)
-    projectHubExpanded: false,
-    projectHubTab: 'docs',  // 'docs' | 'activity' | 'state' | 'artifacts' | 'broadcast' | 'members'
+    // Unified Team Hub (replaces separate TEAM.md + Comms + Broadcast panels)
+    teamHubExpanded: false,
+    teamHubTab: 'docs',  // 'docs' | 'activity' | 'state' | 'artifacts' | 'broadcast' | 'members'
 
-    // PROJECT.md banner on Agents tab (kept for backward compat, not used by template)
-    projectBannerExpanded: false,
+    // TEAM.md banner on Agents tab (kept for backward compat, not used by template)
+    teamBannerExpanded: false,
 
     // Credentials
     showCredForm: false,
@@ -939,10 +939,10 @@ function dashboard() {
     closeDetail() {
       this.detailAgent = null;
       this.selectedAgent = null;
-      if (this._detailReturnProject !== null && this._detailReturnProject !== undefined) {
-        this.activeProject = this._detailReturnProject;
+      if (this._detailReturnTeam !== null && this._detailReturnTeam !== undefined) {
+        this.activeTeam = this._detailReturnTeam;
       }
-      this._detailReturnProject = null;
+      this._detailReturnTeam = null;
       this._pushUrl(false);
     },
 
@@ -989,7 +989,7 @@ function dashboard() {
     get maxAgents() {
       return this.settingsData?.plan_limits?.max_agents ?? 0;
     },
-    get maxProjects() {
+    get maxTeams() {
       return this.settingsData?.plan_limits?.max_projects ?? 0;
     },
     get runningAgents() {
@@ -999,16 +999,16 @@ function dashboard() {
       if (this.maxAgents === 0) return false;
       return this.runningAgents.length >= this.maxAgents;
     },
-    get projectsEnabled() {
+    get teamsEnabled() {
       const limits = this.settingsData?.plan_limits;
       if (!limits) return true; // no limits loaded yet, allow everything
       return limits.projects_enabled !== false;
     },
-    get atProjectLimit() {
-      if (!this.projectsEnabled) return true;
-      if (this.maxProjects === 0) return false; // unlimited
-      const projectCount = this.projects?.length ?? 0;
-      return projectCount >= this.maxProjects;
+    get atTeamLimit() {
+      if (!this.teamsEnabled) return true;
+      if (this.maxTeams === 0) return false; // unlimited
+      const teamCount = this.teams?.length ?? 0;
+      return teamCount >= this.maxTeams;
     },
 
     get filteredEvents() {
@@ -1042,16 +1042,16 @@ function dashboard() {
     get filteredAgents() {
       // User-fleet view: excludes the operator system agent. Drives all stats (cost, tokens, health),
       // count-against-quota displays, and broadcast targeting. Operator is rendered separately via displayAgents.
-      if (this.activeProject) {
-        return this.agents.filter(a => a.id !== 'operator' && a.project === this.activeProject);
+      if (this.activeTeam) {
+        return this.agents.filter(a => a.id !== 'operator' && a.project === this.activeTeam);
       }
-      const base = this.projects.length > 0 ? this.unassignedAgents : this.agents;
+      const base = this.teams.length > 0 ? this.soloAgents : this.agents;
       return base.filter(a => a.id !== 'operator');
     },
 
     /** Agent grid render list. Standalone view prepends the operator card (system agent, links to operator settings). */
     get displayAgents() {
-      if (this.activeProject) return this.filteredAgents;
+      if (this.activeTeam) return this.filteredAgents;
       const operator = this.agents.find(a => a.id === 'operator');
       return operator ? [operator, ...this.filteredAgents] : this.filteredAgents;
     },
@@ -1209,6 +1209,25 @@ function dashboard() {
         if (v === '1') this.messengerSidePanelOpen = true;
       } catch (e) { /* ignore */ }
 
+      // Restore the currently-active team. Reads the new ``activeTeam`` key,
+      // falling back to the legacy ``activeProject`` key one time so users
+      // upgrading from PR 2 don't lose their selection. The legacy key is
+      // cleared after migration so subsequent reads stay clean.
+      try {
+        let active = localStorage.getItem('activeTeam');
+        if (!active) {
+          const legacy = localStorage.getItem('activeProject');
+          if (legacy) {
+            active = legacy;
+            localStorage.setItem('activeTeam', legacy);
+          }
+        }
+        if (localStorage.getItem('activeProject') !== null) {
+          localStorage.removeItem('activeProject');
+        }
+        if (active) this.activeTeam = active;
+      } catch (_) { /* ignore */ }
+
       // Migration: users who saw the legacy "What's new" tour (Phase 4)
       // had the ``olSeenWhatsNew`` flag set. Those users had non-empty
       // fleets — they're not new — and shouldn't see the new-user
@@ -1256,8 +1275,8 @@ function dashboard() {
       this.fetchAgents();
       this.startHeartbeatTimer();
       this.fetchSettings();
-      this.fetchProject();
-      this.fetchProjects();
+      this.fetchTeamContent();
+      this.fetchTeams();
       this.fetchModelHealth();
       this.fetchQueues();
       this._refreshInterval = setInterval(() => this.fetchAgents(), 15000);
@@ -1423,7 +1442,7 @@ function dashboard() {
       // Popstate listener for browser back/forward
       this._popstateHandler = () => {
         // Guard unsaved edits
-        if (this.identityEditing || this.configEditing || this.projectEditing) {
+        if (this.identityEditing || this.configEditing || this.teamEditing) {
           if (!confirm('You have unsaved changes. Discard and navigate away?')) {
             // Re-push current URL to cancel the back navigation
             this._pushUrl(true);
@@ -1433,8 +1452,8 @@ function dashboard() {
           this.identityEditBuffer = '';
           this.configEditing = false;
           this.editForm = {};
-          this.projectEditing = false;
-          this.projectEditBuffer = '';
+          this.teamEditing = false;
+          this.teamEditBuffer = '';
         }
         const route = this._parsePath(window.location.pathname);
         this._applyRoute(route);
@@ -2566,8 +2585,8 @@ function dashboard() {
         this.fetchAgents();
         this.fetchQueues();
         this.fetchSettings();
-        this.fetchProject();
-        this.fetchProjects();
+        this.fetchTeamContent();
+        this.fetchTeams();
       }
       if (tab === 'system') {
         this.fetchSettings();
@@ -2720,7 +2739,7 @@ function dashboard() {
       this.workplaceLoading = true;
       try {
         await Promise.all([
-          this.loadWorkplaceProjects(),
+          this.loadWorkplaceTeams(),
           this.loadWorkplaceTasks(),
           this.loadWorkplaceBlockers(),
           this.loadWorkplaceOutputs(),
@@ -2740,7 +2759,7 @@ function dashboard() {
     retryWorkplaceSection(section) {
       this.workplaceErrors[section] = '';
       const fn = {
-        projects: this.loadWorkplaceProjects,
+        teams: this.loadWorkplaceTeams,
         tasks: this.loadWorkplaceTasks,
         blockers: this.loadWorkplaceBlockers,
         outputs: this.loadWorkplaceOutputs,
@@ -2750,22 +2769,22 @@ function dashboard() {
       if (fn) fn.call(this);
     },
 
-    async loadWorkplaceProjects() {
-      this.workplaceSectionLoading.projects = true;
-      this.workplaceErrors.projects = '';
+    async loadWorkplaceTeams() {
+      this.workplaceSectionLoading.teams = true;
+      this.workplaceErrors.teams = '';
       try {
-        const resp = await fetch(`${window.__config.apiBase}/workplace/projects`);
+        const resp = await fetch(`${window.__config.apiBase}/workplace/teams`);
         if (!resp.ok) {
-          this.workplaceErrors.projects = `Couldn't load projects (HTTP ${resp.status})`;
+          this.workplaceErrors.teams = `Couldn't load teams (HTTP ${resp.status})`;
           return;
         }
         const data = await resp.json();
         this.workplaceEnabled = data.enabled !== false;
-        this.workplaceProjects = data.projects || [];
+        this.workplaceTeams = data.teams || [];
       } catch (e) {
-        this.workplaceErrors.projects = (e && e.message) ? `Couldn't load projects: ${e.message}` : "Couldn't load projects";
+        this.workplaceErrors.teams = (e && e.message) ? `Couldn't load teams: ${e.message}` : "Couldn't load teams";
       } finally {
-        this.workplaceSectionLoading.projects = false;
+        this.workplaceSectionLoading.teams = false;
       }
     },
 
@@ -2773,7 +2792,7 @@ function dashboard() {
       this.workplaceSectionLoading.tasks = true;
       this.workplaceErrors.tasks = '';
       try {
-        const params = this.workplaceProjectFilter ? `?project_id=${encodeURIComponent(this.workplaceProjectFilter)}` : '';
+        const params = this.workplaceTeamFilter ? `?project_id=${encodeURIComponent(this.workplaceTeamFilter)}` : '';
         const resp = await fetch(`${window.__config.apiBase}/workplace/tasks${params}`);
         if (!resp.ok) {
           this.workplaceErrors.tasks = `Couldn't load tasks (HTTP ${resp.status})`;
@@ -2812,7 +2831,7 @@ function dashboard() {
       this.workplaceSectionLoading.outputs = true;
       this.workplaceErrors.outputs = '';
       try {
-        const params = this.workplaceProjectFilter ? `?project_id=${encodeURIComponent(this.workplaceProjectFilter)}` : '';
+        const params = this.workplaceTeamFilter ? `?project_id=${encodeURIComponent(this.workplaceTeamFilter)}` : '';
         const resp = await fetch(`${window.__config.apiBase}/workplace/outputs${params}`);
         if (!resp.ok) {
           this.workplaceErrors.outputs = `Couldn't load outputs (HTTP ${resp.status})`;
@@ -2867,7 +2886,7 @@ function dashboard() {
       this.workplaceSectionLoading.feed = true;
       this.workplaceErrors.feed = '';
       try {
-        const params = this.workplaceProjectFilter ? `?project_id=${encodeURIComponent(this.workplaceProjectFilter)}` : '';
+        const params = this.workplaceTeamFilter ? `?project_id=${encodeURIComponent(this.workplaceTeamFilter)}` : '';
         const resp = await fetch(`${window.__config.apiBase}/workplace/feed${params}`);
         if (!resp.ok) {
           this.workplaceErrors.feed = `Couldn't load activity (HTTP ${resp.status})`;
@@ -4762,16 +4781,16 @@ function dashboard() {
         }
       }
 
-      // Live project CRUD — refresh the projects list. We use the
-      // existing ``fetchProjects`` rather than mutating in place so
-      // the projects view picks up the latest server-side ordering
-      // / member counts in one round-trip.
-      if (evt.type === 'project_created' || evt.type === 'project_deleted' ||
-          evt.type === 'project_updated' || evt.type === 'project_archived' ||
-          evt.type === 'project_unarchived') {
-        if (typeof this.fetchProjects === 'function') {
-          if (this._projectsRefreshDebounce) clearTimeout(this._projectsRefreshDebounce);
-          this._projectsRefreshDebounce = setTimeout(() => this.fetchProjects(), 250);
+      // Live team CRUD — refresh the teams list. We use the existing
+      // ``fetchTeams`` rather than mutating in place so the teams view
+      // picks up the latest server-side ordering / member counts in
+      // one round-trip.
+      if (evt.type === 'team_created' || evt.type === 'team_deleted' ||
+          evt.type === 'team_updated' || evt.type === 'team_archived' ||
+          evt.type === 'team_unarchived') {
+        if (typeof this.fetchTeams === 'function') {
+          if (this._teamsRefreshDebounce) clearTimeout(this._teamsRefreshDebounce);
+          this._teamsRefreshDebounce = setTimeout(() => this.fetchTeams(), 250);
         }
       }
 
@@ -4935,7 +4954,7 @@ function dashboard() {
       if (evt.type === 'blackboard_write' && evt.data && evt.data.key) {
         if (!this.bbHighlights.includes(evt.data.key)) this.bbHighlights.push(evt.data.key);
         setTimeout(() => { const i = this.bbHighlights.indexOf(evt.data.key); if (i !== -1) this.bbHighlights.splice(i, 1); }, 5000);
-        if (this.activeProject && this.activeTab === 'fleet' && !this.detailAgent) {
+        if (this.activeTeam && this.activeTab === 'fleet' && !this.detailAgent) {
           if (this._commsDebounce) clearTimeout(this._commsDebounce);
           this._commsDebounce = setTimeout(() => {
             this.fetchBlackboard();
@@ -4953,7 +4972,7 @@ function dashboard() {
       // Mirror of blackboard_write for the delete endpoint so the
       // SPA can drop the entry from the viewer / refresh comms.
       if (evt.type === 'blackboard_delete' && evt.data && evt.data.key) {
-        if (this.activeProject && this.activeTab === 'fleet' && !this.detailAgent) {
+        if (this.activeTeam && this.activeTab === 'fleet' && !this.detailAgent) {
           if (this._commsDebounce) clearTimeout(this._commsDebounce);
           this._commsDebounce = setTimeout(() => {
             this.fetchBlackboard();
@@ -5475,7 +5494,7 @@ function dashboard() {
 
     async _fetchCoordination() {
       // Only fetch when we have a project with agents
-      const proj = this.activeProject;
+      const proj = this.activeTeam;
       if (!proj || !this.agents.length) return;
       try {
         // Fetch status/ and tasks/ entries in parallel
@@ -5863,44 +5882,44 @@ function dashboard() {
       this.agentActivityLoading = false;
     },
 
-    async fetchProject() {
-      if (!this.activeProject) {
-        this.projectContent = '';
-        this.projectExists = false;
-        this.projectLoading = false;
+    async fetchTeamContent() {
+      if (!this.activeTeam) {
+        this.teamContent = '';
+        this.teamExists = false;
+        this.teamLoading = false;
         return;
       }
-      this.projectLoading = true;
+      this.teamLoading = true;
       try {
-        const resp = await fetch(`${window.__config.apiBase}/project?project=${encodeURIComponent(this.activeProject)}`);
+        const resp = await fetch(`${window.__config.apiBase}/team?team=${encodeURIComponent(this.activeTeam)}`);
         if (resp.ok) {
           const data = await resp.json();
-          this.projectContent = data.content || '';
-          this.projectExists = data.exists;
+          this.teamContent = data.content || '';
+          this.teamExists = data.exists;
         }
-      } catch (e) { console.warn('fetchProject failed:', e); }
-      this.projectLoading = false;
+      } catch (e) { console.warn('fetchTeamContent failed:', e); }
+      this.teamLoading = false;
     },
 
-    async saveProject() {
-      if (this.projectSaving) return;
-      if (!this.activeProject) return;
-      this.projectSaving = true;
+    async saveTeamContent() {
+      if (this.teamSaving) return;
+      if (!this.activeTeam) return;
+      this.teamSaving = true;
       try {
-        const resp = await fetch(`${window.__config.apiBase}/project?project=${encodeURIComponent(this.activeProject)}`, {
+        const resp = await fetch(`${window.__config.apiBase}/team?team=${encodeURIComponent(this.activeTeam)}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ content: this.projectEditBuffer }),
+          body: JSON.stringify({ content: this.teamEditBuffer }),
         });
         if (resp.ok) {
           const data = await resp.json();
-          this.projectContent = this.projectEditBuffer;
-          this.projectExists = true;
-          this.projectEditing = false;
-          this.projectEditBuffer = '';
+          this.teamContent = this.teamEditBuffer;
+          this.teamExists = true;
+          this.teamEditing = false;
+          this.teamEditBuffer = '';
           const pushed = Object.values(data.pushed || {}).filter(Boolean).length;
           const total = Object.keys(data.pushed || {}).length;
-          this.showToast(`${this.activeProject} PROJECT.md saved${total > 0 ? ` (pushed to ${pushed}/${total} agents)` : ''}`);
+          this.showToast(`${this.activeTeam} TEAM.md saved${total > 0 ? ` (pushed to ${pushed}/${total} agents)` : ''}`);
         } else {
           try {
             const err = await resp.json();
@@ -5908,39 +5927,43 @@ function dashboard() {
           } catch (_) { this.showToast('Save failed'); }
         }
       } catch (e) { this.showToast(`Save failed: ${e.message}`); }
-      this.projectSaving = false;
+      this.teamSaving = false;
     },
 
-    startProjectEdit() {
-      this.projectEditBuffer = this.projectContent;
-      this.projectEditing = true;
+    startTeamEdit() {
+      this.teamEditBuffer = this.teamContent;
+      this.teamEditing = true;
     },
 
-    cancelProjectEdit() {
-      this.projectEditing = false;
-      this.projectEditBuffer = '';
+    cancelTeamEdit() {
+      this.teamEditing = false;
+      this.teamEditBuffer = '';
     },
 
-    async fetchProjects() {
+    async fetchTeams() {
       try {
-        const resp = await fetch(`${window.__config.apiBase}/projects`);
+        const resp = await fetch(`${window.__config.apiBase}/teams`);
         if (resp.ok) {
           const data = await resp.json();
-          this.projects = data.projects || [];
-          this.projectsLoaded = true;
+          this.teams = data.teams || [];
+          this.teamsLoaded = true;
         }
-      } catch (e) { console.warn('fetchProjects failed:', e); }
+      } catch (e) { console.warn('fetchTeams failed:', e); }
     },
 
-    switchProject(name) {
-      if (this.activeProject === name) return;
-      this.activeProject = name;
-      this.projectEditing = false;
-      this.projectEditBuffer = '';
-      this.projectBannerExpanded = false;
-      this.projectHubExpanded = false;
-      this.projectHubTab = 'docs';
-      this.showProjectForm = false;
+    switchTeam(name) {
+      if (this.activeTeam === name) return;
+      this.activeTeam = name;
+      try {
+        if (name) localStorage.setItem('activeTeam', name);
+        else localStorage.removeItem('activeTeam');
+      } catch (_) { /* ignore */ }
+      this.teamEditing = false;
+      this.teamEditBuffer = '';
+      this.teamBannerExpanded = false;
+      this.teamHubExpanded = false;
+      this.teamHubTab = 'docs';
+      this.showTeamForm = false;
       this.commsView = 'activity';
       this.commsExpanded = false;
       this.bbPrefix = '';
@@ -5951,7 +5974,7 @@ function dashboard() {
       this.bbEntries = [];
       this.commsSubs = {};
       this.artifactsList = [];
-      this.fetchProject();
+      this.fetchTeamContent();
       if (name) {
         this.fetchCommsActivity();
         this.fetchBlackboard();
@@ -5959,50 +5982,50 @@ function dashboard() {
       }
     },
 
-    openProjectModal() {
-      if (this.atProjectLimit) return;
-      this.showProjectForm = true;
+    openTeamModal() {
+      if (this.atTeamLimit) return;
+      this.showTeamForm = true;
       this.$nextTick(() => {
-        const el = document.getElementById('project-name-input');
+        const el = document.getElementById('team-name-input');
         if (el) el.focus();
       });
     },
 
-    closeProjectModal() {
-      if (this.projectFormLoading) return;
-      this.showProjectForm = false;
-      this.newProjectName = '';
-      this.newProjectDesc = '';
+    closeTeamModal() {
+      if (this.teamFormLoading) return;
+      this.showTeamForm = false;
+      this.newTeamName = '';
+      this.newTeamDesc = '';
     },
 
-    async createProject() {
-      if (!this.projectsEnabled) {
-        this.showToast('Projects are not available on your current plan.');
+    async createTeam() {
+      if (!this.teamsEnabled) {
+        this.showToast('Teams are not available on your current plan.');
         return;
       }
-      if (this.atProjectLimit) {
-        this.showToast('Project limit reached. Upgrade your plan for more projects.');
+      if (this.atTeamLimit) {
+        this.showToast('Team limit reached. Upgrade your plan for more teams.');
         return;
       }
-      const name = this.newProjectName.trim();
+      const name = this.newTeamName.trim();
       if (!name) return;
       if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(name)) {
-        this.showToast('Project name must start with a letter or number and contain only letters, numbers, hyphens, underscores');
+        this.showToast('Team name must start with a letter or number and contain only letters, numbers, hyphens, underscores');
         return;
       }
-      this.projectFormLoading = true;
+      this.teamFormLoading = true;
       try {
-        const resp = await fetch(`${window.__config.apiBase}/projects`, {
+        const resp = await fetch(`${window.__config.apiBase}/teams`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name, description: this.newProjectDesc.trim(), members: [] }),
+          body: JSON.stringify({ name, description: this.newTeamDesc.trim(), members: [] }),
         });
         if (resp.ok) {
-          this.projectFormLoading = false;
-          this.closeProjectModal();
-          await this.fetchProjects();
-          this.switchProject(name);
-          this.showToast(`Project "${name}" created`);
+          this.teamFormLoading = false;
+          this.closeTeamModal();
+          await this.fetchTeams();
+          this.switchTeam(name);
+          this.showToast(`Team "${name}" created`);
         } else {
           const err = await resp.json().catch(() => ({}));
           if (resp.status === 403) {
@@ -6013,21 +6036,21 @@ function dashboard() {
           }
         }
       } catch (e) { this.showToast(`Create failed: ${e.message}`); }
-      this.projectFormLoading = false;
+      this.teamFormLoading = false;
     },
 
-    async deleteProject(name) {
-      this.showConfirm('Delete Project', `Delete project "${name}"? Members will become standalone.`, async () => {
+    async deleteTeam(name) {
+      this.showConfirm('Delete Team', `Delete team "${name}"? Members will become solo.`, async () => {
         try {
-          const resp = await fetch(`${window.__config.apiBase}/projects/${encodeURIComponent(name)}`, {
+          const resp = await fetch(`${window.__config.apiBase}/teams/${encodeURIComponent(name)}`, {
             method: 'DELETE',
           });
           if (resp.ok) {
-            this.projectEditing = false;
-            this.projectEditBuffer = '';
-            await this.fetchProjects();
-            if (this.activeProject === name) this.switchProject(null);
-            this.showToast(`Project "${name}" deleted`);
+            this.teamEditing = false;
+            this.teamEditBuffer = '';
+            await this.fetchTeams();
+            if (this.activeTeam === name) this.switchTeam(null);
+            this.showToast(`Team "${name}" deleted`);
           } else {
             const err = await resp.json().catch(() => ({}));
             this.showToast(`Delete failed: ${err.detail || 'Unknown error'}`);
@@ -6036,17 +6059,17 @@ function dashboard() {
       }, true);
     },
 
-    async addMember(project, agent) {
+    async addMember(team, agent) {
       try {
-        const resp = await fetch(`${window.__config.apiBase}/projects/${encodeURIComponent(project)}/members`, {
+        const resp = await fetch(`${window.__config.apiBase}/teams/${encodeURIComponent(team)}/members`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ agent }),
         });
         if (resp.ok) {
-          await this.fetchProjects();
+          await this.fetchTeams();
           this.fetchAgents();
-          this.showToast(`${agent} added to ${project}`);
+          this.showToast(`${agent} added to ${team}`);
         } else {
           const err = await resp.json().catch(() => ({}));
           this.showToast(`Add failed: ${err.detail || 'Unknown error'}`);
@@ -6054,15 +6077,15 @@ function dashboard() {
       } catch (e) { this.showToast(`Add failed: ${e.message}`); }
     },
 
-    async removeMember(project, agent) {
+    async removeMember(team, agent) {
       try {
-        const resp = await fetch(`${window.__config.apiBase}/projects/${encodeURIComponent(project)}/members/${encodeURIComponent(agent)}`, {
+        const resp = await fetch(`${window.__config.apiBase}/teams/${encodeURIComponent(team)}/members/${encodeURIComponent(agent)}`, {
           method: 'DELETE',
         });
         if (resp.ok) {
-          await this.fetchProjects();
+          await this.fetchTeams();
           this.fetchAgents();
-          this.showToast(`${agent} removed from ${project}`);
+          this.showToast(`${agent} removed from ${team}`);
         } else {
           const err = await resp.json().catch(() => ({}));
           this.showToast(`Remove failed: ${err.detail || 'Unknown error'}`);
@@ -6070,30 +6093,33 @@ function dashboard() {
       } catch (e) { this.showToast(`Remove failed: ${e.message}`); }
     },
 
-    /** Agents in the registry that are not in any project. Excludes operator (system agent, not project-assignable). */
-    get unassignedAgents() {
+    /** Agents in the registry that are not in any team. Excludes operator (system agent, not team-assignable). */
+    get soloAgents() {
       const assigned = new Set();
-      for (const p of this.projects) {
-        for (const m of (p.members || [])) assigned.add(m);
+      for (const t of this.teams) {
+        for (const m of (t.members || [])) assigned.add(m);
       }
       return this.agents.filter(a => a.id !== 'operator' && !assigned.has(a.id));
     },
 
-    /** Get the active project object. */
-    get activeProjectData() {
-      return this.projects.find(p => p.name === this.activeProject) || null;
+    /** Get the active team object. */
+    get activeTeamData() {
+      return this.teams.find(t => t.name === this.activeTeam) || null;
     },
 
 
-    _bbProjectPrefix() {
-      // Scope blackboard keys to the active project
-      return this.activeProject ? `projects/${this.activeProject}/` : '';
+    _bbTeamPrefix() {
+      // Scope blackboard keys to the active team. The on-disk key
+      // namespace is still ``projects/`` — that's a backend storage
+      // prefix, not a domain term, and renaming it is a separate
+      // migration outside the project→team rename's scope.
+      return this.activeTeam ? `projects/${this.activeTeam}/` : '';
     },
 
-    _bbStripProjectPrefix(key) {
-      const pfx = this._bbProjectPrefix();
+    _bbStripTeamPrefix(key) {
+      const pfx = this._bbTeamPrefix();
       if (pfx && key.startsWith(pfx)) return key.slice(pfx.length);
-      // If no active project, still strip any projects/*/  prefix for display
+      // If no active team, still strip any projects/*/  prefix for display.
       const m = key.match(/^projects\/[^/]+\/(.*)/);
       return m ? m[1] : key;
     },
@@ -6101,13 +6127,13 @@ function dashboard() {
     async fetchBlackboard() {
       this.bbLoading = true;
       try {
-        // Prepend project prefix so namespace filters match project-scoped keys
-        const searchPrefix = this._bbProjectPrefix() + this.bbPrefix;
+        // Prepend team prefix so namespace filters match team-scoped keys
+        const searchPrefix = this._bbTeamPrefix() + this.bbPrefix;
         const resp = await fetch(`${window.__config.apiBase}/blackboard?prefix=${encodeURIComponent(searchPrefix)}`);
         if (resp.ok) {
           const entries = (await resp.json()).entries;
-          // Strip project prefix so display/namespace logic works on the real key
-          for (const e of entries) e.key = this._bbStripProjectPrefix(e.key);
+          // Strip team prefix so display/namespace logic works on the real key
+          for (const e of entries) e.key = this._bbStripTeamPrefix(e.key);
           this.bbEntries = entries;
         }
       } catch (e) { console.warn('fetchBlackboard failed:', e); }
@@ -6117,23 +6143,23 @@ function dashboard() {
     async fetchCommsActivity() {
       this.commsActivityLoading = true;
       try {
-        const proj = this.activeProject;
+        const team = this.activeTeam;
         const params = new URLSearchParams({ limit: '100' });
-        if (proj) params.set('project', proj);
+        if (team) params.set('project', team);
         const resp = await fetch(`${window.__config.apiBase}/comms/activity?${params}`);
         if (resp.ok) {
           const data = await resp.json();
           const activity = data.activity || [];
-          // Strip project prefix from blackboard keys and pubsub topics
+          // Strip team prefix from blackboard keys and pubsub topics
           for (const item of activity) {
-            if (item.key) item.key = this._bbStripProjectPrefix(item.key);
-            if (item.topic) item.topic = this._bbStripProjectPrefix(item.topic);
+            if (item.key) item.key = this._bbStripTeamPrefix(item.key);
+            if (item.topic) item.topic = this._bbStripTeamPrefix(item.topic);
           }
           this.commsActivity = activity;
-          // Strip project prefix from subscription topic names
+          // Strip team prefix from subscription topic names
           const rawSubs = data.subscriptions || {};
           const subs = {};
-          const pfx = this._bbProjectPrefix();
+          const pfx = this._bbTeamPrefix();
           for (const [topic, agents] of Object.entries(rawSubs)) {
             const clean = pfx && topic.startsWith(pfx) ? topic.slice(pfx.length) : topic;
             subs[clean] = agents;
@@ -6147,12 +6173,12 @@ function dashboard() {
     async fetchArtifacts() {
       this.artifactsLoading = true;
       try {
-        // Gather artifacts from all agents in the current project
-        const proj = this.activeProject;
-        if (!proj) { this.artifactsList = []; this.artifactsLoading = false; return; }
-        const projectAgents = this.agents.filter(a => a.project === proj);
+        // Gather artifacts from all agents in the current team
+        const team = this.activeTeam;
+        if (!team) { this.artifactsList = []; this.artifactsLoading = false; return; }
+        const teamAgents = this.agents.filter(a => a.project === team);
         const results = await Promise.allSettled(
-          projectAgents.map(async (a) => {
+          teamAgents.map(async (a) => {
             const resp = await fetch(`${window.__config.apiBase}/agents/${a.id}/artifacts`, { credentials: 'same-origin' });
             if (!resp.ok) return [];
             const data = await resp.json();
@@ -6611,7 +6637,7 @@ function dashboard() {
           avatar: f.avatar || 1,
         };
         if (f.color !== null) payload.color = f.color;
-        if (f.project) payload.project = f.project;
+        if (f.team) payload.team = f.team;
         if (f.template) payload.template = f.template;
         const resp = await fetch(`${window.__config.apiBase}/agents`, {
           method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -6619,12 +6645,13 @@ function dashboard() {
         });
         if (resp.ok) {
           const data = await resp.json();
-          const projectNote = data.project ? ` in ${data.project}` : '';
-          this.showToast(data.ready ? `${data.agent} added and ready${projectNote}` : `${data.agent} added (starting)${projectNote}`);
+          const teamName = data.team || data.project;
+          const teamNote = teamName ? ` in ${teamName}` : '';
+          this.showToast(data.ready ? `${data.agent} added and ready${teamNote}` : `${data.agent} added (starting)${teamNote}`);
           this.addAgentMode = false;
-          this.addAgentForm = { name: '', role: '', model: '', avatar: 1, color: null, project: '', template: '', _showPicker: false, _showColorPicker: false, _templateSearch: '', _templateDropdownOpen: false, _modelSearch: '', _modelDropdownOpen: false };
+          this.addAgentForm = { name: '', role: '', model: '', avatar: 1, color: null, team: '', template: '', _showPicker: false, _showColorPicker: false, _templateSearch: '', _templateDropdownOpen: false, _modelSearch: '', _modelDropdownOpen: false };
           this.fetchAgents();
-          if (data.project) this.fetchProjects();
+          if (teamName) this.fetchTeams();
         } else {
           const err = await resp.json();
           if (resp.status === 403) {
@@ -6642,11 +6669,11 @@ function dashboard() {
       if (this.atAgentLimit) return;
       this.addAgentMode = true;
       if (defaultName) this.addAgentForm.name = defaultName;
-      // Pre-select the active project if one is open
-      if (this.activeProject) this.addAgentForm.project = this.activeProject;
+      // Pre-select the active team if one is open
+      if (this.activeTeam) this.addAgentForm.team = this.activeTeam;
       this.fetchSettings();
       this.fetchAgentTemplates();
-      this.fetchProjects();
+      this.fetchTeams();
       this.$nextTick(() => {
         const el = document.getElementById('add-agent-name-input');
         if (el) el.focus();
@@ -6656,7 +6683,7 @@ function dashboard() {
     closeAddAgentModal() {
       if (this.addAgentLoading) return;
       this.addAgentMode = false;
-      this.addAgentForm = { name: '', role: '', model: '', avatar: 1, color: null, project: '', template: '', _showPicker: false, _showColorPicker: false, _templateSearch: '', _templateDropdownOpen: false, _modelSearch: '', _modelDropdownOpen: false };
+      this.addAgentForm = { name: '', role: '', model: '', avatar: 1, color: null, team: '', template: '', _showPicker: false, _showColorPicker: false, _templateSearch: '', _templateDropdownOpen: false, _modelSearch: '', _modelDropdownOpen: false };
     },
 
     openCookieImport() {
@@ -6720,7 +6747,7 @@ function dashboard() {
       try { value = JSON.parse(this.bbNewValue); } catch (_) { this.showToast('Invalid JSON'); return; }
       this.bbWriteLoading = true;
       try {
-        const fullKey = this._bbProjectPrefix() + this.bbNewKey;
+        const fullKey = this._bbTeamPrefix() + this.bbNewKey;
         const resp = await fetch(`${window.__config.apiBase}/blackboard/${fullKey}`, {
           method: 'PUT', headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({ value }),
@@ -6737,7 +6764,7 @@ function dashboard() {
     async deleteBlackboard(key) {
       this.showConfirm('Delete Entry', `Delete blackboard key "${key}"?`, async () => {
         try {
-          const fullKey = this._bbProjectPrefix() + key;
+          const fullKey = this._bbTeamPrefix() + key;
           const resp = await fetch(`${window.__config.apiBase}/blackboard/${fullKey}`, { method: 'DELETE' });
           if (resp.ok) { this.showToast(`Deleted: ${key}`); this.fetchBlackboard(); }
           else { const err = await resp.json(); this.showToast(`Error: ${err.detail}`); }
@@ -8249,10 +8276,10 @@ function dashboard() {
       // Navigate from agent detail to System > Automation with agent pre-selected
       const agent = this.detailAgent;
       this.selectedAgent = null;
-      if (this._detailReturnProject !== null && this._detailReturnProject !== undefined) {
-        this.activeProject = this._detailReturnProject;
+      if (this._detailReturnTeam !== null && this._detailReturnTeam !== undefined) {
+        this.activeTeam = this._detailReturnTeam;
       }
-      this._detailReturnProject = null;
+      this._detailReturnTeam = null;
       this.detailAgent = null;
       this.cronFormAgent = agent;
       this.showCronForm = true;
@@ -8261,9 +8288,9 @@ function dashboard() {
     },
 
     get broadcastTargets() {
-      // Project selected → project members; no project → standalone agents only.
+      // Team selected → team members; no team → solo agents only.
       // Exclude over-limit (locked) agents — they aren't running. Always exclude operator (system agent, has its own chat).
-      if (this.activeProject) {
+      if (this.activeTeam) {
         return this.filteredAgents.filter(a => !a.over_limit);
       }
       return this.agents.filter(a => a.id !== 'operator' && !a.over_limit && !a.project);
@@ -8342,24 +8369,25 @@ function dashboard() {
       // Quick actions
       const actions = [
         { label: 'Add Agent', desc: 'Open add agent form', keywords: ['add', 'agent', 'new', 'create'], action: () => { this.switchTab('fleet'); this.openAddAgentModal(); } },
-        { label: 'Broadcast', desc: this.activeProject ? `Broadcast to ${this.activeProject} agents` : (this.projects.length > 0 ? 'Broadcast to standalone agents' : 'Send message to all agents'), keywords: ['broadcast', 'send', 'all', 'message'], action: () => { this.switchTab('fleet'); if (this.activeProject) { this.projectHubExpanded = true; this.projectHubTab = 'broadcast'; this.$nextTick(() => document.getElementById('broadcast-input')?.focus()); } else { this.$nextTick(() => document.getElementById('broadcast-standalone-input')?.focus()); } } },
-        ...(this.activeProject ? [{ label: 'Edit PROJECT.md', desc: `Edit ${this.activeProject} project context`, keywords: ['project', 'edit', 'context'], action: () => { this.switchTab('fleet'); this.projectHubExpanded = true; this.projectHubTab = 'docs'; this.$nextTick(() => this.startProjectEdit()); } }] : []),
-        ...(this.activeProject ? [{ label: 'Project Members', desc: `Manage ${this.activeProject} members`, keywords: ['members', 'team', 'assign', 'agents'], action: () => { this.switchTab('fleet'); this.projectHubExpanded = true; this.projectHubTab = 'members'; } }] : []),
+        { label: 'Broadcast', desc: this.activeTeam ? `Broadcast to ${this.activeTeam} agents` : (this.teams.length > 0 ? 'Broadcast to solo agents' : 'Send message to all agents'), keywords: ['broadcast', 'send', 'all', 'message'], action: () => { this.switchTab('fleet'); if (this.activeTeam) { this.teamHubExpanded = true; this.teamHubTab = 'broadcast'; this.$nextTick(() => document.getElementById('broadcast-input')?.focus()); } else { this.$nextTick(() => document.getElementById('broadcast-solo-input')?.focus()); } } },
+        ...(this.activeTeam ? [{ label: 'Edit TEAM.md', desc: `Edit ${this.activeTeam} team context`, keywords: ['team', 'edit', 'context'], action: () => { this.switchTab('fleet'); this.teamHubExpanded = true; this.teamHubTab = 'docs'; this.$nextTick(() => this.startTeamEdit()); } }] : []),
+        ...(this.activeTeam ? [{ label: 'Team Members', desc: `Manage ${this.activeTeam} members`, keywords: ['members', 'team', 'assign', 'agents'], action: () => { this.switchTab('fleet'); this.teamHubExpanded = true; this.teamHubTab = 'members'; } }] : []),
       ];
       for (const act of actions) {
         if (act.keywords.some(kw => kw.includes(q)) || act.label.toLowerCase().includes(q)) {
           results.push({ type: 'action', label: act.label, desc: act.desc, action: act.action });
         }
       }
-      // Match projects
-      if (this.projects.length > 0) {
+      // Match teams (legacy 'standalone' / 'unassigned' / 'project' keywords kept
+      // for back-compat — users with muscle memory still find the action).
+      if (this.teams.length > 0) {
         if ('standalone'.startsWith(q) || 'unassigned'.startsWith(q) || 'solo'.startsWith(q)) {
-          results.push({ type: 'action', label: 'Standalone agents', desc: 'Show agents not in any project', action: () => { this.switchTab('fleet'); this.switchProject(null); } });
+          results.push({ type: 'action', label: 'Solo agents', desc: 'Show agents not in any team', action: () => { this.switchTab('fleet'); this.switchTeam(null); } });
         }
-        for (const proj of this.projects) {
-          const pname = (proj.name || '').toLowerCase();
-          if (pname.includes(q) || 'project'.startsWith(q)) {
-            results.push({ type: 'action', label: proj.name, desc: `Switch to project (${(proj.members || []).length} members)`, action: () => { this.switchTab('fleet'); this.switchProject(proj.name); } });
+        for (const t of this.teams) {
+          const tname = (t.name || '').toLowerCase();
+          if (tname.includes(q) || 'team'.startsWith(q) || 'project'.startsWith(q)) {
+            results.push({ type: 'action', label: t.name, desc: `Switch to team (${(t.members || []).length} members)`, action: () => { this.switchTab('fleet'); this.switchTeam(t.name); } });
           }
         }
       }
@@ -9297,7 +9325,7 @@ function dashboard() {
         this.switchSystemTab('operator');
         return;
       }
-      this._detailReturnProject = this.activeProject;
+      this._detailReturnTeam = this.activeTeam;
       this.activeTab = 'fleet';
       this.selectedAgent = agentId;
       this.detailAgent = agentId;

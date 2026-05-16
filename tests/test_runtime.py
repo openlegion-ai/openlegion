@@ -56,9 +56,11 @@ class TestSandboxBackend:
         """Workspace directory is created with expected structure."""
         project_root = tmp_path / "project"
         project_root.mkdir()
-        # Create a project-specific PROJECT.md (not global)
-        project_md = tmp_path / "project_context.md"
-        project_md.write_text("# Test Project")
+        # Create a team-specific context file (not global). Test the
+        # legacy ``PROJECT_MD_PATH`` env name still works as an alias for
+        # ``TEAM_MD_PATH`` so existing deploys don't break.
+        team_md = tmp_path / "team_context.md"
+        team_md.write_text("# Test Team")
 
         skills_src = project_root / "skills" / "alpha"
         skills_src.mkdir(parents=True)
@@ -69,7 +71,7 @@ class TestSandboxBackend:
         backend.mesh_host_port = 8420
         backend.agents = {}
         backend.auth_tokens = {}
-        backend.extra_env = {"PROJECT_MD_PATH": str(project_md)}
+        backend.extra_env = {"PROJECT_MD_PATH": str(team_md)}
         backend._workspace_root = tmp_path / ".openlegion" / "agents"
         backend._workspace_root.mkdir(parents=True)
 
@@ -83,7 +85,9 @@ class TestSandboxBackend:
 
         assert ws.exists()
         assert (ws / "data" / "workspace").is_dir()
-        assert (ws / "PROJECT.md").read_text() == "# Test Project"
+        assert (ws / "TEAM.md").read_text() == "# Test Team"
+        # PR 3 dropped the legacy PROJECT.md write — only TEAM.md ships.
+        assert not (ws / "PROJECT.md").exists()
         assert (ws / "skills" / "my_skill.py").read_text() == "# skill"
         assert (ws / ".agent.env").exists()
 
@@ -94,12 +98,14 @@ class TestSandboxBackend:
         assert "MESH_AUTH_TOKEN=" in env_content
         assert "alpha" in backend.auth_tokens
 
-    def test_prepare_workspace_standalone_no_project_md(self, tmp_path):
-        """Standalone agents (no PROJECT_MD_PATH) get no PROJECT.md."""
+    def test_prepare_workspace_solo_no_team_md(self, tmp_path):
+        """Solo agents (no TEAM_MD_PATH) get no TEAM.md."""
         project_root = tmp_path / "project"
         project_root.mkdir()
-        # Even if global PROJECT.md exists, standalone agents don't get it
-        (project_root / "PROJECT.md").write_text("# Global")
+        # Even if a stray TEAM.md exists at project root, solo agents
+        # don't get it (the path is selected via env var, not by
+        # walking the project tree).
+        (project_root / "TEAM.md").write_text("# Global")
 
         backend = SandboxBackend.__new__(SandboxBackend)
         backend.project_root = project_root
@@ -114,6 +120,7 @@ class TestSandboxBackend:
             agent_id="solo", role="test", skills_dir="",
             system_prompt="", model="",
         )
+        assert not (ws / "TEAM.md").exists()
         assert not (ws / "PROJECT.md").exists()
 
     def test_prepare_workspace_env_no_browser_vars(self, tmp_path):

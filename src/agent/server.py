@@ -10,7 +10,7 @@ Exposes endpoints for the mesh to interact with:
   GET  /workspace - list workspace files
   GET  /workspace/{filename} - read workspace file
   PUT  /workspace/{filename} - write workspace file
-  PUT  /project - update fleet-wide PROJECT.md (pushed by mesh)
+  PUT  /team    - update fleet-wide TEAM.md (pushed by mesh)
   GET  /workspace-logs - read daily logs (read-only)
   GET  /workspace-learnings - read errors and corrections (read-only)
   GET  /heartbeat-context - single-call heartbeat bootstrap data
@@ -418,15 +418,15 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         path.write_text(content)
         return {"filename": filename, "size": path.stat().st_size}
 
-    async def _update_team_md(request: Request) -> dict:
-        """Shared handler for ``PUT /team`` and ``PUT /project``.
+    @app.put("/team")
+    async def update_team(request: Request) -> dict:
+        """Accept an updated TEAM.md from the mesh host.
 
-        TEAM.md (formerly PROJECT.md) is fleet-wide (not per-agent), so
-        it's separate from the identity file allowlist. The mesh pushes
-        updates here after the user edits it on the dashboard. The body
-        is written to BOTH ``TEAM.md`` and ``PROJECT.md`` in the
-        workspace so the bootstrap loader resolves under either name
-        through PR 3.
+        TEAM.md is fleet-wide (not per-agent), so it's separate from the
+        identity file allowlist. The mesh pushes updates here after the
+        user edits it on the dashboard. PR 3 of the project→team rename
+        dropped the ``PUT /project`` alias and the dual-write to
+        ``PROJECT.md`` — only the canonical name is touched.
         """
         if not request.headers.get("x-mesh-internal"):
             raise HTTPException(
@@ -441,23 +441,8 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
             raise HTTPException(400, "content must be a string")
         content = sanitize_for_prompt(content)
         team_path = loop.workspace.root / "TEAM.md"
-        project_path = loop.workspace.root / "PROJECT.md"
         team_path.write_text(content)
-        project_path.write_text(content)
         return {"updated": True, "size": team_path.stat().st_size}
-
-    @app.put("/team")
-    async def update_team(request: Request) -> dict:
-        """Accept an updated TEAM.md from the mesh host."""
-        return await _update_team_md(request)
-
-    @app.put("/project")
-    async def update_project(request: Request) -> dict:
-        """DEPRECATED: accept an updated PROJECT.md from the mesh host.
-
-        Kept for back-compat through PR 3 — delegates to ``PUT /team``.
-        """
-        return await _update_team_md(request)
 
     @app.post("/config")
     async def update_runtime_config(request: Request) -> dict:

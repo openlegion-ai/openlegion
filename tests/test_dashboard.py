@@ -2564,7 +2564,7 @@ class TestBoardLoadingAndErrorStates:
         assert "workplaceSectionLoading" in body
         assert "workplaceErrors" in body
         # Sections covered (matches the loadWorkplace* surface).
-        for key in ("projects", "tasks", "blockers", "outputs", "pending", "feed"):
+        for key in ("teams", "tasks", "blockers", "outputs", "pending", "feed"):
             assert f"{key}: false" in body or f"'{key}'" in body or f'"{key}"' in body, \
                 f"app.js missing per-section bucket for {key}"
 
@@ -2574,7 +2574,7 @@ class TestBoardLoadingAndErrorStates:
         # Error path replaces silent console.error: each loader sets
         # its bucket so the banner renders.
         assert "workplaceErrors.feed" in body
-        assert "workplaceErrors.projects" in body
+        assert "workplaceErrors.teams" in body
         assert "workplaceErrors.tasks" in body
         assert "workplaceErrors.outputs" in body
 
@@ -2592,13 +2592,13 @@ class TestBoardLoadingAndErrorStates:
         # use the existing animate-pulse + bg-gray-800 classes for
         # visual consistency with the drill-in modal skeleton.
         assert 'data-testid="workplace-feed-skeleton"' in body
-        assert 'data-testid="workplace-projects-skeleton"' in body
+        assert 'data-testid="workplace-teams-skeleton"' in body
         assert 'data-testid="workplace-tasks-skeleton"' in body
         assert 'data-testid="workplace-outputs-skeleton"' in body
         # Each skeleton is gated on workplaceSectionLoading.<section>
         # so it disappears when the load resolves.
         assert "workplaceSectionLoading.feed" in body
-        assert "workplaceSectionLoading.projects" in body
+        assert "workplaceSectionLoading.teams" in body
         assert "workplaceSectionLoading.tasks" in body
         assert "workplaceSectionLoading.outputs" in body
 
@@ -2607,14 +2607,14 @@ class TestBoardLoadingAndErrorStates:
         body = resp.text
         # Error banner testid hooks per sub-tab.
         assert 'data-testid="workplace-feed-error"' in body
-        assert 'data-testid="workplace-projects-error"' in body
+        assert 'data-testid="workplace-teams-error"' in body
         assert 'data-testid="workplace-tasks-error"' in body
         assert 'data-testid="workplace-outputs-error"' in body
         # Each banner has a "Retry" button bound to
         # retryWorkplaceSection so the user can recover with one
         # click without reloading.
         assert "retryWorkplaceSection('feed')" in body
-        assert "retryWorkplaceSection('projects')" in body
+        assert "retryWorkplaceSection('teams')" in body
         assert "retryWorkplaceSection('tasks')" in body
         assert "retryWorkplaceSection('outputs')" in body
 
@@ -3125,22 +3125,22 @@ class TestDashboardProjectAPI:
     def test_list_projects(self):
         with patch("src.cli.config.PROJECTS_DIR", MagicMock(exists=MagicMock(return_value=True),
                     glob=MagicMock(return_value=[]))):
-            resp = self.client.get("/dashboard/api/projects")
+            resp = self.client.get("/dashboard/api/teams")
         assert resp.status_code == 200
         data = resp.json()
-        assert "projects" in data
+        assert "teams" in data
 
     def test_project_read_path_traversal_blocked(self):
         """Path traversal in project name is rejected."""
-        resp = self.client.get("/dashboard/api/project", params={"project": "../../etc"})
+        resp = self.client.get("/dashboard/api/team", params={"team": "../../etc"})
         assert resp.status_code == 400
         assert "Invalid project name" in resp.json()["detail"]
 
     def test_project_write_path_traversal_blocked(self):
         """Path traversal in project name is rejected for writes."""
         resp = self.client.put(
-            "/dashboard/api/project",
-            params={"project": "../../../tmp"},
+            "/dashboard/api/team",
+            params={"team": "../../../tmp"},
             json={"content": "pwned"},
         )
         assert resp.status_code == 400
@@ -3150,7 +3150,7 @@ class TestDashboardProjectAPI:
         """Valid project name is accepted and reads project.md."""
         from pathlib import Path
         with patch("src.cli.config.PROJECTS_DIR", Path(self._projects_dir)):
-            resp = self.client.get("/dashboard/api/project", params={"project": "alpha"})
+            resp = self.client.get("/dashboard/api/team", params={"team": "alpha"})
         assert resp.status_code == 200
         data = resp.json()
         assert data["project"] == "alpha"
@@ -3158,13 +3158,13 @@ class TestDashboardProjectAPI:
 
     def test_project_read_requires_project_param(self):
         """GET /api/project without project param returns 400."""
-        resp = self.client.get("/dashboard/api/project")
+        resp = self.client.get("/dashboard/api/team")
         assert resp.status_code == 400
         assert "required" in resp.json()["detail"]
 
     def test_project_write_requires_project_param(self):
         """PUT /api/project without project param returns 400."""
-        resp = self.client.put("/dashboard/api/project", json={"content": "hello"})
+        resp = self.client.put("/dashboard/api/team", json={"content": "hello"})
         assert resp.status_code == 400
         assert "required" in resp.json()["detail"]
 
@@ -3204,7 +3204,7 @@ class TestDashboardProjectCRUD:
              patch("src.cli.config.CONFIG_FILE", Path(self._config_file)), \
              patch("src.cli.config.AGENTS_FILE", Path(self._agents_file)), \
              patch("src.cli.config.PERMISSIONS_FILE", Path(self._tmpdir) / "perms.json"):
-            resp = self.client.post("/dashboard/api/projects", json={
+            resp = self.client.post("/dashboard/api/teams", json={
                 "name": "myproject",
                 "description": "A test project",
                 "members": [],
@@ -3217,7 +3217,7 @@ class TestDashboardProjectCRUD:
 
     def test_create_project_empty_name(self):
         """POST /api/projects with empty name returns 400."""
-        resp = self.client.post("/dashboard/api/projects", json={
+        resp = self.client.post("/dashboard/api/teams", json={
             "name": "",
             "description": "test",
         })
@@ -3228,7 +3228,7 @@ class TestDashboardProjectCRUD:
         from pathlib import Path
         with patch("src.cli.config.CONFIG_FILE", Path(self._config_file)), \
              patch("src.cli.config.AGENTS_FILE", Path(self._agents_file)):
-            resp = self.client.post("/dashboard/api/projects", json={
+            resp = self.client.post("/dashboard/api/teams", json={
                 "name": "proj",
                 "members": ["nonexistent"],
             })
@@ -3248,7 +3248,7 @@ class TestDashboardProjectCRUD:
 
         with patch("src.cli.config.PROJECTS_DIR", Path(self._projects_dir)), \
              patch("src.cli.config.PERMISSIONS_FILE", Path(self._tmpdir) / "perms.json"):
-            resp = self.client.delete("/dashboard/api/projects/doomed")
+            resp = self.client.delete("/dashboard/api/teams/doomed")
         assert resp.status_code == 200
         assert resp.json()["deleted"] is True
         assert not os.path.exists(proj_dir)
@@ -3257,7 +3257,7 @@ class TestDashboardProjectCRUD:
         """DELETE /api/projects/{name} for nonexistent project returns 404."""
         from pathlib import Path
         with patch("src.cli.config.PROJECTS_DIR", Path(self._projects_dir)):
-            resp = self.client.delete("/dashboard/api/projects/ghost")
+            resp = self.client.delete("/dashboard/api/teams/ghost")
         assert resp.status_code == 404
 
     def test_add_member(self):
@@ -3272,7 +3272,7 @@ class TestDashboardProjectCRUD:
 
         with patch("src.cli.config.PROJECTS_DIR", Path(self._projects_dir)), \
              patch("src.cli.config.PERMISSIONS_FILE", Path(self._tmpdir) / "perms.json"):
-            resp = self.client.post("/dashboard/api/projects/team/members", json={"agent": "alpha"})
+            resp = self.client.post("/dashboard/api/teams/team/members", json={"agent": "alpha"})
         assert resp.status_code == 200
         data = resp.json()
         assert data["added"] is True
@@ -3282,7 +3282,7 @@ class TestDashboardProjectCRUD:
 
     def test_add_member_missing_agent(self):
         """POST /api/projects/{name}/members without agent returns 400."""
-        resp = self.client.post("/dashboard/api/projects/team/members", json={})
+        resp = self.client.post("/dashboard/api/teams/team/members", json={})
         assert resp.status_code == 400
 
     def test_remove_member(self):
@@ -3297,7 +3297,7 @@ class TestDashboardProjectCRUD:
 
         with patch("src.cli.config.PROJECTS_DIR", Path(self._projects_dir)), \
              patch("src.cli.config.PERMISSIONS_FILE", Path(self._tmpdir) / "perms.json"):
-            resp = self.client.delete("/dashboard/api/projects/team/members/alpha")
+            resp = self.client.delete("/dashboard/api/teams/team/members/alpha")
         assert resp.status_code == 200
         data = resp.json()
         assert data["removed"] is True
@@ -3308,7 +3308,7 @@ class TestDashboardProjectCRUD:
         """DELETE /api/projects/{name}/members/{agent} for nonexistent project returns 400."""
         from pathlib import Path
         with patch("src.cli.config.PROJECTS_DIR", Path(self._projects_dir)):
-            resp = self.client.delete("/dashboard/api/projects/ghost/members/alpha")
+            resp = self.client.delete("/dashboard/api/teams/ghost/members/alpha")
         assert resp.status_code == 400
 
 
@@ -5012,13 +5012,13 @@ class TestWorkplaceTabRoutes:
         rows = resp.json()["tasks"]
         assert all(r["assignee"] == "alpha" for r in rows)
 
-    def test_workplace_projects_empty_state(self):
+    def test_workplace_teams_empty_state(self):
         client = self._client_with_v2(False)
-        resp = client.get("/dashboard/api/workplace/projects")
+        resp = client.get("/dashboard/api/workplace/teams")
         assert resp.status_code == 200
         data = resp.json()
         assert data["enabled"] is False
-        assert data["projects"] == []
+        assert data["teams"] == []
 
     def test_workplace_blockers_empty_state(self):
         client = self._client_with_v2(False)
@@ -5560,20 +5560,20 @@ class TestDashboardEventBusCoverage:
     def test_create_project_emits_project_created(self, mock_create):
         mock_create.return_value = None
         resp = self.client.post(
-            "/dashboard/api/projects",
+            "/dashboard/api/teams",
             json={"name": "alpha-proj", "description": "hi", "members": []},
         )
         assert resp.status_code == 200, resp.text
-        created = [e for e in self.captured if e["type"] == "project_created"]
+        created = [e for e in self.captured if e["type"] == "team_created"]
         assert len(created) == 1
         assert created[0]["data"]["project_id"] == "alpha-proj"
 
     @patch("src.cli.config._delete_project")
     def test_delete_project_emits_project_deleted(self, mock_del):
         mock_del.return_value = None
-        resp = self.client.delete("/dashboard/api/projects/alpha-proj")
+        resp = self.client.delete("/dashboard/api/teams/alpha-proj")
         assert resp.status_code == 200
-        deleted = [e for e in self.captured if e["type"] == "project_deleted"]
+        deleted = [e for e in self.captured if e["type"] == "team_deleted"]
         assert len(deleted) == 1
         assert deleted[0]["data"]["project_id"] == "alpha-proj"
 

@@ -725,12 +725,13 @@ def create_dashboard_router(
         or "OPENLEGION_MAX_PROJECTS" in os.environ
     )
 
-    # Project-lifecycle WebSocket events are dual-emitted under both the
-    # legacy ``project_*`` name and the canonical ``team_*`` name during
-    # the rename's deprecation window. Mirrors ``_emit_team_event`` in
-    # ``src/host/server.py`` so dashboard-initiated mutations look
-    # identical to mesh-initiated mutations on the wire. PR 3 will drop
-    # the legacy emit once subscribers have migrated.
+    # Team-lifecycle WebSocket events: callers still pass the pre-rename
+    # ``project_*`` event_type strings for code-reuse; this helper maps
+    # them to the canonical ``team_*`` names that actually fire on the
+    # bus. The pre-rename literals stay in ``DashboardEvent.type`` so
+    # type-safety holds for any historical-record code that parses them
+    # — they're just no longer emitted. PR 3 of the project→team rename
+    # dropped the legacy emit; subscribers must listen on ``team_*``.
     _PROJECT_TO_TEAM_EVENT = {
         "project_created": "team_created",
         "project_updated": "team_updated",
@@ -739,12 +740,15 @@ def create_dashboard_router(
         "project_unarchived": "team_unarchived",
     }
 
-    def _emit_project_event(event_type: str, agent: str, data: dict) -> None:
-        """Emit a project lifecycle event under legacy + canonical names.
+    def _emit_team_event(event_type: str, agent: str, data: dict) -> None:
+        """Emit a team lifecycle event on the bus under the canonical name.
 
-        Augments the payload with ``team_id`` / ``team_name`` keys mirroring
-        ``project_id`` / ``name`` so a subscriber bound to either event name
-        sees the same shape.
+        ``event_type`` accepts the pre-rename ``project_*`` literal for
+        caller convenience — the actual emit happens under the
+        ``team_*`` equivalent looked up via ``_PROJECT_TO_TEAM_EVENT``.
+        Payload augmented with ``team_id`` / ``team_name`` keys mirroring
+        ``project_id`` / ``name`` so subscribers reading either key see
+        the same shape.
         """
         if event_bus is None:
             return
@@ -754,13 +758,7 @@ def create_dashboard_router(
         name_value = payload.get("name") or payload.get("project_id")
         if name_value and "team_name" not in payload:
             payload["team_name"] = name_value
-        try:
-            event_bus.emit(event_type, agent=agent, data=payload)
-        except Exception as e:
-            logger.debug("%s emit failed: %s", event_type, e)
-        team_event = _PROJECT_TO_TEAM_EVENT.get(event_type)
-        if team_event is None:
-            return
+        team_event = _PROJECT_TO_TEAM_EVENT.get(event_type, event_type)
         try:
             event_bus.emit(team_event, agent=agent, data=payload)
         except Exception as e:
@@ -2127,7 +2125,10 @@ def create_dashboard_router(
         avatar = body.get("avatar", 1)
         color = body.get("color")
         template = body.get("template", "").strip()
-        project = body.get("project", "").strip()
+        # Accept ``team`` (canonical) and fall back to ``project`` for
+        # back-compat with pre-PR-3 clients. Either keyword maps to the
+        # same per-agent membership write under config/teams/.
+        project = (body.get("team") or body.get("project") or "").strip()
 
         if not name:
             raise HTTPException(status_code=400, detail="name is required")
@@ -2260,7 +2261,13 @@ def create_dashboard_router(
             if event_bus is not None:
                 event_bus.emit("agent_state", agent=name,
                     data={"state": "added", "role": role, "ready": ready})
-            return {"created": True, "agent": name, "ready": ready, "project": project or None}
+            return {
+                "created": True,
+                "agent": name,
+                "ready": ready,
+                "team": project or None,
+                "project": project or None,  # legacy alias — drop next major
+            }
         except HTTPException:
             raise
         except Exception as e:
@@ -4424,29 +4431,15 @@ def create_dashboard_router(
             },
         )
 
-    # ── Projects ──────────────────────────────────────────────
-
-    @api_router.get("/api/projects")
-    async def api_projects_list() -> dict:
-        """List all projects with members."""
-        from src.cli.config import _load_projects
-        projects = _load_projects()
-        result = []
-        sorted_projects = sorted(projects.items(), key=lambda x: x[1].get("created_at") or "")
-        for i, (pname, pdata) in enumerate(sorted_projects):
-            is_over = _projects_disabled or (_max_projects > 0 and i >= _max_projects)
-            result.append({
-                "name": pname,
-                "description": pdata.get("description", ""),
-                "members": pdata.get("members", []),
-                "created_at": pdata.get("created_at", ""),
-                "over_limit": is_over,
-            })
-        return {"projects": result}
+    # ── Teams ─────────────────────────────────────────────────
+    # The legacy ``/api/projects/*`` mirror routes were removed in PR 3
+    # of the project→team rename. Underlying storage / config helpers
+    # still spell "projects" — that's a backend implementation detail
+    # left for a follow-up.
 
     @api_router.get("/api/teams")
     async def api_teams_list() -> dict:
-        """List all teams with members — alias for ``/api/projects``."""
+        """List all teams with members."""
         from src.cli.config import _load_projects
         projects = _load_projects()
         result = []
@@ -4461,57 +4454,11 @@ def create_dashboard_router(
                 "created_at": pdata.get("created_at", ""),
                 "over_limit": is_over,
             })
-        return {"teams": result, "projects": result}
-
-    @api_router.post("/api/projects")
-    async def api_projects_create(request: Request) -> dict:
-        """Create a new project."""
-        if _projects_disabled:
-            raise HTTPException(
-                status_code=403,
-                detail="Projects are not available on your current plan. Upgrade to enable projects.",
-            )
-        if _max_projects > 0:
-            from src.cli.config import _load_projects
-            current_count = len(_load_projects())
-            if current_count >= _max_projects:
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"Project limit reached ({_max_projects}). Upgrade your plan for more projects.",
-                )
-        from src.cli.config import _create_project, _load_config
-        body = await request.json()
-        name = body.get("name", "").strip()
-        description = sanitize_for_prompt(body.get("description", "")).strip()
-        members = body.get("members", [])
-        if not name:
-            raise HTTPException(status_code=400, detail="name is required")
-        if not isinstance(members, list):
-            raise HTTPException(status_code=400, detail="members must be a list")
-        # Validate that member agents exist in the config
-        cfg = _load_config()
-        known_agents = set(cfg.get("agents", {}).keys())
-        unknown = [m for m in members if m not in known_agents]
-        if unknown:
-            raise HTTPException(status_code=400, detail=f"Unknown agents: {', '.join(unknown)}")
-        try:
-            _create_project(name, description=description, members=members)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        _emit_project_event(
-            "project_created", agent="operator",
-            data={
-                "project_id": name,
-                "name": name,
-                "description": description,
-                "members": list(members),
-            },
-        )
-        return {"created": True, "name": name}
+        return {"teams": result}
 
     @api_router.post("/api/teams")
     async def api_teams_create(request: Request) -> dict:
-        """Create a new team — alias for ``/api/projects``."""
+        """Create a new team."""
         if _projects_disabled:
             raise HTTPException(
                 status_code=403,
@@ -4544,7 +4491,7 @@ def create_dashboard_router(
             _create_project(name, description=description, members=members)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
-        _emit_project_event(
+        _emit_team_event(
             "project_created", agent="operator",
             data={
                 "project_id": name,
@@ -4555,68 +4502,23 @@ def create_dashboard_router(
         )
         return {"created": True, "name": name, "team_name": name}
 
-    @api_router.delete("/api/projects/{name}")
-    async def api_projects_delete(name: str) -> dict:
-        """Delete a project and release its members."""
-        from src.cli.config import _delete_project
-        try:
-            _delete_project(name)
-        except ValueError as e:
-            raise HTTPException(status_code=404, detail=str(e))
-        _emit_project_event(
-            "project_deleted", agent="operator",
-            data={"project_id": name, "name": name},
-        )
-        return {"deleted": True, "name": name}
-
     @api_router.delete("/api/teams/{team_name}")
     async def api_teams_delete(team_name: str) -> dict:
-        """Delete a team and release its members — alias for ``/api/projects/{name}``."""
+        """Delete a team and release its members."""
         from src.cli.config import _delete_project
         try:
             _delete_project(team_name)
         except ValueError as e:
             raise HTTPException(status_code=404, detail=str(e))
-        _emit_project_event(
+        _emit_team_event(
             "project_deleted", agent="operator",
             data={"project_id": team_name, "name": team_name},
         )
         return {"deleted": True, "name": team_name, "team_name": team_name}
 
-    @api_router.post("/api/projects/{name}/members")
-    async def api_projects_add_member(name: str, request: Request) -> dict:
-        """Add a member agent to a project."""
-        from src.cli.config import _add_agent_to_project
-        body = await request.json()
-        agent = body.get("agent", "").strip()
-        if not agent:
-            raise HTTPException(status_code=400, detail="agent is required")
-        try:
-            _add_agent_to_project(name, agent)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        # Auto-restart the agent so new scope takes effect
-        restarted = False
-        if transport is not None and agent in agent_registry:
-            try:
-                await transport.request(agent, "POST", "/restart", timeout=10)
-                restarted = True
-            except Exception as e:
-                logger.warning("Failed to restart agent %s after project change: %s", agent, e)
-        _emit_project_event(
-            "project_updated", agent="operator",
-            data={
-                "project_id": name,
-                "name": name,
-                "field": "members",
-                "added": agent,
-            },
-        )
-        return {"added": True, "project": name, "agent": agent, "restarted": restarted}
-
     @api_router.post("/api/teams/{team_name}/members")
     async def api_teams_add_member(team_name: str, request: Request) -> dict:
-        """Add a member agent to a team — alias for ``/api/projects/{name}/members``."""
+        """Add a member agent to a team."""
         from src.cli.config import _add_agent_to_project
         body = await request.json()
         agent = body.get("agent", "").strip()
@@ -4634,7 +4536,7 @@ def create_dashboard_router(
                 restarted = True
             except Exception as e:
                 logger.warning("Failed to restart agent %s after team change: %s", agent, e)
-        _emit_project_event(
+        _emit_team_event(
             "project_updated", agent="operator",
             data={
                 "project_id": team_name,
@@ -4651,36 +4553,9 @@ def create_dashboard_router(
             "restarted": restarted,
         }
 
-    @api_router.delete("/api/projects/{name}/members/{agent}")
-    async def api_projects_remove_member(name: str, agent: str) -> dict:
-        """Remove a member agent from a project."""
-        from src.cli.config import _remove_agent_from_project
-        try:
-            _remove_agent_from_project(name, agent)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        # Auto-restart the agent so new scope takes effect
-        restarted = False
-        if transport is not None and agent in agent_registry:
-            try:
-                await transport.request(agent, "POST", "/restart", timeout=10)
-                restarted = True
-            except Exception as e:
-                logger.warning("Failed to restart agent %s after project change: %s", agent, e)
-        _emit_project_event(
-            "project_updated", agent="operator",
-            data={
-                "project_id": name,
-                "name": name,
-                "field": "members",
-                "removed": agent,
-            },
-        )
-        return {"removed": True, "project": name, "agent": agent, "restarted": restarted}
-
     @api_router.delete("/api/teams/{team_name}/members/{agent}")
     async def api_teams_remove_member(team_name: str, agent: str) -> dict:
-        """Remove a member agent from a team — alias for ``/api/projects/{name}/members/{agent}``."""
+        """Remove a member agent from a team."""
         from src.cli.config import _remove_agent_from_project
         try:
             _remove_agent_from_project(team_name, agent)
@@ -4694,7 +4569,7 @@ def create_dashboard_router(
                 restarted = True
             except Exception as e:
                 logger.warning("Failed to restart agent %s after team change: %s", agent, e)
-        _emit_project_event(
+        _emit_team_event(
             "project_updated", agent="operator",
             data={
                 "project_id": team_name,
@@ -4722,23 +4597,9 @@ def create_dashboard_router(
             raise HTTPException(status_code=400, detail="Invalid project name")
         return PROJECTS_DIR / project / "project.md"
 
-    @api_router.get("/api/project")
-    async def api_project_read(project: str = "") -> dict:
-        """Read a project's project.md. Requires a project name."""
-        if not project:
-            raise HTTPException(status_code=400, detail="project parameter is required")
-        if runtime is None:
-            raise HTTPException(status_code=503, detail="Runtime not available")
-        project_path = _resolve_project_path(project)
-        if not project_path.parent.exists():
-            raise HTTPException(status_code=404, detail=f"Project '{project}' not found")
-        exists = project_path.exists()
-        content = project_path.read_text(errors="replace")[:200_000] if exists else ""
-        return {"content": content, "exists": exists, "project": project}
-
     @api_router.get("/api/team")
     async def api_team_read(team: str = "") -> dict:
-        """Read a team's project.md — alias for ``/api/project``. Requires a team name."""
+        """Read a team's shared context markdown. Requires a team name."""
         if not team:
             raise HTTPException(status_code=400, detail="team parameter is required")
         if runtime is None:
@@ -4755,69 +4616,9 @@ def create_dashboard_router(
             "team": team,
         }
 
-    @api_router.put("/api/project")
-    async def api_project_write(request: Request, project: str = "") -> dict:
-        """Write project.md to host and push to running agents."""
-        if not project:
-            raise HTTPException(status_code=400, detail="project parameter is required")
-        if runtime is None:
-            raise HTTPException(status_code=503, detail="Runtime not available")
-        body = await request.json()
-        content = body.get("content", "")
-        if not isinstance(content, str):
-            raise HTTPException(status_code=400, detail="content must be a string")
-        content = sanitize_for_prompt(content)
-
-        project_path = _resolve_project_path(project)
-        if not project_path.parent.exists():
-            raise HTTPException(status_code=404, detail=f"Project '{project}' not found")
-        project_path.write_text(content)
-
-        # Push to project members only
-        from src.cli.config import _load_projects
-        projects_data = _load_projects()
-        pdata = projects_data.get(project, {})
-        members = set(pdata.get("members", []))
-        push_targets = [a for a in agent_registry.keys() if a in members]
-
-        push_results = {}
-        if transport is not None and push_targets:
-            import asyncio as _asyncio
-
-            async def _push(aid: str) -> tuple[str, bool]:
-                try:
-                    await transport.request(
-                        aid, "PUT", "/project",
-                        json={"content": content}, timeout=10,
-                    )
-                    return aid, True
-                except Exception as e:
-                    logger.warning("Failed to push PROJECT.md to %s: %s", aid, e)
-                    return aid, False
-
-            tasks = [_push(aid) for aid in push_targets]
-            for coro in _asyncio.as_completed(tasks):
-                aid, ok = await coro
-                push_results[aid] = ok
-
-        _emit_project_event(
-            "project_updated", agent="operator",
-            data={
-                "project_id": project,
-                "name": project,
-                "field": "project_md",
-            },
-        )
-
-        return {
-            "saved": True,
-            "size": project_path.stat().st_size,
-            "pushed": push_results,
-        }
-
     @api_router.put("/api/team")
     async def api_team_write(request: Request, team: str = "") -> dict:
-        """Write project.md to host and push to running agents — alias for ``/api/project``."""
+        """Write the team's shared context markdown and push to running agents."""
         if not team:
             raise HTTPException(status_code=400, detail="team parameter is required")
         if runtime is None:
@@ -4847,12 +4648,12 @@ def create_dashboard_router(
             async def _push(aid: str) -> tuple[str, bool]:
                 try:
                     await transport.request(
-                        aid, "PUT", "/project",
+                        aid, "PUT", "/team",
                         json={"content": content}, timeout=10,
                     )
                     return aid, True
                 except Exception as e:
-                    logger.warning("Failed to push PROJECT.md to %s: %s", aid, e)
+                    logger.warning("Failed to push TEAM.md to %s: %s", aid, e)
                     return aid, False
 
             tasks = [_push(aid) for aid in push_targets]
@@ -4860,7 +4661,7 @@ def create_dashboard_router(
                 aid, ok = await coro
                 push_results[aid] = ok
 
-        _emit_project_event(
+        _emit_team_event(
             "project_updated", agent="operator",
             data={
                 "project_id": team,
@@ -6640,48 +6441,11 @@ def create_dashboard_router(
             logger.warning("workplace tasks listing failed: %s", e)
             return {"enabled": True, "tasks": [], "error": str(e)}
 
-    @api_router.get("/api/workplace/projects")
-    async def api_workplace_projects() -> dict:
-        """Project status rollups for the Workplace > project-status tab."""
-        if tasks_store is None or not _orchestration_v2_on():
-            return {"enabled": False, "projects": []}
-        from src.cli.config import _load_projects
-        projects = _load_projects()
-        result = []
-        for pname, pdata in projects.items():
-            try:
-                rows = tasks_store.list_project(pname)
-            except Exception:
-                rows = []
-            counts: dict[str, int] = {}
-            blockers: list[dict] = []
-            for r in rows:
-                counts[r["status"]] = counts.get(r["status"], 0) + 1
-                if r["status"] == "blocked":
-                    blockers.append({
-                        "task_id": r["id"],
-                        "title": r["title"],
-                        "assignee": r["assignee"],
-                        "blocker_note": r.get("blocker_note") or "",
-                    })
-            result.append({
-                "name": pname,
-                "description": pdata.get("description", ""),
-                "members": pdata.get("members", []),
-                "status": pdata.get("status", "active"),
-                "north_star": pdata.get("north_star"),
-                "success_criteria": pdata.get("success_criteria"),
-                "counts": counts,
-                "total": len(rows),
-                "blockers": blockers,
-            })
-        return {"enabled": True, "projects": result}
-
     @api_router.get("/api/workplace/teams")
     async def api_workplace_teams() -> dict:
-        """Team status rollups — alias for ``/api/workplace/projects``."""
+        """Team status rollups for the Workplace > team-status tab."""
         if tasks_store is None or not _orchestration_v2_on():
-            return {"enabled": False, "teams": [], "projects": []}
+            return {"enabled": False, "teams": []}
         from src.cli.config import _load_projects
         projects = _load_projects()
         result = []
@@ -6713,7 +6477,7 @@ def create_dashboard_router(
                 "total": len(rows),
                 "blockers": blockers,
             })
-        return {"enabled": True, "teams": result, "projects": result}
+        return {"enabled": True, "teams": result}
 
     @api_router.get("/api/workplace/blockers")
     async def api_workplace_blockers() -> dict:
@@ -6747,8 +6511,8 @@ def create_dashboard_router(
                 if project_id:
                     sql = (
                         f"SELECT {tasks_store._SELECT_COLS} FROM tasks "
-                        "WHERE status='done' AND project_id=? "
-                        "ORDER BY completed_at DESC LIMIT ?"
+                        f"WHERE status='done' AND {tasks_store._team_col}=? "
+                        f"ORDER BY completed_at DESC LIMIT ?"
                     )
                     raw = conn.execute(sql, (project_id, limit)).fetchall()
                 else:
@@ -6780,30 +6544,31 @@ def create_dashboard_router(
             return {"enabled": False, "feed": []}
         limit = max(1, min(int(limit or 100), 500))
         try:
+            team_col = tasks_store._team_col
             with tasks_store._conn() as conn:
                 if project_id:
                     sql = (
-                        "SELECT e.event_id, e.task_id, e.event_kind, "
-                        "e.actor, e.payload_json, e.created_at, "
-                        "t.title, t.project_id, t.assignee, t.status, "
-                        "t.blocker_note "
-                        "FROM task_events e "
-                        "JOIN tasks t ON t.id = e.task_id "
-                        "WHERE t.project_id = ? "
-                        "ORDER BY e.created_at DESC, e.event_id DESC "
-                        "LIMIT ?"
+                        f"SELECT e.event_id, e.task_id, e.event_kind, "
+                        f"e.actor, e.payload_json, e.created_at, "
+                        f"t.title, t.{team_col}, t.assignee, t.status, "
+                        f"t.blocker_note "
+                        f"FROM task_events e "
+                        f"JOIN tasks t ON t.id = e.task_id "
+                        f"WHERE t.{team_col} = ? "
+                        f"ORDER BY e.created_at DESC, e.event_id DESC "
+                        f"LIMIT ?"
                     )
                     raw = conn.execute(sql, (project_id, limit)).fetchall()
                 else:
                     sql = (
-                        "SELECT e.event_id, e.task_id, e.event_kind, "
-                        "e.actor, e.payload_json, e.created_at, "
-                        "t.title, t.project_id, t.assignee, t.status, "
-                        "t.blocker_note "
-                        "FROM task_events e "
-                        "JOIN tasks t ON t.id = e.task_id "
-                        "ORDER BY e.created_at DESC, e.event_id DESC "
-                        "LIMIT ?"
+                        f"SELECT e.event_id, e.task_id, e.event_kind, "
+                        f"e.actor, e.payload_json, e.created_at, "
+                        f"t.title, t.{team_col}, t.assignee, t.status, "
+                        f"t.blocker_note "
+                        f"FROM task_events e "
+                        f"JOIN tasks t ON t.id = e.task_id "
+                        f"ORDER BY e.created_at DESC, e.event_id DESC "
+                        f"LIMIT ?"
                     )
                     raw = conn.execute(sql, (limit,)).fetchall()
         except Exception as e:

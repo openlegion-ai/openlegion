@@ -252,9 +252,10 @@ agents use natural keys (e.g. `tasks/research_abc123`) while the MeshClient
 transparently namespaces them under the team. Solo agents have no
 blackboard access.
 
-The on-disk prefix is still `projects/{name}/*` during PR 2 of the
-project→team rename; PR 3 will flip the prefix once the alias surface
-is sunset.
+The on-disk prefix is `projects/{name}/*` — that's a backend storage
+namespace, not a domain term, and renaming it is intentionally out of
+scope for the project→team rename (the change would invalidate every
+existing blackboard write).
 
 | Namespace | Purpose | Example |
 |-----------|---------|---------|
@@ -382,9 +383,10 @@ structured output and optional blackboard promotions.
 ### Chat Mode (`POST /chat`)
 
 Accepts a user message. On the first message, loads bootstrap workspace files
-into the system prompt — TEAM.md (team members only; legacy
-`PROJECT.md` still resolves as a fallback), SYSTEM.md,
-INSTRUCTIONS.md, SOUL.md, USER.md, MEMORY.md — injects a live Runtime Context
+into the system prompt — TEAM.md (team members only; the bootstrap loader
+retains a read-only fallback for stray `PROJECT.md` files from pre-rename
+workspaces), SYSTEM.md, INSTRUCTIONS.md, SOUL.md, USER.md, MEMORY.md — injects
+a live Runtime Context
 block (permissions, budget, fleet, cron), and searches memory for relevant facts.
 Executes tool calls in a bounded loop with three caps from `loop.py`:
 `CHAT_MAX_TOOL_ROUNDS=30` per turn, `CHAT_MAX_TOTAL_ROUNDS=200` total before
@@ -503,7 +505,7 @@ Layer 4: Learnings                ← Self-improvement through failure tracking
   │
 Layer 3: Workspace Files          ← Durable, human-readable storage
   │  Bootstrap files loaded into the first-message system prompt:
-  │    TEAM.md (team members only; `PROJECT.md` fallback), SYSTEM.md, INSTRUCTIONS.md,
+  │    TEAM.md (team members only; legacy `PROJECT.md` read-only fallback), SYSTEM.md, INSTRUCTIONS.md,
   │    SOUL.md, USER.md, MEMORY.md
   │  Other workspace files:
   │    HEARTBEAT.md             (autonomous monitoring rules)
@@ -1082,7 +1084,7 @@ config/
 ├── mesh.yaml                           # Framework settings
 ├── agents.yaml                         # Agent definitions (per-team)
 ├── permissions.json                    # Per-agent ACLs
-└── projects/                           # Multi-team namespaces (legacy dir name; PR 3 will flip to ``teams/``)
+└── teams/                              # Multi-team namespaces (pre-rename ``config/projects/`` resolves via a startup-migrator symlink)
 ```
 
 ---

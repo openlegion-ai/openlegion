@@ -848,275 +848,50 @@ async def test_create_agent_conflict():
     assert "already exists" in result["error"]
 
 
-# ── inspect_projects tests ──────────────────────────────────
+# ── Legacy project_* tools — PR 3 sunset stubs ───────────────
+#
+# After PR 3 the eight legacy ``*_project`` tools no longer reach the
+# mesh; they return a recoverable ``{"error": "renamed", ...}`` so a
+# stale LLM prompt fails fast and retries with the canonical ``*_team``
+# name. The exhaustive per-tool behavior tests landed in PR 2 are
+# preserved on the ``*_team`` siblings; here we assert only the stub
+# shape so future regressions on the redirect surface are caught.
 
 
+_LEGACY_REDIRECTS = [
+    ("inspect_projects", "inspect_teams"),
+    ("create_project", "create_team"),
+    ("add_agents_to_project", "add_agents_to_team"),
+    ("remove_agents_from_project", "remove_agents_from_team"),
+    ("update_project_context", "update_team_context"),
+    ("set_project_goal", "set_team_goal"),
+    ("summarize_project_progress", "summarize_team_progress"),
+    ("manage_project", "manage_team"),
+]
+
+
+@pytest.mark.parametrize("legacy, canonical", _LEGACY_REDIRECTS)
 @pytest.mark.asyncio
-async def test_inspect_projects_no_mesh_client():
-    from src.agent.builtins.operator_tools import inspect_projects
+async def test_legacy_project_tool_returns_renamed_stub(legacy, canonical):
+    """Each retired project_* tool returns the standard sunset shape."""
+    import src.agent.builtins.operator_tools as ot
 
-    result = await inspect_projects()
-    assert "error" in result
-
-
-@pytest.mark.asyncio
-async def test_inspect_projects_names_lists_all():
-    from src.agent.builtins.operator_tools import inspect_projects
-
-    mc = MagicMock()
-    mc.list_projects = AsyncMock(
-        return_value={"projects": [{"name": "proj1", "members": ["a1"]}]},
+    fn = getattr(ot, legacy)
+    # Stubs accept anything positionally/keyword and ignore it; pass a
+    # representative payload so the test mirrors a real call.
+    result = await fn(
+        "ignored",
+        "also ignored",
+        mesh_client=object(),
     )
-    result = await inspect_projects(detail="names", mesh_client=mc)
-    assert len(result["projects"]) == 1
-    assert result["projects"][0]["name"] == "proj1"
-
-
-@pytest.mark.asyncio
-async def test_inspect_projects_status_calls_all_projects_status(monkeypatch):
-    """detail='status' calls the v2 endpoint."""
-    monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "1")
-    from src.agent.builtins.operator_tools import inspect_projects
-
-    mc = MagicMock()
-    mc.all_projects_status = AsyncMock(
-        return_value={"projects": [{"project": {"name": "p1"}, "counts": {"active": 2}}]},
-    )
-    result = await inspect_projects(detail="status", mesh_client=mc)
-    assert "projects" in result
-    mc.all_projects_status.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_inspect_projects_status_requires_v2_flag(monkeypatch):
-    monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "0")
-    from src.agent.builtins.operator_tools import inspect_projects
-
-    result = await inspect_projects(detail="status", mesh_client=MagicMock())
-    assert "error" in result
-
-
-@pytest.mark.asyncio
-async def test_inspect_projects_named_returns_full_detail():
-    from src.agent.builtins.operator_tools import inspect_projects
-
-    mc = MagicMock()
-    mc.list_projects = AsyncMock(
-        return_value={"projects": [
-            {"name": "proj1", "members": ["a1"]},
-            {"name": "proj2", "members": ["a2"]},
-        ]},
-    )
-    result = await inspect_projects(project_name="proj2", mesh_client=mc)
-    assert result["name"] == "proj2"
-
-
-@pytest.mark.asyncio
-async def test_inspect_projects_named_not_found():
-    from src.agent.builtins.operator_tools import inspect_projects
-
-    mc = MagicMock()
-    mc.list_projects = AsyncMock(
-        return_value={"projects": [{"name": "proj1"}]},
-    )
-    result = await inspect_projects(project_name="nonexistent", mesh_client=mc)
-    assert "error" in result
-    assert "not found" in result["error"]
-
-
-# ── create_project tests ─────────────────────────���──────────
-
-
-@pytest.mark.asyncio
-async def test_create_project_no_provenance_is_accepted():
-    """Provenance gate dropped — create_project now applies immediately."""
-    from src.agent.builtins.operator_tools import create_project
-
-    mc = MagicMock()
-    mc.create_project = AsyncMock(
-        return_value={"created": True, "name": "myproj"},
-    )
-    result = await create_project(
-        "myproj", "a project",
-        mesh_client=mc, _messages=None,
-    )
-    assert result["created"] is True
-    mc.create_project.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_create_project_success():
-    from src.agent.builtins.operator_tools import create_project
-
-    mc = MagicMock()
-    mc.create_project = AsyncMock(
-        return_value={"created": True, "name": "myproj"},
-    )
-    messages = [{"role": "user", "content": "yes", "_origin": "user"}]
-    result = await create_project(
-        "myproj", "a project", agent_ids=["writer"],
-        mesh_client=mc, _messages=messages,
-    )
-    assert result["created"] is True
-    mc.create_project.assert_awaited_once_with("myproj", "a project", ["writer"])
-
-
-# ── add_agents_to_project tests ───────────────────────────���─
-
-
-@pytest.mark.asyncio
-async def test_add_agents_to_project_no_provenance_is_accepted():
-    """Provenance gate dropped — add_agents_to_project goes through."""
-    from src.agent.builtins.operator_tools import add_agents_to_project
-
-    mc = MagicMock()
-    mc.add_agent_to_project = AsyncMock(
-        return_value={"added": True, "project": "proj", "agent": "a1"},
-    )
-    result = await add_agents_to_project(
-        "proj", ["a1"],
-        mesh_client=mc, _messages=None,
-    )
-    assert result["project"] == "proj"
-    assert result["results"][0]["added"] is True
-    mc.add_agent_to_project.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_add_agents_to_project_success():
-    from src.agent.builtins.operator_tools import add_agents_to_project
-
-    mc = MagicMock()
-    mc.add_agent_to_project = AsyncMock(
-        return_value={"added": True, "project": "proj", "agent": "a1"},
-    )
-    messages = [{"role": "user", "content": "yes", "_origin": "user"}]
-    result = await add_agents_to_project(
-        "proj", ["a1", "a2"],
-        mesh_client=mc, _messages=messages,
-    )
-    assert result["project"] == "proj"
-    assert len(result["results"]) == 2
-
-
-@pytest.mark.asyncio
-async def test_add_agents_partial_failure():
-    from src.agent.builtins.operator_tools import add_agents_to_project
-
-    mc = MagicMock()
-    mc.add_agent_to_project = AsyncMock(
-        side_effect=[
-            {"added": True, "project": "proj", "agent": "a1"},
-            RuntimeError("agent not found"),
-        ],
-    )
-    messages = [{"role": "user", "content": "yes", "_origin": "user"}]
-    result = await add_agents_to_project(
-        "proj", ["a1", "a2"],
-        mesh_client=mc, _messages=messages,
-    )
-    assert result["results"][0]["added"] is True
-    assert "error" in result["results"][1]
-
-
-# ── remove_agents_from_project tests ────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_remove_agents_from_project_no_provenance_is_accepted():
-    """Provenance gate dropped — remove_agents_from_project goes through."""
-    from src.agent.builtins.operator_tools import remove_agents_from_project
-
-    mc = MagicMock()
-    mc.remove_agent_from_project = AsyncMock(
-        return_value={"removed": True, "project": "proj", "agent": "a1"},
-    )
-    result = await remove_agents_from_project(
-        "proj", ["a1"],
-        mesh_client=mc, _messages=None,
-    )
-    assert result["project"] == "proj"
-    assert result["results"][0]["removed"] is True
-    mc.remove_agent_from_project.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_remove_agents_from_project_success():
-    from src.agent.builtins.operator_tools import remove_agents_from_project
-
-    mc = MagicMock()
-    mc.remove_agent_from_project = AsyncMock(
-        return_value={"removed": True, "project": "proj", "agent": "a1"},
-    )
-    messages = [{"role": "user", "content": "yes", "_origin": "user"}]
-    result = await remove_agents_from_project(
-        "proj", ["a1"],
-        mesh_client=mc, _messages=messages,
-    )
-    assert result["project"] == "proj"
-    assert result["results"][0]["removed"] is True
-
-
-# ── update_project_context tests ────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_update_project_context_no_provenance_is_accepted():
-    """Provenance gate dropped — update_project_context goes through."""
-    from src.agent.builtins.operator_tools import update_project_context
-
-    mc = MagicMock()
-    mc.update_project_context = AsyncMock(
-        return_value={"updated": True, "project": "proj"},
-    )
-    result = await update_project_context(
-        "proj", "new context",
-        mesh_client=mc, _messages=None,
-    )
-    assert result["updated"] is True
-    mc.update_project_context.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_update_project_context_success():
-    from src.agent.builtins.operator_tools import update_project_context
-
-    mc = MagicMock()
-    mc.update_project_context = AsyncMock(
-        return_value={"updated": True, "project": "proj"},
-    )
-    messages = [{"role": "user", "content": "yes", "_origin": "user"}]
-    result = await update_project_context(
-        "proj", "new context",
-        mesh_client=mc, _messages=messages,
-    )
-    assert result["updated"] is True
-
-
-@pytest.mark.asyncio
-async def test_update_project_context_no_mesh_client():
-    from src.agent.builtins.operator_tools import update_project_context
-
-    result = await update_project_context("proj", "ctx")
-    assert "error" in result
-    assert "mesh_client" in result["error"].lower()
-
-
-@pytest.mark.asyncio
-async def test_update_project_context_mesh_error():
-    from src.agent.builtins.operator_tools import update_project_context
-
-    mc = MagicMock()
-    mc.update_project_context = AsyncMock(
-        side_effect=RuntimeError("not found"),
-    )
-    messages = [{"role": "user", "content": "yes", "_origin": "user"}]
-    result = await update_project_context(
-        "proj", "ctx",
-        mesh_client=mc, _messages=messages,
-    )
-    assert "error" in result
-    assert "not found" in result["error"]
+    assert result == {
+        "error": "renamed",
+        "new_tool": canonical,
+        "note": (
+            f"Use {canonical} instead. This deprecated alias was "
+            "removed in PR 3 of the project→team rename."
+        ),
+    }
 
 
 # ── PR 1 — edit_agent and undo_change ───────────────────────

@@ -794,14 +794,37 @@ async def create_agent(
 # ── Project Management ───────────────────────────────────────
 
 
+# ── Legacy project_* tools — PR 3 sunset stubs ────────────────────
+#
+# Each ``*_project`` skill below is now a thin redirector: the
+# ``@skill`` registration stays so the LLM still discovers the tool
+# name and the JSON-schema-validated call doesn't raise, but the
+# body returns ``{"error": "renamed", "new_tool": "...", ...}`` so a
+# stale prompt fails fast and recoverably instead of executing
+# duplicate logic. Real behavior lives on the canonical ``*_team``
+# tools defined later in this module.
+#
+# The parameter schemas are preserved verbatim so a tool call that
+# was JSON-schema-valid pre-rename remains valid here — the LLM gets
+# the error in the tool result, not as a schema-validation HTTP 4xx
+# upstream.
+
+
+def _renamed_stub(new_tool: str) -> dict:
+    """Standard sunset-stub payload."""
+    return {
+        "error": "renamed",
+        "new_tool": new_tool,
+        "note": (
+            f"Use {new_tool} instead. This deprecated alias was removed "
+            "in PR 3 of the project→team rename."
+        ),
+    }
+
+
 @skill(
     name="inspect_projects",
-    description=(
-        "[DEPRECATED — use inspect_teams] "
-        "Read project info. detail='names' lists name+description; "
-        "detail='status' adds task-count rollups (requires v2). "
-        "Setting project_name returns full detail for that project."
-    ),
+    description="[REMOVED — call inspect_teams]",
     parameters={
         "detail": {
             "type": "string",
@@ -816,54 +839,14 @@ async def create_agent(
         },
     },
 )
-async def inspect_projects(
-    detail: str = "names",
-    project_name: str = "",
-    *,
-    mesh_client=None,
-    **_kw,
-) -> dict:
-    """Consolidated project read tool (replaces list_projects /
-    get_project / list_project_status).
-    """
-    if not _is_operator():
-        return {"error": "This tool is only available to the operator agent."}
-    if mesh_client is None:
-        return {"error": "No mesh_client available"}
-
-    # Single-project lookup always returns full detail.
-    if project_name:
-        try:
-            result = await mesh_client.list_projects()
-        except Exception as e:
-            return {"error": f"Failed to inspect project: {e}"}
-        for p in result.get("projects", []):
-            if p.get("name") == project_name:
-                return p
-        return {"error": f"Project '{project_name}' not found"}
-
-    if detail == "status":
-        if not _orchestration_v2_on():
-            return {"error": _TASKS_V2_DISABLED}
-        try:
-            return await mesh_client.all_projects_status()
-        except Exception as e:
-            return {"error": f"Failed to read project status: {e}"}
-
-    # detail == "names" (also the default for "full" without project_name)
-    try:
-        return await mesh_client.list_projects()
-    except Exception as e:
-        return {"error": f"Failed to list projects: {e}"}
+async def inspect_projects(*_args, **_kw) -> dict:
+    """Sunset stub — redirects to ``inspect_teams``."""
+    return _renamed_stub("inspect_teams")
 
 
 @skill(
     name="create_project",
-    description=(
-        "[DEPRECATED — use create_team] "
-        "Create a new project and optionally assign agents to it. "
-        "Requires user confirmation."
-    ),
+    description="[REMOVED — call create_team]",
     parameters={
         "name": {
             "type": "string",
@@ -881,40 +864,14 @@ async def inspect_projects(
         },
     },
 )
-async def create_project(
-    name: str,
-    description: str,
-    agent_ids: list | None = None,
-    *,
-    mesh_client=None,
-    _messages=None,
-    **_kw,
-) -> dict:
-    """Create a new project.
-
-    Provenance gate dropped — operator can create projects
-    autonomously. Plan-tier cap ``OPENLEGION_MAX_PROJECTS`` is the
-    quota wall.
-    """
-    if not _is_operator():
-        return {"error": "This tool is only available to the operator agent."}
-    if mesh_client is None:
-        return {"error": "No mesh_client available"}
-
-    try:
-        return await mesh_client.create_project(
-            name, description, agent_ids or [],
-        )
-    except Exception as e:
-        return {"error": f"Failed to create project: {e}"}
+async def create_project(*_args, **_kw) -> dict:
+    """Sunset stub — redirects to ``create_team``."""
+    return _renamed_stub("create_team")
 
 
 @skill(
     name="add_agents_to_project",
-    description=(
-        "[DEPRECATED — use add_agents_to_team] "
-        "Add one or more agents to an existing project. Requires user confirmation."
-    ),
+    description="[REMOVED — call add_agents_to_team]",
     parameters={
         "project_name": {
             "type": "string",
@@ -927,36 +884,14 @@ async def create_project(
         },
     },
 )
-async def add_agents_to_project(
-    project_name: str,
-    agent_ids: list,
-    *,
-    mesh_client=None,
-    _messages=None,
-    **_kw,
-) -> dict:
-    """Add agents to a project."""
-    if not _is_operator():
-        return {"error": "This tool is only available to the operator agent."}
-    if mesh_client is None:
-        return {"error": "No mesh_client available"}
-
-    results = []
-    for aid in agent_ids:
-        try:
-            r = await mesh_client.add_agent_to_project(project_name, aid)
-            results.append(r)
-        except Exception as e:
-            results.append({"agent": aid, "error": str(e)})
-    return {"project": project_name, "results": results}
+async def add_agents_to_project(*_args, **_kw) -> dict:
+    """Sunset stub — redirects to ``add_agents_to_team``."""
+    return _renamed_stub("add_agents_to_team")
 
 
 @skill(
     name="remove_agents_from_project",
-    description=(
-        "[DEPRECATED — use remove_agents_from_team] "
-        "Remove one or more agents from a project. Requires user confirmation."
-    ),
+    description="[REMOVED — call remove_agents_from_team]",
     parameters={
         "project_name": {
             "type": "string",
@@ -969,37 +904,14 @@ async def add_agents_to_project(
         },
     },
 )
-async def remove_agents_from_project(
-    project_name: str,
-    agent_ids: list,
-    *,
-    mesh_client=None,
-    _messages=None,
-    **_kw,
-) -> dict:
-    """Remove agents from a project."""
-    if not _is_operator():
-        return {"error": "This tool is only available to the operator agent."}
-    if mesh_client is None:
-        return {"error": "No mesh_client available"}
-
-    results = []
-    for aid in agent_ids:
-        try:
-            r = await mesh_client.remove_agent_from_project(project_name, aid)
-            results.append(r)
-        except Exception as e:
-            results.append({"agent": aid, "error": str(e)})
-    return {"project": project_name, "results": results}
+async def remove_agents_from_project(*_args, **_kw) -> dict:
+    """Sunset stub — redirects to ``remove_agents_from_team``."""
+    return _renamed_stub("remove_agents_from_team")
 
 
 @skill(
     name="update_project_context",
-    description=(
-        "[DEPRECATED — use update_team_context] "
-        "Update a project's description / context. "
-        "Requires user confirmation."
-    ),
+    description="[REMOVED — call update_team_context]",
     parameters={
         "project_name": {
             "type": "string",
@@ -1011,110 +923,33 @@ async def remove_agents_from_project(
         },
     },
 )
-async def update_project_context(
-    project_name: str,
-    context: str,
-    *,
-    mesh_client=None,
-    _messages=None,
-    **_kw,
-) -> dict:
-    """Update project description/context."""
-    if not _is_operator():
-        return {"error": "This tool is only available to the operator agent."}
-    if mesh_client is None:
-        return {"error": "No mesh_client available"}
-
-    try:
-        return await mesh_client.update_project_context(project_name, context)
-    except Exception as e:
-        return {"error": f"Failed to update project context: {e}"}
+async def update_project_context(*_args, **_kw) -> dict:
+    """Sunset stub — redirects to ``update_team_context``."""
+    return _renamed_stub("update_team_context")
 
 
 @skill(
     name="set_project_goal",
-    description=(
-        "[DEPRECATED — use set_team_goal] "
-        "Set or update a project's north star (vision statement) and "
-        "success criteria (measurable outcomes). The north star answers "
-        "'what are we moving toward'; success criteria are the concrete "
-        "checks that tell us we got there. No confirmation required — "
-        "this is meta-config the user explicitly asked for.\n\n"
-        "Call this proactively whenever the user describes a goal for a "
-        "project so it becomes a first-class artifact visible in the "
-        "Board tab."
-    ),
+    description="[REMOVED — call set_team_goal]",
     parameters={
         "project_name": {
             "type": "string",
-            "description": "Project to set the goal on (use list_projects to find names)",
+            "description": "Project to set the goal on",
         },
         "north_star": {
             "type": "string",
-            "description": (
-                "Free-text vision statement, ≤2000 characters. "
-                "e.g. 'Ship a $10k MRR SaaS landing page in 2 weeks'."
-            ),
+            "description": "Free-text vision statement, ≤2000 characters.",
         },
         "success_criteria": {
             "type": "array",
             "items": {"type": "string"},
-            "description": (
-                "Up to 10 measurable outcomes, each ≤200 characters. "
-                "Optional — pass an empty list or omit to clear."
-            ),
+            "description": "Up to 10 measurable outcomes, each ≤200 characters.",
         },
     },
 )
-async def set_project_goal(
-    project_name: str,
-    north_star: str,
-    success_criteria: list[str] | None = None,
-    *,
-    mesh_client=None,
-    **_kw,
-) -> dict:
-    """Set the project's north_star + success_criteria. No gate."""
-    if not _is_operator():
-        return {"error": "This tool is only available to the operator agent."}
-    if mesh_client is None:
-        return {"error": "No mesh_client available"}
-
-    if not isinstance(project_name, str) or not project_name.strip():
-        return {"error": "project_name is required"}
-    if not isinstance(north_star, str):
-        return {"error": "north_star must be a string"}
-    if len(north_star) > 2000:
-        return {"error": "north_star must be 2000 characters or fewer"}
-
-    cleaned_criteria: list[str] | None
-    if success_criteria is None:
-        cleaned_criteria = None
-    else:
-        if not isinstance(success_criteria, list):
-            return {"error": "success_criteria must be a list of strings"}
-        if len(success_criteria) > 10:
-            return {"error": "success_criteria may contain at most 10 items"}
-        cleaned_criteria = []
-        for item in success_criteria:
-            if not isinstance(item, str):
-                return {"error": "each success_criteria entry must be a string"}
-            if len(item) > 200:
-                return {
-                    "error": "each success_criteria entry must be 200 characters or fewer",
-                }
-            stripped = item.strip()
-            if stripped:
-                cleaned_criteria.append(stripped)
-        if not cleaned_criteria:
-            cleaned_criteria = None
-
-    try:
-        return await mesh_client.set_project_goal(
-            project_name, north_star.strip() or None, cleaned_criteria,
-        )
-    except Exception as e:
-        return {"error": f"Failed to set project goal: {e}"}
+async def set_project_goal(*_args, **_kw) -> dict:
+    """Sunset stub — redirects to ``set_team_goal``."""
+    return _renamed_stub("set_team_goal")
 
 
 # ── Task 7: Operator product tools ───────────────────────────
@@ -1246,12 +1081,7 @@ async def get_team_outputs(
 
 @skill(
     name="summarize_project_progress",
-    description=(
-        "[DEPRECATED — use summarize_team_progress] "
-        "Synthesized status summary for a project: structured counts + "
-        "narrative status_text + top blockers + recent completions + "
-        "ask_for_user list."
-    ),
+    description="[REMOVED — call summarize_team_progress]",
     parameters={
         "project_id": {
             "type": "string",
@@ -1259,23 +1089,9 @@ async def get_team_outputs(
         },
     },
 )
-async def summarize_project_progress(
-    project_id: str,
-    *,
-    mesh_client=None,
-    **_kw,
-) -> dict:
-    """Synthesized progress summary for a project."""
-    if not _is_operator():
-        return {"error": "This tool is only available to the operator agent."}
-    if mesh_client is None:
-        return {"error": "No mesh_client available"}
-    if not _orchestration_v2_on():
-        return {"error": _TASKS_V2_DISABLED}
-    try:
-        return await mesh_client.project_summary(project_id)
-    except Exception as e:
-        return {"error": f"Failed to summarize {project_id}: {e}"}
+async def summarize_project_progress(*_args, **_kw) -> dict:
+    """Sunset stub — redirects to ``summarize_team_progress``."""
+    return _renamed_stub("summarize_team_progress")
 
 
 @skill(
@@ -1538,12 +1354,7 @@ async def manage_task(
 
 @skill(
     name="manage_project",
-    description=(
-        "[DEPRECATED — use manage_team] "
-        "Archive or delete a project. action='archive' is reversible and "
-        "stops scheduling. action='delete' returns a confirmation nonce; "
-        "the project must already be archived."
-    ),
+    description="[REMOVED — call manage_team]",
     parameters={
         "project_name": {
             "type": "string",
@@ -1556,51 +1367,9 @@ async def manage_task(
         },
     },
 )
-async def manage_project(
-    project_name: str,
-    action: str,
-    *,
-    mesh_client=None,
-    _messages=None,
-    **_kw,
-) -> dict:
-    """Consolidated project lifecycle tool (archive | delete).
-
-    Archive is reversible and applies immediately. Delete still goes
-    through a brief confirmation window (mesh-side propose_delete with
-    a short TTL); a follow-up PR will convert delete to immediate-apply
-    with a 72h undo. Operator can call either autonomously — the user's
-    feedback signal on output is the safety net.
-    """
-    if not _is_operator():
-        return {"error": "This tool is only available to the operator agent."}
-    if mesh_client is None:
-        return {"error": "No mesh_client available"}
-
-    if action == "archive":
-        try:
-            return await mesh_client.archive_project(project_name)
-        except Exception as e:
-            return {"error": f"Failed to archive project: {e}"}
-
-    if action == "delete":
-        try:
-            result = await mesh_client.propose_delete_project(project_name)
-            result.setdefault("requires_confirmation", True)
-            return result
-        except Exception as e:
-            msg = str(e)
-            if "must be archived" in msg.lower() or "400" in msg:
-                return {
-                    "error": "archive_required",
-                    "detail": (
-                        f"Project {project_name!r} must be archived first. "
-                        "Call manage_project(action='archive') first."
-                    ),
-                }
-            return {"error": f"Failed to propose delete: {e}"}
-
-    return {"error": f"Unknown action {action!r}; use archive|delete"}
+async def manage_project(*_args, **_kw) -> dict:
+    """Sunset stub — redirects to ``manage_team``."""
+    return _renamed_stub("manage_team")
 
 
 @skill(
@@ -1846,17 +1615,40 @@ async def archive_audit_before(
 async def inspect_teams(
     detail: str = "names",
     team_name: str = "",
-    project_name: str = "",
     *,
+    project_name: str = "",
     mesh_client=None,
     **_kw,
 ) -> dict:
-    """Canonical name for :func:`inspect_projects`."""
-    return await inspect_projects(
-        detail=detail,
-        project_name=team_name or project_name,
-        mesh_client=mesh_client,
-    )
+    """Consolidated team read tool (replaces list_teams / get_team / list_team_status)."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+
+    target = team_name or project_name
+    if target:
+        try:
+            result = await mesh_client.list_teams()
+        except Exception as e:
+            return {"error": f"Failed to inspect team: {e}"}
+        for p in result.get("teams", result.get("projects", [])):
+            if p.get("name") == target:
+                return p
+        return {"error": f"Team '{target}' not found"}
+
+    if detail == "status":
+        if not _orchestration_v2_on():
+            return {"error": _TASKS_V2_DISABLED}
+        try:
+            return await mesh_client.all_teams_status()
+        except Exception as e:
+            return {"error": f"Failed to read team status: {e}"}
+
+    try:
+        return await mesh_client.list_teams()
+    except Exception as e:
+        return {"error": f"Failed to list teams: {e}"}
 
 
 @skill(
@@ -1885,14 +1677,17 @@ async def create_team(
     _messages=None,
     **_kw,
 ) -> dict:
-    """Canonical name for :func:`create_project`."""
-    return await create_project(
-        name=name,
-        description=description,
-        agent_ids=agent_ids or [],
-        mesh_client=mesh_client,
-        _messages=_messages,
-    )
+    """Create a new team. Provenance gate dropped — operator can spawn autonomously."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    try:
+        return await mesh_client.create_team(
+            name, description, agent_ids or [],
+        )
+    except Exception as e:
+        return {"error": f"Failed to create team: {e}"}
 
 
 @skill(
@@ -1909,20 +1704,27 @@ async def create_team(
 )
 async def add_agents_to_team(
     team_name: str = "",
-    project_name: str = "",
     agent_ids: list[str] | None = None,
     *,
+    project_name: str = "",
     mesh_client=None,
     _messages=None,
     **_kw,
 ) -> dict:
-    """Canonical name for :func:`add_agents_to_project`."""
-    return await add_agents_to_project(
-        project_name=team_name or project_name,
-        agent_ids=agent_ids or [],
-        mesh_client=mesh_client,
-        _messages=_messages,
-    )
+    """Add agents to a team."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    target = team_name or project_name
+    results = []
+    for aid in (agent_ids or []):
+        try:
+            r = await mesh_client.add_agent_to_team(target, aid)
+            results.append(r)
+        except Exception as e:
+            results.append({"agent": aid, "error": str(e)})
+    return {"team": target, "results": results}
 
 
 @skill(
@@ -1939,20 +1741,27 @@ async def add_agents_to_team(
 )
 async def remove_agents_from_team(
     team_name: str = "",
-    project_name: str = "",
     agent_ids: list[str] | None = None,
     *,
+    project_name: str = "",
     mesh_client=None,
     _messages=None,
     **_kw,
 ) -> dict:
-    """Canonical name for :func:`remove_agents_from_project`."""
-    return await remove_agents_from_project(
-        project_name=team_name or project_name,
-        agent_ids=agent_ids or [],
-        mesh_client=mesh_client,
-        _messages=_messages,
-    )
+    """Remove agents from a team."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    target = team_name or project_name
+    results = []
+    for aid in (agent_ids or []):
+        try:
+            r = await mesh_client.remove_agent_from_team(target, aid)
+            results.append(r)
+        except Exception as e:
+            results.append({"agent": aid, "error": str(e)})
+    return {"team": target, "results": results}
 
 
 @skill(
@@ -1965,20 +1774,23 @@ async def remove_agents_from_team(
 )
 async def update_team_context(
     team_name: str = "",
-    project_name: str = "",
     context: str = "",
     *,
+    project_name: str = "",
     mesh_client=None,
     _messages=None,
     **_kw,
 ) -> dict:
-    """Canonical name for :func:`update_project_context`."""
-    return await update_project_context(
-        project_name=team_name or project_name,
-        context=context,
-        mesh_client=mesh_client,
-        _messages=_messages,
-    )
+    """Update team description/context."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    target = team_name or project_name
+    try:
+        return await mesh_client.update_team_context(target, context)
+    except Exception as e:
+        return {"error": f"Failed to update team context: {e}"}
 
 
 @skill(
@@ -2001,20 +1813,54 @@ async def update_team_context(
 )
 async def set_team_goal(
     team_name: str = "",
-    project_name: str = "",
     north_star: str = "",
     success_criteria: list[str] | None = None,
     *,
+    project_name: str = "",
     mesh_client=None,
     **_kw,
 ) -> dict:
-    """Canonical name for :func:`set_project_goal`."""
-    return await set_project_goal(
-        project_name=team_name or project_name,
-        north_star=north_star,
-        success_criteria=success_criteria,
-        mesh_client=mesh_client,
-    )
+    """Set the team's north_star + success_criteria. No gate — meta-config the user asked for."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    target = team_name or project_name
+    if not isinstance(target, str) or not target.strip():
+        return {"error": "team_name is required"}
+    if not isinstance(north_star, str):
+        return {"error": "north_star must be a string"}
+    if len(north_star) > 2000:
+        return {"error": "north_star must be 2000 characters or fewer"}
+
+    cleaned_criteria: list[str] | None
+    if success_criteria is None:
+        cleaned_criteria = None
+    else:
+        if not isinstance(success_criteria, list):
+            return {"error": "success_criteria must be a list of strings"}
+        if len(success_criteria) > 10:
+            return {"error": "success_criteria may contain at most 10 items"}
+        cleaned_criteria = []
+        for item in success_criteria:
+            if not isinstance(item, str):
+                return {"error": "each success_criteria entry must be a string"}
+            if len(item) > 200:
+                return {
+                    "error": "each success_criteria entry must be 200 characters or fewer",
+                }
+            stripped = item.strip()
+            if stripped:
+                cleaned_criteria.append(stripped)
+        if not cleaned_criteria:
+            cleaned_criteria = None
+
+    try:
+        return await mesh_client.set_team_goal(
+            target, north_star.strip() or None, cleaned_criteria,
+        )
+    except Exception as e:
+        return {"error": f"Failed to set team goal: {e}"}
 
 
 @skill(
@@ -2026,16 +1872,23 @@ async def set_team_goal(
 )
 async def summarize_team_progress(
     team_id: str = "",
-    project_id: str = "",
     *,
+    project_id: str = "",
     mesh_client=None,
     **_kw,
 ) -> dict:
-    """Canonical name for :func:`summarize_project_progress`."""
-    return await summarize_project_progress(
-        project_id=team_id or project_id,
-        mesh_client=mesh_client,
-    )
+    """Synthesized progress summary for a team."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    if not _orchestration_v2_on():
+        return {"error": _TASKS_V2_DISABLED}
+    target = team_id or project_id
+    try:
+        return await mesh_client.team_summary(target)
+    except Exception as e:
+        return {"error": f"Failed to summarize {target}: {e}"}
 
 
 @skill(
@@ -2055,8 +1908,8 @@ async def summarize_team_progress(
 async def manage_team(
     action: str,
     team_name: str = "",
-    project_name: str = "",
     *,
+    project_name: str = "",
     mesh_client=None,
     _messages=None,
     **_kw,

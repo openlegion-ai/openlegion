@@ -1173,7 +1173,7 @@ def test_outcome_set_at_migration_backfills_existing_rows(tmp_path):
     completed_ts = time.time() - 3 * 24 * 3600
     raw.execute(
         "INSERT INTO tasks "
-        "(id, project_id, parent_task_id, title, description, "
+        "(id, team_id, parent_task_id, title, description, "
         "creator, assignee, status, priority, dependencies_json, "
         "artifact_refs_json, blocker_note, origin_kind, origin_channel, "
         "origin_user, created_at, updated_at, completed_at, "
@@ -1230,7 +1230,7 @@ def test_outcome_set_at_migration_recovers_from_partial_init(tmp_path):
     completed_ts = time.time() - 3 * 24 * 3600
     raw.execute(
         "INSERT INTO tasks "
-        "(id, project_id, parent_task_id, title, description, "
+        "(id, team_id, parent_task_id, title, description, "
         "creator, assignee, status, priority, dependencies_json, "
         "artifact_refs_json, blocker_note, origin_kind, origin_channel, "
         "origin_user, created_at, updated_at, completed_at, "
@@ -1280,7 +1280,7 @@ def test_outcome_set_at_backfill_skips_anomalous_rows(tmp_path):
     # Anomalous row: outcome set but completed_at NULL.
     raw.execute(
         "INSERT INTO tasks "
-        "(id, project_id, parent_task_id, title, description, "
+        "(id, team_id, parent_task_id, title, description, "
         "creator, assignee, status, priority, dependencies_json, "
         "artifact_refs_json, blocker_note, origin_kind, origin_channel, "
         "origin_user, created_at, updated_at, completed_at, "
