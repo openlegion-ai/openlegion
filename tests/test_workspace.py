@@ -1322,3 +1322,140 @@ class TestChatArchiveSurface:
         archive_dir = Path(self._tmpdir) / "chat_archive"
         assert (archive_dir / first).exists()
         assert (archive_dir / second).exists()
+
+    def test_archive_chat_transcript_concurrent_no_clobber(self, monkeypatch):
+        """Concurrent archivers must never collide on the same slot.
+
+        Pre-fix, two threads racing past the ``if target.exists()`` check
+        could both pick the same suffix, then both ``rename()`` over each
+        other (POSIX rename atomically replaces). With the O_EXCL slot
+        claim, exactly N distinct archives survive for N racers.
+        """
+        import threading
+        from src.agent import workspace as workspace_mod
+
+        class _FixedClock:
+            @classmethod
+            def now(cls, tz=None):
+                from datetime import datetime as _dt, timezone as _tz
+                return _dt(2026, 1, 1, 12, 0, 0, tzinfo=tz or _tz.utc)
+
+        monkeypatch.setattr(workspace_mod, "datetime", _FixedClock)
+
+        # Each thread needs its own workspace+transcript so the race is on
+        # archive-slot claiming, not on the source file itself. Sharing a
+        # single root would have threads racing to rename the same source.
+        roots: list[Path] = []
+        archive_dir = Path(self._tmpdir) / "chat_archive"
+        archive_dir.mkdir(exist_ok=True)
+        for i in range(5):
+            root = Path(self._tmpdir) / f"agent_{i}"
+            root.mkdir()
+            (root / "chat_transcript.jsonl").write_text(
+                f'{{"role":"user","content":"msg{i}","ts":{i}}}\n'
+            )
+            roots.append(root)
+
+        barrier = threading.Barrier(len(roots))
+        results: list[str | None] = [None] * len(roots)
+        errors: list[BaseException] = []
+
+        def _worker(idx: int, root: Path) -> None:
+            try:
+                # Per-thread WorkspaceManager pointing at the SAME shared
+                # archive dir via a symlink trick: rebind CHAT_ARCHIVE_DIR
+                # by giving each agent root a chat_archive symlink into
+                # the shared sink.
+                shared = Path(self._tmpdir) / "chat_archive"
+                (root / "chat_archive").symlink_to(shared, target_is_directory=True)
+                ws = WorkspaceManager(workspace_dir=str(root))
+                barrier.wait(timeout=10)
+                results[idx] = ws.archive_chat_transcript()
+            except BaseException as exc:  # pragma: no cover
+                errors.append(exc)
+
+        threads = [threading.Thread(target=_worker, args=(i, r))
+                   for i, r in enumerate(roots)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert not errors, f"worker errors: {errors!r}"
+        names = [n for n in results if n]
+        assert len(names) == len(roots), \
+            f"expected {len(roots)} archives, got {len(names)}: {results!r}"
+        assert len(set(names)) == len(roots), \
+            f"duplicate archive names — race clobber: {sorted(names)}"
+        for name in names:
+            assert (archive_dir / name).exists(), \
+                f"archive {name} reported written but missing on disk"
+
+    def test_archive_retention_evicts_oldest(self, monkeypatch):
+        """Per-agent FIFO cap drops oldest archives once the limit is hit."""
+        import os
+        from src.agent import workspace as workspace_mod
+
+        monkeypatch.setattr(workspace_mod, "_MAX_ARCHIVES_PER_AGENT", 3)
+
+        archive_dir = Path(self._tmpdir) / "chat_archive"
+        archive_dir.mkdir(exist_ok=True)
+        # Seed 5 archives with strictly increasing mtimes so eviction is
+        # deterministic — older files get dropped first.
+        now = 1_700_000_000
+        seeded_names = []
+        for i in range(5):
+            name = f"2026-01-0{i + 1}_120000.jsonl"
+            p = archive_dir / name
+            p.write_text('{"role":"user","content":"hi","ts":1}\n')
+            os.utime(p, (now + i * 100, now + i * 100))
+            seeded_names.append(name)
+
+        # Trigger a new archive write to engage eviction.
+        self.ws.append_chat_message("user", "fresh")
+        new_name = self.ws.archive_chat_transcript()
+        assert new_name is not None
+
+        survivors = sorted(p.name for p in archive_dir.iterdir())
+        assert len(survivors) == 3, f"expected cap=3, got {survivors!r}"
+        # Oldest two seeded archives should be the ones gone.
+        assert seeded_names[0] not in survivors
+        assert seeded_names[1] not in survivors
+
+    def test_load_chat_archive_rejects_oversize(self, monkeypatch, caplog):
+        """Oversize archives return None without buffering the file."""
+        from src.agent import workspace as workspace_mod
+
+        monkeypatch.setattr(workspace_mod, "_MAX_ARCHIVE_LOAD_BYTES", 1024)
+
+        archive_dir = Path(self._tmpdir) / "chat_archive"
+        archive_dir.mkdir(exist_ok=True)
+        name = "2026-01-01_120000.jsonl"
+        # 100 message lines ~ a few KB → comfortably over 1024 bytes.
+        lines = [
+            f'{{"role":"user","content":"message number {i:04d}","ts":{i}}}'
+            for i in range(100)
+        ]
+        (archive_dir / name).write_text("\n".join(lines) + "\n")
+
+        with caplog.at_level("WARNING", logger="agent.workspace"):
+            result = self.ws.load_chat_archive(name)
+        assert result is None
+        assert any("exceeds load cap" in rec.message for rec in caplog.records), \
+            f"expected oversize warning, got: {[r.message for r in caplog.records]}"
+
+    def test_list_chat_archives_count_excludes_bad_lines(self):
+        """message_count tallies only successfully-parsed JSON dicts."""
+        self._write_archive(
+            "2026-01-01_120000.jsonl",
+            lines=[
+                '{"role":"user","content":"ok 1","ts":1}',
+                'not json garbage',
+                '{"role":"assistant","content":"ok 2","ts":2}',
+                '[1, 2, 3]',  # valid JSON, but not a dict
+                '{"role":"user","content":"ok 3","ts":3}',
+            ],
+        )
+        entries = self.ws.list_chat_archives()
+        assert len(entries) == 1
+        assert entries[0]["message_count"] == 3

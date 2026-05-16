@@ -367,11 +367,17 @@ function dashboard() {
 
     // Archives identity tab — list of {name, ts_iso, size_bytes,
     // message_count, preview} entries plus a lazy per-archive cache.
+    // NOTE: per-archive state is keyed by `${agentId}/${name}` (see
+    // _archiveKey). Archive filenames are timestamp-derived and can
+    // collide across agents that reset in the same minute — keying by
+    // name alone would surface another agent's transcript after a tab
+    // switch. Always pass through _archiveKey().
     agentArchives: [],
     agentArchivesLoading: false,
     agentArchivesError: '',
-    _agentArchiveContent: {},     // name -> {messages, count, loading, error}
-    agentArchiveExpanded: {},     // name -> bool
+    agentArchivesAgentId: '',     // pins which agent the current list is for
+    _agentArchiveContent: {},     // _archiveKey -> {messages, count, loading, error}
+    agentArchiveExpanded: {},     // _archiveKey -> bool
 
     // Credit exhausted state
     creditExhausted: false,
@@ -5689,54 +5695,73 @@ function dashboard() {
       }
     },
 
+    // Compose the composite key for per-archive UI state. Archive
+    // filenames are timestamp-derived (YYYY-MM-DD_HHMMSS.jsonl) so two
+    // agents resetting at the same minute would otherwise share a key
+    // and overwrite each other's expanded/cached transcript state.
+    // If you key archive state, always include agent_id to prevent
+    // same-name cross-agent collisions.
+    _archiveKey(agentId, name) {
+      return `${agentId || ''}/${name || ''}`;
+    },
+
     async loadAgentArchives(agentId) {
       if (!agentId) return;
+      // Pin the in-flight agent so stale responses (user switched agent
+      // mid-fetch) can be dropped on arrival.
+      this.agentArchivesAgentId = agentId;
       this.agentArchivesLoading = true;
       this.agentArchivesError = '';
       try {
         const resp = await fetch(`${window.__config.apiBase}/agents/${encodeURIComponent(agentId)}/chat-archives`);
+        if (this.agentArchivesAgentId !== agentId) return;
         if (!resp.ok) {
           this.agentArchivesError = `Couldn't load archives (HTTP ${resp.status})`;
           this.agentArchives = [];
           return;
         }
         const data = await resp.json();
+        if (this.agentArchivesAgentId !== agentId) return;
         this.agentArchives = data.archives || [];
       } catch (e) {
+        if (this.agentArchivesAgentId !== agentId) return;
         this.agentArchivesError = (e && e.message) ? `Couldn't load archives: ${e.message}` : "Couldn't load archives";
         this.agentArchives = [];
       } finally {
-        this.agentArchivesLoading = false;
+        if (this.agentArchivesAgentId === agentId) {
+          this.agentArchivesLoading = false;
+        }
       }
     },
 
     async openAgentArchive(agentId, name) {
-      const wasExpanded = !!this.agentArchiveExpanded[name];
-      this.agentArchiveExpanded = { ...this.agentArchiveExpanded, [name]: !wasExpanded };
+      const key = this._archiveKey(agentId, name);
+      const wasExpanded = !!this.agentArchiveExpanded[key];
+      this.agentArchiveExpanded = { ...this.agentArchiveExpanded, [key]: !wasExpanded };
       if (wasExpanded) return;
-      if (this._agentArchiveContent[name] && !this._agentArchiveContent[name].error) return;
+      if (this._agentArchiveContent[key] && !this._agentArchiveContent[key].error) return;
       this._agentArchiveContent = {
         ...this._agentArchiveContent,
-        [name]: { messages: [], count: 0, loading: true, error: '' },
+        [key]: { messages: [], count: 0, loading: true, error: '' },
       };
       try {
         const resp = await fetch(`${window.__config.apiBase}/agents/${encodeURIComponent(agentId)}/chat-archives/${encodeURIComponent(name)}`);
         if (!resp.ok) {
           this._agentArchiveContent = {
             ...this._agentArchiveContent,
-            [name]: { messages: [], count: 0, loading: false, error: `HTTP ${resp.status}` },
+            [key]: { messages: [], count: 0, loading: false, error: `HTTP ${resp.status}` },
           };
           return;
         }
         const data = await resp.json();
         this._agentArchiveContent = {
           ...this._agentArchiveContent,
-          [name]: { messages: data.messages || [], count: data.count || 0, loading: false, error: '' },
+          [key]: { messages: data.messages || [], count: data.count || 0, loading: false, error: '' },
         };
       } catch (e) {
         this._agentArchiveContent = {
           ...this._agentArchiveContent,
-          [name]: { messages: [], count: 0, loading: false, error: (e && e.message) || 'fetch failed' },
+          [key]: { messages: [], count: 0, loading: false, error: (e && e.message) || 'fetch failed' },
         };
       }
     },
@@ -5752,12 +5777,13 @@ function dashboard() {
             this.showToast(`Delete failed: HTTP ${resp.status}`);
             return;
           }
+          const key = this._archiveKey(agentId, name);
           this.agentArchives = this.agentArchives.filter(a => a.name !== name);
           const next = { ...this._agentArchiveContent };
-          delete next[name];
+          delete next[key];
           this._agentArchiveContent = next;
           const expanded = { ...this.agentArchiveExpanded };
-          delete expanded[name];
+          delete expanded[key];
           this.agentArchiveExpanded = expanded;
           this.showToast('Archive deleted');
         } catch (e) {
@@ -8620,12 +8646,15 @@ function dashboard() {
             this.chatHistories[agentId] = [];
             delete this._chatFetchedAt[agentId];
             this._saveChatToSession();
-            // Toast names what was preserved so users discover the new
-            // Archives tab without having to read release notes.
-            const parts = [`${agentId} conversation reset`];
-            if (data.message_count) parts.push(`${data.message_count} messages archived`);
-            if (data.memory_flushed) parts.push('memory updated');
-            this.showToast(parts.join(' — '));
+            // Friendly toast points users at Archives without alarm-shape
+            // language. The confirm dialog already promises memory is
+            // preserved, so no need to restate that here. Message count
+            // appended only when meaningfully non-zero.
+            const parts = ['Fresh chat started — previous conversation saved to Archives'];
+            if (data.message_count && data.message_count > 0) {
+              parts.push(`(${data.message_count} message${data.message_count === 1 ? '' : 's'})`);
+            }
+            this.showToast(parts.join(' '));
             if (this.detailAgent === agentId && this.identityTab === 'archives') {
               this.loadAgentArchives(agentId);
             }

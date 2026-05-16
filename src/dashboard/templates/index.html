@@ -2854,7 +2854,7 @@
                         <div class="flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-gray-800/40 transition-colors"
                           @click="openAgentArchive(selectedAgent, archive.name)">
                           <svg class="w-3 h-3 text-gray-600 transition-transform shrink-0"
-                            :class="agentArchiveExpanded[archive.name] && 'rotate-90'"
+                            :class="agentArchiveExpanded[_archiveKey(selectedAgent, archive.name)] && 'rotate-90'"
                             fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
                           <div class="flex-1 min-w-0">
                             <div class="flex items-center gap-2">
@@ -2871,16 +2871,16 @@
                             Delete
                           </button>
                         </div>
-                        <div x-show="agentArchiveExpanded[archive.name]" x-cloak class="border-t border-gray-800/60 px-3 py-2 space-y-1.5">
-                          <template x-if="_agentArchiveContent[archive.name] && _agentArchiveContent[archive.name].loading">
+                        <div x-show="agentArchiveExpanded[_archiveKey(selectedAgent, archive.name)]" x-cloak class="border-t border-gray-800/60 px-3 py-2 space-y-1.5">
+                          <template x-if="_agentArchiveContent[_archiveKey(selectedAgent, archive.name)] && _agentArchiveContent[_archiveKey(selectedAgent, archive.name)].loading">
                             <div class="text-xs text-gray-500 py-2">Loading transcript…</div>
                           </template>
-                          <template x-if="_agentArchiveContent[archive.name] && _agentArchiveContent[archive.name].error">
-                            <div class="text-xs text-amber-400 py-2" x-text="'Failed to load: ' + _agentArchiveContent[archive.name].error"></div>
+                          <template x-if="_agentArchiveContent[_archiveKey(selectedAgent, archive.name)] && _agentArchiveContent[_archiveKey(selectedAgent, archive.name)].error">
+                            <div class="text-xs text-amber-400 py-2" x-text="'Failed to load: ' + _agentArchiveContent[_archiveKey(selectedAgent, archive.name)].error"></div>
                           </template>
-                          <template x-if="_agentArchiveContent[archive.name] && !_agentArchiveContent[archive.name].loading && !_agentArchiveContent[archive.name].error">
+                          <template x-if="_agentArchiveContent[_archiveKey(selectedAgent, archive.name)] && !_agentArchiveContent[_archiveKey(selectedAgent, archive.name)].loading && !_agentArchiveContent[_archiveKey(selectedAgent, archive.name)].error">
                             <div class="space-y-1.5 max-h-72 overflow-y-auto custom-scrollbar">
-                              <template x-for="(msg, mi) in _agentArchiveContent[archive.name].messages" :key="mi">
+                              <template x-for="(msg, mi) in _agentArchiveContent[_archiveKey(selectedAgent, archive.name)].messages" :key="mi">
                                 <div class="flex items-start gap-2">
                                   <span class="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0"
                                     :class="msg.role === 'user' ? 'bg-indigo-900/40 text-indigo-300 border border-indigo-800/40'
@@ -2892,7 +2892,7 @@
                                     x-text="typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)"></div>
                                 </div>
                               </template>
-                              <div x-show="!_agentArchiveContent[archive.name].messages.length" class="text-xs text-gray-600 py-1">(empty transcript)</div>
+                              <div x-show="!_agentArchiveContent[_archiveKey(selectedAgent, archive.name)].messages.length" class="text-xs text-gray-600 py-1">(empty transcript)</div>
                             </div>
                           </template>
                         </div>
@@ -6960,7 +6960,7 @@
                   <div class="flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-gray-800/40 transition-colors"
                     @click="openAgentArchive('operator', archive.name)">
                     <svg class="w-3 h-3 text-gray-600 transition-transform shrink-0"
-                      :class="agentArchiveExpanded[archive.name] && 'rotate-90'"
+                      :class="agentArchiveExpanded[_archiveKey('operator', archive.name)] && 'rotate-90'"
                       fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
                     <div class="flex-1 min-w-0">
                       <div class="flex items-center gap-2">
@@ -6976,16 +6976,16 @@
                       Delete
                     </button>
                   </div>
-                  <div x-show="agentArchiveExpanded[archive.name]" x-cloak class="border-t border-gray-800/40 px-3 pb-2.5 pt-2 space-y-1.5">
-                    <template x-if="_agentArchiveContent[archive.name] && _agentArchiveContent[archive.name].loading">
+                  <div x-show="agentArchiveExpanded[_archiveKey('operator', archive.name)]" x-cloak class="border-t border-gray-800/40 px-3 pb-2.5 pt-2 space-y-1.5">
+                    <template x-if="_agentArchiveContent[_archiveKey('operator', archive.name)] && _agentArchiveContent[_archiveKey('operator', archive.name)].loading">
                       <div class="text-xs text-gray-500 py-2">Loading transcript…</div>
                     </template>
-                    <template x-if="_agentArchiveContent[archive.name] && _agentArchiveContent[archive.name].error">
-                      <div class="text-xs text-amber-400 py-2" x-text="'Failed to load: ' + _agentArchiveContent[archive.name].error"></div>
+                    <template x-if="_agentArchiveContent[_archiveKey('operator', archive.name)] && _agentArchiveContent[_archiveKey('operator', archive.name)].error">
+                      <div class="text-xs text-amber-400 py-2" x-text="'Failed to load: ' + _agentArchiveContent[_archiveKey('operator', archive.name)].error"></div>
                     </template>
-                    <template x-if="_agentArchiveContent[archive.name] && !_agentArchiveContent[archive.name].loading && !_agentArchiveContent[archive.name].error">
+                    <template x-if="_agentArchiveContent[_archiveKey('operator', archive.name)] && !_agentArchiveContent[_archiveKey('operator', archive.name)].loading && !_agentArchiveContent[_archiveKey('operator', archive.name)].error">
                       <div class="space-y-1.5 max-h-72 overflow-y-auto custom-scrollbar">
-                        <template x-for="(msg, mi) in _agentArchiveContent[archive.name].messages" :key="mi">
+                        <template x-for="(msg, mi) in _agentArchiveContent[_archiveKey('operator', archive.name)].messages" :key="mi">
                           <div class="flex items-start gap-2">
                             <span class="text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0"
                               :class="msg.role === 'user' ? 'bg-indigo-900/40 text-indigo-300 border border-indigo-800/40'
@@ -6997,7 +6997,7 @@
                               x-text="typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)"></div>
                           </div>
                         </template>
-                        <div x-show="!_agentArchiveContent[archive.name].messages.length" class="text-xs text-gray-600 py-1">(empty transcript)</div>
+                        <div x-show="!_agentArchiveContent[_archiveKey('operator', archive.name)].messages.length" class="text-xs text-gray-600 py-1">(empty transcript)</div>
                       </div>
                     </template>
                   </div>
