@@ -27,6 +27,7 @@ from __future__ import annotations
 import contextlib
 import json
 import math
+import os
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -117,6 +118,24 @@ _MAX_LEARNINGS_SIZE = 50_000
 
 _HEADING_RE = re.compile(r"^\s*##+\s+(.+?)\s*$")
 _BULLET_RE = re.compile(r"^\s*[-*]\s+(.+?)\s*$")
+
+# Strict filename gate for chat-archive entries — used by both list and
+# load/delete paths as defense-in-depth against traversal. The optional
+# ``_\d+`` suffix is the collision-recovery slot suffix written by
+# ``archive_chat_transcript`` when two resets land in the same second.
+_ARCHIVE_NAME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{6}(?:_\d+)?\.jsonl$")
+
+# Per-agent cap on archived conversation transcripts. Older archives are
+# dropped FIFO when a new archive is written. Bounds disk usage without
+# requiring a separate sweep job. Operators wanting forensic retention
+# beyond this should copy archives out of band.
+_MAX_ARCHIVES_PER_AGENT = 100
+
+# Hard ceiling on bytes ``load_chat_archive`` will read into memory.
+# Matches the 10 MiB cap downstream consumers can render safely; oversize
+# archives surface as HTTP 404 (the file is still on disk and recoverable
+# via shell if needed).
+_MAX_ARCHIVE_LOAD_BYTES = 10 * 1024 * 1024
 
 # Heading aliases — case-insensitive. Same header may have alternate
 # phrasings across templates.
@@ -728,24 +747,253 @@ class WorkspaceManager:
             logger.debug("Failed to read chat transcript: %s", e)
             return []
 
-    def archive_chat_transcript(self) -> None:
-        """Archive the current transcript on chat reset."""
+    @staticmethod
+    def _claim_archive_slot(archive_dir: Path, base_ts: str) -> Path | None:
+        """Atomically reserve a unique archive filename.
+
+        Race-safe: uses ``os.open`` with ``O_CREAT|O_EXCL`` semantics so
+        two threads or processes racing for the same timestamp slot can't
+        both pick the same suffix. Creates the target as an empty file
+        once won; the caller then ``rename()`` s the source over the top
+        (POSIX ``rename`` atomically replaces an existing file).
+
+        Returns the claimed path, or ``None`` if 100 collisions in the
+        same wall-clock second (which is implausible enough that we
+        prefer to surface it as a no-op).
+        """
+        for suffix in [""] + [f"_{i}" for i in range(2, 100)]:
+            candidate = archive_dir / f"{base_ts}{suffix}.jsonl"
+            try:
+                # O_CREAT|O_EXCL is atomic-create-if-missing; the kernel
+                # serialises racers so exactly one caller wins each slot.
+                fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            except FileExistsError:
+                continue
+            os.close(fd)
+            return candidate
+        return None
+
+    def _evict_old_archives(self, archive_dir: Path) -> None:
+        """Trim the archive directory down to ``_MAX_ARCHIVES_PER_AGENT``.
+
+        FIFO by mtime — oldest archives drop first. Bounded disk usage
+        without a separate sweep job. The cap is read from the module
+        global on each call so tests can monkeypatch it.
+        """
+        cap = _MAX_ARCHIVES_PER_AGENT
+        try:
+            children = [c for c in archive_dir.iterdir()
+                        if c.is_file() and _ARCHIVE_NAME_RE.match(c.name)]
+        except OSError as e:
+            logger.debug("Failed to list archives for eviction: %s", e)
+            return
+        if len(children) <= cap:
+            return
+        # Sort oldest-first by (mtime, name) so the head is what we drop.
+        # Secondary sort by filename matters when the FS has 1-second mtime
+        # resolution (or two archives land in the same wall-clock second):
+        # the archive name is timestamp-prefixed
+        # (``YYYY-MM-DD_HHMMSS[_N].jsonl``) so name order resolves ties
+        # deterministically — oldest first, newest survives.
+        try:
+            children.sort(key=lambda p: (p.stat().st_mtime, p.name))
+        except OSError:
+            return
+        excess = len(children) - cap
+        for victim in children[:excess]:
+            try:
+                victim.unlink()
+                logger.info("Evicted old chat archive %s (cap=%d)", victim.name, cap)
+            except OSError as e:
+                # Surface as WARN so silent disk-overflow isn't invisible
+                # in operator logs — eviction failures mean the cap isn't
+                # being honored.
+                logger.warning(
+                    "Failed to evict chat archive %s: %s", victim.name, e,
+                )
+
+    def archive_chat_transcript(self) -> str | None:
+        """Archive the current transcript on chat reset.
+
+        Returns the archive filename on success, or ``None`` on no-op /
+        failure. The slot reservation is race-safe (see
+        :meth:`_claim_archive_slot`); after a successful archive we
+        FIFO-evict to ``_MAX_ARCHIVES_PER_AGENT`` to bound disk usage.
+        """
         path = self.root / self.CHAT_TRANSCRIPT
         if not path.exists():
-            return
+            return None
         try:
             if path.stat().st_size == 0:
                 path.unlink(missing_ok=True)
-                return
+                return None
         except OSError:
-            return
+            return None
         archive_dir = self.root / self.CHAT_ARCHIVE_DIR
         archive_dir.mkdir(exist_ok=True)
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M%S")
+        target = self._claim_archive_slot(archive_dir, ts)
+        if target is None:
+            logger.warning(
+                "Failed to archive chat transcript: 100 collisions in same "
+                "wall-clock second (%s)", ts,
+            )
+            return None
         try:
-            path.rename(archive_dir / f"{ts}.jsonl")
+            # rename() over the pre-claimed empty slot is atomic on POSIX
+            # and replaces the empty placeholder with the real transcript.
+            path.rename(target)
         except Exception as e:
             logger.debug("Failed to archive chat transcript: %s", e)
+            # Best-effort: drop the empty placeholder we created above so
+            # we don't leave a zero-byte archive masquerading as content.
+            with contextlib.suppress(OSError):
+                target.unlink()
+            return None
+        logger.info("Archived chat transcript to %s", target.name)
+        self._evict_old_archives(archive_dir)
+        return target.name
+
+    def list_chat_archives(self) -> list[dict]:
+        """Return up to 100 chat archives, newest first.
+
+        Each entry surfaces enough metadata for the dashboard to render
+        a card without opening the file. Per-file errors are swallowed
+        so one bad archive can't break the list.
+        """
+        archive_dir = self.root / self.CHAT_ARCHIVE_DIR
+        if not archive_dir.exists():
+            return []
+        entries: list[tuple[float, dict]] = []
+        try:
+            children = list(archive_dir.iterdir())
+        except OSError as e:
+            logger.debug("Failed to list chat archives: %s", e)
+            return []
+        for child in children:
+            if not child.is_file():
+                continue
+            if not _ARCHIVE_NAME_RE.match(child.name):
+                continue
+            try:
+                stat = child.stat()
+            except OSError:
+                continue
+            size = stat.st_size
+            if size == 0:
+                continue
+            ts_iso = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
+            message_count = 0
+            preview = ""
+            try:
+                with child.open("r") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            msg = json.loads(line)
+                        except json.JSONDecodeError:
+                            # Don't count malformed lines toward the
+                            # surfaced message_count — keeps the dashboard
+                            # tally honest when an archive has truncation
+                            # garbage at the tail.
+                            continue
+                        if not isinstance(msg, dict):
+                            continue
+                        message_count += 1
+                        if not preview and msg.get("role") == "user":
+                            content = msg.get("content", "")
+                            if isinstance(content, str) and content:
+                                cleaned = sanitize_for_prompt(content)
+                                preview = (cleaned[:120] + "…") if len(cleaned) > 120 else cleaned
+            except OSError as e:
+                logger.debug("Skipping unreadable chat archive %s: %s", child.name, e)
+                continue
+            entries.append((stat.st_mtime, {
+                "name": child.name,
+                "ts_iso": ts_iso,
+                "size_bytes": size,
+                "message_count": message_count,
+                "preview": preview,
+            }))
+        entries.sort(key=lambda kv: kv[0], reverse=True)
+        return [e[1] for e in entries[:100]]
+
+    def load_chat_archive(self, name: str, limit: int = 500) -> list[dict] | None:
+        """Load a single chat archive, returning the most-recent ``limit`` entries.
+
+        Returns ``None`` for bad names, traversal attempts, or missing
+        files — endpoint maps that to HTTP 404.
+        """
+        if not _ARCHIVE_NAME_RE.match(name or ""):
+            return None
+        archive_dir = self.root / self.CHAT_ARCHIVE_DIR
+        try:
+            path = (archive_dir / name).resolve()
+            archive_root = archive_dir.resolve()
+        except OSError:
+            return None
+        if not path.is_relative_to(archive_root):
+            return None
+        if not path.exists():
+            return None
+        # Bound RSS: refuse to fully buffer archives above the load cap.
+        # The file is still on disk and can be recovered out-of-band if
+        # needed — surfacing a 404 to the dashboard is the safer default.
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return None
+        if size > _MAX_ARCHIVE_LOAD_BYTES:
+            logger.warning(
+                "Archive %s exceeds load cap (%d bytes); refusing", name, size,
+            )
+            return None
+        try:
+            text = path.read_text(errors="replace").strip()
+        except OSError as e:
+            logger.debug("Failed to read chat archive %s: %s", name, e)
+            return None
+        if not text:
+            return []
+        lines = text.split("\n")
+        messages: list[dict] = []
+        for line in lines[-limit:]:
+            if not line.strip():
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            # Mirror list_chat_archives — only surface dict entries so the
+            # dashboard renderer doesn't get scalars / lists.
+            if not isinstance(obj, dict):
+                continue
+            messages.append(obj)
+        return messages
+
+    def delete_chat_archive(self, name: str) -> bool:
+        """Delete a chat archive by name. Returns ``True`` only when a
+        matching file was removed."""
+        if not _ARCHIVE_NAME_RE.match(name or ""):
+            return False
+        archive_dir = self.root / self.CHAT_ARCHIVE_DIR
+        try:
+            path = (archive_dir / name).resolve()
+            archive_root = archive_dir.resolve()
+        except OSError:
+            return False
+        if not path.is_relative_to(archive_root):
+            return False
+        if not path.exists():
+            return False
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as e:
+            logger.debug("Failed to delete chat archive %s: %s", name, e)
+            return False
+        return True
 
     # ── Activity log ────────────────────────────────────────
 

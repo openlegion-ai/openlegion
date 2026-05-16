@@ -1172,3 +1172,365 @@ class TestDeriveCapabilitiesFromInterface:
         (Path(self._tmpdir) / "INTERFACE.md").mkdir()
         result = _derive_capabilities_from_interface(self._tmpdir)
         assert result["capabilities"] == []
+
+
+class TestChatArchiveSurface:
+    """Cover the list / load / delete surface added for the Archives tab."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.ws = WorkspaceManager(workspace_dir=self._tmpdir)
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _write_archive(self, name: str, lines: list[str] | None = None) -> Path:
+        archive_dir = Path(self._tmpdir) / "chat_archive"
+        archive_dir.mkdir(exist_ok=True)
+        path = archive_dir / name
+        if lines is None:
+            lines = ['{"role":"user","content":"hi","ts":1}']
+        path.write_text("\n".join(lines) + "\n")
+        return path
+
+    def test_list_chat_archives_empty_dir(self):
+        assert self.ws.list_chat_archives() == []
+
+    def test_list_chat_archives_returns_newest_first(self):
+        import os
+
+        a = self._write_archive("2026-01-01_120000.jsonl")
+        b = self._write_archive("2026-01-02_120000.jsonl")
+        c = self._write_archive("2026-01-03_120000.jsonl")
+        # Force distinct mtimes regardless of write order.
+        now = 1_700_000_000
+        os.utime(a, (now, now))
+        os.utime(b, (now + 100, now + 100))
+        os.utime(c, (now + 200, now + 200))
+
+        entries = self.ws.list_chat_archives()
+        names = [e["name"] for e in entries]
+        assert names == [
+            "2026-01-03_120000.jsonl",
+            "2026-01-02_120000.jsonl",
+            "2026-01-01_120000.jsonl",
+        ]
+
+    def test_list_chat_archives_skips_empty_files(self):
+        archive_dir = Path(self._tmpdir) / "chat_archive"
+        archive_dir.mkdir(exist_ok=True)
+        (archive_dir / "2026-01-01_120000.jsonl").write_text("")
+        self._write_archive("2026-01-02_120000.jsonl")
+
+        entries = self.ws.list_chat_archives()
+        names = [e["name"] for e in entries]
+        assert names == ["2026-01-02_120000.jsonl"]
+
+    def test_list_chat_archives_skips_bad_names(self):
+        archive_dir = Path(self._tmpdir) / "chat_archive"
+        archive_dir.mkdir(exist_ok=True)
+        (archive_dir / "garbage.txt").write_text('{"role":"user","content":"x","ts":1}\n')
+        (archive_dir / "evil.jsonl.bak").write_text('{"role":"user","content":"x","ts":1}\n')
+        self._write_archive("2026-01-02_120000.jsonl")
+
+        entries = self.ws.list_chat_archives()
+        names = [e["name"] for e in entries]
+        assert names == ["2026-01-02_120000.jsonl"]
+
+    def test_list_chat_archives_preview_first_user_message(self):
+        self._write_archive(
+            "2026-01-01_120000.jsonl",
+            lines=[
+                '{"role":"assistant","content":"greetings","ts":1}',
+                '{"role":"user","content":"Hello there, how does this work?","ts":2}',
+                '{"role":"assistant","content":"like so","ts":3}',
+            ],
+        )
+        entries = self.ws.list_chat_archives()
+        assert entries[0]["preview"].startswith("Hello there")
+        assert entries[0]["message_count"] == 3
+
+    def test_load_chat_archive_valid(self):
+        self._write_archive(
+            "2026-01-01_120000.jsonl",
+            lines=[
+                '{"role":"user","content":"a","ts":1}',
+                '{"role":"assistant","content":"b","ts":2}',
+            ],
+        )
+        msgs = self.ws.load_chat_archive("2026-01-01_120000.jsonl")
+        assert msgs is not None
+        assert len(msgs) == 2
+        assert msgs[0]["content"] == "a"
+
+    def test_load_chat_archive_rejects_traversal(self):
+        assert self.ws.load_chat_archive("../../etc/passwd") is None
+        assert self.ws.load_chat_archive("..") is None
+        assert self.ws.load_chat_archive("../2026-01-01_120000.jsonl") is None
+
+    def test_load_chat_archive_missing(self):
+        assert self.ws.load_chat_archive("2026-01-01_120000.jsonl") is None
+
+    def test_load_chat_archive_rejects_unknown_extension(self):
+        archive_dir = Path(self._tmpdir) / "chat_archive"
+        archive_dir.mkdir(exist_ok=True)
+        (archive_dir / "garbage.txt").write_text('{"role":"user","content":"x","ts":1}\n')
+        assert self.ws.load_chat_archive("garbage.txt") is None
+
+    def test_delete_chat_archive_valid(self):
+        path = self._write_archive("2026-01-01_120000.jsonl")
+        assert self.ws.delete_chat_archive("2026-01-01_120000.jsonl") is True
+        assert not path.exists()
+
+    def test_delete_chat_archive_rejects_bad_name(self):
+        assert self.ws.delete_chat_archive("..") is False
+        assert self.ws.delete_chat_archive("../foo.jsonl") is False
+        assert self.ws.delete_chat_archive("garbage.txt") is False
+
+    def test_delete_chat_archive_missing_returns_false(self):
+        assert self.ws.delete_chat_archive("2026-01-01_120000.jsonl") is False
+
+    def test_archive_chat_transcript_returns_filename(self):
+        self.ws.append_chat_message("user", "Hello")
+        name = self.ws.archive_chat_transcript()
+        assert isinstance(name, str)
+        assert name.endswith(".jsonl")
+        archive_dir = Path(self._tmpdir) / "chat_archive"
+        assert (archive_dir / name).exists()
+
+    def test_archive_chat_transcript_collision_recovery(self, monkeypatch):
+        """Two resets in the same wall-clock second keep both archives."""
+        from src.agent import workspace as workspace_mod
+
+        class _FixedClock:
+            @classmethod
+            def now(cls, tz=None):
+                # Pin to a single instant so strftime returns the same ts.
+                from datetime import datetime as _dt
+                from datetime import timezone as _tz
+                return _dt(2026, 1, 1, 12, 0, 0, tzinfo=tz or _tz.utc)
+
+        monkeypatch.setattr(workspace_mod, "datetime", _FixedClock)
+
+        self.ws.append_chat_message("user", "first")
+        first = self.ws.archive_chat_transcript()
+        assert first == "2026-01-01_120000.jsonl"
+
+        self.ws.append_chat_message("user", "second")
+        second = self.ws.archive_chat_transcript()
+        assert second == "2026-01-01_120000_2.jsonl"
+
+        archive_dir = Path(self._tmpdir) / "chat_archive"
+        assert (archive_dir / first).exists()
+        assert (archive_dir / second).exists()
+
+    def test_archive_chat_transcript_concurrent_no_clobber(self, monkeypatch):
+        """Concurrent archivers must never collide on the same slot.
+
+        Pre-fix, two threads racing past the ``if target.exists()`` check
+        could both pick the same suffix, then both ``rename()`` over each
+        other (POSIX rename atomically replaces). With the O_EXCL slot
+        claim, exactly N distinct archives survive for N racers.
+        """
+        import threading
+
+        from src.agent import workspace as workspace_mod
+
+        class _FixedClock:
+            @classmethod
+            def now(cls, tz=None):
+                from datetime import datetime as _dt
+                from datetime import timezone as _tz
+                return _dt(2026, 1, 1, 12, 0, 0, tzinfo=tz or _tz.utc)
+
+        monkeypatch.setattr(workspace_mod, "datetime", _FixedClock)
+
+        # Each thread needs its own workspace+transcript so the race is on
+        # archive-slot claiming, not on the source file itself. Sharing a
+        # single root would have threads racing to rename the same source.
+        roots: list[Path] = []
+        archive_dir = Path(self._tmpdir) / "chat_archive"
+        archive_dir.mkdir(exist_ok=True)
+        for i in range(5):
+            root = Path(self._tmpdir) / f"agent_{i}"
+            root.mkdir()
+            (root / "chat_transcript.jsonl").write_text(
+                f'{{"role":"user","content":"msg{i}","ts":{i}}}\n'
+            )
+            roots.append(root)
+
+        barrier = threading.Barrier(len(roots))
+        results: list[str | None] = [None] * len(roots)
+        errors: list[BaseException] = []
+
+        def _worker(idx: int, root: Path) -> None:
+            try:
+                # Per-thread WorkspaceManager pointing at the SAME shared
+                # archive dir via a symlink trick: rebind CHAT_ARCHIVE_DIR
+                # by giving each agent root a chat_archive symlink into
+                # the shared sink.
+                shared = Path(self._tmpdir) / "chat_archive"
+                (root / "chat_archive").symlink_to(shared, target_is_directory=True)
+                ws = WorkspaceManager(workspace_dir=str(root))
+                barrier.wait(timeout=10)
+                results[idx] = ws.archive_chat_transcript()
+            except BaseException as exc:  # pragma: no cover
+                errors.append(exc)
+
+        threads = [threading.Thread(target=_worker, args=(i, r))
+                   for i, r in enumerate(roots)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert not errors, f"worker errors: {errors!r}"
+        names = [n for n in results if n]
+        assert len(names) == len(roots), \
+            f"expected {len(roots)} archives, got {len(names)}: {results!r}"
+        assert len(set(names)) == len(roots), \
+            f"duplicate archive names — race clobber: {sorted(names)}"
+        for name in names:
+            assert (archive_dir / name).exists(), \
+                f"archive {name} reported written but missing on disk"
+
+    def test_archive_retention_evicts_oldest(self, monkeypatch):
+        """Per-agent FIFO cap drops oldest archives once the limit is hit."""
+        import os
+
+        from src.agent import workspace as workspace_mod
+
+        monkeypatch.setattr(workspace_mod, "_MAX_ARCHIVES_PER_AGENT", 3)
+
+        archive_dir = Path(self._tmpdir) / "chat_archive"
+        archive_dir.mkdir(exist_ok=True)
+        # Seed 5 archives with strictly increasing mtimes so eviction is
+        # deterministic — older files get dropped first.
+        now = 1_700_000_000
+        seeded_names = []
+        for i in range(5):
+            name = f"2026-01-0{i + 1}_120000.jsonl"
+            p = archive_dir / name
+            p.write_text('{"role":"user","content":"hi","ts":1}\n')
+            os.utime(p, (now + i * 100, now + i * 100))
+            seeded_names.append(name)
+
+        # Trigger a new archive write to engage eviction.
+        self.ws.append_chat_message("user", "fresh")
+        new_name = self.ws.archive_chat_transcript()
+        assert new_name is not None
+
+        survivors = sorted(p.name for p in archive_dir.iterdir())
+        assert len(survivors) == 3, f"expected cap=3, got {survivors!r}"
+        # Oldest two seeded archives should be the ones gone.
+        assert seeded_names[0] not in survivors
+        assert seeded_names[1] not in survivors
+
+    def test_load_chat_archive_rejects_oversize(self, monkeypatch, caplog):
+        """Oversize archives return None without buffering the file."""
+        from src.agent import workspace as workspace_mod
+
+        monkeypatch.setattr(workspace_mod, "_MAX_ARCHIVE_LOAD_BYTES", 1024)
+
+        archive_dir = Path(self._tmpdir) / "chat_archive"
+        archive_dir.mkdir(exist_ok=True)
+        name = "2026-01-01_120000.jsonl"
+        # 100 message lines ~ a few KB → comfortably over 1024 bytes.
+        lines = [
+            f'{{"role":"user","content":"message number {i:04d}","ts":{i}}}'
+            for i in range(100)
+        ]
+        (archive_dir / name).write_text("\n".join(lines) + "\n")
+
+        with caplog.at_level("WARNING", logger="agent.workspace"):
+            result = self.ws.load_chat_archive(name)
+        assert result is None
+        assert any("exceeds load cap" in rec.message for rec in caplog.records), \
+            f"expected oversize warning, got: {[r.message for r in caplog.records]}"
+
+    def test_list_chat_archives_count_excludes_bad_lines(self):
+        """message_count tallies only successfully-parsed JSON dicts."""
+        self._write_archive(
+            "2026-01-01_120000.jsonl",
+            lines=[
+                '{"role":"user","content":"ok 1","ts":1}',
+                'not json garbage',
+                '{"role":"assistant","content":"ok 2","ts":2}',
+                '[1, 2, 3]',  # valid JSON, but not a dict
+                '{"role":"user","content":"ok 3","ts":3}',
+            ],
+        )
+        entries = self.ws.list_chat_archives()
+        assert len(entries) == 1
+        assert entries[0]["message_count"] == 3
+
+    def test_evict_old_archives_mtime_tie_preserves_newest(self, monkeypatch):
+        """On 1-second-resolution FS / tied mtimes, the lexicographically
+        largest filename (= newest timestamp prefix) survives. Pre-fix
+        the sort was unstable on ties — the just-written archive could be
+        evicted.
+        """
+        import os
+
+        from src.agent import workspace as workspace_mod
+
+        monkeypatch.setattr(workspace_mod, "_MAX_ARCHIVES_PER_AGENT", 2)
+
+        archive_dir = Path(self._tmpdir) / "chat_archive"
+        archive_dir.mkdir(exist_ok=True)
+        names = [
+            "2026-01-01_120000.jsonl",
+            "2026-01-01_120001.jsonl",
+            "2026-01-01_120002.jsonl",
+        ]
+        now = 1_700_000_000
+        for n in names:
+            p = archive_dir / n
+            p.write_text('{"role":"user","content":"x","ts":1}\n')
+            os.utime(p, (now, now))
+
+        self.ws._evict_old_archives(archive_dir)
+
+        survivors = sorted(p.name for p in archive_dir.iterdir())
+        # cap=2 → drop one; lexicographically-largest must survive (it's
+        # the newest by timestamp prefix).
+        assert len(survivors) == 2
+        assert names[-1] in survivors, (
+            f"newest archive ({names[-1]}) was evicted on tied mtimes; "
+            f"survivors={survivors!r}"
+        )
+
+    def test_load_chat_archive_filters_non_dict_lines(self):
+        """load_chat_archive surfaces only dict messages — matches
+        list_chat_archives behavior. Pre-fix it accepted any JSON value
+        (lists, scalars) and handed them to the dashboard renderer."""
+        self._write_archive(
+            "2026-01-01_120000.jsonl",
+            lines=[
+                '{"role":"user","content":"hi"}',
+                '42',
+                '["list"]',
+                '{"role":"assistant","content":"hello"}',
+            ],
+        )
+        msgs = self.ws.load_chat_archive("2026-01-01_120000.jsonl")
+        assert msgs is not None
+        assert len(msgs) == 2
+        assert all(isinstance(m, dict) for m in msgs)
+        assert msgs[0]["content"] == "hi"
+        assert msgs[1]["content"] == "hello"
+
+    def test_archive_chat_transcript_returns_none_when_missing(self):
+        """No transcript on disk → archive is a no-op, returns None."""
+        # Don't write a transcript at all.
+        assert self.ws.archive_chat_transcript() is None
+
+    def test_archive_chat_transcript_returns_none_on_empty(self):
+        """Zero-byte transcript → archive is a no-op AND cleans up the
+        empty file so it doesn't masquerade as content next time."""
+        path = Path(self._tmpdir) / "chat_transcript.jsonl"
+        path.write_text("")
+        assert path.stat().st_size == 0
+
+        assert self.ws.archive_chat_transcript() is None
+        assert not path.exists(), "empty transcript should be removed"
