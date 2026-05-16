@@ -1373,3 +1373,114 @@ class TestHandOffTitleQuality:
         # signal from the summary so the recipient can tell tasks apart.
         assert kwargs["title"]
         assert kwargs["title"] != "(handoff)"
+
+
+# ── Bug 4: surface wake_agent failures in hand_off response ──────
+
+
+class TestHandOffWakeFailureSurfacing:
+    """Operator-reported Bug 4: wake_agent failures were silently swallowed.
+
+    The task IS queued in SQLite/blackboard either way, so ``handed_off``
+    stays True. But callers need visibility into wake failures so they
+    can retry the wake or warn the user, instead of silently relying on
+    the recipient's next cron tick.
+    """
+
+    @pytest.mark.asyncio
+    async def test_hand_off_returns_wake_failed_when_wake_raises(self):
+        """Legacy path: wake failure surfaces ``wake_failed`` + ``wake_error``."""
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="scout")
+        mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
+        mc.wake_agent.side_effect = RuntimeError("agent container 503")
+
+        result = await hand_off(
+            to="analyst",
+            summary="research done",
+            mesh_client=mc,
+        )
+
+        # Task is still queued — handed_off stays True.
+        assert result["handed_off"] is True
+        # Wake failure is surfaced.
+        assert result["wake_failed"] is True
+        assert "agent container 503" in result["wake_error"]
+
+    @pytest.mark.asyncio
+    async def test_hand_off_success_omits_wake_failure_keys(self):
+        """Legacy path: successful wake leaves no wake_failed/wake_error keys."""
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="scout")
+        mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
+
+        result = await hand_off(
+            to="analyst",
+            summary="research done",
+            mesh_client=mc,
+        )
+
+        assert result["handed_off"] is True
+        assert "wake_failed" not in result
+        assert "wake_error" not in result
+
+    @pytest.mark.asyncio
+    async def test_hand_off_wake_error_message_is_truncated(self):
+        """Legacy path: wake_error is bounded to 200 chars to limit payload size."""
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="scout")
+        mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
+        huge_msg = "x" * 5000
+        mc.wake_agent.side_effect = RuntimeError(huge_msg)
+
+        result = await hand_off(
+            to="analyst",
+            summary="research done",
+            mesh_client=mc,
+        )
+
+        assert result["handed_off"] is True
+        assert result["wake_failed"] is True
+        assert len(result["wake_error"]) <= 200
+
+    @pytest.mark.asyncio
+    async def test_hand_off_v2_returns_wake_failed_when_wake_raises(self):
+        """V2 path: wake failure surfaces ``wake_failed`` + ``wake_error``."""
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="scout", v2_enabled=True)
+        mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
+        mc.create_task.return_value = {"id": "task_v2_abc", "status": "pending"}
+        mc.wake_agent.side_effect = RuntimeError("auth token rejected")
+
+        result = await hand_off(
+            to="analyst",
+            summary="enrich the lead",
+            mesh_client=mc,
+        )
+
+        assert result["handed_off"] is True
+        assert result["wake_failed"] is True
+        assert "auth token rejected" in result["wake_error"]
+
+    @pytest.mark.asyncio
+    async def test_hand_off_v2_success_omits_wake_failure_keys(self):
+        """V2 path: successful wake leaves no wake_failed/wake_error keys."""
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="scout", v2_enabled=True)
+        mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
+        mc.create_task.return_value = {"id": "task_v2_abc", "status": "pending"}
+
+        result = await hand_off(
+            to="analyst",
+            summary="enrich the lead",
+            mesh_client=mc,
+        )
+
+        assert result["handed_off"] is True
+        assert "wake_failed" not in result
+        assert "wake_error" not in result

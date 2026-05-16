@@ -210,13 +210,19 @@ async def hand_off(
     # Wake the target agent so it processes the task immediately
     # instead of waiting for its next heartbeat.  Pass origin so
     # the mesh lane worker can auto-notify the originating user.
+    # Wake failures are surfaced to the caller via ``wake_failed`` +
+    # ``wake_error`` (handed_off stays True — the task IS queued in
+    # SQLite, only the wake signal failed; the caller can decide
+    # whether to retry the wake or wait for cron).
+    wake_error: str | None = None
     try:
         await mesh_client.wake_agent(
             to, f"New task from {from_agent}: {summary[:200]}",
             origin=origin,
         )
     except Exception as e:
-        logger.debug("Wake for %s failed (task still queued): %s", to, e)
+        wake_error = str(e)[:200]
+        logger.warning("Wake for %s failed (task still queued): %s", to, e)
 
     result = {
         "handed_off": True,
@@ -226,6 +232,9 @@ async def hand_off(
     }
     if output_key:
         result["output_key"] = output_key
+    if wake_error is not None:
+        result["wake_failed"] = True
+        result["wake_error"] = wake_error
     return result
 
 
@@ -604,15 +613,19 @@ async def _hand_off_v2(
 
     task_id = record.get("id", "")
 
-    # Wake the target so they pick up the task immediately. Failures
-    # are logged and swallowed — the task is queued either way.
+    # Wake the target so they pick up the task immediately. The task
+    # is queued in SQLite either way; wake failures are surfaced to the
+    # caller via ``wake_failed`` + ``wake_error`` so they can decide
+    # whether to retry the wake or wait for the recipient's next cron.
+    wake_error: str | None = None
     try:
         await mesh_client.wake_agent(
             to, f"New task from {mesh_client.agent_id}: {summary[:200]}",
             origin=origin,
         )
     except Exception as e:
-        logger.debug("Wake for %s failed (task still queued): %s", to, e)
+        wake_error = str(e)[:200]
+        logger.warning("Wake for %s failed (task still queued): %s", to, e)
 
     result = {
         "handed_off": True,
@@ -623,6 +636,9 @@ async def _hand_off_v2(
     }
     if artifact_ref:
         result["output_key"] = artifact_ref
+    if wake_error is not None:
+        result["wake_failed"] = True
+        result["wake_error"] = wake_error
     return result
 
 
