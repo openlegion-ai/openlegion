@@ -1881,3 +1881,148 @@ async def test_get_agent_profile_carries_structured_routing_fields(tmp_path):
         bb.close()
         costs.close()
         traces.close()
+
+
+@pytest.mark.asyncio
+async def test_get_agent_profile_carries_runtime_debug_fields(tmp_path):
+    """`/mesh/agents/{id}/profile` surfaces last_heartbeat_at + spend totals."""
+    from unittest.mock import patch
+
+    import yaml as yaml_mod
+    from httpx import ASGITransport, AsyncClient
+
+    from src.host.costs import CostTracker
+    from src.host.cron import CronScheduler
+    from src.host.server import create_mesh_app
+    from src.host.traces import TraceStore
+
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir(parents=True)
+    agents_path = cfg_dir / "agents.yaml"
+    agents_path.write_text(yaml_mod.dump({"agents": {
+        "writer": {"role": "writer", "model": "x"},
+    }}))
+    (cfg_dir / "mesh.yaml").write_text(yaml_mod.dump({"mesh": {"port": 8420}}))
+    projects_dir = cfg_dir / "projects"
+    projects_dir.mkdir()
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix()
+    router = MessageRouter(perms, {})
+    costs = CostTracker(str(tmp_path / "costs.db"))
+    traces = TraceStore(str(tmp_path / "traces.db"))
+    cron = CronScheduler(config_path=str(tmp_path / "cron.json"))
+    router.register_agent("writer", "http://writer:8400", ["file_write"])
+
+    # Seed cost tracker with a known spend for "writer".
+    costs.track_fixed_cost(agent="writer", model="gpt-4o", cost_usd=0.42)
+
+    # Seed cron scheduler with a heartbeat job and force last_run.
+    job = cron.add_job(agent="writer", schedule="every 15m", heartbeat=True)
+    job.last_run = "2026-05-15T10:00:00+00:00"
+
+    app = create_mesh_app(
+        blackboard=bb, pubsub=pubsub, router=router, permissions=perms,
+        cost_tracker=costs, trace_store=traces, cron_scheduler=cron,
+    )
+
+    try:
+        with patch("src.cli.config.AGENTS_FILE", agents_path), \
+             patch("src.cli.config.CONFIG_FILE", cfg_dir / "mesh.yaml"), \
+             patch("src.cli.config.PROJECTS_DIR", projects_dir):
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test",
+            ) as client:
+                resp = await client.get(
+                    "/mesh/agents/writer/profile",
+                    headers={"x-mesh-internal": "1"},
+                )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["last_heartbeat_at"] == "2026-05-15T10:00:00+00:00"
+        assert data["spend_today_usd"] == pytest.approx(0.42)
+        assert data["spend_month_usd"] == pytest.approx(0.42)
+    finally:
+        bb.close()
+        costs.close()
+        traces.close()
+
+
+@pytest.mark.asyncio
+async def test_get_agent_profile_hides_runtime_fields_from_peer_agents(tmp_path):
+    """Peer agents (not operator, not internal) must NOT see runtime debug
+    fields on /profile — they're operator-or-internal only because they
+    leak operational state across the fleet and add SQL load to the
+    routing hot path."""
+    from unittest.mock import patch
+
+    import yaml as yaml_mod
+    from httpx import ASGITransport, AsyncClient
+
+    from src.host.costs import CostTracker
+    from src.host.cron import CronScheduler
+    from src.host.server import create_mesh_app
+    from src.host.traces import TraceStore
+
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir(parents=True)
+    agents_path = cfg_dir / "agents.yaml"
+    agents_path.write_text(yaml_mod.dump({"agents": {
+        "writer": {"role": "writer", "model": "x"},
+        "peer": {"role": "peer", "model": "x"},
+    }}))
+    (cfg_dir / "mesh.yaml").write_text(yaml_mod.dump({"mesh": {"port": 8420}}))
+    projects_dir = cfg_dir / "projects"
+    projects_dir.mkdir()
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix()
+    # Grant peer→writer messaging so the /profile permission check passes —
+    # we want to test the runtime-field gate AFTER the message gate, not
+    # short-circuit at the message gate.
+    perms.permissions["peer"] = AgentPermissions(
+        agent_id="peer", can_message=["writer"],
+    )
+    router = MessageRouter(perms, {})
+    costs = CostTracker(str(tmp_path / "costs.db"))
+    traces = TraceStore(str(tmp_path / "traces.db"))
+    cron = CronScheduler(config_path=str(tmp_path / "cron.json"))
+    router.register_agent("writer", "http://writer:8400", ["file_write"])
+    router.register_agent("peer", "http://peer:8400", [])
+
+    costs.track_fixed_cost(agent="writer", model="gpt-4o", cost_usd=0.42)
+    job = cron.add_job(agent="writer", schedule="every 15m", heartbeat=True)
+    job.last_run = "2026-05-15T10:00:00+00:00"
+
+    app = create_mesh_app(
+        blackboard=bb, pubsub=pubsub, router=router, permissions=perms,
+        cost_tracker=costs, trace_store=traces, cron_scheduler=cron,
+    )
+
+    try:
+        with patch("src.cli.config.AGENTS_FILE", agents_path), \
+             patch("src.cli.config.CONFIG_FILE", cfg_dir / "mesh.yaml"), \
+             patch("src.cli.config.PROJECTS_DIR", projects_dir):
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test",
+            ) as client:
+                resp = await client.get(
+                    "/mesh/agents/writer/profile",
+                    # Peer-agent identity; NO x-mesh-internal header.
+                    params={"requesting_agent": "peer"},
+                )
+        assert resp.status_code == 200
+        data = resp.json()
+        # Routing fields still present.
+        assert data["agent_id"] == "writer"
+        assert "capabilities" in data
+        # Runtime debug fields must be ABSENT for non-operator callers.
+        assert "last_heartbeat_at" not in data
+        assert "spend_today_usd" not in data
+        assert "spend_month_usd" not in data
+    finally:
+        bb.close()
+        costs.close()
+        traces.close()

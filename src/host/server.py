@@ -3220,7 +3220,48 @@ def create_mesh_app(
         escalation_to = _acfg_profile.get("escalation_to")
         forbidden = list(_acfg_profile.get("forbidden") or [])
 
-        return {
+        # Runtime debugging fields: operator-or-internal only. Two reasons:
+        # (a) spend totals + heartbeat liveness are operational visibility
+        #     that peer agents shouldn't have over each other, mirroring how
+        #     /mesh/system/metrics gates per-agent cost behind the same
+        #     operator-or-internal tier;
+        # (b) /profile is in the routing hot path (peer agents call it for
+        #     capability/escalation discovery), and we don't want to pay
+        #     two SQL aggregates per call on that path. Skipping them when
+        #     the caller isn't operator-or-internal keeps the hot path lean.
+        caller_for_gate = _resolve_agent_id("", request)
+        runtime_visible = (
+            caller_for_gate == "operator" or _is_internal_caller(request)
+        )
+
+        runtime_fields: dict[str, object] = {}
+        if runtime_visible:
+            last_heartbeat_at: str | None = None
+            if cron_scheduler is not None:
+                hb_job = cron_scheduler.find_heartbeat_job(agent_id)
+                if hb_job is not None:
+                    last_heartbeat_at = hb_job.last_run
+            runtime_fields["last_heartbeat_at"] = last_heartbeat_at
+
+            spend_today_usd = 0.0
+            spend_month_usd = 0.0
+            if cost_tracker is not None:
+                try:
+                    spend_today_usd = float(
+                        cost_tracker.get_spend(agent=agent_id, period="today").get("total_cost", 0.0)
+                    )
+                    spend_month_usd = float(
+                        cost_tracker.get_spend(agent=agent_id, period="month").get("total_cost", 0.0)
+                    )
+                except Exception:
+                    logger.debug(
+                        "cost_tracker.get_spend failed for %s",
+                        agent_id, exc_info=True,
+                    )
+            runtime_fields["spend_today_usd"] = spend_today_usd
+            runtime_fields["spend_month_usd"] = spend_month_usd
+
+        response = {
             "agent_id": agent_id,
             "role": role,
             "status": status,
@@ -3239,6 +3280,8 @@ def create_mesh_app(
             "escalation_to": escalation_to,
             "forbidden": forbidden,
         }
+        response.update(runtime_fields)
+        return response
 
     # === Request Traces ===
 
@@ -5025,17 +5068,84 @@ def create_mesh_app(
     }
 
     @app.get("/mesh/agents/{agent_id}/config")
-    async def get_agent_config(agent_id: str, request: Request) -> dict:
-        """Read agent config from agents.yaml."""
+    async def get_agent_config(
+        agent_id: str,
+        request: Request,
+        fields: str = "",
+    ) -> dict:
+        """Read agent config in canonical edit_agent shape (operator-only).
+
+        Returns ``{agent_id, config: {...}}`` where ``config`` mirrors the
+        field surface of ``edit_agent``: ``model``, ``instructions``, ``soul``,
+        ``heartbeat``, ``heartbeat_schedule``, ``interface``, ``role``,
+        ``permissions``, ``budget``, ``thinking``. The value sources are
+        normalized — ``initial_*`` yaml internals translated, permissions
+        loaded from PermissionMatrix, heartbeat_schedule pulled from the
+        cron scheduler.
+
+        Optional ``?fields=instructions,soul`` filters the response to a
+        subset (case-sensitive, comma-separated). Unknown field names are
+        silently dropped (the operator tool validates upfront).
+        """
         _require_any_auth(request)
-        if _resolve_agent_id("", request) != "operator":
+        caller = _resolve_agent_id("", request)
+        if not (caller == "operator" or _is_internal_caller(request)):
             raise HTTPException(403, "Only the operator can read agent configs")
+        await _check_rate_limit("agent_profile", "operator")
+
         from src.cli.config import _load_config
-        agent_cfg = _load_config()
-        agents = agent_cfg.get("agents", {})
+        agent_cfg_root = _load_config()
+        agents = agent_cfg_root.get("agents", {})
         if agent_id not in agents:
             raise HTTPException(404, f"Agent '{agent_id}' not found")
-        return {"agent_id": agent_id, "config": agents[agent_id]}
+        raw = agents[agent_id]
+
+        # Translate yaml internals -> canonical edit_agent field names.
+        full: dict = {
+            "model": raw.get("model", ""),
+            "role": raw.get("role", ""),
+            "thinking": raw.get("thinking", "off") or "off",
+            "budget": raw.get("budget", {}),
+            "instructions": raw.get("initial_instructions", ""),
+            "soul": raw.get("initial_soul", ""),
+            "heartbeat": raw.get("initial_heartbeat", ""),
+            "interface": raw.get("initial_interface", ""),
+        }
+
+        # Permissions live in PERMISSIONS_FILE, not agents.yaml. Load via
+        # PermissionMatrix and serialize the AgentPermissions Pydantic model
+        # so the operator gets the same shape edit_agent accepts.
+        #
+        # Strip ``agent_id`` from the dump: the field exists on the Pydantic
+        # model but PermissionMatrix.reload() reconstructs it via
+        # ``AgentPermissions(agent_id=agent_id, **perms)`` — leaving it in
+        # would cause a ``multiple values for keyword argument 'agent_id'``
+        # crash on the next reload after a round-trip read→edit, poisoning
+        # ``config/permissions.json``.
+        if permissions is not None:
+            try:
+                perms = permissions.get_permissions(agent_id)
+                dumped = perms.model_dump() if hasattr(perms, "model_dump") else perms.dict()
+                dumped.pop("agent_id", None)
+                full["permissions"] = dumped
+            except Exception:
+                full["permissions"] = {}
+        else:
+            full["permissions"] = {}
+
+        # heartbeat_schedule lives in the cron scheduler.
+        full["heartbeat_schedule"] = ""
+        if cron_scheduler is not None:
+            job = cron_scheduler.find_heartbeat_job(agent_id)
+            if job is not None:
+                full["heartbeat_schedule"] = job.schedule or ""
+
+        # Optional ?fields= subset filter.
+        if fields:
+            wanted = {f.strip() for f in fields.split(",") if f.strip()}
+            full = {k: v for k, v in full.items() if k in wanted}
+
+        return {"agent_id": agent_id, "config": full}
 
     @app.post("/mesh/agents/{agent_id}/propose")
     async def propose_agent_config_change(agent_id: str, request: Request) -> dict:

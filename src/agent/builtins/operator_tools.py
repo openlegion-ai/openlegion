@@ -7,7 +7,12 @@ import re as _re
 from datetime import datetime, timezone
 
 from src.agent.skills import skill
-from src.shared.types import SOFT_EDIT_FIELDS as _SOFT_EDIT_FIELDS
+from src.shared.types import (
+    HARD_EDIT_FIELDS as _HARD_EDIT_FIELDS,
+)
+from src.shared.types import (
+    SOFT_EDIT_FIELDS as _SOFT_EDIT_FIELDS,
+)
 from src.shared.utils import setup_logging
 
 logger = setup_logging("agent.builtins.operator_tools")
@@ -226,6 +231,93 @@ async def confirm_edit(change_id: str, *, mesh_client=None, _messages=None, **_k
             "5–30 minute revert window. Don't call confirm_edit anymore."
         ),
     }
+
+
+@skill(
+    name="read_agent_config",
+    description=(
+        "Read an agent's current configuration. Symmetric inverse of "
+        "edit_agent — returns the same fields edit_agent can change so you "
+        "can review current values before/after a tweak. Use this BEFORE "
+        "edit_agent whenever you need to know what's there now (e.g. "
+        "before appending to instructions, before adjusting a budget, "
+        "before changing a heartbeat schedule).\n\n"
+        "Returns ``{agent_id, config: {...}}`` with these fields: "
+        "model, instructions, soul, heartbeat, heartbeat_schedule, "
+        "interface, role, permissions, budget, thinking. Pass "
+        "``fields=['instructions','soul']`` to scope the read to a subset."
+    ),
+    parameters={
+        "agent_id": {
+            "type": "string",
+            "description": "Target agent ID (use list_agents to find IDs)",
+        },
+        "fields": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Optional list of field names to return. Valid values: "
+                "model, instructions, soul, heartbeat, heartbeat_schedule, "
+                "interface, role, permissions, budget, thinking. "
+                "Omit or pass empty for the full config."
+            ),
+            "default": [],
+        },
+    },
+)
+async def read_agent_config(
+    agent_id: str,
+    fields: list[str] | None = None,
+    *,
+    mesh_client=None,
+    **_kw,
+) -> dict:
+    """Read an agent's config — symmetric inverse of edit_agent.
+
+    Validates ``fields`` against the union of HARD/SOFT_EDIT_FIELDS
+    upfront so the LLM gets a clear error before the mesh round-trip.
+    On unknown field names, returns ``{"error": "unknown_fields", ...}``
+    listing the bad names and the valid set. On 404 from the mesh,
+    returns ``{"error": "agent_not_found"}``.
+    """
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+
+    valid = _HARD_EDIT_FIELDS | _SOFT_EDIT_FIELDS
+    if fields:
+        # Normalize before validating — mesh-side parsing strips whitespace,
+        # so accepting ["instructions "] (trailing space) keeps the read↔write
+        # symmetry consistent (edit_agent doesn't reject on whitespace either).
+        fields = [f.strip() for f in fields if isinstance(f, str) and f.strip()]
+        unknown = [f for f in fields if f not in valid]
+        if unknown:
+            return {
+                "error": "unknown_fields",
+                "unknown": unknown,
+                "valid": sorted(valid),
+            }
+
+    try:
+        result = await mesh_client.get_agent_config(agent_id, fields=fields)
+    except Exception as e:
+        # Detect httpx HTTPStatusError without importing httpx at module
+        # load (operator_tools is imported in test paths that may stub
+        # networking). Duck-type on .response.status_code.
+        resp = getattr(e, "response", None)
+        status = getattr(resp, "status_code", None)
+        if status == 404:
+            return {"error": "agent_not_found", "agent_id": agent_id}
+        if status is not None:
+            body = getattr(resp, "text", "") or ""
+            return {
+                "error": "mesh_error",
+                "status": status,
+                "body": body[:500],
+            }
+        return {"error": f"Failed to read agent config: {e}"}
+    return result
 
 
 @skill(

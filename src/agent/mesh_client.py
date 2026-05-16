@@ -795,11 +795,21 @@ class MeshClient:
         response.raise_for_status()
         return response.json()
 
-    async def get_agent_config(self, agent_id: str) -> dict:
-        """Get the current config for an agent."""
+    async def get_agent_config(
+        self, agent_id: str, fields: list[str] | None = None,
+    ) -> dict:
+        """Get the current config for an agent (operator-only).
+
+        Returns ``{agent_id, config: {...}}`` mirroring ``edit_agent``'s
+        field surface. Pass ``fields=["instructions", "soul"]`` to scope
+        the response.
+        """
+        params: dict[str, str] = {"requesting_agent": self.agent_id}
+        if fields:
+            params["fields"] = ",".join(fields)
         response = await self._get_with_retry(
             f"{self.mesh_url}/mesh/agents/{agent_id}/config",
-            params={"requesting_agent": self.agent_id},
+            params=params,
         )
         response.raise_for_status()
         return response.json()
