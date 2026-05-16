@@ -1444,6 +1444,30 @@ function dashboard() {
         document.title = this._buildTitle();
       }
 
+      // Operator chat container is x-show="operatorReady" — until fetchAgents
+      // resolves it's display:none (scrollHeight=0) and the init scroll below
+      // silently no-ops. Re-fire once when the gate flips so users land on the
+      // latest message rather than the top of the restored history.
+      this.$watch('operatorReady', (val, oldVal) => {
+        if (!val || oldVal) return;
+        this.$nextTick(() => {
+          if (this.activeTab === 'chat' || this.messengerSidePanelOpen) {
+            this._scrollChat(this.activeChatId || 'operator', true);
+          }
+        });
+      });
+
+      // Side-panel open transition — the chat-messages container mounts at
+      // scrollTop=0; force a scroll on the open edge so click-toggles land
+      // on the latest message. localStorage-restored opens are handled below
+      // since the assignment already happened during state restore.
+      this.$watch('messengerSidePanelOpen', (val) => {
+        if (!val) return;
+        this.$nextTick(() => {
+          if (this.activeChatId) this._scrollChat(this.activeChatId, true);
+        });
+      });
+
       // Ensure operator chat is initialized when landing on the chat tab
       if (this.activeTab === 'chat' || initRoute.tab === 'chat') {
         if (!this.openChats.includes('operator')) {
@@ -1456,6 +1480,14 @@ function dashboard() {
           this._scrollChat('operator', true);
           const el = document.getElementById('operator-chat-input');
           if (el) el.focus();
+        });
+      }
+
+      // Side panel restored from localStorage above (line ~1233) — the
+      // $watch doesn't fire on init-time assignment, so scroll explicitly.
+      if (this.messengerSidePanelOpen && this.activeChatId) {
+        this.$nextTick(() => {
+          this._scrollChat(this.activeChatId, true);
         });
       }
 
@@ -1839,6 +1871,7 @@ function dashboard() {
           this.chatPanelMinimized = false;
           this._loadChatHistory(this.activeChatId || 'operator');
           this.$nextTick(() => {
+            this._scrollChat(this.activeChatId || 'operator', true);
             const el = document.getElementById('operator-chat-input');
             if (el) el.focus();
           });
@@ -7826,6 +7859,7 @@ function dashboard() {
         if (!resp.ok) return;
         const data = await resp.json();
         const localMsgs = this.chatHistories[agentId] || [];
+        const wasEmpty = localMsgs.length === 0;
         if (!data.messages || data.messages.length === 0) {
           // Server returned empty — agent may be restarting or transcript not yet
           // initialized. Preserve local messages to avoid losing visible history.
@@ -7881,7 +7915,11 @@ function dashboard() {
           ? [...serverMsgs, ...trailing]
           : serverMsgs;
         this._saveChatToSession();
-        this.$nextTick(() => this._scrollChat(agentId));
+        // Force scroll when the local cache was empty (first fetch on mount) —
+        // the sticky nearBottom heuristic would otherwise treat scrollTop=0
+        // as "user scrolled to top" and skip. Live-update refreshes keep the
+        // conservative behavior to preserve a user's scroll position.
+        this.$nextTick(() => this._scrollChat(agentId, wasEmpty));
       } catch (e) {
         console.debug('_loadChatHistory failed for', agentId, e.message || e);
       }
