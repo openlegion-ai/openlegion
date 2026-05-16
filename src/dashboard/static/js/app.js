@@ -10210,6 +10210,8 @@ function dashboard() {
         save_observations: 'taking notes',
         edit_agent: 'updating a teammate',
         read_agent_config: 'reviewing a teammate',
+        read_peer_artifact: 'reading a teammate\'s file',
+        list_peer_artifacts: 'browsing a teammate\'s files',
         create_agent: 'adding a teammate',
         apply_template: 'building a team from a template',
         inspect_agents: 'reviewing the team',

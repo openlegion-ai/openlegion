@@ -814,6 +814,35 @@ class MeshClient:
         response.raise_for_status()
         return response.json()
 
+    async def list_peer_artifacts(self, agent_id: str) -> dict:
+        """List a peer agent's artifact files (operator-only).
+
+        Backs the operator's ``list_peer_artifacts`` tool. Returns
+        ``{agent_id, artifacts: [{name, size, modified}, ...]}``. 404
+        if the agent doesn't exist; 403 if the caller isn't operator.
+        """
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/agents/{agent_id}/artifacts",
+            params={"requesting_agent": self.agent_id},
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def read_peer_artifact(self, agent_id: str, name: str) -> dict:
+        """Read a single peer artifact's content (operator-only).
+
+        Backs the operator's ``read_peer_artifact`` tool. Returns
+        ``{agent_id, name, content, size, encoding}``. 404 if the
+        agent or artifact is missing; 413 if the file exceeds the
+        mesh-layer cap; 403 if the caller isn't operator.
+        """
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/agents/{agent_id}/artifacts/{name}",
+            params={"requesting_agent": self.agent_id},
+        )
+        response.raise_for_status()
+        return response.json()
+
     async def cancel_pending_action(self, nonce: str) -> dict:
         """Cancel a pending action by nonce (operator self-cleanup).
 
