@@ -1483,6 +1483,40 @@ class TestHandOffWakeFailureSurfacing:
         assert "[REDACTED]" in result["wake_error"]
 
     @pytest.mark.asyncio
+    async def test_hand_off_wake_error_redacts_url_query_param_value(self):
+        """Codex P1: ``redact_string`` only catches token-shaped secrets
+        (sk-…, gho_…, AKIA…) — it leaves arbitrary URL query-param
+        values intact even when the key signals a credential (e.g.
+        ``?api_key=abc123``). The fix swaps to ``redact_text_with_urls``
+        which runs ``redact_url`` on embedded URLs first so query-param
+        values get stripped regardless of whether the value matches a
+        regex pattern.
+        """
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="scout")
+        mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
+        # Value is short, random — would NOT match SECRET_PATTERNS,
+        # but the query-param KEY (``api_key``) is in SENSITIVE_QUERY_PARAMS.
+        opaque_value = "abc123random"
+        leaky = (
+            f"POST https://gateway.example.com/wake?api_key={opaque_value} "
+            f"failed with 500"
+        )
+        mc.wake_agent.side_effect = RuntimeError(leaky)
+
+        result = await hand_off(
+            to="analyst",
+            summary="research done",
+            mesh_client=mc,
+        )
+
+        assert result["wake_failed"] is True
+        assert opaque_value not in result["wake_error"], (
+            f"opaque query-param value leaked: {result['wake_error']!r}"
+        )
+
+    @pytest.mark.asyncio
     async def test_hand_off_v2_returns_wake_failed_when_wake_raises(self):
         """V2 path: wake failure surfaces ``wake_failed`` + ``wake_error``."""
         from src.agent.builtins.coordination_tool import hand_off
