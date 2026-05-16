@@ -2739,7 +2739,7 @@ function dashboard() {
       this.workplaceLoading = true;
       try {
         await Promise.all([
-          this.loadWorkplaceProjects(),
+          this.loadWorkplaceTeams(),
           this.loadWorkplaceTasks(),
           this.loadWorkplaceBlockers(),
           this.loadWorkplaceOutputs(),
