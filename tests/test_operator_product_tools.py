@@ -28,7 +28,7 @@ from src.shared.types import AgentPermissions, MessageOrigin
 
 @pytest.fixture(autouse=True)
 def _set_operator_env(monkeypatch):
-    monkeypatch.setenv("ALLOWED_TOOLS", "inspect_projects,list_agent_queue")
+    monkeypatch.setenv("ALLOWED_TOOLS", "inspect_teams,list_agent_queue")
 
 
 # ── Helper: simulate an HTTP error wrapping an over_budget body ────
@@ -56,7 +56,7 @@ def _fake_budget_http_error(agent: str, monthly_used: float = 50.0) -> httpx.HTT
 
 
 @pytest.mark.asyncio
-async def test_inspect_projects_status_requires_v2_flag(monkeypatch):
+async def test_inspect_teams_status_requires_v2_flag(monkeypatch):
     """Read tools that consume tasks return a clean error when v2 off.
 
     The flag now defaults to ``1`` (rollout) so the off path must
@@ -64,8 +64,8 @@ async def test_inspect_projects_status_requires_v2_flag(monkeypatch):
     relying on the env var being unset.
     """
     monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "0")
-    from src.agent.builtins.operator_tools import inspect_projects
-    result = await inspect_projects(detail="status", mesh_client=MagicMock())
+    from src.agent.builtins.operator_tools import inspect_teams
+    result = await inspect_teams(detail="status", mesh_client=MagicMock())
     assert "error" in result
     assert "OPENLEGION_ORCHESTRATION_TASKS_V2" in result["error"]
 
@@ -88,10 +88,10 @@ async def test_get_team_outputs_requires_v2_flag(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_summarize_project_progress_requires_v2_flag(monkeypatch):
-    monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_V2", raising=False)
-    from src.agent.builtins.operator_tools import summarize_project_progress
-    result = await summarize_project_progress("p1", mesh_client=MagicMock())
+async def test_summarize_team_progress_requires_v2_flag(monkeypatch):
+    monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "0")
+    from src.agent.builtins.operator_tools import summarize_team_progress
+    result = await summarize_team_progress("p1", mesh_client=MagicMock())
     assert "error" in result
 
 
@@ -121,15 +121,15 @@ async def test_manage_task_retry_requires_v2_flag(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_manage_project_archive_works_without_v2_flag(monkeypatch):
-    """Archive/delete project tools work regardless of the v2 flag."""
+async def test_manage_team_archive_works_without_v2_flag(monkeypatch):
+    """Archive/delete team tools work regardless of the v2 flag."""
     monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_V2", raising=False)
-    from src.agent.builtins.operator_tools import manage_project
+    from src.agent.builtins.operator_tools import manage_team
     mc = MagicMock()
-    mc.archive_project = AsyncMock(return_value={"archived": True, "project": "growth"})
+    mc.archive_team = AsyncMock(return_value={"archived": True, "team": "growth"})
     messages = [{"role": "user", "content": "yes", "_origin": "user"}]
-    result = await manage_project("growth", "archive",
-                                   mesh_client=mc, _messages=messages)
+    result = await manage_team("growth", "archive",
+                                mesh_client=mc, _messages=messages)
     assert result["archived"] is True
 
 
@@ -137,18 +137,18 @@ async def test_manage_project_archive_works_without_v2_flag(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_inspect_projects_status_all_projects(monkeypatch):
+async def test_inspect_teams_status_all_teams(monkeypatch):
     monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "1")
-    from src.agent.builtins.operator_tools import inspect_projects
+    from src.agent.builtins.operator_tools import inspect_teams
     mc = MagicMock()
-    mc.all_projects_status = AsyncMock(
-        return_value={"projects": [
-            {"project": {"name": "p1"}, "counts": {"active": 2}},
+    mc.all_teams_status = AsyncMock(
+        return_value={"teams": [
+            {"team": {"name": "p1"}, "counts": {"active": 2}},
         ]},
     )
-    result = await inspect_projects(detail="status", mesh_client=mc)
-    assert "projects" in result
-    mc.all_projects_status.assert_awaited_once()
+    result = await inspect_teams(detail="status", mesh_client=mc)
+    assert "teams" in result
+    mc.all_teams_status.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -175,14 +175,14 @@ async def test_get_team_outputs_passes_since(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_summarize_project_progress_calls_mesh(monkeypatch):
+async def test_summarize_team_progress_calls_mesh(monkeypatch):
     monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "1")
-    from src.agent.builtins.operator_tools import summarize_project_progress
+    from src.agent.builtins.operator_tools import summarize_team_progress
     mc = MagicMock()
-    mc.project_summary = AsyncMock(
+    mc.team_summary = AsyncMock(
         return_value={"status_text": "all good", "counts": {"active": 0}},
     )
-    result = await summarize_project_progress("p1", mesh_client=mc)
+    result = await summarize_team_progress("p1", mesh_client=mc)
     assert "status_text" in result
 
 
@@ -309,27 +309,27 @@ async def test_manage_task_retry_over_budget(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_manage_project_archive_autonomous_allowed():
-    """The provenance gate was dropped — operator can archive a project
+async def test_manage_team_archive_autonomous_allowed():
+    """The provenance gate was dropped — operator can archive a team
     autonomously (e.g. during heartbeat). The "undo" comes from
     archive being reversible via the dedicated unarchive endpoint."""
-    from src.agent.builtins.operator_tools import manage_project
+    from src.agent.builtins.operator_tools import manage_team
     mc = MagicMock()
-    mc.archive_project = AsyncMock(return_value={"archived": True, "project": "p1"})
+    mc.archive_team = AsyncMock(return_value={"archived": True, "team": "p1"})
     messages = [{"role": "user", "content": "x", "_origin": "system:heartbeat"}]
-    result = await manage_project("p1", "archive",
-                                    mesh_client=mc, _messages=messages)
+    result = await manage_team("archive", team_name="p1",
+                                mesh_client=mc, _messages=messages)
     assert result["archived"] is True
 
 
 @pytest.mark.asyncio
-async def test_manage_project_archive_success():
-    from src.agent.builtins.operator_tools import manage_project
+async def test_manage_team_archive_success():
+    from src.agent.builtins.operator_tools import manage_team
     mc = MagicMock()
-    mc.archive_project = AsyncMock(return_value={"archived": True, "project": "p1"})
+    mc.archive_team = AsyncMock(return_value={"archived": True, "team": "p1"})
     messages = [{"role": "user", "content": "yes", "_origin": "user"}]
-    result = await manage_project("p1", "archive",
-                                    mesh_client=mc, _messages=messages)
+    result = await manage_team("archive", team_name="p1",
+                                mesh_client=mc, _messages=messages)
     assert result["archived"] is True
 
 
@@ -354,54 +354,54 @@ async def test_manage_agent_archive_success():
 
 
 @pytest.mark.asyncio
-async def test_manage_project_delete_returns_nonce_for_confirmation():
-    from src.agent.builtins.operator_tools import manage_project
+async def test_manage_team_propose_delete_returns_nonce_for_confirmation():
+    from src.agent.builtins.operator_tools import manage_team
     mc = MagicMock()
-    mc.propose_delete_project = AsyncMock(return_value={
+    mc.propose_delete_team = AsyncMock(return_value={
         "change_id": "abc-123",
-        "summary": "Delete project 'growth' and 2 agent(s).",
+        "summary": "Delete team 'growth' and 2 agent(s).",
         "expires_at": "2026-05-02T00:15:00+00:00",
         "payload_digest": "deadbeef",
         "requires_confirmation": True,
     })
     messages = [{"role": "user", "content": "yes", "_origin": "user"}]
-    result = await manage_project("growth", "delete",
-                                    mesh_client=mc, _messages=messages)
+    result = await manage_team("propose_delete", team_name="growth",
+                                mesh_client=mc, _messages=messages)
     assert result["requires_confirmation"] is True
     assert result["change_id"] == "abc-123"
     assert "summary" in result
 
 
 @pytest.mark.asyncio
-async def test_manage_project_delete_autonomous_allowed():
+async def test_manage_team_propose_delete_autonomous_allowed():
     """Delete provenance gate was dropped at the operator-tool layer.
     Delete still has a mesh-side confirmation TTL window so the brief
     Confirm step in the dashboard remains; that's tested separately by
     the propose-delete endpoint tests. The operator-tool itself just
     forwards the call without checking message origin."""
-    from src.agent.builtins.operator_tools import manage_project
+    from src.agent.builtins.operator_tools import manage_team
     mc = MagicMock()
-    mc.propose_delete_project = AsyncMock(return_value={
+    mc.propose_delete_team = AsyncMock(return_value={
         "change_id": "n1",
-        "summary": "Delete project 'growth'",
+        "summary": "Delete team 'growth'",
         "requires_confirmation": True,
     })
     messages = [{"role": "user", "content": "hb", "_origin": "system:heartbeat"}]
-    result = await manage_project("growth", "delete",
-                                    mesh_client=mc, _messages=messages)
+    result = await manage_team("propose_delete", team_name="growth",
+                                mesh_client=mc, _messages=messages)
     assert result["change_id"] == "n1"
     assert result["requires_confirmation"] is True
 
 
 @pytest.mark.asyncio
-async def test_manage_project_delete_archive_required():
+async def test_manage_team_propose_delete_archive_required():
     """If the mesh rejects with 400, the tool surfaces a friendly hint."""
-    from src.agent.builtins.operator_tools import manage_project
+    from src.agent.builtins.operator_tools import manage_team
     mc = MagicMock()
-    mc.propose_delete_project = AsyncMock(side_effect=RuntimeError("400: Project must be archived"))
+    mc.propose_delete_team = AsyncMock(side_effect=RuntimeError("400: Team must be archived"))
     messages = [{"role": "user", "content": "yes", "_origin": "user"}]
-    result = await manage_project("growth", "delete",
-                                    mesh_client=mc, _messages=messages)
+    result = await manage_team("propose_delete", team_name="growth",
+                                mesh_client=mc, _messages=messages)
     assert result["error"] == "archive_required"
 
 
