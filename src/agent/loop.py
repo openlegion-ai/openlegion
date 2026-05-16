@@ -1778,8 +1778,12 @@ class AgentLoop:
                         raise
                     # Terminal auto-close ONLY for failure modes the
                     # agent cannot declare itself:
-                    #   - ``tool_limit_reached`` — loop hit the cap, no
-                    #     chance for the LLM to call complete_task.
+                    #   - swallowed internal error — ``_chat_inner``
+                    #     catches Exception and returns a dict with
+                    #     ``error: str``. Mirror the streaming
+                    #     wrapper's contract so we don't leave the
+                    #     task stuck in working (codex P2).
+                    #   - ``tool_limit_reached`` — loop hit the cap.
                     # We deliberately do NOT auto-close as ``done`` on
                     # clean chat completion. The chat handler runs
                     # whether the LLM did real work or just emitted a
@@ -1791,11 +1795,18 @@ class AgentLoop:
                     # done. Tasks left in ``working`` correctly reflect
                     # "agent received but hasn't finished" — a stale
                     # reaper (separate scope) handles forgetful agents.
-                    if task_id and result.get("tool_limit_reached"):
-                        await self._auto_close_task(
-                            task_id, "failed",
-                            error="max_iterations_reached",
-                        )
+                    if task_id:
+                        inner_error = result.get("error")
+                        if inner_error:
+                            await self._auto_close_task(
+                                task_id, "failed",
+                                error=str(inner_error)[:500],
+                            )
+                        elif result.get("tool_limit_reached"):
+                            await self._auto_close_task(
+                                task_id, "failed",
+                                error="max_iterations_reached",
+                            )
                     return result
                 finally:
                     await self._checkpoint_chat_session()
@@ -2348,7 +2359,20 @@ class AgentLoop:
             msg = f"Error: {e}"
             if self.workspace:
                 self.workspace.append_chat_message("assistant", msg)
-            return {"response": msg, "tool_outputs": tool_outputs, "tokens_used": total_tokens}
+            # ``error`` flag mirrors _chat_stream_inner's contract so the
+            # outer chat() wrapper can auto-fail the originating task
+            # on swallowed exceptions. Without this, a non-streaming
+            # handoff that hits an LLM/tool/runtime error after being
+            # marked ``working`` would have neither tool_limit_reached
+            # nor a raised exception in the wrapper, and the task
+            # would stay stuck in working forever (codex P2 from
+            # the false-done-auto-close PR review).
+            return {
+                "response": msg,
+                "tool_outputs": tool_outputs,
+                "tokens_used": total_tokens,
+                "error": str(e),
+            }
 
     def _log_chat_turn(
         self, user_msg: str, assistant_msg: str,

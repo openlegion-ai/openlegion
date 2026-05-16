@@ -159,6 +159,40 @@ async def test_chat_auto_closes_task_as_failed_on_exception():
     assert "boom inside chat" in (calls[1].kwargs.get("error") or "")
 
 
+# ── 3a. swallowed internal error → auto-fail (parallel to streaming) ─
+
+@pytest.mark.asyncio
+async def test_chat_auto_fails_task_on_swallowed_internal_error():
+    """``_chat_inner`` catches Exception and returns ``{"error": str(e), ...}``
+    instead of re-raising. Without explicit detection, a non-streaming
+    handoff that hits an LLM/tool/runtime error after the working
+    transition would have neither tool_limit_reached nor a raised
+    exception — the wrapper's except-Exception branch never sees it,
+    and the task stays stuck in ``working`` forever (codex P2 from
+    the false-done PR review). Wrapper must detect the ``error``
+    field on the returned dict and auto-fail.
+    """
+    loop = _make_loop_with_mocks()
+    # Simulate _chat_inner's swallowed-exception shape: error-flagged
+    # dict instead of raising.
+    loop._chat_inner = AsyncMock(return_value={
+        "response": "Error: upstream LLM timeout",
+        "tool_outputs": [],
+        "tokens_used": 0,
+        "error": "upstream LLM timeout",
+    })
+
+    result = await loop.chat("hi", task_id="task_err")
+    assert "error" in result  # SSE caller still sees the error response
+
+    # working then failed, in order. NOT done.
+    calls = loop.mesh_client.set_task_status.await_args_list
+    assert len(calls) == 2, f"expected working+failed, got {calls}"
+    assert calls[0].args == ("task_err", "working")
+    assert calls[1].args == ("task_err", "failed")
+    assert "upstream LLM timeout" in (calls[1].kwargs.get("error") or "")
+
+
 # ── 3b. explicit complete_task path is the ONLY way to mark done ──
 
 @pytest.mark.asyncio
