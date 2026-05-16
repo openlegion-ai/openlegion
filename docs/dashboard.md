@@ -47,8 +47,8 @@ tab displays a member count.
 
 Click the **+** button next to the team tabs to create a new team. Enter
 a name and optional description. Teams are stored on disk under
-`config/projects/{name}/` (legacy directory name retained through PR 2;
-PR 3 will flip it to `config/teams/`).
+`config/teams/{name}/`; the startup migrator drops a `config/projects`
+symlink at the legacy path so pre-rename code paths still resolve.
 
 ### Team Members
 
@@ -66,9 +66,10 @@ become solo agents.
 
 When a team is selected, a TEAM.md banner appears above the agent grid.
 Edit it to set shared context for all team members. The content is
-pushed to running member agents on save. When no team is selected (All
-Agents view), the banner is hidden. (Legacy `PROJECT.md` is still
-recognised as a fallback filename through PR 2.)
+pushed to running member agents on save. When no team is selected (Solo
+Agents view), the banner is hidden. (The workspace bootstrap loader on
+agents retains a read-only fallback for stray `PROJECT.md` files from
+pre-rename workspaces.)
 
 ## Team Tab
 
@@ -80,8 +81,8 @@ When the shared browser service is running, an embedded KasmVNC viewer appears i
 
 The operator is a system agent that builds and manages your workforce. It is rendered differently from regular agents:
 
-- In the **standalone fleet view** (no team selected), the operator card is **prepended** to the grid as the first card with a `system` badge.
-- Inside a team view, the operator card is **not** rendered — operator is never a team member. The backend rejects `POST /api/projects` and `POST /api/projects/{name}/members` requests that include the operator (`ValueError → HTTP 400`). (The legacy `/api/projects` route is the canonical surface during PR 2; `/api/teams` aliases land it for forward-compat.)
+- In the **solo fleet view** (no team selected), the operator card is **prepended** to the grid as the first card with a `system` badge.
+- Inside a team view, the operator card is **not** rendered — operator is never a team member. The backend rejects `POST /api/teams` and `POST /api/teams/{name}/members` requests that include the operator (`ValueError → HTTP 400`).
 - Clicking the operator card routes to **Settings → Operator** (not the standard agent detail panel).
 - The operator is **excluded from quota math, fleet cost/token totals, and broadcasts** — only "real" agents count against `OPENLEGION_MAX_AGENTS` and receive broadcast messages.
 - The standard agent detail panel for operator (if reached via deep link) shows a banner directing the user to the Operator system sub-tab; **Heartbeat Pause** is hidden.
@@ -445,7 +446,7 @@ The dashboard connects to the mesh via WebSocket at `/ws/events`. Events are str
 | **Pending actions** | `pending_action_created`, `pending_action_resolved`, `pending_action_expired` |
 | **Operator action receipts** | `operator_action_receipt`, `operator_action_receipt_undone`, `operator_action_receipt_superseded` |
 | **Agent lifecycle** | `agent_archived`, `agent_unarchived`, `agent_restarting`, `agent_restarted`, `agent_config_updated` |
-| **Team / project CRUD** | `team_created`, `team_updated`, `team_deleted`, `team_archived`, `team_unarchived` (each event is also emitted under its legacy `project_*` name through PR 3) |
+| **Team CRUD** | `team_created`, `team_updated`, `team_deleted`, `team_archived`, `team_unarchived` (PR 3 dropped the dual-emit under legacy `project_*` names — subscribers must listen on `team_*`) |
 
 Adding a new event-name string anywhere in `src/` without adding the matching `Literal` value will cause `DashboardEvent` to raise `ValidationError`, which the emit-site `try/except` swallows at debug level — the event silently disappears. `tests/test_types.py::test_every_emit_string_in_src_matches_a_dashboard_event_literal` is the regex-sweep guard against that drift.
 
@@ -681,20 +682,19 @@ The tables below are not exhaustive — they cover the user-facing surface area 
 
 **Teams**
 
-The legacy `*/projects/*` paths remain the canonical surface through
-PR 2; matching `*/teams/*` aliases land on the same handlers for
-forward-compat. JSON responses carry both `team_id` and `project_id`
-keys per item.
+The canonical surface is `/api/teams/*`. PR 3 removed the pre-rename
+`/api/projects/*` mirrors; JSON responses still carry a `project_id`
+key alongside `team_id` for consumer back-compat.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/dashboard/api/projects` | List all teams with members |
-| `POST` | `/dashboard/api/projects` | Create a new team |
-| `DELETE` | `/dashboard/api/projects/{name}` | Delete a team |
-| `POST` | `/dashboard/api/projects/{name}/members` | Add agent to team (auto-restarts agent) |
-| `DELETE` | `/dashboard/api/projects/{name}/members/{agent}` | Remove agent from team (auto-restarts agent) |
-| `GET` | `/dashboard/api/project?project={name}` | Read team's TEAM.md (legacy `PROJECT.md` accepted) |
-| `PUT` | `/dashboard/api/project?project={name}` | Update team's TEAM.md |
+| `GET` | `/dashboard/api/teams` | List all teams with members |
+| `POST` | `/dashboard/api/teams` | Create a new team |
+| `DELETE` | `/dashboard/api/teams/{name}` | Delete a team |
+| `POST` | `/dashboard/api/teams/{name}/members` | Add agent to team (auto-restarts agent) |
+| `DELETE` | `/dashboard/api/teams/{name}/members/{agent}` | Remove agent from team (auto-restarts agent) |
+| `GET` | `/dashboard/api/team?team={name}` | Read team's TEAM.md |
+| `PUT` | `/dashboard/api/team?team={name}` | Update team's TEAM.md |
 
 **Automation (Cron)**
 
