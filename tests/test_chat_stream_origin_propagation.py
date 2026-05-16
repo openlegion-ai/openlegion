@@ -440,3 +440,40 @@ async def test_chat_stream_without_task_id_skips_auto_close():
         pass
 
     assert stand_in.mesh_client.calls == []
+
+
+# Cancellation guard: codex P2 from PR R2 round 2 caught that
+# asyncio.CancelledError (Python 3.8+: BaseException, not Exception)
+# bypassed the except-Exception branch and left the task stuck in
+# ``working``. The fix catches CancelledError separately and closes
+# the task as ``cancelled`` (best-effort via asyncio.shield).
+
+class _LoopWithCancelledStream(_LoopWithTaskClose):
+    async def _chat_stream_inner(self, user_message):
+        yield {"type": "text_delta", "content": "starting..."}
+        # Simulate client-disconnect / server-cancel mid-stream.
+        raise asyncio.CancelledError()
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_closes_task_as_cancelled_on_cancel():
+    """When the streaming chat is cancelled (client disconnect, server
+    cancel) AFTER the task was marked ``working``, the wrapper must
+    transition it to ``cancelled`` instead of leaving it stuck.
+    """
+    from src.agent.loop import AgentLoop
+
+    stand_in = _LoopWithCancelledStream()
+    method = AgentLoop.chat_stream.__get__(stand_in, AgentLoop)
+
+    # Iterate until the cancel propagates out as CancelledError.
+    with pytest.raises(asyncio.CancelledError):
+        async for _ in method("hi", task_id="task_delta"):
+            pass
+
+    # working → cancelled, in order.
+    calls = stand_in.mesh_client.calls
+    assert len(calls) == 2, calls
+    assert calls[0][0:2] == ("task_delta", "working")
+    assert calls[1][0:2] == ("task_delta", "cancelled")
+    assert calls[1][2]["error"] == "agent_chat_cancelled"
