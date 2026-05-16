@@ -168,34 +168,60 @@ async def test_chat_without_task_id_skips_auto_close():
     loop.mesh_client.set_task_status.assert_not_awaited()
 
 
-# ── 4b. agent-busy steered guard fails the handed-off task ───────
+# ── 4b. agent-busy handoff rejection — no steer queue + back-edge ─
 
 @pytest.mark.asyncio
-async def test_chat_with_task_id_while_busy_fails_handed_off_task():
-    """When a wake with task_id arrives but the agent is already running
-    a task, the chat() early-return queues the message to the steer
-    queue. Before the fix the originating task was orphaned — the
-    steer queue has no task_id channel so auto-close never fired and
-    the originator's check_inbox stayed empty until the 7-day TTL.
+async def test_chat_with_task_id_while_busy_rejects_handoff_without_queueing():
+    """Codex P2: previous attempt at this fix put the message on the
+    steer queue AND closed the task as failed. The originator saw
+    task_failed and could retry/reroute, while THIS agent later
+    drained the queue and processed the (now-failed) message —
+    duplicate / conflicting work.
 
-    Now we close the task as ``failed`` with a specific
-    ``agent_busy_steered`` error so the sender's check_inbox surfaces
-    a clear back-edge immediately and they can choose to retry or
-    redirect.
+    Correct semantics: a handoff with task_id arriving on a busy
+    agent must be CLEANLY rejected — no steer-queue enqueue. The
+    originator gets a clear back-edge via set_task_status(failed)
+    and is the only party that decides what to do next.
+
+    Legacy free-form chat (no task_id) keeps queueing — there's
+    no durable task in that path so no double-execution risk.
     """
     loop = _make_loop_with_mocks()
+    # Sentinel async-mock for the steer queue so we can assert NO put.
+    loop._steer_queue.put = AsyncMock(return_value=None)
     # Simulate agent already executing a task.
     loop.current_task = "task_in_flight"
 
-    result = await loop.chat("queued plz", task_id="task_arriving")
+    result = await loop.chat("handoff plz", task_id="task_arriving")
 
-    # Steered message still queued (no behavior change for the chat).
-    assert "queued" in result["response"].lower()
-    # And the arriving task got a clear failed back-edge.
+    # The handoff was rejected — response surfaces that to the caller.
+    assert "rejected" in result["response"].lower()
+    # The arriving task got a clear failed back-edge with a specific code.
     loop.mesh_client.set_task_status.assert_awaited_once()
     call = loop.mesh_client.set_task_status.await_args
     assert call.args == ("task_arriving", "failed")
-    assert call.kwargs.get("error") == "agent_busy_steered"
+    assert call.kwargs.get("error") == "agent_busy_handoff_rejected"
+    # CRITICAL: must NOT have queued the message (would cause dup-exec).
+    loop._steer_queue.put.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_chat_without_task_id_while_busy_still_queues_for_chat_ux():
+    """Legacy chat path is unchanged: a free-form chat message (no
+    task_id) on a busy agent still goes onto the steer queue so the
+    user's mid-conversation steering survives. Only the durable-task
+    handoff path skips the queue (see test above)."""
+    loop = _make_loop_with_mocks()
+    loop._steer_queue.put = AsyncMock(return_value=None)
+    loop.current_task = "task_in_flight"
+
+    result = await loop.chat("hey can you also do X?")  # no task_id
+
+    assert "queued" in result["response"].lower()
+    # No task to close (no task_id).
+    loop.mesh_client.set_task_status.assert_not_awaited()
+    # And the queue WAS exercised.
+    loop._steer_queue.put.assert_awaited_once_with("hey can you also do X?")
 
 
 # ── 4c. _auto_close_task log-severity discriminates 4xx vs 5xx ────

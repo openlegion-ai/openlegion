@@ -1717,18 +1717,32 @@ class AgentLoop:
         # state corruption (shared loop_detector, state, flush_triggered).
         # Guard is BEFORE _chat_lock to avoid blocking on a held lock.
         if self.current_task is not None:
-            await self._steer_queue.put(user_message)
-            # A task_id rode in on this wake but we're busy — the steer
-            # queue has no task_id channel, so the auto-close path would
-            # never fire. Fail the originating task now so the sender's
-            # check_inbox sees a clear ``task_failed`` back-edge with a
-            # specific reason, instead of waiting 7 days for the TTL.
-            # Best-effort: _auto_close_task is exception-safe.
+            # Two distinct paths depending on whether this is a real
+            # handoff (task_id set) or a free-form chat:
+            #
+            # - Handoff path: reject cleanly. Closing the task as
+            #   ``failed`` AND queueing it on the steer would let the
+            #   originator retry/reroute (because they see task_failed)
+            #   while THIS agent still processes the queued message —
+            #   duplicate / conflicting work (codex P2). Skip the
+            #   queue, surface the rejection in the chat reply.
+            # - Free chat path: keep legacy behavior — queue the message
+            #   into the active conversation. No durable task exists,
+            #   so there's no double-execution risk.
             if task_id:
                 await self._auto_close_task(
                     task_id, "failed",
-                    error="agent_busy_steered",
+                    error="agent_busy_handoff_rejected",
                 )
+                return {
+                    "response": (
+                        "Agent is working on another task — handoff "
+                        "rejected. Originator notified via back-edge."
+                    ),
+                    "tool_outputs": [],
+                    "tokens_used": 0,
+                }
+            await self._steer_queue.put(user_message)
             return {
                 "response": (
                     "Agent is working on a task. Your message has been queued "
