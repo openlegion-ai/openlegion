@@ -2202,7 +2202,12 @@ class AgentLoop:
                     )
                     if self.workspace:
                         self.workspace.append_chat_message("assistant", msg)
-                    return {"response": msg, "tool_outputs": [], "tokens_used": 0}
+                    return {
+                        "response": msg,
+                        "tool_outputs": [],
+                        "tokens_used": 0,
+                        "error": "chat_session_limit_reached",
+                    }
                 await self._auto_continue_session(system)
 
             steer_interrupts = 0
@@ -2267,6 +2272,7 @@ class AgentLoop:
                         "response": msg,
                         "tool_outputs": tool_outputs,
                         "tokens_used": total_tokens,
+                        "error": f"tool_loop_terminated: {terminate_msg}",
                     }
 
                 entries = self._build_tool_call_entries(llm_response)
@@ -2845,7 +2851,13 @@ class AgentLoop:
                     if self.workspace:
                         self.workspace.append_chat_message("assistant", msg)
                     yield {"type": "text_delta", "content": msg}
-                    yield {"type": "done", "response": msg, "tool_outputs": [], "tokens_used": 0}
+                    yield {
+                        "type": "done",
+                        "response": msg,
+                        "tool_outputs": [],
+                        "tokens_used": 0,
+                        "error": "chat_session_limit_reached",
+                    }
                     return
                 await self._auto_continue_session(system)
 
@@ -2940,6 +2952,7 @@ class AgentLoop:
                         "response": msg,
                         "tool_outputs": tool_outputs,
                         "tokens_used": total_tokens,
+                        "error": f"tool_loop_terminated: {terminate_msg}",
                     }
                     return
 

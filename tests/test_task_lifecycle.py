@@ -193,6 +193,57 @@ async def test_chat_auto_fails_task_on_swallowed_internal_error():
     assert "upstream LLM timeout" in (calls[1].kwargs.get("error") or "")
 
 
+# ── 3c. tool-loop terminate is propagated as failure ─────────────
+
+@pytest.mark.asyncio
+async def test_chat_auto_fails_task_on_tool_loop_terminate():
+    """``_check_tool_loop_terminate`` catches an LLM tool-call loop
+    (same tool, same args, same result, repeatedly) and short-circuits.
+    Returns a normal-shaped dict — without an ``error`` flag it
+    looked like clean completion to the wrapper, leaving the task
+    stuck in ``working`` (codex P2 round 2). Now flagged with
+    ``error="tool_loop_terminated: ..."`` so the wrapper auto-fails.
+    """
+    loop = _make_loop_with_mocks()
+    loop._chat_inner = AsyncMock(return_value={
+        "response": "Stopped: tool loop detected on web_search",
+        "tool_outputs": [],
+        "tokens_used": 50,
+        "error": "tool_loop_terminated: web_search",
+    })
+
+    await loop.chat("hi", task_id="task_loop")
+
+    calls = loop.mesh_client.set_task_status.await_args_list
+    assert len(calls) == 2
+    assert calls[0].args == ("task_loop", "working")
+    assert calls[1].args == ("task_loop", "failed")
+    assert "tool_loop_terminated" in (calls[1].kwargs.get("error") or "")
+
+
+@pytest.mark.asyncio
+async def test_chat_auto_fails_task_on_chat_session_limit():
+    """Absolute chat-session limit (max continuations × max rounds)
+    is a terminal stop the agent can't recover from. Flag it as
+    failure so the wrapper auto-fails the handoff task.
+    """
+    loop = _make_loop_with_mocks()
+    loop._chat_inner = AsyncMock(return_value={
+        "response": "Chat session has reached its absolute limit...",
+        "tool_outputs": [],
+        "tokens_used": 0,
+        "error": "chat_session_limit_reached",
+    })
+
+    await loop.chat("hi", task_id="task_limit")
+
+    calls = loop.mesh_client.set_task_status.await_args_list
+    assert len(calls) == 2
+    assert calls[0].args == ("task_limit", "working")
+    assert calls[1].args == ("task_limit", "failed")
+    assert calls[1].kwargs.get("error") == "chat_session_limit_reached"
+
+
 # ── 3b. explicit complete_task path is the ONLY way to mark done ──
 
 @pytest.mark.asyncio
