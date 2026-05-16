@@ -266,7 +266,56 @@ async def test_explicit_complete_task_marks_done():
 
     assert result["completed"] is True
     assert result["task_id"] == "task_xyz"
+    # No summary passed → set_task_status called without ``result`` kw.
     mesh_client.set_task_status.assert_awaited_once_with("task_xyz", "done")
+
+
+@pytest.mark.asyncio
+async def test_explicit_complete_task_forwards_summary_to_back_edge():
+    """When the recipient passes a summary to ``complete_task``, the
+    mesh sees ``result={"summary": ...}`` so the back-edge writer can
+    populate the originator's ``inbox/{agent}/task_event/{id}`` event
+    with what shipped. Without this codex P2: originator's check_inbox
+    sees an empty completion event and has to come ask.
+
+    Truncates to 500 chars (matches the previous auto-close cap, so
+    payload size stays bounded).
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from src.agent.builtins.coordination_tool import _complete_task_v2
+
+    mesh_client = MagicMock()
+    mesh_client.set_task_status = AsyncMock(return_value={"id": "task_xyz"})
+
+    summary = "wrote design doc at artifacts/seo-strategy-q3.md (4.2KB)"
+    await _complete_task_v2(
+        task_key="task_xyz", summary=summary, mesh_client=mesh_client,
+    )
+
+    mesh_client.set_task_status.assert_awaited_once_with(
+        "task_xyz", "done", result={"summary": summary},
+    )
+
+
+@pytest.mark.asyncio
+async def test_explicit_complete_task_truncates_long_summary():
+    """A pathologically long summary gets capped at 500 chars so a
+    misbehaving recipient can't bloat the back-edge payload."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from src.agent.builtins.coordination_tool import _complete_task_v2
+
+    mesh_client = MagicMock()
+    mesh_client.set_task_status = AsyncMock(return_value={"id": "task_xyz"})
+
+    long_summary = "x" * 2000
+    await _complete_task_v2(
+        task_key="task_xyz", summary=long_summary, mesh_client=mesh_client,
+    )
+
+    call = mesh_client.set_task_status.await_args
+    assert len(call.kwargs["result"]["summary"]) == 500
 
 
 # ── 4. legacy path (no task_id) skips auto-close ─────────────────
