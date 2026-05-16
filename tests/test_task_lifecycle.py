@@ -123,12 +123,15 @@ async def test_chat_auto_closes_task_on_success():
     result = await loop.chat("hi there", task_id="task_xyz")
 
     assert "response" in result
-    loop.mesh_client.set_task_status.assert_awaited_once()
-    call = loop.mesh_client.set_task_status.await_args
-    assert call.args[0] == "task_xyz"
-    assert call.args[1] == "done"
+    # Two transitions: pending→working at start, working→done on completion.
+    # State machine forbids pending→done directly, so the working step is
+    # load-bearing for production handoffs.
+    calls = loop.mesh_client.set_task_status.await_args_list
+    assert len(calls) == 2, f"expected working+done, got {calls}"
+    assert calls[0].args == ("task_xyz", "working")
+    assert calls[1].args == ("task_xyz", "done")
     # Summary should carry the response prefix (truncated to 500 chars).
-    assert call.kwargs.get("result", {}).get("summary", "").startswith(
+    assert calls[1].kwargs.get("result", {}).get("summary", "").startswith(
         "Hello, I finished",
     )
 
@@ -145,11 +148,12 @@ async def test_chat_auto_closes_task_as_failed_on_exception():
     with pytest.raises(RuntimeError, match="boom inside chat"):
         await loop.chat("hi", task_id="task_fail")
 
-    loop.mesh_client.set_task_status.assert_awaited_once()
-    call = loop.mesh_client.set_task_status.await_args
-    assert call.args[0] == "task_fail"
-    assert call.args[1] == "failed"
-    assert "boom inside chat" in (call.kwargs.get("error") or "")
+    # Two transitions: pending→working at start, working→failed on exception.
+    calls = loop.mesh_client.set_task_status.await_args_list
+    assert len(calls) == 2, f"expected working+failed, got {calls}"
+    assert calls[0].args == ("task_fail", "working")
+    assert calls[1].args == ("task_fail", "failed")
+    assert "boom inside chat" in (calls[1].kwargs.get("error") or "")
 
 
 # ── 4. legacy path (no task_id) skips auto-close ─────────────────
@@ -232,6 +236,55 @@ async def _advance_to_working(client, task_id):
         headers={"x-mesh-internal": "1"},
     )
     assert resp.status_code == 200, resp.text
+
+
+@pytest.mark.asyncio
+async def test_pending_to_working_to_done_end_to_end(tmp_path):
+    """Production handoff: a freshly-created (pending) task auto-advances
+    to working, then to done via two POSTs to /mesh/tasks/{id}/status.
+
+    Regression guard: the state machine forbids pending → done directly,
+    so the chat-start working transition is load-bearing. Without it,
+    the auto-close would 4xx in production and tasks would still dangle —
+    silently re-creating Bug 2 even with all the plumbing in place.
+    """
+    from httpx import ASGITransport, AsyncClient
+
+    app, bb, tasks_store, _ = _setup_mesh_app(tmp_path)
+    try:
+        rec = tasks_store.create(
+            creator="alpha",
+            assignee="beta",
+            title="Do the thing",
+            origin={"kind": "agent", "channel": "", "user": "alpha"},
+        )
+        task_id = rec["id"]
+        assert rec["status"] == "pending"
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            # Step 1: pending → working (what chat() does on entry).
+            r1 = await client.post(
+                f"/mesh/tasks/{task_id}/status",
+                json={"status": "working"},
+                headers={"x-mesh-internal": "1"},
+            )
+            assert r1.status_code == 200, r1.text
+            # Step 2: working → done (what chat() does on success).
+            r2 = await client.post(
+                f"/mesh/tasks/{task_id}/status",
+                json={"status": "done", "result": {"summary": "ok"}},
+                headers={"x-mesh-internal": "1"},
+            )
+            assert r2.status_code == 200, r2.text
+
+        # Task closed cleanly + back-edge written.
+        fresh = tasks_store.get(task_id)
+        assert fresh["status"] == "done"
+        assert bb.read(f"inbox/alpha/task_event/{task_id}") is not None
+    finally:
+        _teardown_mesh(bb, tasks_store)
 
 
 @pytest.mark.asyncio

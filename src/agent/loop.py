@@ -1733,6 +1733,13 @@ class AgentLoop:
         try:
             async with self._chat_lock:
                 await self._maybe_restore_session()
+                # State machine requires pending → working before → done,
+                # so open the task as ``working`` here. Best-effort: a
+                # same-state transition or a task already cancelled is
+                # logged, not raised. ``_auto_close_task`` is misnamed —
+                # it handles any auto-transition, not just terminal ones.
+                if task_id:
+                    await self._auto_close_task(task_id, "working")
                 try:
                     try:
                         result = await self._chat_inner(user_message)
