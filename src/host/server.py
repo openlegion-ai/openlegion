@@ -5147,6 +5147,114 @@ def create_mesh_app(
 
         return {"agent_id": agent_id, "config": full}
 
+    # Closes operator bug 6: peer artifacts are stored on each agent's
+    # private /data volume, so save_artifact mirrors metadata to the
+    # blackboard but never the content. The dashboard already exposes a
+    # peer-read path via transport.request; these two endpoints make the
+    # same affordance available to the operator agent (and only the
+    # operator) so operator can review what teammates produced.
+    _PEER_ARTIFACT_MAX_BYTES = 5 * 1024 * 1024  # 5 MB cap on mesh-layer response
+
+    _ARTIFACT_NAME_PATTERN = re.compile(r"^[\w][\w.\-/ ]{0,198}[\w.]$")
+
+    def _validate_peer_artifact_name(name: str) -> None:
+        """Reject path traversal / absolute / control / metacharacter names.
+
+        Mirrors the agent-side ``_ARTIFACT_NAME_RE`` shape but enforced
+        here so the mesh never forwards a malicious name to the agent's
+        artifact-resolution code. Two-stage: explicit ``..`` rejection
+        before any character-class check (defence in depth against
+        regex bypass via unusual unicode forms).
+        """
+        if not name:
+            raise HTTPException(400, "Artifact name is required")
+        # Stage 1: structural rejections that don't depend on the regex.
+        if name.startswith("/") or name.startswith("\\"):
+            raise HTTPException(400, "Absolute paths not allowed")
+        if ".." in name.split("/") or ".." in name.split("\\"):
+            raise HTTPException(400, "Path traversal not allowed")
+        # Stage 2: character-class allowlist (word chars, dot, hyphen,
+        # slash, space — same as the agent's artifact name regex).
+        if not _ARTIFACT_NAME_PATTERN.match(name):
+            raise HTTPException(400, f"Invalid artifact name: {name}")
+
+    @app.get("/mesh/agents/{agent_id}/artifacts")
+    async def list_peer_artifacts(agent_id: str, request: Request) -> dict:
+        """List a peer agent's artifact files. Operator-or-internal only.
+
+        Closes operator bug 6 (read side of save_artifact). Returns
+        ``{agent_id, artifacts: [{name, size, modified}, ...]}``.
+        """
+        _require_any_auth(request)
+        caller = _resolve_agent_id("", request)
+        if not (caller == "operator" or _is_internal_caller(request)):
+            raise HTTPException(403, "Only the operator can read peer artifacts")
+        if agent_id not in router.agent_registry:
+            raise HTTPException(404, f"Agent '{agent_id}' not found")
+        if transport is None:
+            raise HTTPException(503, "Transport not available")
+        result = await transport.request(agent_id, "GET", "/artifacts", timeout=10)
+        if isinstance(result, dict) and "error" in result and "artifacts" not in result:
+            status = result.get("status_code", 502)
+            raise HTTPException(status, result["error"])
+        artifacts = result.get("artifacts", []) if isinstance(result, dict) else []
+        return {"agent_id": agent_id, "artifacts": artifacts}
+
+    @app.get("/mesh/agents/{agent_id}/artifacts/{name:path}")
+    async def read_peer_artifact(
+        agent_id: str, name: str, request: Request,
+    ) -> dict:
+        """Read a single peer artifact's content. Operator-or-internal only.
+
+        Returns ``{agent_id, name, content, size, encoding}``. Text is
+        decoded as UTF-8 (with ``errors='replace'`` for malformed bytes);
+        binary content falls back to base64 with ``encoding='base64'``.
+        Capped at 5 MB; oversize artifacts get HTTP 413.
+        """
+        _require_any_auth(request)
+        caller = _resolve_agent_id("", request)
+        if not (caller == "operator" or _is_internal_caller(request)):
+            raise HTTPException(403, "Only the operator can read peer artifacts")
+        _validate_peer_artifact_name(name)
+        if agent_id not in router.agent_registry:
+            raise HTTPException(404, f"Agent '{agent_id}' not found")
+        if transport is None:
+            raise HTTPException(503, "Transport not available")
+
+        result = await transport.request(
+            agent_id, "GET", f"/artifacts/{name}", timeout=30,
+        )
+        if isinstance(result, dict) and "error" in result and "content" not in result:
+            status = result.get("status_code", 502)
+            # Map the agent's 413 back as 413 (transport returns generic
+            # "HTTP 413" string); 404 maps to 404 with a clean message.
+            if status == 404:
+                raise HTTPException(
+                    404, f"Artifact '{name}' not found on agent '{agent_id}'",
+                )
+            if status == 413:
+                raise HTTPException(
+                    413,
+                    f"Artifact '{name}' exceeds the per-agent size cap",
+                )
+            raise HTTPException(status, result["error"])
+
+        size = int(result.get("size", 0)) if isinstance(result, dict) else 0
+        if size > _PEER_ARTIFACT_MAX_BYTES:
+            raise HTTPException(
+                413,
+                f"Artifact too large ({size} bytes, max {_PEER_ARTIFACT_MAX_BYTES})",
+            )
+        content = result.get("content", "") if isinstance(result, dict) else ""
+        encoding = result.get("encoding", "utf-8") if isinstance(result, dict) else "utf-8"
+        return {
+            "agent_id": agent_id,
+            "name": name,
+            "content": content,
+            "size": size,
+            "encoding": encoding,
+        }
+
     @app.post("/mesh/agents/{agent_id}/propose")
     async def propose_agent_config_change(agent_id: str, request: Request) -> dict:
         """Create a pending config change for review."""

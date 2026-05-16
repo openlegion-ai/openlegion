@@ -321,6 +321,145 @@ async def read_agent_config(
 
 
 @skill(
+    name="list_peer_artifacts",
+    description=(
+        "List a teammate's artifact files. Artifacts are files agents "
+        "write via save_artifact — design docs, reports, generated "
+        "assets, datasets — and live on each agent's private /data "
+        "volume. Use this to see WHAT a teammate has produced before "
+        "pulling content with read_peer_artifact.\n\n"
+        "Returns ``{agent_id, artifacts: [{name, size, modified}, ...]}``. "
+        "Operator-only: only the operator agent can read peer "
+        "artifacts (peer-to-peer reads are intentionally not exposed)."
+    ),
+    parameters={
+        "agent_id": {
+            "type": "string",
+            "description": "Target agent ID (use list_agents to find IDs)",
+        },
+    },
+)
+async def list_peer_artifacts(
+    agent_id: str,
+    *,
+    mesh_client=None,
+    **_kw,
+) -> dict:
+    """List a peer agent's artifacts — operator-only read path.
+
+    Mirrors :func:`read_agent_config` in shape and error handling: 404
+    from the mesh becomes ``{"error": "agent_not_found"}``; other HTTP
+    failures surface as ``mesh_error``. Exceptions are truncated to
+    200 chars so a noisy traceback can't blow up the LLM's context.
+    """
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+
+    try:
+        result = await mesh_client.list_peer_artifacts(agent_id)
+    except Exception as e:
+        resp = getattr(e, "response", None)
+        status = getattr(resp, "status_code", None)
+        if status == 404:
+            return {"error": "agent_not_found", "agent_id": agent_id}
+        if status is not None:
+            body = getattr(resp, "text", "") or ""
+            return {
+                "error": "mesh_error",
+                "status": status,
+                "body": body[:200],
+            }
+        return {"error": f"Failed to list peer artifacts: {str(e)[:200]}"}
+    return result
+
+
+@skill(
+    name="read_peer_artifact",
+    description=(
+        "Read a single artifact file written by a teammate. Use this "
+        "after list_peer_artifacts to pull the content of a specific "
+        "file (e.g. to review a draft, verify a deliverable, or quote "
+        "an agent's output back to the user).\n\n"
+        "Returns ``{agent_id, name, content, size, encoding}``. Text "
+        "artifacts come back as UTF-8 strings; binary artifacts come "
+        "back base64-encoded with ``encoding='base64'``. Capped at "
+        "5 MB — larger artifacts return an oversize error. "
+        "Operator-only."
+    ),
+    parameters={
+        "agent_id": {
+            "type": "string",
+            "description": "Target agent ID (use list_agents to find IDs)",
+        },
+        "name": {
+            "type": "string",
+            "description": (
+                "Artifact file name as returned by list_peer_artifacts "
+                "(e.g. 'design.md', 'reports/q3.pdf'). Path traversal "
+                "and absolute paths are rejected."
+            ),
+        },
+    },
+)
+async def read_peer_artifact(
+    agent_id: str,
+    name: str,
+    *,
+    mesh_client=None,
+    **_kw,
+) -> dict:
+    """Read one artifact written by a teammate — operator-only.
+
+    Mirrors :func:`read_agent_config` in shape. 404 from the mesh
+    becomes ``{"error": "artifact_not_found"}`` (we can't cleanly
+    distinguish agent-missing vs file-missing from the transport
+    layer, so the message names both possibilities). 413 surfaces
+    as ``oversize``. Exception strings are truncated to 200 chars.
+    """
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    if not name or not isinstance(name, str):
+        return {"error": "name is required"}
+
+    try:
+        result = await mesh_client.read_peer_artifact(agent_id, name)
+    except Exception as e:
+        resp = getattr(e, "response", None)
+        status = getattr(resp, "status_code", None)
+        if status == 404:
+            return {
+                "error": "artifact_not_found",
+                "agent_id": agent_id,
+                "name": name,
+            }
+        if status == 413:
+            return {
+                "error": "oversize",
+                "agent_id": agent_id,
+                "name": name,
+            }
+        if status == 400:
+            return {
+                "error": "invalid_name",
+                "agent_id": agent_id,
+                "name": name,
+            }
+        if status is not None:
+            body = getattr(resp, "text", "") or ""
+            return {
+                "error": "mesh_error",
+                "status": status,
+                "body": body[:200],
+            }
+        return {"error": f"Failed to read peer artifact: {str(e)[:200]}"}
+    return result
+
+
+@skill(
     name="edit_agent",
     description=(
         "Change an agent's configuration. All edits apply IMMEDIATELY and "
