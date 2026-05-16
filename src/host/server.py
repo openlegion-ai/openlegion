@@ -219,10 +219,34 @@ def _get_pending_change(change_id: str) -> dict | None:
     }
 
 
+# Map ``PendingActions.consume()`` reason codes to human-readable
+# messages for the structured 400 detail. ``not_found`` keeps the legacy
+# "invalid or expired" phrasing so tests that grep on that substring keep
+# passing and dashboards built before the structured-code change continue
+# to render a sensible message.
+_PENDING_REASON_MESSAGES = {
+    "not_found": "Pending action invalid or expired",
+    "expired": "Pending action expired",
+    "digest_mismatch": "Payload changed since proposal — propose again",
+    "wrong_confirmer": "Wrong confirmer for this pending action",
+    "wrong_origin_kind": (
+        "This action requires a human-origin confirm; the original "
+        "proposal did not carry a verified human origin"
+    ),
+}
+
+
+def _humanize_pending_reason(reason: str | None) -> str:
+    """Translate a ``consume()`` reason code into a human-readable message."""
+    if not reason:
+        return "Pending action invalid or expired"
+    return _PENDING_REASON_MESSAGES.get(reason, "Pending action invalid or expired")
+
+
 def _consume_pending_change(change_id: str) -> dict | None:
     """Atomically consume a pending change. Returns legacy dict shape or None."""
     store = _get_pending_actions_store()
-    rec = store.consume(change_id)
+    rec, _ = store.consume(change_id)
     if rec is None:
         return None
     payload = rec.get("payload") or {}
@@ -6192,14 +6216,20 @@ def create_mesh_app(
                 "Use /mesh/config/confirm for delete pending actions",
             )
 
-        record = pending_actions.consume(
+        record, reason = pending_actions.consume(
             change_id,
             confirmer="operator",
             require_origin_kind="human",
             expected_payload_digest=client_digest,
         )
         if not record:
-            raise HTTPException(400, "Pending action invalid or expired")
+            raise HTTPException(
+                400,
+                detail={
+                    "code": reason,
+                    "message": _humanize_pending_reason(reason),
+                },
+            )
 
         return await _apply_pending_change(
             change_id, _record_to_legacy_change(record),
@@ -6233,14 +6263,20 @@ def create_mesh_app(
         # Consume + apply. ``consume`` is atomic: same nonce can only
         # be applied once. If the apply raises, the row is already
         # gone — the caller must propose a new change.
-        record = pending_actions.consume(
+        record, reason = pending_actions.consume(
             change_id,
             confirmer="operator",
             require_origin_kind="human",
             expected_payload_digest=client_digest,
         )
         if not record:
-            raise HTTPException(400, "Pending action invalid or expired")
+            raise HTTPException(
+                400,
+                detail={
+                    "code": reason,
+                    "message": _humanize_pending_reason(reason),
+                },
+            )
 
         # Task 7: destructive deletes use ``action_kind="delete"`` plus
         # ``target_kind in {"project", "agent"}``. Everything else stays

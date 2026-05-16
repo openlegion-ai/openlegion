@@ -10,9 +10,11 @@ Schema mirrors the Blackboard pattern in ``src/host/mesh.py``: SQLite WAL,
 
 External contract: ``store(nonce, actor, target_kind, target_id, action_kind,
 payload, origin_kind, ttl)`` returns a record dict; ``consume(nonce, *,
-require_origin_kind, expected_payload_digest, confirmer)`` returns the record
-or None (expired/missing/wrong-digest/wrong-origin/wrong-actor) and atomically
-deletes on success.
+require_origin_kind, expected_payload_digest, confirmer)`` returns
+``(record, None)`` on success or ``(None, reason)`` where ``reason`` is one of
+``"not_found"``, ``"expired"``, ``"digest_mismatch"``, ``"wrong_confirmer"``,
+``"wrong_origin_kind"`` — atomically deletes on success / expired and
+preserves the row on every other failure so a legitimate retry can still win.
 
 Reaping is opportunistic: ``store`` and ``consume`` call ``reap_expired``
 themselves so callers do not need to wire a periodic task. A background
@@ -295,24 +297,36 @@ class PendingActions:
         confirmer: str | None = None,
         require_origin_kind: str | None = None,
         expected_payload_digest: str | None = None,
-    ) -> dict | None:
+    ) -> tuple[dict | None, str | None]:
         """Atomically consume a pending action.
 
-        Returns the record on success and deletes the row.
+        Returns ``(record, None)`` on success and deletes the row.
 
-        Returns None on:
-          * unknown nonce
-          * expired (also deletes the expired row inside the same txn)
-          * payload digest mismatch (replay protection -- row preserved)
-          * confirmer != actor (only the proposer can confirm -- row preserved)
-          * origin kind below required level (e.g. ``require="human"`` but
-            row has ``"agent"`` -- row preserved)
+        Returns ``(None, reason)`` on every failure mode, with a stable
+        machine-readable ``reason`` string so callers can distinguish
+        causes without parsing a human-readable message:
+
+          * ``"not_found"`` -- unknown nonce
+          * ``"expired"`` -- past expires_at (also deletes the expired row
+            inside the same txn)
+          * ``"digest_mismatch"`` -- replay protection (row preserved)
+          * ``"wrong_confirmer"`` -- ``confirmer != actor`` (row preserved)
+          * ``"wrong_origin_kind"`` -- origin kind below required level
+            (e.g. ``require="human"`` but row has ``"agent"`` or ``None``;
+            row preserved so a legitimate retry from the right caller can
+            still win)
 
         On a successful consume, the row is deleted in the same
         transaction so the same nonce cannot be replayed.
+
+        We intentionally skip the opportunistic ``_safe_reap`` on this
+        path so the per-row expired check inside ``BEGIN IMMEDIATE`` is
+        actually reachable. Otherwise a freshly-expired row gets reaped
+        by the pre-txn sweep and the caller sees ``"not_found"`` instead
+        of ``"expired"``, which masks the real failure mode. The
+        ``store`` path still reaps opportunistically, so the table
+        remains bounded.
         """
-        # Opportunistic reap on the read path. Cheap, swallowed on error.
-        self._safe_reap()
         with self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
@@ -325,30 +339,23 @@ class PendingActions:
                 ).fetchone()
                 if not row:
                     conn.execute("COMMIT")
-                    return None
+                    return None, "not_found"
                 now = time.time()
                 if now > row[8]:
-                    # Expired -- delete and report None
                     conn.execute(
                         "DELETE FROM pending_actions WHERE nonce=?", (nonce,),
                     )
                     conn.execute("COMMIT")
-                    return None
+                    return None, "expired"
                 if expected_payload_digest and row[5] != expected_payload_digest:
-                    # Replay-protection mismatch -- preserve the row so the
-                    # legitimate confirmer can still consume it.
                     conn.execute("COMMIT")
-                    return None
+                    return None, "digest_mismatch"
                 if confirmer and row[0] != confirmer:
-                    # Wrong confirmer -- preserve the row.
                     conn.execute("COMMIT")
-                    return None
+                    return None, "wrong_confirmer"
                 if require_origin_kind and row[6] != require_origin_kind:
-                    # Origin not strong enough -- preserve the row so
-                    # nothing prevents a legitimate retry from the right
-                    # caller, but refuse to apply.
                     conn.execute("COMMIT")
-                    return None
+                    return None, "wrong_origin_kind"
                 conn.execute(
                     "DELETE FROM pending_actions WHERE nonce=?", (nonce,),
                 )
@@ -387,7 +394,7 @@ class PendingActions:
             "status": "consumed",
             "summary": row[10],
             "preview_diff": row[11],
-        }
+        }, None
 
     def cancel(
         self,

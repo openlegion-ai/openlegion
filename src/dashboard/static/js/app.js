@@ -2049,6 +2049,31 @@ function dashboard() {
       }
     },
 
+    // Top-nav Needs-You badge click handler. Routes to the Work tab when
+    // any item is a durable pending action (the Work tab's unified panel
+    // renders confirm/cancel inline), otherwise falls back to chat where
+    // the credential/browser/captcha overlay cards live. The kind-aware
+    // routing replaces the legacy "always chat" handler that buried
+    // destructive operator confirms behind a tab switch.
+    _routeNeedsYouBadge() {
+      try {
+        const itemCount = (this.needsYouItems || []).length;
+        this.track('needs_you_click', {
+          item_count: itemCount,
+          item_kind: 'badge',
+          action_label: 'badge',
+        });
+        this._trackFirstAction('needs_you_click');
+      } catch (_) { /* ignore */ }
+      const hasPending = (this.needsYouItems || []).some(i => i.kind === 'pending');
+      this.switchTab(hasPending ? 'workplace' : 'chat');
+      this.$nextTick(() => {
+        const selector = hasPending ? '[data-needs-you-panel]' : '[data-pending-cards]';
+        const el = document.querySelector(selector);
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    },
+
     trackEmptyStateCta(sectionId) {
       // Wired from any empty-state CTA button in the template. Caller
       // passes a stable ``section_id`` so we can compare CTA traction
@@ -3940,6 +3965,18 @@ function dashboard() {
       }
     },
 
+    // Normalises the FastAPI ``detail`` field on a pending-action confirm/cancel
+    // error. The mesh now returns ``{code, message}`` on consume() failures so
+    // the dashboard can show a precise reason; older endpoints (cancel) still
+    // return a bare string. Returns ``{text, code}`` for the toast + telemetry.
+    _formatPendingError(detail, fallback) {
+      if (!detail) return { text: String(fallback ?? ''), code: '' };
+      if (typeof detail === 'string') return { text: detail, code: '' };
+      const text = detail.message || String(fallback ?? '');
+      const code = typeof detail.code === 'string' ? detail.code : '';
+      return { text, code };
+    },
+
     async confirmPendingAction(nonce) {
       try {
         // Route via the dashboard's loopback proxy so the mesh sees
@@ -3959,7 +3996,9 @@ function dashboard() {
         );
         if (!resp.ok) {
           const data = await resp.json().catch(() => ({}));
-          this.showToast(`Confirm failed: ${data.detail || resp.status}`);
+          const { text, code } = this._formatPendingError(data.detail, resp.status);
+          this.track('pending_confirm_failed', { code: code || 'unknown', nonce });
+          this.showToast(`Confirm failed: ${text || resp.status}`);
           return;
         }
         this.workplacePending = this.workplacePending.filter(p => p.nonce !== nonce);
@@ -4028,7 +4067,13 @@ function dashboard() {
         );
         if (!resp.ok) {
           const data = await resp.json().catch(() => ({}));
-          this.showToast(`Confirm failed: ${data.detail || resp.status}`);
+          const { text, code } = this._formatPendingError(data.detail, resp.status);
+          this.track('pending_confirm_failed', {
+            code: code || 'unknown',
+            nonce: msg.event_id || '',
+            via: 'card',
+          });
+          this.showToast(`Confirm failed: ${text || resp.status}`);
           return;
         }
       } catch (e) {
@@ -7627,7 +7672,17 @@ function dashboard() {
         // 1. User messages sent after the last server timestamp
         // 2. Agent messages from just-completed streams not yet persisted
         // 3. Notifications injected via WebSocket not yet in the server transcript
+        // 4. Client-side overlay cards (pending actions, credential/browser/captcha
+        //    requests) — these are NEVER part of the server-side transcript, so the
+        //    role-allowlist filter must keep them or they vanish on every refresh.
+        const overlayRoles = new Set([
+          'pending_action_card',
+          'credential_request',
+          'browser_login_request',
+          'browser_captcha_help_request',
+        ]);
         const trailing = localMsgs.filter(m => {
+          if (overlayRoles.has(m.role)) return true;
           if (m.role === 'notification') {
             if ((m.ts || 0) <= lastServerTs) return false;
             return !serverMsgs.some(s =>

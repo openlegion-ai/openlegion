@@ -1328,21 +1328,43 @@ class MeshClient:
         return response.json()
 
     async def propose_delete_project(self, name: str) -> dict:
-        """Propose deletion of an archived project. Returns nonce for human confirm."""
+        """Propose deletion of an archived project. Returns nonce for human confirm.
+
+        Forwards ``current_origin`` so the mesh stores the pending row
+        with ``origin_kind="human"`` when the caller is handling a
+        human-originated message. Without this the subsequent confirm
+        fails the ``require_origin_kind="human"`` gate (Bug A).
+        """
+        from src.shared.trace import current_origin
+        headers = self._trace_headers()
+        origin = current_origin.get()
+        if origin is not None:
+            headers.update(origin_header(origin))
         client = await self._get_client()
         response = await client.post(
             f"{self.mesh_url}/mesh/projects/{name}/propose-delete",
-            headers=self._trace_headers(),
+            headers=headers,
         )
         response.raise_for_status()
         return response.json()
 
     async def propose_delete_agent(self, agent_id: str) -> dict:
-        """Propose deletion of an archived agent. Returns nonce for human confirm."""
+        """Propose deletion of an archived agent. Returns nonce for human confirm.
+
+        Forwards ``current_origin`` so the mesh stores the pending row
+        with ``origin_kind="human"`` when the caller is handling a
+        human-originated message. Without this the subsequent confirm
+        fails the ``require_origin_kind="human"`` gate (Bug A).
+        """
+        from src.shared.trace import current_origin
+        headers = self._trace_headers()
+        origin = current_origin.get()
+        if origin is not None:
+            headers.update(origin_header(origin))
         client = await self._get_client()
         response = await client.post(
             f"{self.mesh_url}/mesh/agents/{agent_id}/propose-delete",
-            headers=self._trace_headers(),
+            headers=headers,
         )
         response.raise_for_status()
         return response.json()

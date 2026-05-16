@@ -1686,3 +1686,121 @@ async def test_agent_origin_does_not_request_auto_notify(v2_app_with_lanes):
     assert kwargs.get("auto_notify") is False, (
         f"agent-only origin must keep auto_notify off, got kwargs={kwargs!r}"
     )
+
+
+# ── Bug A regression: operator propose_delete must forward X-Origin ─
+#
+# These tests pin the operator's MeshClient → mesh chain end-to-end.
+# Before the fix, ``propose_delete_agent``/``propose_delete_project`` on
+# the agent-side MeshClient did NOT forward ``current_origin`` as an
+# ``X-Origin`` header, so the mesh persisted the pending row with
+# ``origin_kind=None``. A subsequent human-origin confirm then failed the
+# ``require_origin_kind="human"`` gate inside ``PendingActions.consume``
+# with a misleading "Pending action invalid or expired" message.
+
+
+@pytest.mark.asyncio
+async def test_operator_propose_delete_via_mesh_client_propagates_human_origin(
+    v2_app, monkeypatch,
+):
+    """End-to-end: operator's ``MeshClient.propose_delete_agent`` must
+    propagate ``current_origin`` so the stored pending row carries
+    ``origin_kind="human"`` and the human-origin confirm succeeds.
+    This is the unit-level reproducer for Bug A.
+    """
+    app, _, _ = v2_app
+    transport = ASGITransport(app=app)
+
+    # Archive scout first (precondition for propose-delete).
+    async with AsyncClient(transport=transport, base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/agents/scout/archive",
+            headers={"X-Agent-ID": "operator"},
+        )
+        assert r.status_code == 200, r.text
+
+    # Build a MeshClient whose underlying httpx.AsyncClient hits the test
+    # app via ASGITransport, and stamps the operator's agent ID on every
+    # outbound request (the mesh otherwise can't resolve the caller).
+    from src.agent.mesh_client import MeshClient
+    from src.shared.trace import current_origin
+    from src.shared.types import MessageOrigin
+
+    async def _make_client(self):
+        return AsyncClient(
+            transport=transport,
+            base_url="http://t",
+            headers={"X-Agent-ID": "operator"},
+        )
+
+    monkeypatch.setattr(MeshClient, "_get_client", _make_client)
+
+    mc = MeshClient(mesh_url="http://t", agent_id="operator")
+    human = MessageOrigin(kind="human", channel="cli", user="u1")
+    token = current_origin.set(human)
+    try:
+        propose_resp = await mc.propose_delete_agent("scout")
+    finally:
+        current_origin.reset(token)
+
+    nonce = propose_resp["change_id"]
+    digest = propose_resp["payload_digest"]
+
+    async with AsyncClient(transport=transport, base_url="http://t") as c:
+        r = await c.post(
+            f"/mesh/pending/{nonce}/confirm",
+            json={"payload_digest": digest},
+            headers=_human_origin_headers(),
+        )
+    assert r.status_code == 200, r.text
+    assert r.json()["deleted"] == "agent"
+
+
+@pytest.mark.asyncio
+async def test_operator_propose_delete_without_origin_fails_confirm(
+    v2_app, monkeypatch,
+):
+    """Autonomous heartbeat case: ``current_origin=None`` means the
+    pending row is stored with ``origin_kind=None``. A subsequent
+    human-origin confirm must be refused with a clear ``wrong_origin_kind``
+    code — that is the correct security behavior (not a regression).
+    """
+    app, _, _ = v2_app
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/agents/scout/archive",
+            headers={"X-Agent-ID": "operator"},
+        )
+        assert r.status_code == 200, r.text
+
+    from src.agent.mesh_client import MeshClient
+
+    async def _make_client(self):
+        return AsyncClient(
+            transport=transport,
+            base_url="http://t",
+            headers={"X-Agent-ID": "operator"},
+        )
+
+    monkeypatch.setattr(MeshClient, "_get_client", _make_client)
+
+    mc = MeshClient(mesh_url="http://t", agent_id="operator")
+    # No origin set — simulating an autonomous/heartbeat propose.
+    propose_resp = await mc.propose_delete_agent("scout")
+    nonce = propose_resp["change_id"]
+    digest = propose_resp["payload_digest"]
+
+    async with AsyncClient(transport=transport, base_url="http://t") as c:
+        r = await c.post(
+            f"/mesh/pending/{nonce}/confirm",
+            json={"payload_digest": digest},
+            headers=_human_origin_headers(),
+        )
+    assert r.status_code == 400, r.text
+    # Structured detail surfaces the precise reason.
+    body = r.json()
+    detail = body.get("detail")
+    assert isinstance(detail, dict), f"expected structured detail, got {detail!r}"
+    assert detail.get("code") == "wrong_origin_kind"
