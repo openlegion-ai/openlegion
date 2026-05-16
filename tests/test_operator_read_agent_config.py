@@ -170,3 +170,67 @@ async def test_read_agent_config_normalizes_field_whitespace():
     mc.get_agent_config.assert_awaited_once_with(
         "alpha", fields=["instructions", "soul"],
     )
+
+
+@pytest.mark.asyncio
+async def test_get_agent_config_strips_agent_id_from_permissions(tmp_path):
+    """End-to-end: /mesh/agents/{id}/config must NOT return permissions.agent_id.
+
+    Regression guard for a round-trip poison: AgentPermissions has an
+    ``agent_id`` field; if the read endpoint returns it inside
+    ``permissions``, an operator's read→edit cycle would write that key
+    back into ``config/permissions.json``. The next
+    ``PermissionMatrix.reload()`` then calls
+    ``AgentPermissions(agent_id=agent_id, **perms)`` and crashes with
+    ``multiple values for keyword argument 'agent_id'``.
+    """
+    import yaml as yaml_mod
+    from unittest.mock import patch
+
+    from httpx import ASGITransport, AsyncClient
+
+    from src.host.mesh import Blackboard, MessageRouter, PubSub
+    from src.host.permissions import PermissionMatrix
+    from src.host.server import create_mesh_app
+
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir()
+    agents_path = cfg_dir / "agents.yaml"
+    agents_path.write_text(yaml_mod.dump({"agents": {
+        "alpha": {"role": "writer", "model": "gpt-4o"},
+    }}))
+    (cfg_dir / "mesh.yaml").write_text(yaml_mod.dump({"mesh": {"port": 8420}}))
+    (cfg_dir / "projects").mkdir()
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix()
+    router = MessageRouter(perms, {})
+    router.register_agent("alpha", "http://alpha:8400", [])
+
+    app = create_mesh_app(
+        blackboard=bb, pubsub=pubsub, router=router, permissions=perms,
+    )
+
+    try:
+        with patch("src.cli.config.AGENTS_FILE", agents_path), \
+             patch("src.cli.config.CONFIG_FILE", cfg_dir / "mesh.yaml"), \
+             patch("src.cli.config.PROJECTS_DIR", cfg_dir / "projects"):
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test",
+            ) as client:
+                resp = await client.get(
+                    "/mesh/agents/alpha/config",
+                    params={"requesting_agent": "operator"},
+                    headers={"x-mesh-internal": "1"},
+                )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "permissions" in body["config"]
+        # The poison key must not be present.
+        assert "agent_id" not in body["config"]["permissions"], (
+            "permissions payload still contains agent_id — read→edit "
+            "round-trip would corrupt config/permissions.json"
+        )
+    finally:
+        bb.close()

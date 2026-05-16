@@ -5005,7 +5005,8 @@ def create_mesh_app(
         silently dropped (the operator tool validates upfront).
         """
         _require_any_auth(request)
-        if _resolve_agent_id("", request) != "operator":
+        caller = _resolve_agent_id("", request)
+        if not (caller == "operator" or _is_internal_caller(request)):
             raise HTTPException(403, "Only the operator can read agent configs")
         await _check_rate_limit("agent_profile", "operator")
 
@@ -5031,10 +5032,19 @@ def create_mesh_app(
         # Permissions live in PERMISSIONS_FILE, not agents.yaml. Load via
         # PermissionMatrix and serialize the AgentPermissions Pydantic model
         # so the operator gets the same shape edit_agent accepts.
+        #
+        # Strip ``agent_id`` from the dump: the field exists on the Pydantic
+        # model but PermissionMatrix.reload() reconstructs it via
+        # ``AgentPermissions(agent_id=agent_id, **perms)`` — leaving it in
+        # would cause a ``multiple values for keyword argument 'agent_id'``
+        # crash on the next reload after a round-trip read→edit, poisoning
+        # ``config/permissions.json``.
         if permissions is not None:
             try:
                 perms = permissions.get_permissions(agent_id)
-                full["permissions"] = perms.model_dump() if hasattr(perms, "model_dump") else perms.dict()
+                dumped = perms.model_dump() if hasattr(perms, "model_dump") else perms.dict()
+                dumped.pop("agent_id", None)
+                full["permissions"] = dumped
             except Exception:
                 full["permissions"] = {}
         else:
