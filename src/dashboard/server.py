@@ -725,12 +725,13 @@ def create_dashboard_router(
         or "OPENLEGION_MAX_PROJECTS" in os.environ
     )
 
-    # Project-lifecycle WebSocket events are dual-emitted under both the
-    # legacy ``project_*`` name and the canonical ``team_*`` name during
-    # the rename's deprecation window. Mirrors ``_emit_team_event`` in
-    # ``src/host/server.py`` so dashboard-initiated mutations look
-    # identical to mesh-initiated mutations on the wire. PR 3 will drop
-    # the legacy emit once subscribers have migrated.
+    # Team-lifecycle WebSocket events: callers still pass the pre-rename
+    # ``project_*`` event_type strings for code-reuse; this helper maps
+    # them to the canonical ``team_*`` names that actually fire on the
+    # bus. The pre-rename literals stay in ``DashboardEvent.type`` so
+    # type-safety holds for any historical-record code that parses them
+    # — they're just no longer emitted. PR 3 of the project→team rename
+    # dropped the legacy emit; subscribers must listen on ``team_*``.
     _PROJECT_TO_TEAM_EVENT = {
         "project_created": "team_created",
         "project_updated": "team_updated",
@@ -739,12 +740,15 @@ def create_dashboard_router(
         "project_unarchived": "team_unarchived",
     }
 
-    def _emit_project_event(event_type: str, agent: str, data: dict) -> None:
-        """Emit a project lifecycle event under legacy + canonical names.
+    def _emit_team_event(event_type: str, agent: str, data: dict) -> None:
+        """Emit a team lifecycle event on the bus under the canonical name.
 
-        Augments the payload with ``team_id`` / ``team_name`` keys mirroring
-        ``project_id`` / ``name`` so a subscriber bound to either event name
-        sees the same shape.
+        ``event_type`` accepts the pre-rename ``project_*`` literal for
+        caller convenience — the actual emit happens under the
+        ``team_*`` equivalent looked up via ``_PROJECT_TO_TEAM_EVENT``.
+        Payload augmented with ``team_id`` / ``team_name`` keys mirroring
+        ``project_id`` / ``name`` so subscribers reading either key see
+        the same shape.
         """
         if event_bus is None:
             return
@@ -754,13 +758,7 @@ def create_dashboard_router(
         name_value = payload.get("name") or payload.get("project_id")
         if name_value and "team_name" not in payload:
             payload["team_name"] = name_value
-        try:
-            event_bus.emit(event_type, agent=agent, data=payload)
-        except Exception as e:
-            logger.debug("%s emit failed: %s", event_type, e)
-        team_event = _PROJECT_TO_TEAM_EVENT.get(event_type)
-        if team_event is None:
-            return
+        team_event = _PROJECT_TO_TEAM_EVENT.get(event_type, event_type)
         try:
             event_bus.emit(team_event, agent=agent, data=payload)
         except Exception as e:
@@ -4493,7 +4491,7 @@ def create_dashboard_router(
             _create_project(name, description=description, members=members)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
-        _emit_project_event(
+        _emit_team_event(
             "project_created", agent="operator",
             data={
                 "project_id": name,
@@ -4512,7 +4510,7 @@ def create_dashboard_router(
             _delete_project(team_name)
         except ValueError as e:
             raise HTTPException(status_code=404, detail=str(e))
-        _emit_project_event(
+        _emit_team_event(
             "project_deleted", agent="operator",
             data={"project_id": team_name, "name": team_name},
         )
@@ -4538,7 +4536,7 @@ def create_dashboard_router(
                 restarted = True
             except Exception as e:
                 logger.warning("Failed to restart agent %s after team change: %s", agent, e)
-        _emit_project_event(
+        _emit_team_event(
             "project_updated", agent="operator",
             data={
                 "project_id": team_name,
@@ -4571,7 +4569,7 @@ def create_dashboard_router(
                 restarted = True
             except Exception as e:
                 logger.warning("Failed to restart agent %s after team change: %s", agent, e)
-        _emit_project_event(
+        _emit_team_event(
             "project_updated", agent="operator",
             data={
                 "project_id": team_name,
@@ -4663,7 +4661,7 @@ def create_dashboard_router(
                 aid, ok = await coro
                 push_results[aid] = ok
 
-        _emit_project_event(
+        _emit_team_event(
             "project_updated", agent="operator",
             data={
                 "project_id": team,

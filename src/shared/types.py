@@ -663,10 +663,10 @@ class DashboardEvent(BaseModel):
         # payload).
         "agent_config_updated",
         # Team (formerly "project") CRUD — create / update / delete so
-        # the teams list refreshes without polling. Both the legacy
-        # ``project_*`` literals and the new ``team_*`` literals are kept
-        # through PR 3 — emitters fire BOTH so old listeners keep
-        # working.
+        # the teams list refreshes without polling. PR 3 stopped emitting
+        # the legacy ``project_*`` names; the literals are retained here
+        # for type-safety on any historical-record code that still parses
+        # the older events (deprecated; no longer emitted).
         "project_created",
         "project_updated",
         "project_deleted",

@@ -977,7 +977,7 @@ async def test_archive_project_emits_project_archived(v2_app_with_bus):
         r = await c.post("/mesh/teams/research/archive",
                          headers={"X-Agent-ID": "operator"})
     assert r.status_code == 200
-    arch = [e for e in captured if e["type"] == "project_archived"]
+    arch = [e for e in captured if e["type"] == "team_archived"]
     assert len(arch) == 1
     assert arch[0]["data"]["project_id"] == "research"
 
@@ -992,7 +992,7 @@ async def test_unarchive_project_emits_project_unarchived(v2_app_with_bus):
         r = await c.post("/mesh/teams/research/unarchive",
                          headers={"X-Agent-ID": "operator"})
     assert r.status_code == 200
-    unarch = [e for e in captured if e["type"] == "project_unarchived"]
+    unarch = [e for e in captured if e["type"] == "team_unarchived"]
     assert len(unarch) == 1
     assert unarch[0]["data"]["project_id"] == "research"
 
@@ -1020,7 +1020,7 @@ async def test_mesh_set_project_goal_emits_project_updated(v2_app_with_bus):
             headers={"X-Agent-ID": "operator"},
         )
     assert r.status_code == 200, r.text
-    updated = [e for e in captured if e["type"] == "project_updated"]
+    updated = [e for e in captured if e["type"] == "team_updated"]
     assert len(updated) == 1
     assert updated[0]["data"]["field"] == "goal"
     assert updated[0]["data"]["project_id"] == "research"

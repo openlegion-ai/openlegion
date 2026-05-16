@@ -480,11 +480,12 @@ def _record_blackboard_xproject(kind: str) -> None:
     _record_blackboard_xteam(kind)
 
 
-# Maps legacy ``project_*`` lifecycle event names to the new ``team_*``
-# equivalents. Used by :func:`_emit_team_event` to fan out a single
-# logical event under both names through PR 3 so existing dashboard /
-# integration listeners keep working while new code can subscribe to
-# the canonical ``team_*`` names.
+# Maps the legacy ``project_*`` lifecycle event names (callers still
+# pass these for code-reuse during the rename) to the canonical
+# ``team_*`` event names that actually fire on the bus. PR 3 stopped
+# dual-emitting under the legacy names — subscribers must listen on
+# ``team_*``. The five legacy literals stay in ``DashboardEvent.type``
+# for type-safety of any historical-record code that parses them.
 _PROJECT_TO_TEAM_EVENT = {
     "project_created": "team_created",
     "project_updated": "team_updated",
@@ -503,13 +504,14 @@ def _emit_team_event(
     extra: dict | None = None,
     logger=logger,
 ) -> None:
-    """Emit a project lifecycle event under BOTH the legacy and new names.
+    """Emit a team lifecycle event on the bus under the canonical name.
 
-    Payload always contains ``project_id`` / ``team_id`` / ``name``.
-    ``extra`` is merged on top so callers can pass description /
-    members / etc. Each emit is independently try/except'd so a failure
-    on the legacy fan-out doesn't suppress the new one (and vice
-    versa).
+    ``legacy_event`` accepts the pre-rename ``project_*`` name purely
+    for caller convenience — the actual emit happens under the
+    ``team_*`` equivalent looked up via ``_PROJECT_TO_TEAM_EVENT``.
+    Payload always contains ``project_id`` / ``team_id`` / ``name`` so
+    listeners reading either key keep working. ``extra`` is merged on
+    top so callers can pass description / members / etc.
     """
     if event_bus is None:
         return
@@ -520,14 +522,11 @@ def _emit_team_event(
     }
     if extra:
         payload.update(extra)
-    team_event = _PROJECT_TO_TEAM_EVENT.get(legacy_event)
-    for ev in (legacy_event, team_event):
-        if not ev:
-            continue
-        try:
-            event_bus.emit(ev, agent=agent, data=payload)
-        except Exception as e:  # pragma: no cover - defensive
-            logger.debug("%s emit failed: %s", ev, e)
+    team_event = _PROJECT_TO_TEAM_EVENT.get(legacy_event, legacy_event)
+    try:
+        event_bus.emit(team_event, agent=agent, data=payload)
+    except Exception as e:  # pragma: no cover - defensive
+        logger.debug("%s emit failed: %s", team_event, e)
 
 
 # Per-category denial counter surfaced on ``/mesh/system/metrics`` as
@@ -3950,19 +3949,10 @@ def create_mesh_app(
             _create_project(name, description=description, members=members)
         except ValueError as e:
             raise HTTPException(400, str(e))
-        if event_bus is not None:
-            payload = {
-                "project_id": name,
-                "team_id": name,
-                "name": name,
-                "description": description,
-                "members": list(members),
-            }
-            for ev in ("project_created", "team_created"):
-                try:
-                    event_bus.emit(ev, agent="operator", data=payload)
-                except Exception as e:
-                    logger.debug("%s emit failed: %s", ev, e)
+        _emit_team_event(
+            event_bus, "project_created", agent="operator", name=name,
+            extra={"description": description, "members": list(members)},
+        )
         return {"created": True, "name": name, "team_name": name, "team_id": name, "project_id": name}
 
     @app.post("/mesh/teams/{team_name}/members")

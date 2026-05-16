@@ -2892,8 +2892,8 @@ class TestOnWsEventHandlersForLiveCoverage:
     def test_project_crud_handlers_present(self):
         # All five project events route to a single fetchProjects path.
         for ev in (
-            "project_created", "project_updated", "project_deleted",
-            "project_archived", "project_unarchived",
+            "team_created", "team_updated", "team_deleted",
+            "team_archived", "team_unarchived",
         ):
             assert f"'{ev}'" in _APP_JS_TEXT, f"handler for {ev} missing"
 

@@ -5564,7 +5564,7 @@ class TestDashboardEventBusCoverage:
             json={"name": "alpha-proj", "description": "hi", "members": []},
         )
         assert resp.status_code == 200, resp.text
-        created = [e for e in self.captured if e["type"] == "project_created"]
+        created = [e for e in self.captured if e["type"] == "team_created"]
         assert len(created) == 1
         assert created[0]["data"]["project_id"] == "alpha-proj"
 
@@ -5573,7 +5573,7 @@ class TestDashboardEventBusCoverage:
         mock_del.return_value = None
         resp = self.client.delete("/dashboard/api/projects/alpha-proj")
         assert resp.status_code == 200
-        deleted = [e for e in self.captured if e["type"] == "project_deleted"]
+        deleted = [e for e in self.captured if e["type"] == "team_deleted"]
         assert len(deleted) == 1
         assert deleted[0]["data"]["project_id"] == "alpha-proj"
 
