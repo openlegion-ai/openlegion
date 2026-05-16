@@ -223,10 +223,12 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
     async def chat(msg: ChatMessage, request: Request) -> ChatResponse:
         """Interactive chat with the agent. Supports tool use."""
         origin = _origin_from_mesh_request(request)
+        task_id = request.headers.get("x-task-id") or None
         result = await loop.chat(
             sanitize_for_prompt(msg.message),
             trace_id=request.headers.get("x-trace-id"),
             origin=origin,
+            task_id=task_id,
         )
         return ChatResponse(**result)
 

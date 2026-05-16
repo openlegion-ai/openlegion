@@ -1127,9 +1127,14 @@ class TestCoordinationV2:
         assert task["status"] == "pending"
         assert task["output_key"] == "output/scout/ho_1"
         assert task["ts"] == 1700000000.0
-        # The new endpoint was hit, NOT the blackboard list.
+        # The new endpoint was hit. (Bug 3 fix: the blackboard list IS
+        # now called once per check_inbox to surface task_event
+        # back-edges, but the dedicated task lookup is still the v2
+        # endpoint, not the legacy blackboard scan.)
         mc.list_task_inbox.assert_called_once_with("analyst")
-        mc.list_blackboard.assert_not_called()
+        mc.list_blackboard.assert_called_once_with(
+            "inbox/analyst/task_event/", global_scope=True,
+        )
 
     @pytest.mark.asyncio
     async def test_complete_task_v2_transitions_to_done(self):

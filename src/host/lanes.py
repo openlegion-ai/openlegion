@@ -38,6 +38,7 @@ class QueuedTask:
     trace_id: str | None = None
     origin: MessageOrigin | None = None
     auto_notify: bool = False
+    task_id: str | None = None
     future: asyncio.Future = field(default_factory=asyncio.Future)
 
 
@@ -83,6 +84,7 @@ class LaneManager:
         trace_id: str | None = None,
         origin: MessageOrigin | None = None,
         auto_notify: bool = False,
+        task_id: str | None = None,
     ) -> str:
         """Queue a message for an agent with the specified mode.
 
@@ -94,6 +96,11 @@ class LaneManager:
         When ``origin`` and ``auto_notify=True`` are set, the lane worker will
         forward the completed task result back to the originating channel+user
         via the configured ``notify_fn``.
+
+        ``task_id`` (Bug 2/3 fix) plumbs through to the dispatched ``/chat``
+        call so the recipient agent's loop can auto-close the task on
+        completion. Only honoured for ``followup`` mode; steer/collect
+        intentionally don't wire it (those aren't single-task semantics).
         """
         self._ensure_lane(agent)
 
@@ -105,12 +112,14 @@ class LaneManager:
             return await self._handle_followup(
                 agent, message, trace_id=trace_id,
                 origin=origin, auto_notify=auto_notify,
+                task_id=task_id,
             )
 
     async def _handle_followup(
         self, agent: str, message: str, *, trace_id: str | None = None,
         origin: MessageOrigin | None = None,
         auto_notify: bool = False,
+        task_id: str | None = None,
     ) -> str:
         """Standard FIFO enqueue."""
         task = QueuedTask(
@@ -121,6 +130,7 @@ class LaneManager:
             trace_id=trace_id,
             origin=origin,
             auto_notify=auto_notify,
+            task_id=task_id,
         )
         self._pending[agent].append(task)
         await self._queues[agent].put(task)
@@ -240,9 +250,19 @@ class LaneManager:
                     meta={"mode": task.mode, "queue_depth": queue.qsize()},
                 )
             try:
+                # Build kwargs lazily — older test/dispatch signatures
+                # accept only ``(agent, message)`` (no **kwargs), so only
+                # pass extras when they're actually set. Preserves the
+                # pre-existing "origin only when present" contract while
+                # threading the new task_id through the same gate.
+                dispatch_kwargs: dict[str, Any] = {}
                 if task.origin is not None:
+                    dispatch_kwargs["origin"] = task.origin
+                if task.task_id is not None:
+                    dispatch_kwargs["task_id"] = task.task_id
+                if dispatch_kwargs:
                     result = await self._dispatch_fn(
-                        agent, task.message, origin=task.origin,
+                        agent, task.message, **dispatch_kwargs,
                     )
                 else:
                     result = await self._dispatch_fn(agent, task.message)

@@ -1692,6 +1692,7 @@ class AgentLoop:
     async def chat(
         self, user_message: str, *, trace_id: str | None = None,
         origin: "MessageOrigin | None" = None,
+        task_id: str | None = None,
     ) -> dict:
         """Handle a single chat turn with persistent conversation history.
 
@@ -1702,6 +1703,13 @@ class AgentLoop:
         Uses an asyncio.Lock so concurrent callers queue instead of being
         rejected.  The lock serialises chat turns; the /status endpoint
         remains available while the lock is held.
+
+        ``task_id`` (Bug 2 fix) — when set, the chat turn is treated as
+        the execution of that specific task. On successful return we
+        auto-call ``set_task_status(task_id, "done")`` with a brief
+        summary; on exception we call it with ``"failed"`` and the error
+        string. Without ``task_id`` (legacy callers, heartbeats, manual
+        chat) the auto-close is skipped entirely.
 
         Returns {"response": str, "tool_outputs": list[dict], "tokens_used": int}.
         """
@@ -1726,11 +1734,57 @@ class AgentLoop:
             async with self._chat_lock:
                 await self._maybe_restore_session()
                 try:
-                    return await self._chat_inner(user_message)
+                    try:
+                        result = await self._chat_inner(user_message)
+                    except Exception as e:
+                        # Auto-fail the originating task before propagating.
+                        if task_id:
+                            await self._auto_close_task(
+                                task_id, "failed",
+                                error=str(e)[:500],
+                            )
+                        raise
+                    # Auto-close on success (and special-case the
+                    # ``tool_limit_reached`` exit, which _chat_inner returns
+                    # as a normal dict — we treat that as ``failed`` with a
+                    # canonical ``max_iterations_reached`` error so the
+                    # originating agent can distinguish exhaustion from
+                    # successful completion).
+                    if task_id:
+                        if result.get("tool_limit_reached"):
+                            await self._auto_close_task(
+                                task_id, "failed",
+                                error="max_iterations_reached",
+                            )
+                        else:
+                            summary = (result.get("response") or "")[:500]
+                            await self._auto_close_task(
+                                task_id, "done",
+                                result_payload={"summary": summary},
+                            )
+                    return result
                 finally:
                     await self._checkpoint_chat_session()
         finally:
             current_origin.reset(origin_token)
+
+    async def _auto_close_task(
+        self, task_id: str, status: str, *,
+        result_payload: dict | None = None,
+        error: str | None = None,
+    ) -> None:
+        """Best-effort terminal transition. Never raises — failures log only."""
+        try:
+            await self.mesh_client.set_task_status(
+                task_id, status,
+                result=result_payload,
+                error=error,
+            )
+        except Exception as e:
+            logger.warning(
+                "Failed to auto-close task %s as %s: %s",
+                task_id, status, e,
+            )
 
     # ── Chat helpers (shared by streaming and non-streaming) ────
 
