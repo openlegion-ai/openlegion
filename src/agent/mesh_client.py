@@ -926,17 +926,15 @@ class MeshClient:
     # === Team management (mesh proxy endpoints) ===
     #
     # The ``*_team`` methods are the canonical names; the legacy
-    # ``*_project`` methods remain as thin aliases through PR 3 so
-    # existing tool implementations and tests keep working unchanged.
-    # All methods continue to hit the ``/mesh/projects/*`` endpoints —
-    # PR 1 added ``/mesh/teams/*`` aliases on the host but the legacy
-    # routes work and we keep MeshClient on them so deployments that
-    # haven't yet caught up to the new routes don't break.
+    # ``*_project`` methods are preserved as thin no-cost shims that
+    # proxy through the canonical name. Every method hits the
+    # ``/mesh/teams/*`` route — PR 3 removed the legacy
+    # ``/mesh/projects/*`` mirror endpoints.
 
     async def list_teams(self) -> dict:
         """List all teams via mesh proxy."""
         response = await self._get_with_retry(
-            f"{self.mesh_url}/mesh/projects",
+            f"{self.mesh_url}/mesh/teams",
         )
         response.raise_for_status()
         return response.json()
@@ -951,7 +949,7 @@ class MeshClient:
         """Create a new team via mesh proxy."""
         client = await self._get_client()
         response = await client.post(
-            f"{self.mesh_url}/mesh/projects",
+            f"{self.mesh_url}/mesh/teams",
             json={
                 "name": name,
                 "description": description,
@@ -972,7 +970,7 @@ class MeshClient:
         """Add an agent to a team via mesh proxy."""
         client = await self._get_client()
         response = await client.post(
-            f"{self.mesh_url}/mesh/projects/{team_name}/members",
+            f"{self.mesh_url}/mesh/teams/{team_name}/members",
             json={"agent": agent_id},
             headers=self._trace_headers(),
         )
@@ -989,7 +987,7 @@ class MeshClient:
         """Remove an agent from a team via mesh proxy."""
         client = await self._get_client()
         response = await client.delete(
-            f"{self.mesh_url}/mesh/projects/{team_name}/members/{agent_id}",
+            f"{self.mesh_url}/mesh/teams/{team_name}/members/{agent_id}",
             headers=self._trace_headers(),
         )
         response.raise_for_status()
@@ -1007,7 +1005,7 @@ class MeshClient:
         """Update a team's description/context via mesh proxy."""
         client = await self._get_client()
         response = await client.put(
-            f"{self.mesh_url}/mesh/projects/{team_name}/context",
+            f"{self.mesh_url}/mesh/teams/{team_name}/context",
             json={"context": context},
             headers=self._trace_headers(),
         )
@@ -1029,7 +1027,7 @@ class MeshClient:
         """Set a team's north star + success criteria via mesh proxy."""
         client = await self._get_client()
         response = await client.post(
-            f"{self.mesh_url}/mesh/projects/{team_name}/goal",
+            f"{self.mesh_url}/mesh/teams/{team_name}/goal",
             json={
                 "north_star": north_star,
                 "success_criteria": success_criteria,
@@ -1267,7 +1265,7 @@ class MeshClient:
     async def list_team_tasks(self, team_id: str) -> list[dict]:
         """List tasks scoped to ``team_id``."""
         response = await self._get_with_retry(
-            f"{self.mesh_url}/mesh/tasks/project/{team_id}",
+            f"{self.mesh_url}/mesh/tasks/team/{team_id}",
         )
         response.raise_for_status()
         data = response.json()
@@ -1358,7 +1356,7 @@ class MeshClient:
     async def team_status(self, team_id: str) -> dict:
         """Per-team status counts + recent blockers/completions."""
         response = await self._get_with_retry(
-            f"{self.mesh_url}/mesh/projects/{team_id}/status",
+            f"{self.mesh_url}/mesh/teams/{team_id}/status",
         )
         response.raise_for_status()
         return response.json()
@@ -1370,7 +1368,7 @@ class MeshClient:
     async def all_teams_status(self) -> dict:
         """Status rollup across every visible team."""
         response = await self._get_with_retry(
-            f"{self.mesh_url}/mesh/projects/status",
+            f"{self.mesh_url}/mesh/teams/status",
         )
         response.raise_for_status()
         return response.json()
@@ -1392,7 +1390,7 @@ class MeshClient:
         """Completed task artifacts for a team in a time window."""
         params = {"since": since} if since else None
         response = await self._get_with_retry(
-            f"{self.mesh_url}/mesh/projects/{team_id}/outputs",
+            f"{self.mesh_url}/mesh/teams/{team_id}/outputs",
             params=params,
         )
         response.raise_for_status()
@@ -1405,7 +1403,7 @@ class MeshClient:
     async def team_summary(self, team_id: str) -> dict:
         """Synthesized status summary for a team."""
         response = await self._get_with_retry(
-            f"{self.mesh_url}/mesh/projects/{team_id}/summary",
+            f"{self.mesh_url}/mesh/teams/{team_id}/summary",
         )
         response.raise_for_status()
         return response.json()
@@ -1418,7 +1416,7 @@ class MeshClient:
         """Archive a team."""
         client = await self._get_client()
         response = await client.post(
-            f"{self.mesh_url}/mesh/projects/{name}/archive",
+            f"{self.mesh_url}/mesh/teams/{name}/archive",
             headers=self._trace_headers(),
         )
         response.raise_for_status()
@@ -1432,7 +1430,7 @@ class MeshClient:
         """Unarchive (restore) a previously archived team."""
         client = await self._get_client()
         response = await client.post(
-            f"{self.mesh_url}/mesh/projects/{name}/unarchive",
+            f"{self.mesh_url}/mesh/teams/{name}/unarchive",
             headers=self._trace_headers(),
         )
         response.raise_for_status()
@@ -1456,7 +1454,7 @@ class MeshClient:
         """Propose deletion of an archived team. Returns nonce for human confirm."""
         client = await self._get_client()
         response = await client.post(
-            f"{self.mesh_url}/mesh/projects/{name}/propose-delete",
+            f"{self.mesh_url}/mesh/teams/{name}/propose-delete",
             headers=self._trace_headers(),
         )
         response.raise_for_status()

@@ -571,7 +571,7 @@ async def test_endpoint_project_status_returns_counts(v2_app):
         await c.post("/mesh/tasks",
                      json={"assignee": "scout", "title": "t2", "project": "research"},
                      headers={"X-Agent-ID": "operator"})
-        r = await c.get("/mesh/projects/research/status",
+        r = await c.get("/mesh/teams/research/status",
                         headers={"X-Agent-ID": "operator"})
     assert r.status_code == 200, r.text
     body = r.json()
@@ -584,7 +584,7 @@ async def test_endpoint_project_status_returns_counts(v2_app):
 async def test_endpoint_project_status_403_for_non_member(v2_app):
     app, _, _ = v2_app
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-        r = await c.get("/mesh/projects/research/status",
+        r = await c.get("/mesh/teams/research/status",
                         headers={"X-Agent-ID": "tracker"})
     assert r.status_code == 403
 
@@ -593,10 +593,10 @@ async def test_endpoint_project_status_403_for_non_member(v2_app):
 async def test_endpoint_all_projects_status_operator_sees_all(v2_app):
     app, _, _ = v2_app
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-        r = await c.get("/mesh/projects/status",
+        r = await c.get("/mesh/teams/status",
                         headers={"X-Agent-ID": "operator"})
     assert r.status_code == 200
-    names = {p["project"]["name"] for p in r.json()["projects"]}
+    names = {t["team"]["name"] for t in r.json()["teams"]}
     assert names == {"research", "ops"}
 
 
@@ -639,7 +639,7 @@ async def test_endpoint_project_outputs_filters_by_since(v2_app):
                      json={"status": "done"},
                      headers={"X-Agent-ID": "analyst"})
         # Last 24h includes the task
-        r = await c.get("/mesh/projects/research/outputs",
+        r = await c.get("/mesh/teams/research/outputs",
                         params={"since": "24h"},
                         headers={"X-Agent-ID": "operator"})
     assert r.status_code == 200
@@ -650,7 +650,7 @@ async def test_endpoint_project_outputs_filters_by_since(v2_app):
 async def test_endpoint_project_summary(v2_app):
     app, _, _ = v2_app
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-        r = await c.get("/mesh/projects/research/summary",
+        r = await c.get("/mesh/teams/research/summary",
                         headers={"X-Agent-ID": "operator"})
     assert r.status_code == 200
     body = r.json()
@@ -723,15 +723,15 @@ async def test_endpoint_retry_only_failed(v2_app):
 async def test_endpoint_archive_project(v2_app):
     app, _, tmp_path = v2_app
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-        r = await c.post("/mesh/projects/research/archive",
+        r = await c.post("/mesh/teams/research/archive",
                          headers={"X-Agent-ID": "operator"})
     assert r.status_code == 200
     # Default list should now exclude archived
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-        r = await c.get("/mesh/projects",
+        r = await c.get("/mesh/teams",
                         headers={"X-Agent-ID": "operator"})
     body = r.json()
-    names = {p["name"] for p in body["projects"]}
+    names = {t["name"] for t in body["teams"]}
     assert "research" not in names
     assert "ops" in names
 
@@ -741,7 +741,7 @@ async def test_endpoint_delete_project_requires_archive(v2_app):
     """Delete on a live project must be rejected with 400."""
     app, _, _ = v2_app
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-        r = await c.post("/mesh/projects/research/propose-delete",
+        r = await c.post("/mesh/teams/research/propose-delete",
                          headers=_human_origin_headers())
     assert r.status_code == 400
     assert "archived" in r.text.lower()
@@ -752,11 +752,11 @@ async def test_endpoint_delete_project_happy_path(v2_app):
     app, _, _ = v2_app
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         # Archive first
-        r = await c.post("/mesh/projects/research/archive",
+        r = await c.post("/mesh/teams/research/archive",
                          headers={"X-Agent-ID": "operator"})
         assert r.status_code == 200
         # Propose delete
-        r = await c.post("/mesh/projects/research/propose-delete",
+        r = await c.post("/mesh/teams/research/propose-delete",
                          headers=_human_origin_headers())
         assert r.status_code == 200, r.text
         body = r.json()
@@ -781,9 +781,9 @@ async def test_endpoint_delete_project_happy_path(v2_app):
 async def test_endpoint_delete_project_confirm_with_agent_origin_403(v2_app):
     app, _, _ = v2_app
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-        await c.post("/mesh/projects/research/archive",
+        await c.post("/mesh/teams/research/archive",
                      headers={"X-Agent-ID": "operator"})
-        r = await c.post("/mesh/projects/research/propose-delete",
+        r = await c.post("/mesh/teams/research/propose-delete",
                          headers=_human_origin_headers())
         nonce = r.json()["change_id"]
         digest = r.json()["payload_digest"]
@@ -865,13 +865,13 @@ async def test_endpoint_archive_agent_blocks_operator(v2_app):
 async def test_endpoint_list_projects_includes_archived_when_flagged(v2_app):
     app, _, _ = v2_app
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-        await c.post("/mesh/projects/research/archive",
+        await c.post("/mesh/teams/research/archive",
                      headers={"X-Agent-ID": "operator"})
-        r = await c.get("/mesh/projects",
+        r = await c.get("/mesh/teams",
                         params={"include_archived": True},
                         headers={"X-Agent-ID": "operator"})
     body = r.json()
-    names = {p["name"] for p in body["projects"]}
+    names = {t["name"] for t in body["teams"]}
     assert "research" in names
 
 
@@ -974,7 +974,7 @@ async def test_archive_project_emits_project_archived(v2_app_with_bus):
     app, _, _, bus = v2_app_with_bus
     captured = _capture(bus)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-        r = await c.post("/mesh/projects/research/archive",
+        r = await c.post("/mesh/teams/research/archive",
                          headers={"X-Agent-ID": "operator"})
     assert r.status_code == 200
     arch = [e for e in captured if e["type"] == "project_archived"]
@@ -986,10 +986,10 @@ async def test_archive_project_emits_project_archived(v2_app_with_bus):
 async def test_unarchive_project_emits_project_unarchived(v2_app_with_bus):
     app, _, _, bus = v2_app_with_bus
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-        await c.post("/mesh/projects/research/archive",
+        await c.post("/mesh/teams/research/archive",
                      headers={"X-Agent-ID": "operator"})
         captured = _capture(bus)
-        r = await c.post("/mesh/projects/research/unarchive",
+        r = await c.post("/mesh/teams/research/unarchive",
                          headers={"X-Agent-ID": "operator"})
     assert r.status_code == 200
     unarch = [e for e in captured if e["type"] == "project_unarchived"]
@@ -1015,7 +1015,7 @@ async def test_mesh_set_project_goal_emits_project_updated(v2_app_with_bus):
     captured = _capture(bus)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         r = await c.post(
-            "/mesh/projects/research/goal",
+            "/mesh/teams/research/goal",
             json={"north_star": "Win this quarter", "success_criteria": ["x"]},
             headers={"X-Agent-ID": "operator"},
         )

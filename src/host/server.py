@@ -2565,21 +2565,11 @@ def create_mesh_app(
 
         return result
 
-    # === Project Costs ===
-
-    @app.get("/mesh/costs/project/{project}")
-    async def get_project_costs(project: str, request: Request, period: str = "today") -> dict:
-        """Return aggregated cost data for a project."""
-        _require_any_auth(request)
-        if cost_tracker is None:
-            raise HTTPException(503, "Cost tracker not available")
-        if not hasattr(cost_tracker, "get_project_spend"):
-            raise HTTPException(503, "Project cost tracking not available")
-        return cost_tracker.get_project_spend(project, period)
+    # === Team Costs ===
 
     @app.get("/mesh/costs/team/{team}")
     async def get_team_costs(team: str, request: Request, period: str = "today") -> dict:
-        """Return aggregated cost data for a team — alias for ``/mesh/costs/project/{project}``."""
+        """Return aggregated cost data for a team."""
         _require_any_auth(request)
         if cost_tracker is None:
             raise HTTPException(503, "Cost tracker not available")
@@ -3879,45 +3869,21 @@ def create_mesh_app(
             "task_ids": ids,
         }
 
-    # === Mesh Project Proxy Endpoints ===
-    # These proxy the dashboard's /api/projects/* endpoints through the mesh
-    # so operator agents can manage projects using their mesh auth token.
-
-    @app.get("/mesh/projects")
-    async def mesh_list_projects(request: Request, include_archived: bool = False) -> dict:
-        """List projects (mesh-authed proxy).
-
-        Excludes archived projects by default — pass ``include_archived=true``
-        to include them. Each row carries ``status`` so callers can render
-        the archive state when ``include_archived`` is set.
-        """
-        caller = _extract_verified_agent_id(request)
-        if caller != "operator" and not _is_internal_caller(request):
-            raise HTTPException(403, "Only the operator can manage projects")
-        from src.cli.config import _load_projects
-        projects = _load_projects()
-        result = []
-        for pname, pdata in sorted(projects.items(), key=lambda x: x[1].get("created_at") or ""):
-            status = pdata.get("status", "active") or "active"
-            if not include_archived and status == "archived":
-                continue
-            result.append({
-                "name": pname,
-                "description": pdata.get("description", ""),
-                "members": pdata.get("members", []),
-                "created_at": pdata.get("created_at", ""),
-                "status": status,
-            })
-        return {"projects": result}
+    # === Mesh Team Proxy Endpoints ===
+    # These proxy the dashboard's /api/teams/* endpoints through the
+    # mesh so operator agents can manage teams using their mesh auth
+    # token. The pre-rename ``/mesh/projects/*`` aliases were removed
+    # in PR 3 of the project→team rename — see CLAUDE.md Review State.
 
     @app.get("/mesh/teams")
     async def mesh_list_teams(request: Request, include_archived: bool = False) -> dict:
-        """List teams (mesh-authed proxy) — alias for ``/mesh/projects``.
+        """List teams (mesh-authed proxy).
 
-        Pure additive alias scaffolded for the upcoming project→team
-        rename (see CLAUDE.md Review State 2026-05-16). Mirrors the
-        project route exactly and carries both ``name``/``team_name``
-        keys so consumers can migrate at their own pace.
+        Excludes archived teams by default — pass ``include_archived=true``
+        to include them. Each row carries ``status`` so callers can render
+        the archive state when ``include_archived`` is set. The ``name``
+        / ``team_name`` keys both ride on each row so callers tracking
+        either field keep working.
         """
         caller = _extract_verified_agent_id(request)
         if caller != "operator" and not _is_internal_caller(request):
@@ -3937,74 +3903,11 @@ def create_mesh_app(
                 "created_at": pdata.get("created_at", ""),
                 "status": status,
             })
-        return {"teams": result, "projects": result}
-
-    @app.post("/mesh/projects")
-    async def mesh_create_project(request: Request) -> dict:
-        """Create a new project (mesh-authed proxy)."""
-        _require_any_auth(request)
-        if _resolve_agent_id("", request) != "operator":
-            raise HTTPException(403, "Only the operator can manage projects")
-        import os as _os
-
-        from src.cli.config import _create_project, _load_config, _load_projects
-
-        _max_teams_env = _os.environ.get(
-            "OPENLEGION_MAX_TEAMS",
-            _os.environ.get("OPENLEGION_MAX_PROJECTS"),
-        )
-        if _max_teams_env is not None:
-            _max_teams = int(_max_teams_env)
-            if _max_teams == 0:
-                raise HTTPException(
-                    403,
-                    "Teams are not available on your plan. Upgrade for team support.",
-                )
-            current_count = len(_load_projects())
-            if current_count >= _max_teams:
-                raise HTTPException(
-                    403,
-                    f"Team limit reached ({_max_teams}). Upgrade your plan for more teams.",
-                )
-
-        body = await request.json()
-        name = body.get("name", "").strip()
-        description = sanitize_for_prompt(body.get("description", "")).strip()
-        members = body.get("members", [])
-        if not name:
-            raise HTTPException(400, "name is required")
-        if not isinstance(members, list):
-            raise HTTPException(400, "members must be a list")
-        cfg = _load_config()
-        known_agents = set(cfg.get("agents", {}).keys())
-        unknown = [m for m in members if m not in known_agents]
-        if unknown:
-            raise HTTPException(400, f"Unknown agents: {', '.join(unknown)}")
-        try:
-            _create_project(name, description=description, members=members)
-        except ValueError as e:
-            raise HTTPException(400, str(e))
-        if event_bus is not None:
-            # Emit BOTH ``project_created`` and ``team_created`` with the
-            # same payload for back-compat through PR 3. Payload carries
-            # BOTH ``project_id`` and ``team_id`` keys.
-            payload = {
-                "project_id": name,
-                "team_id": name,
-                "name": name,
-                "description": description,
-                "members": list(members),
-            }
-            for ev in ("project_created", "team_created"):
-                try:
-                    event_bus.emit(ev, agent="operator", data=payload)
-                except Exception as e:
-                    logger.debug("%s emit failed: %s", ev, e)
-        return {"created": True, "name": name, "team_id": name, "project_id": name}
+        return {"teams": result}
 
     @app.post("/mesh/teams")
     async def mesh_create_team(request: Request) -> dict:
-        """Create a new team (mesh-authed proxy) — alias for ``/mesh/projects``."""
+        """Create a new team (mesh-authed proxy)."""
         _require_any_auth(request)
         if _resolve_agent_id("", request) != "operator":
             raise HTTPException(403, "Only the operator can manage teams")
@@ -4062,28 +3965,9 @@ def create_mesh_app(
                     logger.debug("%s emit failed: %s", ev, e)
         return {"created": True, "name": name, "team_name": name, "team_id": name, "project_id": name}
 
-    @app.post("/mesh/projects/{name}/members")
-    async def mesh_add_project_member(name: str, request: Request) -> dict:
-        """Add an agent to a project (mesh-authed proxy)."""
-        _require_any_auth(request)
-        if _resolve_agent_id("", request) != "operator":
-            raise HTTPException(403, "Only the operator can manage projects")
-        from src.cli.config import _add_agent_to_project
-        body = await request.json()
-        agent = body.get("agent", "").strip()
-        if not agent:
-            raise HTTPException(400, "agent is required")
-        try:
-            _add_agent_to_project(name, agent)
-        except ValueError as e:
-            raise HTTPException(400, str(e))
-        # Update in-memory project mapping so scoping takes effect immediately
-        _agent_projects[agent] = name
-        return {"added": True, "project": name, "agent": agent}
-
     @app.post("/mesh/teams/{team_name}/members")
     async def mesh_add_team_member(team_name: str, request: Request) -> dict:
-        """Add an agent to a team (mesh-authed proxy) — alias for ``/mesh/projects/{name}/members``."""
+        """Add an agent to a team (mesh-authed proxy)."""
         _require_any_auth(request)
         if _resolve_agent_id("", request) != "operator":
             raise HTTPException(403, "Only the operator can manage teams")
@@ -4100,23 +3984,9 @@ def create_mesh_app(
         _agent_projects[agent] = team_name
         return {"added": True, "project": team_name, "team_name": team_name, "agent": agent}
 
-    @app.delete("/mesh/projects/{name}/members/{agent}")
-    async def mesh_remove_project_member(name: str, agent: str, request: Request) -> dict:
-        """Remove an agent from a project (mesh-authed proxy)."""
-        _require_any_auth(request)
-        if _resolve_agent_id("", request) != "operator":
-            raise HTTPException(403, "Only the operator can manage projects")
-        from src.cli.config import _remove_agent_from_project
-        try:
-            _remove_agent_from_project(name, agent)
-        except ValueError as e:
-            raise HTTPException(400, str(e))
-        _agent_projects.pop(agent, None)
-        return {"removed": True, "project": name, "agent": agent}
-
     @app.delete("/mesh/teams/{team_name}/members/{agent}")
     async def mesh_remove_team_member(team_name: str, agent: str, request: Request) -> dict:
-        """Remove an agent from a team (mesh-authed proxy) — alias for ``/mesh/projects/{name}/members/{agent}``."""
+        """Remove an agent from a team (mesh-authed proxy)."""
         _require_any_auth(request)
         if _resolve_agent_id("", request) != "operator":
             raise HTTPException(403, "Only the operator can manage teams")
@@ -4128,23 +3998,9 @@ def create_mesh_app(
         _agent_projects.pop(agent, None)
         return {"removed": True, "project": team_name, "team_name": team_name, "agent": agent}
 
-    @app.delete("/mesh/projects/{name}")
-    async def mesh_delete_project(name: str, request: Request) -> dict:
-        """Delete a project (mesh-authed proxy)."""
-        _require_any_auth(request)
-        if _resolve_agent_id("", request) != "operator":
-            raise HTTPException(403, "Only the operator can manage projects")
-        from src.cli.config import _delete_project
-        try:
-            _delete_project(name)
-        except ValueError as e:
-            raise HTTPException(404, str(e))
-        _emit_team_event(event_bus, "project_deleted", agent="operator", name=name)
-        return {"deleted": True, "name": name, "team_id": name, "project_id": name}
-
     @app.delete("/mesh/teams/{team_name}")
     async def mesh_delete_team(team_name: str, request: Request) -> dict:
-        """Delete a team (mesh-authed proxy) — alias for ``/mesh/projects/{name}``."""
+        """Delete a team (mesh-authed proxy)."""
         _require_any_auth(request)
         if _resolve_agent_id("", request) != "operator":
             raise HTTPException(403, "Only the operator can manage teams")
@@ -4159,44 +4015,9 @@ def create_mesh_app(
             "team_name": team_name, "team_id": team_name, "project_id": team_name,
         }
 
-    @app.put("/mesh/projects/{name}/context")
-    async def mesh_update_project_context(name: str, request: Request) -> dict:
-        """Update a project's description/context (mesh-authed proxy)."""
-        _require_any_auth(request)
-        if _resolve_agent_id("", request) != "operator":
-            raise HTTPException(403, "Only the operator can manage projects")
-        from src.cli.config import PROJECTS_DIR, _load_projects
-        body = await request.json()
-        context = sanitize_for_prompt(body.get("context", "")).strip()
-
-        projects = _load_projects()
-        if name not in projects:
-            raise HTTPException(404, f"Project '{name}' not found")
-
-        # Update metadata.yaml description in place (never delete the project)
-        import yaml
-        meta_file = PROJECTS_DIR / name / "metadata.yaml"
-        if meta_file.exists():
-            with open(meta_file) as f:
-                meta = yaml.safe_load(f) or {}
-            meta["description"] = context
-            with open(meta_file, "w") as f:
-                yaml.dump(meta, f, default_flow_style=False, sort_keys=False)
-
-        # Update project.md in place
-        project_md = PROJECTS_DIR / name / "project.md"
-        project_md.write_text(f"# {name}\n\n{context}\n")
-
-        _emit_team_event(
-            event_bus, "project_updated", agent="operator", name=name,
-            extra={"field": "context"},
-        )
-
-        return {"updated": True, "project": name, "team": name, "team_id": name, "project_id": name}
-
     @app.put("/mesh/teams/{team_name}/context")
     async def mesh_update_team_context(team_name: str, request: Request) -> dict:
-        """Update a team's description/context (mesh-authed proxy) — alias for ``/mesh/projects/{name}/context``."""
+        """Update a team's description/context (mesh-authed proxy)."""
         _require_any_auth(request)
         if _resolve_agent_id("", request) != "operator":
             raise HTTPException(403, "Only the operator can manage teams")
@@ -4232,94 +4053,9 @@ def create_mesh_app(
             "team_name": team_name, "team_id": team_name, "project_id": team_name,
         }
 
-    @app.post("/mesh/projects/{name}/goal")
-    async def mesh_set_project_goal(name: str, request: Request) -> dict:
-        """Set a project's north star + success criteria (mesh-authed proxy).
-
-        Operator-only (or internal localhost callers). Validates length
-        limits then persists to ``metadata.yaml`` in place. No confirmation
-        gate — this is meta-config the user explicitly asked for.
-        """
-        _require_any_auth(request)
-        caller = _extract_verified_agent_id(request)
-        if caller != "operator" and not _is_internal_caller(request):
-            raise HTTPException(403, "Only the operator can manage projects")
-        from src.cli.config import PROJECTS_DIR, _load_projects
-
-        body = await request.json()
-        north_star_raw = body.get("north_star")
-        success_criteria_raw = body.get("success_criteria")
-
-        # Normalize and validate.
-        if north_star_raw is None:
-            north_star: str | None = None
-        else:
-            north_star = sanitize_for_prompt(str(north_star_raw)).strip()
-            if len(north_star) > 2000:
-                raise HTTPException(
-                    400, "north_star must be 2000 characters or fewer",
-                )
-            if not north_star:
-                north_star = None
-
-        success_criteria: list[str] | None
-        if success_criteria_raw is None:
-            success_criteria = None
-        else:
-            if not isinstance(success_criteria_raw, list):
-                raise HTTPException(
-                    400, "success_criteria must be a list of strings",
-                )
-            if len(success_criteria_raw) > 10:
-                raise HTTPException(
-                    400, "success_criteria may contain at most 10 items",
-                )
-            cleaned: list[str] = []
-            for item in success_criteria_raw:
-                sc = sanitize_for_prompt(str(item)).strip()
-                if not sc:
-                    continue
-                if len(sc) > 200:
-                    raise HTTPException(
-                        400,
-                        "each success_criteria entry must be 200 characters or fewer",
-                    )
-                cleaned.append(sc)
-            success_criteria = cleaned or None
-
-        projects = _load_projects()
-        if name not in projects:
-            raise HTTPException(404, f"Project '{name}' not found")
-
-        import yaml
-        meta_file = PROJECTS_DIR / name / "metadata.yaml"
-        if not meta_file.exists():
-            raise HTTPException(404, f"Project '{name}' has no metadata file")
-        with open(meta_file) as f:
-            meta = yaml.safe_load(f) or {}
-        meta["north_star"] = north_star
-        meta["success_criteria"] = success_criteria
-        with open(meta_file, "w") as f:
-            yaml.dump(meta, f, default_flow_style=False, sort_keys=False)
-
-        _emit_team_event(
-            event_bus, "project_updated", agent="operator", name=name,
-            extra={"field": "goal"},
-        )
-
-        return {
-            "success": True,
-            "project_name": name,
-            "team_name": name,
-            "team_id": name,
-            "project_id": name,
-            "north_star": north_star,
-            "success_criteria": success_criteria,
-        }
-
     @app.post("/mesh/teams/{team_name}/goal")
     async def mesh_set_team_goal(team_name: str, request: Request) -> dict:
-        """Set a team's north star + success criteria (mesh-authed proxy) — alias for ``/mesh/projects/{name}/goal``.
+        """Set a team's north star + success criteria (mesh-authed proxy).
 
         Operator-only (or internal localhost callers). Validates length
         limits then persists to ``metadata.yaml`` in place. No confirmation
@@ -4523,26 +4259,9 @@ def create_mesh_app(
         rows = store.list_inbox(assignee)
         return {"tasks": rows, "count": len(rows)}
 
-    @app.get("/mesh/tasks/project/{project_id}")
-    async def list_project_tasks(project_id: str, request: Request) -> dict:
-        """List tasks scoped to a project.
-
-        Caller must be a member of the project (or operator / internal).
-        """
-        store = _require_tasks_v2()
-        caller = _extract_verified_agent_id(request)
-        if not _is_project_member(caller, project_id):
-            raise HTTPException(
-                403,
-                f"Caller {caller} is not a member of project {project_id!r}",
-            )
-        _reap_tasks_opportunistically()
-        rows = store.list_project(project_id)
-        return {"tasks": rows, "count": len(rows)}
-
     @app.get("/mesh/tasks/team/{team_id}")
     async def list_team_tasks(team_id: str, request: Request) -> dict:
-        """List tasks scoped to a team — alias for ``/mesh/tasks/project/{project_id}``.
+        """List tasks scoped to a team.
 
         Caller must be a member of the team (or operator / internal).
         """
@@ -4960,40 +4679,9 @@ def create_mesh_app(
             ],
         }
 
-    @app.get("/mesh/projects/{project_id}/status")
-    async def project_status(project_id: str, request: Request) -> dict:
-        """Per-project status counts + recent blockers/completions.
-
-        Caller must be a project member (or operator/internal). Returns
-        the same structure as ``_summarize_tasks`` plus a ``project``
-        field carrying name and archive status.
-        """
-        store = _require_tasks_v2()
-        caller = _extract_verified_agent_id(request)
-        if not _is_project_member(caller, project_id):
-            raise HTTPException(
-                403,
-                f"Caller {caller} is not a member of project {project_id!r}",
-            )
-        from src.cli.config import _load_projects
-        projects = _load_projects()
-        if project_id not in projects:
-            raise HTTPException(404, f"Project '{project_id}' not found")
-        meta = projects[project_id]
-        _reap_tasks_opportunistically()
-        rows = store.list_project(project_id)
-        result = _summarize_tasks(rows)
-        result["project"] = {
-            "name": project_id,
-            "status": meta.get("status", "active") or "active",
-            "members": meta.get("members", []),
-            "description": meta.get("description", ""),
-        }
-        return result
-
     @app.get("/mesh/teams/{team_id}/status")
     async def team_status(team_id: str, request: Request) -> dict:
-        """Per-team status counts + recent blockers/completions — alias for ``/mesh/projects/{project_id}/status``.
+        """Per-team status counts + recent blockers/completions.
 
         Caller must be a team member (or operator/internal). Returns
         the same structure as ``_summarize_tasks`` plus a ``project``
@@ -5024,42 +4712,9 @@ def create_mesh_app(
         result["team"] = meta_block
         return result
 
-    @app.get("/mesh/projects/status")
-    async def all_projects_status(request: Request) -> dict:
-        """List status rollups for every project the caller can see.
-
-        Operator / internal callers see all projects (including archived);
-        other callers see only their own. Each row carries the same
-        ``counts``/``blockers``/``recent_done`` shape as the per-project
-        endpoint, plus the project name and status.
-        """
-        store = _require_tasks_v2()
-        caller = _extract_verified_agent_id(request)
-        from src.cli.config import _load_projects
-        projects = _load_projects()
-        visible: list[str]
-        if caller == "operator" or _is_internal_caller(request):
-            visible = list(projects.keys())
-        else:
-            visible = sorted(_caller_projects(caller))
-        _reap_tasks_opportunistically()
-        rows: list[dict] = []
-        for pid in sorted(visible):
-            meta = projects.get(pid, {})
-            project_rows = store.list_project(pid)
-            summary = _summarize_tasks(project_rows)
-            summary["project"] = {
-                "name": pid,
-                "status": meta.get("status", "active") or "active",
-                "members": meta.get("members", []),
-                "description": meta.get("description", ""),
-            }
-            rows.append(summary)
-        return {"projects": rows}
-
     @app.get("/mesh/teams/status")
     async def all_teams_status(request: Request) -> dict:
-        """List status rollups for every team the caller can see — alias for ``/mesh/projects/status``.
+        """List status rollups for every team the caller can see.
 
         Operator / internal callers see all teams (including archived);
         other callers see only their own. Each row carries the same
@@ -5087,10 +4742,9 @@ def create_mesh_app(
                 "members": meta.get("members", []),
                 "description": meta.get("description", ""),
             }
-            summary["project"] = meta_block
             summary["team"] = meta_block
             rows.append(summary)
-        return {"projects": rows, "teams": rows}
+        return {"teams": rows}
 
     @app.get("/mesh/agents/{agent_id}/queue")
     async def agent_queue(
@@ -5167,45 +4821,11 @@ def create_mesh_app(
         except (ValueError, TypeError):
             return _time.time() - (7 * 24 * 60 * 60)
 
-    @app.get("/mesh/projects/{project_id}/outputs")
-    async def project_outputs(
-        project_id: str, request: Request, since: str = "",
-    ) -> dict:
-        """Completed task artifacts for a project in a time window.
-
-        ``since`` accepts an ISO timestamp or duration string (``"24h"``,
-        ``"7d"``); default is the last 7 days. Returns one entry per
-        completed task with its title, assignee, completion time, and
-        artifact refs.
-        """
-        store = _require_tasks_v2()
-        caller = _extract_verified_agent_id(request)
-        if not _is_project_member(caller, project_id):
-            raise HTTPException(
-                403,
-                f"Caller {caller} is not a member of project {project_id!r}",
-            )
-        floor = _parse_since(since)
-        _reap_tasks_opportunistically()
-        rows = store.list_project(project_id, statuses=["done"])
-        outputs = []
-        for r in rows:
-            completed_at = r.get("completed_at") or 0
-            if completed_at < floor:
-                continue
-            outputs.append({
-                "id": r["id"], "title": r["title"], "assignee": r["assignee"],
-                "completed_at": completed_at,
-                "artifact_refs": r.get("artifact_refs", []) or [],
-            })
-        outputs.sort(key=lambda x: x["completed_at"], reverse=True)
-        return {"project_id": project_id, "since": since, "outputs": outputs}
-
     @app.get("/mesh/teams/{team_id}/outputs")
     async def team_outputs(
         team_id: str, request: Request, since: str = "",
     ) -> dict:
-        """Completed task artifacts for a team in a time window — alias for ``/mesh/projects/{project_id}/outputs``.
+        """Completed task artifacts for a team in a time window.
 
         ``since`` accepts an ISO timestamp or duration string (``"24h"``,
         ``"7d"``); default is the last 7 days. Returns one entry per
@@ -5240,66 +4860,9 @@ def create_mesh_app(
             "outputs": outputs,
         }
 
-    @app.get("/mesh/projects/{project_id}/summary")
-    async def project_summary(project_id: str, request: Request) -> dict:
-        """Synthesized status text + structured fields for a project.
-
-        Combines status counts, blocker list, recent completions, and a
-        simple ``ask_for_user`` list (currently mirrors ``blocked`` —
-        operators can later swap in a richer policy here without changing
-        the on-the-wire shape). The narrative ``status_text`` is plain
-        prose so the operator's prompt machinery doesn't have to format
-        it again.
-        """
-        store = _require_tasks_v2()
-        caller = _extract_verified_agent_id(request)
-        if not _is_project_member(caller, project_id):
-            raise HTTPException(
-                403,
-                f"Caller {caller} is not a member of project {project_id!r}",
-            )
-        from src.cli.config import _load_projects
-        projects = _load_projects()
-        if project_id not in projects:
-            raise HTTPException(404, f"Project '{project_id}' not found")
-        meta = projects[project_id]
-        _reap_tasks_opportunistically()
-        rows = store.list_project(project_id)
-        s = _summarize_tasks(rows)
-        active = s["counts"]["active"]
-        blocked = s["counts"]["blocked"]
-        done = s["counts"]["done"]
-        failed = s["counts"]["failed"]
-        if active == 0 and blocked == 0 and done == 0 and failed == 0:
-            status_text = f"No tasks recorded for {project_id!r} yet."
-        else:
-            parts: list[str] = []
-            if active:
-                parts.append(f"{active} active")
-            if blocked:
-                parts.append(f"{blocked} blocked")
-            if done:
-                parts.append(f"{done} done")
-            if failed:
-                parts.append(f"{failed} failed")
-            status_text = ", ".join(parts) + f" in project {project_id!r}."
-        return {
-            "project": {
-                "name": project_id,
-                "status": meta.get("status", "active") or "active",
-                "description": meta.get("description", ""),
-                "members": meta.get("members", []),
-            },
-            "status_text": status_text,
-            "counts": s["counts"],
-            "top_blockers": s["blockers"],
-            "recent_completions": s["recent_done"],
-            "ask_for_user": s["blockers"],
-        }
-
     @app.get("/mesh/teams/{team_id}/summary")
     async def team_summary(team_id: str, request: Request) -> dict:
-        """Synthesized status text + structured fields for a team — alias for ``/mesh/projects/{project_id}/summary``.
+        """Synthesized status text + structured fields for a team.
 
         Combines status counts, blocker list, recent completions, and a
         simple ``ask_for_user`` list (currently mirrors ``blocked`` —
@@ -5365,25 +4928,9 @@ def create_mesh_app(
     # ``"agent"`` and ``action_kind="delete"``. Archive must precede
     # delete; the gate is enforced server-side at propose time.
 
-    @app.post("/mesh/projects/{name}/archive")
-    async def archive_project_endpoint(name: str, request: Request) -> dict:
-        """Archive a project (operator-only). Idempotent."""
-        caller = _extract_verified_agent_id(request)
-        if caller != "operator" and not _is_internal_caller(request):
-            raise HTTPException(403, "Only the operator can archive projects")
-        from src.cli.config import _archive_project, _load_projects
-        if name not in _load_projects():
-            raise HTTPException(404, f"Project '{name}' not found")
-        try:
-            _archive_project(name)
-        except ValueError as e:
-            raise HTTPException(404, str(e))
-        _emit_team_event(event_bus, "project_archived", agent="operator", name=name)
-        return {"archived": True, "project": name, "team": name, "team_id": name, "project_id": name}
-
     @app.post("/mesh/teams/{team_name}/archive")
     async def archive_team_endpoint(team_name: str, request: Request) -> dict:
-        """Archive a team (operator-only). Idempotent. Alias for ``/mesh/projects/{name}/archive``."""
+        """Archive a team (operator-only). Idempotent."""
         caller = _extract_verified_agent_id(request)
         if caller != "operator" and not _is_internal_caller(request):
             raise HTTPException(403, "Only the operator can archive teams")
@@ -5400,25 +4947,9 @@ def create_mesh_app(
             "team_name": team_name, "team_id": team_name, "project_id": team_name,
         }
 
-    @app.post("/mesh/projects/{name}/unarchive")
-    async def unarchive_project_endpoint(name: str, request: Request) -> dict:
-        """Unarchive a project (operator-only). Idempotent."""
-        caller = _extract_verified_agent_id(request)
-        if caller != "operator" and not _is_internal_caller(request):
-            raise HTTPException(403, "Only the operator can unarchive projects")
-        from src.cli.config import _load_projects, _unarchive_project
-        if name not in _load_projects():
-            raise HTTPException(404, f"Project '{name}' not found")
-        try:
-            _unarchive_project(name)
-        except ValueError as e:
-            raise HTTPException(404, str(e))
-        _emit_team_event(event_bus, "project_unarchived", agent="operator", name=name)
-        return {"archived": False, "project": name, "team": name, "team_id": name, "project_id": name}
-
     @app.post("/mesh/teams/{team_name}/unarchive")
     async def unarchive_team_endpoint(team_name: str, request: Request) -> dict:
-        """Unarchive a team (operator-only). Idempotent. Alias for ``/mesh/projects/{name}/unarchive``."""
+        """Unarchive a team (operator-only). Idempotent."""
         caller = _extract_verified_agent_id(request)
         if caller != "operator" and not _is_internal_caller(request):
             raise HTTPException(403, "Only the operator can unarchive teams")
@@ -5502,86 +5033,11 @@ def create_mesh_app(
                 logger.debug("agent_unarchived emit failed: %s", e)
         return {"archived": False, "agent_id": agent_id}
 
-    @app.post("/mesh/projects/{name}/propose-delete")
-    async def propose_delete_project(name: str, request: Request) -> dict:
-        """Propose deletion of an archived project. Returns nonce for human confirm.
-
-        Pre-conditions:
-          * project exists
-          * project is archived (delete on a live project rejected)
-
-        Stores a pending action with ``target_kind="project"``,
-        ``action_kind="delete"``, ``origin_kind`` from the validated
-        ``X-Origin``. Confirmation goes through the existing
-        ``/mesh/config/confirm`` endpoint, which now dispatches on
-        ``target_kind``.
-        """
-        caller = _extract_verified_agent_id(request)
-        if caller != "operator" and not _is_internal_caller(request):
-            raise HTTPException(403, "Only the operator can delete projects")
-        from src.cli.config import _load_projects, _project_status
-        projects = _load_projects()
-        if name not in projects:
-            raise HTTPException(404, f"Project '{name}' not found")
-        status = _project_status(name)
-        if status != "archived":
-            raise HTTPException(
-                400,
-                "Project must be archived before delete. "
-                "Call /mesh/projects/{name}/archive first.",
-            )
-        origin = _validated_origin(request, caller)
-        origin_kind = origin.kind if origin is not None else None
-        # Cap pending rows to bound storage growth (mirrors propose_edit).
-        pending_actions.reap_expired()
-        existing = pending_actions.list_pending()
-        if len(existing) >= _MAX_PENDING:
-            oldest = min(existing, key=lambda r: r["expires_at"])
-            with pending_actions._conn() as _conn:
-                _conn.execute(
-                    "DELETE FROM pending_actions WHERE nonce=?",
-                    (oldest["nonce"],),
-                )
-        nonce = str(_uuid.uuid4())
-        members = projects[name].get("members", []) or []
-        # Short headline shown in the inline chat card (max ~80 chars
-        # so it doesn't wrap awkwardly). The longer policy explanation
-        # is kept in the payload for the legacy CLI surface.
-        summary = (
-            f"Delete project {name!r} and unlink {len(members)} agent(s)"
-        )
-        payload = {
-            "name": name,
-            "summary": summary,
-            "members": members,
-        }
-        record = pending_actions.store(
-            nonce=nonce,
-            actor="operator",
-            target_kind="project",
-            target_id=name,
-            action_kind="delete",
-            payload=payload,
-            origin_kind=origin_kind,
-            ttl=_CHANGE_TTL_SECONDS,
-            summary=summary,
-            preview_diff=None,
-        )
-        return {
-            "change_id": nonce,
-            "summary": summary,
-            "expires_at": datetime.fromtimestamp(
-                record["expires_at"], tz=timezone.utc,
-            ).isoformat(),
-            "payload_digest": record["payload_digest"],
-            "requires_confirmation": True,
-        }
-
     @app.post("/mesh/teams/{team_name}/propose-delete")
     async def propose_delete_team(team_name: str, request: Request) -> dict:
         """Propose deletion of an archived team. Returns nonce for human confirm.
 
-        Alias for ``/mesh/projects/{name}/propose-delete``. Pre-conditions:
+        Pre-conditions:
           * team exists
           * team is archived (delete on a live team rejected)
 
@@ -5589,7 +5045,9 @@ def create_mesh_app(
         ``action_kind="delete"``, ``origin_kind`` from the validated
         ``X-Origin``. Confirmation goes through the existing
         ``/mesh/config/confirm`` endpoint, which now dispatches on
-        ``target_kind``.
+        ``target_kind``. ``target_kind`` stays ``"project"`` because
+        the pending_actions schema predates the rename — it's a
+        backend value, not a domain term.
         """
         caller = _extract_verified_agent_id(request)
         if caller != "operator" and not _is_internal_caller(request):

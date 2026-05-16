@@ -644,8 +644,8 @@ def _mesh_post(port: int, path: str, body: dict | None = None) -> dict:
 
 def _run_teams_list(port: int, as_json: bool) -> None:
     """List active teams. Shared implementation for ``teams`` / ``projects``."""
-    data = _mesh_get(port, "/dashboard/api/workplace/projects")
-    teams = data.get("projects", []) if isinstance(data, dict) else []
+    data = _mesh_get(port, "/dashboard/api/workplace/teams")
+    teams = data.get("teams", []) if isinstance(data, dict) else []
     if as_json:
         # Emit both keys for back-compat with downstream JSON consumers.
         click.echo(_json.dumps({"teams": teams, "projects": teams}, default=str))
@@ -667,8 +667,8 @@ def _run_teams_list(port: int, as_json: bool) -> None:
 
 def _run_team_show(team_id: str, port: int, as_json: bool) -> None:
     """Show a single team. Shared implementation for ``team`` / ``project``."""
-    data = _mesh_get(port, "/dashboard/api/workplace/projects")
-    teams = data.get("projects", []) if isinstance(data, dict) else []
+    data = _mesh_get(port, "/dashboard/api/workplace/teams")
+    teams = data.get("teams", []) if isinstance(data, dict) else []
     match = next((p for p in teams if p.get("name") == team_id), None)
     if match is None:
         _fail(f"Team '{team_id}' not found")

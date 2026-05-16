@@ -273,20 +273,20 @@ async def test_project_list_requires_membership(v2_app, monkeypatch):
         )
         # Member can list project tasks.
         r = await c.get(
-            "/mesh/tasks/project/research",
+            "/mesh/tasks/team/research",
             headers={"X-Agent-ID": "scout"},
         )
         assert r.status_code == 200
         assert r.json()["count"] == 1
         # Non-member is denied.
         r = await c.get(
-            "/mesh/tasks/project/research",
+            "/mesh/tasks/team/research",
             headers={"X-Agent-ID": "tracker"},
         )
         assert r.status_code == 403
         # Operator gets through.
         r = await c.get(
-            "/mesh/tasks/project/research",
+            "/mesh/tasks/team/research",
             headers={"X-Agent-ID": "operator"},
         )
         assert r.status_code == 200
