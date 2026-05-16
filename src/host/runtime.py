@@ -274,11 +274,13 @@ class DockerBackend(RuntimeBackend):
             }
         # Mount team-specific TEAM.md (solo agents get none).
         # Resolution order honours both new ``TEAM_MD_PATH`` and legacy
-        # ``PROJECT_MD_PATH`` envs; the mount inside the container is
-        # ``/app/TEAM.md`` (canonical) plus ``/app/PROJECT.md`` (legacy
-        # alias mount of the same file) so the workspace bootstrap can
-        # find the content under either name. Check env_overrides first
-        # (per-agent), then fall back to extra_env (system-wide).
+        # ``PROJECT_MD_PATH`` envs (the env-var name is a deploy-time
+        # back-compat surface — the legacy alias keeps existing
+        # systemd units working). The mount inside the container is
+        # ``/app/TEAM.md``; the legacy ``/app/PROJECT.md`` mount was
+        # dropped in PR 3 of the project→team rename. Check
+        # env_overrides first (per-agent), then fall back to extra_env
+        # (system-wide).
         team_md_path = (env_overrides or {}).get(
             "TEAM_MD_PATH",
             (env_overrides or {}).get(
@@ -821,9 +823,11 @@ class SandboxBackend(RuntimeBackend):
 
         # Copy team-specific TEAM.md (solo agents get none).
         # Both ``TEAM_MD_PATH`` (new) and ``PROJECT_MD_PATH`` (legacy)
-        # envs are honoured; the workspace receives both ``TEAM.md`` and
-        # ``PROJECT.md`` (same content) so the bootstrap loader resolves
-        # under either name through PR 3.
+        # envs are honoured for back-compat with existing deploy
+        # configs, but the workspace only receives ``TEAM.md`` — the
+        # legacy ``PROJECT.md`` copy was dropped in PR 3. The workspace
+        # bootstrap still has a read-only fallback that picks up a
+        # stray ``PROJECT.md`` left behind by an old migration.
         team_md_path = (env_overrides or {}).get(
             "TEAM_MD_PATH",
             (env_overrides or {}).get(
@@ -833,7 +837,6 @@ class SandboxBackend(RuntimeBackend):
         )
         if team_md_path and Path(team_md_path).exists():
             shutil.copy2(team_md_path, ws / "TEAM.md")
-            shutil.copy2(team_md_path, ws / "PROJECT.md")
         elif team_md_path:
             logger.warning("Team file not found: %s", team_md_path)
 

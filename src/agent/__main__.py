@@ -101,22 +101,19 @@ def main() -> None:
         except Exception as e:
             logger.debug("Greeting seed skipped: %s", e)
 
-    # Copy host-mounted TEAM.md (preferred) or legacy PROJECT.md into the
-    # workspace. Mounted at /app to avoid Docker creating
-    # /data/workspace as root and breaking permissions. Both names are
-    # written into the workspace so the bootstrap loader resolves under
-    # either name through PR 3.
-    for source_name in ("TEAM.md", "PROJECT.md"):
-        host_team = Path(f"/app/{source_name}")
-        if not host_team.exists() or not host_team.is_file():
-            continue
+    # Copy host-mounted TEAM.md into the workspace. Mounted at /app to
+    # avoid Docker creating /data/workspace as root and breaking
+    # permissions. Only the canonical name is written; PR 3 of the
+    # project→team rename dropped the legacy ``PROJECT.md`` write but
+    # the workspace bootstrap retains a read fallback for any
+    # pre-migration files left behind.
+    host_team = Path("/app/TEAM.md")
+    if host_team.exists() and host_team.is_file():
         try:
             content = host_team.read_text()
             Path("/data/workspace/TEAM.md").write_text(content)
-            Path("/data/workspace/PROJECT.md").write_text(content)
         except OSError:
-            logger.debug("Could not copy %s into workspace", source_name)
-        break
+            logger.debug("Could not copy TEAM.md into workspace")
 
     async def _notify_memory_update() -> None:
         await mesh_client.notify_user(f"[{agent_id}] MEMORY.md updated during context compaction.")

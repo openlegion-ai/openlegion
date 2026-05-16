@@ -216,15 +216,15 @@ class TestHeartbeatContext:
             assert "Did some work" in data["daily_logs"]
 
 
-class TestProjectEndpoint:
+class TestTeamEndpoint:
     @pytest.mark.asyncio
-    async def test_update_project(self, tmp_workspace):
-        """PUT /project writes PROJECT.md to workspace."""
+    async def test_update_team(self, tmp_workspace):
+        """PUT /team writes TEAM.md to workspace."""
         app, loop = _make_app(tmp_workspace)
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.put(
-                "/project",
-                json={"content": "# My Project\n\nBuild a web app."},
+                "/team",
+                json={"content": "# My Team\n\nBuild a web app."},
                 headers={"x-mesh-internal": "1"},
             )
             assert resp.status_code == 200
@@ -233,49 +233,63 @@ class TestProjectEndpoint:
             assert data["size"] > 0
 
             # Verify file was written
-            project_path = Path(tmp_workspace) / "PROJECT.md"
-            assert project_path.exists()
-            assert "My Project" in project_path.read_text()
+            team_path = Path(tmp_workspace) / "TEAM.md"
+            assert team_path.exists()
+            assert "My Team" in team_path.read_text()
+            # Legacy PROJECT.md is no longer written.
+            assert not (Path(tmp_workspace) / "PROJECT.md").exists()
 
     @pytest.mark.asyncio
-    async def test_update_project_sanitizes_content(self, tmp_workspace):
-        """PUT /project sanitizes invisible characters."""
+    async def test_update_team_sanitizes_content(self, tmp_workspace):
+        """PUT /team sanitizes invisible characters."""
         app, _ = _make_app(tmp_workspace)
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.put(
-                "/project",
+                "/team",
                 json={"content": "clean\u200Btext\u202Ehere"},
                 headers={"x-mesh-internal": "1"},
             )
             assert resp.status_code == 200
-            content = (Path(tmp_workspace) / "PROJECT.md").read_text()
+            content = (Path(tmp_workspace) / "TEAM.md").read_text()
             assert "\u200B" not in content
             assert "\u202E" not in content
             assert "cleantexthere" in content
 
     @pytest.mark.asyncio
-    async def test_update_project_no_workspace(self):
-        """PUT /project returns 503 without workspace."""
+    async def test_update_team_no_workspace(self):
+        """PUT /team returns 503 without workspace."""
         app, _ = _make_app(None)
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.put(
-                "/project",
+                "/team",
                 json={"content": "anything"},
                 headers={"x-mesh-internal": "1"},
             )
             assert resp.status_code == 503
 
     @pytest.mark.asyncio
-    async def test_update_project_rejects_non_string(self, tmp_workspace):
-        """PUT /project rejects non-string content."""
+    async def test_update_team_rejects_non_string(self, tmp_workspace):
+        """PUT /team rejects non-string content."""
         app, _ = _make_app(tmp_workspace)
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.put(
-                "/project",
+                "/team",
                 json={"content": 12345},
                 headers={"x-mesh-internal": "1"},
             )
             assert resp.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_put_project_alias_removed(self, tmp_workspace):
+        """PUT /project was removed in PR 3 \u2014 returns 405."""
+        app, _ = _make_app(tmp_workspace)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.put(
+                "/project",
+                json={"content": "anything"},
+                headers={"x-mesh-internal": "1"},
+            )
+            assert resp.status_code in (404, 405)
 
 
 class TestRuntimeConfig:
