@@ -1078,6 +1078,61 @@ class TestCoordinationV2:
         assert "research handoff" in call_kwargs["title"]
 
     @pytest.mark.asyncio
+    async def test_hand_off_v2_wake_message_prompts_explicit_complete_task(self):
+        """Pin the wake-message format. Reason: PR #912 reversed the
+        auto-close semantics so tasks ONLY close on explicit
+        ``complete_task``. The recipient agent learns this from the
+        wake message text. If the format silently changes (e.g. a
+        well-meaning refactor strips the instruction or the task_id),
+        recipients won't know to call complete_task, and every
+        handed-off task will dangle in ``working``.
+
+        Asserts the substrings that matter for the LLM contract:
+          1. The task_id is in the message (recipient needs it for
+             the complete_task call).
+          2. The ``complete_task`` tool name is mentioned with the
+             ``task_key='{task_id}'`` template literal.
+          3. The ``summary='...'`` parameter is mentioned so
+             recipients know to include one.
+          4. The ``update_status('blocked')`` alternative is
+             mentioned for the can't-finish case.
+        """
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="scout", v2_enabled=True)
+        mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
+        mc.create_task.return_value = {
+            "id": "task_xyz",
+            "creator": "scout",
+            "assignee": "analyst",
+            "title": "research",
+            "status": "pending",
+        }
+
+        await hand_off(
+            to="analyst",
+            summary="research handoff",
+            mesh_client=mc,
+        )
+
+        mc.wake_agent.assert_awaited_once()
+        wake_call = mc.wake_agent.await_args
+        # First positional after ``to`` is the message string.
+        wake_message = wake_call.args[1]
+
+        # 1. Task ID must be in the message body.
+        assert "task_xyz" in wake_message
+        # 2. complete_task with task_key= template.
+        assert "complete_task" in wake_message
+        assert "task_key='task_xyz'" in wake_message
+        # 3. summary= parameter prompt.
+        assert "summary=" in wake_message
+        # 4. update_status('blocked') escape hatch.
+        assert "update_status('blocked'" in wake_message
+        # 5. Sanity: still carries the original summary text.
+        assert "research handoff" in wake_message
+
+    @pytest.mark.asyncio
     async def test_hand_off_v2_with_data_writes_artifact(self):
         from src.agent.builtins.coordination_tool import hand_off
 

@@ -1839,10 +1839,33 @@ class AgentLoop:
             resp = getattr(e, "response", None)
             http_status = getattr(resp, "status_code", None)
             if isinstance(http_status, int) and 400 <= http_status < 500:
-                logger.warning(
-                    "Auto-close %s → %s rejected by state machine (%s): %s",
-                    task_id, status, http_status, e,
-                )
+                # Sub-case: the rejection is "task is already terminal"
+                # — exactly what happens when the LLM explicitly called
+                # ``complete_task`` mid-chat and then the chat also hit
+                # ``tool_limit_reached`` or an exception. This is the
+                # COMMON production path (PR #912 made it so), not an
+                # anomaly. Log at DEBUG so ops aren't paged for it.
+                # Detect by parsing the mesh's InvalidStatusTransition
+                # message ("cannot move … from 'done'/'failed'/...").
+                err_text = ""
+                try:
+                    err_text = (getattr(resp, "text", "") or str(e)).lower()
+                except Exception:
+                    err_text = str(e).lower()
+                if any(
+                    f"from '{terminal}'" in err_text
+                    for terminal in ("done", "failed", "cancelled")
+                ):
+                    logger.debug(
+                        "Auto-close %s → %s noop: task already terminal "
+                        "(agent declared completion explicitly): %s",
+                        task_id, status, err_text[:200],
+                    )
+                else:
+                    logger.warning(
+                        "Auto-close %s → %s rejected by state machine (%s): %s",
+                        task_id, status, http_status, e,
+                    )
             else:
                 # No HTTP response or 5xx → the originating agent will
                 # never see this task close. Surface loudly so operators

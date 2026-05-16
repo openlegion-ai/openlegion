@@ -244,6 +244,80 @@ async def test_chat_auto_fails_task_on_chat_session_limit():
     assert calls[1].kwargs.get("error") == "chat_session_limit_reached"
 
 
+# ── 3d. auto-close noop when task is already terminal ───────────
+
+@pytest.mark.asyncio
+async def test_auto_close_noop_logs_debug_when_task_already_terminal(caplog):
+    """COMMON production path after PR #912: agent explicitly calls
+    ``complete_task`` mid-chat → task=done. Chat continues and hits
+    tool_limit (or any failure mode). Wrapper auto-fails → mesh 400
+    "cannot move from 'done'". WITHOUT this discrimination, every
+    such handoff would emit a WARNING log and flood ops alerts.
+
+    Test: simulate a 400 carrying "cannot move … from 'done'" and
+    assert the WARNING was downgraded to DEBUG. State-conflict 400s
+    for OTHER reasons (e.g. invalid status name) still WARN.
+    """
+    import logging
+    from unittest.mock import MagicMock as _MM
+
+    loop = _make_loop_with_mocks()
+
+    fake_resp = _MM()
+    fake_resp.status_code = 400
+    fake_resp.text = "cannot move task_xyz from 'done' to 'failed'"
+    err = Exception("400 Bad Request")
+    err.response = fake_resp
+    loop.mesh_client.set_task_status = AsyncMock(side_effect=err)
+
+    caplog.set_level(logging.DEBUG, logger="agent.loop")
+    await loop._auto_close_task("task_xyz", "failed", error="max_iterations_reached")
+
+    warning_records = [
+        r for r in caplog.records if r.levelno >= logging.WARNING
+    ]
+    assert not warning_records, (
+        f"already-terminal 400 should not WARN, got: "
+        f"{[r.getMessage() for r in warning_records]}"
+    )
+    # And the noop IS logged at DEBUG so ops can still trace if needed.
+    debug_records = [
+        r for r in caplog.records
+        if r.levelno == logging.DEBUG and "noop" in r.getMessage()
+    ]
+    assert len(debug_records) == 1, (
+        f"expected DEBUG noop log, got: {[r.getMessage() for r in caplog.records]}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_auto_close_unrelated_4xx_still_warns(caplog):
+    """Sanity: state-conflict 400s for reasons OTHER than
+    already-terminal still emit WARNING. The DEBUG-downgrade is
+    narrow — only "cannot move … from 'done'/'failed'/'cancelled'"
+    matches. A 400 like "invalid status name 'donr'" should still
+    warn because it's a real client bug worth seeing."""
+    import logging
+    from unittest.mock import MagicMock as _MM
+
+    loop = _make_loop_with_mocks()
+
+    fake_resp = _MM()
+    fake_resp.status_code = 400
+    fake_resp.text = "invalid status 'donr'"
+    err = Exception("400 Bad Request")
+    err.response = fake_resp
+    loop.mesh_client.set_task_status = AsyncMock(side_effect=err)
+
+    caplog.set_level(logging.WARNING, logger="agent.loop")
+    await loop._auto_close_task("task_xyz", "donr")
+
+    warning_records = [
+        r for r in caplog.records if r.levelno >= logging.WARNING
+    ]
+    assert len(warning_records) == 1
+
+
 # ── 3b. explicit complete_task path is the ONLY way to mark done ──
 
 @pytest.mark.asyncio
