@@ -184,9 +184,9 @@ async def test_get_agent_config_strips_agent_id_from_permissions(tmp_path):
     ``AgentPermissions(agent_id=agent_id, **perms)`` and crashes with
     ``multiple values for keyword argument 'agent_id'``.
     """
-    import yaml as yaml_mod
     from unittest.mock import patch
 
+    import yaml as yaml_mod
     from httpx import ASGITransport, AsyncClient
 
     from src.host.mesh import Blackboard, MessageRouter, PubSub

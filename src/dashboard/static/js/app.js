@@ -10194,6 +10194,7 @@ function dashboard() {
         wallet_transfer: 'sending a wallet transfer',
         save_observations: 'taking notes',
         edit_agent: 'updating a teammate',
+        read_agent_config: 'reviewing a teammate',
         create_agent: 'adding a teammate',
         apply_template: 'building a team from a template',
         inspect_agents: 'reviewing the team',

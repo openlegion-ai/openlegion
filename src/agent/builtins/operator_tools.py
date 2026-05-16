@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from src.agent.skills import skill
 from src.shared.types import (
     HARD_EDIT_FIELDS as _HARD_EDIT_FIELDS,
+)
+from src.shared.types import (
     SOFT_EDIT_FIELDS as _SOFT_EDIT_FIELDS,
 )
 from src.shared.utils import setup_logging
