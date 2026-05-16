@@ -1285,6 +1285,24 @@ def _create_agent_from_template(
     resolved_model = model or agent_def.get("model", default_model)
     resolved_model = resolved_model.replace("{default_model}", default_model)
 
+    # BYOK-safety: reject up front if the resolved model's provider
+    # has no credentials in env. Mirrors the mesh-side check in
+    # ``create_custom_agent`` so ``apply_template`` doesn't silently
+    # mint dead-on-arrival agents (Bug 5).
+    from src.shared.models import get_available_providers, resolve_provider_for_model
+    provider = resolve_provider_for_model(resolved_model)
+    if provider:
+        available = get_available_providers()
+        if provider not in available:
+            available_list = sorted(available) if available else "none"
+            raise ValueError(
+                f"Model '{resolved_model}' requires '{provider}' "
+                f"credentials, but no {provider.upper()} key is "
+                f"configured. Available providers: {available_list}. "
+                f"Set OPENLEGION_SYSTEM_{provider.upper()}_API_KEY or "
+                "pick a different model.",
+            )
+
     instructions = agent_def.get("instructions", "") or agent_def.get("system_prompt", "")
     soul = agent_def.get("soul", "")
     heartbeat = agent_def.get("heartbeat", "")

@@ -2462,6 +2462,22 @@ def create_mesh_app(
         if section in ("project", "all"):
             result["project"] = _agent_projects.get(agent_id)
 
+        if section in ("llm", "all"):
+            # BYOK visibility: surface the set of providers that actually
+            # have credentials configured so agents can introspect what
+            # models are reachable before they request one. Bug 5 —
+            # paired with the mesh-side validation in
+            # ``create_custom_agent``.
+            available_providers: list[str] = []
+            if credential_vault is not None:
+                try:
+                    available_providers = sorted(
+                        credential_vault.get_providers_with_credentials(),
+                    )
+                except Exception as e:
+                    logger.debug("introspect available_providers failed: %s", e)
+            result["llm"] = {"available_providers": available_providers}
+
         return result
 
     # === Project Costs ===
@@ -2947,6 +2963,29 @@ def create_mesh_app(
         # Default model
         if not model:
             model = config.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
+
+        # BYOK-safety: validate the chosen model's provider has
+        # credentials configured before we spin a container that would
+        # otherwise die on its first LLM call. Bug 5 — silent
+        # dead-on-arrival agents on deployments that only have one
+        # provider key set. Skip when no vault is wired (test
+        # harnesses, sandbox transport) — the vault is the only way
+        # to enumerate which providers actually have OAuth state.
+        if credential_vault is not None:
+            from src.shared.models import resolve_provider_for_model
+            provider = resolve_provider_for_model(model)
+            if provider:
+                available = credential_vault.get_providers_with_credentials()
+                if provider not in available:
+                    available_list = sorted(available) if available else "none"
+                    raise HTTPException(
+                        400,
+                        f"Model '{model}' requires '{provider}' credentials, "
+                        f"but no {provider.upper()} key is configured. "
+                        f"Available providers: {available_list}. Set "
+                        f"OPENLEGION_SYSTEM_{provider.upper()}_API_KEY or "
+                        "pick a different model.",
+                    )
 
         # Create agent config
         import random
@@ -3552,6 +3591,21 @@ def create_mesh_app(
         from src.cli.config import _load_projects
         current_projects = len(_load_projects())
 
+        # -- BYOK visibility (Bug 5) --
+        # Operators (and the operator agent's heartbeat playbook) need
+        # to know which providers actually have credentials configured
+        # so they can pick a model that won't dead-on-arrival at create
+        # time. Paired with the up-front validation in
+        # ``create_custom_agent`` and ``_create_agent_from_template``.
+        available_providers: list[str] = []
+        if credential_vault is not None:
+            try:
+                available_providers = sorted(
+                    credential_vault.get_providers_with_credentials(),
+                )
+            except Exception as e:
+                logger.debug("system_metrics available_providers failed: %s", e)
+
         return {
             "total_agents": total,
             "healthy": healthy,
@@ -3601,6 +3655,10 @@ def create_mesh_app(
             # dict — defaultdict semantics; readers should treat missing
             # keys as zero.
             "tool_denials_24h": dict(_denial_counter),
+            # Bug 5 — BYOK provider visibility. Sorted list of provider
+            # names with credentials currently configured. Empty list
+            # means no LLM keys at all (deployment broken).
+            "available_providers": available_providers,
         }
 
     @app.get("/mesh/agents/{agent_id}/metrics")
