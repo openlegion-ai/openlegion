@@ -290,20 +290,11 @@ def test_end_to_end_migration(tmp_path):
     _make_legacy_workspace(tmp_path, "agent-a", body="# fleet\n")
     db = tmp_path / "tasks.db"
     _make_legacy_tasks_db(db)
-    # Enable the DB rename for the e2e check (gated off by default in
-    # PR 2; tests exercise it directly).
-    os.environ["OPENLEGION_TEAM_MIGRATION_RENAME_DB"] = "1"
-    try:
-        result = migrate_project_to_team(repo_root=tmp_path, tasks_db=db)
-    finally:
-        os.environ.pop("OPENLEGION_TEAM_MIGRATION_RENAME_DB", None)
+    # PR 3 flipped the DB rename to default-on. No env var needed.
+    result = migrate_project_to_team(repo_root=tmp_path, tasks_db=db)
     assert result == {"filesystem": True, "workspaces": 1, "db_column": True}
     # Second run is fully idempotent.
-    os.environ["OPENLEGION_TEAM_MIGRATION_RENAME_DB"] = "1"
-    try:
-        result2 = migrate_project_to_team(repo_root=tmp_path, tasks_db=db)
-    finally:
-        os.environ.pop("OPENLEGION_TEAM_MIGRATION_RENAME_DB", None)
+    result2 = migrate_project_to_team(repo_root=tmp_path, tasks_db=db)
     assert result2 == {"filesystem": False, "workspaces": 0, "db_column": False}
 
 
@@ -319,20 +310,43 @@ def test_disable_flag_honored(tmp_path, monkeypatch):
     assert not (tmp_path / "config" / "teams").exists()
 
 
-def test_db_step_gated_off_by_default(tmp_path):
+def test_db_step_opt_out_keeps_project_id(tmp_path, monkeypatch):
+    """``OPENLEGION_TEAM_MIGRATION_RENAME_DB=0`` skips the column rename.
+
+    The orchestration layer's PRAGMA-driven column resolution keeps
+    legacy-column instances working without source changes, so the
+    opt-out is a safe emergency-rollback escape hatch.
+    """
     _make_legacy_project_dir(tmp_path)
     db = tmp_path / "tasks.db"
     _make_legacy_tasks_db(db)
-    # No env var set → DB step is skipped, filesystem still migrates.
+    monkeypatch.setenv("OPENLEGION_TEAM_MIGRATION_RENAME_DB", "0")
     result = migrate_project_to_team(repo_root=tmp_path, tasks_db=db)
     assert result["filesystem"] is True
     assert result["db_column"] is False
-    # Column should still be project_id since the step was skipped.
+    # Column should still be project_id since the rename was opted out.
     conn = sqlite3.connect(str(db))
     try:
         cols = [r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()]
         assert "project_id" in cols
         assert "team_id" not in cols
+    finally:
+        conn.close()
+
+
+def test_db_step_runs_by_default(tmp_path):
+    """The DB column rename is default-on after PR 3."""
+    _make_legacy_project_dir(tmp_path)
+    db = tmp_path / "tasks.db"
+    _make_legacy_tasks_db(db)
+    result = migrate_project_to_team(repo_root=tmp_path, tasks_db=db)
+    assert result["filesystem"] is True
+    assert result["db_column"] is True
+    conn = sqlite3.connect(str(db))
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()]
+        assert "team_id" in cols
+        assert "project_id" not in cols
     finally:
         conn.close()
 

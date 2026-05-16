@@ -6756,8 +6756,8 @@ def create_dashboard_router(
                 if project_id:
                     sql = (
                         f"SELECT {tasks_store._SELECT_COLS} FROM tasks "
-                        "WHERE status='done' AND project_id=? "
-                        "ORDER BY completed_at DESC LIMIT ?"
+                        f"WHERE status='done' AND {tasks_store._team_col}=? "
+                        f"ORDER BY completed_at DESC LIMIT ?"
                     )
                     raw = conn.execute(sql, (project_id, limit)).fetchall()
                 else:
@@ -6789,30 +6789,31 @@ def create_dashboard_router(
             return {"enabled": False, "feed": []}
         limit = max(1, min(int(limit or 100), 500))
         try:
+            team_col = tasks_store._team_col
             with tasks_store._conn() as conn:
                 if project_id:
                     sql = (
-                        "SELECT e.event_id, e.task_id, e.event_kind, "
-                        "e.actor, e.payload_json, e.created_at, "
-                        "t.title, t.project_id, t.assignee, t.status, "
-                        "t.blocker_note "
-                        "FROM task_events e "
-                        "JOIN tasks t ON t.id = e.task_id "
-                        "WHERE t.project_id = ? "
-                        "ORDER BY e.created_at DESC, e.event_id DESC "
-                        "LIMIT ?"
+                        f"SELECT e.event_id, e.task_id, e.event_kind, "
+                        f"e.actor, e.payload_json, e.created_at, "
+                        f"t.title, t.{team_col}, t.assignee, t.status, "
+                        f"t.blocker_note "
+                        f"FROM task_events e "
+                        f"JOIN tasks t ON t.id = e.task_id "
+                        f"WHERE t.{team_col} = ? "
+                        f"ORDER BY e.created_at DESC, e.event_id DESC "
+                        f"LIMIT ?"
                     )
                     raw = conn.execute(sql, (project_id, limit)).fetchall()
                 else:
                     sql = (
-                        "SELECT e.event_id, e.task_id, e.event_kind, "
-                        "e.actor, e.payload_json, e.created_at, "
-                        "t.title, t.project_id, t.assignee, t.status, "
-                        "t.blocker_note "
-                        "FROM task_events e "
-                        "JOIN tasks t ON t.id = e.task_id "
-                        "ORDER BY e.created_at DESC, e.event_id DESC "
-                        "LIMIT ?"
+                        f"SELECT e.event_id, e.task_id, e.event_kind, "
+                        f"e.actor, e.payload_json, e.created_at, "
+                        f"t.title, t.{team_col}, t.assignee, t.status, "
+                        f"t.blocker_note "
+                        f"FROM task_events e "
+                        f"JOIN tasks t ON t.id = e.task_id "
+                        f"ORDER BY e.created_at DESC, e.event_id DESC "
+                        f"LIMIT ?"
                     )
                     raw = conn.execute(sql, (limit,)).fetchall()
         except Exception as e:

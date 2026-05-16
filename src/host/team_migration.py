@@ -1,4 +1,4 @@
-"""Idempotent startup migrator for the project → team rename (PR 2).
+"""Idempotent startup migrator for the project → team rename.
 
 Runs once on each mesh startup and is a no-op on subsequent invocations.
 Three steps, each independently safe:
@@ -12,21 +12,13 @@ Three steps, each independently safe:
    ``TEAM.md``, copy ``PROJECT.md`` → ``TEAM.md``. The original is
    preserved — the workspace bootstrap reads ``TEAM.md`` first then
    falls back to ``PROJECT.md`` (see :mod:`src.agent.workspace`).
-3. **SQLite tasks column**: the source-of-truth column on ``tasks`` is
-   still named ``project_id`` in this PR — the column rename to
-   ``team_id`` is deferred to PR 3 alongside the orchestration.py
-   source refactor, so the migrator's DB step is a deliberate no-op
-   on existing schemas. The hook + test surface stays in place so PR
-   3 can flip a single switch.
-
-   This is a deliberate scope cut for PR 2: dozens of orchestration
-   query sites read/write ``row["project_id"]`` directly, and
-   coordinating the column rename with all those callsites in a
-   single PR was judged riskier than the back-compat aliases we ship
-   instead. The ``_migrate_tasks_db`` helper is functional and
-   exercised by tests — only the call from
-   :func:`migrate_project_to_team` is wired to skip it under a
-   feature flag so PR 3 can flip the bit without code churn.
+3. **SQLite tasks column**: rename ``tasks.project_id`` →
+   ``tasks.team_id``. PR 3 flipped this step to **default-on** —
+   :func:`migrate_project_to_team` runs the rename unless an operator
+   opts out via ``OPENLEGION_TEAM_MIGRATION_RENAME_DB=0``. The
+   orchestration layer is column-name aware (introspects the live
+   column via PRAGMA at init) so an opted-out instance still reads
+   and writes via the legacy column without code changes.
 
 Failure of any step logs and continues — the caller is expected to
 wrap the whole entrypoint in try/except so a migration error doesn't
@@ -322,12 +314,13 @@ def migrate_project_to_team(
         result["workspaces"] = _migrate_workspaces(repo_root)
     except Exception as e:
         logger.warning("team_migration: workspace step failed: %s", e)
-    # DB column rename is gated behind an explicit opt-in flag while
-    # the orchestration source still uses ``project_id``. PR 3 flips
-    # the source to ``team_id`` and drops this guard. Tests exercise
-    # ``_migrate_tasks_db`` directly so the column-rename code path
-    # is still covered.
-    if os.environ.get("OPENLEGION_TEAM_MIGRATION_RENAME_DB") == "1":
+    # DB column rename is **default-on** as of PR 3. Operators can
+    # opt out with ``OPENLEGION_TEAM_MIGRATION_RENAME_DB=0`` to keep
+    # the legacy ``project_id`` column for emergency rollback — the
+    # orchestration layer auto-detects which name is live via PRAGMA
+    # introspection at init, so either column shape works without
+    # source changes.
+    if os.environ.get("OPENLEGION_TEAM_MIGRATION_RENAME_DB", "1") != "0":
         try:
             result["db_column"] = _migrate_tasks_db(tasks_db)
         except Exception as e:

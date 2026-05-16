@@ -141,6 +141,17 @@ class Tasks:
         # tests don't trip ``database is locked`` on the shared
         # connection.
         self._mem_lock = threading.Lock()
+        # Active name of the team-membership column on the ``tasks``
+        # table. PR 2 created the column as ``project_id``; PR 3
+        # renames it to ``team_id`` via :mod:`src.host.team_migration`
+        # at startup (now default-on). When the rename hasn't run yet
+        # (e.g. a customer with ``OPENLEGION_TEAM_MIGRATION_RENAME_DB=0``,
+        # or a stale DB picked up before the migration fired) this
+        # attribute drops back to ``project_id`` so existing reads
+        # / writes keep working. SQL string builders below splice
+        # ``self._team_col`` into the query — never hard-code the
+        # column name.
+        self._team_col = "team_id"
         self._init_schema()
 
     def set_event_bus(self, bus) -> None:
@@ -189,10 +200,15 @@ class Tasks:
     def _init_schema(self) -> None:
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True) if self.db_path != ":memory:" else None
         with self._conn() as conn:
+            # Fresh schemas land with ``team_id`` (post-rename name). The
+            # ``CREATE TABLE IF NOT EXISTS`` is a no-op on pre-rename
+            # databases that still have ``project_id`` — the actual
+            # column-name resolution happens below via the PRAGMA
+            # introspection step.
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS tasks (
                     id TEXT PRIMARY KEY,
-                    project_id TEXT,
+                    team_id TEXT,
                     parent_task_id TEXT,
                     title TEXT NOT NULL,
                     description TEXT,
@@ -211,8 +227,6 @@ class Tasks:
                     completed_at REAL,
                     retention_until REAL
                 );
-                CREATE INDEX IF NOT EXISTS idx_tasks_project_status
-                    ON tasks (project_id, status);
                 CREATE INDEX IF NOT EXISTS idx_tasks_assignee_status
                     ON tasks (assignee, status);
                 CREATE INDEX IF NOT EXISTS idx_tasks_created
@@ -232,6 +246,29 @@ class Tasks:
                 CREATE INDEX IF NOT EXISTS idx_task_events_task
                     ON task_events (task_id, created_at);
             """)
+            # Resolve the active column name. ``team_id`` is canonical;
+            # ``project_id`` is the pre-rename column kept readable so
+            # downgrades / opted-out instances still work. The composite
+            # status index is rebuilt against whichever column is live.
+            existing_cols = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
+            }
+            if "team_id" in existing_cols:
+                self._team_col = "team_id"
+                conn.execute("DROP INDEX IF EXISTS idx_tasks_project_status")
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_tasks_team_status "
+                    "ON tasks (team_id, status)"
+                )
+            elif "project_id" in existing_cols:
+                self._team_col = "project_id"
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_tasks_project_status "
+                    "ON tasks (project_id, status)"
+                )
+            else:  # pragma: no cover — defensive: schema in a broken state
+                self._team_col = "team_id"
             # Task 9 PR 4 — outcome capture migration. Existing
             # databases predate the outcome / feedback columns; ALTER
             # TABLE ... ADD COLUMN is a metadata-only op in SQLite so
@@ -345,13 +382,21 @@ class Tasks:
             "outcome_set_at": row[22],
         }
 
-    _SELECT_COLS = (
-        "id, project_id, parent_task_id, title, description, creator, "
+    # ``{team_col}`` is filled in at query time from ``self._team_col``
+    # (``team_id`` post-rename, ``project_id`` on pre-rename DBs). The
+    # public dict key from :meth:`_row_to_dict` stays ``"project_id"``
+    # for API back-compat — callers and tests still read that key.
+    _SELECT_COLS_TEMPLATE = (
+        "id, {team_col}, parent_task_id, title, description, creator, "
         "assignee, status, priority, dependencies_json, artifact_refs_json, "
         "blocker_note, origin_kind, origin_channel, origin_user, "
         "created_at, updated_at, completed_at, retention_until, "
         "outcome, feedback_text, previous_task_id, outcome_set_at"
     )
+
+    @property
+    def _SELECT_COLS(self) -> str:
+        return self._SELECT_COLS_TEMPLATE.format(team_col=self._team_col)
 
     def _emit_event(
         self, conn: sqlite3.Connection, task_id: str, event_kind: str,
@@ -419,14 +464,14 @@ class Tasks:
 
         with self._conn() as conn:
             conn.execute(
-                "INSERT INTO tasks "
-                "(id, project_id, parent_task_id, title, description, "
-                "creator, assignee, status, priority, dependencies_json, "
-                "artifact_refs_json, blocker_note, origin_kind, "
-                "origin_channel, origin_user, created_at, updated_at, "
-                "completed_at, retention_until) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, NULL, "
-                "?, ?, ?, ?, ?, NULL, NULL)",
+                f"INSERT INTO tasks "
+                f"(id, {self._team_col}, parent_task_id, title, description, "
+                f"creator, assignee, status, priority, dependencies_json, "
+                f"artifact_refs_json, blocker_note, origin_kind, "
+                f"origin_channel, origin_user, created_at, updated_at, "
+                f"completed_at, retention_until) "
+                f"VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, NULL, "
+                f"?, ?, ?, ?, ?, NULL, NULL)",
                 (
                     tid, project_id, parent_task_id, title, description,
                     creator, assignee, priority,
@@ -487,7 +532,7 @@ class Tasks:
         clauses = ["assignee = ?"]
         params: list[Any] = [assignee]
         if project_id is not None:
-            clauses.append("project_id = ?")
+            clauses.append(f"{self._team_col} = ?")
             params.append(project_id)
         if not include_terminal:
             placeholders = ",".join("?" * len(TERMINAL_STATUSES))
@@ -508,7 +553,7 @@ class Tasks:
         statuses: list[str] | None = None,
     ) -> list[dict]:
         """List tasks in a project. Optional ``statuses`` filter."""
-        clauses = ["project_id = ?"]
+        clauses = [f"{self._team_col} = ?"]
         params: list[Any] = [project_id]
         if statuses:
             invalid = [s for s in statuses if s not in VALID_STATUSES]
@@ -707,8 +752,8 @@ class Tasks:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 row = conn.execute(
-                    "SELECT status, project_id, assignee, title, outcome "
-                    "FROM tasks WHERE id=?",
+                    f"SELECT status, {self._team_col}, assignee, title, outcome "
+                    f"FROM tasks WHERE id=?",
                     (task_id,),
                 ).fetchone()
                 if not row:
@@ -816,8 +861,8 @@ class Tasks:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 row = conn.execute(
-                    "SELECT assignee, status, project_id, title, outcome "
-                    "FROM tasks WHERE id=?",
+                    f"SELECT assignee, status, {self._team_col}, title, outcome "
+                    f"FROM tasks WHERE id=?",
                     (task_id,),
                 ).fetchone()
                 if not row:
@@ -910,7 +955,7 @@ class Tasks:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 row = conn.execute(
-                    "SELECT artifact_refs_json, project_id FROM tasks WHERE id=?",
+                    f"SELECT artifact_refs_json, {self._team_col} FROM tasks WHERE id=?",
                     (task_id,),
                 ).fetchone()
                 if not row:
@@ -994,8 +1039,8 @@ class Tasks:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 row = conn.execute(
-                    "SELECT status, outcome, project_id, assignee "
-                    "FROM tasks WHERE id=?",
+                    f"SELECT status, outcome, {self._team_col}, assignee "
+                    f"FROM tasks WHERE id=?",
                     (task_id,),
                 ).fetchone()
                 if not row:
@@ -1088,15 +1133,15 @@ class Tasks:
         now = time.time()
         with self._conn() as conn:
             conn.execute(
-                "INSERT INTO tasks "
-                "(id, project_id, parent_task_id, title, description, "
-                "creator, assignee, status, priority, dependencies_json, "
-                "artifact_refs_json, blocker_note, origin_kind, "
-                "origin_channel, origin_user, created_at, updated_at, "
-                "completed_at, retention_until, outcome, feedback_text, "
-                "previous_task_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, NULL, NULL, "
-                "NULL, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?)",
+                f"INSERT INTO tasks "
+                f"(id, {self._team_col}, parent_task_id, title, description, "
+                f"creator, assignee, status, priority, dependencies_json, "
+                f"artifact_refs_json, blocker_note, origin_kind, "
+                f"origin_channel, origin_user, created_at, updated_at, "
+                f"completed_at, retention_until, outcome, feedback_text, "
+                f"previous_task_id) "
+                f"VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, NULL, NULL, "
+                f"NULL, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?)",
                 (
                     new_id,
                     previous.get("project_id"),
