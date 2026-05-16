@@ -243,7 +243,26 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         """Streaming chat. Returns SSE events for tool use and text deltas."""
         _trace_id = request.headers.get("x-trace-id")
         _origin = _origin_from_mesh_request(request)
+
         async def event_generator():
+            # Set current_origin / current_trace_id in THIS task's
+            # context — not inside ``loop.chat_stream``'s generator
+            # body — so the per-iteration ``asyncio.ensure_future``
+            # child tasks below inherit the origin. If the contextvar
+            # is only set inside the generator body, only iteration 1
+            # carries it; iterations 2+ run in fresh child tasks
+            # that copied event_generator's parent context (no
+            # origin), and tool dispatches in later iterations read
+            # ``None``. This is the production reproducer for the
+            # operator delete-confirm bug — the manage_agent →
+            # propose_delete_agent path called ``current_origin.get()``
+            # in iteration N and got ``None``, so the propose row
+            # stored ``origin_kind=None`` and the confirm gate
+            # rejected it.
+            from src.shared.trace import current_origin, current_trace_id
+            current_trace_id.set(_trace_id)
+            current_origin.set(_origin)
+
             stream = loop.chat_stream(
                 sanitize_for_prompt(msg.message), trace_id=_trace_id,
                 origin=_origin,
