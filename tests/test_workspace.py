@@ -1306,7 +1306,8 @@ class TestChatArchiveSurface:
             @classmethod
             def now(cls, tz=None):
                 # Pin to a single instant so strftime returns the same ts.
-                from datetime import datetime as _dt, timezone as _tz
+                from datetime import datetime as _dt
+                from datetime import timezone as _tz
                 return _dt(2026, 1, 1, 12, 0, 0, tzinfo=tz or _tz.utc)
 
         monkeypatch.setattr(workspace_mod, "datetime", _FixedClock)
@@ -1332,12 +1333,14 @@ class TestChatArchiveSurface:
         claim, exactly N distinct archives survive for N racers.
         """
         import threading
+
         from src.agent import workspace as workspace_mod
 
         class _FixedClock:
             @classmethod
             def now(cls, tz=None):
-                from datetime import datetime as _dt, timezone as _tz
+                from datetime import datetime as _dt
+                from datetime import timezone as _tz
                 return _dt(2026, 1, 1, 12, 0, 0, tzinfo=tz or _tz.utc)
 
         monkeypatch.setattr(workspace_mod, "datetime", _FixedClock)
@@ -1394,6 +1397,7 @@ class TestChatArchiveSurface:
     def test_archive_retention_evicts_oldest(self, monkeypatch):
         """Per-agent FIFO cap drops oldest archives once the limit is hit."""
         import os
+
         from src.agent import workspace as workspace_mod
 
         monkeypatch.setattr(workspace_mod, "_MAX_ARCHIVES_PER_AGENT", 3)
@@ -1467,6 +1471,7 @@ class TestChatArchiveSurface:
         evicted.
         """
         import os
+
         from src.agent import workspace as workspace_mod
 
         monkeypatch.setattr(workspace_mod, "_MAX_ARCHIVES_PER_AGENT", 2)
