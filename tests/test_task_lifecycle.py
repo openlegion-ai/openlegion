@@ -116,24 +116,27 @@ def _make_loop_with_mocks():
 
 
 @pytest.mark.asyncio
-async def test_chat_auto_closes_task_on_success():
-    """A successful chat with task_id triggers set_task_status("done")."""
+async def test_chat_does_not_auto_close_task_as_done_on_clean_completion():
+    """**Reversed semantics**: a clean chat completion no longer
+    auto-closes the task as ``done``. The chat handler runs whether
+    the LLM did real work or just acknowledged with text ("Got it,
+    I'll start on that") — so auto-closing on chat-end was lying to
+    operators about completion.
+
+    Now: opens as ``working`` at chat start, then LEAVES it in
+    ``working``. The recipient agent must explicitly call
+    ``complete_task`` to declare done. Tests for the explicit
+    completion path live in test_coordination.py.
+    """
     loop = _make_loop_with_mocks()
 
     result = await loop.chat("hi there", task_id="task_xyz")
 
     assert "response" in result
-    # Two transitions: pending→working at start, working→done on completion.
-    # State machine forbids pending→done directly, so the working step is
-    # load-bearing for production handoffs.
+    # Only the working transition fires. No "done" call.
     calls = loop.mesh_client.set_task_status.await_args_list
-    assert len(calls) == 2, f"expected working+done, got {calls}"
+    assert len(calls) == 1, f"expected working only, got {calls}"
     assert calls[0].args == ("task_xyz", "working")
-    assert calls[1].args == ("task_xyz", "done")
-    # Summary should carry the response prefix (truncated to 500 chars).
-    assert calls[1].kwargs.get("result", {}).get("summary", "").startswith(
-        "Hello, I finished",
-    )
 
 
 # ── 3. loop.chat() auto-fails on exception ───────────────────────
@@ -154,6 +157,259 @@ async def test_chat_auto_closes_task_as_failed_on_exception():
     assert calls[0].args == ("task_fail", "working")
     assert calls[1].args == ("task_fail", "failed")
     assert "boom inside chat" in (calls[1].kwargs.get("error") or "")
+
+
+# ── 3a. swallowed internal error → auto-fail (parallel to streaming) ─
+
+@pytest.mark.asyncio
+async def test_chat_auto_fails_task_on_swallowed_internal_error():
+    """``_chat_inner`` catches Exception and returns ``{"error": str(e), ...}``
+    instead of re-raising. Without explicit detection, a non-streaming
+    handoff that hits an LLM/tool/runtime error after the working
+    transition would have neither tool_limit_reached nor a raised
+    exception — the wrapper's except-Exception branch never sees it,
+    and the task stays stuck in ``working`` forever (codex P2 from
+    the false-done PR review). Wrapper must detect the ``error``
+    field on the returned dict and auto-fail.
+    """
+    loop = _make_loop_with_mocks()
+    # Simulate _chat_inner's swallowed-exception shape: error-flagged
+    # dict instead of raising.
+    loop._chat_inner = AsyncMock(return_value={
+        "response": "Error: upstream LLM timeout",
+        "tool_outputs": [],
+        "tokens_used": 0,
+        "error": "upstream LLM timeout",
+    })
+
+    result = await loop.chat("hi", task_id="task_err")
+    assert "error" in result  # SSE caller still sees the error response
+
+    # working then failed, in order. NOT done.
+    calls = loop.mesh_client.set_task_status.await_args_list
+    assert len(calls) == 2, f"expected working+failed, got {calls}"
+    assert calls[0].args == ("task_err", "working")
+    assert calls[1].args == ("task_err", "failed")
+    assert "upstream LLM timeout" in (calls[1].kwargs.get("error") or "")
+
+
+# ── 3c. tool-loop terminate is propagated as failure ─────────────
+
+@pytest.mark.asyncio
+async def test_chat_auto_fails_task_on_tool_loop_terminate():
+    """``_check_tool_loop_terminate`` catches an LLM tool-call loop
+    (same tool, same args, same result, repeatedly) and short-circuits.
+    Returns a normal-shaped dict — without an ``error`` flag it
+    looked like clean completion to the wrapper, leaving the task
+    stuck in ``working`` (codex P2 round 2). Now flagged with
+    ``error="tool_loop_terminated: ..."`` so the wrapper auto-fails.
+    """
+    loop = _make_loop_with_mocks()
+    loop._chat_inner = AsyncMock(return_value={
+        "response": "Stopped: tool loop detected on web_search",
+        "tool_outputs": [],
+        "tokens_used": 50,
+        "error": "tool_loop_terminated: web_search",
+    })
+
+    await loop.chat("hi", task_id="task_loop")
+
+    calls = loop.mesh_client.set_task_status.await_args_list
+    assert len(calls) == 2
+    assert calls[0].args == ("task_loop", "working")
+    assert calls[1].args == ("task_loop", "failed")
+    assert "tool_loop_terminated" in (calls[1].kwargs.get("error") or "")
+
+
+@pytest.mark.asyncio
+async def test_chat_auto_fails_task_on_chat_session_limit():
+    """Absolute chat-session limit (max continuations × max rounds)
+    is a terminal stop the agent can't recover from. Flag it as
+    failure so the wrapper auto-fails the handoff task.
+    """
+    loop = _make_loop_with_mocks()
+    loop._chat_inner = AsyncMock(return_value={
+        "response": "Chat session has reached its absolute limit...",
+        "tool_outputs": [],
+        "tokens_used": 0,
+        "error": "chat_session_limit_reached",
+    })
+
+    await loop.chat("hi", task_id="task_limit")
+
+    calls = loop.mesh_client.set_task_status.await_args_list
+    assert len(calls) == 2
+    assert calls[0].args == ("task_limit", "working")
+    assert calls[1].args == ("task_limit", "failed")
+    assert calls[1].kwargs.get("error") == "chat_session_limit_reached"
+
+
+# ── 3b. explicit complete_task path is the ONLY way to mark done ──
+
+@pytest.mark.asyncio
+async def test_explicit_complete_task_marks_done():
+    """The new contract: tasks only transition to ``done`` when an
+    agent explicitly calls ``complete_task``. This is the
+    counter-test to the reversed semantics above — pin the
+    explicit-completion path so future refactors don't accidentally
+    remove the only way for agents to declare done."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from src.agent.builtins.coordination_tool import _complete_task_v2
+
+    mesh_client = MagicMock()
+    mesh_client.set_task_status = AsyncMock(return_value={"id": "task_xyz"})
+
+    result = await _complete_task_v2(
+        task_key="tasks/recipient/task_xyz", mesh_client=mesh_client,
+    )
+
+    assert result["completed"] is True
+    assert result["task_id"] == "task_xyz"
+    # No summary passed → set_task_status called without ``result`` kw.
+    mesh_client.set_task_status.assert_awaited_once_with("task_xyz", "done")
+
+
+@pytest.mark.asyncio
+async def test_explicit_complete_task_forwards_summary_to_back_edge():
+    """When the recipient passes a summary to ``complete_task``, the
+    mesh sees ``result={"summary": ...}`` so the back-edge writer can
+    populate the originator's ``inbox/{agent}/task_event/{id}`` event
+    with what shipped. Without this codex P2: originator's check_inbox
+    sees an empty completion event and has to come ask.
+
+    Truncates to 500 chars (matches the previous auto-close cap, so
+    payload size stays bounded).
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from src.agent.builtins.coordination_tool import _complete_task_v2
+
+    mesh_client = MagicMock()
+    mesh_client.set_task_status = AsyncMock(return_value={"id": "task_xyz"})
+
+    summary = "wrote design doc at artifacts/seo-strategy-q3.md (4.2KB)"
+    await _complete_task_v2(
+        task_key="task_xyz", summary=summary, mesh_client=mesh_client,
+    )
+
+    mesh_client.set_task_status.assert_awaited_once_with(
+        "task_xyz", "done", result={"summary": summary},
+    )
+
+
+@pytest.mark.asyncio
+async def test_update_status_done_forwards_summary_to_back_edge():
+    """Parallel completion path: agents that call
+    ``update_status(state='done', summary='...')`` instead of the
+    dedicated ``complete_task`` tool must ALSO forward the summary
+    to ``set_task_status(result={"summary": ...})`` so the back-edge
+    writer can populate the originator's check_inbox event. Without
+    this codex P2 r4: this advertised path silently dropped summaries.
+    Non-done states leave ``result`` unset (only ``done`` uses it —
+    ``blocked`` uses ``blocker_note`` which is wired separately).
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from src.agent.builtins.coordination_tool import _update_status_v2
+
+    mesh_client = MagicMock()
+    mesh_client.agent_id = "recipient"
+    mesh_client.list_task_inbox = AsyncMock(
+        return_value=[{"id": "task_xyz", "status": "working"}],
+    )
+    mesh_client.set_task_status = AsyncMock(return_value={"id": "task_xyz"})
+
+    result = await _update_status_v2(
+        state="done", summary="shipped: artifacts/report.md",
+        task_id="task_xyz", mesh_client=mesh_client,
+    )
+
+    assert result["updated"] is True
+    call = mesh_client.set_task_status.await_args
+    assert call.args == ("task_xyz", "done")
+    assert call.kwargs["result"] == {
+        "summary": "shipped: artifacts/report.md",
+    }
+
+
+@pytest.mark.asyncio
+async def test_update_status_non_done_omits_summary_result():
+    """Sanity guard: only ``done`` populates ``result`` — for other
+    states the summary either has its own slot (``blocker_note`` for
+    blocked) or is ignored. Pin this so a future refactor doesn't
+    accidentally start forwarding summaries for ``working``/``accepted``
+    transitions."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from src.agent.builtins.coordination_tool import _update_status_v2
+
+    mesh_client = MagicMock()
+    mesh_client.agent_id = "recipient"
+    mesh_client.list_task_inbox = AsyncMock(
+        return_value=[{"id": "task_xyz", "status": "pending"}],
+    )
+    mesh_client.set_task_status = AsyncMock(return_value={"id": "task_xyz"})
+
+    await _update_status_v2(
+        state="working", summary="some text", task_id="task_xyz",
+        mesh_client=mesh_client,
+    )
+
+    call = mesh_client.set_task_status.await_args
+    # No ``result`` kwarg — only ``blocker_note=None`` for non-blocked.
+    assert "result" not in call.kwargs
+
+
+@pytest.mark.asyncio
+async def test_explicit_complete_task_truncates_long_summary():
+    """A pathologically long summary gets capped at 500 chars so a
+    misbehaving recipient can't bloat the back-edge payload."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from src.agent.builtins.coordination_tool import _complete_task_v2
+
+    mesh_client = MagicMock()
+    mesh_client.set_task_status = AsyncMock(return_value={"id": "task_xyz"})
+
+    long_summary = "x" * 2000
+    await _complete_task_v2(
+        task_key="task_xyz", summary=long_summary, mesh_client=mesh_client,
+    )
+
+    call = mesh_client.set_task_status.await_args
+    assert len(call.kwargs["result"]["summary"]) == 500
+
+
+@pytest.mark.asyncio
+async def test_explicit_complete_task_sanitizes_summary():
+    """The summary flows into another agent's LLM context via the
+    originator's check_inbox back-edge event. Invisible/control
+    Unicode (zero-width spaces, BOMs, etc.) must be stripped via
+    ``sanitize_for_prompt`` before forwarding — same boundary the
+    parallel update_status(done) path enforces. Codex P2 r5 caught
+    that this path was sending raw user-controlled summary text."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from src.agent.builtins.coordination_tool import _complete_task_v2
+
+    mesh_client = MagicMock()
+    mesh_client.set_task_status = AsyncMock(return_value={"id": "task_xyz"})
+
+    # Mix visible text with a zero-width space (​) and a BOM
+    # (﻿) — both stripped by sanitize_for_prompt.
+    leaky_summary = "wrote​ design﻿ doc"
+    await _complete_task_v2(
+        task_key="task_xyz", summary=leaky_summary, mesh_client=mesh_client,
+    )
+
+    call = mesh_client.set_task_status.await_args
+    forwarded = call.kwargs["result"]["summary"]
+    assert "​" not in forwarded
+    assert "﻿" not in forwarded
+    # Visible content survives.
+    assert "wrote" in forwarded
+    assert "design" in forwarded
 
 
 # ── 4. legacy path (no task_id) skips auto-close ─────────────────

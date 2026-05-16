@@ -1776,23 +1776,36 @@ class AgentLoop:
                                 error=str(e)[:500],
                             )
                         raise
-                    # Auto-close on success (and special-case the
-                    # ``tool_limit_reached`` exit, which _chat_inner returns
-                    # as a normal dict — we treat that as ``failed`` with a
-                    # canonical ``max_iterations_reached`` error so the
-                    # originating agent can distinguish exhaustion from
-                    # successful completion).
+                    # Terminal auto-close ONLY for failure modes the
+                    # agent cannot declare itself:
+                    #   - swallowed internal error — ``_chat_inner``
+                    #     catches Exception and returns a dict with
+                    #     ``error: str``. Mirror the streaming
+                    #     wrapper's contract so we don't leave the
+                    #     task stuck in working (codex P2).
+                    #   - ``tool_limit_reached`` — loop hit the cap.
+                    # We deliberately do NOT auto-close as ``done`` on
+                    # clean chat completion. The chat handler runs
+                    # whether the LLM did real work or just emitted a
+                    # one-line ack ("Got it, I'll start on that") — so
+                    # treating chat-end as task-completion was lying:
+                    # operators saw ``task_completed`` for work that
+                    # was only acknowledged. Agents must call
+                    # ``complete_task(task_id)`` explicitly to declare
+                    # done. Tasks left in ``working`` correctly reflect
+                    # "agent received but hasn't finished" — a stale
+                    # reaper (separate scope) handles forgetful agents.
                     if task_id:
-                        if result.get("tool_limit_reached"):
+                        inner_error = result.get("error")
+                        if inner_error:
+                            await self._auto_close_task(
+                                task_id, "failed",
+                                error=str(inner_error)[:500],
+                            )
+                        elif result.get("tool_limit_reached"):
                             await self._auto_close_task(
                                 task_id, "failed",
                                 error="max_iterations_reached",
-                            )
-                        else:
-                            summary = (result.get("response") or "")[:500]
-                            await self._auto_close_task(
-                                task_id, "done",
-                                result_payload={"summary": summary},
                             )
                     return result
                 finally:
@@ -2189,7 +2202,12 @@ class AgentLoop:
                     )
                     if self.workspace:
                         self.workspace.append_chat_message("assistant", msg)
-                    return {"response": msg, "tool_outputs": [], "tokens_used": 0}
+                    return {
+                        "response": msg,
+                        "tool_outputs": [],
+                        "tokens_used": 0,
+                        "error": "chat_session_limit_reached",
+                    }
                 await self._auto_continue_session(system)
 
             steer_interrupts = 0
@@ -2254,6 +2272,7 @@ class AgentLoop:
                         "response": msg,
                         "tool_outputs": tool_outputs,
                         "tokens_used": total_tokens,
+                        "error": f"tool_loop_terminated: {terminate_msg}",
                     }
 
                 entries = self._build_tool_call_entries(llm_response)
@@ -2346,7 +2365,20 @@ class AgentLoop:
             msg = f"Error: {e}"
             if self.workspace:
                 self.workspace.append_chat_message("assistant", msg)
-            return {"response": msg, "tool_outputs": tool_outputs, "tokens_used": total_tokens}
+            # ``error`` flag mirrors _chat_stream_inner's contract so the
+            # outer chat() wrapper can auto-fail the originating task
+            # on swallowed exceptions. Without this, a non-streaming
+            # handoff that hits an LLM/tool/runtime error after being
+            # marked ``working`` would have neither tool_limit_reached
+            # nor a raised exception in the wrapper, and the task
+            # would stay stuck in working forever (codex P2 from
+            # the false-done-auto-close PR review).
+            return {
+                "response": msg,
+                "tool_outputs": tool_outputs,
+                "tokens_used": total_tokens,
+                "error": str(e),
+            }
 
     def _log_chat_turn(
         self, user_msg: str, assistant_msg: str,
@@ -2720,28 +2752,28 @@ class AgentLoop:
             if task_id:
                 await self._auto_close_task(task_id, "working")
             # Capture the final response for task auto-close. The
-            # ``done`` event carries the full response; collecting
-            # text_delta would also work but ``done`` is canonical.
-            final_response = ""
+            # We only need to inspect ``done`` events for failure flags
+            # now — auto-close as ``done`` was removed because chat-end
+            # ≠ task-end. ``final_response`` summary capture is gone
+            # for the same reason: the agent declares completion via
+            # ``complete_task`` and supplies its own summary there.
             tool_limit_hit = False
             internal_error: str | None = None
             try:
                 try:
                     async for event in self._chat_stream_inner(user_message):
-                        if isinstance(event, dict):
-                            if event.get("type") == "done":
-                                final_response = event.get("response", "") or ""
-                                if event.get("tool_limit_reached"):
-                                    tool_limit_hit = True
-                                # _chat_stream_inner catches Exception
-                                # internally and yields a ``done`` event
-                                # with ``error: str``. Detect it so we
-                                # don't misclassify a swallowed failure
-                                # as a successful close (codex P2 from
-                                # PR R2 review).
-                                err = event.get("error")
-                                if err:
-                                    internal_error = str(err)
+                        if isinstance(event, dict) and event.get("type") == "done":
+                            if event.get("tool_limit_reached"):
+                                tool_limit_hit = True
+                            # _chat_stream_inner catches Exception
+                            # internally and yields a ``done`` event
+                            # with ``error: str``. Detect it so we
+                            # don't misclassify a swallowed failure
+                            # as a successful close (codex P2 from
+                            # PR R2 review).
+                            err = event.get("error")
+                            if err:
+                                internal_error = str(err)
                         yield event
                 except asyncio.CancelledError:
                     # Client disconnect / server cancel after the
@@ -2776,12 +2808,15 @@ class AgentLoop:
                             error=str(e)[:500],
                         )
                     raise
-                # Auto-close on completion. Three possible terminal
-                # states for the streaming path:
-                #   1. ``internal_error`` — _chat_stream_inner caught
-                #      an exception and emitted error-flagged done.
-                #   2. ``tool_limit_reached`` — max-iterations exit.
-                #   3. Otherwise — clean completion.
+                # Terminal auto-close ONLY for failure modes the agent
+                # cannot declare itself (mirrors loop.chat — see the
+                # rationale there for why we no longer auto-close as
+                # ``done`` on clean chat completion). The chat handler
+                # runs whether the LLM did real work or just emitted
+                # a one-line ack, so treating chat-end as
+                # task-completion was lying to operators about
+                # completion. Agents must call ``complete_task``
+                # explicitly to declare done.
                 if task_id:
                     if internal_error is not None:
                         await self._auto_close_task(
@@ -2792,11 +2827,6 @@ class AgentLoop:
                         await self._auto_close_task(
                             task_id, "failed",
                             error="max_iterations_reached",
-                        )
-                    else:
-                        await self._auto_close_task(
-                            task_id, "done",
-                            result_payload={"summary": final_response[:500]},
                         )
             finally:
                 await self._checkpoint_chat_session()
@@ -2821,7 +2851,13 @@ class AgentLoop:
                     if self.workspace:
                         self.workspace.append_chat_message("assistant", msg)
                     yield {"type": "text_delta", "content": msg}
-                    yield {"type": "done", "response": msg, "tool_outputs": [], "tokens_used": 0}
+                    yield {
+                        "type": "done",
+                        "response": msg,
+                        "tool_outputs": [],
+                        "tokens_used": 0,
+                        "error": "chat_session_limit_reached",
+                    }
                     return
                 await self._auto_continue_session(system)
 
@@ -2916,6 +2952,7 @@ class AgentLoop:
                         "response": msg,
                         "tool_outputs": tool_outputs,
                         "tokens_used": total_tokens,
+                        "error": f"tool_loop_terminated: {terminate_msg}",
                     }
                     return
 

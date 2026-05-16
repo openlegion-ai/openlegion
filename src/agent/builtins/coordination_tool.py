@@ -413,16 +413,32 @@ async def update_status(
     description=(
         "Mark a task from your inbox as done so it won't appear in "
         "check_inbox() again. Call this after you've finished processing "
-        "a task. Pass the task key from the check_inbox() result."
+        "a task. Pass the task key from the check_inbox() result and a "
+        "short summary of what you produced — the originator sees this "
+        "in their check_inbox back-edge so they know what shipped without "
+        "asking. Without a summary the originator gets an empty 'done' "
+        "event and has to come ask."
     ),
     parameters={
         "task_key": {
             "type": "string",
             "description": "The task key from check_inbox() (e.g. 'tasks/you/ho_abc123')",
         },
+        "summary": {
+            "type": "string",
+            "description": (
+                "Short summary (≤500 chars) of what you completed — "
+                "e.g. 'wrote design doc at artifacts/design.md', "
+                "'merged PR #42', 'classified 30 leads, 12 qualified'. "
+                "Optional but strongly preferred."
+            ),
+            "default": "",
+        },
     },
 )
-async def complete_task(task_key: str, *, mesh_client=None) -> dict:
+async def complete_task(
+    task_key: str, summary: str = "", *, mesh_client=None,
+) -> dict:
     if mesh_client is None:
         return {"error": "No mesh_client available"}
 
@@ -437,7 +453,9 @@ async def complete_task(task_key: str, *, mesh_client=None) -> dict:
     except Exception:
         v2_enabled = False
     if v2_enabled:
-        return await _complete_task_v2(task_key, mesh_client=mesh_client)
+        return await _complete_task_v2(
+            task_key, summary=summary, mesh_client=mesh_client,
+        )
 
     if mesh_client.is_standalone and not is_operator:
         return {"error": _STANDALONE_ERROR}
@@ -627,13 +645,29 @@ async def _hand_off_v2(
     # caller via ``wake_failed`` + ``wake_error`` so they can decide
     # whether to retry the wake or wait for the recipient's next cron.
     #
-    # Bug 2 fix: forward the task_id on the wake so the recipient's lane
-    # → /chat → loop chain auto-closes the task on completion. Without
-    # this, the Task row would sit at pending forever.
+    # The wake message format is load-bearing. Earlier "New task from
+    # X: ..." text let recipients ack with a one-liner ("Got it!") and
+    # the auto-close marked the task done — false completion. Now
+    # tasks only close on EXPLICIT complete_task; the wake prompts
+    # the recipient to actually do the work and call complete_task
+    # when finished (task_id is embedded for them to copy verbatim).
+    wake_message = (
+        f"[TASK {task_id}] from {mesh_client.agent_id}: {summary[:200]}\n\n"
+        f"Do the work, then call complete_task(task_key='{task_id}', "
+        f"summary='<one-line description of what you produced>') to "
+        f"mark this done. The summary flows back to the originator's "
+        f"check_inbox so they know what shipped without re-asking — "
+        f"include artifact paths, PR numbers, counts, etc. If you "
+        f"can't finish, call update_status('blocked', "
+        f"task_id='{task_id}') with a blocker note. Without explicit "
+        f"completion, this task stays in working until a stale sweep."
+    ) if task_id else (
+        f"New task from {mesh_client.agent_id}: {summary[:200]}"
+    )
     wake_error: str | None = None
     try:
         await mesh_client.wake_agent(
-            to, f"New task from {mesh_client.agent_id}: {summary[:200]}",
+            to, wake_message,
             origin=origin,
             task_id=task_id or None,
         )
@@ -790,24 +824,56 @@ async def _update_status_v2(
             return {"error": "task_not_found", "task_id": task_id}
 
     blocker_note = sanitize_for_prompt(summary) if state == "blocked" else None
+    # When the recipient transitions to ``done`` via update_status
+    # (instead of the dedicated complete_task tool), still forward
+    # the summary as ``result={"summary": ...}`` so the mesh back-edge
+    # writer can populate the originator's check_inbox event. Without
+    # this codex P2 r4: the parallel completion path silently drops
+    # summaries — originator sees an empty done event.
+    done_result: dict | None = None
+    if state == "done" and summary:
+        done_result = {"summary": sanitize_for_prompt(summary)[:500]}
     try:
-        await mesh_client.set_task_status(
-            target["id"], state, blocker_note=blocker_note,
-        )
+        kwargs: dict = {"blocker_note": blocker_note}
+        if done_result is not None:
+            kwargs["result"] = done_result
+        await mesh_client.set_task_status(target["id"], state, **kwargs)
     except Exception as e:
         return {"error": f"Failed to update status: {e}"}
     return {"updated": True, "state": state, "task_id": target["id"]}
 
 
-async def _complete_task_v2(task_key: str, *, mesh_client) -> dict:
-    """Task 6 complete_task path — transitions a task to ``done``."""
+async def _complete_task_v2(
+    task_key: str, *, mesh_client, summary: str = "",
+) -> dict:
+    """Task 6 complete_task path — transitions a task to ``done``.
+
+    ``summary`` flows through to ``set_task_status`` as
+    ``result={"summary": ...}`` so the mesh back-edge writer can copy
+    it into the originator's ``inbox/{agent}/task_event/{id}`` payload.
+    Without it the originator's ``check_inbox`` shows an empty
+    completion event — they know the task closed but not what
+    shipped.
+    """
     # ``task_key`` may be either the raw task id (preferred) or one of
     # the legacy blackboard-style keys (``tasks/x/ho_abc``). Strip the
     # legacy prefix when present so flag-flipped fleets can still pass
     # through the old key shapes for one transition cycle.
     task_id = task_key.rsplit("/", 1)[-1] if "/" in task_key else task_key
     try:
-        record = await mesh_client.set_task_status(task_id, "done")
+        if summary:
+            # Sanitize invisible/control Unicode BEFORE forwarding —
+            # the back-edge writer copies this into the originator's
+            # check_inbox event which feeds back into another agent's
+            # LLM context. Same sanitization the parallel
+            # update_status(done) path already applies (codex P2 r5).
+            clean = sanitize_for_prompt(summary)[:500]
+            record = await mesh_client.set_task_status(
+                task_id, "done",
+                result={"summary": clean},
+            )
+        else:
+            record = await mesh_client.set_task_status(task_id, "done")
     except Exception as e:
         return {"error": f"Failed to complete task: {e}"}
     return {

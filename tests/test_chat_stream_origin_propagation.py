@@ -311,35 +311,31 @@ class _LoopWithTaskClose:
 
 
 @pytest.mark.asyncio
-async def test_chat_stream_auto_closes_task_with_working_then_done():
-    """When ``x-task-id`` rides the streaming wake, ``loop.chat_stream``
-    must transition the task pending → working → done. Codex P1 from
-    the R2 review: an earlier draft of this PR called
-    ``set_task_status(done)`` straight from ``pending``, which the
-    state machine 4xx's, leaving the task pending forever (Bug 2
-    silently reproduced for streaming handoffs). Mirror the
-    non-streaming ``chat()`` path: open as ``working`` at body
-    start, close as ``done`` on clean exit.
+async def test_chat_stream_does_not_auto_close_task_as_done():
+    """**Reversed semantics** — see the analogous test in
+    test_task_lifecycle for full context. Streaming chat now opens
+    as ``working`` but does NOT auto-close as ``done`` on clean
+    completion. Recipient agents must call ``complete_task``
+    explicitly to declare done, mirroring the non-streaming path.
+
+    Without this, the streaming path would still silently lie:
+    operator hand_off looks succesful while recipient may have
+    only acknowledged.
     """
     from src.agent.loop import AgentLoop
 
     stand_in = _LoopWithTaskClose()
-    # Steal the real chat_stream method, bind it to our stand-in.
     method = AgentLoop.chat_stream.__get__(stand_in, AgentLoop)
     events = []
     async for ev in method("hi", task_id="task_alpha"):
         events.append(ev)
 
-    # Stream produced both events.
+    # Stream still surfaces the done event to the SSE caller.
     assert any(e.get("type") == "done" for e in events), events
-    # Two transitions, in order: working then done.
-    assert len(stand_in.mesh_client.calls) == 2, stand_in.mesh_client.calls
+    # Only working fires — NOT done.
+    assert len(stand_in.mesh_client.calls) == 1, stand_in.mesh_client.calls
     first_id, first_status, _ = stand_in.mesh_client.calls[0]
     assert (first_id, first_status) == ("task_alpha", "working")
-    second_id, second_status, second_payload = stand_in.mesh_client.calls[1]
-    assert (second_id, second_status) == ("task_alpha", "done")
-    assert second_payload["result"] == {"summary": "all done"}
-    assert second_payload["error"] is None
     # Checkpoint still ran.
     assert stand_in._checkpointed
 
