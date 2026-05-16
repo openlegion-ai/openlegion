@@ -627,13 +627,26 @@ async def _hand_off_v2(
     # caller via ``wake_failed`` + ``wake_error`` so they can decide
     # whether to retry the wake or wait for the recipient's next cron.
     #
-    # Bug 2 fix: forward the task_id on the wake so the recipient's lane
-    # → /chat → loop chain auto-closes the task on completion. Without
-    # this, the Task row would sit at pending forever.
+    # The wake message format is load-bearing. Earlier "New task from
+    # X: ..." text let recipients ack with a one-liner ("Got it!") and
+    # the auto-close marked the task done — false completion. Now
+    # tasks only close on EXPLICIT complete_task; the wake prompts
+    # the recipient to actually do the work and call complete_task
+    # when finished (task_id is embedded for them to copy verbatim).
+    wake_message = (
+        f"[TASK {task_id}] from {mesh_client.agent_id}: {summary[:200]}\n\n"
+        f"Do the work, then call complete_task(task_key='{task_id}') "
+        f"to mark this done. If you can't finish, call "
+        f"update_status('blocked', task_id='{task_id}') with a "
+        f"blocker note. Without explicit completion, this task stays "
+        f"in working until a stale-task sweep."
+    ) if task_id else (
+        f"New task from {mesh_client.agent_id}: {summary[:200]}"
+    )
     wake_error: str | None = None
     try:
         await mesh_client.wake_agent(
-            to, f"New task from {mesh_client.agent_id}: {summary[:200]}",
+            to, wake_message,
             origin=origin,
             task_id=task_id or None,
         )

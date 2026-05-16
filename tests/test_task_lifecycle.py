@@ -116,24 +116,27 @@ def _make_loop_with_mocks():
 
 
 @pytest.mark.asyncio
-async def test_chat_auto_closes_task_on_success():
-    """A successful chat with task_id triggers set_task_status("done")."""
+async def test_chat_does_not_auto_close_task_as_done_on_clean_completion():
+    """**Reversed semantics**: a clean chat completion no longer
+    auto-closes the task as ``done``. The chat handler runs whether
+    the LLM did real work or just acknowledged with text ("Got it,
+    I'll start on that") — so auto-closing on chat-end was lying to
+    operators about completion.
+
+    Now: opens as ``working`` at chat start, then LEAVES it in
+    ``working``. The recipient agent must explicitly call
+    ``complete_task`` to declare done. Tests for the explicit
+    completion path live in test_coordination.py.
+    """
     loop = _make_loop_with_mocks()
 
     result = await loop.chat("hi there", task_id="task_xyz")
 
     assert "response" in result
-    # Two transitions: pending→working at start, working→done on completion.
-    # State machine forbids pending→done directly, so the working step is
-    # load-bearing for production handoffs.
+    # Only the working transition fires. No "done" call.
     calls = loop.mesh_client.set_task_status.await_args_list
-    assert len(calls) == 2, f"expected working+done, got {calls}"
+    assert len(calls) == 1, f"expected working only, got {calls}"
     assert calls[0].args == ("task_xyz", "working")
-    assert calls[1].args == ("task_xyz", "done")
-    # Summary should carry the response prefix (truncated to 500 chars).
-    assert calls[1].kwargs.get("result", {}).get("summary", "").startswith(
-        "Hello, I finished",
-    )
 
 
 # ── 3. loop.chat() auto-fails on exception ───────────────────────
@@ -154,6 +157,31 @@ async def test_chat_auto_closes_task_as_failed_on_exception():
     assert calls[0].args == ("task_fail", "working")
     assert calls[1].args == ("task_fail", "failed")
     assert "boom inside chat" in (calls[1].kwargs.get("error") or "")
+
+
+# ── 3b. explicit complete_task path is the ONLY way to mark done ──
+
+@pytest.mark.asyncio
+async def test_explicit_complete_task_marks_done():
+    """The new contract: tasks only transition to ``done`` when an
+    agent explicitly calls ``complete_task``. This is the
+    counter-test to the reversed semantics above — pin the
+    explicit-completion path so future refactors don't accidentally
+    remove the only way for agents to declare done."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from src.agent.builtins.coordination_tool import _complete_task_v2
+
+    mesh_client = MagicMock()
+    mesh_client.set_task_status = AsyncMock(return_value={"id": "task_xyz"})
+
+    result = await _complete_task_v2(
+        task_key="tasks/recipient/task_xyz", mesh_client=mesh_client,
+    )
+
+    assert result["completed"] is True
+    assert result["task_id"] == "task_xyz"
+    mesh_client.set_task_status.assert_awaited_once_with("task_xyz", "done")
 
 
 # ── 4. legacy path (no task_id) skips auto-close ─────────────────
