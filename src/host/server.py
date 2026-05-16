@@ -5410,24 +5410,27 @@ def create_mesh_app(
         if field == "model":
             if not isinstance(new_value, str) or not new_value:
                 raise HTTPException(400, "model must be a non-empty string")
-            # Same BYOK validation as /edit-soft and create-agent —
-            # /propose is deprecated per CLAUDE.md but still active for
-            # back-compat, so close the gap here too.
-            from src.shared.models import (
-                get_available_providers,
-                resolve_provider_for_model,
-            )
-            _provider = resolve_provider_for_model(new_value)
-            _providers_with_creds = get_available_providers()
-            if _provider and _provider not in _providers_with_creds:
-                raise HTTPException(
-                    400,
-                    f"Model '{new_value}' requires '{_provider}' credentials, "
-                    f"but no {_provider.upper()} key is configured. Available "
-                    f"providers: {sorted(_providers_with_creds) or 'none'}. "
-                    f"Set OPENLEGION_SYSTEM_{_provider.upper()}_API_KEY or pick "
-                    f"a different model.",
-                )
+            # Same BYOK validation as create_custom_agent (PR #901):
+            # use the live vault to enumerate providers — mirrors
+            # OAuth state, not just env. Skip when no vault is wired
+            # (test harnesses, sandbox transport) — matches create-agent's
+            # behavior so propose/edit and create stay consistent.
+            if credential_vault is not None:
+                from src.shared.models import resolve_provider_for_model
+                _provider = resolve_provider_for_model(new_value)
+                if _provider:
+                    _available = credential_vault.get_providers_with_credentials()
+                    if _provider not in _available:
+                        _available_list = sorted(_available) if _available else "none"
+                        raise HTTPException(
+                            400,
+                            f"Model '{new_value}' requires '{_provider}' "
+                            f"credentials, but no {_provider.upper()} key is "
+                            f"configured. Available providers: "
+                            f"{_available_list}. Set "
+                            f"OPENLEGION_SYSTEM_{_provider.upper()}_API_KEY or "
+                            f"pick a different model.",
+                        )
         elif field == "thinking":
             from src.agent.llm import LLMClient
             if new_value not in LLMClient.VALID_THINKING_LEVELS:
@@ -5890,26 +5893,26 @@ def create_mesh_app(
         if field == "model":
             if not isinstance(new_value, str) or not new_value:
                 raise HTTPException(400, "model must be a non-empty string")
-            # Match create-agent BYOK validation (PR #901): block edits
-            # that would point the agent at a model whose provider has
-            # no credentials. Otherwise /edit-soft is a back-door
-            # around the create-time check — the agent would silently
-            # fail on its next LLM call.
-            from src.shared.models import (
-                get_available_providers,
-                resolve_provider_for_model,
-            )
-            _provider = resolve_provider_for_model(new_value)
-            _providers_with_creds = get_available_providers()
-            if _provider and _provider not in _providers_with_creds:
-                raise HTTPException(
-                    400,
-                    f"Model '{new_value}' requires '{_provider}' credentials, "
-                    f"but no {_provider.upper()} key is configured. Available "
-                    f"providers: {sorted(_providers_with_creds) or 'none'}. "
-                    f"Set OPENLEGION_SYSTEM_{_provider.upper()}_API_KEY or pick "
-                    f"a different model.",
-                )
+            # Match create-agent BYOK validation (PR #901). Use the
+            # live vault, not raw env, so OAuth-only providers count;
+            # skip when no vault is wired (test harnesses) so existing
+            # vault-less tests don't regress to 400.
+            if credential_vault is not None:
+                from src.shared.models import resolve_provider_for_model
+                _provider = resolve_provider_for_model(new_value)
+                if _provider:
+                    _available = credential_vault.get_providers_with_credentials()
+                    if _provider not in _available:
+                        _available_list = sorted(_available) if _available else "none"
+                        raise HTTPException(
+                            400,
+                            f"Model '{new_value}' requires '{_provider}' "
+                            f"credentials, but no {_provider.upper()} key is "
+                            f"configured. Available providers: "
+                            f"{_available_list}. Set "
+                            f"OPENLEGION_SYSTEM_{_provider.upper()}_API_KEY or "
+                            f"pick a different model.",
+                        )
         elif field == "thinking":
             from src.agent.llm import LLMClient
             if new_value not in LLMClient.VALID_THINKING_LEVELS:
