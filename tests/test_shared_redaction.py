@@ -388,3 +388,50 @@ class TestRedactUrlPreservesCanonicalQuery:
         assert "mysecret" not in out
         assert "[REDACTED]" in out
         assert "keep=ok" in out
+
+
+class TestRedactTextWithUrls:
+    """Free-form-text redaction: catches both token-shaped secrets
+    (delegated to ``redact_string``) AND URL query-param values whose
+    key signals a credential (delegated to ``redact_url`` per-URL).
+
+    Motivated by Codex P1 from the PR R1 review of coordination_tool's
+    wake_error path — plain ``redact_string`` left ``?api_key=anyvalue``
+    intact when the value didn't match SECRET_PATTERNS, leaking
+    credentials into the LLM context."""
+
+    def test_strips_query_param_value_even_when_value_is_opaque(self):
+        from src.shared.redaction import redact_text_with_urls
+        msg = "POST https://gw.example.com/x?api_key=abc123random failed 500"
+        out = redact_text_with_urls(msg)
+        assert "abc123random" not in out
+        assert "[REDACTED]" in out
+
+    def test_still_catches_bare_tokens_outside_urls(self):
+        from src.shared.redaction import redact_text_with_urls
+        token = "sk-" + "a" * 40
+        msg = f"oauth handshake leaked {token} into the log"
+        out = redact_text_with_urls(msg)
+        assert token not in out
+        assert "[REDACTED]" in out
+
+    def test_handles_url_followed_by_sentence_terminator(self):
+        from src.shared.redaction import redact_text_with_urls
+        msg = "ping https://x.example.com/?api_key=secretvalue."
+        out = redact_text_with_urls(msg)
+        assert "secretvalue" not in out
+        # The trailing period must survive — it's prose, not URL.
+        assert out.rstrip().endswith(".")
+
+    def test_empty_input_passes_through(self):
+        from src.shared.redaction import redact_text_with_urls
+        assert redact_text_with_urls("") == ""
+        assert redact_text_with_urls(None) is None  # type: ignore[arg-type]
+
+    def test_url_without_sensitive_param_unchanged_otherwise(self):
+        from src.shared.redaction import redact_text_with_urls
+        msg = "GET https://x.example.com/v1/things?filter=red failed"
+        out = redact_text_with_urls(msg)
+        # ``filter`` is not in SENSITIVE_QUERY_PARAMS — value survives.
+        assert "filter=red" in out
+        assert "failed" in out

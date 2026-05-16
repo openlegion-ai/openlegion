@@ -48,7 +48,13 @@ def _agents_yaml(tmp_path, names: list[str]) -> Path:
 
 @pytest.fixture
 def mesh_app(tmp_path, monkeypatch):
-    """Mesh app pinned to a tmp_path with `writer` agent on disk."""
+    """Mesh app pinned to a tmp_path with `writer` agent on disk.
+
+    No credential_vault is wired — matches the production behavior
+    where edit_agent_soft's BYOK model validator is a no-op when no
+    vault exists (test harnesses / sandbox transport). The dedicated
+    validator tests below construct their own vault-wired app.
+    """
     afile = _agents_yaml(tmp_path, names=["writer", "researcher"])
     monkeypatch.chdir(tmp_path)
     import src.cli.config as cli_cfg
@@ -190,6 +196,140 @@ async def test_edit_soft_rejects_invalid_model_value(mesh_app):
         )
     assert r.status_code == 400
     assert "model" in r.text.lower()
+
+
+def _vault_wired_mesh_app(tmp_path, monkeypatch, provider_keys: dict[str, str]):
+    """Build a mesh app with a live credential_vault. ``provider_keys``
+    maps provider name → key value, e.g. ``{"anthropic": "sk-ant-x"}``.
+    Returns ``(app, server_module)``."""
+    afile = _agents_yaml(tmp_path, names=["writer"])
+    monkeypatch.chdir(tmp_path)
+    import src.cli.config as cli_cfg
+    monkeypatch.setattr(cli_cfg, "AGENTS_FILE", afile)
+    monkeypatch.setattr(
+        cli_cfg, "PERMISSIONS_FILE", tmp_path / "config" / "permissions.json",
+    )
+    (tmp_path / "config" / "permissions.json").write_text('{"permissions": {}}')
+
+    # Plant ONLY the requested provider keys; drop the others so the
+    # vault reports exactly the providers under test.
+    for prov in ("openai", "anthropic", "google", "deepseek", "xai"):
+        monkeypatch.delenv(f"OPENLEGION_SYSTEM_{prov.upper()}_API_KEY", raising=False)
+    for prov, key in provider_keys.items():
+        monkeypatch.setenv(f"OPENLEGION_SYSTEM_{prov.upper()}_API_KEY", key)
+
+    import src.host.server as server_module
+    importlib.reload(server_module)
+    from src.host.credentials import CredentialVault
+
+    blackboard = Blackboard(str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    permissions = PermissionMatrix()
+    for aid, p in (
+        ("operator", {"can_route_tasks": True, "can_manage_projects": True}),
+        ("writer", {"can_route_tasks": False}),
+    ):
+        permissions.permissions[aid] = AgentPermissions(agent_id=aid, **p)
+    router = MessageRouter(permissions, {})
+    vault = CredentialVault()  # picks up env via _load_credentials()
+
+    app = server_module.create_mesh_app(
+        blackboard=blackboard,
+        pubsub=pubsub,
+        router=router,
+        permissions=permissions,
+        credential_vault=vault,
+    )
+    return app, server_module, blackboard
+
+
+@pytest.mark.asyncio
+async def test_edit_soft_rejects_model_without_provider_credentials(
+    tmp_path, monkeypatch,
+):
+    """BYOK validation closes the /edit-soft back-door: if the operator
+    tries to retarget an agent at a model whose provider has no API
+    key configured, the edit must 400 — otherwise the agent silently
+    dies on its next LLM call (same failure mode PR #901 plugged at
+    create-agent time).
+
+    Uses a vault-wired app so the validator runs (it's a no-op when
+    credential_vault is None — matches create-agent's gating).
+    """
+    app, _, bb = _vault_wired_mesh_app(
+        tmp_path, monkeypatch,
+        provider_keys={"anthropic": "sk-ant-only"},  # NO openai
+    )
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://t",
+        ) as c:
+            r = await c.post(
+                "/mesh/agents/writer/edit-soft",
+                json={"field": "model", "value": "openai/gpt-4o", "reason": "u"},
+                headers=_human_origin_headers(),
+            )
+        assert r.status_code == 400, r.text
+        body = r.text.lower()
+        assert "openai" in body
+        assert "credentials" in body or "key" in body
+    finally:
+        bb.close()
+        import src.host.server as server_module
+        importlib.reload(server_module)
+
+
+@pytest.mark.asyncio
+async def test_edit_soft_accepts_model_when_provider_has_credentials(
+    tmp_path, monkeypatch,
+):
+    """Positive case: vault has an anthropic key, so /edit-soft to an
+    anthropic/* model is accepted."""
+    app, _, bb = _vault_wired_mesh_app(
+        tmp_path, monkeypatch,
+        provider_keys={"anthropic": "sk-ant-only"},
+    )
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://t",
+        ) as c:
+            r = await c.post(
+                "/mesh/agents/writer/edit-soft",
+                json={
+                    "field": "model",
+                    "value": "anthropic/claude-sonnet-4-20250514",
+                    "reason": "u",
+                },
+                headers=_human_origin_headers(),
+            )
+        assert r.status_code == 200, r.text
+        assert r.json()["field"] == "model"
+    finally:
+        bb.close()
+        import src.host.server as server_module
+        importlib.reload(server_module)
+
+
+@pytest.mark.asyncio
+async def test_edit_soft_skips_validation_when_no_vault_wired(mesh_app):
+    """Production parity guard: when ``create_mesh_app`` is built without
+    a ``credential_vault`` (test harnesses, sandbox transport), the
+    model-field validator must be a no-op. Otherwise existing
+    vault-less tests that POST arbitrary model strings would all
+    regress to 400. Mirrors ``create_custom_agent``'s gating.
+    """
+    app, _, _ = mesh_app
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://t",
+    ) as c:
+        r = await c.post(
+            "/mesh/agents/writer/edit-soft",
+            # A provider that almost certainly has no env key in CI;
+            # without the no-vault skip this would 400.
+            json={"field": "model", "value": "cohere/command-x", "reason": "u"},
+            headers=_human_origin_headers(),
+        )
+    assert r.status_code == 200, r.text
 
 
 @pytest.mark.asyncio

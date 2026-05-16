@@ -1717,6 +1717,31 @@ class AgentLoop:
         # state corruption (shared loop_detector, state, flush_triggered).
         # Guard is BEFORE _chat_lock to avoid blocking on a held lock.
         if self.current_task is not None:
+            # Two distinct paths depending on whether this is a real
+            # handoff (task_id set) or a free-form chat:
+            #
+            # - Handoff path: reject cleanly. Closing the task as
+            #   ``failed`` AND queueing it on the steer would let the
+            #   originator retry/reroute (because they see task_failed)
+            #   while THIS agent still processes the queued message —
+            #   duplicate / conflicting work (codex P2). Skip the
+            #   queue, surface the rejection in the chat reply.
+            # - Free chat path: keep legacy behavior — queue the message
+            #   into the active conversation. No durable task exists,
+            #   so there's no double-execution risk.
+            if task_id:
+                await self._auto_close_task(
+                    task_id, "failed",
+                    error="agent_busy_handoff_rejected",
+                )
+                return {
+                    "response": (
+                        "Agent is working on another task — handoff "
+                        "rejected. Originator notified via back-edge."
+                    ),
+                    "tool_outputs": [],
+                    "tokens_used": 0,
+                }
             await self._steer_queue.put(user_message)
             return {
                 "response": (
@@ -1780,7 +1805,13 @@ class AgentLoop:
         result_payload: dict | None = None,
         error: str | None = None,
     ) -> None:
-        """Best-effort terminal transition. Never raises — failures log only."""
+        """Best-effort terminal transition. Never raises — failures log only.
+
+        Log severity differentiates state-conflict (HTTP 400, the
+        transition was already done or invalid for current state — benign)
+        from infrastructure failures (network / 5xx — operator action
+        required because the task will dangle in ``pending`` forever).
+        """
         try:
             await self.mesh_client.set_task_status(
                 task_id, status,
@@ -1788,10 +1819,26 @@ class AgentLoop:
                 error=error,
             )
         except Exception as e:
-            logger.warning(
-                "Failed to auto-close task %s as %s: %s",
-                task_id, status, e,
-            )
+            # Discriminate HTTP errors: 4xx is usually "state machine said
+            # no" (benign, e.g. concurrent transition already landed);
+            # 5xx / network / anything else means the mesh is unhealthy
+            # and the task will silently dangle without an alert.
+            resp = getattr(e, "response", None)
+            http_status = getattr(resp, "status_code", None)
+            if isinstance(http_status, int) and 400 <= http_status < 500:
+                logger.warning(
+                    "Auto-close %s → %s rejected by state machine (%s): %s",
+                    task_id, status, http_status, e,
+                )
+            else:
+                # No HTTP response or 5xx → the originating agent will
+                # never see this task close. Surface loudly so operators
+                # notice via standard error-log monitoring.
+                logger.error(
+                    "Auto-close %s → %s FAILED (%s) — task may dangle "
+                    "in pending until a heartbeat or manual close: %s",
+                    task_id, status, http_status or "no response", e,
+                )
 
     # ── Chat helpers (shared by streaming and non-streaming) ────
 

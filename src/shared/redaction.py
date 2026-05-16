@@ -301,6 +301,51 @@ def redact_string(text: str) -> str:
     return text
 
 
+# Greedy http(s) URL match. Trailing punctuation that's likely sentence
+# terminator (``.,;:)>"'``) is excluded so ``failed: https://x/?k=v.``
+# doesn't drag the dot into the URL and corrupt the rebuilt result.
+_URL_RE = re.compile(r"https?://[^\s\"'<>`]+", re.IGNORECASE)
+
+
+def redact_text_with_urls(text: str) -> str:
+    """Redact secrets from a free-form string that may contain URLs.
+
+    ``redact_string`` only catches secrets matching ``SECRET_PATTERNS``
+    (provider-token shapes, long base64/hex). It does NOT strip arbitrary
+    URL query-parameter values whose key signals a credential
+    (``api_key=anything``). Use this helper for free-form text — log
+    messages, exception strings — where URLs may carry sensitive query
+    params that don't otherwise look like tokens.
+
+    Two passes: first ``redact_url`` on every embedded URL, then
+    ``redact_string`` on the result for tokens outside URL context.
+    """
+    if not text:
+        return text
+
+    def _replace(match: re.Match[str]) -> str:
+        url = match.group(0)
+        # Strip a trailing sentence terminator BEFORE handing to redact_url
+        # (sentence terminators inside a query value are legitimate, but
+        # at the very end of a URL token they're almost certainly the
+        # surrounding prose). Preserve whatever we trim and re-append.
+        trailing = ""
+        while url and url[-1] in ".,;:!?)]>}":
+            trailing = url[-1] + trailing
+            url = url[:-1]
+        if not url:
+            return trailing
+        try:
+            redacted = redact_url(url)
+        except Exception:
+            # Defensive: never let URL-redaction failures kill the caller.
+            redacted = url
+        return redacted + trailing
+
+    text = _URL_RE.sub(_replace, text)
+    return redact_string(text)
+
+
 # ── Deep recursion over JSON-shaped structures ──────────────────────────────
 
 

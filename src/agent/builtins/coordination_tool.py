@@ -18,6 +18,7 @@ import re
 import time
 
 from src.agent.skills import skill
+from src.shared.redaction import redact_text_with_urls
 from src.shared.task_titles import (
     LONG_TITLE_THRESHOLD,
     normalize_title_and_description,
@@ -221,7 +222,15 @@ async def hand_off(
             origin=origin,
         )
     except Exception as e:
-        wake_error = str(e)[:200]
+        # Redact credentials BEFORE truncation — an HTTP-level exception
+        # may carry the failing URL with an API key in the query string.
+        # ``redact_text_with_urls`` runs ``redact_url`` on embedded URLs
+        # (catches arbitrary ``?api_key=…`` values whose key signals a
+        # credential) AND ``redact_string`` for token-shaped secrets
+        # outside URL context. Codex P1 from PR R1 review: plain
+        # ``redact_string`` left ``?api_key=anything`` intact and
+        # leaked into the LLM via the returned wake_error.
+        wake_error = redact_text_with_urls(str(e))[:200]
         logger.warning("Wake for %s failed (task still queued): %s", to, e)
 
     result = {
@@ -629,7 +638,15 @@ async def _hand_off_v2(
             task_id=task_id or None,
         )
     except Exception as e:
-        wake_error = str(e)[:200]
+        # Redact credentials BEFORE truncation — an HTTP-level exception
+        # may carry the failing URL with an API key in the query string.
+        # ``redact_text_with_urls`` runs ``redact_url`` on embedded URLs
+        # (catches arbitrary ``?api_key=…`` values whose key signals a
+        # credential) AND ``redact_string`` for token-shaped secrets
+        # outside URL context. Codex P1 from PR R1 review: plain
+        # ``redact_string`` left ``?api_key=anything`` intact and
+        # leaked into the LLM via the returned wake_error.
+        wake_error = redact_text_with_urls(str(e))[:200]
         logger.warning("Wake for %s failed (task still queued): %s", to, e)
 
     result = {

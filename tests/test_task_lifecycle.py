@@ -168,6 +168,127 @@ async def test_chat_without_task_id_skips_auto_close():
     loop.mesh_client.set_task_status.assert_not_awaited()
 
 
+# ── 4b. agent-busy handoff rejection — no steer queue + back-edge ─
+
+@pytest.mark.asyncio
+async def test_chat_with_task_id_while_busy_rejects_handoff_without_queueing():
+    """Codex P2: previous attempt at this fix put the message on the
+    steer queue AND closed the task as failed. The originator saw
+    task_failed and could retry/reroute, while THIS agent later
+    drained the queue and processed the (now-failed) message —
+    duplicate / conflicting work.
+
+    Correct semantics: a handoff with task_id arriving on a busy
+    agent must be CLEANLY rejected — no steer-queue enqueue. The
+    originator gets a clear back-edge via set_task_status(failed)
+    and is the only party that decides what to do next.
+
+    Legacy free-form chat (no task_id) keeps queueing — there's
+    no durable task in that path so no double-execution risk.
+    """
+    loop = _make_loop_with_mocks()
+    # Sentinel async-mock for the steer queue so we can assert NO put.
+    loop._steer_queue.put = AsyncMock(return_value=None)
+    # Simulate agent already executing a task.
+    loop.current_task = "task_in_flight"
+
+    result = await loop.chat("handoff plz", task_id="task_arriving")
+
+    # The handoff was rejected — response surfaces that to the caller.
+    assert "rejected" in result["response"].lower()
+    # The arriving task got a clear failed back-edge with a specific code.
+    loop.mesh_client.set_task_status.assert_awaited_once()
+    call = loop.mesh_client.set_task_status.await_args
+    assert call.args == ("task_arriving", "failed")
+    assert call.kwargs.get("error") == "agent_busy_handoff_rejected"
+    # CRITICAL: must NOT have queued the message (would cause dup-exec).
+    loop._steer_queue.put.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_chat_without_task_id_while_busy_still_queues_for_chat_ux():
+    """Legacy chat path is unchanged: a free-form chat message (no
+    task_id) on a busy agent still goes onto the steer queue so the
+    user's mid-conversation steering survives. Only the durable-task
+    handoff path skips the queue (see test above)."""
+    loop = _make_loop_with_mocks()
+    loop._steer_queue.put = AsyncMock(return_value=None)
+    loop.current_task = "task_in_flight"
+
+    result = await loop.chat("hey can you also do X?")  # no task_id
+
+    assert "queued" in result["response"].lower()
+    # No task to close (no task_id).
+    loop.mesh_client.set_task_status.assert_not_awaited()
+    # And the queue WAS exercised.
+    loop._steer_queue.put.assert_awaited_once_with("hey can you also do X?")
+
+
+# ── 4c. _auto_close_task log-severity discriminates 4xx vs 5xx ────
+
+@pytest.mark.asyncio
+async def test_auto_close_logs_5xx_at_error_not_warning(caplog):
+    """A mesh 5xx on auto-close means the task will silently dangle in
+    pending forever — must surface at ERROR so standard log monitors
+    page the operator. State-machine 4xx (benign concurrent-transition
+    races) stays at WARNING so it doesn't trigger noise alerts.
+    """
+    import logging
+    from unittest.mock import MagicMock as _MM
+
+    loop = _make_loop_with_mocks()
+
+    # Simulate httpx.HTTPStatusError shape: exception with a .response
+    # that carries a status_code int.
+    fake_resp_5xx = _MM()
+    fake_resp_5xx.status_code = 503
+    fake_resp_5xx.text = "Service Unavailable"
+    err_5xx = Exception("mesh exploded")
+    err_5xx.response = fake_resp_5xx
+    loop.mesh_client.set_task_status = AsyncMock(side_effect=err_5xx)
+
+    caplog.set_level(logging.WARNING, logger="agent.loop")
+    await loop._auto_close_task("task_x", "done")
+
+    # Exactly one log record, at ERROR level (not WARNING).
+    err_records = [
+        r for r in caplog.records
+        if r.levelno >= logging.ERROR and "task_x" in r.getMessage()
+    ]
+    assert len(err_records) == 1, (
+        f"expected 1 ERROR log for 5xx, got {len(err_records)}: "
+        f"{[r.getMessage() for r in caplog.records]}"
+    )
+    assert "FAILED" in err_records[0].getMessage()
+
+
+@pytest.mark.asyncio
+async def test_auto_close_logs_4xx_at_warning_not_error(caplog):
+    """State-machine rejections (e.g. already done, transition not
+    allowed) are 400-ish and benign. Must NOT escalate to ERROR or
+    we'll page on every concurrent-transition race.
+    """
+    import logging
+    from unittest.mock import MagicMock as _MM
+
+    loop = _make_loop_with_mocks()
+
+    fake_resp_4xx = _MM()
+    fake_resp_4xx.status_code = 400
+    fake_resp_4xx.text = "Invalid transition"
+    err_4xx = Exception("state machine said no")
+    err_4xx.response = fake_resp_4xx
+    loop.mesh_client.set_task_status = AsyncMock(side_effect=err_4xx)
+
+    caplog.set_level(logging.WARNING, logger="agent.loop")
+    await loop._auto_close_task("task_y", "done")
+
+    err_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(err_records) == 0, (
+        f"4xx should not emit ERROR — got {[r.getMessage() for r in err_records]}"
+    )
+
+
 # ── 5/6/7: back-edge emission on terminal transition ─────────────
 
 def _setup_mesh_app(tmp_path):
@@ -322,6 +443,47 @@ async def test_terminal_transition_writes_back_edge_for_agent_origin(tmp_path):
         assert payload["status"] == "done"
         assert payload["summary"] == "all done"
         assert entry.ttl == 604800
+    finally:
+        _teardown_mesh(bb, tasks_store)
+
+
+@pytest.mark.asyncio
+async def test_back_edge_tolerates_non_dict_result(tmp_path):
+    """Before the fix, a /status call with ``result="ok"`` (a string,
+    not a dict) crashed the back-edge writer with AttributeError —
+    the status update committed but the originator's inbox stayed
+    empty. Test guards against the regression by sending a plain
+    string result and verifying:
+      (a) the status transition succeeds (200),
+      (b) the back-edge IS written (just with empty summary).
+    """
+    from httpx import ASGITransport, AsyncClient
+
+    app, bb, tasks_store, _ = _setup_mesh_app(tmp_path)
+    try:
+        rec = tasks_store.create(
+            creator="alpha",
+            assignee="beta",
+            title="Do the thing",
+            origin={"kind": "agent", "channel": "", "user": "alpha"},
+        )
+        task_id = rec["id"]
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            await _advance_to_working(client, task_id)
+            resp = await client.post(
+                f"/mesh/tasks/{task_id}/status",
+                # Misuse: result is a string, not a dict.
+                json={"status": "done", "result": "ok"},
+                headers={"x-mesh-internal": "1"},
+            )
+        assert resp.status_code == 200, resp.text
+        entry = bb.read(f"inbox/alpha/task_event/{task_id}")
+        assert entry is not None, "back-edge dropped on non-dict result"
+        # Summary defaults to "" — the writer didn't crash extracting it.
+        assert entry.value.get("summary") == ""
     finally:
         _teardown_mesh(bb, tasks_store)
 
