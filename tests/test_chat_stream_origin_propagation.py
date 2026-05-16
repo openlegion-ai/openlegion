@@ -311,18 +311,16 @@ class _LoopWithTaskClose:
 
 
 @pytest.mark.asyncio
-async def test_chat_stream_auto_closes_task_on_clean_done():
+async def test_chat_stream_auto_closes_task_with_working_then_done():
     """When ``x-task-id`` rides the streaming wake, ``loop.chat_stream``
-    must auto-call ``set_task_status(done)`` on clean completion —
-    same contract as the non-streaming ``loop.chat`` (PR #903).
-    Without this, dashboard-routed handoffs that happen to land on
-    streaming chat never close.
+    must transition the task pending → working → done. Codex P1 from
+    the R2 review: an earlier draft of this PR called
+    ``set_task_status(done)`` straight from ``pending``, which the
+    state machine 4xx's, leaving the task pending forever (Bug 2
+    silently reproduced for streaming handoffs). Mirror the
+    non-streaming ``chat()`` path: open as ``working`` at body
+    start, close as ``done`` on clean exit.
     """
-    # Use the real loop.chat_stream method on a stand-in that has
-    # the helpers it needs but a simple inner generator. We invoke
-    # chat_stream directly (not via the endpoint) — the contract
-    # under test is the loop-side auto-close, not the endpoint
-    # plumbing (covered by the test above).
     from src.agent.loop import AgentLoop
 
     stand_in = _LoopWithTaskClose()
@@ -334,12 +332,111 @@ async def test_chat_stream_auto_closes_task_on_clean_done():
 
     # Stream produced both events.
     assert any(e.get("type") == "done" for e in events), events
-    # Auto-close fired exactly once, with the right shape.
-    assert len(stand_in.mesh_client.calls) == 1
-    task_id, status, payload = stand_in.mesh_client.calls[0]
-    assert task_id == "task_alpha"
-    assert status == "done"
-    assert payload["result"] == {"summary": "all done"}
-    assert payload["error"] is None
+    # Two transitions, in order: working then done.
+    assert len(stand_in.mesh_client.calls) == 2, stand_in.mesh_client.calls
+    first_id, first_status, _ = stand_in.mesh_client.calls[0]
+    assert (first_id, first_status) == ("task_alpha", "working")
+    second_id, second_status, second_payload = stand_in.mesh_client.calls[1]
+    assert (second_id, second_status) == ("task_alpha", "done")
+    assert second_payload["result"] == {"summary": "all done"}
+    assert second_payload["error"] is None
     # Checkpoint still ran.
     assert stand_in._checkpointed
+
+
+# Swallowed-error guard: _chat_stream_inner catches Exception and
+# yields a ``done`` event with ``error: str`` so the outer wrapper
+# can auto-close the task as ``failed``. Without the ``error`` flag
+# (codex P2 from PR R2), a swallowed LLM/tool/runtime failure would
+# be misclassified as ``done`` with response "Error: ..." — the
+# originating agent sees task_completed instead of task_failed.
+
+class _LoopWithErrorStream(_LoopWithTaskClose):
+    async def _chat_stream_inner(self, user_message):
+        # Mimic _chat_stream_inner's except-Exception branch: yield
+        # a done with error flag instead of raising.
+        yield {"type": "text_delta", "content": "starting..."}
+        yield {
+            "type": "done",
+            "response": "Error: upstream LLM hiccup",
+            "tool_outputs": [],
+            "tokens_used": 0,
+            "error": "upstream LLM hiccup",
+        }
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_auto_fails_task_on_swallowed_error():
+    """When _chat_stream_inner swallows an exception and emits an
+    error-flagged ``done`` event, the wrapper must transition the
+    task to ``failed`` (with the inner error in the back-edge
+    payload), NOT ``done``. Codex P2: previously the wrapper only
+    detected ``tool_limit_reached`` and treated everything else as
+    success, so swallowed failures were silently reported as
+    ``task_completed``.
+    """
+    from src.agent.loop import AgentLoop
+
+    stand_in = _LoopWithErrorStream()
+    method = AgentLoop.chat_stream.__get__(stand_in, AgentLoop)
+    events = []
+    async for ev in method("hi", task_id="task_bravo"):
+        events.append(ev)
+
+    # Stream still surfaces the error-flagged done to the SSE caller
+    # (so the dashboard chat shows the error). The user-visible
+    # behavior is unchanged.
+    assert any(e.get("type") == "done" and "error" in e for e in events), events
+    # working + failed transitions, in order.
+    assert len(stand_in.mesh_client.calls) == 2, stand_in.mesh_client.calls
+    first = stand_in.mesh_client.calls[0]
+    assert first[0:2] == ("task_bravo", "working")
+    second = stand_in.mesh_client.calls[1]
+    assert second[0:2] == ("task_bravo", "failed")
+    assert second[2]["error"] == "upstream LLM hiccup"
+
+
+class _LoopWithToolLimitStream(_LoopWithTaskClose):
+    async def _chat_stream_inner(self, user_message):
+        yield {"type": "text_delta", "content": "going..."}
+        yield {
+            "type": "done",
+            "response": "...stopped after N tool rounds",
+            "tool_outputs": [],
+            "tokens_used": 100,
+            "tool_limit_reached": True,
+        }
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_auto_fails_task_on_tool_limit():
+    """``tool_limit_reached`` is a known terminal condition we want to
+    surface as ``failed`` with a specific reason rather than ``done``
+    — same contract as the non-streaming chat path."""
+    from src.agent.loop import AgentLoop
+
+    stand_in = _LoopWithToolLimitStream()
+    method = AgentLoop.chat_stream.__get__(stand_in, AgentLoop)
+    async for _ in method("hi", task_id="task_charlie"):
+        pass
+
+    calls = stand_in.mesh_client.calls
+    assert len(calls) == 2
+    assert calls[0][0:2] == ("task_charlie", "working")
+    assert calls[1][0:2] == ("task_charlie", "failed")
+    assert calls[1][2]["error"] == "max_iterations_reached"
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_without_task_id_skips_auto_close():
+    """Legacy / free-form chat (no task_id) must not call
+    set_task_status at all — same contract as the non-streaming
+    chat path."""
+    from src.agent.loop import AgentLoop
+
+    stand_in = _LoopWithTaskClose()
+    method = AgentLoop.chat_stream.__get__(stand_in, AgentLoop)
+    async for _ in method("hi"):  # no task_id
+        pass
+
+    assert stand_in.mesh_client.calls == []

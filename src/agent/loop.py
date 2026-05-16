@@ -2697,11 +2697,20 @@ class AgentLoop:
         # the token was created in a different context.
         async with self._chat_lock:
             await self._maybe_restore_session()
+            # State machine requires pending → working before → done
+            # (same as the non-streaming chat path — codex P1 from
+            # PR R2 review caught this gap). Without it, every
+            # streaming handoff would be a no-op pending → done
+            # which 4xx's and leaves the task pending forever.
+            # Best-effort: _auto_close_task is exception-safe.
+            if task_id:
+                await self._auto_close_task(task_id, "working")
             # Capture the final response for task auto-close. The
             # ``done`` event carries the full response; collecting
             # text_delta would also work but ``done`` is canonical.
             final_response = ""
             tool_limit_hit = False
+            internal_error: str | None = None
             try:
                 try:
                     async for event in self._chat_stream_inner(user_message):
@@ -2710,6 +2719,15 @@ class AgentLoop:
                                 final_response = event.get("response", "") or ""
                                 if event.get("tool_limit_reached"):
                                     tool_limit_hit = True
+                                # _chat_stream_inner catches Exception
+                                # internally and yields a ``done`` event
+                                # with ``error: str``. Detect it so we
+                                # don't misclassify a swallowed failure
+                                # as a successful close (codex P2 from
+                                # PR R2 review).
+                                err = event.get("error")
+                                if err:
+                                    internal_error = str(err)
                         yield event
                 except Exception as e:
                     # Auto-fail the originating task before propagating
@@ -2722,11 +2740,19 @@ class AgentLoop:
                             error=str(e)[:500],
                         )
                     raise
-                # Auto-close on clean completion. ``tool_limit_reached``
-                # is a known terminal condition we want to surface as
-                # ``failed`` with a specific reason rather than ``done``.
+                # Auto-close on completion. Three possible terminal
+                # states for the streaming path:
+                #   1. ``internal_error`` — _chat_stream_inner caught
+                #      an exception and emitted error-flagged done.
+                #   2. ``tool_limit_reached`` — max-iterations exit.
+                #   3. Otherwise — clean completion.
                 if task_id:
-                    if tool_limit_hit:
+                    if internal_error is not None:
+                        await self._auto_close_task(
+                            task_id, "failed",
+                            error=internal_error[:500],
+                        )
+                    elif tool_limit_hit:
                         await self._auto_close_task(
                             task_id, "failed",
                             error="max_iterations_reached",
@@ -2958,11 +2984,18 @@ class AgentLoop:
             msg = f"Error: {e}"
             if self.workspace:
                 self.workspace.append_chat_message("assistant", msg)
+            # ``error`` field flags this as a swallowed internal
+            # failure so the outer ``chat_stream`` wrapper can
+            # auto-close the originating task as ``failed`` instead
+            # of misclassifying it as ``done`` (the response text
+            # "Error: ..." is human-readable but not parseable
+            # reliably as a failure signal — codex P2 from PR R2).
             yield {
                 "type": "done",
                 "response": msg,
                 "tool_outputs": tool_outputs,
                 "tokens_used": total_tokens,
+                "error": str(e),
             }
         finally:
             self.state = "idle"
