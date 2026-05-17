@@ -307,6 +307,72 @@ class TestQuarantine:
         monitor = _make_monitor({})
         assert monitor.clear_quarantine("ghost", reason="test") is False
 
+    def test_clear_quarantine_preserves_failed_status(self):
+        """Codex r4 (principal-eng): an agent that exhausted its restart
+        budget is in the terminal ``failed`` state. A credential-side
+        clear (TTL expiry or operator edit_agent) must NOT revive it to
+        ``healthy`` — the runtime is permanently stopped and the operator
+        should still see ``failed``."""
+        monitor = _make_monitor({})
+        monitor.register("agent-a")
+        # Force quarantine.
+        for _ in range(3):
+            monitor.record_auth_failure(
+                "agent-a", provider="openai", model="x", http_status=401,
+            )
+        # Independently drive the runtime to ``failed`` (e.g. restart
+        # budget exhausted while quarantined).
+        monitor.agents["agent-a"].status = "failed"
+        monitor.agents["agent-a"].consecutive_failures = 10
+
+        cleared = monitor.clear_quarantine("agent-a", reason="auto-expiry")
+        assert cleared is True
+        assert monitor.agents["agent-a"].quarantined is False
+        # Status preserved — failed is terminal.
+        assert monitor.agents["agent-a"].status == "failed"
+
+    def test_clear_quarantine_preserves_unhealthy_status(self):
+        """Same principle for ``unhealthy``: reachability is genuinely
+        broken (the failure counter is non-zero), so clearing the
+        credential signal alone must not paint the agent green. The next
+        successful ``_check_agent`` poll is what reconciles to healthy."""
+        monitor = _make_monitor({})
+        monitor.register("agent-a")
+        for _ in range(3):
+            monitor.record_auth_failure(
+                "agent-a", provider="openai", model="x", http_status=401,
+            )
+        # Simulate concurrent unreachable polls accumulating failures.
+        monitor.agents["agent-a"].consecutive_failures = 2
+
+        cleared = monitor.clear_quarantine("agent-a", reason="model changed")
+        assert cleared is True
+        assert monitor.agents["agent-a"].quarantined is False
+        # Reachability counter > 0 → keep ``unhealthy``; next poll
+        # reconciles to ``healthy`` if the agent actually responds.
+        assert monitor.agents["agent-a"].status == "unhealthy"
+
+    def test_clear_quarantine_preserves_restarting_status(self):
+        """``restarting`` is an in-flight state the restart path
+        reconciles on its own — clearing the credential mid-restart must
+        not pre-empt that to ``healthy``."""
+        monitor = _make_monitor({})
+        monitor.register("agent-a")
+        for _ in range(3):
+            monitor.record_auth_failure(
+                "agent-a", provider="openai", model="x", http_status=401,
+            )
+        # An in-flight restart resets consecutive_failures to 0 (see
+        # health.py:531) and sets status="restarting".
+        monitor.agents["agent-a"].status = "restarting"
+        monitor.agents["agent-a"].consecutive_failures = 0
+
+        cleared = monitor.clear_quarantine("agent-a", reason="model changed")
+        assert cleared is True
+        # The restart path will set the post-restart status — we just
+        # don't preempt it with a stale "healthy".
+        assert monitor.agents["agent-a"].status == "restarting"
+
     def test_auto_expiry_clears_old_quarantine(self):
         monitor = _make_monitor({})
         monitor.register("agent-a")

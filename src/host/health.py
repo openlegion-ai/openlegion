@@ -229,15 +229,30 @@ class HealthMonitor:
             h.consecutive_auth_failures = 0
         if not h.quarantined:
             return False  # counter already reset above; nothing more to do
+        prev_status = h.status
         h.quarantined = False
         h.quarantine_reason = None
         h.quarantined_at = None
-        h.status = "healthy"
+        # Codex r4 (principal-eng): don't clobber a more-severe runtime
+        # state. ``failed`` is terminal (MAX_FAILURES restarts exhausted
+        # — see :440/:471) and must never be revived to ``healthy`` by a
+        # credential-side clear. ``restarting`` is an in-flight state
+        # (set in :534) the restart path will reconcile on its own.
+        # ``unhealthy`` means reachability is genuinely broken — the
+        # next ``_check_agent`` poll will flip it back to ``healthy`` if
+        # the agent actually responds. Only flip to ``healthy`` when no
+        # other negative signal is in flight.
+        if h.status in ("failed", "restarting"):
+            pass  # preserve — terminal or in-flight runtime state
+        elif h.consecutive_failures > 0:
+            h.status = "unhealthy"
+        else:
+            h.status = "healthy"
         logger.info("Agent '%s' quarantine cleared: %s", agent_id, reason)
         if self._event_bus:
             try:
                 self._event_bus.emit("health_change", agent=agent_id, data={
-                    "previous": "quarantined", "current": "healthy",
+                    "previous": prev_status, "current": h.status,
                     "reason": reason,
                 })
             except Exception as ev_err:
