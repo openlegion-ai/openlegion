@@ -693,6 +693,17 @@ class AgentLoop:
             for m in messages
             if m.get("role") == "assistant"
         )
+        # Codex r5: if we resumed past iteration 0 from a checkpoint and
+        # the seed read 0, the prior tool-call history was almost
+        # certainly compacted away — ``context.maybe_compact`` keeps a
+        # summary tail and is not tool-call-group-aware. Treat that as
+        # "at least one prior call" so the lazy-completion guard doesn't
+        # trip on a task that did real work pre-compaction. False
+        # negative (a genuinely tool-less long-running task that resumed
+        # from a checkpoint) is acceptable; false positive (failing a
+        # real task because compaction hid its tool calls) is not.
+        if start_iteration > 0 and tool_calls_count == 0:
+            tool_calls_count = 1
 
         try:
             for iteration in range(start_iteration, self.MAX_ITERATIONS):
@@ -971,10 +982,19 @@ class AgentLoop:
                     # is X" outcome. We check for the top-level "result"
                     # key (the contract documented in the nudge prompt and
                     # honoured by ``_parse_final_output``).
+                    # Codex r5: require ``result`` to be a dict, not just
+                    # present. An LLM could otherwise paper over the guard
+                    # with ``{"result": "I'll do it now"}`` — the prompt
+                    # contract is ``{"result": {...}}`` (object), enforced
+                    # by ``_parse_final_output`` callers and the
+                    # pathological-success test fixtures.
                     is_structured_final = False
                     try:
                         _parsed_final = json.loads(llm_response.content or "")
-                        if isinstance(_parsed_final, dict) and "result" in _parsed_final:
+                        if (
+                            isinstance(_parsed_final, dict)
+                            and isinstance(_parsed_final.get("result"), dict)
+                        ):
                             is_structured_final = True
                     except (json.JSONDecodeError, TypeError):
                         pass

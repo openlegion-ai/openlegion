@@ -203,6 +203,31 @@ async def test_lazy_guard_allows_structured_final_after_nudge():
 
 
 @pytest.mark.asyncio
+async def test_lazy_guard_rejects_scalar_result_chatter():
+    """Bug F (codex r5): the structured-final escape hatch must require
+    ``result`` to be a dict, not just present. Otherwise an LLM can
+    paper over the guard by wrapping chatter in ``{"result": "I'll do
+    it now"}`` — the prompt contract calls for ``{"result": {...}}``."""
+    responses = [
+        LLMResponse(content="Sure thing.", tokens_used=20),
+        LLMResponse(content='{"result": "I will do it now"}', tokens_used=30),
+    ]
+    loop = _make_loop(responses)
+    loop.skills.get_tool_definitions = MagicMock(
+        return_value=[{"type": "function", "function": {"name": "web_search"}}]
+    )
+    assignment = TaskAssignment(
+        workflow_id="wf1", step_id="s1", task_type="research",
+        input_data={"query": "test"},
+    )
+    result = await loop.execute_task(assignment)
+    # Scalar result with no tool calls = chatter — guard trips.
+    assert result.status == "failed"
+    assert "no_action_taken" in (result.error or "")
+    assert loop.tasks_failed == 1
+
+
+@pytest.mark.asyncio
 async def test_lazy_guard_survives_message_compaction():
     """Bug F (codex r4): summarizing compaction can drop the assistant-
     with-tool_calls entry from the live ``messages`` list. The guard
