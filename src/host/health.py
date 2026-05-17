@@ -204,15 +204,34 @@ class HealthMonitor:
 
         Called by ``edit_agent`` (on a successful ``model`` change) and by
         the auto-expiry sweeper. Returns ``True`` when the agent was
-        actually quarantined and got cleared, ``False`` when it was a no-op.
+        actually quarantined and got cleared, ``False`` when it was a no-op
+        with respect to the quarantine flag itself.
+
+        Codex P2 r3: always reset the pre-threshold auth-failure counter
+        too — when the credential or model changes, any partial-failure
+        history is no longer relevant. Without this reset, an agent that
+        accumulated 2 auth failures (below threshold), then had its model
+        switched, would quarantine on the very first failure on the new
+        model. The boolean return value still reflects the quarantine
+        flag transition, NOT the counter reset.
         """
         h = self.agents.get(agent_id)
-        if not h or not h.quarantined:
+        if not h:
             return False
+        # Reset the pre-threshold counter regardless of quarantine state —
+        # any pending failures are no longer relevant after a credential
+        # or model change.
+        if h.consecutive_auth_failures > 0:
+            logger.debug(
+                "Resetting auth-failure counter for '%s' (was %d): %s",
+                agent_id, h.consecutive_auth_failures, reason,
+            )
+            h.consecutive_auth_failures = 0
+        if not h.quarantined:
+            return False  # counter already reset above; nothing more to do
         h.quarantined = False
         h.quarantine_reason = None
         h.quarantined_at = None
-        h.consecutive_auth_failures = 0
         h.status = "healthy"
         logger.info("Agent '%s' quarantine cleared: %s", agent_id, reason)
         if self._event_bus:

@@ -272,6 +272,41 @@ class TestQuarantine:
         monitor.register("agent-a")
         assert monitor.clear_quarantine("agent-a", reason="test") is False
 
+    def test_clear_quarantine_resets_counter_when_not_quarantined(self):
+        """Codex P2 r3: clear_quarantine must reset the pre-threshold
+        auth-failure counter even when the agent isn't quarantined yet.
+
+        Without this, an agent with 2 partial failures (below threshold)
+        whose model is then changed would quarantine on the very next
+        failure on the new model — using stale counts from credentials
+        that no longer apply. The boolean return value still reflects
+        the quarantine-flag transition (False here), NOT the counter.
+        """
+        monitor = _make_monitor({})
+        monitor.register("agent-a")
+        # Two partial auth failures — below the threshold of 3.
+        monitor.record_auth_failure(
+            "agent-a", provider="openai", model="x", http_status=401,
+        )
+        monitor.record_auth_failure(
+            "agent-a", provider="openai", model="x", http_status=401,
+        )
+        assert monitor.agents["agent-a"].consecutive_auth_failures == 2
+        assert monitor.agents["agent-a"].quarantined is False
+        # Operator changes the model → clear_quarantine called from the
+        # edit-soft hook. Returns False (no quarantine flag to flip) but
+        # MUST reset the counter so the next failure doesn't trip the
+        # threshold using stale history.
+        result = monitor.clear_quarantine("agent-a", reason="model changed")
+        assert result is False
+        assert monitor.agents["agent-a"].consecutive_auth_failures == 0
+
+    def test_clear_quarantine_unknown_agent_returns_false(self):
+        """Codex P2 r3 guardrail: clearing an unregistered agent is a
+        clean no-op — return False, no exception."""
+        monitor = _make_monitor({})
+        assert monitor.clear_quarantine("ghost", reason="test") is False
+
     def test_auto_expiry_clears_old_quarantine(self):
         monitor = _make_monitor({})
         monitor.register("agent-a")

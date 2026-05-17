@@ -4516,3 +4516,281 @@ class TestLLMAuthAndConfigErrors:
         ).get("allowed_models", [])
         # Did NOT fire — config is misconfig, not credential failure.
         assert recorded == []
+
+
+class TestLiteLLMTypedErrorClassification:
+    """Codex P1 r3: LiteLLM exceptions (API-key path) must classify into
+    LLMAuthError / LLMConfigError so broken
+    ``OPENLEGION_SYSTEM_*_API_KEY`` credentials trigger quarantine the
+    same way OAuth-path 401s already do.
+
+    Without this, the API-key path surfaces 401/403 as bare LiteLLM
+    exceptions, which the agent loop catches in the generic Exception
+    branch — the auth-failure recorder never fires and the lane keeps
+    dispatching work that will obviously fail.
+    """
+
+    @staticmethod
+    def _mock_response(status: int = 401):
+        """Build a real httpx.Response so litellm exceptions construct
+        cleanly. The openai SDK constructor dereferences
+        ``response.request`` which crashes if ``response`` is None."""
+        import httpx
+        return httpx.Response(
+            status, request=httpx.Request("POST", "https://example.invalid"),
+        )
+
+    def test_raise_typed_llm_error_classifies_authentication_error(self):
+        import litellm.exceptions as lex
+
+        from src.shared.errors import LLMAuthError
+
+        err = lex.AuthenticationError(
+            message="bad key",
+            llm_provider="openai",
+            model="openai/gpt-5",
+            response=self._mock_response(401),
+        )
+        with pytest.raises(LLMAuthError) as ei:
+            CredentialVault._raise_typed_llm_error(err, model="openai/gpt-5")
+        # Provider inferred from model prefix.
+        assert ei.value.provider == "openai"
+        assert ei.value.model == "openai/gpt-5"
+        assert ei.value.http_status in (401, 403)
+        # raw_body carries the original message (capped at 500).
+        assert "bad key" in (ei.value.raw_body or "")
+
+    def test_raise_typed_llm_error_classifies_permission_denied(self):
+        import litellm.exceptions as lex
+
+        from src.shared.errors import LLMAuthError
+
+        err = lex.PermissionDeniedError(
+            message="forbidden",
+            llm_provider="anthropic",
+            model="anthropic/claude-sonnet-4-6",
+            response=self._mock_response(403),
+        )
+        with pytest.raises(LLMAuthError) as ei:
+            CredentialVault._raise_typed_llm_error(
+                err, model="anthropic/claude-sonnet-4-6",
+            )
+        assert ei.value.provider == "anthropic"
+        assert ei.value.http_status == 403
+
+    def test_raise_typed_llm_error_classifies_not_found_as_config(self):
+        import litellm.exceptions as lex
+
+        from src.shared.errors import LLMConfigError
+
+        err = lex.NotFoundError(
+            message="model 'gpt-99' does not exist",
+            llm_provider="openai",
+            model="openai/gpt-99",
+            response=self._mock_response(404),
+        )
+        with pytest.raises(LLMConfigError) as ei:
+            CredentialVault._raise_typed_llm_error(err, model="openai/gpt-99")
+        assert ei.value.provider == "openai"
+        assert ei.value.model == "openai/gpt-99"
+
+    def test_raise_typed_llm_error_classifies_bad_request_model_missing(self):
+        """Some providers route model-not-found through 400 rather
+        than 404 — make sure the BadRequestError text is parsed."""
+        import litellm.exceptions as lex
+
+        from src.shared.errors import LLMConfigError
+
+        err = lex.BadRequestError(
+            message="The model 'unknown-model' is not supported",
+            llm_provider="openai",
+            model="openai/unknown-model",
+            response=self._mock_response(400),
+        )
+        with pytest.raises(LLMConfigError) as ei:
+            CredentialVault._raise_typed_llm_error(
+                err, model="openai/unknown-model",
+            )
+        assert ei.value.provider == "openai"
+
+    def test_raise_typed_llm_error_passes_through_other_exceptions(self):
+        """Non-auth / non-config errors must NOT be wrapped — the caller
+        falls back to ``raise`` so failover / retry semantics are
+        preserved for transient errors."""
+        import litellm.exceptions as lex
+
+        # Plain rate limit error — wrapping would short-circuit failover
+        # and incorrectly tag the agent as needing quarantine.
+        err = lex.RateLimitError(
+            message="429 slow down",
+            llm_provider="openai",
+            model="openai/gpt-5",
+            response=self._mock_response(429),
+        )
+        # The helper returns without raising (caller will re-raise).
+        result = CredentialVault._raise_typed_llm_error(
+            err, model="openai/gpt-5",
+        )
+        assert result is None
+
+    def test_raise_typed_llm_error_infers_provider_from_bare_prefix(self):
+        """Provider inference must work for bare-prefix model names
+        like ``gpt-5`` (no ``provider/`` prefix)."""
+        import litellm.exceptions as lex
+
+        from src.shared.errors import LLMAuthError
+
+        err = lex.AuthenticationError(
+            message="bad key", llm_provider="openai",
+            model="gpt-5", response=self._mock_response(401),
+        )
+        with pytest.raises(LLMAuthError) as ei:
+            CredentialVault._raise_typed_llm_error(err, model="gpt-5")
+        assert ei.value.provider == "openai"
+
+    def test_raise_typed_llm_error_passes_bad_request_without_model_text(self):
+        """BadRequestError without model-related text must propagate as-is
+        — not every 400 is a config error (could be schema validation,
+        oversized payload, etc.)."""
+        import litellm.exceptions as lex
+
+        err = lex.BadRequestError(
+            message="Invalid value for parameter 'temperature'",
+            llm_provider="openai",
+            model="openai/gpt-5",
+            response=self._mock_response(400),
+        )
+        # The helper returns without raising — caller re-raises original.
+        result = CredentialVault._raise_typed_llm_error(
+            err, model="openai/gpt-5",
+        )
+        assert result is None
+
+
+class TestOAuthStreamDoesNotYieldUntypedFrame:
+    """Codex P2 r3: OAuth streaming paths must NOT yield an untyped
+    ``{'error': ...}`` SSE frame before raising ``LLMAuthError`` /
+    ``LLMConfigError``. The downstream consumer
+    (``LLMClient.chat_stream``) raises ``RuntimeError`` on the first
+    untyped error frame, which masks the typed exception and prevents
+    quarantine routing.
+
+    The fix: just raise. The wrapper in ``stream_llm`` /
+    ``_oauth_chat`` propagates the typed error correctly.
+    """
+
+    @pytest.mark.asyncio
+    async def test_openai_oauth_stream_401_does_not_yield_before_raise(
+        self, monkeypatch,
+    ):
+        from src.shared.errors import LLMAuthError
+        from src.shared.types import APIProxyRequest
+
+        monkeypatch.setenv(
+            "OPENLEGION_SYSTEM_OPENAI_OAUTH",
+            '{"access_token":"tok","refresh_token":"ref"}',
+        )
+        v = CredentialVault()
+
+        async def _stub_token():
+            return ("tok", "acct")
+        v._ensure_openai_oauth_token = _stub_token  # type: ignore[assignment]
+
+        class _MockResp:
+            status_code = 401
+            is_success = False
+            text = "auth blown"
+            async def aread(self):
+                return None
+            async def aiter_lines(self):
+                if False:
+                    yield ""
+                return
+
+        class _MockStreamCtx:
+            async def __aenter__(self):
+                return _MockResp()
+            async def __aexit__(self, *a):
+                return False
+
+        class _MockClient:
+            def stream(self, *a, **kw):
+                return _MockStreamCtx()
+
+        async def _stub_client():
+            return _MockClient()
+        v._get_http_client = _stub_client  # type: ignore[assignment]
+
+        req = APIProxyRequest(
+            service="llm", action="chat",
+            params={"model": "openai/gpt-5.3-codex", "messages": []},
+        )
+
+        # Collect chunks before the raise lands. After the fix, the
+        # generator must raise WITHOUT yielding any frame first.
+        yielded: list[str] = []
+        with pytest.raises(LLMAuthError):
+            async for chunk in v._openai_oauth_chat_stream(
+                req, "openai/gpt-5.3-codex",
+            ):
+                yielded.append(chunk)
+        # Critical assertion: no chunks may be emitted before the raise.
+        assert yielded == [], (
+            "OAuth stream must not yield an untyped error frame before "
+            f"raising LLMAuthError — got {yielded!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_openai_oauth_stream_400_model_not_found_does_not_yield(
+        self, monkeypatch,
+    ):
+        from src.shared.errors import LLMConfigError
+        from src.shared.types import APIProxyRequest
+
+        monkeypatch.setenv(
+            "OPENLEGION_SYSTEM_OPENAI_OAUTH",
+            '{"access_token":"tok","refresh_token":"ref"}',
+        )
+        v = CredentialVault()
+
+        async def _stub_token():
+            return ("tok", "acct")
+        v._ensure_openai_oauth_token = _stub_token  # type: ignore[assignment]
+
+        class _MockResp:
+            status_code = 400
+            is_success = False
+            text = '{"error":{"message":"The model gpt-99 is not supported"}}'
+            async def aread(self):
+                return None
+            async def aiter_lines(self):
+                if False:
+                    yield ""
+                return
+
+        class _MockStreamCtx:
+            async def __aenter__(self):
+                return _MockResp()
+            async def __aexit__(self, *a):
+                return False
+
+        class _MockClient:
+            def stream(self, *a, **kw):
+                return _MockStreamCtx()
+
+        async def _stub_client():
+            return _MockClient()
+        v._get_http_client = _stub_client  # type: ignore[assignment]
+
+        req = APIProxyRequest(
+            service="llm", action="chat",
+            params={"model": "openai/gpt-99", "messages": []},
+        )
+        yielded: list[str] = []
+        with pytest.raises(LLMConfigError):
+            async for chunk in v._openai_oauth_chat_stream(req, "openai/gpt-99"):
+                yielded.append(chunk)
+        assert yielded == [], (
+            "OAuth stream must not yield an untyped error frame before "
+            f"raising LLMConfigError — got {yielded!r}"
+        )

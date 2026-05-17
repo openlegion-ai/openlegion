@@ -1142,6 +1142,83 @@ class CredentialVault:
         """Extract HTTP status code from a litellm exception."""
         return getattr(error, "status_code", 0)
 
+    @staticmethod
+    def _raise_typed_llm_error(error: Exception, *, model: str) -> None:
+        """Classify a LiteLLM exception into LLMAuthError / LLMConfigError.
+
+        Codex P1 r3: the OAuth path already raises the distinguished
+        exceptions on 401/403 / 400-model-not-found. The LiteLLM path
+        used to surface those failures as bare ``litellm.exceptions.*``
+        which the agent loop caught in the generic ``except Exception``
+        branch — never triggering quarantine. Wrap each LiteLLM call in
+        the API-key + streaming paths so they raise the same typed errors.
+
+        Behaviour:
+        - ``litellm.AuthenticationError`` (401) → ``LLMAuthError``
+        - ``litellm.PermissionDeniedError`` (403) → ``LLMAuthError``
+        - ``litellm.NotFoundError`` (404 "model not found") → ``LLMConfigError``
+        - ``litellm.BadRequestError`` with model-not-found text →
+          ``LLMConfigError`` (some providers route model-not-found
+          through 400 rather than 404)
+        - Anything else: returns without raising, leaving the original
+          exception to propagate via the caller's ``raise`` statement.
+
+        Provider is inferred from the model string (e.g.
+        ``openai/gpt-5`` → ``openai``); falls back to ``"unknown"``.
+        """
+        import litellm.exceptions as _lex
+
+        # Infer provider from the model prefix so the structured error
+        # carries the right tag. Mirrors ``_resolve_provider`` logic but
+        # kept static-only to avoid coupling to vault instance state.
+        provider = "unknown"
+        if "/" in model:
+            provider = model.split("/", 1)[0]
+        else:
+            for prefix in ("gpt-", "o1", "o3", "o4"):
+                if model.startswith(prefix):
+                    provider = "openai"
+                    break
+
+        if isinstance(error, (_lex.AuthenticationError, _lex.PermissionDeniedError)):
+            status = getattr(error, "status_code", None) or (
+                403 if isinstance(error, _lex.PermissionDeniedError) else 401
+            )
+            raise LLMAuthError(
+                f"{provider} API-key auth failed: {error}",
+                provider=provider, model=model,
+                http_status=status, raw_body=str(error)[:500],
+            )
+
+        if isinstance(error, _lex.NotFoundError):
+            raise LLMConfigError(
+                f"Model '{model}' not available via API key for "
+                f"{provider}: {error}",
+                provider=provider, model=model,
+                http_status=getattr(error, "status_code", 404),
+            )
+
+        if isinstance(error, _lex.BadRequestError):
+            msg_lower = str(error).lower()
+            if (
+                "model" in msg_lower
+                and (
+                    "not found" in msg_lower
+                    or "not_found" in msg_lower
+                    or "does not exist" in msg_lower
+                    or "not supported" in msg_lower
+                    or "not_supported" in msg_lower
+                    or "unknown model" in msg_lower
+                )
+            ):
+                raise LLMConfigError(
+                    f"Model '{model}' not available via API key for "
+                    f"{provider}: {error}",
+                    provider=provider, model=model,
+                    http_status=getattr(error, "status_code", 400),
+                )
+        # No match — caller will re-raise the original exception.
+
     async def _call_llm_with_failover(
         self, requested_model: str, call_fn,
     ) -> tuple:
@@ -1167,6 +1244,16 @@ class CredentialVault:
                         f"Failover: '{requested_model}' → '{model}' succeeded",
                     )
                 return result, model
+            except (LLMAuthError, LLMConfigError) as typed_err:
+                # Codex P1 r3: typed auth/config errors must propagate to
+                # ``execute_api_call`` so the recorder fires and the agent
+                # loop sees a structured response. Failing over to another
+                # model would mask a broken credential.
+                status_code = typed_err.http_status or 0
+                self._health_tracker.record_failure(
+                    model, type(typed_err).__name__, status_code,
+                )
+                raise
             except Exception as e:
                 status_code = self._get_status_code(e)
                 self._health_tracker.record_failure(
@@ -1188,6 +1275,11 @@ class CredentialVault:
                     self._health_tracker.record_success(fallback)
                     logger.info(f"Auto-fallback: '{requested_model}' → '{fallback}' succeeded")
                     return result, fallback
+                except (LLMAuthError, LLMConfigError):
+                    # Codex P1 r3: propagate typed errors out of the
+                    # last-resort fallback too — see comment in the main
+                    # loop above.
+                    raise
                 except Exception as e:
                     if self._is_permanent_error(e):
                         raise
@@ -1779,9 +1871,10 @@ class CredentialVault:
                 msg = e.body.get("error", {}).get("message", msg)
             logger.error("OAuth AuthenticationError: token=%s, msg=%s", token_preview, msg)
             err_msg = f"OAuth auth failed (token may have expired): {msg}"
-            yield f"data: {json.dumps({'error': err_msg})}\n\n"
-            # Surface as a distinguished exception so the agent loop can
-            # route to the quarantine path (Fix 3/4 in seam follow-up).
+            # Codex P2 r3: do NOT yield an untyped error frame before
+            # raising — see ``_openai_oauth_chat_stream`` for the full
+            # rationale. The raise propagates through ``stream_llm`` /
+            # ``_oauth_chat`` and produces a typed error frame.
             raise LLMAuthError(
                 err_msg, provider="anthropic", model=model,
                 http_status=401, raw_body=str(msg),
@@ -1796,8 +1889,10 @@ class CredentialVault:
             if detail:
                 msg += f": {detail}"
             logger.error("OAuth APIStatusError (%d): token=%s, detail=%s", e.status_code, token_preview, detail)
-            yield f"data: {json.dumps({'error': msg})}\n\n"
             # 403 → auth issue; 400 with model-related text → config issue.
+            # Codex P2 r3: raise typed exceptions without yielding an
+            # untyped frame first (would mask the typed error in the
+            # downstream consumer).
             if e.status_code == 403:
                 raise LLMAuthError(
                     msg, provider="anthropic", model=model,
@@ -1817,6 +1912,9 @@ class CredentialVault:
                         allowed_models=set(OAUTH_ALLOWED_MODELS_ANTHROPIC),
                         http_status=400,
                     )
+            # Non-distinguished APIStatusError — emit a friendly frame so
+            # the consumer still gets some context.
+            yield f"data: {json.dumps({'error': msg})}\n\n"
 
         except (LLMAuthError, LLMConfigError):
             # Already a distinguished exception (e.g. raised inside the
@@ -2347,11 +2445,15 @@ class CredentialVault:
                         f"OpenAI Codex auth failed (HTTP {resp.status_code}, "
                         f"token may have expired): {detail}"
                     )
-                    # Surface as a distinguished exception so the agent loop
-                    # can route to the quarantine path (Fix 3/4 in seam
-                    # follow-up). Also emit one error chunk so any consumer
-                    # mid-stream sees a friendly message before unwinding.
-                    yield f"data: {json.dumps({'error': msg})}\n\n"
+                    # Codex P2 r3: do NOT yield an untyped error frame
+                    # before raising. The downstream consumer
+                    # (LLMClient.chat_stream) raises RuntimeError on the
+                    # first untyped frame, which masks the LLMAuthError
+                    # and prevents the agent loop from routing to the
+                    # quarantine path. The raise propagates through the
+                    # ``stream_llm`` wrapper, which converts it into a
+                    # typed ``error_type=auth_failure`` frame and records
+                    # the failure mesh-side.
                     raise LLMAuthError(
                         msg, provider="openai", model=model,
                         http_status=resp.status_code, raw_body=detail,
@@ -2376,7 +2478,8 @@ class CredentialVault:
                             f"Switch to an OAuth-allowed model via "
                             f"list_available_models / edit_agent. Detail: {detail}"
                         )
-                        yield f"data: {json.dumps({'error': msg})}\n\n"
+                        # Codex P2 r3: same yield-then-raise removal as
+                        # the 401/403 branch above.
                         raise LLMConfigError(
                             msg, provider="openai", model=model,
                             allowed_models=set(OAUTH_ALLOWED_MODELS_OPENAI),
@@ -2562,7 +2665,17 @@ class CredentialVault:
                 }
                 if api_key:
                     llm_kwargs["api_key"] = api_key
-                result = await litellm.acompletion(**llm_kwargs)
+                try:
+                    result = await litellm.acompletion(**llm_kwargs)
+                except Exception as litellm_err:
+                    # Codex P1 r3: classify LiteLLM auth/config failures
+                    # into the distinguished exceptions so the API-key
+                    # path triggers quarantine the same way the OAuth
+                    # path does. Without this, a broken
+                    # OPENLEGION_SYSTEM_*_API_KEY surfaces as a bare
+                    # RuntimeError and the lane keeps dispatching work.
+                    self._raise_typed_llm_error(litellm_err, model=model)
+                    raise  # _raise_typed_llm_error re-raises on no match
                 # Empty choices = failed generation — raise so failover can
                 # try the next model instead of marking this one healthy.
                 if not getattr(result, "choices", None):
@@ -2743,11 +2856,32 @@ class CredentialVault:
                 }
                 if api_key:
                     llm_kwargs["api_key"] = api_key
-                response = await litellm.acompletion(**llm_kwargs)
+                try:
+                    response = await litellm.acompletion(**llm_kwargs)
+                except Exception as litellm_err:
+                    # Codex P1 r3: classify LiteLLM auth/config failures
+                    # in the streaming path too — symmetric with the
+                    # non-streaming wrapper above.
+                    self._raise_typed_llm_error(litellm_err, model=model)
+                    raise  # _raise_typed_llm_error re-raises on no match
                 used_model = model
                 if model != requested_model:
                     logger.info(f"Stream failover: '{requested_model}' → '{model}'")
                 break
+            except (LLMAuthError, LLMConfigError) as typed_err:
+                # Surface as a structured SSE error frame (matches the
+                # OAuth path) AND record auth failures mesh-side so the
+                # quarantine counter ticks even when streaming.
+                kind = (
+                    "auth_failure" if isinstance(typed_err, LLMAuthError)
+                    else "config_error"
+                )
+                self._health_tracker.record_failure(
+                    model, type(typed_err).__name__,
+                    typed_err.http_status or 0,
+                )
+                yield await _emit_distinguished_error(typed_err, kind=kind)
+                return
             except Exception as e:
                 status_code = self._get_status_code(e)
                 self._health_tracker.record_failure(model, type(e).__name__, status_code)
@@ -2778,9 +2912,28 @@ class CredentialVault:
                         }
                         if api_key:
                             llm_kwargs["api_key"] = api_key
-                        response = await litellm.acompletion(**llm_kwargs)
+                        try:
+                            response = await litellm.acompletion(**llm_kwargs)
+                        except Exception as litellm_err:
+                            # Codex P1 r3: same typed-error classification
+                            # in the last-resort fallback path.
+                            self._raise_typed_llm_error(
+                                litellm_err, model=fallback,
+                            )
+                            raise
                         used_model = fallback
                         logger.info(f"Stream auto-fallback: '{requested_model}' → '{fallback}'")
+                    except (LLMAuthError, LLMConfigError) as typed_err:
+                        kind = (
+                            "auth_failure" if isinstance(typed_err, LLMAuthError)
+                            else "config_error"
+                        )
+                        self._health_tracker.record_failure(
+                            fallback, type(typed_err).__name__,
+                            typed_err.http_status or 0,
+                        )
+                        yield await _emit_distinguished_error(typed_err, kind=kind)
+                        return
                     except Exception as e:
                         if self._is_permanent_error(e):
                             error_data = {'error': str(e)}
