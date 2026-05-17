@@ -882,9 +882,30 @@ class AgentLoop:
 
                 else:
                     # LLM returned text with no tool calls.
+                    # Codex r8 (post-regression-fix audit): detect a
+                    # structured ``{"result": {...}}`` payload up front so
+                    # the iter-0 nudge can skip when the LLM already
+                    # delivered a legitimate final answer. Without this
+                    # hoist, an iter-0 structured noop with tools available
+                    # gets nudged unnecessarily — wasting a turn and risking
+                    # a false-positive lazy-completion failure if the LLM
+                    # responds with "I already told you" on iter 1.
+                    # Codex r9: extracted to ``_is_structured_final`` so the
+                    # chat-path handoff auto-close can apply the same check
+                    # without code duplication.
+                    is_structured_final = self._is_structured_final(
+                        llm_response.content,
+                    )
+
                     # If this is iteration 0, the agent hasn't used any tools,
-                    # AND tools are actually available, nudge it to take action.
-                    if iteration == 0 and available_tools:
+                    # AND tools are actually available, nudge it to take action
+                    # — UNLESS the response is already a structured final
+                    # answer (no point nudging a task that's correctly done).
+                    if (
+                        iteration == 0
+                        and available_tools
+                        and not is_structured_final
+                    ):
                         messages.append({"role": "assistant", "content": llm_response.content or ""})
                         messages.append({
                             "role": "user",
@@ -963,58 +984,53 @@ class AgentLoop:
                         return result
 
                     # Bug F (lazy completion) guard: when the LLM reaches
-                    # the final-answer branch having used zero tools across
-                    # more than one iteration AND its final reply is plain
-                    # chatter (not a structured ``{"result": ...}`` JSON
-                    # response), that's a "I'll do it now" / "Done!"
-                    # acknowledgment with no real work. The iter-0 nudge
-                    # above caught a single text-only response; this catches
-                    # the case where the LLM ignored the nudge and produced
-                    # a second text-only reply. PR #918's pathological-success
-                    # guard misses this because the LLM was actually called
-                    # (tokens > 0) and content is non-empty (it's chatter).
-                    #
-                    # Codex r4: the nudge text explicitly invites a structured
-                    # final answer for genuine completion or impossibility,
-                    # so a parseable ``{"result": ...}`` payload must escape
-                    # the guard even with zero tool calls — that's a
-                    # legitimate "I can't do this because X" or "the answer
-                    # is X" outcome. We check for the top-level "result"
-                    # key (the contract documented in the nudge prompt and
-                    # honoured by ``_parse_final_output``).
-                    # Codex r5: require ``result`` to be a dict, not just
-                    # present. An LLM could otherwise paper over the guard
-                    # with ``{"result": "I'll do it now"}`` — the prompt
-                    # contract is ``{"result": {...}}`` (object), enforced
-                    # by ``_parse_final_output`` callers and the
-                    # pathological-success test fixtures.
-                    # Codex r6: also require the dict to be non-empty —
-                    # ``{"result": {}}`` is the same chatter-in-structure
-                    # bypass with a more compact payload.
-                    is_structured_final = False
-                    try:
-                        _parsed_final = json.loads(llm_response.content or "")
-                        _result_field = (
-                            _parsed_final.get("result")
-                            if isinstance(_parsed_final, dict) else None
-                        )
-                        if isinstance(_result_field, dict) and _result_field:
-                            is_structured_final = True
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-                    if (
-                        iterations_executed > 1
-                        and tool_calls_count == 0
-                        and not is_structured_final
-                    ):
+                    # the final-answer branch having used zero tools AND
+                    # its reply is plain chatter (not a structured
+                    # ``{"result": {...}}`` JSON response), that's a
+                    # "I'll do it now" / "Done!" acknowledgment with no
+                    # real work. ``is_structured_final`` was computed once
+                    # at the top of this branch (line ~893) and is reused
+                    # here. PR #918's pathological-success guard misses
+                    # this case because the LLM was actually called
+                    # (tokens > 0) and content is non-empty chatter.
+                    # The structured-final contract:
+                    #  - r4: ``{"result": ...}`` payload escapes the guard
+                    #    (legitimate "impossible" / "the answer is X").
+                    #  - r5: ``result`` must be a DICT (no chatter wrapped
+                    #    as ``{"result": "I'll do it now"}``).
+                    #  - r6: dict must be NON-EMPTY (no ``{"result": {}}``
+                    #    compact bypass).
+                    # Regression follow-up to #932: the prior guard required
+                    # ``iterations_executed > 1`` on the assumption that the
+                    # iter-0 nudge ALWAYS fires for handoff-originated tasks
+                    # and bumps the counter to 2 before this branch runs.
+                    # That contract is fragile — the nudge is gated on
+                    # ``available_tools`` (line ~890) and silently skips
+                    # whenever tools are empty/None (skill-filter quirks,
+                    # runtime-disabled tools, hot-reload races). Operator
+                    # hit a trend-scout task that fell straight through
+                    # with iterations_executed=1 and got marked done despite
+                    # zero side effects. Drop the iteration count from the
+                    # condition: ``tool_calls_count == 0 AND not
+                    # structured_final`` is already the complete lazy-
+                    # completion signature. The iter-0 nudge is a SOFT path
+                    # (give the model one chance to course-correct); this
+                    # guard is the HARD fail that doesn't depend on the
+                    # nudge having run. Legitimate one-iteration noop tasks
+                    # must return the documented contract
+                    # ``{"result": {"status": "noop", "reason": "..."}}``,
+                    # which escapes via ``is_structured_final``.
+                    if tool_calls_count == 0 and not is_structured_final:
                         self.state = "idle"
                         self.current_task = None
                         self.tasks_failed += 1
                         logger.error(
                             "execute_task lazy-completion guard tripped for "
-                            "task=%s: iterations=%d tokens=%d tool_calls=0 — "
-                            "downgrading to failed (text-only response after "
-                            "nudge; no work performed)",
+                            "task=%s: iterations=%d tokens=%d tool_calls=0 "
+                            "structured_final=False — downgrading to failed "
+                            "(no work performed; LLM did not call any tools "
+                            "and did not return a structured {\"result\": "
+                            "{...}} payload)",
                             assignment.task_id, iterations_executed, total_tokens,
                         )
                         if self.workspace:
@@ -1037,10 +1053,14 @@ class AgentLoop:
                             status="failed",
                             error=(
                                 "no_action_taken: the LLM produced a text-only "
-                                "acknowledgment without calling any tools across "
-                                f"{iterations_executed} iterations. Tasks that "
-                                "reach the loop are expected to perform work via "
-                                "tools, not just acknowledge intent."
+                                "response without calling any tools across "
+                                f"{iterations_executed} iteration(s) and "
+                                "without emitting a structured {\"result\": "
+                                "{...}} payload. Tasks that reach the loop "
+                                "are expected to either perform work via "
+                                "tools OR return a structured result envelope "
+                                "(e.g. {\"result\": {\"status\": \"noop\", "
+                                "\"reason\": \"...\"}})."
                             ),
                             tokens_used=total_tokens,
                             duration_ms=int(duration_s * 1000),
@@ -1476,6 +1496,52 @@ class AgentLoop:
                 parts.append(runtime_ctx)
 
         return "\n\n".join(parts)
+
+    @staticmethod
+    def _chat_result_failure_reason(result: dict) -> str | None:
+        """Return a failure-reason string if ``result`` carries a known
+        ``_chat_inner`` failure marker, else None.
+
+        Codex r10: ``_chat_inner`` catches ``LLMAuthError``,
+        ``LLMConfigError``, and bare ``Exception`` and returns ordinary
+        result dicts tagged with ``auth_failure``, ``config_error``, or
+        ``exception_caught`` respectively. ``tool_limit_reached`` is
+        already in the result envelope for bounded-iteration exits.
+        The chat() auto-close site checks these BEFORE the
+        lazy-completion guard so a failure after ≥1 tool call doesn't
+        slip past the empty-tool_outputs check and auto-close as
+        ``done``.
+        """
+        if not isinstance(result, dict):
+            return None
+        if result.get("tool_limit_reached"):
+            return "max_iterations_reached"
+        if result.get("auth_failure"):
+            return f"auth_failure: {(result.get('response') or '')[:400]}"
+        if result.get("config_error"):
+            return f"config_error: {(result.get('response') or '')[:400]}"
+        if result.get("exception_caught"):
+            return f"exception: {(result.get('response') or '')[:400]}"
+        return None
+
+    def _is_structured_final(self, content: str | None) -> bool:
+        """True iff ``content`` is the documented final-answer contract.
+
+        The contract is whole-content JSON: ``{"result": {...}}`` where
+        ``result`` is a non-empty dict. Rejects scalar/empty/list/null
+        ``result`` values and any non-JSON wrapper (fenced markdown,
+        prose-wrapped JSON, etc.). Single source of truth for the
+        lazy-completion guards in ``execute_task`` and the handoff
+        auto-close in ``chat``.
+        """
+        try:
+            parsed = json.loads(content or "")
+        except (json.JSONDecodeError, TypeError):
+            return False
+        if not isinstance(parsed, dict):
+            return False
+        result_field = parsed.get("result")
+        return isinstance(result_field, dict) and bool(result_field)
 
     def _parse_final_output(self, content: str) -> tuple[dict, dict]:
         """Parse the LLM's final response into result data and blackboard promotions."""
@@ -2156,6 +2222,18 @@ class AgentLoop:
                 try:
                     try:
                         result = await self._chat_inner(user_message)
+                    except asyncio.CancelledError:
+                        # Codex r10 (MEDIUM): _chat_inner re-raises
+                        # CancelledError, which is BaseException and slips
+                        # past the ``except Exception`` arm below. Without
+                        # this branch the durable task stays at
+                        # ``working`` forever after a cancellation.
+                        if task_id:
+                            await self._auto_close_task(
+                                task_id, "cancelled",
+                                error="chat_cancelled",
+                            )
+                        raise
                     except Exception as e:
                         # Auto-fail the originating task before propagating.
                         if task_id:
@@ -2164,24 +2242,75 @@ class AgentLoop:
                                 error=str(e)[:500],
                             )
                         raise
-                    # Auto-close on success (and special-case the
-                    # ``tool_limit_reached`` exit, which _chat_inner returns
-                    # as a normal dict — we treat that as ``failed`` with a
-                    # canonical ``max_iterations_reached`` error so the
-                    # originating agent can distinguish exhaustion from
-                    # successful completion).
+                    # Auto-close on success. Three terminal branches:
+                    #   1. Failure markers in ``result`` → ``failed``. Codex
+                    #      r10: ``_chat_inner`` catches LLMAuthError /
+                    #      LLMConfigError / generic Exception and returns
+                    #      a normal-shaped dict tagged with the relevant
+                    #      flag (``auth_failure`` / ``config_error`` /
+                    #      ``exception_caught``) plus ``tool_limit_reached``
+                    #      for the bounded-iteration exit. Without this
+                    #      check, an exception fired AFTER one or more
+                    #      tool calls would surface as a result with
+                    #      non-empty ``tool_outputs`` and slip past the
+                    #      lazy-completion guard → task auto-closes as
+                    #      ``done`` despite the failure.
+                    #   2. Lazy-completion guard (codex r9): empty
+                    #      ``tool_outputs`` AND non-structured response.
+                    #      Handoff tasks must perform work via tools or
+                    #      return ``{"result": {...}}``.
+                    #   3. Success → ``done`` with response prefix as
+                    #      summary.
                     if task_id:
-                        if result.get("tool_limit_reached"):
+                        failure_reason = self._chat_result_failure_reason(result)
+                        if failure_reason is not None:
+                            logger.error(
+                                "chat handoff task=%s closing as failed: %s",
+                                task_id, failure_reason,
+                            )
                             await self._auto_close_task(
-                                task_id, "failed",
-                                error="max_iterations_reached",
+                                task_id, "failed", error=failure_reason,
                             )
                         else:
-                            summary = (result.get("response") or "")[:500]
-                            await self._auto_close_task(
-                                task_id, "done",
-                                result_payload={"summary": summary},
+                            response_text = result.get("response") or ""
+                            tool_outputs = result.get("tool_outputs") or []
+                            handoff_is_lazy = (
+                                not tool_outputs
+                                and not self._is_structured_final(response_text)
                             )
+                            if handoff_is_lazy:
+                                logger.error(
+                                    "chat lazy-completion guard tripped for "
+                                    "handoff task=%s: tool_outputs=0 "
+                                    "structured_final=False — auto-closing "
+                                    "as failed (LLM produced a text-only "
+                                    "response without calling any tools and "
+                                    "without returning a structured "
+                                    "{\"result\": {...}} payload)",
+                                    task_id,
+                                )
+                                await self._auto_close_task(
+                                    task_id, "failed",
+                                    error=(
+                                        "no_action_taken: the recipient "
+                                        "produced a text-only response "
+                                        "without calling any tools and "
+                                        "without returning a structured "
+                                        "{\"result\": {...}} payload. "
+                                        "Handoff tasks are expected to "
+                                        "either perform work via tools OR "
+                                        "return a structured result "
+                                        "envelope (e.g. {\"result\": "
+                                        "{\"status\": \"noop\", \"reason\": "
+                                        "\"...\"}})."
+                                    ),
+                                )
+                            else:
+                                summary = response_text[:500]
+                                await self._auto_close_task(
+                                    task_id, "done",
+                                    result_payload={"summary": summary},
+                                )
                     return result
                 finally:
                     await self._checkpoint_chat_session()
@@ -2770,7 +2899,18 @@ class AgentLoop:
             msg = f"Error: {e}"
             if self.workspace:
                 self.workspace.append_chat_message("assistant", msg)
-            return {"response": msg, "tool_outputs": tool_outputs, "tokens_used": total_tokens}
+            # Codex r10: tag the bare-exception return with
+            # ``exception_caught`` so the chat() auto-close site can
+            # detect failures-after-tool-calls and route them to
+            # ``failed`` instead of ``done``. Without this marker, any
+            # exception that fires AFTER at least one tool dispatch
+            # would surface as a normal result dict with non-empty
+            # tool_outputs, slip past the lazy-completion guard, and
+            # auto-close the handoff task as successful.
+            return {
+                "response": msg, "tool_outputs": tool_outputs,
+                "tokens_used": total_tokens, "exception_caught": True,
+            }
 
     def _log_chat_turn(
         self, user_msg: str, assistant_msg: str,
@@ -2956,6 +3096,12 @@ class AgentLoop:
         else:
             rules += "- Use notify_user for the user; blackboard for other agents only.\n"
         rules += (
+            "- For HANDOFF tasks (dispatched via lane → /chat with an "
+            "x-task-id header): either call tools to do the work, OR "
+            "respond with a structured final answer: "
+            "{\"result\": {\"status\": \"noop\"|\"impossible\"|...}}. "
+            "A text-only \"on it\" / \"done\" acknowledgment without "
+            "tool calls auto-closes the task as failed (no_action_taken).\n"
             "- Before answering from memory, run memory_search first.\n"
             "- Use update_workspace to save lasting knowledge and user preferences.\n"
         )
