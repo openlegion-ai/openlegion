@@ -178,7 +178,7 @@ Heartbeat schedules can be changed via:
 1. **Dashboard Automations tab** — edit the cron schedule directly
 2. **Operator agent** — via `edit_agent(agent_id, field="heartbeat_schedule", value=...)` with a cron expression (e.g. `0 */8 * * *`) or interval (e.g. `every 6h`)
 
-`heartbeat_schedule` is a **soft** field on `edit_agent` — it applies immediately with a 5-minute Undo receipt and retargets the live cron job in lockstep with the YAML write. The legacy `propose_edit`/`confirm_edit` pair does NOT accept `heartbeat_schedule` (`_PROPOSE_EDIT_FIELDS = _VALID_FIELDS - {"heartbeat_schedule"}` in `src/agent/builtins/operator_tools.py:159`); use `edit_agent` instead.
+`heartbeat_schedule` is a **soft** field on `edit_agent` — it applies immediately with a 5-minute Undo receipt and retargets the live cron job in lockstep with the YAML write.
 
 Both methods sync the schedule to the cron scheduler immediately — no restart required. The dashboard displays update in real-time.
 
