@@ -765,17 +765,6 @@ class MeshClient:
 
     # === Operator agent config management ===
 
-    async def propose_config_change(self, agent_id: str, field: str, value) -> dict:
-        """Propose a config change for an agent. Returns preview + change_id."""
-        client = await self._get_client()
-        response = await client.post(
-            f"{self.mesh_url}/mesh/agents/{agent_id}/propose",
-            json={"field": field, "value": value, "proposed_by": self.agent_id},
-            headers=self._trace_headers(),
-        )
-        response.raise_for_status()
-        return response.json()
-
     async def confirm_config_change(self, change_id: str) -> dict:
         """Confirm and apply a previously proposed config change.
 

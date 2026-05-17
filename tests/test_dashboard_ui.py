@@ -2211,7 +2211,6 @@ _VERB_FOR_TOOL_FALLBACK_OK = frozenset({
     "spawn_fleet_agent",
     "wait_for_subagent",
     # Operator-only edit/orchestration.
-    "propose_edit",
     "confirm_edit",
     "cancel_pending_action",
     "archive_audit_before",

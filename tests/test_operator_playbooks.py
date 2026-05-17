@@ -135,13 +135,13 @@ class TestPlaybookConstants:
             assert "1." in content, f"{name} should have numbered steps"
 
     def test_tool_map_covers_all_action_tools(self):
-        # The approval-workflow redesign dropped both propose_edit and
-        # confirm_edit from the playbook map: edit_agent is the single
-        # immediate-apply path (5-min undo for soft fields, 30-min for
-        # hard). propose_edit/confirm_edit remain registered as
-        # deprecation stubs in operator_tools.py for back-compat, but
-        # the playbook map only advertises the new flow so the LLM
-        # picks one path.
+        # The approval-workflow redesign dropped propose_edit/confirm_edit
+        # from the playbook map: edit_agent is the single immediate-apply
+        # path (5-min undo for soft fields, 30-min for hard). propose_edit
+        # has been deleted; confirm_edit remains registered as a deprecated
+        # no-op stub in operator_tools.py for back-compat with in-flight
+        # LLM conversations, but the playbook map only advertises the new
+        # flow so the LLM picks one path.
         # Team-named canonical entries (PR 2 of the project→team rename)
         # sit alongside their legacy ``*_project`` aliases in
         # ``_TOOL_PLAYBOOK_MAP``. Both names route to the same playbook so
@@ -176,9 +176,9 @@ class TestPlaybookConstants:
 
     def test_playbooks_have_key_tools(self):
         """Each playbook references the tools it guides the operator to use."""
-        # PR 1 — edit_agent replaces propose_edit/confirm_edit guidance in
-        # team_build; the edit playbook references both edit_agent (always)
-        # and confirm_edit (hard-field follow-up step).
+        # PR 1 — edit_agent replaces the legacy propose_edit/confirm_edit
+        # guidance in team_build; the edit playbook references edit_agent
+        # (the single immediate-apply tool with field-aware undo TTLs).
         assert "edit_agent" in _PLAYBOOK_TEAM_BUILD
         # Project→team rename PR 2 flipped the playbook prose to the
         # canonical team-named tools. The legacy ``*_project`` names

@@ -434,29 +434,6 @@ async def test_mesh_client_get_agent_config_with_fields():
 
 
 @pytest.mark.asyncio
-async def test_mesh_client_propose_config_change():
-    """MeshClient.propose_config_change calls the correct endpoint."""
-    from src.agent.mesh_client import MeshClient
-
-    client = MeshClient("http://localhost:8420", "operator")
-    mock_response = MagicMock()
-    mock_response.status_code = 200
-    mock_response.raise_for_status = MagicMock()
-    mock_response.json.return_value = {"change_id": "abc-123", "preview_diff": "..."}
-
-    mock_http = AsyncMock(return_value=mock_response)
-    with patch.object(client, "_get_client", return_value=AsyncMock(post=mock_http)):
-        result = await client.propose_config_change("alpha", "model", "claude-sonnet-4-20250514")
-        assert result["change_id"] == "abc-123"
-        mock_http.assert_called_once()
-        call_args = mock_http.call_args
-        assert "/mesh/agents/alpha/propose" in call_args[0][0]
-        assert call_args[1]["json"]["field"] == "model"
-        assert call_args[1]["json"]["value"] == "claude-sonnet-4-20250514"
-    await client.close()
-
-
-@pytest.mark.asyncio
 async def test_mesh_client_confirm_config_change():
     """MeshClient.confirm_config_change calls the correct endpoint."""
     from src.agent.mesh_client import MeshClient

@@ -93,13 +93,13 @@ _OPERATOR_AGENT_ID = "operator"
 
 
 def _validate_edit(agent_id: str, field: str, value) -> dict | None:
-    """Shared validation for edit_agent / propose_edit. Returns error dict or None.
+    """Shared validation for edit_agent. Returns error dict or None.
 
     Centralises the common gates (self-modification block, valid field,
-    permission ceiling, budget bounds, thinking enum) so both the
-    propose-flow and the new edit_agent tool produce identical error
-    messages for the same misuse. Returns ``None`` when the call is
-    safe to forward to the mesh.
+    permission ceiling, budget bounds, thinking enum) so edit_agent (and
+    any future edit-flow callers) produce identical error messages for
+    the same misuse. Returns ``None`` when the call is safe to forward
+    to the mesh.
     """
     if agent_id.lower() == _OPERATOR_AGENT_ID:
         return {
@@ -159,48 +159,6 @@ def _validate_edit(agent_id: str, field: str, value) -> dict | None:
         if err:
             return {"error": err}
     return None
-
-
-@skill(
-    name="propose_edit",
-    description=(
-        "DEPRECATED — calls edit_agent under the hood. All config edits now "
-        "apply immediately and emit an undo receipt; no separate confirm step "
-        "is needed. Prefer edit_agent directly."
-    ),
-    parameters={
-        "agent_id": {"type": "string", "description": "Target agent ID"},
-        "field": {
-            "type": "string",
-            "description": "Config field to change",
-            "enum": [
-                "instructions", "soul", "model", "role", "heartbeat",
-                "heartbeat_schedule",
-                "interface", "thinking", "budget", "permissions",
-            ],
-        },
-        "value": {
-            "type": ["string", "object"],
-            "description": "New value for the field",
-        },
-    },
-)
-async def propose_edit(
-    agent_id: str, field: str, value, *,
-    mesh_client=None, _messages=None, **_kw,
-) -> dict:
-    """Deprecated shim — applies the edit immediately via edit_agent."""
-    result = await edit_agent(
-        agent_id, field, value, reason="user_asked",
-        mesh_client=mesh_client, _messages=_messages,
-    )
-    if isinstance(result, dict) and "error" not in result:
-        result.setdefault(
-            "deprecation_notice",
-            "propose_edit is deprecated. The change applied immediately; "
-            "no confirm_edit call is needed. Use edit_agent next time.",
-        )
-    return result
 
 
 @skill(
