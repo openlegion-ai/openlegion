@@ -919,6 +919,235 @@ async def test_edit_agent_heartbeat_schedule_blocks_self_modification():
     assert "operator" in result["error"].lower()
 
 
+# ── Post-#927 coverage retargeted from deleted propose_edit tests ─────────
+#
+# PR #927 retired the propose+confirm chain. The shared ``_validate_edit``
+# helper still backs ``edit_agent``, so the validation branches the deleted
+# ``test_propose_edit_*`` cases used to cover (self-block case-insensitivity,
+# interface forwarding, can_use_wallet ceiling, allowed-permissions and
+# artifacts_write pass-through, budget bounds, thinking enum) need a home
+# against the current entry point.
+
+
+@pytest.mark.asyncio
+async def test_edit_agent_blocks_self_modification_case_insensitive():
+    """Self-block is case-insensitive — ``OPERATOR``/``Operator`` reject too."""
+    from src.agent.builtins.operator_tools import edit_agent
+
+    result = await edit_agent(
+        "OPERATOR", "instructions", "new text", mesh_client=MagicMock(),
+    )
+    assert "error" in result
+    assert "operator" in result["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_edit_agent_accepts_interface_field():
+    """``interface`` is a valid soft field and forwards through edit_soft."""
+    from src.agent.builtins.operator_tools import edit_agent
+
+    mc = MagicMock()
+    mc.edit_soft = AsyncMock(return_value={
+        "success": True,
+        "undo_token": "tok-iface",
+        "expires_at": "2026-05-13T00:05:00+00:00",
+        "ttl_seconds": 300,
+        "field_class": "soft",
+        "summary": "Updated writer's interface",
+    })
+    result = await edit_agent(
+        "writer", "interface", "Accepts research, produces notes.",
+        reason="user_asked", mesh_client=mc,
+    )
+    assert "error" not in result
+    assert result["applied"] is True
+    assert result["undo_token"] == "tok-iface"
+    mc.edit_soft.assert_awaited_once_with(
+        "writer", "interface", "Accepts research, produces notes.", "user_asked",
+    )
+
+
+@pytest.mark.asyncio
+async def test_edit_agent_permission_ceiling_can_use_wallet():
+    """can_use_wallet=True hits the same ceiling as can_spawn=True."""
+    from src.agent.builtins.operator_tools import edit_agent
+
+    result = await edit_agent(
+        "writer", "permissions", {"can_use_wallet": True},
+        mesh_client=MagicMock(),
+    )
+    assert "error" in result
+    assert "ceiling" in result["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_edit_agent_permission_ceiling_allows_permitted():
+    """Permissions beneath the ceiling pass validation and reach edit_soft."""
+    from src.agent.builtins.operator_tools import edit_agent
+
+    mc = MagicMock()
+    mc.edit_soft = AsyncMock(return_value={
+        "success": True,
+        "undo_token": "tok-perm",
+        "expires_at": "2026-05-13T00:30:00+00:00",
+        "ttl_seconds": 1800,
+        "field_class": "hard",
+        "summary": "Updated writer's permissions",
+    })
+    result = await edit_agent(
+        "writer", "permissions", {"can_use_browser": True},
+        reason="user_asked", mesh_client=mc,
+    )
+    assert "error" not in result
+    assert result["applied"] is True
+    assert result["undo_token"] == "tok-perm"
+    mc.edit_soft.assert_awaited_once_with(
+        "writer", "permissions", {"can_use_browser": True}, "user_asked",
+    )
+
+
+@pytest.mark.asyncio
+async def test_edit_agent_permission_ceiling_allows_artifacts_write():
+    """``artifacts/*`` must sit inside the blackboard_write ceiling — without
+    it the operator couldn't reproduce the save_artifact pattern via
+    edit_agent (regression guard for the ceiling list)."""
+    from src.agent.builtins.operator_tools import edit_agent
+
+    mc = MagicMock()
+    mc.edit_soft = AsyncMock(return_value={
+        "success": True,
+        "undo_token": "tok-art",
+        "expires_at": "2026-05-13T00:30:00+00:00",
+        "ttl_seconds": 1800,
+        "field_class": "hard",
+        "summary": "Updated writer's permissions",
+    })
+    result = await edit_agent(
+        "writer", "permissions", {"blackboard_write": ["artifacts/*"]},
+        reason="user_asked", mesh_client=mc,
+    )
+    assert "error" not in result
+    assert result["applied"] is True
+    assert result["undo_token"] == "tok-art"
+    mc.edit_soft.assert_awaited_once_with(
+        "writer", "permissions", {"blackboard_write": ["artifacts/*"]}, "user_asked",
+    )
+
+
+@pytest.mark.asyncio
+async def test_edit_agent_budget_daily_too_low():
+    """daily_usd below the 0.01 floor is rejected pre-mesh."""
+    from src.agent.builtins.operator_tools import edit_agent
+
+    result = await edit_agent(
+        "writer", "budget", {"daily_usd": -1, "monthly_usd": 100},
+        mesh_client=MagicMock(),
+    )
+    assert "error" in result
+    assert "daily_usd" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_edit_agent_budget_daily_too_high():
+    """daily_usd above the 1000 cap is rejected pre-mesh."""
+    from src.agent.builtins.operator_tools import edit_agent
+
+    result = await edit_agent(
+        "writer", "budget", {"daily_usd": 5000, "monthly_usd": 100},
+        mesh_client=MagicMock(),
+    )
+    assert "error" in result
+    assert "daily_usd" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_edit_agent_budget_monthly_too_low():
+    """monthly_usd below the 0.10 floor is rejected pre-mesh."""
+    from src.agent.builtins.operator_tools import edit_agent
+
+    result = await edit_agent(
+        "writer", "budget", {"daily_usd": 1, "monthly_usd": 0.01},
+        mesh_client=MagicMock(),
+    )
+    assert "error" in result
+    assert "monthly_usd" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_edit_agent_budget_monthly_too_high():
+    """monthly_usd above the 30000 cap is rejected pre-mesh."""
+    from src.agent.builtins.operator_tools import edit_agent
+
+    result = await edit_agent(
+        "writer", "budget", {"daily_usd": 1, "monthly_usd": 50000},
+        mesh_client=MagicMock(),
+    )
+    assert "error" in result
+    assert "monthly_usd" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_edit_agent_budget_valid():
+    """A budget inside both bounds passes validation and reaches edit_soft."""
+    from src.agent.builtins.operator_tools import edit_agent
+
+    mc = MagicMock()
+    mc.edit_soft = AsyncMock(return_value={
+        "success": True,
+        "undo_token": "tok-b1",
+        "expires_at": "2026-05-13T00:30:00+00:00",
+        "ttl_seconds": 1800,
+        "field_class": "hard",
+        "summary": "Updated writer's budget",
+    })
+    result = await edit_agent(
+        "writer", "budget", {"daily_usd": 5, "monthly_usd": 100},
+        reason="user_asked", mesh_client=mc,
+    )
+    assert result["applied"] is True
+    assert result["undo_token"] == "tok-b1"
+    mc.edit_soft.assert_awaited_once_with(
+        "writer", "budget", {"daily_usd": 5, "monthly_usd": 100}, "user_asked",
+    )
+
+
+@pytest.mark.asyncio
+async def test_edit_agent_thinking_invalid():
+    """A value outside the off/low/medium/high enum is rejected pre-mesh."""
+    from src.agent.builtins.operator_tools import edit_agent
+
+    result = await edit_agent(
+        "writer", "thinking", "ultra", mesh_client=MagicMock(),
+    )
+    assert "error" in result
+    assert "thinking" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_edit_agent_thinking_valid():
+    """A valid thinking level passes validation and reaches edit_soft."""
+    from src.agent.builtins.operator_tools import edit_agent
+
+    mc = MagicMock()
+    mc.edit_soft = AsyncMock(return_value={
+        "success": True,
+        "undo_token": "tok-t1",
+        "expires_at": "2026-05-13T00:30:00+00:00",
+        "ttl_seconds": 1800,
+        "field_class": "hard",
+        "summary": "Updated writer's thinking",
+    })
+    result = await edit_agent(
+        "writer", "thinking", "high",
+        reason="user_asked", mesh_client=mc,
+    )
+    assert result["applied"] is True
+    assert result["undo_token"] == "tok-t1"
+    mc.edit_soft.assert_awaited_once_with(
+        "writer", "thinking", "high", "user_asked",
+    )
+
+
 # ── list_pending ─────────────────────────────────────────────
 
 
