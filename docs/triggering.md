@@ -362,27 +362,6 @@ This sends the notification to:
 
 Agents can use `notify_user` at any time -- during cron jobs, heartbeats, or regular tasks.
 
-## File Watchers
-
-Poll directories for new or modified files matching glob patterns. Uses polling (not inotify) for Docker volume compatibility — works reliably across macOS, Linux, and Windows host mounts.
-
-### Configuration
-
-File watchers are configured programmatically via the `FileWatcher.watch()` method. There is no dashboard UI, CLI command, or YAML config for file watchers -- they must be registered in code (e.g., from a custom channel integration or startup hook). Each watcher specifies:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `path` | string | Directory to watch |
-| `pattern` | string | Glob pattern to match files (e.g., `*.csv`, `*.json`) |
-| `agent` | string | Agent to notify when a match is found |
-| `message_template` | string \| None | Optional message template. `{filepath}` and `{filename}` are replaced with the matched file's full path and name. Defaults to `"New file detected: {filepath}\nFilename: {filename}\nProcess this file."` when omitted. |
-
-The watcher polls at a hardcoded `POLL_INTERVAL = 5` seconds (`src/host/watchers.py:22`; not user-configurable — no parameter on `watch()`, no env var), tracks file modification times, and dispatches to the target agent when new or changed files are detected.
-
-**First-scan is silent.** On `start()` the watcher records existing-file mtimes via `_scan(dispatch=False)` so the initial set of files is treated as the baseline — only files added or modified after startup dispatch. Drop files into the watch directory **after** start, not before.
-
-Every dispatched message is run through `sanitize_for_prompt()` before reaching the agent (`watchers.py:77`).
-
 ## Source Files
 
 | File | Role |
@@ -394,7 +373,6 @@ Every dispatched message is run through `sanitize_for_prompt()` before reaching 
 | `src/host/lanes.py` | Per-agent FIFO task queues (followup/steer/collect) |
 | `src/agent/builtins/mesh_tool.py` | Agent-side `set_cron`, `list_cron`, `remove_cron`, `publish_event`, `subscribe_event` tools |
 | `src/agent/builtins/coordination_tool.py` | `hand_off`, `check_inbox`, `update_status`, `complete_task` |
-| `src/host/watchers.py` | Polling-based file watchers for Docker volume compatibility |
 | `src/dashboard/server.py` | Webhook creation API (`POST /api/webhooks`) |
 | `config/cron.json` | Persisted job state |
 | `config/webhooks.json` | Persisted webhook config |

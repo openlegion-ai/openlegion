@@ -136,7 +136,7 @@ fleets in isolated Docker containers. Each agent gets its own memory, tools, sch
 and budget — coordinated through blackboard shared state and pub/sub events with no LLM routing layer.
 
 Chat with your agent fleet via **Telegram**, **Discord**, **Slack**, **WhatsApp**, or CLI. Agents act autonomously
-via cron schedules, webhooks, heartbeat monitoring, and file watchers — without being
+via cron schedules, webhooks, and heartbeat monitoring — without being
 prompted.
 
 **5800+ tests passing** across 155 test files.
@@ -152,7 +152,7 @@ No LangChain. No Redis. No Kubernetes. No CEO agent. BSL License.
    daily and monthly budget caps at the vault layer. Agents physically cannot spend
    what you haven't authorized. View live spend with `/costs` in the REPL.
 
-3. **Acts autonomously** — cron schedules, heartbeat probes, webhook triggers, and file watchers let agents work without being prompted.
+3. **Acts autonomously** — cron schedules, heartbeat probes, and webhook triggers let agents work without being prompted.
 
 4. **Self-aware and self-improving** — agents understand their own permissions, budget, fleet topology, and system architecture via auto-generated `SYSTEM.md` and live runtime context. They learn from tool failures and user corrections, injecting past learnings into future sessions.
 
@@ -596,16 +596,6 @@ curl -X POST http://localhost:8420/webhook/hook/hook_a1b2c3d4 \
   -d '{"event": "push", "repo": "myproject"}'
 ```
 
-### File Watchers
-
-Poll directories for new/modified files matching glob patterns. Uses polling
-(not inotify) for Docker volume compatibility.
-
-File watchers are configured programmatically via the `FileWatcher.watch()` API,
-specifying a directory path, glob pattern, target agent, and message template
-(supports `{filepath}` and `{filename}` placeholders). There is no REPL or CLI
-command to manage watchers — they're set up from code or via dashboard endpoints.
-
 ---
 
 ## Cost Tracking & Budgets
@@ -1014,7 +1004,6 @@ src/
 │   ├── transport.py                    # Transport ABC + Http/Sandbox transports
 │   ├── cron.py                         # Cron scheduler + heartbeats
 │   ├── webhooks.py                     # Named webhook endpoints
-│   ├── watchers.py                     # File watchers (polling)
 │   ├── costs.py                        # Cost tracking + budgets (SQLite)
 │   ├── health.py                       # Health monitor + auto-restart
 │   ├── lanes.py                        # Per-agent FIFO task queues

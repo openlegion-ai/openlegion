@@ -80,7 +80,6 @@ The mesh host runs on the user's machine as a single FastAPI process. It is the 
 | `lanes.py` | Per-agent FIFO task queues with three modes: `followup` (default), `steer` (inject into running chat), `collect` (buffer while busy, drain on idle). Auto-notify forwards results back via `MessageOrigin`. |
 | `failover.py` | Model health tracking and failover chains (in-memory). |
 | `webhooks.py` | Named webhook endpoints (sanitized payloads, 1MB body size limit, optional HMAC). |
-| `watchers.py` | File watcher — polling at 5s intervals, not inotify. |
 | `traces.py` | Request tracing + grouped summaries. Uses `busy_timeout=5000` (lower than the 30000 used elsewhere). |
 | `transcript.py` | Provider-specific transcript sanitization (Gemini/Mistral tool-id formats, tool-call pairing). |
 | `wallet.py` | Wallet signing service for Ethereum + Solana. Master seed only on the mesh. |

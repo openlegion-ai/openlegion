@@ -124,7 +124,6 @@ Sharding uses `pytest-split` (`--splits 3 --group N`). `--dist=loadfile` keeps a
 | `src/dashboard/server.py` | `tests/test_dashboard.py`, `tests/test_dashboard_workspace.py` |
 | `src/host/failover.py` | `tests/test_failover.py` |
 | `src/host/webhooks.py` | `tests/test_webhooks.py` |
-| `src/host/watchers.py` | `tests/test_watchers.py` |
 | `src/agent/loop_detector.py` | `tests/test_loop_detector.py` |
 | `src/marketplace.py` | `tests/test_marketplace.py` |
 | `src/channels/base.py` | `tests/test_channels.py` |
@@ -371,7 +370,6 @@ openlegion/
 │   │   ├── lanes.py             # Per-agent task queues
 │   │   ├── failover.py          # LLM model failover logic
 │   │   ├── webhooks.py          # Webhook manager
-│   │   ├── watchers.py          # File watchers
 │   │   ├── traces.py            # Request tracing and diagnostics
 │   │   ├── transcript.py        # Provider-specific transcript sanitization
 │   │   ├── wallet.py            # Ethereum + Solana wallet signing service
