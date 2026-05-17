@@ -101,14 +101,14 @@ if TYPE_CHECKING:
     from src.shared.types import MessageOrigin
 
 
-# ── Pending Config Change Store (SQLite-backed) ──────────────────
+# ── Pending Action Store TTLs ────────────────────────────────────
 #
-# Pending operator-config edits live in ``PendingActions``
-# (``data/pending_actions.db``) so they survive mesh restarts. Schema
-# carries the payload digest (replay protection) and origin kind (so
-# confirm-side gates can require ``origin_kind="human"``). The mesh
-# app picks the canonical instance up via ``_get_pending_actions_store()``
-# below; the module-level helpers delegate to that singleton.
+# Pending operator actions (delete confirmations, undo-receipt rows)
+# live in ``PendingActions`` (``data/pending_actions.db``) so they
+# survive mesh restarts. The store itself is constructed inside
+# ``create_mesh_app`` and exposed on the app as ``app.pending_actions``.
+# Only the field-aware TTLs live at module scope so the receipt-card
+# layer and tests can compute them without instantiating an app.
 _MAX_PENDING = 10
 # Default TTL for pending-action rows (deletes, soft-edit receipts,
 # anything we don't have a more specific budget for). 5 minutes is the
@@ -116,9 +116,9 @@ _MAX_PENDING = 10
 # undo.
 _CHANGE_TTL_SECONDS = 300
 # Riskier config edits — model swaps, permission changes, budget
-# tweaks, thinking-level changes — get a longer review window because
-# the user typically wants to read the diff and think before
-# confirming. 30 minutes mirrors the worktree code-review reflex.
+# tweaks, thinking-level changes — get a longer undo window because
+# the user typically wants to read the diff before deciding to revert.
+# 30 minutes mirrors the worktree code-review reflex.
 _HARD_CHANGE_TTL_SECONDS = 1800
 
 
@@ -127,10 +127,11 @@ def _ttl_for_field(field: str | None) -> int:
 
     Hard fields (model / permissions / budget / thinking) get the
     longer ``_HARD_CHANGE_TTL_SECONDS`` window so the user has time to
-    read the diff. Everything else (soft fields, non-config actions
-    like project/agent deletes, unknown action kinds) falls back to
-    ``_CHANGE_TTL_SECONDS``. The hard set is defined once in
-    :data:`src.shared.types.HARD_EDIT_FIELDS` and imported here.
+    read the diff before the undo receipt expires. Everything else
+    (soft fields, non-config actions like team/agent deletes, unknown
+    action kinds) falls back to ``_CHANGE_TTL_SECONDS``. The hard set
+    is defined once in :data:`src.shared.types.HARD_EDIT_FIELDS` and
+    imported here.
     """
     if field and field in HARD_EDIT_FIELDS:
         return _HARD_CHANGE_TTL_SECONDS
@@ -141,98 +142,6 @@ def _ttl_for_field(field: str | None) -> int:
         # iteration over delay).
         logger.debug("unknown TTL field %r, defaulting to soft", field)
     return _CHANGE_TTL_SECONDS
-
-
-# Module-level singleton used by the ``_store_pending_change`` /
-# ``_get_pending_change`` / ``_consume_pending_change`` helpers below.
-# ``create_mesh_app`` sets this to its own instance so the helpers and
-# the app share one store; tests that import the helpers directly get
-# an in-memory store the first time they touch one of the helpers.
-_pending_actions_singleton: PendingActions | None = None
-
-
-def _get_pending_actions_store() -> PendingActions:
-    """Lazy-init the module-level pending-action store.
-
-    Tests that import ``_store_pending_change`` directly without going
-    through ``create_mesh_app`` will land here; we use ``:memory:`` so
-    they don't pollute the cwd. Production callers run through
-    ``create_mesh_app``, which constructs a disk-backed instance and
-    assigns it to ``_pending_actions_singleton`` before the helpers
-    are ever called.
-    """
-    global _pending_actions_singleton
-    if _pending_actions_singleton is None:
-        _pending_actions_singleton = PendingActions(db_path=":memory:")
-    return _pending_actions_singleton
-
-
-def _cleanup_expired_changes() -> None:
-    """Reap expired pending actions."""
-    _get_pending_actions_store().reap_expired()
-
-
-def _store_pending_change(agent_id: str, field: str, old_value: object, new_value: object) -> str:
-    """Persist a pending config change. Returns a change_id (nonce).
-
-    Backed by ``PendingActions`` (SQLite). Capped at ``_MAX_PENDING``
-    rows per process; oldest expires-first row is evicted to make room.
-    """
-    store = _get_pending_actions_store()
-    store.reap_expired()
-    pending = store.list_pending()
-    if len(pending) >= _MAX_PENDING:
-        # Evict the row whose ``expires_at`` is soonest -- matches the
-        # legacy behavior (``min(...)`` over ``expires_at``).
-        oldest = min(pending, key=lambda r: r["expires_at"])
-        with store._conn() as conn:
-            conn.execute(
-                "DELETE FROM pending_actions WHERE nonce=?", (oldest["nonce"],),
-            )
-    change_id = str(_uuid.uuid4())
-    payload = {"old_value": old_value, "new_value": new_value}
-    store.store(
-        nonce=change_id,
-        actor="operator",
-        target_kind="agent",
-        target_id=agent_id,
-        action_kind=field,
-        payload=payload,
-        ttl=_ttl_for_field(field),
-    )
-    return change_id
-
-
-def _get_pending_change(change_id: str) -> dict | None:
-    """Read a pending change. Returns the legacy dict shape or None."""
-    store = _get_pending_actions_store()
-    rec = store.peek(change_id)
-    if rec is None:
-        return None
-    payload = rec.get("payload") or {}
-    return {
-        "agent_id": rec["target_id"],
-        "field": rec["action_kind"],
-        "old_value": payload.get("old_value", ""),
-        "new_value": payload.get("new_value", ""),
-        "expires_at": datetime.fromtimestamp(rec["expires_at"], tz=timezone.utc),
-    }
-
-
-def _consume_pending_change(change_id: str) -> dict | None:
-    """Atomically consume a pending change. Returns legacy dict shape or None."""
-    store = _get_pending_actions_store()
-    rec = store.consume(change_id)
-    if rec is None:
-        return None
-    payload = rec.get("payload") or {}
-    return {
-        "agent_id": rec["target_id"],
-        "field": rec["action_kind"],
-        "old_value": payload.get("old_value", ""),
-        "new_value": payload.get("new_value", ""),
-        "expires_at": datetime.fromtimestamp(rec["expires_at"], tz=timezone.utc),
-    }
 
 
 # ── Task 2c: Server-side channel origin validation ────────────────
@@ -652,14 +561,11 @@ def create_mesh_app(
     app.cleanup_agent = lambda agent_id: None  # replaced below
 
     # Persistent pending-action store. Mirrors the path convention of
-    # ``data/costs.db`` / ``data/traces.db``. The disk-backed instance
-    # is also assigned to the module-level singleton so the
-    # ``_store_pending_change`` / ``_consume_pending_change`` helpers
-    # share state with the endpoints below.
+    # ``data/costs.db`` / ``data/traces.db``. Backs the
+    # ``/mesh/config/confirm`` delete dispatcher and the dashboard's
+    # pending-action review surface.
     pending_actions = PendingActions(db_path="data/pending_actions.db")
     app.pending_actions = pending_actions  # exposed for tests/dashboard
-    global _pending_actions_singleton
-    _pending_actions_singleton = pending_actions
     # Task 9 — wire EventBus so store/consume/cancel/reap_expired emit
     # ``pending_action_*`` events to the dashboard.
     if event_bus is not None:
@@ -5479,25 +5385,6 @@ def create_mesh_app(
             "encoding": encoding,
         }
 
-    def _record_to_legacy_change(record: dict) -> dict:
-        """Map a ``PendingActions`` record to the legacy change dict.
-
-        ``_apply_pending_change`` was written against the old in-memory
-        shape (``agent_id`` / ``field`` / ``old_value`` / ``new_value``).
-        Rather than rewrite it, the SQLite-backed endpoints translate
-        records on the way in.
-        """
-        payload = record.get("payload") or {}
-        return {
-            "agent_id": record["target_id"],
-            "field": record["action_kind"],
-            "old_value": payload.get("old_value", ""),
-            "new_value": payload.get("new_value", ""),
-            "expires_at": datetime.fromtimestamp(
-                record["expires_at"], tz=timezone.utc,
-            ),
-        }
-
     async def _apply_pending_change(
         change_id: str, change: dict,
         *, undoable: bool = False, is_undo: bool = False,
@@ -6218,63 +6105,27 @@ def create_mesh_app(
         if confirm_origin is None or confirm_origin.kind != "human":
             raise HTTPException(403, "Confirmation requires human origin")
 
-    @app.post("/mesh/agents/{agent_id}/config")
-    async def update_agent_config(agent_id: str, request: Request) -> dict:
-        """Apply a pending config change. Used by confirm_edit tool.
-
-        Refuses delete pending actions — those must go through
-        ``/mesh/config/confirm`` so the destructive dispatcher runs.
-        """
-        _require_any_auth(request)
-        caller = _resolve_agent_id("", request)
-        if caller != "operator":
-            raise HTTPException(403, "Only the operator can apply config changes")
-        _confirm_origin_check(request, caller)
-        data = await request.json()
-        change_id = data.get("change_id", "")
-        client_digest = data.get("payload_digest")
-
-        # Pre-flight: peek so we can preserve the legacy "agent ID
-        # mismatch" 400 (different from the generic invalid/expired
-        # response). Only ``consume`` actually deletes the row.
-        peek = pending_actions.peek(change_id)
-        if peek is not None and peek.get("target_id") != agent_id:
-            raise HTTPException(400, "Agent ID mismatch")
-        if peek is not None and peek.get("action_kind") == "delete":
-            raise HTTPException(
-                400,
-                "Use /mesh/config/confirm for delete pending actions",
-            )
-
-        record = pending_actions.consume(
-            change_id,
-            confirmer="operator",
-            require_origin_kind="human",
-            expected_payload_digest=client_digest,
-        )
-        if not record:
-            raise HTTPException(400, "Pending action invalid or expired")
-
-        return await _apply_pending_change(
-            change_id, _record_to_legacy_change(record),
-        )
-
     @app.post("/mesh/config/confirm")
     async def confirm_config_change(request: Request) -> dict:
-        """Apply a pending action by change_id only.
+        """Apply a destructive pending action by change_id only.
 
-        Resolves the target from the pending action itself so callers
-        don't need to know the target ahead of time. Dispatches on
-        ``target_kind``:
+        Post PR #927 this endpoint is the consume side of the
+        delete-confirmation flow only. Config edits no longer flow
+        through propose+confirm — they apply immediately via
+        ``/mesh/agents/{id}/edit-soft`` and emit an undo receipt
+        instead. The endpoint name is retained for SDK / dashboard
+        back-compat with the existing ``MeshClient.confirm_config_change``
+        method, which the destructive-action review surface (delete-team,
+        delete-agent) still uses.
 
-        * ``target_kind="agent"`` + standard config field — the legacy
-          ``confirm_edit`` flow (apply through ``_apply_pending_change``).
-        * ``target_kind in {"project", "agent"}`` + ``action_kind="delete"``
-          — Task 7 destructive-confirm flow (apply through
-          ``_apply_pending_delete``).
+        Accepted shape: ``target_kind in {"project", "agent"}`` +
+        ``action_kind="delete"``. Any other ``action_kind`` returns
+        HTTP 400 — non-delete pending rows are no longer produced.
 
-        Both shapes share the same ``require_origin_kind="human"`` gate
-        and the same atomic single-shot consume.
+        The endpoint inherits ``require_origin_kind="human"`` on
+        ``PendingActions.consume`` and the additional confirm-side
+        ``_confirm_origin_check`` so a forged X-Origin or buggy
+        non-human caller can't flip the lever.
         """
         caller = _extract_verified_agent_id(request)
         if caller != "operator" and not _is_internal_caller(request):
@@ -6296,16 +6147,30 @@ def create_mesh_app(
         if not record:
             raise HTTPException(400, "Pending action invalid or expired")
 
-        # Task 7: destructive deletes use ``action_kind="delete"`` plus
-        # ``target_kind in {"project", "agent"}``. Everything else stays
-        # on the legacy config-edit path.
+        # Post PR #927 this dispatcher is the delete-only path.
+        # ``action_kind`` is always ``"delete"`` and ``target_kind`` is
+        # always one of {"project", "agent"} — the only producers
+        # (/mesh/teams/{name}/propose-delete and
+        # /mesh/agents/{id}/propose-delete) hard-code those values.
         if record.get("action_kind") == "delete" and record.get("target_kind") in {
             "project", "agent",
         }:
             return await _apply_pending_delete(record)
 
-        return await _apply_pending_change(
-            change_id, _record_to_legacy_change(record),
+        # Defensive: a stray non-delete row would otherwise reach the
+        # retired legacy edit-apply path. Refuse it loudly so the
+        # producer surfaces in logs.
+        logger.warning(
+            "rejecting non-delete pending row on /mesh/config/confirm: "
+            "action_kind=%r target_kind=%r",
+            record.get("action_kind"),
+            record.get("target_kind"),
+        )
+        raise HTTPException(
+            400,
+            "Pending action is not a delete confirmation; "
+            "/mesh/config/confirm no longer accepts config edits "
+            "(use /mesh/agents/{id}/edit-soft instead).",
         )
 
     # === Task 9 — Pending action review surface ===

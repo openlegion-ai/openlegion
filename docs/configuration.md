@@ -198,7 +198,7 @@ Blackboard patterns use the `projects/{name}/*` namespace (on-disk prefix retain
 | `wallet_allowed_contracts` | list[string] | Contract addresses this agent can interact with. Empty list allows all. |
 | `can_manage_fleet` | boolean | Control-plane: create/register/deregister agents via mesh endpoints. Default: `false` for workers, `true` for the operator agent. |
 | `can_manage_teams` (alias `can_manage_projects`) | boolean | Control-plane: create/archive teams and edit membership. Default: `false` for workers, `true` for operator. The legacy field name is mirrored via a permanent model-validator so config files written under either name keep working. |
-| `can_edit_agent_config` | boolean | Control-plane: propose/confirm edits to another agent's instructions/soul/model/etc. Default: `false` for workers, `true` for operator. |
+| `can_edit_agent_config` | boolean | Control-plane: edit another agent's instructions/soul/model/etc. All edits apply immediately and emit an undo receipt (5 min for soft fields, 30 min for hard fields). Default: `false` for workers, `true` for operator. |
 | `can_view_fleet_metrics` | boolean | Control-plane: access `/mesh/system/metrics` and `/mesh/agents/{id}/metrics`. Default: `false` for workers, `true` for operator. |
 | `can_route_tasks` | boolean | Control-plane: create durable orchestration task records (Task 6 surface). Default: `false` for workers, `true` for operator. |
 | `can_request_user_credentials` | boolean | Allow `request_credential` and `request_browser_login` tools. Default: `false` for workers, `true` for operator. |

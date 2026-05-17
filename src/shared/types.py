@@ -35,28 +35,31 @@ AGENT_ID_RE_PATTERN = r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
 """Canonical agent ID regex — 1-64 chars, alphanumeric start, then alphanumeric/hyphen/underscore."""
 
 HARD_EDIT_FIELDS = frozenset({"model", "permissions", "budget", "thinking"})
-"""Agent-config fields that require explicit propose+confirm (the "hard"
-review path). Mirrors :data:`SOFT_EDIT_FIELDS` — the union is the full
-set of editable fields surfaced through the operator-tool layer.
+"""Agent-config fields that earn the longer 30-min Undo window (the
+"hard" review path). Mirrors :data:`SOFT_EDIT_FIELDS` — the union is
+the full set of editable fields surfaced through the operator-tool
+layer.
 
 These are the consequential edits — model swaps, permission grants,
-budget tweaks, thinking-level changes — that:
+budget tweaks, thinking-level changes. All edits apply immediately
+via ``/edit-soft``; the only difference between hard and soft fields
+is the receipt TTL, i.e. how long the user has to click Undo:
 
-* Take the longer 30-min review TTL on the pending-action store
-  (vs 5-min for soft edits) so the user has time to read the diff.
-* Refuse the soft `/edit-soft` shortcut and force the operator tool to
-  fall through to the propose+confirm path.
+* Hard fields → 30-min Undo window so the user has time to read the
+  diff before the receipt expires.
+* Soft fields → 5-min Undo window (see :data:`SOFT_EDIT_FIELDS`).
 
-Single source of truth — imported by :mod:`src.host.server` and
-:mod:`src.agent.builtins.operator_tools`.
+There is no propose+confirm step — the legacy gated flow was retired
+in PR #927. Single source of truth — imported by :mod:`src.host.server`
+and :mod:`src.agent.builtins.operator_tools`.
 """
 
 SOFT_EDIT_FIELDS = frozenset({
     "instructions", "soul", "heartbeat", "heartbeat_schedule",
     "interface", "role",
 })
-"""Agent-config fields that apply immediately with a 5-min Undo receipt
-(the "soft" review path). See :data:`HARD_EDIT_FIELDS` for the inverse.
+"""Agent-config fields that apply immediately with a 5-min Undo receipt.
+See :data:`HARD_EDIT_FIELDS` for the longer 30-min Undo window.
 
 ``heartbeat_schedule`` retargets the agent's cron job in lockstep with
 the YAML write — the operator can adjust monitoring cadence without a
@@ -338,7 +341,7 @@ class AgentPermissions(BaseModel):
     # working until PR 3 retires the alias.
     can_manage_teams: bool = False         # team create/archive, membership
     can_manage_projects: bool = False      # DEPRECATED: alias for can_manage_teams
-    can_edit_agent_config: bool = False    # propose/confirm edits to instructions/soul/etc.
+    can_edit_agent_config: bool = False    # edit another agent's instructions/soul/etc. (apply-immediately + undo)
     can_view_fleet_metrics: bool = False   # /mesh/system/metrics, /mesh/agents/{id}/metrics
     can_route_tasks: bool = False          # durable task records (Task 6)
     can_request_user_credentials: bool = False  # request_credential, request_browser_login

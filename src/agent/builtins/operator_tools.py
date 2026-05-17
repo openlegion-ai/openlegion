@@ -1,4 +1,4 @@
-"""Operator agent tools -- propose/confirm edits, observations, agent/project management."""
+"""Operator agent tools -- agent edits (with undo), observations, agent/team management."""
 from __future__ import annotations
 
 import json
@@ -78,11 +78,12 @@ def _validate_heartbeat_schedule(value) -> str | None:
         "('*/15 * * * *') or 'every N[smhd]' ('every 15m')."
     )
 
-# PR 1 — soft edits apply immediately + emit a receipt with 5min Undo;
-# hard edits keep the propose+confirm dance (model swap, budget change,
-# and permissions are too consequential to undo via a button). The
-# canonical sets are imported from :mod:`src.shared.types` (single
-# source of truth across host + agent modules).
+# All edits apply immediately via ``/edit-soft`` + emit an undo receipt.
+# Hard fields (model / permissions / budget / thinking) earn a 30-min
+# Undo window; soft fields get 5 min. There is no propose+confirm gate
+# — that flow was retired in PR #927. The canonical field sets are
+# imported from :mod:`src.shared.types` (single source of truth across
+# host + agent modules).
 
 # Audited reasons the operator can declare. ``user_asked`` is the common
 # path (the user said "do X"); ``operator_proactive`` is the "I noticed"
