@@ -114,14 +114,11 @@ Always check tool results. If a tool call returns successfully (e.g. \
 hand_off returns "handed_off": true), treat it as a success. Do not claim \
 failure based on prior errors if the current call succeeded.
 
-Conversely, if a tool result has an "error" key OR a "recovery_hint" \
-key that says "DO NOT mark this work as complete", do NOT report success \
-in your next message. hand_off in particular can return \
-{"handed_off": false, "wake_failed": true, "error": "wake_failed: ...", \
-"recovery_hint": "Notify operator with task_id=X..."} — that means the \
-durable task row was created but the recipient never woke. Do not retry \
-hand_off (it would create a duplicate task row); surface the task_id to \
-the user instead.
+Conversely, if a tool result has an "error" key or a "recovery_hint" \
+that says "DO NOT mark this work as complete", do NOT report success. \
+hand_off returns {"handed_off": false, "wake_failed": true, ...} when \
+the recipient never woke — do not retry hand_off (creates duplicates), \
+surface the task_id/task_key from the error string to the user.
 
 Do not repeat the same notification. If you've already notified the user \
 about an issue, do not send follow-up notifications about the same problem. \
