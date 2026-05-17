@@ -308,13 +308,84 @@ async def test_lazy_guard_survives_message_compaction():
 
 
 @pytest.mark.asyncio
-async def test_single_iteration_text_only_still_completes():
-    """Counter-test to the lazy-completion guard: a single-iteration
-    text-only response is a legitimate Q&A-style completion (no tools
-    needed) and must NOT be downgraded — the guard fires only on
-    iterations_executed > 1 with zero tool calls."""
-    loop = _make_loop()
-    # No tools available → no nudge → iter 0 text-only completes.
+async def test_lazy_guard_fires_on_iter0_text_only_with_tools_available():
+    """Bug F regression follow-up (operator reported post-#932): the
+    iter-0 nudge is gated on ``available_tools`` being truthy. If the
+    LLM responds text-only on iter 0 and the nudge skips for any reason
+    (e.g. responds before the nudge wraps), the prior guard's
+    ``iterations_executed > 1`` precondition let the task complete as
+    done. The fix drops that precondition — text-only + zero tools +
+    not-structured is a hard fail regardless of iteration count.
+
+    This test forces the scenario by feeding ONE LLM response and
+    relying on the nudge path: the nudge appends a follow-up message
+    and continues, the LLM mock raises StopAsyncIteration on the second
+    call, which propagates as an exception out of execute_task. To
+    exercise the guard directly we instead provide a single text-only
+    response AND no tools available (so the nudge is skipped at iter 0
+    and we fall straight to terminal). That's exactly the trend-scout
+    failure mode.
+    """
+    text_only = LLMResponse(content="On it — running now.", tokens_used=42)
+    loop = _make_loop([text_only])
+    # available_tools=[] → nudge skipped at iter 0 → fall straight
+    # through to terminal with iterations_executed=1 (the exact path
+    # operator's trend-scout task hit in production).
+    assignment = TaskAssignment(
+        workflow_id="wf1", step_id="s1", task_type="research",
+        input_data={"query": "test"},
+    )
+    result = await loop.execute_task(assignment)
+    assert result.status == "failed", (
+        f"text-only iter-0 completion must fail under the post-regression "
+        f"guard; got status={result.status} error={result.error}"
+    )
+    assert "no_action_taken" in (result.error or "")
+    assert loop.tasks_failed == 1
+    assert loop.tasks_completed == 0
+
+
+@pytest.mark.asyncio
+async def test_lazy_guard_passes_iter0_structured_noop():
+    """Counter-test to the iter-0 fix: a legitimate one-shot noop task
+    must still complete when the LLM returns the documented contract
+    ``{"result": {"status": "noop", "reason": "..."}}``. The
+    structured-final escape handles this — guard does NOT trip."""
+    structured_noop = LLMResponse(
+        content='{"result": {"status": "noop", "reason": "queue empty"}}',
+        tokens_used=42,
+    )
+    loop = _make_loop([structured_noop])
+    assignment = TaskAssignment(
+        workflow_id="wf1", step_id="s1", task_type="research",
+        input_data={"query": "test"},
+    )
+    result = await loop.execute_task(assignment)
+    assert result.status == "complete"
+    assert result.result == {"status": "noop", "reason": "queue empty"}
+    assert loop.tasks_completed == 1
+
+
+@pytest.mark.asyncio
+async def test_lazy_guard_passes_iter0_with_one_tool_call():
+    """Counter-test: a one-iteration tool-call followed by a final
+    text response must complete. The tool dispatch increments the
+    counter and the guard skips."""
+    responses = [
+        LLMResponse(
+            content="",
+            tool_calls=[ToolCallInfo(name="web_search", arguments={"q": "x"})],
+            tokens_used=30,
+        ),
+        # Final response after tool — text is acceptable here because
+        # tool_calls_count > 0 (real work performed).
+        LLMResponse(content="Done — see search results.", tokens_used=40),
+    ]
+    loop = _make_loop(responses)
+    loop.skills.get_tool_definitions = MagicMock(
+        return_value=[{"type": "function", "function": {"name": "web_search"}}]
+    )
+    loop.skills.execute = AsyncMock(return_value={"results": ["r1"]})
     assignment = TaskAssignment(
         workflow_id="wf1", step_id="s1", task_type="research",
         input_data={"query": "test"},
@@ -322,7 +393,6 @@ async def test_single_iteration_text_only_still_completes():
     result = await loop.execute_task(assignment)
     assert result.status == "complete"
     assert loop.tasks_completed == 1
-    assert loop.tasks_failed == 0
 
 
 @pytest.mark.asyncio

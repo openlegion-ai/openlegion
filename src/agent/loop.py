@@ -1002,19 +1002,37 @@ class AgentLoop:
                             is_structured_final = True
                     except (json.JSONDecodeError, TypeError):
                         pass
-                    if (
-                        iterations_executed > 1
-                        and tool_calls_count == 0
-                        and not is_structured_final
-                    ):
+                    # Regression follow-up to #932: the prior guard required
+                    # ``iterations_executed > 1`` on the assumption that the
+                    # iter-0 nudge ALWAYS fires for handoff-originated tasks
+                    # and bumps the counter to 2 before this branch runs.
+                    # That contract is fragile — the nudge is gated on
+                    # ``available_tools`` (line ~890) and silently skips
+                    # whenever tools are empty/None (skill-filter quirks,
+                    # runtime-disabled tools, hot-reload races). Operator
+                    # hit a trend-scout task that fell straight through
+                    # with iterations_executed=1 and got marked done despite
+                    # zero side effects. Drop the iteration count from the
+                    # condition: ``tool_calls_count == 0 AND not
+                    # structured_final`` is already the complete lazy-
+                    # completion signature. The iter-0 nudge is a SOFT path
+                    # (give the model one chance to course-correct); this
+                    # guard is the HARD fail that doesn't depend on the
+                    # nudge having run. Legitimate one-iteration noop tasks
+                    # must return the documented contract
+                    # ``{"result": {"status": "noop", "reason": "..."}}``,
+                    # which escapes via ``is_structured_final``.
+                    if tool_calls_count == 0 and not is_structured_final:
                         self.state = "idle"
                         self.current_task = None
                         self.tasks_failed += 1
                         logger.error(
                             "execute_task lazy-completion guard tripped for "
-                            "task=%s: iterations=%d tokens=%d tool_calls=0 — "
-                            "downgrading to failed (text-only response after "
-                            "nudge; no work performed)",
+                            "task=%s: iterations=%d tokens=%d tool_calls=0 "
+                            "structured_final=False — downgrading to failed "
+                            "(no work performed; LLM did not call any tools "
+                            "and did not return a structured {\"result\": "
+                            "{...}} payload)",
                             assignment.task_id, iterations_executed, total_tokens,
                         )
                         if self.workspace:
@@ -1037,10 +1055,14 @@ class AgentLoop:
                             status="failed",
                             error=(
                                 "no_action_taken: the LLM produced a text-only "
-                                "acknowledgment without calling any tools across "
-                                f"{iterations_executed} iterations. Tasks that "
-                                "reach the loop are expected to perform work via "
-                                "tools, not just acknowledge intent."
+                                "response without calling any tools across "
+                                f"{iterations_executed} iteration(s) and "
+                                "without emitting a structured {\"result\": "
+                                "{...}} payload. Tasks that reach the loop "
+                                "are expected to either perform work via "
+                                "tools OR return a structured result envelope "
+                                "(e.g. {\"result\": {\"status\": \"noop\", "
+                                "\"reason\": \"...\"}})."
                             ),
                             tokens_used=total_tokens,
                             duration_ms=int(duration_s * 1000),
