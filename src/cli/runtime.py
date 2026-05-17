@@ -695,7 +695,7 @@ class RuntimeContext:
         # fact rather than threading it through the lane constructor.
         _tasks_store_ref = getattr(app, "tasks_store", None)
         if _tasks_store_ref is not None and self.lane_manager is not None:
-            self.lane_manager._tasks_store = _tasks_store_ref
+            self.lane_manager.set_tasks_store(_tasks_store_ref)
 
         self._init_channel_manager()
 

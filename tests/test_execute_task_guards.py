@@ -8,9 +8,10 @@ Three guards:
    The guard clears the checkpoint and starts fresh.
 
 2. Pathological-success rejection: if the final-response branch is hit
-   with both ``iterations_executed == 0`` and ``total_tokens == 0`` we
-   downgrade to ``failed`` with a clear error rather than reporting a
-   ghost-success that masks corruption.
+   on the first iteration with ``total_tokens == 0`` we downgrade to
+   ``failed`` with a clear error rather than reporting a ghost-success
+   that masks corruption (mocked no-op LLM, checkpoint resurrection of
+   a finished state, double-completion race).
 
 3. Branch-exit logging: every ``return TaskResult(...)`` in
    ``execute_task`` is preceded by a structured ``logger.info`` so a
@@ -131,25 +132,59 @@ async def test_stale_checkpoint_at_max_iterations_starts_fresh():
 # ── Guard 2: pathological success rejection ──────────────────────
 
 
-def test_pathological_guard_present_in_source():
-    """Belt-and-suspenders guard: the final-response branch will downgrade
-    to ``failed`` when both ``iterations_executed`` and ``total_tokens``
-    are zero — a combination that can't arise from a healthy run
-    (iterations_executed is always at least 1 by the time we reach the
-    success branch). Cannot be exercised via the normal loop path; we
-    pin the guard's presence and contract in source to prevent silent
-    removal during future refactors."""
-    from pathlib import Path
+@pytest.mark.asyncio
+async def test_pathological_zero_token_completion_downgraded_to_failed():
+    """A first-iteration LLM response with zero tokens is the ghost-completion
+    smoking gun — guard must downgrade success → failed."""
+    ghost = LLMResponse(content='{"result": {"answer": "I did nothing"}}', tokens_used=0)
+    loop = _make_loop(llm_responses=[ghost])
 
-    loop_src = Path("src/agent/loop.py").read_text()
-    # The guard's loud-log line, the operator-facing error message,
-    # and the corruption hint must all be present. The error string is
-    # split across source lines so we look for prefix + suffix.
-    assert "pathological success guard tripped" in loop_src
-    assert "execute_task returned success without doing" in loop_src
-    assert "checkpoint corruption" in loop_src
-    # And the guard must downgrade to failed, not silently log.
-    assert 'status="failed"' in loop_src
+    assignment = TaskAssignment(
+        task_id="task_ghost", workflow_id="wf", step_id="s1",
+        task_type="research", input_data={"q": "anything"},
+    )
+    result = await loop.execute_task(assignment)
+
+    assert result.status == "failed"
+    assert "without doing work" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_pathological_zero_token_completion_logs_guard_branch(caplog):
+    """The guard should emit the pathological_success_guard branch-exit log,
+    not the normal final_response label."""
+    ghost = LLMResponse(content='{"result": {"answer": "nope"}}', tokens_used=0)
+    loop = _make_loop(llm_responses=[ghost])
+
+    assignment = TaskAssignment(
+        task_id="task_ghost_log", workflow_id="wf", step_id="s1",
+        task_type="research", input_data={"q": "x"},
+    )
+
+    with caplog.at_level(logging.INFO, logger="agent.loop"):
+        result = await loop.execute_task(assignment)
+
+    assert result.status == "failed"
+    branch_lines = [
+        r.message for r in caplog.records
+        if r.name == "agent.loop"
+        and "execute_task exit branch=" in r.message
+    ]
+    assert any("branch=pathological_success_guard" in m for m in branch_lines)
+
+
+@pytest.mark.asyncio
+async def test_first_iteration_completion_with_tokens_stays_complete():
+    """Zero-token guard must NOT fire when the LLM actually did work."""
+    real = LLMResponse(content='{"result": {"answer": "real"}}', tokens_used=42)
+    loop = _make_loop(llm_responses=[real])
+    assignment = TaskAssignment(
+        task_id="task_real", workflow_id="wf", step_id="s1",
+        task_type="research", input_data={"q": "real"},
+    )
+    result = await loop.execute_task(assignment)
+    assert result.status == "complete"
+    assert result.tokens_used == 42
 
 
 # ── Guard 3: branch-exit logging ─────────────────────────────────

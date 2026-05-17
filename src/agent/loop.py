@@ -903,14 +903,14 @@ class AgentLoop:
                         )
 
                     iterations_executed = iteration + 1
-                    # Bug 5 (pathological-success rejection): if we somehow
-                    # reach this branch with zero iterations AND zero tokens
-                    # spent, something fundamental is wrong (corrupt
-                    # checkpoint, mocked LLM that no-ops, double-completion
+                    # Bug 5 (pathological-success rejection): catch the ghost
+                    # completion signature — first-iteration completion with
+                    # zero LLM tokens spent. That combination means the LLM
+                    # never really got called (mocked no-op, checkpoint
+                    # resurrection of a finished state, double-completion
                     # race). Downgrade to a loud failure rather than reporting
-                    # a 3s pending→done with empty logs. This is a belt-and-
-                    # suspenders guard; it cannot fire in legitimate runs.
-                    if iterations_executed <= 0 and total_tokens <= 0:
+                    # a sub-second pending→done with empty logs.
+                    if iterations_executed == 1 and total_tokens == 0:
                         logger.error(
                             "execute_task pathological success guard tripped "
                             "for task=%s: iterations=%d tokens=%d — downgrading "
@@ -1437,6 +1437,7 @@ class AgentLoop:
                 messages: list[dict] = [{"role": "user", "content": message, "_origin": "system:heartbeat"}]
 
                 for _iteration in range(max_iters):
+                    self._bump_liveness()
                     if self._cancel_requested:
                         self._cancel_requested = False
                         self.state = "idle"
@@ -1499,6 +1500,11 @@ class AgentLoop:
                         messages=messages,
                         tools=iter_tools,
                     )
+                    # Bug 1 (codex P2 r2): tick after the LLM call returns —
+                    # a single deep-research call can run >5 min, and bumping
+                    # only at iteration head would let the staleness check fire
+                    # during a perfectly healthy turn.
+                    self._bump_liveness()
                     total_tokens += llm_response.tokens_used
 
                     # Early cancel check after LLM call
@@ -2348,6 +2354,11 @@ class AgentLoop:
                     messages=self._chat_messages,
                     tools=self.skills.get_tool_definitions(**self._skill_filter_kw) or None,
                 )
+                # Bug 1 (codex P2 r2): tick after the LLM call returns —
+                # a single deep-research call can run >5 min, and bumping
+                # only at iteration head would let the staleness check fire
+                # during a perfectly healthy turn.
+                self._bump_liveness()
                 total_tokens += llm_response.tokens_used
 
                 if not llm_response.tool_calls:
@@ -2424,6 +2435,12 @@ class AgentLoop:
                                 "tool_call_id": entry["id"],
                                 "content": json.dumps({"error": f"Internal error: {tool_err}"}),
                             })
+                # Bug 1 (codex P2 r2): tick after tool execution — a
+                # long-running shell or browser action can sit at the
+                # 300s _TOOL_TIMEOUT cap. Without this bump the next
+                # iteration head might already be past the staleness
+                # threshold even though the loop is healthy.
+                self._bump_liveness()
                 self._chat_total_rounds += 1
 
                 # Rebuild system prompt if operator playbook state changed
@@ -2869,6 +2886,11 @@ class AgentLoop:
                         self.llm.chat, system=system, messages=self._chat_messages, tools=tools,
                     )
 
+                # Bug 1 (codex P2 r2): tick after the LLM call returns —
+                # a single deep-research call can run >5 min, and bumping
+                # only at iteration head would let the staleness check fire
+                # during a perfectly healthy turn.
+                self._bump_liveness()
                 total_tokens += llm_response.tokens_used
 
                 if not llm_response.tool_calls:
@@ -2963,6 +2985,12 @@ class AgentLoop:
                                 "name": llm_response.tool_calls[idx].name,
                                 "output": {"error": str(tool_err)},
                             }
+                # Bug 1 (codex P2 r2): tick after tool execution — a
+                # long-running shell or browser action can sit at the
+                # 300s _TOOL_TIMEOUT cap. Without this bump the next
+                # iteration head might already be past the staleness
+                # threshold even though the loop is healthy.
+                self._bump_liveness()
                 self._chat_total_rounds += 1
 
                 # Rebuild system prompt if operator playbook state changed
