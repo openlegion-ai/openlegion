@@ -1497,6 +1497,33 @@ class AgentLoop:
 
         return "\n\n".join(parts)
 
+    @staticmethod
+    def _chat_result_failure_reason(result: dict) -> str | None:
+        """Return a failure-reason string if ``result`` carries a known
+        ``_chat_inner`` failure marker, else None.
+
+        Codex r10: ``_chat_inner`` catches ``LLMAuthError``,
+        ``LLMConfigError``, and bare ``Exception`` and returns ordinary
+        result dicts tagged with ``auth_failure``, ``config_error``, or
+        ``exception_caught`` respectively. ``tool_limit_reached`` is
+        already in the result envelope for bounded-iteration exits.
+        The chat() auto-close site checks these BEFORE the
+        lazy-completion guard so a failure after ≥1 tool call doesn't
+        slip past the empty-tool_outputs check and auto-close as
+        ``done``.
+        """
+        if not isinstance(result, dict):
+            return None
+        if result.get("tool_limit_reached"):
+            return "max_iterations_reached"
+        if result.get("auth_failure"):
+            return f"auth_failure: {(result.get('response') or '')[:400]}"
+        if result.get("config_error"):
+            return f"config_error: {(result.get('response') or '')[:400]}"
+        if result.get("exception_caught"):
+            return f"exception: {(result.get('response') or '')[:400]}"
+        return None
+
     def _is_structured_final(self, content: str | None) -> bool:
         """True iff ``content`` is the documented final-answer contract.
 
@@ -2195,6 +2222,18 @@ class AgentLoop:
                 try:
                     try:
                         result = await self._chat_inner(user_message)
+                    except asyncio.CancelledError:
+                        # Codex r10 (MEDIUM): _chat_inner re-raises
+                        # CancelledError, which is BaseException and slips
+                        # past the ``except Exception`` arm below. Without
+                        # this branch the durable task stays at
+                        # ``working`` forever after a cancellation.
+                        if task_id:
+                            await self._auto_close_task(
+                                task_id, "cancelled",
+                                error="chat_cancelled",
+                            )
+                        raise
                     except Exception as e:
                         # Auto-fail the originating task before propagating.
                         if task_id:
@@ -2203,33 +2242,36 @@ class AgentLoop:
                                 error=str(e)[:500],
                             )
                         raise
-                    # Auto-close on success (and special-case the
-                    # ``tool_limit_reached`` exit, which _chat_inner returns
-                    # as a normal dict — we treat that as ``failed`` with a
-                    # canonical ``max_iterations_reached`` error so the
-                    # originating agent can distinguish exhaustion from
-                    # successful completion).
+                    # Auto-close on success. Three terminal branches:
+                    #   1. Failure markers in ``result`` → ``failed``. Codex
+                    #      r10: ``_chat_inner`` catches LLMAuthError /
+                    #      LLMConfigError / generic Exception and returns
+                    #      a normal-shaped dict tagged with the relevant
+                    #      flag (``auth_failure`` / ``config_error`` /
+                    #      ``exception_caught``) plus ``tool_limit_reached``
+                    #      for the bounded-iteration exit. Without this
+                    #      check, an exception fired AFTER one or more
+                    #      tool calls would surface as a result with
+                    #      non-empty ``tool_outputs`` and slip past the
+                    #      lazy-completion guard → task auto-closes as
+                    #      ``done`` despite the failure.
+                    #   2. Lazy-completion guard (codex r9): empty
+                    #      ``tool_outputs`` AND non-structured response.
+                    #      Handoff tasks must perform work via tools or
+                    #      return ``{"result": {...}}``.
+                    #   3. Success → ``done`` with response prefix as
+                    #      summary.
                     if task_id:
-                        if result.get("tool_limit_reached"):
+                        failure_reason = self._chat_result_failure_reason(result)
+                        if failure_reason is not None:
+                            logger.error(
+                                "chat handoff task=%s closing as failed: %s",
+                                task_id, failure_reason,
+                            )
                             await self._auto_close_task(
-                                task_id, "failed",
-                                error="max_iterations_reached",
+                                task_id, "failed", error=failure_reason,
                             )
                         else:
-                            # Bug F (codex r9): the lazy-completion guard in
-                            # execute_task didn't cover the production
-                            # handoff path. Lane dispatch routes durable
-                            # tasks through ``/chat`` → ``loop.chat()`` with
-                            # an ``x-task-id`` header; this auto-close site
-                            # used to mark the task ``done`` regardless of
-                            # whether real work was performed. A lazy
-                            # text-only "On it — running now" reply with
-                            # zero tool calls would close the task
-                            # successfully — the exact failure mode operator
-                            # reported. Mirror the execute_task contract: a
-                            # handoff-bound chat must either call ≥1 tool
-                            # OR return a structured ``{"result": {...}}``
-                            # payload. Otherwise auto-close as failed.
                             response_text = result.get("response") or ""
                             tool_outputs = result.get("tool_outputs") or []
                             handoff_is_lazy = (
@@ -2857,7 +2899,18 @@ class AgentLoop:
             msg = f"Error: {e}"
             if self.workspace:
                 self.workspace.append_chat_message("assistant", msg)
-            return {"response": msg, "tool_outputs": tool_outputs, "tokens_used": total_tokens}
+            # Codex r10: tag the bare-exception return with
+            # ``exception_caught`` so the chat() auto-close site can
+            # detect failures-after-tool-calls and route them to
+            # ``failed`` instead of ``done``. Without this marker, any
+            # exception that fires AFTER at least one tool dispatch
+            # would surface as a normal result dict with non-empty
+            # tool_outputs, slip past the lazy-completion guard, and
+            # auto-close the handoff task as successful.
+            return {
+                "response": msg, "tool_outputs": tool_outputs,
+                "tokens_used": total_tokens, "exception_caught": True,
+            }
 
     def _log_chat_turn(
         self, user_msg: str, assistant_msg: str,
@@ -3043,6 +3096,12 @@ class AgentLoop:
         else:
             rules += "- Use notify_user for the user; blackboard for other agents only.\n"
         rules += (
+            "- For HANDOFF tasks (dispatched via lane → /chat with an "
+            "x-task-id header): either call tools to do the work, OR "
+            "respond with a structured final answer: "
+            "{\"result\": {\"status\": \"noop\"|\"impossible\"|...}}. "
+            "A text-only \"on it\" / \"done\" acknowledgment without "
+            "tool calls auto-closes the task as failed (no_action_taken).\n"
             "- Before answering from memory, run memory_search first.\n"
             "- Use update_workspace to save lasting knowledge and user preferences.\n"
         )

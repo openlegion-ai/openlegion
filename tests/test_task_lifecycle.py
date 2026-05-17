@@ -244,6 +244,89 @@ async def test_chat_handoff_text_only_with_tool_calls_completes_as_done():
 
 
 @pytest.mark.asyncio
+async def test_chat_handoff_exception_after_tool_calls_auto_closes_as_failed():
+    """Codex r10 HIGH: _chat_inner catches LLMAuthError, LLMConfigError,
+    and bare Exception and returns ordinary result dicts (not raises).
+    If an exception fires AFTER one or more tool dispatches, the
+    result has non-empty tool_outputs and would slip past the
+    lazy-completion guard, auto-closing the task as done despite the
+    failure.
+
+    Fix: _chat_inner tags the bare-exception return with
+    exception_caught=True; the auto-close site checks
+    _chat_result_failure_reason BEFORE the lazy guard so any failure
+    marker (tool_limit_reached / auth_failure / config_error /
+    exception_caught) routes the task to failed.
+    """
+
+    loop = _make_loop_with_mocks()
+
+    # Simulate _chat_inner having partially executed (one tool output)
+    # and then hitting an exception that got swallowed into a result
+    # dict with the new exception_caught marker. The handler at
+    # ``chat()`` must detect this BEFORE the lazy guard.
+    swallowed_failure_result = {
+        "response": "Error: provider down",
+        "tool_outputs": [{"tool": "memory_save", "result": {"ok": True}}],
+        "tokens_used": 50,
+        "exception_caught": True,
+    }
+    loop._chat_inner = AsyncMock(return_value=swallowed_failure_result)
+
+    await loop.chat("save the brief", task_id="task_partial")
+
+    calls = loop.mesh_client.set_task_status.await_args_list
+    # working then failed (NOT done despite non-empty tool_outputs).
+    assert calls[-1].args == ("task_partial", "failed"), (
+        f"exception_caught marker must route to failed; got {calls}"
+    )
+    assert "exception" in (calls[-1].kwargs.get("error") or "")
+
+
+@pytest.mark.asyncio
+async def test_chat_handoff_auth_failure_routes_to_failed():
+    """Codex r10: auth_failure flag from _chat_inner must close the
+    task as failed regardless of whether tool calls preceded the
+    error (an auth failure mid-task is still a failure)."""
+    loop = _make_loop_with_mocks()
+    loop._chat_inner = AsyncMock(return_value={
+        "response": "Auth failure: token expired",
+        "tool_outputs": [{"tool": "memory_save", "result": {"ok": True}}],
+        "tokens_used": 50,
+        "auth_failure": True,
+    })
+
+    await loop.chat("do the thing", task_id="task_auth_fail")
+
+    calls = loop.mesh_client.set_task_status.await_args_list
+    assert calls[-1].args == ("task_auth_fail", "failed")
+    assert "auth_failure" in (calls[-1].kwargs.get("error") or "")
+
+
+@pytest.mark.asyncio
+async def test_chat_handoff_cancelled_error_closes_task_as_cancelled():
+    """Codex r10 MEDIUM: _chat_inner re-raises CancelledError, which is
+    BaseException (NOT Exception). The original try/except Exception in
+    chat() didn't catch it, so the durable task stayed at ``working``
+    forever after a cancellation. Fix adds an explicit
+    ``except asyncio.CancelledError`` branch that auto-closes as
+    cancelled before re-raising."""
+    import asyncio
+
+    loop = _make_loop_with_mocks()
+    loop._chat_inner = AsyncMock(side_effect=asyncio.CancelledError())
+
+    with pytest.raises(asyncio.CancelledError):
+        await loop.chat("interrupt me", task_id="task_cancelled")
+
+    calls = loop.mesh_client.set_task_status.await_args_list
+    # Two transitions: pending→working, working→cancelled.
+    assert len(calls) == 2, f"expected working+cancelled, got {calls}"
+    assert calls[0].args == ("task_cancelled", "working")
+    assert calls[1].args == ("task_cancelled", "cancelled")
+
+
+@pytest.mark.asyncio
 async def test_chat_handoff_structured_final_no_tools_completes_as_done():
     """Counter-test: a chat-path handoff that returns a structured
     ``{"result": {...}}`` payload WITHOUT calling any tools MUST still
