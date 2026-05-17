@@ -882,9 +882,35 @@ class AgentLoop:
 
                 else:
                     # LLM returned text with no tool calls.
+                    # Codex r8 (post-regression-fix audit): detect a
+                    # structured ``{"result": {...}}`` payload up front so
+                    # the iter-0 nudge can skip when the LLM already
+                    # delivered a legitimate final answer. Without this
+                    # hoist, an iter-0 structured noop with tools available
+                    # gets nudged unnecessarily — wasting a turn and risking
+                    # a false-positive lazy-completion failure if the LLM
+                    # responds with "I already told you" on iter 1.
+                    is_structured_final = False
+                    try:
+                        _parsed_final = json.loads(llm_response.content or "")
+                        _result_field = (
+                            _parsed_final.get("result")
+                            if isinstance(_parsed_final, dict) else None
+                        )
+                        if isinstance(_result_field, dict) and _result_field:
+                            is_structured_final = True
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+
                     # If this is iteration 0, the agent hasn't used any tools,
-                    # AND tools are actually available, nudge it to take action.
-                    if iteration == 0 and available_tools:
+                    # AND tools are actually available, nudge it to take action
+                    # — UNLESS the response is already a structured final
+                    # answer (no point nudging a task that's correctly done).
+                    if (
+                        iteration == 0
+                        and available_tools
+                        and not is_structured_final
+                    ):
                         messages.append({"role": "assistant", "content": llm_response.content or ""})
                         messages.append({
                             "role": "user",
@@ -963,45 +989,22 @@ class AgentLoop:
                         return result
 
                     # Bug F (lazy completion) guard: when the LLM reaches
-                    # the final-answer branch having used zero tools across
-                    # more than one iteration AND its final reply is plain
-                    # chatter (not a structured ``{"result": ...}`` JSON
-                    # response), that's a "I'll do it now" / "Done!"
-                    # acknowledgment with no real work. The iter-0 nudge
-                    # above caught a single text-only response; this catches
-                    # the case where the LLM ignored the nudge and produced
-                    # a second text-only reply. PR #918's pathological-success
-                    # guard misses this because the LLM was actually called
-                    # (tokens > 0) and content is non-empty (it's chatter).
-                    #
-                    # Codex r4: the nudge text explicitly invites a structured
-                    # final answer for genuine completion or impossibility,
-                    # so a parseable ``{"result": ...}`` payload must escape
-                    # the guard even with zero tool calls — that's a
-                    # legitimate "I can't do this because X" or "the answer
-                    # is X" outcome. We check for the top-level "result"
-                    # key (the contract documented in the nudge prompt and
-                    # honoured by ``_parse_final_output``).
-                    # Codex r5: require ``result`` to be a dict, not just
-                    # present. An LLM could otherwise paper over the guard
-                    # with ``{"result": "I'll do it now"}`` — the prompt
-                    # contract is ``{"result": {...}}`` (object), enforced
-                    # by ``_parse_final_output`` callers and the
-                    # pathological-success test fixtures.
-                    # Codex r6: also require the dict to be non-empty —
-                    # ``{"result": {}}`` is the same chatter-in-structure
-                    # bypass with a more compact payload.
-                    is_structured_final = False
-                    try:
-                        _parsed_final = json.loads(llm_response.content or "")
-                        _result_field = (
-                            _parsed_final.get("result")
-                            if isinstance(_parsed_final, dict) else None
-                        )
-                        if isinstance(_result_field, dict) and _result_field:
-                            is_structured_final = True
-                    except (json.JSONDecodeError, TypeError):
-                        pass
+                    # the final-answer branch having used zero tools AND
+                    # its reply is plain chatter (not a structured
+                    # ``{"result": {...}}`` JSON response), that's a
+                    # "I'll do it now" / "Done!" acknowledgment with no
+                    # real work. ``is_structured_final`` was computed once
+                    # at the top of this branch (line ~893) and is reused
+                    # here. PR #918's pathological-success guard misses
+                    # this case because the LLM was actually called
+                    # (tokens > 0) and content is non-empty chatter.
+                    # The structured-final contract:
+                    #  - r4: ``{"result": ...}`` payload escapes the guard
+                    #    (legitimate "impossible" / "the answer is X").
+                    #  - r5: ``result`` must be a DICT (no chatter wrapped
+                    #    as ``{"result": "I'll do it now"}``).
+                    #  - r6: dict must be NON-EMPTY (no ``{"result": {}}``
+                    #    compact bypass).
                     # Regression follow-up to #932: the prior guard required
                     # ``iterations_executed > 1`` on the assumption that the
                     # iter-0 nudge ALWAYS fires for handoff-originated tasks

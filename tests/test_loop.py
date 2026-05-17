@@ -367,6 +367,44 @@ async def test_lazy_guard_passes_iter0_structured_noop():
 
 
 @pytest.mark.asyncio
+async def test_iter0_structured_final_with_tools_skips_nudge():
+    """Codex r8: when the LLM returns a structured ``{"result": {...}}``
+    on iter 0 AND tools are available, the prior code would still nudge
+    (since the structured check was after the nudge branch). That wasted
+    a turn and risked a false-positive lazy-completion failure if the
+    LLM responded with text-only "I already told you" on iter 1.
+
+    Fix: structured-final is detected up front. The nudge branch now
+    requires ``not is_structured_final``, so a legitimate one-shot
+    structured noop with tools available completes WITHOUT nudging.
+    Verified by feeding a SINGLE LLM response: if the nudge fired,
+    the test would hit StopAsyncIteration looking for a second response.
+    """
+    structured_only = LLMResponse(
+        content='{"result": {"status": "noop", "reason": "queue empty"}}',
+        tokens_used=42,
+    )
+    # Single response — if the nudge fires, the loop will call llm.chat
+    # a second time and raise StopAsyncIteration.
+    loop = _make_loop([structured_only])
+    # Tools available — the OLD code would nudge here. New code detects
+    # structured-final and skips the nudge.
+    loop.skills.get_tool_definitions = MagicMock(
+        return_value=[{"type": "function", "function": {"name": "web_search"}}]
+    )
+    assignment = TaskAssignment(
+        workflow_id="wf1", step_id="s1", task_type="research",
+        input_data={"query": "test"},
+    )
+    result = await loop.execute_task(assignment)
+    assert result.status == "complete"
+    assert result.result == {"status": "noop", "reason": "queue empty"}
+    # Exactly one LLM call — confirms the nudge did not fire.
+    assert result.tokens_used == 42
+    assert loop.tasks_completed == 1
+
+
+@pytest.mark.asyncio
 async def test_lazy_guard_passes_iter0_with_one_tool_call():
     """Counter-test: a one-iteration tool-call followed by a final
     text response must complete. The tool dispatch increments the
