@@ -682,6 +682,29 @@ class AgentLoop:
         introspect_data = await self._fetch_introspect_cached()
         system_prompt = self._build_system_prompt(assignment, introspect_data=introspect_data)
 
+        # Bug F (codex r4): seed the tool-call counter from messages so a
+        # checkpoint-resumed task picks up where it left off; thereafter
+        # we increment locally at the dispatch site so the count survives
+        # ``maybe_compact`` dropping the assistant-with-tool_calls entry
+        # from the live ``messages`` list. The guard at the terminal
+        # branch reads this counter, not the message history.
+        tool_calls_count = sum(
+            len(m.get("tool_calls") or [])
+            for m in messages
+            if m.get("role") == "assistant"
+        )
+        # Codex r5: if we resumed past iteration 0 from a checkpoint and
+        # the seed read 0, the prior tool-call history was almost
+        # certainly compacted away — ``context.maybe_compact`` keeps a
+        # summary tail and is not tool-call-group-aware. Treat that as
+        # "at least one prior call" so the lazy-completion guard doesn't
+        # trip on a task that did real work pre-compaction. False
+        # negative (a genuinely tool-less long-running task that resumed
+        # from a checkpoint) is acceptable; false positive (failing a
+        # real task because compaction hid its tool calls) is not.
+        if start_iteration > 0 and tool_calls_count == 0:
+            tool_calls_count = 1
+
         try:
             for iteration in range(start_iteration, self.MAX_ITERATIONS):
                 self._bump_liveness()
@@ -808,6 +831,10 @@ class AgentLoop:
                         "content": llm_response.content or "",
                         "tool_calls": tool_call_entries,
                     })
+                    # Bug F (codex r4): track tool dispatches independently
+                    # of the message list so summarizing compaction can't
+                    # drop the signal mid-task.
+                    tool_calls_count += len(llm_response.tool_calls)
 
                     # Execute tools — parallel-safe tools run concurrently
                     self._current_messages = messages
@@ -930,6 +957,97 @@ class AgentLoop:
                         self._last_result = result
                         logger.info(
                             "execute_task exit branch=pathological_success_guard "
+                            "status=%s iterations=%d tokens=%d",
+                            result.status, iterations_executed, total_tokens,
+                        )
+                        return result
+
+                    # Bug F (lazy completion) guard: when the LLM reaches
+                    # the final-answer branch having used zero tools across
+                    # more than one iteration AND its final reply is plain
+                    # chatter (not a structured ``{"result": ...}`` JSON
+                    # response), that's a "I'll do it now" / "Done!"
+                    # acknowledgment with no real work. The iter-0 nudge
+                    # above caught a single text-only response; this catches
+                    # the case where the LLM ignored the nudge and produced
+                    # a second text-only reply. PR #918's pathological-success
+                    # guard misses this because the LLM was actually called
+                    # (tokens > 0) and content is non-empty (it's chatter).
+                    #
+                    # Codex r4: the nudge text explicitly invites a structured
+                    # final answer for genuine completion or impossibility,
+                    # so a parseable ``{"result": ...}`` payload must escape
+                    # the guard even with zero tool calls — that's a
+                    # legitimate "I can't do this because X" or "the answer
+                    # is X" outcome. We check for the top-level "result"
+                    # key (the contract documented in the nudge prompt and
+                    # honoured by ``_parse_final_output``).
+                    # Codex r5: require ``result`` to be a dict, not just
+                    # present. An LLM could otherwise paper over the guard
+                    # with ``{"result": "I'll do it now"}`` — the prompt
+                    # contract is ``{"result": {...}}`` (object), enforced
+                    # by ``_parse_final_output`` callers and the
+                    # pathological-success test fixtures.
+                    # Codex r6: also require the dict to be non-empty —
+                    # ``{"result": {}}`` is the same chatter-in-structure
+                    # bypass with a more compact payload.
+                    is_structured_final = False
+                    try:
+                        _parsed_final = json.loads(llm_response.content or "")
+                        _result_field = (
+                            _parsed_final.get("result")
+                            if isinstance(_parsed_final, dict) else None
+                        )
+                        if isinstance(_result_field, dict) and _result_field:
+                            is_structured_final = True
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                    if (
+                        iterations_executed > 1
+                        and tool_calls_count == 0
+                        and not is_structured_final
+                    ):
+                        self.state = "idle"
+                        self.current_task = None
+                        self.tasks_failed += 1
+                        logger.error(
+                            "execute_task lazy-completion guard tripped for "
+                            "task=%s: iterations=%d tokens=%d tool_calls=0 — "
+                            "downgrading to failed (text-only response after "
+                            "nudge; no work performed)",
+                            assignment.task_id, iterations_executed, total_tokens,
+                        )
+                        if self.workspace:
+                            self.workspace.append_activity(
+                                trigger="task",
+                                summary=(
+                                    f"Task failed (no_action_taken): "
+                                    f"{assignment.task_type} | "
+                                    f"{iterations_executed} iterations, "
+                                    f"{total_tokens} tokens, {duration_s}s | "
+                                    "LLM acknowledged without calling any tools"
+                                ),
+                                tools_used=[],
+                                duration_ms=int(duration_s * 1000),
+                                tokens_used=total_tokens,
+                                outcome="failed",
+                            )
+                        result = TaskResult(
+                            task_id=assignment.task_id,
+                            status="failed",
+                            error=(
+                                "no_action_taken: the LLM produced a text-only "
+                                "acknowledgment without calling any tools across "
+                                f"{iterations_executed} iterations. Tasks that "
+                                "reach the loop are expected to perform work via "
+                                "tools, not just acknowledge intent."
+                            ),
+                            tokens_used=total_tokens,
+                            duration_ms=int(duration_s * 1000),
+                        )
+                        self._last_result = result
+                        logger.info(
+                            "execute_task exit branch=lazy_completion_guard "
                             "status=%s iterations=%d tokens=%d",
                             result.status, iterations_executed, total_tokens,
                         )

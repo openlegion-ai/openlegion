@@ -1089,6 +1089,58 @@ class TestCoordinationV2:
         assert "research handoff" in call_kwargs["title"]
 
     @pytest.mark.asyncio
+    async def test_hand_off_v2_wake_failure_surfaces_error_field(self):
+        """Bug G (silent peer hand_off failure): when wake_agent raises
+        AFTER the task row was successfully created, the result envelope
+        must carry an ``error`` key — not just a soft ``wake_failed=true``
+        flag that LLMs routinely paper over with a "task is complete"
+        summary in their next reply.
+
+        The durable task row is still persisted in SQLite (caller can
+        retry or operator can re-wake), but the envelope is now
+        unambiguous: ``handed_off=false``, ``error="wake_failed: ..."``,
+        directive ``recovery_hint`` ("RETRY", "DO NOT mark complete").
+        """
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="scout", v2_enabled=True)
+        mc.list_agents.return_value = {"page-writer": {"role": "writer"}}
+        mc.create_task.return_value = {
+            "id": "task_orphan_42", "creator": "scout",
+            "assignee": "page-writer", "title": "x", "status": "pending",
+        }
+        # Wake fails AFTER the task row was created.
+        mc.wake_agent.side_effect = Exception("wake failed: 503 service unavailable")
+
+        result = await hand_off(
+            to="page-writer",
+            summary="brief ready for write",
+            mesh_client=mc,
+        )
+
+        # Caller MUST NOT think this succeeded.
+        assert result["handed_off"] is False
+        # Durable row exists — recipient discovery + manual re-wake stay viable.
+        assert result["task_queued"] is True
+        assert result["wake_failed"] is True
+        assert result["task_id"] == "task_orphan_42"
+        # Bug G fix: ``error`` field surfaces the failure unambiguously.
+        # LLMs trained on tool-use conventions react strongly to ``error``
+        # keys; the soft ``wake_failed=true`` flag alone was being skimmed.
+        assert "error" in result
+        assert "wake_failed" in result["error"]
+        assert "page-writer" in result["error"]
+        assert "MUST NOT report success" in result["error"]
+        assert "task_orphan_42" in result["error"]
+        # Directive recovery_hint — no "wait for heartbeat" softness,
+        # and explicitly NOT "RETRY hand_off" (codex r4: each call
+        # creates a new task row, retry would leave orphan duplicates).
+        assert "task_orphan_42" in result["recovery_hint"]
+        assert "DO NOT retry hand_off" in result["recovery_hint"]
+        assert "DO NOT mark" in result["recovery_hint"]
+        assert "operator" in result["recovery_hint"].lower()
+
+    @pytest.mark.asyncio
     async def test_hand_off_v2_with_data_writes_artifact(self):
         from src.agent.builtins.coordination_tool import hand_off
 
@@ -1408,7 +1460,8 @@ class TestHandOffWakeFailureSurfacing:
     @pytest.mark.asyncio
     async def test_hand_off_returns_wake_failed_when_wake_raises(self):
         """Legacy path: wake failure surfaces ``handed_off=False`` +
-        ``task_queued=True`` + ``wake_failed`` + ``wake_error``."""
+        ``task_queued=True`` + ``wake_failed`` + ``wake_error`` + (Bug G
+        codex r4) the new ``error`` key + directive recovery hint."""
         from src.agent.builtins.coordination_tool import hand_off
 
         mc = _make_mesh_client(agent_id="scout")
@@ -1429,6 +1482,19 @@ class TestHandOffWakeFailureSurfacing:
         assert result["wake_failed"] is True
         assert "agent container 503" in result["wake_error"]
         assert "recovery_hint" in result
+        # Bug G (codex r4): legacy path now also carries the explicit
+        # ``error`` field LLMs reliably react to, and a directive
+        # recovery hint that doesn't suggest a duplicate-creating retry.
+        assert "error" in result
+        assert "wake_failed" in result["error"]
+        assert "MUST NOT report success" in result["error"]
+        assert "DO NOT retry hand_off" in result["recovery_hint"]
+        assert "DO NOT mark" in result["recovery_hint"]
+        # task_key is the legacy locator the operator uses to look up
+        # the queued task — it must appear in both error + hint so the
+        # LLM can pass it along when escalating.
+        assert result["task_key"] in result["error"]
+        assert result["task_key"] in result["recovery_hint"]
 
     @pytest.mark.asyncio
     async def test_hand_off_success_omits_wake_failure_keys(self):
@@ -1611,5 +1677,13 @@ class TestHandOffWakeFailureSurfacing:
         # Wake-failure details remain available.
         assert result["wake_failed"] is True
         assert "network unreachable" in result["wake_error"]
-        # Recovery hint guides the LLM toward the right next action.
-        assert "heartbeat" in result["recovery_hint"].lower()
+        # Bug G fix: recovery_hint is now directive ("DO NOT retry
+        # hand_off", "DO NOT mark complete") rather than soft ("wait
+        # for heartbeat"). LLMs were papering over the soft hint and
+        # finalizing with "task complete" in their next reply. Codex
+        # r4: must NOT instruct "retry hand_off" — each call creates a
+        # new task row, retry would leave orphan duplicates.
+        assert "DO NOT retry hand_off" in result["recovery_hint"]
+        assert "DO NOT mark" in result["recovery_hint"]
+        # And the unambiguous ``error`` field LLMs reliably react to.
+        assert "wake_failed" in result["error"]

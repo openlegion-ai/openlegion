@@ -193,6 +193,70 @@ async def test_first_iteration_completion_with_tokens_stays_complete():
 
 
 @pytest.mark.asyncio
+async def test_lazy_guard_conservative_seed_on_resume_after_compaction():
+    """Bug F (codex r5): a checkpoint can be saved AFTER ``maybe_compact``
+    stripped the assistant-with-tool_calls entries from the message
+    tail. On resume, seeding ``tool_calls_count`` from the compacted
+    messages reads as 0 even though tools were called pre-checkpoint —
+    the original undercount bug. The fix conservatively sets the seed
+    to 1 when ``start_iteration > 0 AND tool_calls_count == 0``, so a
+    legitimately-busy task that resumes from a compacted checkpoint
+    does NOT trip the lazy-completion guard on its post-resume reply.
+    """
+    # The resumed LLM call returns a plain text final answer — would
+    # normally trip the guard (text-only, zero tool_calls visible in
+    # the compacted messages). The conservative seed must let it pass.
+    resumed_reply = LLMResponse(content="Done.", tokens_used=15)
+    loop = _make_loop(llm_responses=[resumed_reply], real_memory=True)
+    task_id = "task_compacted_cp"
+    assignment = TaskAssignment(
+        task_id=task_id, workflow_id="wf", step_id="s1",
+        task_type="research", input_data={"q": "x"},
+    )
+
+    # Persist a checkpoint at iteration=3 with messages that contain NO
+    # assistant-with-tool_calls entries (simulating compaction stripping
+    # them out). Only user + tool-response messages remain.
+    compacted_messages = [
+        {"role": "user", "content": "original task brief"},
+        # NOTE: the assistant-with-tool_calls record that would have
+        # carried `"tool_calls": [...]` has been compacted away. Only
+        # the user message survives in the worst-case tail.
+    ]
+
+    def _save():
+        loop.memory.save_task_checkpoint(
+            task_id=task_id,
+            messages=compacted_messages,
+            iteration=3,  # start_iteration will be 4 — well past the guard's threshold
+            tokens_used=120,
+            assignment_json=assignment.model_dump_json(),
+            budget_used_tokens=120,
+            budget_estimated_cost=0.0,
+            flush_triggered=False,
+        )
+
+    await loop.memory._run_db(_save)
+
+    # Give the agent tools so the nudge would normally fire — but the
+    # nudge only fires at iteration 0, and we're resuming at iteration 4.
+    loop.skills.get_tool_definitions = MagicMock(
+        return_value=[{"type": "function", "function": {"name": "web_search"}}]
+    )
+
+    result = await loop.execute_task(assignment)
+
+    # The lazy-completion guard MUST NOT trip — the conservative seed
+    # remembered that tools were called pre-compaction.
+    assert result.status == "complete", (
+        f"expected complete (conservative seed should suppress guard), got "
+        f"status={result.status} error={result.error}"
+    )
+    assert loop.tasks_completed == 1
+    assert loop.tasks_failed == 0
+
+
+@pytest.mark.asyncio
 async def test_first_iteration_completion_with_content_but_zero_tokens_stays_complete():
     """Codex P2 regression guard: a provider that omits usage metadata
     (e.g. Ollama, some proxies) returns tokens_used=0 for legitimate
