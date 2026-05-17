@@ -90,6 +90,16 @@ class LaneManager:
         # per the Python docs warning.
         self._forward_tasks: set[asyncio.Task] = set()
 
+    def set_tasks_store(self, store: Any) -> None:
+        """Wire the durable tasks store after construction.
+
+        ``LaneManager`` is built before the mesh app (which owns the tasks
+        store), so the bootstrap path needs to inject the store post-hoc.
+        Mirrors the ``HealthMonitor.set_queue_depth_fn`` pattern. Pass
+        ``None`` to clear.
+        """
+        self._tasks_store = store
+
     def _ensure_lane(self, agent: str) -> None:
         """Lazily create queue, worker, and tracking structures for an agent."""
         if agent not in self._queues:

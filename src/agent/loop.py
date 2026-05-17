@@ -871,11 +871,72 @@ class AgentLoop:
 
                     # LLM returned final answer -- task is done
                     result_data, promotions = self._parse_final_output(llm_response.content)
+                    duration_s = round(time.time() - start, 1)
+                    iterations_executed = iteration + 1
+
+                    # Bug 5 (pathological-success rejection): catch the ghost
+                    # completion signature — first-iteration completion with
+                    # zero LLM tokens AND empty content. That combination
+                    # means the LLM never really did work (mocked no-op,
+                    # checkpoint resurrection of a finished state, double-
+                    # completion race). Token count alone is unreliable —
+                    # some providers (Ollama, certain proxies) omit usage
+                    # metadata so a legitimate first-turn answer can read
+                    # as ``tokens_used=0``. Requiring empty content too
+                    # avoids false-positive failures for those providers.
+                    # Evaluated BEFORE success counters / logs / workspace
+                    # activity so the failure path doesn't leave inconsistent
+                    # "Task complete" entries behind (codex P3).
+                    _raw_content = (llm_response.content or "").strip()
+                    if (
+                        iterations_executed == 1
+                        and total_tokens == 0
+                        and not _raw_content
+                    ):
+                        self.state = "idle"
+                        self.current_task = None
+                        self.tasks_failed += 1
+                        logger.error(
+                            "execute_task pathological success guard tripped "
+                            "for task=%s: iterations=%d tokens=%d — downgrading "
+                            "to failed (possible checkpoint corruption)",
+                            assignment.task_id, iterations_executed, total_tokens,
+                        )
+                        if self.workspace:
+                            self.workspace.append_activity(
+                                trigger="task",
+                                summary=(
+                                    f"Task failed (pathological guard): "
+                                    f"{assignment.task_type} | "
+                                    f"{iterations_executed} iterations, "
+                                    f"{total_tokens} tokens, {duration_s}s"
+                                ),
+                                tools_used=[],
+                                duration_ms=int(duration_s * 1000),
+                                tokens_used=total_tokens,
+                                outcome="failed",
+                            )
+                        result = TaskResult(
+                            task_id=assignment.task_id,
+                            status="failed",
+                            error=(
+                                "execute_task returned success without doing "
+                                "work — possible checkpoint corruption"
+                            ),
+                            tokens_used=total_tokens,
+                            duration_ms=int(duration_s * 1000),
+                        )
+                        self._last_result = result
+                        logger.info(
+                            "execute_task exit branch=pathological_success_guard "
+                            "status=%s iterations=%d tokens=%d",
+                            result.status, iterations_executed, total_tokens,
+                        )
+                        return result
 
                     self.state = "idle"
                     self.current_task = None
                     self.tasks_completed += 1
-                    duration_s = round(time.time() - start, 1)
 
                     logger.info(
                         f"Task {assignment.task_id} complete",
@@ -901,42 +962,6 @@ class AgentLoop:
                             tokens_used=total_tokens,
                             outcome="complete",
                         )
-
-                    iterations_executed = iteration + 1
-                    # Bug 5 (pathological-success rejection): if we somehow
-                    # reach this branch with zero iterations AND zero tokens
-                    # spent, something fundamental is wrong (corrupt
-                    # checkpoint, mocked LLM that no-ops, double-completion
-                    # race). Downgrade to a loud failure rather than reporting
-                    # a 3s pending→done with empty logs. This is a belt-and-
-                    # suspenders guard; it cannot fire in legitimate runs.
-                    if iterations_executed <= 0 and total_tokens <= 0:
-                        logger.error(
-                            "execute_task pathological success guard tripped "
-                            "for task=%s: iterations=%d tokens=%d — downgrading "
-                            "to failed (possible checkpoint corruption)",
-                            assignment.task_id, iterations_executed, total_tokens,
-                        )
-                        # Roll back the success bookkeeping we just did.
-                        self.tasks_completed -= 1
-                        self.tasks_failed += 1
-                        result = TaskResult(
-                            task_id=assignment.task_id,
-                            status="failed",
-                            error=(
-                                "execute_task returned success without doing "
-                                "work — possible checkpoint corruption"
-                            ),
-                            tokens_used=total_tokens,
-                            duration_ms=int(duration_s * 1000),
-                        )
-                        self._last_result = result
-                        logger.info(
-                            "execute_task exit branch=pathological_success_guard "
-                            "status=%s iterations=%d tokens=%d",
-                            result.status, iterations_executed, total_tokens,
-                        )
-                        return result
 
                     result = TaskResult(
                         task_id=assignment.task_id,
@@ -1437,6 +1462,7 @@ class AgentLoop:
                 messages: list[dict] = [{"role": "user", "content": message, "_origin": "system:heartbeat"}]
 
                 for _iteration in range(max_iters):
+                    self._bump_liveness()
                     if self._cancel_requested:
                         self._cancel_requested = False
                         self.state = "idle"
@@ -1499,6 +1525,11 @@ class AgentLoop:
                         messages=messages,
                         tools=iter_tools,
                     )
+                    # Bug 1 (codex P2 r2): tick after the LLM call returns —
+                    # a single deep-research call can run >5 min, and bumping
+                    # only at iteration head would let the staleness check fire
+                    # during a perfectly healthy turn.
+                    self._bump_liveness()
                     total_tokens += llm_response.tokens_used
 
                     # Early cancel check after LLM call
@@ -2348,6 +2379,11 @@ class AgentLoop:
                     messages=self._chat_messages,
                     tools=self.skills.get_tool_definitions(**self._skill_filter_kw) or None,
                 )
+                # Bug 1 (codex P2 r2): tick after the LLM call returns —
+                # a single deep-research call can run >5 min, and bumping
+                # only at iteration head would let the staleness check fire
+                # during a perfectly healthy turn.
+                self._bump_liveness()
                 total_tokens += llm_response.tokens_used
 
                 if not llm_response.tool_calls:
@@ -2424,6 +2460,12 @@ class AgentLoop:
                                 "tool_call_id": entry["id"],
                                 "content": json.dumps({"error": f"Internal error: {tool_err}"}),
                             })
+                # Bug 1 (codex P2 r2): tick after tool execution — a
+                # long-running shell or browser action can sit at the
+                # 300s _TOOL_TIMEOUT cap. Without this bump the next
+                # iteration head might already be past the staleness
+                # threshold even though the loop is healthy.
+                self._bump_liveness()
                 self._chat_total_rounds += 1
 
                 # Rebuild system prompt if operator playbook state changed
@@ -2869,6 +2911,11 @@ class AgentLoop:
                         self.llm.chat, system=system, messages=self._chat_messages, tools=tools,
                     )
 
+                # Bug 1 (codex P2 r2): tick after the LLM call returns —
+                # a single deep-research call can run >5 min, and bumping
+                # only at iteration head would let the staleness check fire
+                # during a perfectly healthy turn.
+                self._bump_liveness()
                 total_tokens += llm_response.tokens_used
 
                 if not llm_response.tool_calls:
@@ -2963,6 +3010,12 @@ class AgentLoop:
                                 "name": llm_response.tool_calls[idx].name,
                                 "output": {"error": str(tool_err)},
                             }
+                # Bug 1 (codex P2 r2): tick after tool execution — a
+                # long-running shell or browser action can sit at the
+                # 300s _TOOL_TIMEOUT cap. Without this bump the next
+                # iteration head might already be past the staleness
+                # threshold even though the loop is healthy.
+                self._bump_liveness()
                 self._chat_total_rounds += 1
 
                 # Rebuild system prompt if operator playbook state changed

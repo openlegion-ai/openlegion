@@ -221,6 +221,47 @@ class TestHealthLivenessCheck:
         assert h.status == "healthy"
 
 
+class TestChatLoopBumpsMidIteration:
+    """Codex P2 r2 added post-LLM and post-tool bumps to ``execute_task``.
+    Mirror coverage for ``_chat_inner``: a single chat round with a tool
+    call should bump liveness more than once (head + post-LLM + post-tool),
+    so long reasoning turns can't trip the staleness check."""
+
+    @pytest.mark.asyncio
+    async def test_chat_inner_bumps_more_than_once_per_round(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from src.shared.types import LLMResponse, ToolCallInfo
+
+        # Import the same factory used by the existing chat tests.
+        from tests.test_loop import _make_loop
+
+        tool_response = LLMResponse(
+            content="",
+            tool_calls=[ToolCallInfo(name="search", arguments={"q": "x"})],
+            tokens_used=10,
+        )
+        final_response = LLMResponse(content="done", tokens_used=20)
+        loop = _make_loop([tool_response, final_response])
+        loop.skills.get_tool_definitions = MagicMock(
+            return_value=[{"type": "function", "function": {"name": "search"}}]
+        )
+        loop.skills.execute = AsyncMock(return_value={"result": "ok"})
+
+        before = loop._iterations_since_boot
+        await loop.chat("trigger one tool round")
+        after = loop._iterations_since_boot
+
+        # Two rounds (one with a tool, one with the final text). Iteration-
+        # head alone would yield +2. Post-LLM + post-tool bumps should push
+        # the delta to at least +3 (head + tool batch on round 1, head on
+        # round 2 — post-LLM is also expected, so realistically +5).
+        assert after - before >= 3, (
+            f"expected at least 3 bumps for one tool-round chat, "
+            f"got delta={after - before} (head-only would yield 2)"
+        )
+
+
 class TestLaneQueueDepthHelper:
     """``LaneManager.get_queue_depth`` underpins the staleness branch."""
 
