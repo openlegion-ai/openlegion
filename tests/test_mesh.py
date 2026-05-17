@@ -95,8 +95,13 @@ def test_ttl_gc_runs_once_under_concurrent_writes(tmp_path):
 
     bb._gc_expired_unlocked = counting_gc
 
-    # Force the last GC time far in the past so the next call triggers GC
-    bb._last_ttl_gc = 0
+    # Force the last GC time far in the past so the next call triggers GC.
+    # ``float("-inf")`` is required because ``time.monotonic()`` is unsigned
+    # and can return values < _TTL_GC_INTERVAL on cold CI runners; setting
+    # ``_last_ttl_gc = 0`` would make ``now - 0 < 60`` evaluate True and the
+    # GC would silently skip (matches the sentinel pattern in
+    # ``src/host/traces.py:29``).
+    bb._last_ttl_gc = float("-inf")
 
     start_event = threading.Event()
 
