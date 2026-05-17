@@ -890,17 +890,12 @@ class AgentLoop:
                     # gets nudged unnecessarily — wasting a turn and risking
                     # a false-positive lazy-completion failure if the LLM
                     # responds with "I already told you" on iter 1.
-                    is_structured_final = False
-                    try:
-                        _parsed_final = json.loads(llm_response.content or "")
-                        _result_field = (
-                            _parsed_final.get("result")
-                            if isinstance(_parsed_final, dict) else None
-                        )
-                        if isinstance(_result_field, dict) and _result_field:
-                            is_structured_final = True
-                    except (json.JSONDecodeError, TypeError):
-                        pass
+                    # Codex r9: extracted to ``_is_structured_final`` so the
+                    # chat-path handoff auto-close can apply the same check
+                    # without code duplication.
+                    is_structured_final = self._is_structured_final(
+                        llm_response.content,
+                    )
 
                     # If this is iteration 0, the agent hasn't used any tools,
                     # AND tools are actually available, nudge it to take action
@@ -1501,6 +1496,25 @@ class AgentLoop:
                 parts.append(runtime_ctx)
 
         return "\n\n".join(parts)
+
+    def _is_structured_final(self, content: str | None) -> bool:
+        """True iff ``content`` is the documented final-answer contract.
+
+        The contract is whole-content JSON: ``{"result": {...}}`` where
+        ``result`` is a non-empty dict. Rejects scalar/empty/list/null
+        ``result`` values and any non-JSON wrapper (fenced markdown,
+        prose-wrapped JSON, etc.). Single source of truth for the
+        lazy-completion guards in ``execute_task`` and the handoff
+        auto-close in ``chat``.
+        """
+        try:
+            parsed = json.loads(content or "")
+        except (json.JSONDecodeError, TypeError):
+            return False
+        if not isinstance(parsed, dict):
+            return False
+        result_field = parsed.get("result")
+        return isinstance(result_field, dict) and bool(result_field)
 
     def _parse_final_output(self, content: str) -> tuple[dict, dict]:
         """Parse the LLM's final response into result data and blackboard promotions."""
@@ -2202,11 +2216,59 @@ class AgentLoop:
                                 error="max_iterations_reached",
                             )
                         else:
-                            summary = (result.get("response") or "")[:500]
-                            await self._auto_close_task(
-                                task_id, "done",
-                                result_payload={"summary": summary},
+                            # Bug F (codex r9): the lazy-completion guard in
+                            # execute_task didn't cover the production
+                            # handoff path. Lane dispatch routes durable
+                            # tasks through ``/chat`` → ``loop.chat()`` with
+                            # an ``x-task-id`` header; this auto-close site
+                            # used to mark the task ``done`` regardless of
+                            # whether real work was performed. A lazy
+                            # text-only "On it — running now" reply with
+                            # zero tool calls would close the task
+                            # successfully — the exact failure mode operator
+                            # reported. Mirror the execute_task contract: a
+                            # handoff-bound chat must either call ≥1 tool
+                            # OR return a structured ``{"result": {...}}``
+                            # payload. Otherwise auto-close as failed.
+                            response_text = result.get("response") or ""
+                            tool_outputs = result.get("tool_outputs") or []
+                            handoff_is_lazy = (
+                                not tool_outputs
+                                and not self._is_structured_final(response_text)
                             )
+                            if handoff_is_lazy:
+                                logger.error(
+                                    "chat lazy-completion guard tripped for "
+                                    "handoff task=%s: tool_outputs=0 "
+                                    "structured_final=False — auto-closing "
+                                    "as failed (LLM produced a text-only "
+                                    "response without calling any tools and "
+                                    "without returning a structured "
+                                    "{\"result\": {...}} payload)",
+                                    task_id,
+                                )
+                                await self._auto_close_task(
+                                    task_id, "failed",
+                                    error=(
+                                        "no_action_taken: the recipient "
+                                        "produced a text-only response "
+                                        "without calling any tools and "
+                                        "without returning a structured "
+                                        "{\"result\": {...}} payload. "
+                                        "Handoff tasks are expected to "
+                                        "either perform work via tools OR "
+                                        "return a structured result "
+                                        "envelope (e.g. {\"result\": "
+                                        "{\"status\": \"noop\", \"reason\": "
+                                        "\"...\"}})."
+                                    ),
+                                )
+                            else:
+                                summary = response_text[:500]
+                                await self._auto_close_task(
+                                    task_id, "done",
+                                    result_payload={"summary": summary},
+                                )
                     return result
                 finally:
                     await self._checkpoint_chat_session()

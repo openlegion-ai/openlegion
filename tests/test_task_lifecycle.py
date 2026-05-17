@@ -91,8 +91,14 @@ def _make_loop_with_mocks():
     skills.get_loop_exempt_tools = MagicMock(return_value=frozenset())
 
     llm = MagicMock()
+    # Default mock returns a STRUCTURED final answer so the chat-path
+    # handoff lazy-completion guard (codex r9 follow-up) lets the
+    # auto-close → done transition land. Lazy text-only mocks now
+    # auto-fail under that guard — see ``test_chat_lazy_completion_*``
+    # below for the failure-path tests.
     llm.chat = AsyncMock(return_value=LLMResponse(
-        content="Hello, I finished.", tokens_used=10,
+        content='{"result": {"summary": "Hello, I finished."}}',
+        tokens_used=10,
     ))
     llm.default_model = "test-model"
 
@@ -131,8 +137,10 @@ async def test_chat_auto_closes_task_on_success():
     assert calls[0].args == ("task_xyz", "working")
     assert calls[1].args == ("task_xyz", "done")
     # Summary should carry the response prefix (truncated to 500 chars).
-    assert calls[1].kwargs.get("result", {}).get("summary", "").startswith(
-        "Hello, I finished",
+    # The structured ``{"result": ...}`` mock content survives intact —
+    # auto-close packs the raw response prefix as ``summary``.
+    assert "Hello, I finished" in calls[1].kwargs.get("result", {}).get(
+        "summary", "",
     )
 
 
@@ -154,6 +162,107 @@ async def test_chat_auto_closes_task_as_failed_on_exception():
     assert calls[0].args == ("task_fail", "working")
     assert calls[1].args == ("task_fail", "failed")
     assert "boom inside chat" in (calls[1].kwargs.get("error") or "")
+
+
+# ── 3b. Bug F (codex r9) chat-path lazy-completion guard ─────────
+
+@pytest.mark.asyncio
+async def test_chat_handoff_text_only_no_tools_auto_closes_as_failed():
+    """Codex r9 finding: the lazy-completion guard in execute_task did
+    not cover the production handoff path. Lane dispatch posts the work
+    through ``/chat`` → ``loop.chat(task_id=...)``, which used to
+    auto-close as ``done`` regardless of whether real work was done.
+
+    The trend-scout bug operator hit (text-only "On it — running now"
+    reply with zero tool calls) was on THIS path, not execute_task.
+    Mirror the contract: a handoff-bound chat must either call ≥1
+    tool OR return a structured ``{"result": {...}}`` payload.
+    """
+    from src.shared.types import LLMResponse
+
+    loop = _make_loop_with_mocks()
+    # Override default mock with the operator's reproduction shape:
+    # lazy text-only response, no tools.
+    loop.llm.chat = AsyncMock(return_value=LLMResponse(
+        content="On it — running now. I'll pick a topic and hand off shortly.",
+        tokens_used=42,
+    ))
+
+    result = await loop.chat("Please pick a fresh topic.", task_id="task_lazy")
+
+    # Two status calls: pending→working at start, working→failed via the
+    # lazy-completion guard at the auto-close site.
+    calls = loop.mesh_client.set_task_status.await_args_list
+    assert len(calls) == 2, f"expected working+failed, got {calls}"
+    assert calls[0].args == ("task_lazy", "working")
+    assert calls[1].args == ("task_lazy", "failed")
+    error_msg = calls[1].kwargs.get("error") or ""
+    assert "no_action_taken" in error_msg
+    # The chat call itself still returns the original response — the
+    # auto-close failure annotates the task row, doesn't crash the
+    # request.
+    assert "response" in result
+
+
+@pytest.mark.asyncio
+async def test_chat_handoff_text_only_with_tool_calls_completes_as_done():
+    """Counter-test: a chat-path handoff that calls at least one tool
+    AND then summarizes in text MUST still complete. The tool dispatch
+    is the work signal — text final after tools is the normal pattern.
+    """
+    from src.shared.types import LLMResponse, ToolCallInfo
+
+    loop = _make_loop_with_mocks()
+    # Two-response sequence: iter 0 tool call → iter 1 text summary.
+    loop.llm.chat = AsyncMock(side_effect=[
+        LLMResponse(
+            content="", tokens_used=20,
+            tool_calls=[ToolCallInfo(
+                name="memory_save", arguments={"content": "noted"},
+            )],
+        ),
+        LLMResponse(
+            content="Saved the brief and notified the next agent.",
+            tokens_used=30,
+        ),
+    ])
+    loop.skills.get_tool_definitions = MagicMock(return_value=[
+        {"type": "function", "function": {"name": "memory_save"}},
+    ])
+    loop.skills.execute = AsyncMock(return_value={"ok": True})
+
+    await loop.chat("save the brief", task_id="task_real_work")
+
+    calls = loop.mesh_client.set_task_status.await_args_list
+    assert calls[-1].args == ("task_real_work", "done"), (
+        f"task with real tool calls must auto-close as done; got {calls}"
+    )
+    # The summary carries the text-final response.
+    assert "Saved the brief" in calls[-1].kwargs.get("result", {}).get(
+        "summary", "",
+    )
+
+
+@pytest.mark.asyncio
+async def test_chat_handoff_structured_final_no_tools_completes_as_done():
+    """Counter-test: a chat-path handoff that returns a structured
+    ``{"result": {...}}`` payload WITHOUT calling any tools MUST still
+    complete — that's the documented contract for legitimate noop /
+    impossibility outcomes."""
+    from src.shared.types import LLMResponse
+
+    loop = _make_loop_with_mocks()
+    loop.llm.chat = AsyncMock(return_value=LLMResponse(
+        content='{"result": {"status": "noop", "reason": "queue empty"}}',
+        tokens_used=40,
+    ))
+
+    await loop.chat("check queue", task_id="task_noop")
+
+    calls = loop.mesh_client.set_task_status.await_args_list
+    assert calls[-1].args == ("task_noop", "done"), (
+        f"structured-final handoff must auto-close as done; got {calls}"
+    )
 
 
 # ── 4. legacy path (no task_id) skips auto-close ─────────────────
