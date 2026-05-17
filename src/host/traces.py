@@ -15,6 +15,7 @@ import threading
 import time
 from pathlib import Path
 
+from src.shared.sqlite_helpers import open_db
 from src.shared.utils import setup_logging
 
 logger = setup_logging("host.traces")
@@ -28,9 +29,8 @@ class TraceStore:
         self._last_age_gc: float = -300.0  # ensure first GC runs regardless of monotonic() epoch
         self._gc_lock = threading.Lock()
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._conn = open_db(db_path, busy_timeout_ms=5000)
         self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS traces (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,

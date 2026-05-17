@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from src.shared.sqlite_helpers import open_db
 from src.shared.types import AgentMessage, BlackboardEntry
 from src.shared.utils import setup_logging
 
@@ -47,9 +48,8 @@ class Blackboard:
     """
 
     def __init__(self, db_path: str = "blackboard.db", event_bus=None):
-        self.db = sqlite3.connect(db_path, check_same_thread=False)
+        self.db = open_db(db_path)
         self.db.execute("PRAGMA journal_mode=WAL")
-        self.db.execute("PRAGMA busy_timeout=30000")
         self._write_lock = threading.Lock()
         self._event_bus = event_bus
         self._last_ttl_gc: float = 0.0
@@ -610,9 +610,8 @@ class PubSub:
         self._lock = threading.Lock()
 
         if db_path is not None:
-            self._db = sqlite3.connect(db_path, check_same_thread=False)
+            self._db = open_db(db_path)
             self._db.execute("PRAGMA journal_mode=WAL")
-            self._db.execute("PRAGMA busy_timeout=30000")
             self._init_schema()
             self._load_subscriptions()
             self._load_events()

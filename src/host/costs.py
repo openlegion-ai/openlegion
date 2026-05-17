@@ -9,11 +9,11 @@ Storage: SQLite (lightweight, no external services).
 from __future__ import annotations
 
 import json
-import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from src.shared.models import estimate_cost, get_model_cost  # noqa: F401 — re-export
+from src.shared.sqlite_helpers import open_db
 from src.shared.utils import setup_logging
 
 logger = setup_logging("host.costs")
@@ -38,9 +38,8 @@ class CostTracker:
 
     def __init__(self, db_path: str = "data/costs.db"):
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(db_path, check_same_thread=False)
+        self.db = open_db(db_path)
         self.db.execute("PRAGMA journal_mode=WAL")
-        self.db.execute("PRAGMA busy_timeout=30000")
         self._init_schema()
         self.budgets: dict[str, dict[str, float]] = {}
         # ``_team_budgets`` (formerly ``_project_budgets``). Back-compat
