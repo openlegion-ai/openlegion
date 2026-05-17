@@ -14,7 +14,7 @@ Comprehensive documentation for the OpenLegion multi-agent runtime.
 | [Configuration](configuration.md) | All config files, environment variables, agent definitions |
 | [Channels](channels.md) | Telegram, Discord, Slack, WhatsApp, and webhook channel setup |
 | [Dashboard](dashboard.md) | Real-time web dashboard for fleet observability and management |
-| [Triggering & Automation](triggering.md) | Cron, heartbeats, webhooks, file watchers |
+| [Triggering & Automation](triggering.md) | Cron, heartbeats, webhooks |
 | [Development & Testing](development.md) | Testing guide, code patterns, adding new components |
 
 ## Quick Links

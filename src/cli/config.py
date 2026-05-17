@@ -614,7 +614,7 @@ def _suppress_host_logs() -> None:
     for name in [
         "host", "host.credentials",
         "host.mesh", "host.costs", "host.permissions", "host.cron", "host.webhooks",
-        "host.health", "host.lanes", "host.runtime", "host.watchers",
+        "host.health", "host.lanes", "host.runtime",
         "channels", "channels.base", "channels.telegram", "channels.discord",
         "channels.slack", "channels.whatsapp",
     ]:
