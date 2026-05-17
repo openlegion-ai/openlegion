@@ -16,8 +16,14 @@ UTC = timezone.utc
 def dumps_safe(obj: Any, **kwargs: Any) -> str:
     """json.dumps with `default=str` — handles datetime, UUID, Decimal, Path.
 
-    Any other json.dumps kwargs (indent, sort_keys, ensure_ascii, etc.)
-    pass through unchanged.
+    Other ``json.dumps`` kwargs (``indent``, ``sort_keys``, ``separators``,
+    ``ensure_ascii``, …) pass through unchanged.
+
+    The helper enforces ``default=str``: do NOT pass ``default=`` (raises
+    ``TypeError: multiple values for keyword argument 'default'``) or
+    ``cls=CustomEncoder`` (custom encoder's default() may conflict with
+    the forced ``str`` callable). If you need a different encoder, call
+    ``json.dumps`` directly at that site.
     """
     return json.dumps(obj, default=str, **kwargs)
 
