@@ -370,7 +370,7 @@ Agents can use `notify_user` at any time -- during cron jobs, heartbeats, or reg
 | `src/host/server.py` | Cron management API |
 | `src/host/webhooks.py` | Webhook router, HMAC verification, 1 MB body cap |
 | `src/host/mesh.py` | Pub/Sub system and `MessageRouter` |
-| `src/host/lanes.py` | Per-agent FIFO task queues (followup/steer/collect) |
+| `src/host/lanes.py` | Per-agent FIFO task queues (followup/steer) |
 | `src/agent/builtins/mesh_tool.py` | Agent-side `set_cron`, `list_cron`, `remove_cron`, `publish_event`, `subscribe_event` tools |
 | `src/agent/builtins/coordination_tool.py` | `hand_off`, `check_inbox`, `update_status`, `complete_task` |
 | `src/dashboard/server.py` | Webhook creation API (`POST /api/webhooks`) |

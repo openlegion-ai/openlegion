@@ -71,7 +71,7 @@ def metrics_app(tmp_path):
     cost_tracker = CostTracker(db_path=str(tmp_path / "costs.db"))
     lane_manager = MagicMock()
     lane_manager.get_status.return_value = {
-        "alpha": {"queued": 0, "busy": False, "pending": 0, "collected": 0},
+        "alpha": {"queued": 0, "busy": False, "pending": 0},
     }
 
     app = create_mesh_app(
