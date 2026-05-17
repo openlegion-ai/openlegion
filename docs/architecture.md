@@ -81,7 +81,6 @@ The mesh host runs on the user's machine as a single FastAPI process. It is the 
 | `failover.py` | Model health tracking and failover chains (in-memory). |
 | `webhooks.py` | Named webhook endpoints (sanitized payloads, 1MB body size limit, optional HMAC). |
 | `watchers.py` | File watcher — polling at 5s intervals, not inotify. |
-| `containers.py` | Backward-compat alias `ContainerManager = DockerBackend` (used only by E2E tests). |
 | `traces.py` | Request tracing + grouped summaries. Uses `busy_timeout=5000` (lower than the 30000 used elsewhere). |
 | `transcript.py` | Provider-specific transcript sanitization (Gemini/Mistral tool-id formats, tool-call pairing). |
 | `wallet.py` | Wallet signing service for Ethereum + Solana. Master seed only on the mesh. |

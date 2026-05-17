@@ -372,7 +372,6 @@ openlegion/
 │   │   ├── failover.py          # LLM model failover logic
 │   │   ├── webhooks.py          # Webhook manager
 │   │   ├── watchers.py          # File watchers
-│   │   ├── containers.py        # Backward-compat alias for DockerBackend
 │   │   ├── traces.py            # Request tracing and diagnostics
 │   │   ├── transcript.py        # Provider-specific transcript sanitization
 │   │   ├── wallet.py            # Ethereum + Solana wallet signing service
