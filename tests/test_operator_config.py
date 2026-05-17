@@ -253,12 +253,12 @@ class TestOperatorConstants:
         # tests/test_operator_internet_access.py).
         # Project→team rename PR 2 adds 8 canonical *_team tools alongside
         # the legacy *_project entries → 40.
-        # Seam follow-up Fix 1 (this PR) adds 9 missing operator-gated
-        # tools: read_agent_config + propose_edit (re-added as deprecated
-        # stub for back-compat) + list_peer_artifacts + read_peer_artifact
+        # Seam follow-up Fix 1 (this PR) adds 8 missing operator-gated
+        # tools: read_agent_config + list_peer_artifacts + read_peer_artifact
         # + list_available_models + memory_save + memory_search
-        # + update_workspace + read_file → 49.
-        assert len(_OPERATOR_ALLOWED_TOOLS) == 49
+        # + update_workspace + read_file → 48. (propose_edit was originally
+        # in this set but was retired in PR #927.)
+        assert len(_OPERATOR_ALLOWED_TOOLS) == 48
         assert len(_OPERATOR_HEARTBEAT_TOOLS) == 4
         # Heartbeat tools should be a subset of allowed tools
         assert set(_OPERATOR_HEARTBEAT_TOOLS).issubset(set(_OPERATOR_ALLOWED_TOOLS))
@@ -292,17 +292,18 @@ class TestOperatorConstants:
     def test_pr1_edit_tools_present(self):
         """PR 1 — edit_agent + undo_change in allowlist.
 
-        Seam follow-up Fix 1: propose_edit re-added as deprecated stub
-        for back-compat so in-flight conversations that still call it
-        get routed through edit_agent instead of failing with
-        "tool not found". confirm_edit is kept for the same reason.
+        confirm_edit is kept as a deprecated stub for back-compat with
+        in-flight LLM conversations that may still emit it. propose_edit
+        was retired in PR #927 (no longer registered as a @skill, so
+        listing it in the allowlist would be a dangling reference).
         """
         from src.cli.config import _OPERATOR_ALLOWED_TOOLS
         assert "edit_agent" in _OPERATOR_ALLOWED_TOOLS
         assert "undo_change" in _OPERATOR_ALLOWED_TOOLS
-        # Deprecated stubs kept in the allowlist for back-compat.
-        assert "propose_edit" in _OPERATOR_ALLOWED_TOOLS
+        # confirm_edit kept as a deprecated stub.
         assert "confirm_edit" in _OPERATOR_ALLOWED_TOOLS
+        # propose_edit retired in #927 — must NOT be in the allowlist.
+        assert "propose_edit" not in _OPERATOR_ALLOWED_TOOLS
 
     def test_seam_followup_fix1_missing_tools_added(self):
         """Seam follow-up Fix 1: 9 operator-gated tools that were missing
