@@ -305,9 +305,10 @@ receipt + undo is the safety net — but the user sees that you initiated it.
 
 ## Deprecated
 
-`propose_edit` and `confirm_edit` are deprecated no-op shims. `propose_edit` \
-routes through edit_agent (immediate-apply). `confirm_edit` is a no-op. \
-Don't call either from new conversations — use edit_agent directly.
+`confirm_edit` is a deprecated no-op kept only so in-flight LLM \
+conversations that still emit it don't error. Edits apply immediately \
+via edit_agent and emit an undo receipt; there is nothing to confirm. \
+Don't call confirm_edit from new conversations — use edit_agent directly.
 
 ## Self-cleanup
 
@@ -436,12 +437,11 @@ _TOOL_PLAYBOOK_MAP: dict[str, str] = {
     "set_project_goal": "team_build",
     "edit_agent": "edit",
     "undo_change": "edit",
-    # ``propose_edit`` / ``confirm_edit`` retired as gated flows — they
-    # remain registered in operator_tools.py as deprecated stubs (apply-
-    # immediately for back-compat with any in-flight LLM conversations
-    # that already mentioned them), but the operator's allowed-tools
-    # list and playbook map both advertise only ``edit_agent`` so the
-    # model picks one path.
+    # ``confirm_edit`` retired as a gated flow — it remains registered
+    # in operator_tools.py as a deprecated no-op stub for back-compat
+    # with any in-flight LLM conversations that already mentioned it,
+    # but the operator's allowed-tools list and playbook map both
+    # advertise only ``edit_agent`` so the model picks one path.
     "save_observations": "monitor",
     "request_credential": "credentials",
     "request_browser_login": "credentials",

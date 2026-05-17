@@ -18,7 +18,7 @@ async def test_heartbeat_restricts_operator_tools():
     # Simulate operator: set _allowed_tools to a superset
     operator_tools = frozenset({
         "list_agents", "get_agent_profile", "get_system_status",
-        "notify_user", "save_observations", "hand_off", "propose_edit", "confirm_edit",
+        "notify_user", "save_observations", "hand_off", "confirm_edit",
     })
     loop._allowed_tools = operator_tools
     original_allowed = loop._allowed_tools

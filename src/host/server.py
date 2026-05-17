@@ -4913,10 +4913,10 @@ def create_mesh_app(
     #
     # Archive endpoints flip a status flag and stop scheduling. Delete
     # endpoints proxy through the existing ``PendingActions`` store
-    # (Task 2d) — same propose-then-confirm flow as ``propose_edit`` /
-    # ``confirm_edit``, just with ``target_kind="project"`` /
-    # ``"agent"`` and ``action_kind="delete"``. Archive must precede
-    # delete; the gate is enforced server-side at propose time.
+    # (Task 2d) — a propose-then-confirm flow keyed by
+    # ``target_kind="project"`` / ``"agent"`` and ``action_kind="delete"``,
+    # confirmed via ``/mesh/config/confirm``. Archive must precede delete;
+    # the gate is enforced server-side at propose time.
 
     @app.post("/mesh/teams/{team_name}/archive")
     async def archive_team_endpoint(team_name: str, request: Request) -> dict:
@@ -5055,7 +5055,7 @@ def create_mesh_app(
             )
         origin = _validated_origin(request, caller)
         origin_kind = origin.kind if origin is not None else None
-        # Cap pending rows to bound storage growth (mirrors propose_edit).
+        # Cap pending rows to bound storage growth.
         pending_actions.reap_expired()
         existing = pending_actions.list_pending()
         if len(existing) >= _MAX_PENDING:
@@ -5481,159 +5481,6 @@ def create_mesh_app(
             "content": content,
             "size": size,
             "encoding": encoding,
-        }
-
-    @app.post("/mesh/agents/{agent_id}/propose")
-    async def propose_agent_config_change(agent_id: str, request: Request) -> dict:
-        """Create a pending config change for review."""
-        _require_any_auth(request)
-        caller = _resolve_agent_id("", request)
-        if caller != "operator":
-            raise HTTPException(403, "Only the operator can propose config changes")
-        data = await request.json()
-
-        field = data.get("field", "")
-        new_value = data.get("value")
-
-        if not field:
-            raise HTTPException(400, "field is required")
-        if field not in _VALID_CONFIG_FIELDS:
-            raise HTTPException(400, f"Invalid field: {field}. Must be one of: {_VALID_CONFIG_FIELDS}")
-
-        # Validate runtime-critical values before they can be persisted to
-        # YAML. The agent-side hot-reload endpoint also rejects these, but
-        # catching them here prevents a bad value from being stored as a
-        # pending change, confirmed, and surviving across restarts.
-        if field == "model":
-            if not isinstance(new_value, str) or not new_value:
-                raise HTTPException(400, "model must be a non-empty string")
-            # Same BYOK validation as create_custom_agent (PR #901):
-            # use the live vault to enumerate providers — mirrors
-            # OAuth state, not just env. Skip when no vault is wired
-            # (test harnesses, sandbox transport) — matches create-agent's
-            # behavior so propose/edit and create stay consistent.
-            if credential_vault is not None:
-                from src.shared.models import resolve_provider_for_model
-                _provider = resolve_provider_for_model(new_value)
-                if _provider:
-                    _available = credential_vault.get_providers_with_credentials()
-                    if _provider not in _available:
-                        _available_list = sorted(_available) if _available else "none"
-                        raise HTTPException(
-                            400,
-                            f"Model '{new_value}' requires '{_provider}' "
-                            f"credentials, but no {_provider.upper()} key is "
-                            f"configured. Available providers: "
-                            f"{_available_list}. Set "
-                            f"OPENLEGION_SYSTEM_{_provider.upper()}_API_KEY or "
-                            f"pick a different model.",
-                        )
-        elif field == "thinking":
-            from src.agent.llm import LLMClient
-            if new_value not in LLMClient.VALID_THINKING_LEVELS:
-                raise HTTPException(
-                    400,
-                    f"thinking must be one of: {sorted(LLMClient.VALID_THINKING_LEVELS)}",
-                )
-
-        # Get current value
-        from src.cli.config import _load_config
-        agent_cfg = _load_config()
-        agents = agent_cfg.get("agents", {})
-        if agent_id not in agents:
-            raise HTTPException(404, f"Agent '{agent_id}' not found")
-
-        if field == "permissions":
-            from src.cli.config import _load_permissions
-            perms = _load_permissions()
-            old_value = perms.get("permissions", {}).get(agent_id, {})
-        else:
-            yaml_key = _CONFIG_FIELD_MAP.get(field, field)
-            old_value = agents[agent_id].get(yaml_key, "")
-
-        # Capture the proposer's origin kind so the confirm side can
-        # gate on ``origin_kind="human"`` (Task 2d). When the X-Origin
-        # header is missing or unverifiable the row stores ``None`` and
-        # the confirm endpoint will refuse to apply.
-        origin = _validated_origin(request, caller)
-        origin_kind = origin.kind if origin is not None else None
-
-        # Cap to ``_MAX_PENDING`` rows to bound storage growth -- mirrors
-        # the legacy in-memory eviction behavior.
-        pending_actions.reap_expired()
-        existing = pending_actions.list_pending()
-        if len(existing) >= _MAX_PENDING:
-            oldest = min(existing, key=lambda r: r["expires_at"])
-            with pending_actions._conn() as _conn:
-                _conn.execute(
-                    "DELETE FROM pending_actions WHERE nonce=?",
-                    (oldest["nonce"],),
-                )
-
-        change_id = str(_uuid.uuid4())
-        payload = {"old_value": old_value, "new_value": new_value}
-
-        # Generate preview diff. Computed up-front so we can persist it
-        # alongside the row — the dashboard's inline pending-action card
-        # renders the diff inline without an extra round-trip.
-        old_str = json.dumps(old_value, indent=2) if not isinstance(old_value, str) else old_value
-        new_str = json.dumps(new_value, indent=2) if not isinstance(new_value, str) else new_value
-
-        preview = f"--- {field} (current)\n+++ {field} (proposed)\n"
-        if old_str != new_str:
-            old_lines = old_str.splitlines()
-            new_lines = new_str.splitlines()
-            for line in old_lines:
-                if line not in new_lines:
-                    preview += f"- {line}\n"
-            for line in new_lines:
-                if line not in old_lines:
-                    preview += f"+ {line}\n"
-
-        # Build a one-line summary for the chat-card title. Free-text
-        # fields (instructions, soul) get a "(updated)" pseudo-summary
-        # because the diff is what carries the meaning; scalar fields
-        # show old → new with the values truncated to keep the headline
-        # readable. Full diff lives in ``preview_diff``.
-        humanized_field = field.replace("_", " ")
-        if field in ("instructions", "soul", "permissions"):
-            summary = f"Update {agent_id}'s {humanized_field}"
-        else:
-            def _short(v: object, n: int = 40) -> str:
-                s = v if isinstance(v, str) else dumps_safe(v)
-                s = s.replace("\n", " ").strip()
-                return s if len(s) <= n else s[: n - 1] + "…"
-            summary = (
-                f"Switch {agent_id}'s {humanized_field} "
-                f"from {_short(old_value)} to {_short(new_value)}"
-            )
-
-        record = pending_actions.store(
-            nonce=change_id,
-            actor="operator",
-            target_kind="agent",
-            target_id=agent_id,
-            action_kind=field,
-            payload=payload,
-            origin_kind=origin_kind,
-            # Hard fields (model / permissions / budget / thinking) get
-            # the longer review window via ``_ttl_for_field``; soft
-            # fields fall back to the legacy 5-minute default. Keeps
-            # the act-and-undo path snappy while giving users time to
-            # think about risky edits.
-            ttl=_ttl_for_field(field),
-            summary=summary,
-            preview_diff=preview,
-        )
-
-        return {
-            "change_id": change_id,
-            "summary": summary,
-            "preview_diff": preview,
-            "expires_at": datetime.fromtimestamp(
-                record["expires_at"], tz=timezone.utc,
-            ).isoformat(),
-            "payload_digest": record["payload_digest"],
         }
 
     def _record_to_legacy_change(record: dict) -> dict:

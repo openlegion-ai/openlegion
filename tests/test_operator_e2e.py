@@ -454,27 +454,27 @@ class TestPlanLimitEnforcement:
 class TestOperatorLoopCreation:
     """Verify AgentLoop can be created with operator-style configuration."""
 
-    def test_create_operator_loop_with_20_tools(self):
-        """An operator-style loop should accept a 20-tool allowlist."""
+    def test_create_operator_loop_with_19_tools(self):
+        """An operator-style loop should accept a 19-tool allowlist."""
         operator_tools = frozenset({
             "list_agents", "get_agent_profile", "get_system_status",
-            "notify_user", "save_observations", "hand_off", "propose_edit",
+            "notify_user", "save_observations", "hand_off",
             "confirm_edit", "check_inbox", "update_status",
             "blackboard_read", "blackboard_write", "publish",
             "memory_search", "memory_save", "update_workspace",
             "read_file", "exec_command", "http_request", "web_search",
         })
-        assert len(operator_tools) == 20
+        assert len(operator_tools) == 19
 
         loop = _make_loop(allowed_tools=operator_tools)
         assert loop._allowed_tools == operator_tools
-        assert len(loop._allowed_tools) == 20
+        assert len(loop._allowed_tools) == 19
 
     def test_operator_heartbeat_subset(self):
         """Heartbeat tools should be a proper subset of the full allowed list."""
         full_tools = frozenset({
             "list_agents", "get_agent_profile", "get_system_status",
-            "notify_user", "save_observations", "hand_off", "propose_edit",
+            "notify_user", "save_observations", "hand_off",
             "confirm_edit", "check_inbox", "update_status",
             "blackboard_read", "blackboard_write", "publish",
             "memory_search", "memory_save", "update_workspace",
@@ -492,7 +492,7 @@ class TestOperatorLoopCreation:
         """Operator should not have spawn or cron tools."""
         operator_tools = frozenset({
             "list_agents", "get_agent_profile", "get_system_status",
-            "notify_user", "save_observations", "hand_off", "propose_edit",
+            "notify_user", "save_observations", "hand_off",
             "confirm_edit", "check_inbox", "update_status",
             "blackboard_read", "blackboard_write", "publish",
             "memory_search", "memory_save", "update_workspace",
@@ -515,21 +515,6 @@ class TestSelfModificationPrevention:
         blocked_names = {"operator", "OPERATOR", "Operator", "OpErAtOr"}
         for name in blocked_names:
             assert name.lower() == "operator"
-
-    def test_propose_edit_blocks_self(self):
-        """A propose_edit targeting 'operator' should be blocked."""
-        # This tests the pattern: reject edits where target == "operator"
-        target = "operator"
-        assert target.lower() == "operator"
-
-        target_upper = "OPERATOR"
-        assert target_upper.lower() == "operator"
-
-    def test_propose_edit_allows_other_agents(self):
-        """propose_edit targeting non-operator agents should be allowed."""
-        for target in ("writer", "researcher", "coder", "analyst"):
-            assert target.lower() != "operator"
-
 
 # ===========================================================================
 # 8. Permission ceiling enforcement
