@@ -323,9 +323,11 @@ class TestTabLabelVocabulary:
         )
 
     def test_fleet_running_count_uses_team_word(self):
-        # The dynamic-label expression in the top-nav swaps "Agents (N)"
-        # for "Team (N)" once Phase 2 ships.
-        assert "'Team (' + runningAgents.length" in _INDEX_HTML
+        # PR #915 swapped the fleet-tab label from "Team (runningAgents)"
+        # to "Teams (teams.length)" so the count in parens matches the
+        # section the tab opens. The "Agents (..." form must still be
+        # absent — that was the pre-Phase-2 wording.
+        assert "'Teams (' + teams.length" in _INDEX_HTML
         assert "'Agents (' + runningAgents.length" not in _INDEX_HTML
 
 

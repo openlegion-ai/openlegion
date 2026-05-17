@@ -1424,6 +1424,31 @@ function dashboard() {
         document.title = this._buildTitle();
       }
 
+      // Operator chat container is x-show="operatorReady" — until fetchAgents
+      // resolves it's display:none and any scroll fired against it no-ops.
+      // Re-fire once when the gate flips so users land on the latest message
+      // rather than the top of the restored history.
+      this.$watch('operatorReady', (val, oldVal) => {
+        if (!val || oldVal) return;
+        this.$nextTick(() => {
+          if (this.activeTab === 'chat' || this.messengerSidePanelOpen) {
+            this._scrollChat(this.activeChatId || 'operator', true);
+          }
+        });
+      });
+
+      // Side-panel open transition — the chat-messages container mounts
+      // at scrollTop=0; force a scroll on the open edge so click-toggles
+      // land on the latest message. localStorage-restored opens are
+      // handled below since the assignment already happened during state
+      // restore (the watcher only fires on subsequent changes).
+      this.$watch('messengerSidePanelOpen', (val) => {
+        if (!val) return;
+        this.$nextTick(() => {
+          if (this.activeChatId) this._scrollChat(this.activeChatId, true);
+        });
+      });
+
       // Ensure operator chat is initialized when landing on the chat tab
       if (this.activeTab === 'chat' || initRoute.tab === 'chat') {
         if (!this.openChats.includes('operator')) {
@@ -1436,6 +1461,15 @@ function dashboard() {
           this._scrollChat('operator', true);
           const el = document.getElementById('operator-chat-input');
           if (el) el.focus();
+        });
+      }
+
+      // Side panel restored from localStorage above (line ~1233) — the
+      // $watch above doesn't fire on init-time assignment, so scroll
+      // explicitly here.
+      if (this.messengerSidePanelOpen && this.activeChatId) {
+        this.$nextTick(() => {
+          this._scrollChat(this.activeChatId, true);
         });
       }
 
@@ -1819,6 +1853,9 @@ function dashboard() {
           this.chatPanelMinimized = false;
           this._loadChatHistory(this.activeChatId || 'operator');
           this.$nextTick(() => {
+            // Without this, the side-panel mounts at scrollTop=0 even
+            // though restored history is already in the container.
+            this._scrollChat(this.activeChatId || 'operator', true);
             const el = document.getElementById('operator-chat-input');
             if (el) el.focus();
           });
@@ -7621,6 +7658,7 @@ function dashboard() {
         if (!resp.ok) return;
         const data = await resp.json();
         const localMsgs = this.chatHistories[agentId] || [];
+        const wasEmpty = localMsgs.length === 0;
         if (!data.messages || data.messages.length === 0) {
           // Server returned empty — agent may be restarting or transcript not yet
           // initialized. Preserve local messages to avoid losing visible history.
@@ -7670,7 +7708,11 @@ function dashboard() {
           ? [...serverMsgs, ...trailing]
           : serverMsgs;
         this._saveChatToSession();
-        this.$nextTick(() => this._scrollChat(agentId));
+        // Force scroll when the local cache was empty (first fetch on
+        // mount) — the sticky nearBottom heuristic would otherwise treat
+        // scrollTop=0 as "user scrolled to top" and skip. Live-update
+        // refreshes keep the conservative behavior.
+        this.$nextTick(() => this._scrollChat(agentId, wasEmpty));
       } catch (e) {
         console.debug('_loadChatHistory failed for', agentId, e.message || e);
       }
@@ -7811,14 +7853,53 @@ function dashboard() {
     _scrollTimers: {},
 
     _scrollChat(agentId, force) {
-      if (this._scrollTimers[agentId]) return;
+      if (!agentId) return;
+      // Newest caller wins — the original dedup silently dropped subsequent
+      // triggers, so if the first attempt fired before the chat container
+      // had mounted (Alpine x-for / x-show / async _loadChatHistory), no
+      // later attempt would catch up.
+      if (this._scrollTimers[agentId]) clearTimeout(this._scrollTimers[agentId]);
+      let lastSet = null;
+      const findVisible = () => {
+        // The chat for a given agent can render in two surfaces: the main
+        // /chat tab (static id="chat-messages-operator", line ~481 in
+        // index.html) and the slide-out side panel (dynamic
+        // id="side-chat-messages-{agentId}"). When activeChatId='operator'
+        // both surfaces want to scroll. The main-tab element is always
+        // mounted via x-show (never removed from DOM), so a plain
+        // getElementById('chat-messages-operator') would always return the
+        // main-tab element — which is display:none whenever activeTab !==
+        // 'chat'. Pick whichever element is actually visible (offsetParent
+        // is null for display:none) so the sidebar surface gets scrolled
+        // when it's the one the user sees.
+        const candidates = [
+          document.getElementById('chat-messages-' + agentId),
+          document.getElementById('side-chat-messages-' + agentId),
+        ].filter(Boolean);
+        return candidates.find(el => el.offsetParent !== null) || candidates[0] || null;
+      };
+      const tryScroll = (allowForce) => {
+        const el = findVisible();
+        if (!el) return;
+        const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+        // If we set scrollTop earlier and it has since drifted, the user
+        // scrolled manually — respect them and stop chasing.
+        const userMoved = lastSet !== null && Math.abs(el.scrollTop - lastSet) > 4;
+        if ((allowForce && force) || (distance < 150 && !userMoved)) {
+          el.scrollTop = el.scrollHeight;
+          lastSet = el.scrollTop;
+        }
+      };
       this._scrollTimers[agentId] = setTimeout(() => {
         delete this._scrollTimers[agentId];
-        const el = document.getElementById('chat-messages-' + agentId);
-        if (!el) return;
-        // Only auto-scroll if user is near the bottom (within 150px) or forced
-        const nearBottom = force || (el.scrollHeight - el.scrollTop - el.clientHeight < 150);
-        if (nearBottom) el.scrollTop = el.scrollHeight;
+        tryScroll(true);
+        // Late-render safety net — covers (a) Alpine x-for renders that
+        // land after the 50ms timer, (b) async _loadChatHistory replacing
+        // the message array, (c) avatar image-load reflows that grow
+        // scrollHeight after the initial paint. Retries respect manual
+        // user scrolling (force is one-shot via allowForce).
+        setTimeout(() => tryScroll(false), 250);
+        setTimeout(() => tryScroll(false), 800);
       }, 50);
     },
 
