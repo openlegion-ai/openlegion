@@ -251,6 +251,14 @@ class AgentStatus(BaseModel):
     context_tokens: int = 0
     context_max: int = 0
     context_pct: float = 0.0
+    # Loop liveness signal (Bug 1) — surfaced so the mesh health monitor can
+    # detect a dead inner loop with a live FastAPI thread. ``last_iteration_ts``
+    # is wall-clock seconds (time.time()) stamped at the head of each
+    # task/chat iteration; ``iterations_since_boot`` is monotonically
+    # increasing across the agent's lifetime. Both default to safe values
+    # so older serialized payloads parse cleanly.
+    last_iteration_ts: float | None = None
+    iterations_since_boot: int = 0
 
 
 # === Blackboard & Events ===

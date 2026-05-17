@@ -207,6 +207,19 @@ Heartbeats skip the LLM dispatch entirely (zero cost) when all four conditions a
 
 This makes always-on heartbeats economically viable even at high frequencies. See `src/host/cron.py:394`.
 
+#### Forcing the LLM to run every tick
+
+Pipeline-kicker agents — those whose entire job is to wake up on a schedule and decide what to do next — typically have no probes registered and ship with an empty `HEARTBEAT.md`. Under the four-condition skip-LLM check above they would never actually wake. Set `force_llm: true` on the cron job to bypass the skip and dispatch to the LLM on every tick regardless of the other predicates:
+
+```bash
+curl -X PUT http://localhost:8420/mesh/cron/<job_id> \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $MESH_AUTH_TOKEN" \
+  -d '{"force_llm": true}'
+```
+
+You're opting out of the cost optimization — pick `force_llm: true` only for agents that genuinely need to think every tick. `force_llm` is in `_UPDATABLE_FIELDS` so you can flip it at runtime; it persists across mesh restarts via `config/cron.json`.
+
 ## Tool-Mode Cron
 
 In addition to dispatching a message to an agent (message mode) or running a heartbeat (heartbeat mode), cron jobs can invoke a tool directly — **without any LLM call**. This is useful for fully deterministic periodic operations where no reasoning is needed.

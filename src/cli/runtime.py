@@ -565,6 +565,11 @@ class RuntimeContext:
             trace_store=self.trace_store,
             notify_fn=self._handle_notify_origin,
         )
+        # Bug 1: hand the lane queue-depth lookup to the health monitor so
+        # the staleness check (reachable+busy+no-tick → unhealthy) has
+        # the data it needs. Health monitor was built before the lane.
+        if self.health_monitor is not None:
+            self.health_monitor.set_queue_depth_fn(self.lane_manager.get_queue_depth)
 
         self._dispatch_loop = asyncio.new_event_loop()
 
@@ -682,6 +687,15 @@ class RuntimeContext:
         )
         app.include_router(webhook_manager.create_router())
         self.health_monitor._cleanup_agent = app.cleanup_agent  # type: ignore[attr-defined]
+
+        # Bug 4: lane watchdog needs the durable task store so a per-task
+        # timeout can mark the row ``failed`` (back-edge inbox event fires)
+        # instead of leaving the originator waiting forever. The store is
+        # created inside ``create_mesh_app`` so we wire it here after the
+        # fact rather than threading it through the lane constructor.
+        _tasks_store_ref = getattr(app, "tasks_store", None)
+        if _tasks_store_ref is not None and self.lane_manager is not None:
+            self.lane_manager._tasks_store = _tasks_store_ref
 
         self._init_channel_manager()
 

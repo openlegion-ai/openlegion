@@ -211,10 +211,12 @@ async def hand_off(
     # Wake the target agent so it processes the task immediately
     # instead of waiting for its next heartbeat.  Pass origin so
     # the mesh lane worker can auto-notify the originating user.
-    # Wake failures are surfaced to the caller via ``wake_failed`` +
-    # ``wake_error`` (handed_off stays True — the task IS queued in
-    # SQLite, only the wake signal failed; the caller can decide
-    # whether to retry the wake or wait for cron).
+    # Bug 2 fix: when the wake fails the contract used to claim
+    # ``handed_off: true`` AND ``wake_failed: true`` — LLMs read
+    # ``handed_off`` and reported success to the user while the recipient
+    # never woke. We now flip ``handed_off: false`` and add
+    # ``task_queued: true`` so the LLM sees a partial outcome and can
+    # decide whether to retry or wait for the recipient's heartbeat.
     wake_error: str | None = None
     try:
         await mesh_client.wake_agent(
@@ -234,7 +236,7 @@ async def hand_off(
         logger.warning("Wake for %s failed (task still queued): %s", to, e)
 
     result = {
-        "handed_off": True,
+        "handed_off": wake_error is None,
         "to": to,
         "task_key": task_key,
         "handoff_id": handoff_id,
@@ -242,8 +244,13 @@ async def hand_off(
     if output_key:
         result["output_key"] = output_key
     if wake_error is not None:
+        result["task_queued"] = True
         result["wake_failed"] = True
         result["wake_error"] = wake_error
+        result["recovery_hint"] = (
+            "Recipient will discover via next heartbeat (default 15min). "
+            "Operator can retry hand_off or wait."
+        )
     return result
 
 
@@ -624,12 +631,17 @@ async def _hand_off_v2(
 
     # Wake the target so they pick up the task immediately. The task
     # is queued in SQLite either way; wake failures are surfaced to the
-    # caller via ``wake_failed`` + ``wake_error`` so they can decide
-    # whether to retry the wake or wait for the recipient's next cron.
+    # caller via ``handed_off=False`` + ``task_queued=True`` so they can
+    # decide whether to retry the wake or wait for the recipient's next
+    # cron. Bug 2 (PR R2): the prior contract claimed ``handed_off: true``
+    # alongside ``wake_failed: true`` — LLMs read ``handed_off`` and
+    # reported success while the recipient never woke. ``task_queued``
+    # signals the durable row exists; the recovery hint tells the LLM
+    # what will happen next.
     #
-    # Bug 2 fix: forward the task_id on the wake so the recipient's lane
-    # → /chat → loop chain auto-closes the task on completion. Without
-    # this, the Task row would sit at pending forever.
+    # Bug 2 fix (earlier): forward the task_id on the wake so the
+    # recipient's lane → /chat → loop chain auto-closes the task on
+    # completion. Without this, the Task row would sit at pending forever.
     wake_error: str | None = None
     try:
         await mesh_client.wake_agent(
@@ -650,7 +662,7 @@ async def _hand_off_v2(
         logger.warning("Wake for %s failed (task still queued): %s", to, e)
 
     result = {
-        "handed_off": True,
+        "handed_off": wake_error is None,
         "to": to,
         "handoff_id": task_id,
         "task_key": task_id,
@@ -659,8 +671,13 @@ async def _hand_off_v2(
     if artifact_ref:
         result["output_key"] = artifact_ref
     if wake_error is not None:
+        result["task_queued"] = True
         result["wake_failed"] = True
         result["wake_error"] = wake_error
+        result["recovery_hint"] = (
+            "Recipient will discover via next heartbeat (default 15min). "
+            "Operator can retry hand_off or wait."
+        )
     return result
 
 
