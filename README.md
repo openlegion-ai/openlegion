@@ -1012,7 +1012,6 @@ src/
 │   ├── failover.py                     # Model health tracking + failover chains
 │   ├── runtime.py                      # RuntimeBackend ABC + Docker/Sandbox backends
 │   ├── transport.py                    # Transport ABC + Http/Sandbox transports
-│   ├── containers.py                   # Backward-compat alias for DockerBackend
 │   ├── cron.py                         # Cron scheduler + heartbeats
 │   ├── webhooks.py                     # Named webhook endpoints
 │   ├── watchers.py                     # File watchers (polling)
