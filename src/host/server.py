@@ -729,6 +729,11 @@ def create_mesh_app(
         "agent_profile": (6000, 60),
         "upload_stage": (3000, 60),
         "upload_apply": (3000, 60),
+        # Self-reported LLM auth failures. Quarantine threshold is 3 so
+        # legitimate traffic never approaches this — the bucket exists to
+        # cap notification-store writes when a runaway agent retries on a
+        # broken credential before its lane gate latches.
+        "auth_failure": (60, 60),
     }
 
     async def _check_rate_limit(endpoint: str, agent_id: str) -> None:
@@ -3374,6 +3379,11 @@ def create_mesh_app(
                 raise HTTPException(
                     403, "Agents can only report failures for themselves",
                 )
+            # Rate-limit only the agent-self-report path. Internal callers
+            # (mesh's own ``_record_auth`` recorder threading the proxy
+            # boundary) are the load-bearing trigger and must never be
+            # throttled — quarantine itself caps damage at threshold=3.
+            await _check_rate_limit("auth_failure", agent_id)
         if health_monitor is None:
             return {"recorded": False, "reason": "no health_monitor"}
         if not isinstance(body, dict):

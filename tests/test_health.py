@@ -372,3 +372,50 @@ class TestQuarantine:
         assert monitor.agents["agent-a"].consecutive_failures >= 1
         # Status string stays quarantined.
         assert monitor.agents["agent-a"].status == "quarantined"
+
+    @pytest.mark.asyncio
+    async def test_try_restart_preserves_quarantined_status_when_ready(self):
+        """Principal-eng follow-up: _try_restart was the one path that
+        clobbered status to "healthy" on a successful restart even when
+        the agent was still quarantined. The lane gate is the bool flag
+        and still rejects work — but the dashboard renders ``status`` and
+        would lie about availability. Restart should restore the runtime
+        without touching the credential-broken signal."""
+        monitor = _make_monitor({"agent-a": {"role": "x"}})
+        monitor.register("agent-a")
+        for _ in range(3):
+            monitor.record_auth_failure(
+                "agent-a", provider="openai", model="x", http_status=401,
+            )
+        assert monitor.agents["agent-a"].quarantined is True
+        monitor.runtime.start_agent.return_value = "http://localhost:8401"
+        monitor.runtime.wait_for_agent = AsyncMock(return_value=True)
+        monitor.agents["agent-a"].consecutive_failures = 3
+
+        await monitor._try_restart("agent-a")
+
+        assert monitor.agents["agent-a"].status == "quarantined"
+        assert monitor.agents["agent-a"].quarantined is True
+        assert monitor.agents["agent-a"].restart_count == 1
+
+    @pytest.mark.asyncio
+    async def test_try_restart_falls_to_unhealthy_when_not_ready_even_if_quarantined(self):
+        """When the runtime fails to come back up, ``unhealthy`` wins —
+        more urgent operator signal than ``quarantined``. The lane gate
+        (bool flag) is unchanged either way; this is purely about which
+        status string surfaces."""
+        monitor = _make_monitor({"agent-a": {"role": "x"}})
+        monitor.register("agent-a")
+        for _ in range(3):
+            monitor.record_auth_failure(
+                "agent-a", provider="openai", model="x", http_status=401,
+            )
+        monitor.runtime.start_agent.return_value = "http://localhost:8401"
+        monitor.runtime.wait_for_agent = AsyncMock(return_value=False)
+        monitor.agents["agent-a"].consecutive_failures = 3
+
+        await monitor._try_restart("agent-a")
+
+        assert monitor.agents["agent-a"].status == "unhealthy"
+        # The bool flag is the real lane gate; restart doesn't fix creds.
+        assert monitor.agents["agent-a"].quarantined is True

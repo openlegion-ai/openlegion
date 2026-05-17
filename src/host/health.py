@@ -540,7 +540,18 @@ class HealthMonitor:
 
             ready = await self.runtime.wait_for_agent(agent_id, timeout=60)
             prev = health.status
-            health.status = "healthy" if ready else "unhealthy"
+            # Codex P2 follow-up: restart restores the runtime but does NOT
+            # rotate a broken credential. If the agent is still quarantined,
+            # snap the status string back to "quarantined" — symmetric with
+            # the ``_check_agent`` guards at lines 393 and 414 — so the
+            # dashboard and the lane stay in sync. ``unhealthy`` still wins
+            # when the runtime didn't come up, because the lane gate (bool
+            # flag) is unchanged either way and the operator needs to see
+            # the more urgent "still broken" signal.
+            if health.quarantined and ready:
+                health.status = "quarantined"
+            else:
+                health.status = "healthy" if ready else "unhealthy"
             if self._event_bus:
                 self._event_bus.emit("health_change", agent=agent_id, data={
                     "previous": prev, "current": health.status,

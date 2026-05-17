@@ -607,6 +607,151 @@ def test_report_auth_failure_endpoint_rejects_cross_agent_report(
         bb.close()
 
 
+def test_auth_failure_endpoint_is_rate_limited(
+    tmp_path, _mesh_env, monkeypatch,
+):
+    """Principal-eng follow-up: /auth-failure must enforce the
+    ``auth_failure`` rate-limit bucket on agent self-reports.
+
+    Quarantine threshold is 3 so legitimate traffic never approaches
+    the limit (default 60/min). This bucket exists to cap notification-store
+    writes and event-bus emits when a runaway agent retries on a broken
+    credential before its lane gate latches. Internal callers
+    (``x-mesh-internal``) intentionally bypass — they are the
+    load-bearing trigger fired from inside the proxy boundary.
+    """
+    from src.host import server as host_server
+    from src.host.health import HealthMonitor
+
+    _clear_system_env(monkeypatch)
+    vault = CredentialVault()
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    import json as _json
+    perms_file = tmp_path / "config" / "permissions.json"
+    perms_file.parent.mkdir(parents=True, exist_ok=True)
+    perms_file.write_text(_json.dumps({"permissions": {}}))
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {}
+    perms._config_path = str(perms_file)
+    router = MessageRouter(
+        permissions=perms,
+        agent_registry={"alice": "http://localhost:9999"},
+    )
+
+    health_monitor = HealthMonitor(
+        runtime=MagicMock(), transport=MagicMock(), router=router,
+    )
+    health_monitor.register("alice")
+
+    container_mgr = MagicMock()
+    container_mgr.agents = {}
+    app = create_mesh_app(
+        bb, pubsub, router, perms,
+        container_manager=container_mgr,
+        credential_vault=vault,
+        health_monitor=health_monitor,
+        auth_tokens={"alice": "tok-alice"},
+    )
+    client = TestClient(app)
+    # Drop the rate counter to a clean slate so prior tests don't
+    # pollute this test's window.
+    host_server._denial_counter["rate"] = 0
+
+    try:
+        # Burn through the bucket. Limit is 60/min — fire 60 OK then
+        # the 61st must 429. Body content is irrelevant past threshold;
+        # the limiter raises before record_auth_failure executes.
+        for i in range(60):
+            resp = client.post(
+                "/mesh/agents/alice/auth-failure",
+                json={"provider": "openai", "model": "x", "http_status": 401},
+                headers={"Authorization": "Bearer tok-alice"},
+            )
+            assert resp.status_code == 200, (
+                f"request {i} unexpectedly failed: {resp.status_code} {resp.text}"
+            )
+        resp = client.post(
+            "/mesh/agents/alice/auth-failure",
+            json={"provider": "openai", "model": "x", "http_status": 401},
+            headers={"Authorization": "Bearer tok-alice"},
+        )
+        assert resp.status_code == 429, resp.text
+        # ``rate`` denial counter bumped.
+        assert host_server._denial_counter["rate"] >= 1
+    finally:
+        bb.close()
+
+
+@pytest.mark.asyncio
+async def test_auth_failure_endpoint_internal_caller_bypasses_rate_limit(
+    tmp_path, _mesh_env, monkeypatch,
+):
+    """Internal (loopback + ``x-mesh-internal``) callers must not be
+    rate-limited — they are the mesh's own ``_record_auth`` recorder
+    threading the credential-vault proxy boundary, which is the
+    load-bearing quarantine trigger. Throttling that path would mute
+    quarantine signals for legitimate operator credentials going bad.
+
+    ``_is_internal_caller`` requires loopback peer + the header; the
+    Starlette ``TestClient`` reports peer ``"testclient"`` which fails
+    the loopback parse, so this test uses ``AsyncClient`` over
+    ``ASGITransport`` which presents ``127.0.0.1``.
+    """
+    from httpx import ASGITransport, AsyncClient
+
+    from src.host.health import HealthMonitor
+
+    _clear_system_env(monkeypatch)
+    vault = CredentialVault()
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    import json as _json
+    perms_file = tmp_path / "config" / "permissions.json"
+    perms_file.parent.mkdir(parents=True, exist_ok=True)
+    perms_file.write_text(_json.dumps({"permissions": {}}))
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {}
+    perms._config_path = str(perms_file)
+    router = MessageRouter(
+        permissions=perms,
+        agent_registry={"alice": "http://localhost:9999"},
+    )
+
+    health_monitor = HealthMonitor(
+        runtime=MagicMock(), transport=MagicMock(), router=router,
+    )
+    health_monitor.register("alice")
+
+    container_mgr = MagicMock()
+    container_mgr.agents = {}
+    app = create_mesh_app(
+        bb, pubsub, router, perms,
+        container_manager=container_mgr,
+        credential_vault=vault,
+        health_monitor=health_monitor,
+    )
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            # 70 internal calls — bypasses the rate limit because the
+            # internal-caller branch returns before _check_rate_limit.
+            for i in range(70):
+                resp = await client.post(
+                    "/mesh/agents/alice/auth-failure",
+                    json={"provider": "openai", "model": "x", "http_status": 401},
+                    headers={"x-mesh-internal": "1"},
+                )
+                assert resp.status_code == 200, (
+                    f"internal request {i} hit rate limit: {resp.text}"
+                )
+    finally:
+        bb.close()
+
+
 def test_profile_endpoint_surfaces_quarantine_fields(
     tmp_path, _mesh_env, monkeypatch,
 ):

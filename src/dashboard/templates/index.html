@@ -2244,6 +2244,7 @@
                     <span class="health-badge"
                       :class="{
                         'health-healthy': agent.health_status === 'healthy',
+                        'health-quarantined': agent.health_status === 'quarantined',
                         'health-unhealthy': agent.health_status === 'unhealthy' || agent.health_status === 'restarting',
                         'health-failed': agent.health_status === 'failed',
                         'health-unknown': agent.health_status === 'unknown' || !agent.health_status,
@@ -2539,6 +2540,7 @@
                     <span class="health-badge shrink-0"
                       :class="{
                         'health-healthy': agentDetail.health?.status === 'healthy',
+                        'health-quarantined': agentDetail.health?.status === 'quarantined',
                         'health-unhealthy': agentDetail.health?.status === 'unhealthy' || agentDetail.health?.status === 'restarting',
                         'health-failed': agentDetail.health?.status === 'failed',
                         'health-unknown': !agentDetail.health?.status || agentDetail.health?.status === 'unknown',
