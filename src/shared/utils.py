@@ -19,7 +19,6 @@ def dumps_safe(obj: Any, **kwargs: Any) -> str:
     Any other json.dumps kwargs (indent, sort_keys, ensure_ascii, etc.)
     pass through unchanged.
     """
-    import json
     return json.dumps(obj, default=str, **kwargs)
 
 
