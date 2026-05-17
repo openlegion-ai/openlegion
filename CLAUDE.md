@@ -81,10 +81,8 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 | `traces.py` | Request tracing + grouped summaries |
 | `transcript.py` | Provider-specific transcript sanitization |
 | `webhooks.py` | Named webhook endpoints (payloads sanitized, 1MB body size limit) |
-| `watchers.py` | File watcher with polling (messages sanitized) |
 | `wallet.py` | WalletService — Ethereum and Solana wallet operations |
 | `api_keys.py` | Named API key management — salted SHA-256 hashes in `config/api_keys.json`. Raw keys returned once at creation. |
-| `containers.py` | Backward-compat alias for `DockerBackend` (used by E2E tests) |
 | **`src/browser/`** | |
 | `__main__.py` | Starts the FastAPI command server. Per-agent Xvnc + Openbox + unclutter stacks spawned lazily by `BrowserManager._spawn_per_agent_x_stack`. |
 | `server.py` | Browser service FastAPI app. Raises `RuntimeError` on startup when `MESH_AUTH_TOKEN` is set but `BROWSER_AUTH_TOKEN` is missing (warns in dev). |
@@ -262,7 +260,7 @@ Provisioner manages engine instances via Docker/systemd on Hetzner VPS:
 7. **LLM tool-calling message roles must alternate.** `user → assistant(tool_calls) → tool(result) → assistant`. `_trim_context` merges summary into first user message to preserve this invariant.
 8. **busy_timeout variance.** Traces uses 5000ms while other SQLite connections use 30000ms.
 9. **Monolithic server files.** `dashboard/server.py` (145 endpoints) and `host/server.py` (100 endpoints) are single function-scoped definitions.
-10. **`containers.py` backward-compat alias.** Only consumed by E2E tests.
+10. **Shared SQLite + JSON helpers.** `src/shared/sqlite_helpers.py::open_db(path, *, busy_timeout_ms=30000, check_same_thread=False)` captures the standard sqlite3.connect + busy_timeout pattern (9 sites use it; 11 sites with compound pragmas — `isolation_level=None` autocommit, URI mode — remain inline). `src/shared/utils.py::dumps_safe(obj, **kwargs)` wraps `json.dumps(default=str)` and passes through `indent`/`sort_keys`/`separators`/`ensure_ascii`. New code should reach for both helpers first before duplicating the patterns.
 11. **Browser surface caveats.** CAPTCHA cost is tracked in **millicents** (1/100,000 USD), persisted to `data/captcha_costs.json`. Per-agent + per-tenant monthly caps with 50/80/100% threshold alerts. Fleet-wide `CAPTCHA_DISABLED` kill switch + per-provider circuit breaker. **Session continuity is opt-in** via `BROWSER_SESSION_PERSISTENCE_ENABLED` (default false). `BROWSER_DEVICE_PROFILE` rewrites UA strings but the underlying Camoufox Firefox engine doesn't change — server-side TLS/JA3 fingerprint may still be desktop. **Fingerprint burn does not auto-rotate** — operators must clear the burn flag manually after rotating the profile.
 12. **`apply_template` is per-slot, not atomic.** Mesh validates upfront (unknown agent names, unknown override fields, oversized string fields rejected before any agent is created), but the create loop is not transactional — a mid-loop failure leaves earlier-created agents in place. Operator/LLM should verify the returned `created` list matches the requested slot set.
 13. **`MessageOrigin` propagation pattern.** `wake_agent` and `create_task` both accept an optional `origin: MessageOrigin` and merge `origin_header(origin)` into the request. New cross-agent paths that produce work for another agent should read `current_origin` once and forward it to both calls — otherwise the receiving agent's lane worker has no way to auto-notify the originating channel/user when the handoff completes.
