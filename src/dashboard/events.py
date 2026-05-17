@@ -8,7 +8,6 @@ Thread-safe emit() supports cross-thread calls from HealthMonitor/CronScheduler.
 from __future__ import annotations
 
 import asyncio
-import json
 import threading
 from collections import deque
 from collections.abc import Callable

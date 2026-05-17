@@ -23,7 +23,6 @@ from src.cli.config import (
     _load_skill_templates,
     _pick_model_interactive,
 )
-from src.shared.utils import dumps_safe
 from src.cli.formatting import (
     agent_prompt,
     display_response,
@@ -32,6 +31,7 @@ from src.cli.formatting import (
     display_stream_tool_start,
     user_prompt,
 )
+from src.shared.utils import dumps_safe
 
 if TYPE_CHECKING:
     from src.cli.runtime import RuntimeContext

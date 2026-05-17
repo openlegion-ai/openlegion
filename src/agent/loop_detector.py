@@ -15,7 +15,6 @@ but still respect the terminate threshold (hard safety cap).
 from __future__ import annotations
 
 import hashlib
-import json
 from collections import Counter, deque
 from typing import Any
 
