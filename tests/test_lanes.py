@@ -9,7 +9,7 @@ Covers:
 """
 
 import asyncio
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -468,3 +468,121 @@ async def test_origin_passed_to_dispatch_fn():
     await lm.enqueue("agent1", "hello", origin=origin)
 
     assert received_kwargs.get("origin") == origin
+
+
+# ── Per-task lane watchdog (Bug 4) ─────────────────────────────
+
+
+class TestLaneWatchdog:
+    """A hung dispatch_fn previously blocked the lane forever — every
+    subsequent task for that agent piled up indefinitely. The watchdog
+    wraps dispatch in ``asyncio.wait_for`` with a configurable timeout
+    and marks the durable task ``failed`` so the originator sees a
+    back-edge event."""
+
+    @pytest.mark.asyncio
+    async def test_hanging_dispatch_times_out_and_lane_recovers(self):
+        """Stuck dispatch is cancelled at the timeout; the next task runs."""
+        call_log = []
+
+        async def hanging_then_normal(agent, message, **kwargs):
+            call_log.append(message)
+            if message == "stuck":
+                await asyncio.sleep(60)  # never returns within the timeout
+                return "should never reach here"
+            return f"ok:{message}"
+
+        # Tight timeout so the test runs quickly.
+        lm = LaneManager(
+            dispatch_fn=hanging_then_normal,
+            task_timeout_seconds=1,
+        )
+
+        # First task hangs and should fail with TimeoutError.
+        with pytest.raises(asyncio.TimeoutError):
+            await lm.enqueue("agent1", "stuck")
+
+        # Second task on the same lane must still be picked up — the
+        # lane worker survived.
+        result = await lm.enqueue("agent1", "next")
+        assert result == "ok:next"
+        assert call_log == ["stuck", "next"]
+
+    @pytest.mark.asyncio
+    async def test_normal_dispatch_within_timeout_unchanged(self):
+        """Fast dispatch behaves exactly as before."""
+        dispatch = AsyncMock(return_value="hi")
+        lm = LaneManager(dispatch_fn=dispatch, task_timeout_seconds=5)
+
+        result = await lm.enqueue("agent1", "ping")
+        assert result == "hi"
+        dispatch.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_env_var_overrides_default_timeout(self, monkeypatch):
+        """``OPENLEGION_LANE_TIMEOUT_SECONDS`` is honoured at module load.
+        Re-importing the module after setting the env var picks it up."""
+        import importlib
+
+        monkeypatch.setenv("OPENLEGION_LANE_TIMEOUT_SECONDS", "42")
+        import src.host.lanes as lanes_mod
+
+        importlib.reload(lanes_mod)
+        try:
+            lm = lanes_mod.LaneManager(dispatch_fn=AsyncMock(return_value=""))
+            assert lm._task_timeout_seconds == 42
+        finally:
+            # Restore the default for downstream tests.
+            monkeypatch.delenv("OPENLEGION_LANE_TIMEOUT_SECONDS", raising=False)
+            importlib.reload(lanes_mod)
+
+    @pytest.mark.asyncio
+    async def test_timeout_marks_durable_task_failed(self):
+        """When the queued task has a ``task_id`` AND a tasks_store is
+        wired, the watchdog calls ``update_status('failed')`` so the
+        originator's back-edge inbox sees ``lane_timeout``."""
+        async def hanging(agent, message, **kwargs):
+            await asyncio.sleep(60)
+            return "never"
+
+        tasks_store = MagicMock()
+        tasks_store.update_status = MagicMock()
+        lm = LaneManager(
+            dispatch_fn=hanging,
+            task_timeout_seconds=1,
+            tasks_store=tasks_store,
+        )
+
+        with pytest.raises(asyncio.TimeoutError):
+            await lm.enqueue("agent1", "stuck", task_id="task-abc-123")
+
+        # update_status should have been invoked with the failed status
+        # and the lane_timeout marker.
+        tasks_store.update_status.assert_called_once()
+        args, kwargs = tasks_store.update_status.call_args
+        assert args[0] == "task-abc-123"
+        assert args[1] == "failed"
+        assert kwargs.get("actor") == "lane_watchdog"
+        extra = kwargs.get("extra_payload", {})
+        assert extra.get("error") == "lane_timeout"
+
+    @pytest.mark.asyncio
+    async def test_timeout_without_task_id_skips_task_update(self):
+        """Free-form lane messages (no task_id) just time out — no
+        durable-task bookkeeping to do."""
+        async def hanging(agent, message, **kwargs):
+            await asyncio.sleep(60)
+            return "never"
+
+        tasks_store = MagicMock()
+        tasks_store.update_status = MagicMock()
+        lm = LaneManager(
+            dispatch_fn=hanging,
+            task_timeout_seconds=1,
+            tasks_store=tasks_store,
+        )
+
+        with pytest.raises(asyncio.TimeoutError):
+            await lm.enqueue("agent1", "stuck")  # no task_id
+
+        tasks_store.update_status.assert_not_called()

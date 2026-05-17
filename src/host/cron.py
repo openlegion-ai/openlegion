@@ -59,6 +59,13 @@ class CronJob:
     heartbeat: bool = False
     tool_name: str | None = None    # invoke this tool directly — no LLM involved
     tool_params: str | None = None  # JSON-encoded params dict for the tool
+    # Bug 4 (force_llm): heartbeats normally short-circuit the LLM when
+    # there's nothing actionable (default HEARTBEAT.md, no recent
+    # activity, no probes triggered) to keep cost down. Pipeline-kicker
+    # agents that have no probes and an empty HEARTBEAT.md never wake
+    # under that policy. Setting ``force_llm=True`` makes the cron tick
+    # always dispatch to the LLM regardless of the skip predicate.
+    force_llm: bool = False
     last_run: str | None = None
     next_run: str | None = None
     run_count: int = 0
@@ -233,7 +240,13 @@ class CronScheduler:
             message=f"Heartbeat check for {agent}", heartbeat=True,
         )
 
-    _UPDATABLE_FIELDS = frozenset({"schedule", "message", "enabled", "suppress_empty", "tool_name", "tool_params"})
+    _UPDATABLE_FIELDS = frozenset({
+        "schedule", "message", "enabled", "suppress_empty",
+        "tool_name", "tool_params",
+        # Bug 4: operator can toggle force_llm on an existing cron job
+        # without recreating it.
+        "force_llm",
+    })
 
     async def update_job(self, job_id: str, **kwargs) -> CronJob | None:
         """Update fields on an existing cron job. Returns updated job or None."""
@@ -391,7 +404,18 @@ class CronScheduler:
 
                         # Skip-LLM optimization: no custom rules, no activity, no probes
                         # Always dispatch when manually triggered (user expects it to run)
-                        if not manual and is_default and not has_activity and not triggered:
+                        # Bug 4 (force_llm): pipeline-kicker agents (no probes,
+                        # empty HEARTBEAT.md) need the LLM every tick — they're
+                        # the wake signal for whatever pipeline they're driving.
+                        # ``force_llm=True`` short-circuits the skip so the
+                        # operator can opt out of the cost optimization.
+                        if (
+                            not manual
+                            and not job.force_llm
+                            and is_default
+                            and not has_activity
+                            and not triggered
+                        ):
                             logger.debug(
                                 "Heartbeat %s: skipped (default rules, no activity, "
                                 "no probes) for '%s'", job.id, job.agent,
@@ -467,9 +491,15 @@ class CronScheduler:
 
                         message = "\n\n".join(sections)
 
-                        # Use dedicated heartbeat endpoint when available
+                        # Use dedicated heartbeat endpoint when available.
+                        # Bug 6 (codex P2 r2): propagate ``force_llm`` to the
+                        # dispatch fn so the agent-side
+                        # ``no_heartbeat_rules`` skip is also bypassed for
+                        # pipeline-kicker agents.
                         if self.heartbeat_dispatch_fn:
-                            hb_result = await self.heartbeat_dispatch_fn(job.agent, message)
+                            hb_result = await self.heartbeat_dispatch_fn(
+                                job.agent, message, force_llm=job.force_llm,
+                            )
                             # hb_result is a structured dict from execute_heartbeat
                             if isinstance(hb_result, dict):
                                 if hb_result.get("skipped"):

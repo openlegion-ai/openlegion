@@ -981,7 +981,11 @@ class TestOperatorHandoff:
     @pytest.mark.asyncio
     async def test_hand_off_to_operator_survives_wake_failure(self):
         """Regression: wake_agent failure must not prevent the task from
-        being queued. The operator picks it up on its next heartbeat."""
+        being queued. The operator picks it up on its next heartbeat.
+
+        Bug 2 (operator-seam): the contract was flipped so wake failure
+        surfaces ``handed_off: false`` + ``task_queued: true`` — the
+        write still succeeds, just the wake signal didn't land."""
         from src.agent.builtins.coordination_tool import hand_off
 
         mc = _make_mesh_client(agent_id="scout")
@@ -996,8 +1000,11 @@ class TestOperatorHandoff:
             to="operator", summary="follow up", mesh_client=mc,
         )
 
-        # Handoff still succeeds — task is queued, wake is best-effort.
-        assert result["handed_off"] is True
+        # Wake failed — handed_off MUST be False so the LLM doesn't lie.
+        assert result["handed_off"] is False
+        # The durable row still landed; the operator's next heartbeat
+        # picks it up.
+        assert result["task_queued"] is True
         assert result["task_key"].startswith("global/tasks/operator/")
         # The task write happened before the wake attempt.
         mc.write_blackboard.assert_awaited()
@@ -1390,15 +1397,18 @@ class TestHandOffTitleQuality:
 class TestHandOffWakeFailureSurfacing:
     """Operator-reported Bug 4: wake_agent failures were silently swallowed.
 
-    The task IS queued in SQLite/blackboard either way, so ``handed_off``
-    stays True. But callers need visibility into wake failures so they
-    can retry the wake or warn the user, instead of silently relying on
-    the recipient's next cron tick.
+    Updated for Bug 2 (operator seam) — the prior contract claimed
+    ``handed_off: true`` even on wake failure, which made LLMs report
+    success to the user while the recipient never woke. The task IS
+    still queued in SQLite/blackboard, so we add ``task_queued: true``
+    and a ``recovery_hint`` but flip ``handed_off: false`` so the
+    caller sees a partial outcome and can decide whether to retry.
     """
 
     @pytest.mark.asyncio
     async def test_hand_off_returns_wake_failed_when_wake_raises(self):
-        """Legacy path: wake failure surfaces ``wake_failed`` + ``wake_error``."""
+        """Legacy path: wake failure surfaces ``handed_off=False`` +
+        ``task_queued=True`` + ``wake_failed`` + ``wake_error``."""
         from src.agent.builtins.coordination_tool import hand_off
 
         mc = _make_mesh_client(agent_id="scout")
@@ -1411,11 +1421,14 @@ class TestHandOffWakeFailureSurfacing:
             mesh_client=mc,
         )
 
-        # Task is still queued — handed_off stays True.
-        assert result["handed_off"] is True
-        # Wake failure is surfaced.
+        # Wake failed — the LLM must NOT see handed_off:true here.
+        assert result["handed_off"] is False
+        # Task IS queued in the durable store.
+        assert result["task_queued"] is True
+        # Wake failure detail is surfaced.
         assert result["wake_failed"] is True
         assert "agent container 503" in result["wake_error"]
+        assert "recovery_hint" in result
 
     @pytest.mark.asyncio
     async def test_hand_off_success_omits_wake_failure_keys(self):
@@ -1451,7 +1464,9 @@ class TestHandOffWakeFailureSurfacing:
             mesh_client=mc,
         )
 
-        assert result["handed_off"] is True
+        # Bug 2: handed_off flips to False on wake failure.
+        assert result["handed_off"] is False
+        assert result["task_queued"] is True
         assert result["wake_failed"] is True
         assert len(result["wake_error"]) <= 200
 
@@ -1522,7 +1537,9 @@ class TestHandOffWakeFailureSurfacing:
 
     @pytest.mark.asyncio
     async def test_hand_off_v2_returns_wake_failed_when_wake_raises(self):
-        """V2 path: wake failure surfaces ``wake_failed`` + ``wake_error``."""
+        """V2 path: wake failure flips ``handed_off=False`` and surfaces
+        ``task_queued=True`` + ``wake_failed`` + ``wake_error`` +
+        ``recovery_hint`` (Bug 2 contract honesty)."""
         from src.agent.builtins.coordination_tool import hand_off
 
         mc = _make_mesh_client(agent_id="scout", v2_enabled=True)
@@ -1536,9 +1553,11 @@ class TestHandOffWakeFailureSurfacing:
             mesh_client=mc,
         )
 
-        assert result["handed_off"] is True
+        assert result["handed_off"] is False
+        assert result["task_queued"] is True
         assert result["wake_failed"] is True
         assert "auth token rejected" in result["wake_error"]
+        assert "recovery_hint" in result
 
     @pytest.mark.asyncio
     async def test_hand_off_v2_success_omits_wake_failure_keys(self):
@@ -1558,3 +1577,39 @@ class TestHandOffWakeFailureSurfacing:
         assert result["handed_off"] is True
         assert "wake_failed" not in result
         assert "wake_error" not in result
+
+    @pytest.mark.asyncio
+    async def test_hand_off_v2_wake_failure_reports_handed_off_false(self):
+        """Pins the new contract: on wake failure ``_hand_off_v2`` MUST
+        flip ``handed_off`` to False and emit ``task_queued=True``
+        alongside the wake_failed signal. Pre-fix this returned
+        ``handed_off:true`` AND ``wake_failed:true`` — the LLM picked up
+        ``handed_off`` and reported success while the recipient never
+        actually woke (Bug 2)."""
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="scout", v2_enabled=True)
+        mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
+        mc.create_task.return_value = {"id": "task_v2_xyz", "status": "pending"}
+        mc.wake_agent.side_effect = RuntimeError("network unreachable")
+
+        result = await hand_off(
+            to="analyst",
+            summary="run the enrichment",
+            mesh_client=mc,
+        )
+
+        # The PRIMARY guarantee: handed_off must be False so LLMs
+        # don't tell the user the work was delivered.
+        assert result["handed_off"] is False, (
+            "wake failed but handed_off claims success — LLM will lie to user"
+        )
+        # task_queued lets the LLM know the work is durable.
+        assert result["task_queued"] is True
+        # The task_id is still surfaced so an operator can retry/reroute.
+        assert result["task_id"] == "task_v2_xyz"
+        # Wake-failure details remain available.
+        assert result["wake_failed"] is True
+        assert "network unreachable" in result["wake_error"]
+        # Recovery hint guides the LLM toward the right next action.
+        assert "heartbeat" in result["recovery_hint"].lower()

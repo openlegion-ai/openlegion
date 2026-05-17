@@ -307,6 +307,21 @@ class AgentLoop:
         # Reference to the active messages list — set during tool execution
         # so skills.execute() can inject it into provenance-gated tools.
         self._current_messages: list[dict] = []
+        # Liveness signal (Bug 1): single-task asyncio model means no lock
+        # needed — the loop only ticks one iteration at a time. The
+        # mesh health monitor reads these via /status to detect a dead
+        # inner loop with a live FastAPI thread.
+        self._last_iteration_ts: float | None = None
+        self._iterations_since_boot: int = 0
+
+    def _bump_liveness(self) -> None:
+        """Stamp the last-iteration timestamp + bump the boot-relative counter.
+
+        Called at the head of every iteration in execute_task and per-round
+        in the chat loops. Cheap on purpose — no I/O, no lock.
+        """
+        self._last_iteration_ts = time.time()
+        self._iterations_since_boot += 1
 
     @property
     def _skill_filter_kw(self) -> dict:
@@ -591,31 +606,58 @@ class AgentLoop:
             total_tokens = checkpoint["tokens_used"]
             assignment_json = checkpoint["assignment_json"]
 
-            # Reconcile TokenBudget mutable state
-            if assignment.token_budget:
-                assignment.token_budget.used_tokens = checkpoint["budget_used_tokens"]
-                assignment.token_budget.estimated_cost_usd = checkpoint["budget_estimated_cost"]
+            # Bug 5 (stale checkpoint rejection): if the persisted iteration
+            # is already at or past MAX_ITERATIONS, resuming would skip the
+            # for-loop entirely and immediately fall through to the
+            # "Max iterations reached" branch — looking like a 0-token,
+            # 0-iteration completion from outside. Detect that here and
+            # start fresh, clearing the corrupt checkpoint.
+            if start_iteration >= self.MAX_ITERATIONS:
+                logger.warning(
+                    "Discarding stale checkpoint for task=%s (iteration %d "
+                    ">= MAX %d) — starting fresh",
+                    assignment.task_id, start_iteration, self.MAX_ITERATIONS,
+                )
+                if self.memory:
+                    try:
+                        await self.memory._run_db(self.memory.clear_task_checkpoint)
+                    except Exception as clr_err:
+                        logger.warning(
+                            "Failed to clear stale checkpoint: %s", clr_err,
+                        )
+                checkpoint = None
+                total_tokens = 0
+                start_iteration = 0
+                assignment_json = assignment.model_dump_json()
+                messages = await self._build_initial_context(assignment)
+                if self.memory:
+                    await self.memory.decay_all()
+            else:
+                # Reconcile TokenBudget mutable state
+                if assignment.token_budget:
+                    assignment.token_budget.used_tokens = checkpoint["budget_used_tokens"]
+                    assignment.token_budget.estimated_cost_usd = checkpoint["budget_estimated_cost"]
 
-            # Restore context manager flush state
-            if self.context_manager:
-                self.context_manager._flush_triggered = checkpoint["flush_triggered"]
+                # Restore context manager flush state
+                if self.context_manager:
+                    self.context_manager._flush_triggered = checkpoint["flush_triggered"]
 
-            # Inject continuation prompt — but only if last message isn't already
-            # a user message (avoids violating role alternation invariant).
-            if messages and messages[-1].get("role") != "user":
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        "You were working on this task and your session was interrupted. "
-                        "Your conversation history above reflects your progress. "
-                        "Continue from where you left off. Do not repeat completed work."
-                    ),
-                })
+                # Inject continuation prompt — but only if last message isn't already
+                # a user message (avoids violating role alternation invariant).
+                if messages and messages[-1].get("role") != "user":
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "You were working on this task and your session was interrupted. "
+                            "Your conversation history above reflects your progress. "
+                            "Continue from where you left off. Do not repeat completed work."
+                        ),
+                    })
 
-            logger.info(
-                "Resumed task %s from iteration %d (%d tokens used)",
-                assignment.task_id, start_iteration, total_tokens,
-            )
+                logger.info(
+                    "Resumed task %s from iteration %d (%d tokens used)",
+                    assignment.task_id, start_iteration, total_tokens,
+                )
         elif checkpoint:
             # Stale checkpoint from a different task — clear it
             logger.warning(
@@ -641,6 +683,7 @@ class AgentLoop:
 
         try:
             for iteration in range(start_iteration, self.MAX_ITERATIONS):
+                self._bump_liveness()
                 if self._cancel_requested:
                     self._cancel_requested = False
                     self.state = "idle"
@@ -652,6 +695,11 @@ class AgentLoop:
                         duration_ms=int((time.time() - start) * 1000),
                     )
                     self._last_result = result
+                    logger.info(
+                        "execute_task exit branch=cancelled_iter_head status=%s "
+                        "iterations=%d tokens=%d",
+                        result.status, iteration, total_tokens,
+                    )
                     return result
 
                 if assignment.token_budget and not assignment.token_budget.can_spend(4096):
@@ -668,6 +716,11 @@ class AgentLoop:
                         duration_ms=int((time.time() - start) * 1000),
                     )
                     self._last_result = result
+                    logger.info(
+                        "execute_task exit branch=token_budget_exhausted "
+                        "status=%s iterations=%d tokens=%d",
+                        result.status, iteration, total_tokens,
+                    )
                     return result
 
                 # === DECIDE (LLM call) ===
@@ -685,6 +738,11 @@ class AgentLoop:
                     messages=messages,
                     tools=available_tools,
                 )
+                # Bug 1 (codex P2 r2): tick after the LLM call returns —
+                # a single deep-research call can run >5 min, and bumping
+                # only at iteration head would let the staleness check fire
+                # during a perfectly healthy turn.
+                self._bump_liveness()
                 total_tokens += llm_response.tokens_used
                 if assignment.token_budget:
                     assignment.token_budget.record_usage(llm_response.tokens_used, self.llm.default_model)
@@ -702,6 +760,11 @@ class AgentLoop:
                         duration_ms=int((time.time() - start) * 1000),
                     )
                     self._last_result = result
+                    logger.info(
+                        "execute_task exit branch=cancelled_post_llm "
+                        "status=%s iterations=%d tokens=%d",
+                        result.status, iteration, total_tokens,
+                    )
                     return result
 
                 # === ACT ===
@@ -720,6 +783,11 @@ class AgentLoop:
                             duration_ms=int((time.time() - start) * 1000),
                         )
                         self._last_result = result
+                        logger.info(
+                            "execute_task exit branch=tool_loop_terminate "
+                            "status=%s iterations=%d tokens=%d",
+                            result.status, iteration, total_tokens,
+                        )
                         return result
 
                     # Append assistant response with tool calls (correct role)
@@ -745,6 +813,12 @@ class AgentLoop:
                     tool_results = await self._run_tools_parallel(
                         llm_response.tool_calls,
                     )
+                    # Bug 1 (codex P2 r2): tick after tool execution — a
+                    # long-running shell or browser action can sit at the
+                    # 300s _TOOL_TIMEOUT cap. Without this bump the next
+                    # iteration head might already be past the staleness
+                    # threshold even though the loop is healthy.
+                    self._bump_liveness()
                     for i, (result_str, _result) in enumerate(tool_results):
                         tool_msg = {
                             "role": "tool",
@@ -828,6 +902,42 @@ class AgentLoop:
                             outcome="complete",
                         )
 
+                    iterations_executed = iteration + 1
+                    # Bug 5 (pathological-success rejection): if we somehow
+                    # reach this branch with zero iterations AND zero tokens
+                    # spent, something fundamental is wrong (corrupt
+                    # checkpoint, mocked LLM that no-ops, double-completion
+                    # race). Downgrade to a loud failure rather than reporting
+                    # a 3s pending→done with empty logs. This is a belt-and-
+                    # suspenders guard; it cannot fire in legitimate runs.
+                    if iterations_executed <= 0 and total_tokens <= 0:
+                        logger.error(
+                            "execute_task pathological success guard tripped "
+                            "for task=%s: iterations=%d tokens=%d — downgrading "
+                            "to failed (possible checkpoint corruption)",
+                            assignment.task_id, iterations_executed, total_tokens,
+                        )
+                        # Roll back the success bookkeeping we just did.
+                        self.tasks_completed -= 1
+                        self.tasks_failed += 1
+                        result = TaskResult(
+                            task_id=assignment.task_id,
+                            status="failed",
+                            error=(
+                                "execute_task returned success without doing "
+                                "work — possible checkpoint corruption"
+                            ),
+                            tokens_used=total_tokens,
+                            duration_ms=int(duration_s * 1000),
+                        )
+                        self._last_result = result
+                        logger.info(
+                            "execute_task exit branch=pathological_success_guard "
+                            "status=%s iterations=%d tokens=%d",
+                            result.status, iterations_executed, total_tokens,
+                        )
+                        return result
+
                     result = TaskResult(
                         task_id=assignment.task_id,
                         status="complete",
@@ -837,6 +947,11 @@ class AgentLoop:
                         duration_ms=int(duration_s * 1000),
                     )
                     self._last_result = result
+                    logger.info(
+                        "execute_task exit branch=final_response "
+                        "status=%s iterations=%d tokens=%d",
+                        result.status, iterations_executed, total_tokens,
+                    )
                     return result
 
             # Max iterations reached
@@ -865,6 +980,11 @@ class AgentLoop:
                 duration_ms=int((time.time() - start) * 1000),
             )
             self._last_result = result
+            logger.info(
+                "execute_task exit branch=max_iterations_reached status=%s "
+                "iterations=%d tokens=%d",
+                result.status, self.MAX_ITERATIONS, total_tokens,
+            )
             return result
 
         except asyncio.CancelledError:
@@ -877,6 +997,10 @@ class AgentLoop:
                 duration_ms=int((time.time() - start) * 1000),
             )
             self._last_result = result
+            logger.info(
+                "execute_task exit branch=cancelled_exception status=%s tokens=%d",
+                result.status, total_tokens,
+            )
             return result
         except Exception as e:
             self.state = "idle"
@@ -902,6 +1026,10 @@ class AgentLoop:
                 duration_ms=int((time.time() - start) * 1000),
             )
             self._last_result = result
+            logger.info(
+                "execute_task exit branch=exception status=%s tokens=%d error=%r",
+                result.status, total_tokens, str(e)[:120],
+            )
             return result
         finally:
             # Clear task checkpoint on ANY exit (success, failure, cancel, exception).
@@ -1171,7 +1299,7 @@ class AgentLoop:
 
     # ── Heartbeat mode ────────────────────────────────────────
 
-    async def execute_heartbeat(self, message: str) -> dict:
+    async def execute_heartbeat(self, message: str, *, force_llm: bool = False) -> dict:
         """Execute an autonomous heartbeat — stateless, separate from chat.
 
         Returns a structured dict with response, tools used, duration, etc.
@@ -1179,6 +1307,13 @@ class AgentLoop:
         _heartbeat_mode ContextVar so tools can detect heartbeat context.
         Notifications are still persisted to the chat transcript so users
         can find them in chat history.
+
+        ``force_llm`` (Bug 6 — codex P2 r2): pipeline-kicker agents have
+        no probes and ship with an empty HEARTBEAT.md, which makes the
+        ``no_heartbeat_rules`` skip below fire on every tick. When the
+        cron job sets ``force_llm: true`` the dispatcher forwards the
+        flag (via ``x-force-llm`` header) so the LLM is invoked anyway.
+        The ``agent_busy`` skip is NOT bypassed — busy is busy.
         """
         # Restrict operator to heartbeat-only tools during unsupervised execution.
         # Non-operator agents have _allowed_tools=None, so the swap is skipped.
@@ -1194,7 +1329,13 @@ class AgentLoop:
 
             # Skip the LLM call entirely when HEARTBEAT.md has no actionable
             # content and no goals are set — saves tokens on empty heartbeats.
-            if self.workspace and _is_heartbeat_empty(self.workspace.load_heartbeat_rules()):
+            # Bug 6 fix: ``force_llm`` lets the operator opt out of this
+            # optimization for pipeline-kicker agents.
+            if (
+                not force_llm
+                and self.workspace
+                and _is_heartbeat_empty(self.workspace.load_heartbeat_rules())
+            ):
                 # Still need to check goals before skipping
                 goals = await self._fetch_goals()
                 if not goals:
@@ -1483,6 +1624,12 @@ class AgentLoop:
                     tool_results = await self._run_tools_parallel(
                         llm_response.tool_calls,
                     )
+                    # Bug 1 (codex P2 r2): tick after tool execution — a
+                    # long-running shell or browser action can sit at the
+                    # 300s _TOOL_TIMEOUT cap. Without this bump the next
+                    # iteration head might already be past the staleness
+                    # threshold even though the loop is healthy.
+                    self._bump_liveness()
                     for i, (result_str, _result) in enumerate(tool_results):
                         hb_tool_msg = {
                             "role": "tool",
@@ -2194,6 +2341,7 @@ class AgentLoop:
 
             steer_interrupts = 0
             for _ in range(self.CHAT_MAX_TOOL_ROUNDS):
+                self._bump_liveness()
                 llm_response = await _llm_call_with_retry(
                     self.llm.chat,
                     system=system,
@@ -2616,6 +2764,8 @@ class AgentLoop:
             context_tokens=ctx_tokens,
             context_max=ctx_max,
             context_pct=ctx_pct,
+            last_iteration_ts=self._last_iteration_ts,
+            iterations_since_boot=self._iterations_since_boot,
         )
 
     # ── Streaming chat ────────────────────────────────────────
@@ -2690,6 +2840,7 @@ class AgentLoop:
 
             steer_interrupts = 0
             for _ in range(self.CHAT_MAX_TOOL_ROUNDS):
+                self._bump_liveness()
                 # Try token-level streaming, fall back to non-streaming on error
                 llm_response = None
                 used_streaming = False

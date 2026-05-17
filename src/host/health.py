@@ -12,7 +12,9 @@ After the limit is hit, the agent is marked as 'failed' and left stopped.
 from __future__ import annotations
 
 import asyncio
+import os
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -26,6 +28,19 @@ if TYPE_CHECKING:
     from src.host.transport import Transport
 
 logger = setup_logging("host.health")
+
+# Liveness staleness threshold (Bug 1) — a reachable agent with a non-empty
+# lane queue but no loop iteration in this window is treated as having a
+# dead inner loop. Aligned with the per-task lane watchdog default (900s)
+# so the lane watchdog gets to fail a single stuck task before the health
+# monitor escalates to an agent restart. Codex P2 r2: 300s was too
+# aggressive — the loop bumps at iteration boundaries, post-LLM, and
+# post-tool, so a single deep reasoning call or a full 300s tool timeout
+# can exceed the old threshold even on a perfectly healthy turn. With the
+# 900s default, the staleness check only fires when truly nothing has
+# happened in the same window that the lane watchdog uses to cancel the
+# task itself.
+_STALE_LOOP_SECONDS = int(os.environ.get("OPENLEGION_LOOP_STALE_SECONDS", "900"))
 
 
 @dataclass
@@ -55,6 +70,7 @@ class HealthMonitor:
         event_bus=None,
         cleanup_agent_fn=None,
         blackboard=None,
+        queue_depth_fn: Callable[[str], int] | None = None,
     ):
         self.runtime = runtime
         self.transport = transport
@@ -62,6 +78,12 @@ class HealthMonitor:
         self._event_bus = event_bus
         self._cleanup_agent = cleanup_agent_fn
         self._blackboard = blackboard
+        # ``queue_depth_fn`` (Bug 1) — optional callable that returns the
+        # lane queue depth for an agent_id. When wired, the health monitor
+        # combines /status liveness (last_iteration_ts) with queue depth to
+        # detect a dead inner loop with a live FastAPI thread. Without it
+        # the staleness check is a no-op (reachability behaviour unchanged).
+        self._queue_depth_fn = queue_depth_fn
         self.agents: dict[str, AgentHealth] = {}
         self._agent_lock: asyncio.Lock | None = None
         self._agent_lock_loop: asyncio.AbstractEventLoop | None = None
@@ -79,6 +101,15 @@ class HealthMonitor:
 
     def unregister(self, agent_id: str) -> None:
         self.agents.pop(agent_id, None)
+
+    def set_queue_depth_fn(self, fn: Callable[[str], int] | None) -> None:
+        """Wire (or unwire) the lane queue-depth callback after construction.
+
+        ``HealthMonitor`` is built before ``LaneManager`` in the host
+        bootstrap path; this setter lets the lane wire itself in once
+        constructed. ``None`` disables the staleness branch.
+        """
+        self._queue_depth_fn = fn
 
     async def start(self) -> None:
         self._running = True
@@ -131,6 +162,50 @@ class HealthMonitor:
                         "state": "removed", "reason": "ttl_expired",
                     })
 
+    async def _is_loop_stale(self, agent_id: str, now: float) -> bool:
+        """Return True if the agent has queued work but its loop hasn't ticked.
+
+        Bug 1 fix: ``Transport.is_reachable`` only checks the /status HTTP
+        response — a wedged inner loop with a live FastAPI thread reports
+        healthy. We compare the loop's ``last_iteration_ts`` against the
+        wall clock and only flag a problem when (a) the lane has actual
+        work waiting (``queue_depth > 0``), and (b) the loop hasn't ticked
+        in ``_STALE_LOOP_SECONDS``. An idle agent with an empty queue is
+        fine — it shouldn't be bumping the counter.
+
+        Best-effort: any error in the /status fetch or queue lookup
+        returns ``False`` so this never spuriously flags an otherwise
+        healthy agent.
+        """
+        if self._queue_depth_fn is None:
+            return False
+        try:
+            depth = self._queue_depth_fn(agent_id)
+        except Exception as e:
+            logger.debug("queue_depth_fn raised for '%s': %s", agent_id, e)
+            return False
+        if depth <= 0:
+            return False
+        try:
+            status_resp = await self.transport.request(
+                agent_id, "GET", "/status", timeout=5,
+            )
+        except Exception as e:
+            logger.debug("Liveness /status fetch failed for '%s': %s", agent_id, e)
+            return False
+        if not isinstance(status_resp, dict):
+            return False
+        if "error" in status_resp:
+            return False
+        last_ts = status_resp.get("last_iteration_ts")
+        if last_ts is None:
+            # Agent hasn't ticked yet (just booted) — not stale.
+            return False
+        try:
+            return (now - float(last_ts)) > _STALE_LOOP_SECONDS
+        except (TypeError, ValueError):
+            return False
+
     async def _check_agent(self, agent_id: str) -> None:
         health = self.agents.get(agent_id)
         if not health or health.status == "failed":
@@ -143,17 +218,32 @@ class HealthMonitor:
         try:
             reachable = await self.transport.is_reachable(agent_id, timeout=5)
             if reachable:
-                health.consecutive_failures = 0
-                health.last_healthy = now
-                new_status = "healthy"
-                health.status = new_status
-                if new_status != prev_status and self._event_bus:
-                    self._event_bus.emit("health_change", agent=agent_id, data={
-                        "previous": prev_status, "current": health.status,
-                        "failures": health.consecutive_failures,
-                        "restart_count": health.restart_count,
-                    })
-                return
+                # Liveness check (Bug 1): an agent can be reachable on
+                # /status (FastAPI thread alive) while its inner loop is
+                # hung. Only flag stale when the lane queue actually has
+                # work waiting — an idle agent legitimately stops bumping
+                # the iteration counter.
+                stale = await self._is_loop_stale(agent_id, now)
+                if stale:
+                    logger.warning(
+                        "Agent '%s' is reachable with queued work but loop "
+                        "appears stale (no iteration in >%ds) — treating as "
+                        "unhealthy",
+                        agent_id, _STALE_LOOP_SECONDS,
+                    )
+                    # Fall through to the unhealthy bookkeeping below.
+                else:
+                    health.consecutive_failures = 0
+                    health.last_healthy = now
+                    new_status = "healthy"
+                    health.status = new_status
+                    if new_status != prev_status and self._event_bus:
+                        self._event_bus.emit("health_change", agent=agent_id, data={
+                            "previous": prev_status, "current": health.status,
+                            "failures": health.consecutive_failures,
+                            "restart_count": health.restart_count,
+                        })
+                    return
         except Exception as e:
             logger.debug("Health check transport error for '%s': %s", agent_id, e)
 

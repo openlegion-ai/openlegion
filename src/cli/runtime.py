@@ -565,6 +565,11 @@ class RuntimeContext:
             trace_store=self.trace_store,
             notify_fn=self._handle_notify_origin,
         )
+        # Bug 1: hand the lane queue-depth lookup to the health monitor so
+        # the staleness check (reachable+busy+no-tick → unhealthy) has
+        # the data it needs. Health monitor was built before the lane.
+        if self.health_monitor is not None:
+            self.health_monitor.set_queue_depth_fn(self.lane_manager.get_queue_depth)
 
         self._dispatch_loop = asyncio.new_event_loop()
 
@@ -683,6 +688,15 @@ class RuntimeContext:
         app.include_router(webhook_manager.create_router())
         self.health_monitor._cleanup_agent = app.cleanup_agent  # type: ignore[attr-defined]
 
+        # Bug 4: lane watchdog needs the durable task store so a per-task
+        # timeout can mark the row ``failed`` (back-edge inbox event fires)
+        # instead of leaving the originator waiting forever. The store is
+        # created inside ``create_mesh_app`` so we wire it here after the
+        # fact rather than threading it through the lane constructor.
+        _tasks_store_ref = getattr(app, "tasks_store", None)
+        if _tasks_store_ref is not None and self.lane_manager is not None:
+            self.lane_manager._tasks_store = _tasks_store_ref
+
         self._init_channel_manager()
 
         from src.dashboard.server import create_dashboard_router, create_spa_catchall_router
@@ -793,18 +807,30 @@ class RuntimeContext:
                 logger.warning("Failed to invoke tool '%s' on '%s': %s", tool_name, agent_name, e)
                 return {"error": str(e)}
 
-        async def heartbeat_dispatch(agent_name: str, message: str) -> dict:
+        async def heartbeat_dispatch(
+            agent_name: str, message: str, *, force_llm: bool = False,
+        ) -> dict:
             """Dispatch heartbeat via dedicated /heartbeat endpoint.
 
             Task 2b: stamp ``kind="heartbeat"`` origin so the agent's
             tools (and downstream gates) can identify self-triggered
             heartbeat work versus a human or cron wake.
+
+            Bug 6 (codex P2 r2): ``force_llm`` is forwarded to the
+            agent via the ``x-force-llm`` header so
+            ``AgentLoop.execute_heartbeat`` skips its own ``empty
+            HEARTBEAT.md → no_heartbeat_rules`` short-circuit. Without
+            this, bypassing only the cron-side skip leaves
+            pipeline-kicker agents silent because the agent-side check
+            still fires.
             """
             from src.shared.trace import origin_header, trace_headers
             from src.shared.types import MessageOrigin
             origin = MessageOrigin(kind="heartbeat", channel="heartbeat", user="")
             headers = trace_headers()
             headers.update(origin_header(origin))
+            if force_llm:
+                headers["x-force-llm"] = "true"
             try:
                 return await self.transport.request(
                     agent_name, "POST", "/heartbeat",

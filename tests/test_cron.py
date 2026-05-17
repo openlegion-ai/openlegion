@@ -1013,3 +1013,166 @@ class TestComputeNextRun:
         await sched.resume_job(job.id)
         assert sched.jobs[job.id].next_run is not None
 
+
+class TestCronForceLlm:
+    """Bug 4 (force_llm) — pipeline-kicker agents have no probes and an
+    empty HEARTBEAT.md, so the standard skip-LLM check would never wake
+    them. ``force_llm=True`` bypasses the skip so the LLM runs every tick."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.config_path = f"{self._tmpdir}/cron.json"
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    @pytest.mark.asyncio
+    async def test_force_llm_dispatches_through_all_skip_conditions(self):
+        """All four skip conditions hold but force_llm=True → dispatch fires."""
+        dispatch = AsyncMock(return_value="kicked the pipeline")
+        context_fn = AsyncMock(return_value={
+            "heartbeat_rules": "",
+            "daily_logs": "",
+            "is_default_heartbeat": True,
+            "has_recent_activity": False,
+        })
+        mock_bb = MagicMock()
+        mock_bb.list_by_prefix.return_value = []
+        sched = CronScheduler(
+            config_path=self.config_path, dispatch_fn=dispatch,
+            blackboard=mock_bb, context_fn=context_fn,
+        )
+        job = sched.add_job(
+            agent="kicker", schedule="every 15m",
+            message="heartbeat", heartbeat=True,
+            force_llm=True,
+        )
+        with patch.object(sched, "_run_heartbeat_probes", return_value=[]):
+            result = await sched._execute_job(job)
+        # Even with all skip conditions met, dispatch fires.
+        dispatch.assert_called_once()
+        assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_force_llm_default_unset_keeps_skipping(self):
+        """Without force_llm the skip-LLM optimization runs unchanged."""
+        dispatch = AsyncMock(return_value="should not see this")
+        context_fn = AsyncMock(return_value={
+            "heartbeat_rules": "",
+            "daily_logs": "",
+            "is_default_heartbeat": True,
+            "has_recent_activity": False,
+        })
+        mock_bb = MagicMock()
+        mock_bb.list_by_prefix.return_value = []
+        sched = CronScheduler(
+            config_path=self.config_path, dispatch_fn=dispatch,
+            blackboard=mock_bb, context_fn=context_fn,
+        )
+        # No force_llm — default False.
+        job = sched.add_job(
+            agent="regular", schedule="every 15m",
+            message="heartbeat", heartbeat=True,
+        )
+        assert job.force_llm is False
+        with patch.object(sched, "_run_heartbeat_probes", return_value=[]):
+            result = await sched._execute_job(job)
+        assert result is None
+        dispatch.assert_not_called()
+
+    def test_force_llm_persists_across_save_load_cycle(self):
+        """``CronJob.force_llm`` round-trips through the JSON config file."""
+        sched = CronScheduler(config_path=self.config_path)
+        sched.add_job(
+            agent="kicker", schedule="every 1h",
+            message="heartbeat", heartbeat=True,
+            force_llm=True,
+        )
+
+        # Reload from disk — confirm force_llm survived.
+        sched2 = CronScheduler(config_path=self.config_path)
+        loaded = list(sched2.jobs.values())[0]
+        assert loaded.force_llm is True
+
+    @pytest.mark.asyncio
+    async def test_force_llm_updatable_via_update_job(self):
+        """``_UPDATABLE_FIELDS`` allows toggling force_llm at runtime."""
+        sched = CronScheduler(config_path=self.config_path)
+        job = sched.add_job(
+            agent="kicker", schedule="every 1h",
+            message="heartbeat", heartbeat=True,
+        )
+        assert job.force_llm is False
+
+        updated = await sched.update_job(job.id, force_llm=True)
+        assert updated is not None
+        assert updated.force_llm is True
+
+        # And toggling it back off works too.
+        updated = await sched.update_job(job.id, force_llm=False)
+        assert updated.force_llm is False
+
+    @pytest.mark.asyncio
+    async def test_force_llm_propagates_to_heartbeat_dispatch_fn(self):
+        """Bug 6 (codex P2 r2): force_llm must flow past cron into the dispatch.
+
+        The cron-side skip is only half the path — the agent's
+        ``execute_heartbeat`` runs its own ``no_heartbeat_rules`` skip on
+        empty HEARTBEAT.md. If ``force_llm`` doesn't reach the dispatch
+        callable, the loop-side skip still silences pipeline-kicker
+        agents. Pin the propagation so a future refactor can't drop it.
+        """
+        hb_dispatch = AsyncMock(return_value={
+            "response": "kicked", "summary": "", "tools_used": [],
+            "duration_ms": 10, "tokens_used": 5, "outcome": "ok",
+            "skipped": False,
+        })
+        context_fn = AsyncMock(return_value={
+            "heartbeat_rules": "",
+            "daily_logs": "",
+            "is_default_heartbeat": True,
+            "has_recent_activity": False,
+        })
+        mock_bb = MagicMock()
+        mock_bb.list_by_prefix.return_value = []
+        sched = CronScheduler(
+            config_path=self.config_path, dispatch_fn=AsyncMock(),
+            heartbeat_dispatch_fn=hb_dispatch,
+            blackboard=mock_bb, context_fn=context_fn,
+        )
+        job = sched.add_job(
+            agent="kicker", schedule="every 15m",
+            message="heartbeat", heartbeat=True, force_llm=True,
+        )
+        with patch.object(sched, "_run_heartbeat_probes", return_value=[]):
+            await sched._execute_job(job)
+        hb_dispatch.assert_called_once()
+        # force_llm=True must reach the dispatcher as a kwarg so it can
+        # set the x-force-llm header on the /heartbeat request.
+        assert hb_dispatch.call_args.kwargs.get("force_llm") is True
+
+    @pytest.mark.asyncio
+    async def test_force_llm_default_does_not_propagate_true(self):
+        """Default force_llm=False stays False through the dispatch."""
+        hb_dispatch = AsyncMock(return_value={
+            "response": "ok", "summary": "", "tools_used": [],
+            "duration_ms": 10, "tokens_used": 5, "outcome": "ok",
+            "skipped": False,
+        })
+        context_fn = AsyncMock(return_value={
+            "heartbeat_rules": "# Rules\nstuff",
+            "is_default_heartbeat": False,
+            "has_recent_activity": True,
+        })
+        sched = CronScheduler(
+            config_path=self.config_path, dispatch_fn=AsyncMock(),
+            heartbeat_dispatch_fn=hb_dispatch, context_fn=context_fn,
+        )
+        job = sched.add_job(
+            agent="regular", schedule="every 15m",
+            message="heartbeat", heartbeat=True,
+        )
+        await sched._execute_job(job)
+        hb_dispatch.assert_called_once()
+        assert hb_dispatch.call_args.kwargs.get("force_llm") is False
+

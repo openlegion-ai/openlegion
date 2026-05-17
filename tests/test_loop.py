@@ -1838,6 +1838,51 @@ async def test_heartbeat_skips_when_no_rules():
 
 
 @pytest.mark.asyncio
+async def test_heartbeat_force_llm_bypasses_no_heartbeat_rules_skip():
+    """Bug 6 (codex P2 r2): force_llm=True must reach the LLM even with empty rules.
+
+    Pipeline-kicker agents intentionally have no HEARTBEAT.md content and
+    no goals (their job IS to think on a schedule and decide what to
+    do). Without force_llm propagation the agent-side
+    ``no_heartbeat_rules`` skip would silence them. Pin the bypass.
+    """
+    loop = _make_loop()
+    loop.llm.chat = AsyncMock(return_value=LLMResponse(content="kicked", tokens_used=10))
+    loop.mesh_client.introspect = AsyncMock(return_value={})
+    loop.mesh_client.read_blackboard = AsyncMock(return_value=None)
+    loop.workspace = MagicMock()
+    loop.workspace.get_bootstrap_content = MagicMock(return_value="")
+    loop.workspace.get_learnings_context = MagicMock(return_value="")
+    loop.workspace.load_heartbeat_rules = MagicMock(return_value="# Heartbeat Rules\n")
+    loop.workspace.append_daily_log = MagicMock()
+    loop.workspace.append_activity = MagicMock()
+
+    result = await loop.execute_heartbeat("Check stuff", force_llm=True)
+    assert not result.get("skipped", False)
+    loop.llm.chat.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_force_llm_still_respects_agent_busy():
+    """Bug 6 (codex P2 r2): force_llm bypasses no_heartbeat_rules but NOT busy.
+
+    A busy agent has work in flight — running the heartbeat would
+    contend with the active state machine. force_llm is about
+    overriding the skip-LLM cost optimization, not about ignoring
+    safety interlocks. Pin that busy still wins.
+    """
+    loop = _make_loop()
+    # Mark the agent as already working.
+    await loop._chat_lock.acquire()
+    try:
+        result = await loop.execute_heartbeat("Check stuff", force_llm=True)
+        assert result["skipped"] is True
+        assert result["reason"] == "agent_busy"
+    finally:
+        loop._chat_lock.release()
+
+
+@pytest.mark.asyncio
 async def test_heartbeat_runs_when_empty_rules_but_goals_exist():
     """Heartbeat still runs when HEARTBEAT.md is empty but goals are set."""
     loop = _make_loop()

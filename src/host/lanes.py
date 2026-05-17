@@ -14,6 +14,7 @@ Three queue modes control how incoming messages interact with busy agents:
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
@@ -27,6 +28,13 @@ logger = setup_logging("host.lanes")
 _STEER_WAKEUP_MAX = 10  # max wakeups per window
 _STEER_WAKEUP_WINDOW = 3600  # 1 hour window
 _NOTIFY_FORWARD_TIMEOUT = 30  # seconds — cap on auto-notify send
+# Per-task lane watchdog (Bug 4): a hung LLM stream or stuck tool call
+# previously blocked the lane indefinitely — every subsequent task for that
+# agent would queue forever. The default is generous (15 min) because some
+# deep-research workloads legitimately take that long; tune via env var.
+_DEFAULT_LANE_TIMEOUT_SECONDS = int(
+    os.getenv("OPENLEGION_LANE_TIMEOUT_SECONDS", "900"),
+)
 
 
 @dataclass
@@ -51,11 +59,24 @@ class LaneManager:
         steer_fn: Callable[..., Coroutine[Any, Any, Any]] | None = None,
         trace_store: Any = None,
         notify_fn: Callable[..., Coroutine[Any, Any, Any]] | None = None,
+        tasks_store: Any = None,
+        task_timeout_seconds: int | None = None,
     ):
         self._dispatch_fn = dispatch_fn
         self._steer_fn = steer_fn
         self._trace_store = trace_store
         self._notify_fn = notify_fn
+        # ``tasks_store`` (Bug 4): when wired, the lane watchdog marks the
+        # durable task ``failed`` with ``error="lane_timeout"`` on timeout
+        # so originators see the back-edge event instead of waiting forever.
+        # Lane keeps working without it — falls back to a loud log line.
+        self._tasks_store = tasks_store
+        # ``task_timeout_seconds`` (Bug 4): per-task wall-clock cap. Read
+        # from env at construction so each LaneManager honours its own
+        # override (and tests can pass a tight value).
+        if task_timeout_seconds is None:
+            task_timeout_seconds = _DEFAULT_LANE_TIMEOUT_SECONDS
+        self._task_timeout_seconds = task_timeout_seconds
         self._queues: dict[str, asyncio.Queue[QueuedTask]] = {}
         self._workers: dict[str, asyncio.Task] = {}
         self._pending: dict[str, list[QueuedTask]] = {}
@@ -260,12 +281,19 @@ class LaneManager:
                     dispatch_kwargs["origin"] = task.origin
                 if task.task_id is not None:
                     dispatch_kwargs["task_id"] = task.task_id
+                # Bug 4: per-task wall-clock cap. A hung LLM stream or
+                # stuck tool previously blocked the lane forever — every
+                # subsequent task for this agent would queue forever.
                 if dispatch_kwargs:
-                    result = await self._dispatch_fn(
-                        agent, task.message, **dispatch_kwargs,
+                    result = await asyncio.wait_for(
+                        self._dispatch_fn(agent, task.message, **dispatch_kwargs),
+                        timeout=self._task_timeout_seconds,
                     )
                 else:
-                    result = await self._dispatch_fn(agent, task.message)
+                    result = await asyncio.wait_for(
+                        self._dispatch_fn(agent, task.message),
+                        timeout=self._task_timeout_seconds,
+                    )
                 task.future.set_result(result)
                 # Auto-forward result to origin channel+user when requested.
                 # Runs as a background task with a timeout so a hung channel
@@ -303,6 +331,43 @@ class LaneManager:
                     forward_task = asyncio.create_task(_forward())
                     self._forward_tasks.add(forward_task)
                     forward_task.add_done_callback(self._forward_tasks.discard)
+            except asyncio.TimeoutError:
+                # Bug 4: dispatch exceeded the per-task wall-clock cap.
+                # Free the lane, mark the durable task ``failed`` so the
+                # originating agent's back-edge inbox sees the timeout,
+                # then continue serving the queue. Do NOT raise — the
+                # worker must survive a single stuck task.
+                timeout_msg = (
+                    f"Lane task {task.id} for agent={agent} timed out after "
+                    f"{self._task_timeout_seconds}s — freeing lane"
+                )
+                logger.error(timeout_msg)
+                if task.task_id and self._tasks_store is not None:
+                    try:
+                        # ``Tasks.update_status`` is sync — push it off the
+                        # event loop so a slow SQLite write can't pile back
+                        # onto the lane worker we just freed.
+                        await asyncio.get_running_loop().run_in_executor(
+                            None,
+                            lambda: self._tasks_store.update_status(
+                                task.task_id,
+                                "failed",
+                                actor="lane_watchdog",
+                                extra_payload={
+                                    "error": "lane_timeout",
+                                    "timeout_seconds": self._task_timeout_seconds,
+                                },
+                            ),
+                        )
+                    except Exception as close_err:
+                        logger.warning(
+                            "Lane watchdog failed to close task %s: %s",
+                            task.task_id, close_err,
+                        )
+                if not task.future.done():
+                    task.future.set_exception(
+                        asyncio.TimeoutError(timeout_msg),
+                    )
             except Exception as e:
                 if not task.future.done():
                     task.future.set_exception(e)
@@ -335,6 +400,22 @@ class LaneManager:
                 "busy": self._busy.get(agent, False),
             }
         return result
+
+    def get_queue_depth(self, agent: str) -> int:
+        """Return current queue depth for an agent (0 if no lane exists).
+
+        Used by HealthMonitor's loop-liveness check (Bug 1) — combine with
+        the agent's ``last_iteration_ts`` from /status to detect a wedged
+        inner loop with a live FastAPI thread. We count both queued
+        messages waiting and an in-flight task (``busy``) so the "agent has
+        actual work" predicate fires correctly during the gap between
+        dequeue and dispatch.
+        """
+        queue = self._queues.get(agent)
+        depth = queue.qsize() if queue is not None else 0
+        if self._busy.get(agent, False):
+            depth += 1
+        return depth
 
     def remove_lane(self, agent: str) -> None:
         """Remove all lane state for an agent, cancelling its worker task."""
