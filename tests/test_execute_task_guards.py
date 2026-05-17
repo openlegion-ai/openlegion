@@ -8,10 +8,12 @@ Three guards:
    The guard clears the checkpoint and starts fresh.
 
 2. Pathological-success rejection: if the final-response branch is hit
-   on the first iteration with ``total_tokens == 0`` we downgrade to
-   ``failed`` with a clear error rather than reporting a ghost-success
-   that masks corruption (mocked no-op LLM, checkpoint resurrection of
-   a finished state, double-completion race).
+   on the first iteration with ``total_tokens == 0`` AND empty content,
+   downgrade to ``failed`` with a clear error rather than reporting a
+   ghost-success (mocked no-op LLM, checkpoint resurrection of a
+   finished state, double-completion race). Empty content is required
+   because some providers (Ollama, proxies that strip usage) report
+   ``tokens_used=0`` for legitimate completions.
 
 3. Branch-exit logging: every ``return TaskResult(...)`` in
    ``execute_task`` is preceded by a structured ``logger.info`` so a
@@ -133,10 +135,13 @@ async def test_stale_checkpoint_at_max_iterations_starts_fresh():
 
 
 @pytest.mark.asyncio
-async def test_pathological_zero_token_completion_downgraded_to_failed():
-    """A first-iteration LLM response with zero tokens is the ghost-completion
-    smoking gun — guard must downgrade success → failed."""
-    ghost = LLMResponse(content='{"result": {"answer": "I did nothing"}}', tokens_used=0)
+async def test_pathological_zero_token_empty_content_downgraded_to_failed():
+    """A first-iteration LLM response with zero tokens AND empty content
+    is the ghost-completion smoking gun — guard must downgrade success
+    to failed. Empty content is required because some providers (Ollama,
+    proxies that strip usage) legitimately report tokens_used=0 for real
+    answers; content + tokens together is the unambiguous signal."""
+    ghost = LLMResponse(content="", tokens_used=0)
     loop = _make_loop(llm_responses=[ghost])
 
     assignment = TaskAssignment(
@@ -150,10 +155,10 @@ async def test_pathological_zero_token_completion_downgraded_to_failed():
 
 
 @pytest.mark.asyncio
-async def test_pathological_zero_token_completion_logs_guard_branch(caplog):
+async def test_pathological_zero_token_empty_content_logs_guard_branch(caplog):
     """The guard should emit the pathological_success_guard branch-exit log,
     not the normal final_response label."""
-    ghost = LLMResponse(content='{"result": {"answer": "nope"}}', tokens_used=0)
+    ghost = LLMResponse(content="   ", tokens_used=0)  # whitespace-only also empty
     loop = _make_loop(llm_responses=[ghost])
 
     assignment = TaskAssignment(
@@ -185,6 +190,24 @@ async def test_first_iteration_completion_with_tokens_stays_complete():
     result = await loop.execute_task(assignment)
     assert result.status == "complete"
     assert result.tokens_used == 42
+
+
+@pytest.mark.asyncio
+async def test_first_iteration_completion_with_content_but_zero_tokens_stays_complete():
+    """Codex P2 regression guard: a provider that omits usage metadata
+    (e.g. Ollama, some proxies) returns tokens_used=0 for legitimate
+    completions. As long as content is present, the guard must NOT fire."""
+    legit = LLMResponse(content='{"result": {"answer": "real"}}', tokens_used=0)
+    loop = _make_loop(llm_responses=[legit])
+    assignment = TaskAssignment(
+        task_id="task_no_usage", workflow_id="wf", step_id="s1",
+        task_type="research", input_data={"q": "ok"},
+    )
+    result = await loop.execute_task(assignment)
+    assert result.status == "complete", (
+        f"providers without usage metadata must not be flagged; got {result.status} "
+        f"(error={result.error})"
+    )
 
 
 # ── Guard 3: branch-exit logging ─────────────────────────────────

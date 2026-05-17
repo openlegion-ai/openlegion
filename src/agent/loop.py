@@ -905,12 +905,20 @@ class AgentLoop:
                     iterations_executed = iteration + 1
                     # Bug 5 (pathological-success rejection): catch the ghost
                     # completion signature — first-iteration completion with
-                    # zero LLM tokens spent. That combination means the LLM
-                    # never really got called (mocked no-op, checkpoint
-                    # resurrection of a finished state, double-completion
-                    # race). Downgrade to a loud failure rather than reporting
-                    # a sub-second pending→done with empty logs.
-                    if iterations_executed == 1 and total_tokens == 0:
+                    # zero LLM tokens AND empty content. That combination
+                    # means the LLM never really did work (mocked no-op,
+                    # checkpoint resurrection of a finished state, double-
+                    # completion race). Token count alone is unreliable —
+                    # some providers (Ollama, certain proxies) omit usage
+                    # metadata so a legitimate first-turn answer can read
+                    # as ``tokens_used=0``. Requiring empty content too
+                    # avoids false-positive failures for those providers.
+                    _raw_content = (llm_response.content or "").strip()
+                    if (
+                        iterations_executed == 1
+                        and total_tokens == 0
+                        and not _raw_content
+                    ):
                         logger.error(
                             "execute_task pathological success guard tripped "
                             "for task=%s: iterations=%d tokens=%d — downgrading "
