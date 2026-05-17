@@ -684,15 +684,11 @@ class DashboardEvent(BaseModel):
         # payload).
         "agent_config_updated",
         # Team (formerly "project") CRUD — create / update / delete so
-        # the teams list refreshes without polling. PR 3 stopped emitting
-        # the legacy ``project_*`` names; the literals are retained here
-        # for type-safety on any historical-record code that still parses
-        # the older events (deprecated; no longer emitted).
-        "project_created",
-        "project_updated",
-        "project_deleted",
-        "project_archived",
-        "project_unarchived",
+        # the teams list refreshes without polling. The 5 legacy
+        # ``project_*`` literals were dropped on 2026-05-18 (see
+        # refactor/drop-dead-project-literals): PR 3 of the rename had
+        # already stopped emitting them, and no consumer / dispatcher /
+        # historical-record code in src/ or tests/ still references them.
         "team_created",
         "team_updated",
         "team_deleted",
