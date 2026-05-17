@@ -988,13 +988,17 @@ class AgentLoop:
                     # contract is ``{"result": {...}}`` (object), enforced
                     # by ``_parse_final_output`` callers and the
                     # pathological-success test fixtures.
+                    # Codex r6: also require the dict to be non-empty —
+                    # ``{"result": {}}`` is the same chatter-in-structure
+                    # bypass with a more compact payload.
                     is_structured_final = False
                     try:
                         _parsed_final = json.loads(llm_response.content or "")
-                        if (
-                            isinstance(_parsed_final, dict)
-                            and isinstance(_parsed_final.get("result"), dict)
-                        ):
+                        _result_field = (
+                            _parsed_final.get("result")
+                            if isinstance(_parsed_final, dict) else None
+                        )
+                        if isinstance(_result_field, dict) and _result_field:
                             is_structured_final = True
                     except (json.JSONDecodeError, TypeError):
                         pass

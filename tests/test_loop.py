@@ -203,6 +203,28 @@ async def test_lazy_guard_allows_structured_final_after_nudge():
 
 
 @pytest.mark.asyncio
+async def test_lazy_guard_rejects_empty_dict_result():
+    """Bug F (codex r6): ``{"result": {}}`` is the same chatter-in-
+    structure bypass as ``{"result": "..."}`` — it satisfies isinstance
+    + dict but conveys nothing. The guard requires a non-empty dict."""
+    responses = [
+        LLMResponse(content="ok", tokens_used=20),
+        LLMResponse(content='{"result": {}}', tokens_used=30),
+    ]
+    loop = _make_loop(responses)
+    loop.skills.get_tool_definitions = MagicMock(
+        return_value=[{"type": "function", "function": {"name": "web_search"}}]
+    )
+    assignment = TaskAssignment(
+        workflow_id="wf1", step_id="s1", task_type="research",
+        input_data={"query": "test"},
+    )
+    result = await loop.execute_task(assignment)
+    assert result.status == "failed"
+    assert "no_action_taken" in (result.error or "")
+
+
+@pytest.mark.asyncio
 async def test_lazy_guard_rejects_scalar_result_chatter():
     """Bug F (codex r5): the structured-final escape hatch must require
     ``result`` to be a dict, not just present. Otherwise an LLM can
