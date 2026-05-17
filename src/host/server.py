@@ -5283,10 +5283,6 @@ def create_mesh_app(
 
     # === Operator Config Endpoints ===
 
-    _VALID_CONFIG_FIELDS = {
-        "instructions", "soul", "model", "role", "heartbeat",
-        "interface", "thinking", "budget", "permissions",
-    }
     _CONFIG_FIELD_MAP = {
         "instructions": "initial_instructions", "soul": "initial_soul",
         "heartbeat": "initial_heartbeat",
