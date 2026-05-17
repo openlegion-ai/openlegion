@@ -62,10 +62,10 @@ def memory_stack(tmp_path_factory):
         if openai_key:
             os.environ["OPENLEGION_CRED_OPENAI_API_KEY"] = openai_key
 
-    from src.host.runtime import DockerBackend as ContainerManager
     from src.host.credentials import CredentialVault
     from src.host.mesh import Blackboard, MessageRouter, PubSub
     from src.host.permissions import PermissionMatrix
+    from src.host.runtime import DockerBackend as ContainerManager
     from src.host.server import create_mesh_app
 
     tmp_dir = tmp_path_factory.mktemp("e2e_memory")
