@@ -15,6 +15,12 @@ def open_db(
 
     Caller is responsible for any additional pragmas (journal_mode,
     foreign_keys, etc.) and for closing the connection.
+
+    Not covered by this helper (set inline at the call site instead):
+      - ``isolation_level=None`` (autocommit) — pass to ``sqlite3.connect``
+        directly; the helper does not expose it.
+      - URI form (``file:...?mode=ro`` with ``uri=True``) — use
+        ``sqlite3.connect`` directly for read-only or other URI modes.
     """
     conn = sqlite3.connect(str(path), check_same_thread=check_same_thread)
     conn.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
