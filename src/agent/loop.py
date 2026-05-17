@@ -682,6 +682,18 @@ class AgentLoop:
         introspect_data = await self._fetch_introspect_cached()
         system_prompt = self._build_system_prompt(assignment, introspect_data=introspect_data)
 
+        # Bug F (codex r4): seed the tool-call counter from messages so a
+        # checkpoint-resumed task picks up where it left off; thereafter
+        # we increment locally at the dispatch site so the count survives
+        # ``maybe_compact`` dropping the assistant-with-tool_calls entry
+        # from the live ``messages`` list. The guard at the terminal
+        # branch reads this counter, not the message history.
+        tool_calls_count = sum(
+            len(m.get("tool_calls") or [])
+            for m in messages
+            if m.get("role") == "assistant"
+        )
+
         try:
             for iteration in range(start_iteration, self.MAX_ITERATIONS):
                 self._bump_liveness()
@@ -808,6 +820,10 @@ class AgentLoop:
                         "content": llm_response.content or "",
                         "tool_calls": tool_call_entries,
                     })
+                    # Bug F (codex r4): track tool dispatches independently
+                    # of the message list so summarizing compaction can't
+                    # drop the signal mid-task.
+                    tool_calls_count += len(llm_response.tool_calls)
 
                     # Execute tools — parallel-safe tools run concurrently
                     self._current_messages = messages
@@ -935,26 +951,38 @@ class AgentLoop:
                         )
                         return result
 
-                    # Bug F (lazy completion) guard: when the LLM reaches the
-                    # final-answer branch having used zero tools across more
-                    # than one iteration, that's a "I'll do it now" / "Done!"
+                    # Bug F (lazy completion) guard: when the LLM reaches
+                    # the final-answer branch having used zero tools across
+                    # more than one iteration AND its final reply is plain
+                    # chatter (not a structured ``{"result": ...}`` JSON
+                    # response), that's a "I'll do it now" / "Done!"
                     # acknowledgment with no real work. The iter-0 nudge
                     # above caught a single text-only response; this catches
                     # the case where the LLM ignored the nudge and produced
                     # a second text-only reply. PR #918's pathological-success
                     # guard misses this because the LLM was actually called
                     # (tokens > 0) and content is non-empty (it's chatter).
-                    # The discriminator: a real task either completes via a
-                    # tool action or via the nudged-first-reply path; reaching
-                    # iteration 2+ without ever calling a tool means the LLM
-                    # is stalling. Single-iteration text-only completion is
-                    # explicitly allowed (legitimate Q&A-style tasks).
-                    tool_calls_count = sum(
-                        len(m.get("tool_calls") or [])
-                        for m in messages
-                        if m.get("role") == "assistant"
-                    )
-                    if iterations_executed > 1 and tool_calls_count == 0:
+                    #
+                    # Codex r4: the nudge text explicitly invites a structured
+                    # final answer for genuine completion or impossibility,
+                    # so a parseable ``{"result": ...}`` payload must escape
+                    # the guard even with zero tool calls — that's a
+                    # legitimate "I can't do this because X" or "the answer
+                    # is X" outcome. We check for the top-level "result"
+                    # key (the contract documented in the nudge prompt and
+                    # honoured by ``_parse_final_output``).
+                    is_structured_final = False
+                    try:
+                        _parsed_final = json.loads(llm_response.content or "")
+                        if isinstance(_parsed_final, dict) and "result" in _parsed_final:
+                            is_structured_final = True
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                    if (
+                        iterations_executed > 1
+                        and tool_calls_count == 0
+                        and not is_structured_final
+                    ):
                         self.state = "idle"
                         self.current_task = None
                         self.tasks_failed += 1

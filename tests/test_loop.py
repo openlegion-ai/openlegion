@@ -165,6 +165,102 @@ async def test_lazy_completion_guard_fails_text_only_after_nudge():
 
 
 @pytest.mark.asyncio
+async def test_lazy_guard_allows_structured_final_after_nudge():
+    """Bug F counter-test (codex r4): a STRUCTURED final response after
+    the nudge — e.g. ``{"result": {"status": "impossible", "reason":
+    "..."}}`` — is a legitimate completion even with zero tool calls.
+
+    The iter-0 nudge text explicitly invites a final JSON response for
+    genuine completion or impossibility; the guard must let that
+    through. Plain-text "I'll do it now" / "Done!" chatter still fails.
+    """
+    responses = [
+        # Iter 0: text-only — triggers the nudge.
+        LLMResponse(content="Looking at this...", tokens_used=30),
+        # Iter 1: structured final response declaring impossibility.
+        LLMResponse(
+            content='{"result": {"status": "impossible", "reason": "needs API key"}}',
+            tokens_used=40,
+        ),
+    ]
+    loop = _make_loop(responses)
+    loop.skills.get_tool_definitions = MagicMock(
+        return_value=[{"type": "function", "function": {"name": "web_search"}}]
+    )
+    assignment = TaskAssignment(
+        workflow_id="wf1", step_id="s1", task_type="research",
+        input_data={"query": "test"},
+    )
+
+    result = await loop.execute_task(assignment)
+
+    # Structured final answer with "result" key → escapes the guard.
+    assert result.status == "complete"
+    assert loop.tasks_completed == 1
+    assert loop.tasks_failed == 0
+    # And the result_data reflects the structured answer.
+    assert result.result == {"status": "impossible", "reason": "needs API key"}
+
+
+@pytest.mark.asyncio
+async def test_lazy_guard_survives_message_compaction():
+    """Bug F (codex r4): summarizing compaction can drop the assistant-
+    with-tool_calls entry from the live ``messages`` list. The guard
+    uses a locally-tracked counter (seeded from messages at task start,
+    then incremented at dispatch) so the tool-call signal survives.
+
+    Simulated by clearing ``messages`` between the tool-call iteration
+    and the final-answer iteration — equivalent to compaction dropping
+    the assistant-with-tool_calls record.
+    """
+    responses = [
+        # Iter 0: text-only — triggers the nudge.
+        LLMResponse(content="thinking...", tokens_used=20),
+        # Iter 1: nudged — calls a tool.
+        LLMResponse(
+            content="",
+            tool_calls=[ToolCallInfo(name="web_search", arguments={"q": "x"})],
+            tokens_used=30,
+        ),
+        # Iter 2: legitimate final summary referencing the tool result.
+        LLMResponse(content='{"result": {"summary": "found 3"}}', tokens_used=40),
+    ]
+    loop = _make_loop(responses)
+    loop.skills.get_tool_definitions = MagicMock(
+        return_value=[{"type": "function", "function": {"name": "web_search"}}]
+    )
+    loop.skills.execute = AsyncMock(return_value={"results": ["r1", "r2", "r3"]})
+
+    # Stub maybe_compact to wipe message history right after the tool
+    # iteration runs — proves the counter is independent of `messages`.
+    compacted_once = {"done": False}
+    if loop.context_manager is not None:
+        async def _strip_history(_sys_prompt, msgs):
+            if not compacted_once["done"] and any(
+                m.get("role") == "tool" for m in msgs
+            ):
+                compacted_once["done"] = True
+                # Keep only the latest user message; drop everything else
+                # (worst-case compaction: tool_calls entries gone).
+                msgs = [m for m in msgs if m.get("role") == "user"][-1:]
+            return msgs, None
+        loop.context_manager.maybe_compact = _strip_history
+
+    assignment = TaskAssignment(
+        workflow_id="wf1", step_id="s1", task_type="research",
+        input_data={"query": "test"},
+    )
+
+    result = await loop.execute_task(assignment)
+
+    # Despite the live messages losing the tool_calls record, the
+    # counter remembered the dispatch — guard does NOT trip.
+    assert result.status == "complete"
+    assert loop.tasks_completed == 1
+    assert loop.tasks_failed == 0
+
+
+@pytest.mark.asyncio
 async def test_single_iteration_text_only_still_completes():
     """Counter-test to the lazy-completion guard: a single-iteration
     text-only response is a legitimate Q&A-style completion (no tools
