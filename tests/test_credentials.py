@@ -4025,3 +4025,298 @@ def test_lazy_system_credential_providers_still_resolves():
     assert result.stdout.startswith("OK "), (
         f"Unexpected subprocess output: {result.stdout!r}"
     )
+
+
+# ── Seam follow-up Fix 2: credential-kind & model-compat surface ──
+
+
+class TestCredentialKindAndModelCompat:
+    """Tests for get_credential_kind / is_model_compatible / get_allowed_models.
+
+    These methods power the operator-facing list_available_models tool and
+    the edit_agent / create_agent / apply_template validation gates so the
+    operator never has to memorize the OAuth model subsets.
+    """
+
+    def _purge_env(self, monkeypatch):
+        # Clear every provider's API key + both OAuth blobs so the test
+        # starts from a known-empty credential surface.
+        for p in (
+            "anthropic", "openai", "gemini", "deepseek", "moonshot",
+            "minimax", "xai", "groq", "zai", "mistral", "openrouter",
+        ):
+            monkeypatch.delenv(f"OPENLEGION_SYSTEM_{p.upper()}_API_KEY", raising=False)
+        monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_OAUTH", raising=False)
+        monkeypatch.delenv("OPENLEGION_SYSTEM_ANTHROPIC_OAUTH", raising=False)
+        monkeypatch.delenv("OPENLEGION_SYSTEM_OLLAMA_API_BASE", raising=False)
+
+    def test_credential_kind_none(self, monkeypatch):
+        self._purge_env(monkeypatch)
+        v = CredentialVault()
+        assert v.get_credential_kind("openai") == "none"
+        assert v.get_credential_kind("anthropic") == "none"
+
+    def test_credential_kind_api_key_only(self, monkeypatch):
+        self._purge_env(monkeypatch)
+        monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-test")
+        v = CredentialVault()
+        assert v.get_credential_kind("openai") == "api_key"
+        assert v.get_credential_kind("anthropic") == "none"
+
+    def test_credential_kind_oauth_only(self, monkeypatch):
+        self._purge_env(monkeypatch)
+        monkeypatch.setenv(
+            "OPENLEGION_SYSTEM_OPENAI_OAUTH",
+            '{"access_token":"tok","refresh_token":"ref"}',
+        )
+        v = CredentialVault()
+        assert v.get_credential_kind("openai") == "oauth"
+
+    def test_credential_kind_both(self, monkeypatch):
+        self._purge_env(monkeypatch)
+        monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-test")
+        monkeypatch.setenv(
+            "OPENLEGION_SYSTEM_OPENAI_OAUTH",
+            '{"access_token":"tok","refresh_token":"ref"}',
+        )
+        v = CredentialVault()
+        assert v.get_credential_kind("openai") == "both"
+
+    def test_is_model_compatible_no_credentials(self, monkeypatch):
+        self._purge_env(monkeypatch)
+        v = CredentialVault()
+        ok, reason = v.is_model_compatible("openai/gpt-5")
+        assert ok is False
+        assert reason is not None and "No credentials" in reason
+        assert "OPENLEGION_SYSTEM_OPENAI_API_KEY" in reason
+
+    def test_is_model_compatible_api_key_accepts_any(self, monkeypatch):
+        self._purge_env(monkeypatch)
+        monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-test")
+        v = CredentialVault()
+        # API key path is unrestricted — even an OAuth-only model passes
+        ok, reason = v.is_model_compatible("openai/gpt-4.1-mini")
+        assert ok is True
+        assert reason is None
+
+    def test_is_model_compatible_oauth_accepts_allowed(self, monkeypatch):
+        self._purge_env(monkeypatch)
+        monkeypatch.setenv(
+            "OPENLEGION_SYSTEM_OPENAI_OAUTH",
+            '{"access_token":"tok","refresh_token":"ref"}',
+        )
+        v = CredentialVault()
+        # An OAuth-allowed model (Codex) is fine
+        ok, reason = v.is_model_compatible("openai/gpt-5.3-codex")
+        assert ok is True
+        assert reason is None
+
+    def test_is_model_compatible_oauth_rejects_non_allowed(self, monkeypatch):
+        self._purge_env(monkeypatch)
+        monkeypatch.setenv(
+            "OPENLEGION_SYSTEM_OPENAI_OAUTH",
+            '{"access_token":"tok","refresh_token":"ref"}',
+        )
+        v = CredentialVault()
+        # gpt-4.1-mini is NOT in OAUTH_ALLOWED_MODELS_OPENAI
+        ok, reason = v.is_model_compatible("openai/gpt-4.1-mini")
+        assert ok is False
+        # Reason must surface the allowed alternatives so the operator
+        # doesn't have to guess.
+        assert reason is not None
+        assert "OAuth-allowed models" in reason
+        assert "openai/gpt-5.3-codex" in reason
+
+    def test_is_model_compatible_unknown_model(self, monkeypatch):
+        """A bare model name with no slash / no known prefix → 'Unknown model'.
+
+        Names with a slash still parse as ``<prefix>/...`` and route
+        through the per-provider 'no credentials' branch instead of
+        'unknown model' — this is by design (the prefix could be a
+        legitimate provider that just isn't configured).
+        """
+        self._purge_env(monkeypatch)
+        monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-test")
+        v = CredentialVault()
+        ok, reason = v.is_model_compatible("totally-made-up-model-no-slash")
+        assert ok is False
+        assert reason is not None and "Unknown model" in reason
+        assert "list_available_models" in reason
+
+    def test_get_allowed_models_oauth_subset(self, monkeypatch):
+        self._purge_env(monkeypatch)
+        monkeypatch.setenv(
+            "OPENLEGION_SYSTEM_OPENAI_OAUTH",
+            '{"access_token":"tok","refresh_token":"ref"}',
+        )
+        v = CredentialVault()
+        result = v.get_allowed_models()
+        assert "openai" in result
+        # OAuth path returns the smaller per-provider subset only.
+        openai_models = set(result["openai"])
+        assert "openai/gpt-5.3-codex" in openai_models
+        # gpt-4.1-mini is NOT in the OAuth subset.
+        assert "openai/gpt-4.1-mini" not in openai_models
+        assert "anthropic" not in result
+
+    def test_get_allowed_models_api_key_returns_featured_list(self, monkeypatch):
+        self._purge_env(monkeypatch)
+        monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-test")
+        v = CredentialVault()
+        result = v.get_allowed_models()
+        assert "openai" in result
+        openai_models = set(result["openai"])
+        # API key path returns the full featured list — includes
+        # models that are NOT in the OAuth subset.
+        assert "openai/gpt-4.1-mini" in openai_models
+
+    def test_get_allowed_models_provider_filter(self, monkeypatch):
+        self._purge_env(monkeypatch)
+        monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-test")
+        monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant")
+        v = CredentialVault()
+        result = v.get_allowed_models(provider="openai")
+        assert set(result.keys()) == {"openai"}
+
+    def test_get_allowed_models_omits_unconfigured_providers(self, monkeypatch):
+        self._purge_env(monkeypatch)
+        monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-test")
+        v = CredentialVault()
+        result = v.get_allowed_models()
+        assert "openai" in result
+        # No anthropic creds → omitted entirely.
+        assert "anthropic" not in result
+
+    def test_oauth_allowed_models_env_override(self, monkeypatch):
+        """OPENLEGION_OAUTH_ALLOWED_MODELS_OPENAI overrides the default subset."""
+        # The env override is read at module import time, so we have to
+        # reload the module to pick it up.
+        import importlib
+
+        import src.host.credentials as creds_mod
+        monkeypatch.setenv(
+            "OPENLEGION_OAUTH_ALLOWED_MODELS_OPENAI",
+            "openai/custom-model-one,openai/custom-model-two",
+        )
+        importlib.reload(creds_mod)
+        try:
+            assert "openai/custom-model-one" in creds_mod.OAUTH_ALLOWED_MODELS_OPENAI
+            assert "openai/custom-model-two" in creds_mod.OAUTH_ALLOWED_MODELS_OPENAI
+            # Default model dropped after override.
+            assert "openai/gpt-5.3-codex" not in creds_mod.OAUTH_ALLOWED_MODELS_OPENAI
+        finally:
+            # Reset to defaults so other tests aren't polluted.
+            monkeypatch.delenv("OPENLEGION_OAUTH_ALLOWED_MODELS_OPENAI", raising=False)
+            importlib.reload(creds_mod)
+
+
+class TestLLMAuthAndConfigErrors:
+    """Tests for LLMAuthError / LLMConfigError raised from OAuth paths.
+
+    The OAuth streaming paths in CredentialVault must raise the new
+    distinguished exceptions on 401/403/400-model-not-found so the agent
+    loop can route to quarantine vs. config-error branches.
+    """
+
+    @pytest.mark.asyncio
+    async def test_openai_oauth_raises_auth_error_on_401(self, monkeypatch):
+        """A 401 from the Codex OAuth endpoint must raise LLMAuthError."""
+        from src.shared.errors import LLMAuthError
+        from src.shared.types import APIProxyRequest
+        monkeypatch.setenv(
+            "OPENLEGION_SYSTEM_OPENAI_OAUTH",
+            '{"access_token":"tok","refresh_token":"ref"}',
+        )
+        v = CredentialVault()
+        # Bypass the token refresh — return what we configured.
+        async def _stub_token():
+            return ("tok", "acct")
+        v._ensure_openai_oauth_token = _stub_token  # type: ignore[assignment]
+
+        # Build a mock stream context that returns a 401 response.
+        class _MockResp:
+            status_code = 401
+            is_success = False
+            text = "auth blown"
+            async def aread(self):
+                return None
+            async def aiter_lines(self):
+                if False:
+                    yield ""
+                return
+
+        class _MockStreamCtx:
+            async def __aenter__(self):
+                return _MockResp()
+            async def __aexit__(self, *a):
+                return False
+
+        class _MockClient:
+            def stream(self, *a, **kw):
+                return _MockStreamCtx()
+
+        async def _stub_client():
+            return _MockClient()
+        v._get_http_client = _stub_client  # type: ignore[assignment]
+
+        req = APIProxyRequest(
+            service="llm", action="chat",
+            params={"model": "openai/gpt-5.3-codex", "messages": []},
+        )
+        with pytest.raises(LLMAuthError) as ei:
+            async for _ in v._openai_oauth_chat_stream(req, "openai/gpt-5.3-codex"):
+                pass
+        assert ei.value.provider == "openai"
+        assert ei.value.http_status == 401
+
+    @pytest.mark.asyncio
+    async def test_openai_oauth_raises_config_error_on_400_model_not_found(
+        self, monkeypatch,
+    ):
+        """A 400 with model-not-found text must raise LLMConfigError."""
+        from src.shared.errors import LLMConfigError
+        from src.shared.types import APIProxyRequest
+        monkeypatch.setenv(
+            "OPENLEGION_SYSTEM_OPENAI_OAUTH",
+            '{"access_token":"tok","refresh_token":"ref"}',
+        )
+        v = CredentialVault()
+
+        async def _stub_token():
+            return ("tok", "acct")
+        v._ensure_openai_oauth_token = _stub_token  # type: ignore[assignment]
+
+        class _MockResp:
+            status_code = 400
+            is_success = False
+            text = '{"error":{"message":"The model gpt-99 is not supported"}}'
+            async def aread(self):
+                return None
+            async def aiter_lines(self):
+                if False:
+                    yield ""
+                return
+
+        class _MockStreamCtx:
+            async def __aenter__(self):
+                return _MockResp()
+            async def __aexit__(self, *a):
+                return False
+
+        class _MockClient:
+            def stream(self, *a, **kw):
+                return _MockStreamCtx()
+
+        async def _stub_client():
+            return _MockClient()
+        v._get_http_client = _stub_client  # type: ignore[assignment]
+
+        req = APIProxyRequest(
+            service="llm", action="chat",
+            params={"model": "openai/gpt-99", "messages": []},
+        )
+        with pytest.raises(LLMConfigError) as ei:
+            async for _ in v._openai_oauth_chat_stream(req, "openai/gpt-99"):
+                pass
+        assert ei.value.provider == "openai"
+        assert ei.value.http_status == 400

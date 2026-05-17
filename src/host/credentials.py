@@ -27,6 +27,7 @@ import httpx
 
 from src.agent.attachments import convert_openai_image_blocks
 from src.host.transcript import sanitize_for_provider
+from src.shared.errors import LLMAuthError, LLMConfigError
 from src.shared.models import KEYLESS_PROVIDERS, get_known_provider_names
 from src.shared.types import APIProxyRequest, APIProxyResponse
 from src.shared.utils import friendly_streaming_error, setup_logging
@@ -218,6 +219,45 @@ def __getattr__(name: str):  # PEP 562 — lazy module attributes
         globals()[name] = value  # cache after first access
         return value
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+# ── OAuth-allowed model subsets ───────────────────────────
+# OAuth credentials (ChatGPT/Codex, Claude Code, etc.) only accept a fixed
+# subset of models on their OAuth-specific inference endpoints. These lists
+# are conservative starting points — verify against current provider Codex /
+# Claude Code docs. Operator can override via env var if needed:
+#   OPENLEGION_OAUTH_ALLOWED_MODELS_OPENAI=openai/foo,openai/bar
+#   OPENLEGION_OAUTH_ALLOWED_MODELS_ANTHROPIC=anthropic/foo,...
+def _parse_env_models(env_name: str, fallback: frozenset[str]) -> frozenset[str]:
+    val = os.environ.get(env_name)
+    if not val:
+        return fallback
+    return frozenset(m.strip() for m in val.split(",") if m.strip())
+
+
+OAUTH_ALLOWED_MODELS_OPENAI = _parse_env_models(
+    "OPENLEGION_OAUTH_ALLOWED_MODELS_OPENAI",
+    frozenset({
+        "openai/gpt-5.3-codex",
+        "openai/gpt-5",
+        "openai/gpt-5-mini",
+        "openai/gpt-5-pro",
+    }),
+)
+
+OAUTH_ALLOWED_MODELS_ANTHROPIC = _parse_env_models(
+    "OPENLEGION_OAUTH_ALLOWED_MODELS_ANTHROPIC",
+    frozenset({
+        "anthropic/claude-opus-4-7",
+        "anthropic/claude-sonnet-4-6",
+        "anthropic/claude-haiku-4-5-20251001",
+    }),
+)
+
+_OAUTH_ALLOWED_MODELS: dict[str, frozenset[str]] = {
+    "openai": OAUTH_ALLOWED_MODELS_OPENAI,
+    "anthropic": OAUTH_ALLOWED_MODELS_ANTHROPIC,
+}
 
 
 def is_oauth_token(token: str) -> bool:
@@ -698,6 +738,89 @@ class CredentialVault:
         if self._has_anthropic_oauth():
             providers.add("anthropic")
         return providers
+
+    def get_credential_kind(self, provider: str) -> str:
+        """Return what's configured for this provider.
+
+        Returns one of ``'api_key' | 'oauth' | 'both' | 'none'``.
+        api_key gates take precedence — if both exist, model selection is
+        unrestricted (api_key path can serve any model).
+        """
+        has_oauth = False
+        has_api_key = False
+        if provider == "openai":
+            has_oauth = self._has_openai_oauth()
+            has_api_key = bool(self.system_credentials.get("openai_api_key"))
+        elif provider == "anthropic":
+            has_oauth = self._has_anthropic_oauth()
+            has_api_key = bool(self.system_credentials.get("anthropic_api_key"))
+        else:
+            has_api_key = bool(self.system_credentials.get(f"{provider}_api_key"))
+        if has_api_key and has_oauth:
+            return "both"
+        if has_api_key:
+            return "api_key"
+        if has_oauth:
+            return "oauth"
+        return "none"
+
+    def is_model_compatible(self, model: str) -> tuple[bool, str | None]:
+        """Validate model against current credentials.
+
+        Returns ``(True, None)`` when usable, ``(False, actionable_reason)``
+        otherwise. The reason string is shown directly to the operator —
+        name the allowed alternatives so they don't have to guess.
+        """
+        from src.shared.models import resolve_provider_for_model
+        provider = resolve_provider_for_model(model)
+        if not provider:
+            return (False, (
+                f"Unknown model '{model}'. Use list_available_models to see "
+                "what's compatible."
+            ))
+        kind = self.get_credential_kind(provider)
+        if kind == "none":
+            return (False, (
+                f"No credentials configured for provider '{provider}'. "
+                f"Set OPENLEGION_SYSTEM_{provider.upper()}_API_KEY (preferred) "
+                f"or complete the OAuth setup."
+            ))
+        if kind in ("api_key", "both"):
+            return (True, None)
+        # oauth-only — must be in the per-provider OAuth allowlist
+        allowed = _OAUTH_ALLOWED_MODELS.get(provider, frozenset())
+        if model in allowed:
+            return (True, None)
+        suggestion = (
+            ", ".join(sorted(allowed))
+            or "(no OAuth-allowed models defined for this provider)"
+        )
+        return (False, (
+            f"Model '{model}' is not compatible with the {provider} OAuth "
+            f"credential currently configured. OAuth-allowed models: "
+            f"{suggestion}. To use other models, configure an API key via "
+            f"OPENLEGION_SYSTEM_{provider.upper()}_API_KEY."
+        ))
+
+    def get_allowed_models(self, provider: str | None = None) -> dict[str, list[str]]:
+        """Return per-provider allowed-model lists given current credentials.
+
+        - ``api_key`` / ``both`` → full ``_FEATURED_MODELS`` list for that provider
+        - ``oauth``-only → the OAuth-subset list for that provider
+        - ``none`` → omitted from result entirely
+        """
+        from src.shared.models import _FEATURED_MODELS
+        result: dict[str, list[str]] = {}
+        providers_to_check = [provider] if provider else list(_FEATURED_MODELS.keys())
+        for p in providers_to_check:
+            kind = self.get_credential_kind(p)
+            if kind == "none":
+                continue
+            if kind in ("api_key", "both"):
+                result[p] = sorted(_FEATURED_MODELS.get(p, []))
+            else:
+                result[p] = sorted(_OAUTH_ALLOWED_MODELS.get(p, []))
+        return result
 
     def _find_fallback_model(self, exclude: set[str] | None = None) -> str | None:
         """Find a model with valid credentials, for last-resort fallback.
@@ -1543,7 +1666,14 @@ class CredentialVault:
             if hasattr(e, "body") and isinstance(e.body, dict):
                 msg = e.body.get("error", {}).get("message", msg)
             logger.error("OAuth AuthenticationError: token=%s, msg=%s", token_preview, msg)
-            yield f"data: {json.dumps({'error': f'OAuth auth failed (token may have expired): {msg}'})}\n\n"
+            err_msg = f"OAuth auth failed (token may have expired): {msg}"
+            yield f"data: {json.dumps({'error': err_msg})}\n\n"
+            # Surface as a distinguished exception so the agent loop can
+            # route to the quarantine path (Fix 3/4 in seam follow-up).
+            raise LLMAuthError(
+                err_msg, provider="anthropic", model=model,
+                http_status=401, raw_body=str(msg),
+            )
 
         except anthropic.APIStatusError as e:
             self._health_tracker.record_failure(model, "HTTPError", e.status_code)
@@ -1555,6 +1685,31 @@ class CredentialVault:
                 msg += f": {detail}"
             logger.error("OAuth APIStatusError (%d): token=%s, detail=%s", e.status_code, token_preview, detail)
             yield f"data: {json.dumps({'error': msg})}\n\n"
+            # 403 → auth issue; 400 with model-related text → config issue.
+            if e.status_code == 403:
+                raise LLMAuthError(
+                    msg, provider="anthropic", model=model,
+                    http_status=403, raw_body=detail,
+                )
+            if e.status_code == 400:
+                lowered = (detail or "").lower()
+                if "model" in lowered and any(
+                    marker in lowered for marker in (
+                        "not supported", "not_supported",
+                        "not found", "not_found",
+                        "unknown model", "unavailable",
+                    )
+                ):
+                    raise LLMConfigError(
+                        msg, provider="anthropic", model=model,
+                        allowed_models=set(OAUTH_ALLOWED_MODELS_ANTHROPIC),
+                        http_status=400,
+                    )
+
+        except (LLMAuthError, LLMConfigError):
+            # Already a distinguished exception (e.g. raised inside the
+            # stream). Don't wrap — propagate so the loop catches it.
+            raise
 
         except Exception as e:
             logger.error(f"OAuth streaming call failed: {e}")
@@ -2070,11 +2225,52 @@ class CredentialVault:
                 "POST", _OPENAI_RESPONSES_URL, headers=headers,
                 json=body, timeout=120,
             ) as resp:
-                if resp.status_code == 401:
-                    self._health_tracker.record_failure(model, "AuthError", 401)
+                if resp.status_code in (401, 403):
+                    self._health_tracker.record_failure(
+                        model, "AuthError", resp.status_code,
+                    )
                     await resp.aread()
                     detail = resp.text[:500] if resp.text else ""
-                    msg = f"OpenAI Codex auth failed (token may have expired): {detail}"
+                    msg = (
+                        f"OpenAI Codex auth failed (HTTP {resp.status_code}, "
+                        f"token may have expired): {detail}"
+                    )
+                    # Surface as a distinguished exception so the agent loop
+                    # can route to the quarantine path (Fix 3/4 in seam
+                    # follow-up). Also emit one error chunk so any consumer
+                    # mid-stream sees a friendly message before unwinding.
+                    yield f"data: {json.dumps({'error': msg})}\n\n"
+                    raise LLMAuthError(
+                        msg, provider="openai", model=model,
+                        http_status=resp.status_code, raw_body=detail,
+                    )
+                if resp.status_code == 400:
+                    self._health_tracker.record_failure(
+                        model, "HTTPError", resp.status_code,
+                    )
+                    await resp.aread()
+                    detail = (resp.text or "")[:500]
+                    lowered = detail.lower()
+                    if "model" in lowered and any(
+                        marker in lowered for marker in (
+                            "not supported", "not_supported",
+                            "not found", "not_found",
+                            "unknown model", "unavailable model",
+                        )
+                    ):
+                        msg = (
+                            f"OpenAI Codex rejected model '{model}' (HTTP 400). "
+                            f"This model is not available on the OAuth endpoint. "
+                            f"Switch to an OAuth-allowed model via "
+                            f"list_available_models / edit_agent. Detail: {detail}"
+                        )
+                        yield f"data: {json.dumps({'error': msg})}\n\n"
+                        raise LLMConfigError(
+                            msg, provider="openai", model=model,
+                            allowed_models=set(OAUTH_ALLOWED_MODELS_OPENAI),
+                            http_status=400,
+                        )
+                    msg = f"OpenAI Codex API error (HTTP 400): {detail}"
                     yield f"data: {json.dumps({'error': msg})}\n\n"
                     return
                 if not resp.is_success:
@@ -2198,6 +2394,10 @@ class CredentialVault:
                 done_data["thinking_content"] = collected_thinking
             yield f"data: {json.dumps(done_data)}\n\n"
 
+        except (LLMAuthError, LLMConfigError):
+            # Already a distinguished exception — propagate so the loop
+            # catches it on the agent side (Fix 3 in seam follow-up).
+            raise
         except Exception as e:
             logger.error(f"OpenAI Codex streaming call failed: {e}")
             self._health_tracker.record_failure(model, type(e).__name__, 0)

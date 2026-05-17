@@ -160,3 +160,141 @@ class TestHealthRecoveryEvent:
                 "failures": 0, "restart_count": 0,
             },
         )
+
+
+# ── Seam follow-up Fix 4: quarantine on consecutive auth failures ──
+
+
+class TestQuarantine:
+    """Tests for HealthMonitor.record_auth_failure / clear_quarantine
+    / is_quarantined / auto-expiry — the credential-failure quarantine path.
+
+    The mesh quarantines an agent after AUTH_FAILURE_THRESHOLD consecutive
+    auth failures so the lane stops dispatching work that will obviously
+    fail. Clear is implicit on edit_agent(model) or after the auto-expiry
+    TTL — no separate operator tool needed (operator UX principle).
+    """
+
+    def test_record_auth_failure_increments_counter(self):
+        monitor = _make_monitor({})
+        monitor.register("agent-a")
+        quarantined = monitor.record_auth_failure(
+            "agent-a", provider="openai", model="openai/gpt-5", http_status=401,
+        )
+        assert quarantined is False
+        assert monitor.agents["agent-a"].consecutive_auth_failures == 1
+        assert monitor.agents["agent-a"].quarantined is False
+
+    def test_quarantine_triggers_at_threshold(self):
+        monitor = _make_monitor({})
+        monitor.register("agent-a")
+        # Default threshold is 3 — first two stay below.
+        monitor.record_auth_failure("agent-a", provider="openai", model="x", http_status=401)
+        monitor.record_auth_failure("agent-a", provider="openai", model="x", http_status=401)
+        assert monitor.agents["agent-a"].quarantined is False
+        just_quarantined = monitor.record_auth_failure(
+            "agent-a", provider="openai", model="x", http_status=401,
+        )
+        assert just_quarantined is True
+        assert monitor.agents["agent-a"].quarantined is True
+        assert monitor.agents["agent-a"].status == "quarantined"
+        assert monitor.agents["agent-a"].quarantine_reason is not None
+        assert "openai" in monitor.agents["agent-a"].quarantine_reason
+
+    def test_quarantine_emits_event(self):
+        monitor = _make_monitor({})
+        monitor.register("agent-a")
+        for _ in range(3):
+            monitor.record_auth_failure(
+                "agent-a", provider="openai", model="x", http_status=401,
+            )
+        # The event bus is called with the quarantine transition.
+        emit_calls = monitor._event_bus.emit.call_args_list
+        # Find the health_change → quarantined emit
+        quarantine_emit = [
+            c for c in emit_calls
+            if c.args and c.args[0] == "health_change"
+            and c.kwargs.get("data", {}).get("current") == "quarantined"
+        ]
+        assert len(quarantine_emit) == 1
+
+    def test_quarantine_writes_notification(self):
+        monitor = _make_monitor({})
+        notif_store = MagicMock()
+        monitor.set_notifications_store(notif_store)
+        monitor.register("agent-a")
+        for _ in range(3):
+            monitor.record_auth_failure(
+                "agent-a", provider="openai", model="openai/gpt-5", http_status=401,
+            )
+        notif_store.add.assert_called_once()
+        kwargs = notif_store.add.call_args.kwargs
+        assert kwargs["kind"] == "credential"
+        assert kwargs["agent_id"] == "agent-a"
+
+    def test_is_quarantined_query(self):
+        monitor = _make_monitor({})
+        monitor.register("agent-a")
+        monitor.register("agent-b")
+        for _ in range(3):
+            monitor.record_auth_failure(
+                "agent-a", provider="openai", model="x", http_status=401,
+            )
+        assert monitor.is_quarantined("agent-a") is True
+        assert monitor.is_quarantined("agent-b") is False
+        assert monitor.is_quarantined("unknown") is False
+
+    def test_clear_quarantine_resets_state(self):
+        monitor = _make_monitor({})
+        monitor.register("agent-a")
+        for _ in range(3):
+            monitor.record_auth_failure(
+                "agent-a", provider="openai", model="x", http_status=401,
+            )
+        cleared = monitor.clear_quarantine("agent-a", reason="model changed")
+        assert cleared is True
+        assert monitor.agents["agent-a"].quarantined is False
+        assert monitor.agents["agent-a"].quarantine_reason is None
+        assert monitor.agents["agent-a"].consecutive_auth_failures == 0
+        assert monitor.agents["agent-a"].status == "healthy"
+        # Emits a clear event.
+        emit_calls = monitor._event_bus.emit.call_args_list
+        clear_emits = [
+            c for c in emit_calls
+            if c.args and c.args[0] == "health_change"
+            and c.kwargs.get("data", {}).get("current") == "healthy"
+            and c.kwargs.get("data", {}).get("previous") == "quarantined"
+        ]
+        assert len(clear_emits) == 1
+
+    def test_clear_quarantine_noop_when_not_quarantined(self):
+        monitor = _make_monitor({})
+        monitor.register("agent-a")
+        assert monitor.clear_quarantine("agent-a", reason="test") is False
+
+    def test_auto_expiry_clears_old_quarantine(self):
+        monitor = _make_monitor({})
+        monitor.register("agent-a")
+        for _ in range(3):
+            monitor.record_auth_failure(
+                "agent-a", provider="openai", model="x", http_status=401,
+            )
+        # Backdate the quarantine timestamp past the TTL.
+        monitor.agents["agent-a"].quarantined_at = time.time() - (
+            monitor.QUARANTINE_AUTO_CLEAR_SECONDS + 60
+        )
+        monitor._maybe_expire_quarantines(time.time())
+        assert monitor.agents["agent-a"].quarantined is False
+
+    def test_get_status_surfaces_quarantine_fields(self):
+        monitor = _make_monitor({})
+        monitor.register("agent-a")
+        for _ in range(3):
+            monitor.record_auth_failure(
+                "agent-a", provider="openai", model="x", http_status=401,
+            )
+        statuses = monitor.get_status()
+        agent_status = next(s for s in statuses if s["agent"] == "agent-a")
+        assert agent_status["quarantined"] is True
+        assert agent_status["quarantine_reason"] is not None
+        assert agent_status["consecutive_auth_failures"] == 3

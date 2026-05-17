@@ -586,3 +586,50 @@ class TestLaneWatchdog:
             await lm.enqueue("agent1", "stuck")  # no task_id
 
         tasks_store.update_status.assert_not_called()
+
+
+# ── Seam follow-up Fix 5: lane refuses dispatch to quarantined agent ──
+
+
+class TestLaneQuarantineGate:
+    """LaneManager.quarantine_check shorts the dispatch when the agent
+    is quarantined — protects the broken-credential path from queuing
+    more work onto an agent that can't run."""
+
+    @pytest.mark.asyncio
+    async def test_lane_refuses_dispatch_for_quarantined_agent(self):
+        dispatch = AsyncMock(return_value="should not be called")
+        quarantined = {"agent-a"}
+        lm = LaneManager(
+            dispatch_fn=dispatch,
+            quarantine_check=lambda a: a in quarantined,
+        )
+        with pytest.raises(RuntimeError) as ei:
+            await lm.enqueue("agent-a", "hello")
+        assert "quarantined" in str(ei.value).lower()
+        assert "edit_agent" in str(ei.value)
+        dispatch.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_lane_dispatches_when_not_quarantined(self):
+        dispatch = AsyncMock(return_value="ok")
+        quarantined: set[str] = set()
+        lm = LaneManager(
+            dispatch_fn=dispatch,
+            quarantine_check=lambda a: a in quarantined,
+        )
+        result = await lm.enqueue("agent-a", "hello")
+        assert result == "ok"
+        dispatch.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_lane_set_quarantine_check_setter(self):
+        dispatch = AsyncMock(return_value="ok")
+        lm = LaneManager(dispatch_fn=dispatch)
+        # First call goes through — no quarantine check wired.
+        r1 = await lm.enqueue("agent-a", "first")
+        assert r1 == "ok"
+        # Wire the check after construction.
+        lm.set_quarantine_check(lambda a: True)
+        with pytest.raises(RuntimeError):
+            await lm.enqueue("agent-a", "second")

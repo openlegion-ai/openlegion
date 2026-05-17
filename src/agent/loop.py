@@ -19,6 +19,7 @@ import httpx
 from src.agent.attachments import enrich_message_with_attachments
 from src.agent.loop_detector import ToolLoopDetector
 from src.agent.workspace import INTROSPECT_PERM_KEYS
+from src.shared.errors import LLMAuthError, LLMConfigError
 from src.shared.types import SILENT_REPLY_TOKEN, AgentStatus, LLMResponse, TaskAssignment, TaskResult
 from src.shared.utils import dumps_safe, format_dict, generate_id, sanitize_for_prompt, setup_logging, truncate
 
@@ -1027,6 +1028,54 @@ class AgentLoop:
                 result.status, total_tokens,
             )
             return result
+        except LLMAuthError as e:
+            # Distinguished credential failure — self-report to mesh so
+            # HealthMonitor can quarantine after threshold (Fix 3/4 in
+            # seam follow-up). Best-effort report; never let the report
+            # itself raise out of the loop.
+            self.state = "idle"
+            self.current_task = None
+            self.tasks_failed += 1
+            result = TaskResult(
+                task_id=assignment.task_id,
+                status="failed",
+                error=f"auth_failure: {e}",
+                tokens_used=total_tokens,
+                duration_ms=int((time.time() - start) * 1000),
+            )
+            self._last_result = result
+            try:
+                await self.mesh_client.report_auth_failure(
+                    provider=e.provider,
+                    model=e.model or "",
+                    http_status=e.http_status or 0,
+                )
+            except Exception as report_err:
+                logger.warning("Failed to report auth failure to mesh: %s", report_err)
+            logger.info(
+                "execute_task exit branch=auth_failure status=%s tokens=%d provider=%s",
+                result.status, total_tokens, e.provider,
+            )
+            return result
+        except LLMConfigError as e:
+            # Distinguished config failure — agent NOT quarantined; this
+            # is operator misconfig that's actionable via edit_agent.
+            self.state = "idle"
+            self.current_task = None
+            self.tasks_failed += 1
+            result = TaskResult(
+                task_id=assignment.task_id,
+                status="failed",
+                error=f"config_error: {e}",
+                tokens_used=total_tokens,
+                duration_ms=int((time.time() - start) * 1000),
+            )
+            self._last_result = result
+            logger.info(
+                "execute_task exit branch=config_error status=%s tokens=%d",
+                result.status, total_tokens,
+            )
+            return result
         except Exception as e:
             self.state = "idle"
             self.current_task = None
@@ -1717,6 +1766,61 @@ class AgentLoop:
                         outcome="cancelled",
                     )
                 raise
+            except LLMAuthError as e:
+                # Heartbeat hit a credential failure — self-report so the
+                # mesh quarantines on threshold. Same pattern as
+                # execute_task (Fix 3/4 in seam follow-up).
+                self.state = "idle"
+                duration_ms = int((time.time() - start) * 1000)
+                logger.warning("Heartbeat auth failure: %s", e)
+                try:
+                    await self.mesh_client.report_auth_failure(
+                        provider=e.provider,
+                        model=e.model or "",
+                        http_status=e.http_status or 0,
+                    )
+                except Exception as report_err:
+                    logger.warning("Failed to report auth failure to mesh: %s", report_err)
+                if self.workspace:
+                    self.workspace.append_activity(
+                        trigger="heartbeat",
+                        summary=f"Auth failure: {e}",
+                        tools_used=tools_used,
+                        duration_ms=duration_ms,
+                        tokens_used=total_tokens,
+                        outcome="error",
+                    )
+                return {
+                    "response": f"Auth failure: {e}",
+                    "summary": f"Auth failure: {e}",
+                    "tools_used": tools_used,
+                    "duration_ms": duration_ms,
+                    "tokens_used": total_tokens,
+                    "outcome": "auth_failure",
+                    "skipped": False,
+                }
+            except LLMConfigError as e:
+                self.state = "idle"
+                duration_ms = int((time.time() - start) * 1000)
+                logger.warning("Heartbeat config error: %s", e)
+                if self.workspace:
+                    self.workspace.append_activity(
+                        trigger="heartbeat",
+                        summary=f"Config error: {e}",
+                        tools_used=tools_used,
+                        duration_ms=duration_ms,
+                        tokens_used=total_tokens,
+                        outcome="error",
+                    )
+                return {
+                    "response": f"Config error: {e}",
+                    "summary": f"Config error: {e}",
+                    "tools_used": tools_used,
+                    "duration_ms": duration_ms,
+                    "tokens_used": total_tokens,
+                    "outcome": "config_error",
+                    "skipped": False,
+                }
             except Exception as e:
                 self.state = "idle"
                 duration_ms = int((time.time() - start) * 1000)
@@ -2530,6 +2634,37 @@ class AgentLoop:
         except asyncio.CancelledError:
             self.state = "idle"
             raise
+        except LLMAuthError as e:
+            # Chat path hit a credential failure — self-report so the
+            # mesh quarantines on threshold. Same pattern as execute_task
+            # (Fix 3/4 in seam follow-up).
+            self.state = "idle"
+            logger.warning(f"Chat auth failure: {e}")
+            try:
+                await self.mesh_client.report_auth_failure(
+                    provider=e.provider,
+                    model=e.model or "",
+                    http_status=e.http_status or 0,
+                )
+            except Exception as report_err:
+                logger.warning("Failed to report auth failure to mesh: %s", report_err)
+            msg = f"Auth failure: {e}"
+            if self.workspace:
+                self.workspace.append_chat_message("assistant", msg)
+            return {
+                "response": msg, "tool_outputs": tool_outputs,
+                "tokens_used": total_tokens, "auth_failure": True,
+            }
+        except LLMConfigError as e:
+            self.state = "idle"
+            logger.warning(f"Chat config error: {e}")
+            msg = f"Config error: {e}"
+            if self.workspace:
+                self.workspace.append_chat_message("assistant", msg)
+            return {
+                "response": msg, "tool_outputs": tool_outputs,
+                "tokens_used": total_tokens, "config_error": True,
+            }
         except Exception as e:
             self.state = "idle"
             logger.error(f"Chat failed: {e}", exc_info=True)
@@ -3082,6 +3217,41 @@ class AgentLoop:
 
         except asyncio.CancelledError:
             raise
+        except LLMAuthError as e:
+            # Streaming chat path hit a credential failure — self-report
+            # so the mesh quarantines on threshold (Fix 3/4 in seam
+            # follow-up).
+            logger.warning("Streaming chat auth failure: %s", e)
+            try:
+                await self.mesh_client.report_auth_failure(
+                    provider=e.provider,
+                    model=e.model or "",
+                    http_status=e.http_status or 0,
+                )
+            except Exception as report_err:
+                logger.warning("Failed to report auth failure to mesh: %s", report_err)
+            msg = f"Auth failure: {e}"
+            if self.workspace:
+                self.workspace.append_chat_message("assistant", msg)
+            yield {
+                "type": "done",
+                "response": msg,
+                "tool_outputs": tool_outputs,
+                "tokens_used": total_tokens,
+                "auth_failure": True,
+            }
+        except LLMConfigError as e:
+            logger.warning("Streaming chat config error: %s", e)
+            msg = f"Config error: {e}"
+            if self.workspace:
+                self.workspace.append_chat_message("assistant", msg)
+            yield {
+                "type": "done",
+                "response": msg,
+                "tool_outputs": tool_outputs,
+                "tokens_used": total_tokens,
+                "config_error": True,
+            }
         except Exception as e:
             logger.error("Streaming chat failed: %s", e, exc_info=True)
             msg = f"Error: {e}"

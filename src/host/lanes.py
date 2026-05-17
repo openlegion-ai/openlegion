@@ -61,6 +61,7 @@ class LaneManager:
         notify_fn: Callable[..., Coroutine[Any, Any, Any]] | None = None,
         tasks_store: Any = None,
         task_timeout_seconds: int | None = None,
+        quarantine_check: Callable[[str], bool] | None = None,
     ):
         self._dispatch_fn = dispatch_fn
         self._steer_fn = steer_fn
@@ -77,6 +78,14 @@ class LaneManager:
         if task_timeout_seconds is None:
             task_timeout_seconds = _DEFAULT_LANE_TIMEOUT_SECONDS
         self._task_timeout_seconds = task_timeout_seconds
+        # ``quarantine_check`` (Fix 5 in seam follow-up): callable that
+        # returns True when the agent is currently quarantined. Wired
+        # post-construction from runtime.py to
+        # ``HealthMonitor.is_quarantined``. When the lane dequeues work
+        # for a quarantined agent, the task is rejected with an actionable
+        # error instead of dispatched — the agent will keep failing on a
+        # broken credential otherwise.
+        self._quarantine_check = quarantine_check
         self._queues: dict[str, asyncio.Queue[QueuedTask]] = {}
         self._workers: dict[str, asyncio.Task] = {}
         self._pending: dict[str, list[QueuedTask]] = {}
@@ -99,6 +108,18 @@ class LaneManager:
         ``None`` to clear.
         """
         self._tasks_store = store
+
+    def set_quarantine_check(
+        self, check: Callable[[str], bool] | None,
+    ) -> None:
+        """Wire the quarantine check after construction (Fix 5).
+
+        Both ``LaneManager`` and ``HealthMonitor`` are built in
+        runtime.py; if construction order makes constructor injection
+        awkward, this setter lets the lane wire ``HealthMonitor.is_quarantined``
+        in once the monitor is available. ``None`` disables the check.
+        """
+        self._quarantine_check = check
 
     def _ensure_lane(self, agent: str) -> None:
         """Lazily create queue, worker, and tracking structures for an agent."""
@@ -270,6 +291,25 @@ class LaneManager:
                 task = await queue.get()
             except asyncio.CancelledError:
                 return
+            # Fix 5 (seam follow-up): refuse dispatch to a quarantined
+            # agent. The agent will keep failing on a broken credential
+            # otherwise; surface the actionable hint and free the lane.
+            if self._quarantine_check and self._quarantine_check(agent):
+                err_msg = (
+                    f"Agent '{agent}' is quarantined (credential failure). "
+                    f"Fix via edit_agent(field='model', value=...) — "
+                    f"quarantine clears on a successful edit. "
+                    f"Task not dispatched."
+                )
+                logger.warning(err_msg)
+                if not task.future.done():
+                    task.future.set_exception(RuntimeError(err_msg))
+                try:
+                    self._pending[agent].remove(task)
+                except ValueError:
+                    pass
+                queue.task_done()
+                continue
             async with lock:
                 self._busy[agent] = True
             current_trace_id.set(task.trace_id)

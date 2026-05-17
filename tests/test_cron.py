@@ -216,6 +216,11 @@ class TestCronDispatch:
         ctx.trace_store = None
         ctx.event_bus = None
         ctx.cfg = {}
+        # Fix 5 (seam follow-up): RuntimeContext now passes
+        # ``health_monitor`` to CronScheduler so the quarantine skip
+        # works. Synthetic contexts must provide the attr (None is OK
+        # — disables the skip).
+        ctx.health_monitor = None
 
         ctx._create_cron_scheduler()
         # The cron_dispatch closure was registered as ``dispatch_fn``.
@@ -1175,4 +1180,78 @@ class TestCronForceLlm:
         await sched._execute_job(job)
         hb_dispatch.assert_called_once()
         assert hb_dispatch.call_args.kwargs.get("force_llm") is False
+
+
+# ── Seam follow-up Fix 5: cron skips dispatch to quarantined agent ──
+
+
+class TestCronQuarantineGate:
+    """CronScheduler skips dispatch when the target agent is quarantined.
+
+    The heartbeat cron tick is the cheapest place to bail — skip is silent
+    (debug-level) because quarantine itself already surfaces a dashboard
+    notification via HealthMonitor.
+    """
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.config_path = f"{self._tmpdir}/cron.json"
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    @pytest.mark.asyncio
+    async def test_cron_skips_quarantined_agent(self):
+        dispatch = AsyncMock(return_value="ok")
+        health_monitor = MagicMock()
+        health_monitor.is_quarantined = MagicMock(return_value=True)
+        sched = CronScheduler(
+            config_path=self.config_path,
+            dispatch_fn=dispatch,
+            health_monitor=health_monitor,
+        )
+        job = sched.add_job(
+            agent="quarantined-agent", schedule="every 15m",
+            message="ping",
+        )
+        result = await sched._execute_job(job)
+        assert result is None
+        dispatch.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cron_dispatches_to_healthy_agent(self):
+        dispatch = AsyncMock(return_value="ok")
+        health_monitor = MagicMock()
+        health_monitor.is_quarantined = MagicMock(return_value=False)
+        sched = CronScheduler(
+            config_path=self.config_path,
+            dispatch_fn=dispatch,
+            health_monitor=health_monitor,
+        )
+        job = sched.add_job(
+            agent="healthy", schedule="every 15m", message="ping",
+        )
+        await sched._execute_job(job)
+        dispatch.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_cron_set_health_monitor_setter(self):
+        dispatch = AsyncMock(return_value="ok")
+        sched = CronScheduler(
+            config_path=self.config_path,
+            dispatch_fn=dispatch,
+        )
+        # No health monitor → no skip.
+        job = sched.add_job(
+            agent="agent-a", schedule="every 15m", message="ping",
+        )
+        await sched._execute_job(job)
+        dispatch.assert_called_once()
+        # Wire after construction.
+        hm = MagicMock()
+        hm.is_quarantined = MagicMock(return_value=True)
+        sched.set_health_monitor(hm)
+        dispatch.reset_mock()
+        await sched._execute_job(job)
+        dispatch.assert_not_called()
 

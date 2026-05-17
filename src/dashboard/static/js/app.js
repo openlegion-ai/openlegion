@@ -10324,6 +10324,7 @@ function dashboard() {
         create_agent: 'adding a teammate',
         apply_template: 'building a team from a template',
         inspect_agents: 'reviewing the team',
+        list_available_models: 'checking available models',
       };
       if (map[toolName]) return map[toolName];
       // Fallback: humanise the snake_case tool name.

@@ -360,3 +360,301 @@ def test_apply_template_accepts_model_with_credentials(tmp_path, monkeypatch):
     import yaml
     data = yaml.safe_load((cfg_dir / "agents.yaml").read_text())
     assert "worker" in data.get("agents", {})
+
+
+# ── Seam follow-up Fix 2: OAuth-only model compat at write paths ──
+
+
+def test_create_agent_rejects_non_oauth_allowed_model_under_oauth_only(
+    tmp_path, _mesh_env, container_mgr, monkeypatch,
+):
+    """OAuth-only OpenAI creds + non-OAuth-allowed model → 400.
+
+    Naming the allowed alternatives in the error message is the operator
+    UX contract — they should never have to guess which models work.
+    """
+    _clear_system_env(monkeypatch)
+    monkeypatch.setenv(
+        "OPENLEGION_SYSTEM_OPENAI_OAUTH",
+        '{"access_token":"tok","refresh_token":"ref"}',
+    )
+    vault = CredentialVault()
+
+    client, bb = _build_mesh_app(tmp_path, container_mgr, vault)
+    try:
+        # gpt-4.1-mini is NOT in OAUTH_ALLOWED_MODELS_OPENAI
+        resp = client.post(
+            "/mesh/agents/create",
+            json={
+                "agent_id": "operator",
+                "name": "oauth_blocker",
+                "role": "research",
+                "model": "openai/gpt-4.1-mini",
+            },
+        )
+        assert resp.status_code == 400, resp.text
+        detail = resp.json()["detail"]
+        assert "OAuth-allowed models" in detail
+        # Suggested replacement model is named.
+        assert "openai/gpt-5.3-codex" in detail
+        container_mgr.start_agent.assert_not_called()
+    finally:
+        bb.close()
+
+
+def test_apply_template_rejects_non_oauth_allowed_model_under_oauth_only(
+    tmp_path, monkeypatch,
+):
+    """Same gate fires on the CLI template path."""
+    _clear_system_env(monkeypatch)
+    monkeypatch.setenv(
+        "OPENLEGION_SYSTEM_OPENAI_OAUTH",
+        '{"access_token":"tok","refresh_token":"ref"}',
+    )
+
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir()
+    monkeypatch.setattr("src.cli.config.PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr("src.cli.config.AGENTS_FILE", cfg_dir / "agents.yaml")
+    monkeypatch.setattr("src.cli.config.PERMISSIONS_FILE", cfg_dir / "permissions.json")
+    monkeypatch.setattr("src.cli.config.CONFIG_FILE", cfg_dir / "mesh.yaml")
+
+    fake_template = {
+        "starter": {
+            "agents": {
+                "worker": {
+                    "role": "worker",
+                    "model": "openai/gpt-4.1-mini",  # NOT in OAuth allowlist
+                    "instructions": "do work",
+                },
+            },
+        },
+    }
+    monkeypatch.setattr("src.cli.config._load_templates", lambda: fake_template)
+
+    from src.cli.config import _create_agent_from_template
+    with pytest.raises(ValueError) as exc:
+        _create_agent_from_template(
+            name="worker", template_id="starter/worker", model="",
+        )
+    assert "OAuth-allowed models" in str(exc.value)
+
+
+def test_introspect_llm_surface_includes_allowed_models_and_kinds(
+    tmp_path, _mesh_env, monkeypatch,
+):
+    """``GET /mesh/introspect?section=llm`` must surface the new fields
+    so list_available_models has a stable contract."""
+    _clear_system_env(monkeypatch)
+    monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-test")
+    vault = CredentialVault()
+
+    container_mgr = MagicMock()
+    container_mgr.agents = {}
+    client, bb = _build_mesh_app(tmp_path, container_mgr, vault)
+    try:
+        resp = client.get(
+            "/mesh/introspect",
+            params={"section": "llm", "agent_id": "operator"},
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert "llm" in data
+        llm = data["llm"]
+        assert "available_providers" in llm
+        assert "allowed_models" in llm
+        assert "credential_kinds" in llm
+        # OpenAI API key is configured — should appear with kind=api_key.
+        assert "openai" in llm["available_providers"]
+        assert llm["credential_kinds"].get("openai") == "api_key"
+        assert "openai" in llm["allowed_models"]
+        assert len(llm["allowed_models"]["openai"]) > 0
+    finally:
+        bb.close()
+
+
+# ── Seam follow-up Fix 4 / 5: auth-failure endpoint + profile quarantine ──
+
+
+def test_report_auth_failure_endpoint_records_and_quarantines(
+    tmp_path, _mesh_env, monkeypatch,
+):
+    """POST /mesh/agents/{id}/auth-failure increments counter and
+    quarantines at the threshold."""
+    from src.host.health import HealthMonitor
+
+    _clear_system_env(monkeypatch)
+    vault = CredentialVault()
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    import json as _json
+    perms_file = tmp_path / "config" / "permissions.json"
+    perms_file.parent.mkdir(parents=True, exist_ok=True)
+    perms_file.write_text(_json.dumps({
+        "permissions": {
+            "agent-a": {
+                "can_message": ["*"],
+                "blackboard_read": ["*"],
+                "blackboard_write": ["*"],
+            },
+        },
+    }))
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {
+        "agent-a": AgentPermissions(
+            agent_id="agent-a", can_message=["*"],
+            blackboard_read=["*"], blackboard_write=["*"],
+        ),
+    }
+    perms._config_path = str(perms_file)
+    router = MessageRouter(permissions=perms, agent_registry={})
+
+    health_monitor = HealthMonitor(
+        runtime=MagicMock(), transport=MagicMock(), router=router,
+    )
+    health_monitor.register("agent-a")
+
+    container_mgr = MagicMock()
+    container_mgr.agents = {}
+    app = create_mesh_app(
+        bb, pubsub, router, perms,
+        container_manager=container_mgr,
+        credential_vault=vault,
+        health_monitor=health_monitor,
+    )
+    client = TestClient(app)
+    try:
+        # First two reports stay below threshold.
+        for _ in range(2):
+            resp = client.post(
+                "/mesh/agents/agent-a/auth-failure",
+                json={"provider": "openai", "model": "openai/gpt-5", "http_status": 401},
+            )
+            assert resp.status_code == 200
+            assert resp.json() == {"recorded": True, "quarantined": False}
+        # Third trips the quarantine.
+        resp = client.post(
+            "/mesh/agents/agent-a/auth-failure",
+            json={"provider": "openai", "model": "openai/gpt-5", "http_status": 401},
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"recorded": True, "quarantined": True}
+        assert health_monitor.is_quarantined("agent-a") is True
+    finally:
+        bb.close()
+
+
+def test_report_auth_failure_endpoint_rejects_cross_agent_report(
+    tmp_path, _mesh_env, monkeypatch,
+):
+    """Agents must only be able to self-report.
+
+    With auth tokens unset (dev mode), ``_resolve_agent_id`` trusts the
+    caller. To assert the cross-agent rejection path we wire auth_tokens
+    so the verified agent ID diverges from the URL agent_id.
+    """
+    from src.host.health import HealthMonitor
+
+    _clear_system_env(monkeypatch)
+    vault = CredentialVault()
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    import json as _json
+    perms_file = tmp_path / "config" / "permissions.json"
+    perms_file.parent.mkdir(parents=True, exist_ok=True)
+    perms_file.write_text(_json.dumps({"permissions": {}}))
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {}
+    perms._config_path = str(perms_file)
+    router = MessageRouter(permissions=perms, agent_registry={})
+
+    health_monitor = HealthMonitor(
+        runtime=MagicMock(), transport=MagicMock(), router=router,
+    )
+    health_monitor.register("alice")
+    health_monitor.register("bob")
+
+    container_mgr = MagicMock()
+    container_mgr.agents = {}
+    app = create_mesh_app(
+        bb, pubsub, router, perms,
+        container_manager=container_mgr,
+        credential_vault=vault,
+        health_monitor=health_monitor,
+        auth_tokens={"alice": "tok-alice", "bob": "tok-bob"},
+    )
+    client = TestClient(app)
+    try:
+        # Bob's token, but URL targets alice → 403.
+        resp = client.post(
+            "/mesh/agents/alice/auth-failure",
+            json={"provider": "openai", "model": "x", "http_status": 401},
+            headers={"Authorization": "Bearer tok-bob"},
+        )
+        assert resp.status_code == 403
+        assert health_monitor.agents["alice"].consecutive_auth_failures == 0
+        # Self-report (alice with alice's token) works → 200.
+        resp = client.post(
+            "/mesh/agents/alice/auth-failure",
+            json={"provider": "openai", "model": "x", "http_status": 401},
+            headers={"Authorization": "Bearer tok-alice"},
+        )
+        assert resp.status_code == 200
+        assert health_monitor.agents["alice"].consecutive_auth_failures == 1
+    finally:
+        bb.close()
+
+
+def test_profile_endpoint_surfaces_quarantine_fields(
+    tmp_path, _mesh_env, monkeypatch,
+):
+    """GET /mesh/agents/{id}/profile must include quarantine state."""
+    from src.host.health import HealthMonitor
+
+    _clear_system_env(monkeypatch)
+    vault = CredentialVault()
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    import json as _json
+    perms_file = tmp_path / "config" / "permissions.json"
+    perms_file.parent.mkdir(parents=True, exist_ok=True)
+    perms_file.write_text(_json.dumps({"permissions": {}}))
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {}
+    perms._config_path = str(perms_file)
+    router = MessageRouter(
+        permissions=perms,
+        agent_registry={"agent-a": "http://localhost:9999"},
+    )
+
+    health_monitor = HealthMonitor(
+        runtime=MagicMock(), transport=MagicMock(), router=router,
+    )
+    health_monitor.register("agent-a")
+    # Force quarantine.
+    for _ in range(3):
+        health_monitor.record_auth_failure(
+            "agent-a", provider="openai", model="x", http_status=401,
+        )
+
+    container_mgr = MagicMock()
+    container_mgr.agents = {}
+    app = create_mesh_app(
+        bb, pubsub, router, perms,
+        container_manager=container_mgr,
+        credential_vault=vault,
+        health_monitor=health_monitor,
+    )
+    client = TestClient(app)
+    try:
+        resp = client.get("/mesh/agents/agent-a/profile")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["quarantined"] is True
+        assert body["quarantine_reason"] is not None
+        assert body["consecutive_auth_failures"] == 3
+    finally:
+        bb.close()

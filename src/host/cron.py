@@ -93,6 +93,7 @@ class CronScheduler:
         context_fn: Callable | None = None,
         heartbeat_dispatch_fn: Callable | None = None,
         event_bus: Any = None,
+        health_monitor: Any = None,
     ):
         self.config_path = Path(config_path)
         self.jobs: dict[str, CronJob] = {}
@@ -103,9 +104,22 @@ class CronScheduler:
         self.context_fn = context_fn
         self.heartbeat_dispatch_fn = heartbeat_dispatch_fn
         self._event_bus = event_bus
+        # ``health_monitor`` (Fix 5 in seam follow-up): when wired, the
+        # scheduler skips dispatch for quarantined agents. Heartbeat
+        # cron jobs would otherwise keep ticking on a broken credential.
+        self.health_monitor = health_monitor
         self._running = False
         self._job_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._load()
+
+    def set_health_monitor(self, health_monitor: Any) -> None:
+        """Wire the health monitor after construction (Fix 5).
+
+        Mirrors the ``LaneManager.set_tasks_store`` injection pattern —
+        ``CronScheduler`` may be built before ``HealthMonitor`` in some
+        bootstrap orderings. ``None`` disables the quarantine skip.
+        """
+        self.health_monitor = health_monitor
 
     def _load(self) -> None:
         if not self.config_path.exists():
@@ -346,6 +360,21 @@ class CronScheduler:
         lock = self._job_locks[job.id]
         if lock.locked():
             logger.debug("Job %s already running, skipping this tick", job.id)
+            return None
+        # Fix 5 (seam follow-up): quarantined agents are skipped — the
+        # cron tick is the cheapest place to bail out, before we burn
+        # probes / context / LLM cost on an agent that can't run. Skip
+        # is silent (debug-level) because quarantine itself already
+        # surfaces a dashboard notification.
+        if (
+            self.health_monitor is not None
+            and self.health_monitor.is_quarantined(job.agent)
+        ):
+            logger.debug(
+                "Cron %s: agent '%s' quarantined — skipping dispatch "
+                "(clear via edit_agent)",
+                job.id, job.agent,
+            )
             return None
         async with lock:
             try:

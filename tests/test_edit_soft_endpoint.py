@@ -626,3 +626,136 @@ async def test_edit_soft_records_audit_log(mesh_app):
     # but we can verify via the change_history row.
     rows = app.change_history.list_recent(agent_id="writer")
     assert any(r["field"] == "role" for r in rows)
+
+
+# ── Seam follow-up Fix 4: edit_agent(model=...) clears quarantine ──
+
+
+@pytest.mark.asyncio
+async def test_edit_soft_model_clears_quarantine(tmp_path, monkeypatch):
+    """A successful field=model edit is the operator's "fix the credential"
+    signal — quarantine clears implicitly so the lane resumes dispatching.
+    No separate clear_quarantine operator tool needed."""
+    from unittest.mock import MagicMock
+
+    from src.host.health import HealthMonitor
+
+    afile = _agents_yaml(tmp_path, names=["writer"])
+    monkeypatch.chdir(tmp_path)
+    import src.cli.config as cli_cfg
+    monkeypatch.setattr(cli_cfg, "AGENTS_FILE", afile)
+    monkeypatch.setattr(cli_cfg, "PERMISSIONS_FILE", tmp_path / "config" / "permissions.json")
+    (tmp_path / "config" / "permissions.json").write_text('{"permissions": {}}')
+
+    import src.host.server as server_module
+    importlib.reload(server_module)
+
+    blackboard = Blackboard(str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    permissions = PermissionMatrix()
+    permissions.permissions["operator"] = AgentPermissions(
+        agent_id="operator", can_route_tasks=True, can_manage_projects=True,
+    )
+    permissions.permissions["writer"] = AgentPermissions(agent_id="writer")
+    router = MessageRouter(permissions, {})
+
+    health_monitor = HealthMonitor(
+        runtime=MagicMock(), transport=MagicMock(), router=router,
+    )
+    health_monitor.register("writer")
+    # Force quarantine.
+    for _ in range(3):
+        health_monitor.record_auth_failure(
+            "writer", provider="openai", model="x", http_status=401,
+        )
+    assert health_monitor.is_quarantined("writer") is True
+
+    app = server_module.create_mesh_app(
+        blackboard=blackboard,
+        pubsub=pubsub,
+        router=router,
+        permissions=permissions,
+        health_monitor=health_monitor,
+    )
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.post(
+                "/mesh/agents/writer/edit-soft",
+                json={
+                    "field": "model",
+                    "value": "anthropic/claude-haiku",
+                    "reason": "fix credential",
+                },
+                headers=_human_origin_headers(),
+            )
+        assert r.status_code == 200, r.text
+        # Quarantine should have been cleared by the edit.
+        assert health_monitor.is_quarantined("writer") is False
+        assert health_monitor.agents["writer"].consecutive_auth_failures == 0
+    finally:
+        blackboard.close()
+        importlib.reload(server_module)
+
+
+@pytest.mark.asyncio
+async def test_edit_soft_non_model_field_does_not_clear_quarantine(
+    tmp_path, monkeypatch,
+):
+    """Only model changes clear quarantine — editing instructions doesn't,
+    because that doesn't fix a broken credential."""
+    from unittest.mock import MagicMock
+
+    from src.host.health import HealthMonitor
+
+    afile = _agents_yaml(tmp_path, names=["writer"])
+    monkeypatch.chdir(tmp_path)
+    import src.cli.config as cli_cfg
+    monkeypatch.setattr(cli_cfg, "AGENTS_FILE", afile)
+    monkeypatch.setattr(cli_cfg, "PERMISSIONS_FILE", tmp_path / "config" / "permissions.json")
+    (tmp_path / "config" / "permissions.json").write_text('{"permissions": {}}')
+
+    import src.host.server as server_module
+    importlib.reload(server_module)
+
+    blackboard = Blackboard(str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    permissions = PermissionMatrix()
+    permissions.permissions["operator"] = AgentPermissions(
+        agent_id="operator", can_route_tasks=True, can_manage_projects=True,
+    )
+    permissions.permissions["writer"] = AgentPermissions(agent_id="writer")
+    router = MessageRouter(permissions, {})
+
+    health_monitor = HealthMonitor(
+        runtime=MagicMock(), transport=MagicMock(), router=router,
+    )
+    health_monitor.register("writer")
+    for _ in range(3):
+        health_monitor.record_auth_failure(
+            "writer", provider="openai", model="x", http_status=401,
+        )
+
+    app = server_module.create_mesh_app(
+        blackboard=blackboard,
+        pubsub=pubsub,
+        router=router,
+        permissions=permissions,
+        health_monitor=health_monitor,
+    )
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.post(
+                "/mesh/agents/writer/edit-soft",
+                json={
+                    "field": "instructions",
+                    "value": "# new instructions",
+                    "reason": "u",
+                },
+                headers=_human_origin_headers(),
+            )
+        assert r.status_code == 200, r.text
+        # Quarantine remains — instructions don't fix credentials.
+        assert health_monitor.is_quarantined("writer") is True
+    finally:
+        blackboard.close()
+        importlib.reload(server_module)

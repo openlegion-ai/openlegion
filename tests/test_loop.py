@@ -2395,3 +2395,81 @@ async def test_skills_reload_rebuilds_system_prompt():
     assert len(systems_seen) >= 2
     # The flag should be consumed (not stuck True)
     assert loop._skills_reloaded is False
+
+
+# ── Seam follow-up Fix 3: loop catches LLMAuthError / LLMConfigError ──
+
+
+class TestLoopLLMErrorHandling:
+    """execute_task / chat / chat_stream must catch LLMAuthError and
+    LLMConfigError explicitly — auth errors self-report to mesh for
+    quarantine; config errors fail the task with actionable error string
+    but don't quarantine (operator misconfig, not broken credential).
+    """
+
+    @pytest.mark.asyncio
+    async def test_execute_task_catches_llm_auth_error(self):
+        from src.shared.errors import LLMAuthError
+        loop = _make_loop()
+        loop.llm.chat = AsyncMock(
+            side_effect=LLMAuthError(
+                "auth blown", provider="openai", model="openai/gpt-5",
+                http_status=401,
+            ),
+        )
+        # report_auth_failure must be awaited.
+        loop.mesh_client.report_auth_failure = AsyncMock(
+            return_value={"recorded": True, "quarantined": False},
+        )
+        assignment = TaskAssignment(
+            workflow_id="w", step_id="s", task_type="x", input_data={"q": "1"},
+        )
+        result = await loop.execute_task(assignment)
+        assert result.status == "failed"
+        assert "auth_failure" in (result.error or "")
+        loop.mesh_client.report_auth_failure.assert_awaited_once()
+        kwargs = loop.mesh_client.report_auth_failure.call_args.kwargs
+        assert kwargs.get("provider") == "openai"
+        assert kwargs.get("http_status") == 401
+
+    @pytest.mark.asyncio
+    async def test_execute_task_catches_llm_config_error(self):
+        from src.shared.errors import LLMConfigError
+        loop = _make_loop()
+        loop.llm.chat = AsyncMock(
+            side_effect=LLMConfigError(
+                "model not supported", provider="openai",
+                model="openai/gpt-99", http_status=400,
+            ),
+        )
+        # Even though report_auth_failure exists, config errors must NOT
+        # self-report (this is operator misconfig, not a broken credential).
+        loop.mesh_client.report_auth_failure = AsyncMock()
+        assignment = TaskAssignment(
+            workflow_id="w", step_id="s", task_type="x", input_data={"q": "1"},
+        )
+        result = await loop.execute_task(assignment)
+        assert result.status == "failed"
+        assert "config_error" in (result.error or "")
+        loop.mesh_client.report_auth_failure.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_execute_task_auth_error_report_failure_doesnt_raise(self):
+        """If report_auth_failure itself raises, the loop must NOT propagate."""
+        from src.shared.errors import LLMAuthError
+        loop = _make_loop()
+        loop.llm.chat = AsyncMock(
+            side_effect=LLMAuthError(
+                "auth blown", provider="openai", model="x", http_status=401,
+            ),
+        )
+        loop.mesh_client.report_auth_failure = AsyncMock(
+            side_effect=RuntimeError("mesh down"),
+        )
+        assignment = TaskAssignment(
+            workflow_id="w", step_id="s", task_type="x", input_data={"q": "1"},
+        )
+        # Should not raise — the loop swallows reporting failures.
+        result = await loop.execute_task(assignment)
+        assert result.status == "failed"
+        assert "auth_failure" in (result.error or "")
