@@ -1,23 +1,13 @@
-"""Tests for operator audit trail, pending change store, and config endpoints."""
+"""Tests for operator audit trail, pending-action TTLs, and MeshClient endpoints."""
 
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from src.host.mesh import Blackboard
-from src.host.server import (
-    _CHANGE_TTL_SECONDS,
-    _HARD_CHANGE_TTL_SECONDS,
-    _cleanup_expired_changes,
-    _consume_pending_change,
-    _get_pending_actions_store,
-    _get_pending_change,
-    _store_pending_change,
-)
 
 # === Blackboard Audit Log Tests ===
 
@@ -227,110 +217,15 @@ def test_audit_log_undoable_column_migration(tmp_path):
         bb.close()
 
 
-# === Pending Change Store Tests ===
-
-
-def _clear_pending_actions() -> None:
-    """Drop every row from the pending-actions store (test helper)."""
-    store = _get_pending_actions_store()
-    with store._conn() as conn:
-        conn.execute("DELETE FROM pending_actions")
-
-
-@pytest.fixture(autouse=True)
-def clear_pending_changes():
-    """Clear the pending changes store before each test."""
-    _clear_pending_actions()
-    yield
-    _clear_pending_actions()
-
-
-def test_store_and_get_pending_change():
-    """Store a change and retrieve it."""
-    change_id = _store_pending_change("alpha", "model", "gpt-4o", "claude-sonnet-4-20250514")
-    change = _get_pending_change(change_id)
-    assert change is not None
-    assert change["agent_id"] == "alpha"
-    assert change["field"] == "model"
-    assert change["old_value"] == "gpt-4o"
-    assert change["new_value"] == "claude-sonnet-4-20250514"
-
-
-def test_consume_pending_change():
-    """Consuming removes the change."""
-    change_id = _store_pending_change("alpha", "model", "old", "new")
-    change = _consume_pending_change(change_id)
-    assert change is not None
-    assert change["field"] == "model"
-
-    # Second consume returns None
-    assert _consume_pending_change(change_id) is None
-
-
-def test_consume_nonexistent_change():
-    """Consuming a non-existent change returns None."""
-    assert _consume_pending_change("nonexistent") is None
-
-
-def test_expired_changes_cleaned_up():
-    """Expired changes are removed during cleanup."""
-    change_id = _store_pending_change("alpha", "model", "old", "new")
-    # Force expiry by backdating ``expires_at`` directly on the store.
-    store = _get_pending_actions_store()
-    expired_ts = (datetime.now(timezone.utc) - timedelta(seconds=1)).timestamp()
-    with store._conn() as conn:
-        conn.execute(
-            "UPDATE pending_actions SET expires_at=? WHERE nonce=?",
-            (expired_ts, change_id),
-        )
-
-    _cleanup_expired_changes()
-    assert _get_pending_change(change_id) is None
-
-
-def test_max_pending_evicts_oldest():
-    """When at capacity, the oldest change is evicted."""
-    from src.host.server import _MAX_PENDING
-
-    ids = []
-    for i in range(_MAX_PENDING):
-        cid = _store_pending_change("alpha", f"field_{i}", f"old_{i}", f"new_{i}")
-        ids.append(cid)
-
-    # Store one more — should evict the oldest
-    new_id = _store_pending_change("alpha", "extra", "old", "new")
-    assert len(_get_pending_actions_store().list_pending()) == _MAX_PENDING
-    # The first stored should be gone
-    assert _get_pending_change(ids[0]) is None
-    # The new one should exist
-    assert _get_pending_change(new_id) is not None
-
-
-def test_get_nonexistent_change():
-    """Getting a non-existent change returns None."""
-    assert _get_pending_change("nonexistent") is None
-
-
-def test_change_ttl_hard_field_uses_long_window():
-    """Hard fields (model / permissions / budget / thinking) get the
-    longer ``_HARD_CHANGE_TTL_SECONDS`` review window so the user has
-    time to read the diff before confirming."""
-    change_id = _store_pending_change("alpha", "model", "old", "new")
-    change = _get_pending_change(change_id)
-    assert change is not None
-    expected = datetime.now(timezone.utc) + timedelta(seconds=_HARD_CHANGE_TTL_SECONDS)
-    # Allow 5 seconds tolerance
-    assert abs((change["expires_at"] - expected).total_seconds()) < 5
-
-
-def test_change_ttl_soft_field_uses_default_window():
-    """Soft fields fall back to the legacy ``_CHANGE_TTL_SECONDS`` window."""
-    change_id = _store_pending_change("alpha", "instructions", "old", "new")
-    change = _get_pending_change(change_id)
-    assert change is not None
-    expected = datetime.now(timezone.utc) + timedelta(seconds=_CHANGE_TTL_SECONDS)
-    # Allow 5 seconds tolerance
-    assert abs((change["expires_at"] - expected).total_seconds()) < 5
+# === Pending Action TTL Tests ===
+#
+# The legacy ``_store_pending_change`` / ``_get_pending_change`` /
+# ``_consume_pending_change`` / ``_cleanup_expired_changes`` helpers
+# were removed alongside the retired config propose+confirm flow
+# (PR #927 + follow-up). Only the field-aware TTL function survives at
+# module scope; everything else lives on ``app.pending_actions`` and is
+# exercised through the HTTP endpoints (see ``test_operator_product_tools``
+# for the delete-confirm path, ``test_edit_soft_endpoint`` for receipts).
 
 
 @pytest.mark.parametrize(

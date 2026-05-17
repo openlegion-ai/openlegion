@@ -37,6 +37,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from src.shared.sqlite_helpers import open_db
 from src.shared.utils import setup_logging
 
 logger = setup_logging("host.team_migration")
@@ -166,9 +167,8 @@ def _migrate_tasks_db(db_path: Path) -> bool:
     """
     if not db_path.exists():
         return False
-    conn = sqlite3.connect(str(db_path))
+    conn = open_db(db_path, busy_timeout_ms=30000)
     try:
-        conn.execute("PRAGMA busy_timeout=30000")
         # Confirm the table exists; treat its absence as nothing to do.
         tables = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='tasks'",
@@ -284,7 +284,7 @@ def migrate_project_to_team(
                     ws_count += 1
         db_change = False
         if tasks_db.exists():
-            conn = sqlite3.connect(str(tasks_db))
+            conn = open_db(tasks_db)
             try:
                 tables = conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' AND name='tasks'",

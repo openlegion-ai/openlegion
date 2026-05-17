@@ -26,7 +26,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
-import json as json_module
 import mimetypes
 import os
 import re
@@ -44,7 +43,7 @@ from src.shared.types import (
     TaskAssignment,
     TaskResult,
 )
-from src.shared.utils import sanitize_for_prompt, setup_logging
+from src.shared.utils import dumps_safe, sanitize_for_prompt, setup_logging
 
 if TYPE_CHECKING:
     from src.agent.loop import AgentLoop
@@ -274,7 +273,7 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
                         event = next_event.result()
                     except StopAsyncIteration:
                         break
-                    yield f"data: {json_module.dumps(event, default=str)}\n\n"
+                    yield f"data: {dumps_safe(event)}\n\n"
                     next_event = asyncio.ensure_future(stream_iter.__anext__())
             finally:
                 if not next_event.done():
@@ -785,7 +784,7 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
 
 def _summarize_payload(payload: dict, max_len: int = 500) -> str:
     """Compact a message payload for memory storage."""
-    text = json_module.dumps(payload, default=str)
+    text = dumps_safe(payload)
     return text[:max_len] + "..." if len(text) > max_len else text
 
 

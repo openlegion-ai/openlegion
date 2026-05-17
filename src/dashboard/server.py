@@ -45,6 +45,7 @@ from jinja2 import Environment, FileSystemLoader
 
 from src.cli.proxy import build_proxy_env_vars, resolve_agent_proxy
 from src.dashboard.auth import verify_session_cookie
+from src.shared.sqlite_helpers import open_db
 from src.shared.utils import dumps_safe, friendly_streaming_error, sanitize_for_prompt, setup_logging
 
 if TYPE_CHECKING:
@@ -5888,9 +5889,8 @@ def create_dashboard_router(
             if not db_path.exists():
                 return {"purged": True, "deleted_records": 0}
 
-            conn = sqlite3.connect(str(db_path))
+            conn = open_db(db_path, busy_timeout_ms=5000)
             try:
-                conn.execute("PRAGMA busy_timeout=5000")
                 total_deleted = 0
 
                 for table_name, meta in entry["tables"].items():

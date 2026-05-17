@@ -603,6 +603,39 @@ async def test_legacy_project_tool_returns_renamed_stub(legacy, canonical):
 
 
 @pytest.mark.asyncio
+async def test_confirm_edit_returns_deprecation_stub():
+    """Pin the EXACT no-op response shape of the deprecated confirm_edit stub.
+
+    confirm_edit was retired alongside the propose+confirm config flow
+    (config edits now apply immediately via edit_agent and emit an undo
+    receipt). The skill is kept registered so in-flight LLM conversations
+    that still emit it don't crash. This test locks the response so a
+    future cleanup pass can't silently drop a key or alter the message —
+    the contract is what an in-flight conversation will observe.
+    """
+    from src.agent.builtins.operator_tools import confirm_edit
+
+    mc = MagicMock()
+    mc.confirm_config_change = AsyncMock()
+    result = await confirm_edit("any-change-id", mesh_client=mc, _messages=None)
+
+    # Exact response shape — three keys, nothing more.
+    assert set(result.keys()) == {"success", "applied", "deprecation_notice"}
+    assert result["success"] is True
+    assert result["applied"] is False
+    # Pin the exact deprecation_notice string. If the wording needs to
+    # change, update this test deliberately so the contract change is
+    # reviewed.
+    assert result["deprecation_notice"] == (
+        "confirm_edit is a no-op. Config edits now apply immediately "
+        "when you call edit_agent; the user sees an undo receipt with a "
+        "5–30 minute revert window. Don't call confirm_edit anymore."
+    )
+    # No mesh round-trip happens — the stub returns synchronously.
+    mc.confirm_config_change.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_edit_agent_soft_field_calls_edit_soft_immediately():
     """instructions is a soft field — must hit edit_soft and skip provenance."""
     from src.agent.builtins.operator_tools import edit_agent
