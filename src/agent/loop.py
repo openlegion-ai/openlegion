@@ -738,6 +738,11 @@ class AgentLoop:
                     messages=messages,
                     tools=available_tools,
                 )
+                # Bug 1 (codex P2 r2): tick after the LLM call returns —
+                # a single deep-research call can run >5 min, and bumping
+                # only at iteration head would let the staleness check fire
+                # during a perfectly healthy turn.
+                self._bump_liveness()
                 total_tokens += llm_response.tokens_used
                 if assignment.token_budget:
                     assignment.token_budget.record_usage(llm_response.tokens_used, self.llm.default_model)
@@ -808,6 +813,12 @@ class AgentLoop:
                     tool_results = await self._run_tools_parallel(
                         llm_response.tool_calls,
                     )
+                    # Bug 1 (codex P2 r2): tick after tool execution — a
+                    # long-running shell or browser action can sit at the
+                    # 300s _TOOL_TIMEOUT cap. Without this bump the next
+                    # iteration head might already be past the staleness
+                    # threshold even though the loop is healthy.
+                    self._bump_liveness()
                     for i, (result_str, _result) in enumerate(tool_results):
                         tool_msg = {
                             "role": "tool",
@@ -1288,7 +1299,7 @@ class AgentLoop:
 
     # ── Heartbeat mode ────────────────────────────────────────
 
-    async def execute_heartbeat(self, message: str) -> dict:
+    async def execute_heartbeat(self, message: str, *, force_llm: bool = False) -> dict:
         """Execute an autonomous heartbeat — stateless, separate from chat.
 
         Returns a structured dict with response, tools used, duration, etc.
@@ -1296,6 +1307,13 @@ class AgentLoop:
         _heartbeat_mode ContextVar so tools can detect heartbeat context.
         Notifications are still persisted to the chat transcript so users
         can find them in chat history.
+
+        ``force_llm`` (Bug 6 — codex P2 r2): pipeline-kicker agents have
+        no probes and ship with an empty HEARTBEAT.md, which makes the
+        ``no_heartbeat_rules`` skip below fire on every tick. When the
+        cron job sets ``force_llm: true`` the dispatcher forwards the
+        flag (via ``x-force-llm`` header) so the LLM is invoked anyway.
+        The ``agent_busy`` skip is NOT bypassed — busy is busy.
         """
         # Restrict operator to heartbeat-only tools during unsupervised execution.
         # Non-operator agents have _allowed_tools=None, so the swap is skipped.
@@ -1311,7 +1329,13 @@ class AgentLoop:
 
             # Skip the LLM call entirely when HEARTBEAT.md has no actionable
             # content and no goals are set — saves tokens on empty heartbeats.
-            if self.workspace and _is_heartbeat_empty(self.workspace.load_heartbeat_rules()):
+            # Bug 6 fix: ``force_llm`` lets the operator opt out of this
+            # optimization for pipeline-kicker agents.
+            if (
+                not force_llm
+                and self.workspace
+                and _is_heartbeat_empty(self.workspace.load_heartbeat_rules())
+            ):
                 # Still need to check goals before skipping
                 goals = await self._fetch_goals()
                 if not goals:
@@ -1600,6 +1624,12 @@ class AgentLoop:
                     tool_results = await self._run_tools_parallel(
                         llm_response.tool_calls,
                     )
+                    # Bug 1 (codex P2 r2): tick after tool execution — a
+                    # long-running shell or browser action can sit at the
+                    # 300s _TOOL_TIMEOUT cap. Without this bump the next
+                    # iteration head might already be past the staleness
+                    # threshold even though the loop is healthy.
+                    self._bump_liveness()
                     for i, (result_str, _result) in enumerate(tool_results):
                         hb_tool_msg = {
                             "role": "tool",

@@ -162,8 +162,9 @@ class TestHealthLivenessCheck:
         monitor.set_queue_depth_fn(lambda a: 1)
         monitor.register("agent-e")
         monitor.transport.is_reachable = AsyncMock(return_value=True)
+        # Stale by 1200s (> default 900s threshold post codex P2 r2).
         monitor.transport.request = AsyncMock(return_value={
-            "agent_id": "agent-e", "last_iteration_ts": time.time() - 600,
+            "agent_id": "agent-e", "last_iteration_ts": time.time() - 1200,
         })
 
         await monitor._check_agent("agent-e")

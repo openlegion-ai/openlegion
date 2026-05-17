@@ -491,9 +491,15 @@ class CronScheduler:
 
                         message = "\n\n".join(sections)
 
-                        # Use dedicated heartbeat endpoint when available
+                        # Use dedicated heartbeat endpoint when available.
+                        # Bug 6 (codex P2 r2): propagate ``force_llm`` to the
+                        # dispatch fn so the agent-side
+                        # ``no_heartbeat_rules`` skip is also bypassed for
+                        # pipeline-kicker agents.
                         if self.heartbeat_dispatch_fn:
-                            hb_result = await self.heartbeat_dispatch_fn(job.agent, message)
+                            hb_result = await self.heartbeat_dispatch_fn(
+                                job.agent, message, force_llm=job.force_llm,
+                            )
                             # hb_result is a structured dict from execute_heartbeat
                             if isinstance(hb_result, dict):
                                 if hb_result.get("skipped"):

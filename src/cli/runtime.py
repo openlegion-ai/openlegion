@@ -807,18 +807,30 @@ class RuntimeContext:
                 logger.warning("Failed to invoke tool '%s' on '%s': %s", tool_name, agent_name, e)
                 return {"error": str(e)}
 
-        async def heartbeat_dispatch(agent_name: str, message: str) -> dict:
+        async def heartbeat_dispatch(
+            agent_name: str, message: str, *, force_llm: bool = False,
+        ) -> dict:
             """Dispatch heartbeat via dedicated /heartbeat endpoint.
 
             Task 2b: stamp ``kind="heartbeat"`` origin so the agent's
             tools (and downstream gates) can identify self-triggered
             heartbeat work versus a human or cron wake.
+
+            Bug 6 (codex P2 r2): ``force_llm`` is forwarded to the
+            agent via the ``x-force-llm`` header so
+            ``AgentLoop.execute_heartbeat`` skips its own ``empty
+            HEARTBEAT.md → no_heartbeat_rules`` short-circuit. Without
+            this, bypassing only the cron-side skip leaves
+            pipeline-kicker agents silent because the agent-side check
+            still fires.
             """
             from src.shared.trace import origin_header, trace_headers
             from src.shared.types import MessageOrigin
             origin = MessageOrigin(kind="heartbeat", channel="heartbeat", user="")
             headers = trace_headers()
             headers.update(origin_header(origin))
+            if force_llm:
+                headers["x-force-llm"] = "true"
             try:
                 return await self.transport.request(
                     agent_name, "POST", "/heartbeat",

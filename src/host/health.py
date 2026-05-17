@@ -31,9 +31,16 @@ logger = setup_logging("host.health")
 
 # Liveness staleness threshold (Bug 1) — a reachable agent with a non-empty
 # lane queue but no loop iteration in this window is treated as having a
-# dead inner loop. Default 5 minutes; legitimate long-running tools (300s
-# cap) plus normal LLM round-trip easily fit.
-_STALE_LOOP_SECONDS = int(os.environ.get("OPENLEGION_LOOP_STALE_SECONDS", "300"))
+# dead inner loop. Aligned with the per-task lane watchdog default (900s)
+# so the lane watchdog gets to fail a single stuck task before the health
+# monitor escalates to an agent restart. Codex P2 r2: 300s was too
+# aggressive — the loop bumps at iteration boundaries, post-LLM, and
+# post-tool, so a single deep reasoning call or a full 300s tool timeout
+# can exceed the old threshold even on a perfectly healthy turn. With the
+# 900s default, the staleness check only fires when truly nothing has
+# happened in the same window that the lane watchdog uses to cancel the
+# task itself.
+_STALE_LOOP_SECONDS = int(os.environ.get("OPENLEGION_LOOP_STALE_SECONDS", "900"))
 
 
 @dataclass
