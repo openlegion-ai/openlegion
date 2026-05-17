@@ -871,11 +871,72 @@ class AgentLoop:
 
                     # LLM returned final answer -- task is done
                     result_data, promotions = self._parse_final_output(llm_response.content)
+                    duration_s = round(time.time() - start, 1)
+                    iterations_executed = iteration + 1
+
+                    # Bug 5 (pathological-success rejection): catch the ghost
+                    # completion signature — first-iteration completion with
+                    # zero LLM tokens AND empty content. That combination
+                    # means the LLM never really did work (mocked no-op,
+                    # checkpoint resurrection of a finished state, double-
+                    # completion race). Token count alone is unreliable —
+                    # some providers (Ollama, certain proxies) omit usage
+                    # metadata so a legitimate first-turn answer can read
+                    # as ``tokens_used=0``. Requiring empty content too
+                    # avoids false-positive failures for those providers.
+                    # Evaluated BEFORE success counters / logs / workspace
+                    # activity so the failure path doesn't leave inconsistent
+                    # "Task complete" entries behind (codex P3).
+                    _raw_content = (llm_response.content or "").strip()
+                    if (
+                        iterations_executed == 1
+                        and total_tokens == 0
+                        and not _raw_content
+                    ):
+                        self.state = "idle"
+                        self.current_task = None
+                        self.tasks_failed += 1
+                        logger.error(
+                            "execute_task pathological success guard tripped "
+                            "for task=%s: iterations=%d tokens=%d — downgrading "
+                            "to failed (possible checkpoint corruption)",
+                            assignment.task_id, iterations_executed, total_tokens,
+                        )
+                        if self.workspace:
+                            self.workspace.append_activity(
+                                trigger="task",
+                                summary=(
+                                    f"Task failed (pathological guard): "
+                                    f"{assignment.task_type} | "
+                                    f"{iterations_executed} iterations, "
+                                    f"{total_tokens} tokens, {duration_s}s"
+                                ),
+                                tools_used=[],
+                                duration_ms=int(duration_s * 1000),
+                                tokens_used=total_tokens,
+                                outcome="failed",
+                            )
+                        result = TaskResult(
+                            task_id=assignment.task_id,
+                            status="failed",
+                            error=(
+                                "execute_task returned success without doing "
+                                "work — possible checkpoint corruption"
+                            ),
+                            tokens_used=total_tokens,
+                            duration_ms=int(duration_s * 1000),
+                        )
+                        self._last_result = result
+                        logger.info(
+                            "execute_task exit branch=pathological_success_guard "
+                            "status=%s iterations=%d tokens=%d",
+                            result.status, iterations_executed, total_tokens,
+                        )
+                        return result
 
                     self.state = "idle"
                     self.current_task = None
                     self.tasks_completed += 1
-                    duration_s = round(time.time() - start, 1)
 
                     logger.info(
                         f"Task {assignment.task_id} complete",
@@ -901,50 +962,6 @@ class AgentLoop:
                             tokens_used=total_tokens,
                             outcome="complete",
                         )
-
-                    iterations_executed = iteration + 1
-                    # Bug 5 (pathological-success rejection): catch the ghost
-                    # completion signature — first-iteration completion with
-                    # zero LLM tokens AND empty content. That combination
-                    # means the LLM never really did work (mocked no-op,
-                    # checkpoint resurrection of a finished state, double-
-                    # completion race). Token count alone is unreliable —
-                    # some providers (Ollama, certain proxies) omit usage
-                    # metadata so a legitimate first-turn answer can read
-                    # as ``tokens_used=0``. Requiring empty content too
-                    # avoids false-positive failures for those providers.
-                    _raw_content = (llm_response.content or "").strip()
-                    if (
-                        iterations_executed == 1
-                        and total_tokens == 0
-                        and not _raw_content
-                    ):
-                        logger.error(
-                            "execute_task pathological success guard tripped "
-                            "for task=%s: iterations=%d tokens=%d — downgrading "
-                            "to failed (possible checkpoint corruption)",
-                            assignment.task_id, iterations_executed, total_tokens,
-                        )
-                        # Roll back the success bookkeeping we just did.
-                        self.tasks_completed -= 1
-                        self.tasks_failed += 1
-                        result = TaskResult(
-                            task_id=assignment.task_id,
-                            status="failed",
-                            error=(
-                                "execute_task returned success without doing "
-                                "work — possible checkpoint corruption"
-                            ),
-                            tokens_used=total_tokens,
-                            duration_ms=int(duration_s * 1000),
-                        )
-                        self._last_result = result
-                        logger.info(
-                            "execute_task exit branch=pathological_success_guard "
-                            "status=%s iterations=%d tokens=%d",
-                            result.status, iterations_executed, total_tokens,
-                        )
-                        return result
 
                     result = TaskResult(
                         task_id=assignment.task_id,
