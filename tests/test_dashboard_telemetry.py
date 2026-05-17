@@ -4,7 +4,7 @@ Covers:
   * ``DashboardTelemetry`` SQLite store — record, recent, rate limit,
     payload caps.
   * ``POST /dashboard/api/telemetry`` HTTP endpoint — auth, CSRF,
-    validation, rate limit at 60/min per session.
+    validation, per-session rate limit.
 """
 
 from __future__ import annotations
@@ -13,15 +13,13 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.dashboard.events import EventBus
-from src.dashboard.telemetry import (
-    RATE_LIMIT_EVENTS_PER_MIN,
-    DashboardTelemetry,
-)
+from src.dashboard.telemetry import DashboardTelemetry
 from src.host.costs import CostTracker
 from src.host.health import HealthMonitor
 from src.host.mesh import Blackboard
@@ -146,21 +144,25 @@ class TestDashboardTelemetryStore:
             assert retry == 0
 
     def test_rate_limit_blocks_over_threshold(self):
-        # Burn through the budget.
-        for _ in range(RATE_LIMIT_EVENTS_PER_MIN):
-            allowed, _ = self.store.check_rate_limit("op-burst")
-            assert allowed
-        # Next call must be denied.
-        allowed, retry = self.store.check_rate_limit("op-burst")
-        assert not allowed
-        assert retry > 0
+        # Patch the limit down so the test stays fast and is independent
+        # of the production constant (currently 6000; may grow further).
+        with patch("src.dashboard.telemetry.RATE_LIMIT_EVENTS_PER_MIN", 5):
+            # Burn through the budget.
+            for _ in range(5):
+                allowed, _ = self.store.check_rate_limit("op-burst")
+                assert allowed
+            # Next call must be denied.
+            allowed, retry = self.store.check_rate_limit("op-burst")
+            assert not allowed
+            assert retry > 0
 
     def test_rate_limit_isolated_per_session(self):
-        for _ in range(RATE_LIMIT_EVENTS_PER_MIN):
-            self.store.check_rate_limit("op-a")
-        # op-b is independent.
-        allowed, _ = self.store.check_rate_limit("op-b")
-        assert allowed
+        with patch("src.dashboard.telemetry.RATE_LIMIT_EVENTS_PER_MIN", 5):
+            for _ in range(5):
+                self.store.check_rate_limit("op-a")
+            # op-b is independent.
+            allowed, _ = self.store.check_rate_limit("op-b")
+            assert allowed
 
     def test_recent_filters_by_event_name(self):
         self.store.record(event_name="wizard_started", session_id="op")
@@ -239,29 +241,37 @@ class TestDashboardTelemetryEndpoint:
         )
         assert resp.status_code == 400
 
-    def test_post_telemetry_rate_limits_at_60_per_min(self):
+    def test_post_telemetry_rate_limits_when_threshold_reached(self):
         # Burn through the per-session budget. We share a session_id
         # because the dashboard uses ``ol_session`` cookie for that and
         # the TestClient doesn't set one (so all calls map to the same
         # 'operator' session bucket).
-        last_status = 200
-        for _ in range(RATE_LIMIT_EVENTS_PER_MIN):
+        #
+        # We patch the limit down to a small value so the burst completes
+        # in well under the 60s sliding-window — otherwise on slower CI
+        # runners the front of the bucket starts evicting before the
+        # burst finishes and the 429 never fires. The endpoint reads
+        # ``RATE_LIMIT_EVENTS_PER_MIN`` at call time, so ``mock.patch``
+        # is enough.
+        with patch("src.dashboard.telemetry.RATE_LIMIT_EVENTS_PER_MIN", 5):
+            last_status = 200
+            for _ in range(5):
+                resp = self.client.post(
+                    "/dashboard/api/telemetry",
+                    json={"event_name": "wizard_chip_clicked"},
+                )
+                last_status = resp.status_code
+            assert last_status == 200
+            # Next call must hit 429.
             resp = self.client.post(
                 "/dashboard/api/telemetry",
                 json={"event_name": "wizard_chip_clicked"},
             )
-            last_status = resp.status_code
-        assert last_status == 200
-        # Next call must hit 429.
-        resp = self.client.post(
-            "/dashboard/api/telemetry",
-            json={"event_name": "wizard_chip_clicked"},
-        )
-        assert resp.status_code == 429
-        body = resp.json()
-        assert body["error"]["code"] == "rate_limited"
-        assert body["error"]["retry_after_ms"] > 0
-        assert "Retry-After" in resp.headers
+            assert resp.status_code == 429
+            body = resp.json()
+            assert body["error"]["code"] == "rate_limited"
+            assert body["error"]["retry_after_ms"] > 0
+            assert "Retry-After" in resp.headers
 
     def test_post_telemetry_lazy_init_when_omitted(self):
         # When the caller doesn't pass ``telemetry`` at all (default
