@@ -294,6 +294,13 @@ class LaneManager:
             # Fix 5 (seam follow-up): refuse dispatch to a quarantined
             # agent. The agent will keep failing on a broken credential
             # otherwise; surface the actionable hint and free the lane.
+            #
+            # Codex P2 follow-up: when the queued wake carries a task_id
+            # (handoff path), mark the durable task ``failed`` too — same
+            # pattern as the lane timeout branch — so the originating
+            # agent's back-edge inbox sees a terminal event instead of
+            # the task dangling in ``working`` until the stale-task
+            # reaper picks it up.
             if self._quarantine_check and self._quarantine_check(agent):
                 err_msg = (
                     f"Agent '{agent}' is quarantined (credential failure). "
@@ -302,6 +309,25 @@ class LaneManager:
                     f"Task not dispatched."
                 )
                 logger.warning(err_msg)
+                if task.task_id and self._tasks_store is not None:
+                    try:
+                        await asyncio.get_running_loop().run_in_executor(
+                            None,
+                            lambda: self._tasks_store.update_status(
+                                task.task_id,
+                                "failed",
+                                actor="lane_quarantine",
+                                extra_payload={
+                                    "error": "agent_quarantined",
+                                    "agent": agent,
+                                },
+                            ),
+                        )
+                    except Exception as close_err:
+                        logger.warning(
+                            "Lane quarantine failed to close task %s: %s",
+                            task.task_id, close_err,
+                        )
                 if not task.future.done():
                     task.future.set_exception(RuntimeError(err_msg))
                 try:

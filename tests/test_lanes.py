@@ -633,3 +633,28 @@ class TestLaneQuarantineGate:
         lm.set_quarantine_check(lambda a: True)
         with pytest.raises(RuntimeError):
             await lm.enqueue("agent-a", "second")
+
+    @pytest.mark.asyncio
+    async def test_lane_closes_durable_task_on_quarantine_reject(self):
+        """Codex P2 follow-up: when a queued wake carries a task_id and
+        the assignee is quarantined, the durable task must be marked
+        failed so the originating agent's back-edge inbox sees a
+        terminal event instead of the task dangling in 'working'."""
+        dispatch = AsyncMock(return_value="ok")
+        tasks_store = MagicMock()
+        tasks_store.update_status = MagicMock()
+        lm = LaneManager(
+            dispatch_fn=dispatch,
+            tasks_store=tasks_store,
+            quarantine_check=lambda a: True,
+        )
+        with pytest.raises(RuntimeError):
+            await lm.enqueue(
+                "agent-a", "hello", task_id="task-abc",
+            )
+        tasks_store.update_status.assert_called_once()
+        call_kwargs = tasks_store.update_status.call_args
+        assert call_kwargs.args[0] == "task-abc"
+        assert call_kwargs.args[1] == "failed"
+        assert call_kwargs.kwargs.get("actor") == "lane_quarantine"
+        assert call_kwargs.kwargs.get("extra_payload", {}).get("error") == "agent_quarantined"

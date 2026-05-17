@@ -1029,10 +1029,14 @@ class AgentLoop:
             )
             return result
         except LLMAuthError as e:
-            # Distinguished credential failure — self-report to mesh so
-            # HealthMonitor can quarantine after threshold (Fix 3/4 in
-            # seam follow-up). Best-effort report; never let the report
-            # itself raise out of the loop.
+            # Distinguished credential failure. Recording is mesh-side
+            # only (CredentialVault.execute_api_call already called the
+            # auth-failure recorder before tagging the response) — the
+            # agent does NOT self-report here, otherwise each failure
+            # would double-increment and trip quarantine at 2 instead
+            # of 3. The mesh endpoint is the failsafe for paths that
+            # don't go through the proxy (e.g. legacy clients) but
+            # within the loop we trust the proxy path.
             self.state = "idle"
             self.current_task = None
             self.tasks_failed += 1
@@ -1044,14 +1048,6 @@ class AgentLoop:
                 duration_ms=int((time.time() - start) * 1000),
             )
             self._last_result = result
-            try:
-                await self.mesh_client.report_auth_failure(
-                    provider=e.provider,
-                    model=e.model or "",
-                    http_status=e.http_status or 0,
-                )
-            except Exception as report_err:
-                logger.warning("Failed to report auth failure to mesh: %s", report_err)
             logger.info(
                 "execute_task exit branch=auth_failure status=%s tokens=%d provider=%s",
                 result.status, total_tokens, e.provider,
@@ -1767,20 +1763,12 @@ class AgentLoop:
                     )
                 raise
             except LLMAuthError as e:
-                # Heartbeat hit a credential failure — self-report so the
-                # mesh quarantines on threshold. Same pattern as
-                # execute_task (Fix 3/4 in seam follow-up).
+                # Heartbeat hit a credential failure. Same pattern as
+                # execute_task — mesh-side recording is authoritative,
+                # the agent does NOT self-report to avoid double-counting.
                 self.state = "idle"
                 duration_ms = int((time.time() - start) * 1000)
                 logger.warning("Heartbeat auth failure: %s", e)
-                try:
-                    await self.mesh_client.report_auth_failure(
-                        provider=e.provider,
-                        model=e.model or "",
-                        http_status=e.http_status or 0,
-                    )
-                except Exception as report_err:
-                    logger.warning("Failed to report auth failure to mesh: %s", report_err)
                 if self.workspace:
                     self.workspace.append_activity(
                         trigger="heartbeat",
@@ -2635,19 +2623,12 @@ class AgentLoop:
             self.state = "idle"
             raise
         except LLMAuthError as e:
-            # Chat path hit a credential failure — self-report so the
-            # mesh quarantines on threshold. Same pattern as execute_task
-            # (Fix 3/4 in seam follow-up).
+            # Chat path hit a credential failure. Mesh-side recording is
+            # authoritative (CredentialVault records before tagging the
+            # response) — agent does NOT self-report to avoid double-
+            # counting against the quarantine threshold.
             self.state = "idle"
             logger.warning(f"Chat auth failure: {e}")
-            try:
-                await self.mesh_client.report_auth_failure(
-                    provider=e.provider,
-                    model=e.model or "",
-                    http_status=e.http_status or 0,
-                )
-            except Exception as report_err:
-                logger.warning("Failed to report auth failure to mesh: %s", report_err)
             msg = f"Auth failure: {e}"
             if self.workspace:
                 self.workspace.append_chat_message("assistant", msg)
@@ -3218,18 +3199,10 @@ class AgentLoop:
         except asyncio.CancelledError:
             raise
         except LLMAuthError as e:
-            # Streaming chat path hit a credential failure — self-report
-            # so the mesh quarantines on threshold (Fix 3/4 in seam
-            # follow-up).
+            # Streaming chat path hit a credential failure. Mesh-side
+            # recording is authoritative — agent does NOT self-report
+            # to avoid double-counting against the quarantine threshold.
             logger.warning("Streaming chat auth failure: %s", e)
-            try:
-                await self.mesh_client.report_auth_failure(
-                    provider=e.provider,
-                    model=e.model or "",
-                    http_status=e.http_status or 0,
-                )
-            except Exception as report_err:
-                logger.warning("Failed to report auth failure to mesh: %s", report_err)
             msg = f"Auth failure: {e}"
             if self.workspace:
                 self.workspace.append_chat_message("assistant", msg)

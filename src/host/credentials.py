@@ -834,7 +834,16 @@ class CredentialVault:
             has_api_key = bool(self.system_credentials.get("openai_api_key"))
         elif provider == "anthropic":
             has_oauth = self._has_anthropic_oauth()
-            has_api_key = bool(self.system_credentials.get("anthropic_api_key"))
+            # Codex P2 follow-up: anthropic_api_key may carry an OAuth
+            # setup-token (sk-ant-oat...). _handle_llm routes those
+            # through _oauth_chat, so they must classify as OAuth here
+            # too — otherwise is_model_compatible would let non-OAuth
+            # models through and they'd fail on first call.
+            raw_key = self.system_credentials.get("anthropic_api_key", "")
+            if raw_key and is_oauth_token(raw_key):
+                has_oauth = True
+            else:
+                has_api_key = bool(raw_key)
         else:
             has_api_key = bool(self.system_credentials.get(f"{provider}_api_key"))
         if has_api_key and has_oauth:

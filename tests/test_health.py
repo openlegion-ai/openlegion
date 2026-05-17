@@ -298,3 +298,42 @@ class TestQuarantine:
         assert agent_status["quarantined"] is True
         assert agent_status["quarantine_reason"] is not None
         assert agent_status["consecutive_auth_failures"] == 3
+
+    @pytest.mark.asyncio
+    async def test_reachability_poll_preserves_quarantined_status(self):
+        """Codex P2 follow-up: a successful reachability poll must NOT
+        flip a quarantined agent back to healthy — the agent is
+        reachable but its credentials are broken, which is what lane/cron
+        are skipping on. Only clear_quarantine should flip status."""
+        monitor = _make_monitor({"agent-a": {"role": "x"}})
+        monitor.register("agent-a")
+        # Quarantine the agent.
+        for _ in range(3):
+            monitor.record_auth_failure(
+                "agent-a", provider="openai", model="x", http_status=401,
+            )
+        assert monitor.agents["agent-a"].status == "quarantined"
+        # Successful reachability poll.
+        monitor.transport.is_reachable = AsyncMock(return_value=True)
+        await monitor._check_agent("agent-a")
+        # Status must remain quarantined.
+        assert monitor.agents["agent-a"].status == "quarantined"
+        assert monitor.agents["agent-a"].quarantined is True
+
+    @pytest.mark.asyncio
+    async def test_unreachable_poll_preserves_quarantined_status(self):
+        """Same for unreachable polls — the reachability counter ticks
+        but the status string stays quarantined."""
+        monitor = _make_monitor({"agent-a": {"role": "x"}})
+        monitor.register("agent-a")
+        for _ in range(3):
+            monitor.record_auth_failure(
+                "agent-a", provider="openai", model="x", http_status=401,
+            )
+        assert monitor.agents["agent-a"].status == "quarantined"
+        monitor.transport.is_reachable = AsyncMock(return_value=False)
+        await monitor._check_agent("agent-a")
+        # Reachability counter still ticks.
+        assert monitor.agents["agent-a"].consecutive_failures >= 1
+        # Status string stays quarantined.
+        assert monitor.agents["agent-a"].status == "quarantined"

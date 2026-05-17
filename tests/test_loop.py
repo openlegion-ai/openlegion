@@ -2409,6 +2409,13 @@ class TestLoopLLMErrorHandling:
 
     @pytest.mark.asyncio
     async def test_execute_task_catches_llm_auth_error(self):
+        """Loop catches LLMAuthError and fails the task.
+
+        Codex P1 follow-up: the loop does NOT self-report — the mesh
+        already recorded the failure inside execute_api_call before
+        tagging the response, and self-reporting would double-count
+        against the quarantine threshold.
+        """
         from src.shared.errors import LLMAuthError
         loop = _make_loop()
         loop.llm.chat = AsyncMock(
@@ -2417,7 +2424,7 @@ class TestLoopLLMErrorHandling:
                 http_status=401,
             ),
         )
-        # report_auth_failure must be awaited.
+        # report_auth_failure must NOT be called from the loop.
         loop.mesh_client.report_auth_failure = AsyncMock(
             return_value={"recorded": True, "quarantined": False},
         )
@@ -2427,10 +2434,7 @@ class TestLoopLLMErrorHandling:
         result = await loop.execute_task(assignment)
         assert result.status == "failed"
         assert "auth_failure" in (result.error or "")
-        loop.mesh_client.report_auth_failure.assert_awaited_once()
-        kwargs = loop.mesh_client.report_auth_failure.call_args.kwargs
-        assert kwargs.get("provider") == "openai"
-        assert kwargs.get("http_status") == 401
+        loop.mesh_client.report_auth_failure.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_execute_task_catches_llm_config_error(self):
@@ -2454,22 +2458,22 @@ class TestLoopLLMErrorHandling:
         loop.mesh_client.report_auth_failure.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_execute_task_auth_error_report_failure_doesnt_raise(self):
-        """If report_auth_failure itself raises, the loop must NOT propagate."""
-        from src.shared.errors import LLMAuthError
-        loop = _make_loop()
-        loop.llm.chat = AsyncMock(
-            side_effect=LLMAuthError(
-                "auth blown", provider="openai", model="x", http_status=401,
-            ),
-        )
-        loop.mesh_client.report_auth_failure = AsyncMock(
-            side_effect=RuntimeError("mesh down"),
-        )
-        assignment = TaskAssignment(
-            workflow_id="w", step_id="s", task_type="x", input_data={"q": "1"},
-        )
-        # Should not raise — the loop swallows reporting failures.
-        result = await loop.execute_task(assignment)
-        assert result.status == "failed"
-        assert "auth_failure" in (result.error or "")
+    async def test_mesh_client_report_auth_failure_swallows_errors(self):
+        """The mesh_client.report_auth_failure helper exists for
+        future/non-loop call sites (legacy clients, external scripts).
+        It must never raise out — fire-and-forget semantics."""
+        from unittest.mock import patch
+
+        from src.agent.mesh_client import MeshClient
+
+        mc = MeshClient(mesh_url="http://localhost:8420", agent_id="a")
+
+        # Stub the underlying client.post to raise.
+        with patch.object(
+            mc, "_get_client", AsyncMock(side_effect=RuntimeError("mesh down")),
+        ):
+            result = await mc.report_auth_failure(
+                provider="openai", model="x", http_status=401,
+            )
+        assert result.get("recorded") is False
+        assert "error" in result

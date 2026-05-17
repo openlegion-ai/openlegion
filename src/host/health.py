@@ -365,20 +365,35 @@ class HealthMonitor:
                 else:
                     health.consecutive_failures = 0
                     health.last_healthy = now
-                    new_status = "healthy"
-                    health.status = new_status
-                    if new_status != prev_status and self._event_bus:
-                        self._event_bus.emit("health_change", agent=agent_id, data={
-                            "previous": prev_status, "current": health.status,
-                            "failures": health.consecutive_failures,
-                            "restart_count": health.restart_count,
-                        })
+                    # Codex P2 follow-up: a successful reachability poll
+                    # must NOT clobber quarantined status — the agent is
+                    # reachable but its credentials are broken, which is
+                    # what lane/cron are skipping on. Status flips back
+                    # to healthy only via clear_quarantine (operator
+                    # edit_agent or TTL expiry).
+                    if not health.quarantined:
+                        new_status = "healthy"
+                        health.status = new_status
+                        if new_status != prev_status and self._event_bus:
+                            self._event_bus.emit("health_change", agent=agent_id, data={
+                                "previous": prev_status, "current": health.status,
+                                "failures": health.consecutive_failures,
+                                "restart_count": health.restart_count,
+                            })
                     return
         except Exception as e:
             logger.debug("Health check transport error for '%s': %s", agent_id, e)
 
         health.consecutive_failures += 1
-        health.status = "unhealthy"
+        # Codex P2 follow-up: don't flip quarantined → unhealthy on an
+        # unreachable poll either. The reachability tracker continues
+        # (failures counter ticks toward the restart path) but the
+        # status string stays "quarantined" so the dashboard and the
+        # lane stay in sync. Restart escalation below still fires if
+        # the agent is unreachable AND quarantined — the restart
+        # itself doesn't clear quarantine, only edit_agent or TTL does.
+        if not health.quarantined:
+            health.status = "unhealthy"
         if health.status != prev_status and self._event_bus:
             self._event_bus.emit("health_change", agent=agent_id, data={
                 "previous": prev_status, "current": health.status,

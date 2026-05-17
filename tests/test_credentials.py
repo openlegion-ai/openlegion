@@ -4262,6 +4262,50 @@ class TestCredentialKindAndModelCompat:
         assert "openai/gpt-5.3-codex" in models
         assert "openai/gpt-4.1-mini" not in models
 
+    def test_anthropic_oauth_form_api_key_classified_as_oauth(self, monkeypatch):
+        """Codex P2 follow-up: anthropic_api_key in OAuth setup-token
+        form (sk-ant-oat...) routes through _oauth_chat at runtime so
+        get_credential_kind must classify it as OAuth, not api_key.
+
+        Without this, is_model_compatible would let non-OAuth models
+        through and they'd fail on first call.
+        """
+        self._purge_env(monkeypatch)
+        monkeypatch.setenv(
+            "OPENLEGION_SYSTEM_ANTHROPIC_API_KEY",
+            "sk-ant-oat01-" + "x" * 80,
+        )
+        v = CredentialVault()
+        assert v.get_credential_kind("anthropic") == "oauth"
+        # OAuth-allowed model is fine.
+        ok, _ = v.is_model_compatible("anthropic/claude-sonnet-4-6")
+        assert ok is True
+        # Non-OAuth-allowed model is rejected (would fail on first call
+        # otherwise).
+        from src.host.credentials import OAUTH_ALLOWED_MODELS_ANTHROPIC
+        non_allowed = next(
+            (m for m in [
+                "anthropic/claude-3-opus-20240229",
+                "anthropic/claude-3-haiku-20240307",
+            ] if m not in OAUTH_ALLOWED_MODELS_ANTHROPIC),
+            None,
+        )
+        if non_allowed is not None:
+            ok2, reason2 = v.is_model_compatible(non_allowed)
+            assert ok2 is False
+            assert reason2 is not None
+
+    def test_anthropic_regular_api_key_classified_as_api_key(self, monkeypatch):
+        """Regular (non-OAuth-form) anthropic_api_key still classifies
+        as api_key — only the sk-ant-oat... prefix flips it."""
+        self._purge_env(monkeypatch)
+        monkeypatch.setenv(
+            "OPENLEGION_SYSTEM_ANTHROPIC_API_KEY",
+            "sk-ant-api03-regular-key",
+        )
+        v = CredentialVault()
+        assert v.get_credential_kind("anthropic") == "api_key"
+
     def test_oauth_allowed_models_env_override(self, monkeypatch):
         """OPENLEGION_OAUTH_ALLOWED_MODELS_OPENAI overrides the default subset."""
         # The env override is read at module import time, so we have to
