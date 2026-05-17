@@ -35,10 +35,10 @@ implicit index on ``session_id`` that ``list_for_session()`` rides.
 
 from __future__ import annotations
 
-import sqlite3
 import time
 from pathlib import Path
 
+from src.shared.sqlite_helpers import open_db
 from src.shared.utils import setup_logging
 
 logger = setup_logging("dashboard.conversations")
@@ -55,9 +55,8 @@ class OpenedConversationsStore:
 
     def __init__(self, db_path: str | Path = "data/dashboard_conversations.db") -> None:
         Path(str(db_path)).parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(str(db_path), check_same_thread=False)
+        self.db = open_db(db_path)
         self.db.execute("PRAGMA journal_mode=WAL")
-        self.db.execute("PRAGMA busy_timeout=30000")
         self._init_schema()
 
     def _init_schema(self) -> None:

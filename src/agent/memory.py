@@ -28,6 +28,7 @@ from typing import Any, TypeVar
 import sqlite_vec
 from sqlite_vec import serialize_float32
 
+from src.shared.sqlite_helpers import open_db
 from src.shared.types import MemoryFact, MemoryLog
 from src.shared.utils import generate_id, setup_logging
 
@@ -64,9 +65,8 @@ class MemoryStore:
         categorize_fn: CategorizeFn | None = None,
     ):
         self._close_lock = threading.Lock()
-        self.db = sqlite3.connect(db_path, check_same_thread=False)
+        self.db = open_db(db_path)
         self.db.execute("PRAGMA journal_mode=WAL")
-        self.db.execute("PRAGMA busy_timeout=30000")
         self.db.enable_load_extension(True)
         sqlite_vec.load(self.db)
         self.db.enable_load_extension(False)

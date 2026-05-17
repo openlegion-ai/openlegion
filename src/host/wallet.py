@@ -17,7 +17,6 @@ import base64
 import hashlib
 import hmac as _hmac
 import os
-import sqlite3
 import time
 from collections import deque
 from datetime import datetime, timezone
@@ -26,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from src.shared.sqlite_helpers import open_db
 from src.shared.utils import setup_logging
 
 if TYPE_CHECKING:
@@ -137,9 +137,8 @@ class WalletService:
         )
         self._chains = self._load_chains()
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(db_path, check_same_thread=False)
+        self.db = open_db(db_path)
         self.db.execute("PRAGMA journal_mode=WAL")
-        self.db.execute("PRAGMA busy_timeout=30000")
         self._init_schema()
 
         # Policy defaults (overridable via env vars)
