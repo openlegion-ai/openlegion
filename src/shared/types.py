@@ -516,6 +516,16 @@ class APIProxyResponse(BaseModel):
     data: dict[str, Any] | None = None
     error: str | None = None
     status_code: int | None = None
+    # ``error_type`` (seam follow-up Fix 3): when the upstream call raised
+    # a distinguished exception (``LLMAuthError`` / ``LLMConfigError``),
+    # the mesh tags the response so the agent can route to the correct
+    # loop branch instead of treating it as a generic RuntimeError. Values
+    # are stable string keys: ``'auth_failure'`` / ``'config_error'``.
+    # The mesh ALSO records the auth failure directly via HealthMonitor —
+    # ``error_type`` is for client-side bookkeeping, the quarantine path
+    # does not depend on the agent self-reporting.
+    error_type: str | None = None
+    error_meta: dict[str, Any] | None = None
 
 
 # === LLM Response (standardized across providers) ===

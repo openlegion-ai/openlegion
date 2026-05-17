@@ -2026,6 +2026,71 @@ class TestLLMClientEmbeddingModel:
         llm = LLMClient(mesh_url="http://localhost:8420", agent_id="test")
         assert llm.embedding_model == ""
 
+    @pytest.mark.asyncio
+    async def test_chat_reraises_auth_error_from_tagged_response(self):
+        """Seam follow-up Fix 3: when the mesh returns
+        ``{success: false, error_type: 'auth_failure', ...}`` the
+        client must re-raise LLMAuthError (not generic RuntimeError)
+        so the agent loop's auth-failure branch fires and quarantine
+        triggers."""
+        from src.agent.llm import LLMClient
+        from src.shared.errors import LLMAuthError
+
+        llm = LLMClient(mesh_url="http://localhost:8420", agent_id="test")
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = {
+            "success": False,
+            "error": "creds blown",
+            "error_type": "auth_failure",
+            "error_meta": {
+                "provider": "openai",
+                "model": "openai/gpt-5",
+                "http_status": 401,
+            },
+        }
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client.is_closed = False
+        llm._client = mock_client
+
+        with pytest.raises(LLMAuthError) as ei:
+            await llm.chat(system="", messages=[{"role": "user", "content": "hi"}])
+        assert ei.value.provider == "openai"
+        assert ei.value.http_status == 401
+
+    @pytest.mark.asyncio
+    async def test_chat_reraises_config_error_from_tagged_response(self):
+        """Same as above for ``config_error``."""
+        from src.agent.llm import LLMClient
+        from src.shared.errors import LLMConfigError
+
+        llm = LLMClient(mesh_url="http://localhost:8420", agent_id="test")
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = {
+            "success": False,
+            "error": "model not supported",
+            "error_type": "config_error",
+            "error_meta": {
+                "provider": "openai",
+                "model": "openai/gpt-99",
+                "http_status": 400,
+                "allowed_models": ["openai/gpt-5.3-codex"],
+            },
+        }
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client.is_closed = False
+        llm._client = mock_client
+
+        with pytest.raises(LLMConfigError) as ei:
+            await llm.chat(system="", messages=[{"role": "user", "content": "hi"}])
+        assert ei.value.provider == "openai"
+        assert "openai/gpt-5.3-codex" in ei.value.allowed_models
+
 
 # ── artifact path traversal ──────────────────────────────────
 

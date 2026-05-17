@@ -306,6 +306,27 @@ class RuntimeContext:
             notifications_store=self._notification_store,
         )
 
+        # Fix 4 (seam follow-up): wire the credential vault's auth-failure
+        # recorder to the health monitor. This is the load-bearing path
+        # for quarantine — the agent-side report channel can also fire,
+        # but the mesh-proxy boundary erases exception types so the
+        # mesh-side recording must be the authoritative trigger.
+        if self.credential_vault is not None:
+            def _record_auth(agent_id: str, provider: str, model: str, http_status: int) -> None:
+                try:
+                    self.health_monitor.record_auth_failure(
+                        agent_id, provider=provider, model=model,
+                        http_status=http_status,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "HealthMonitor.record_auth_failure failed for "
+                        "agent='%s': %s",
+                        agent_id, e,
+                    )
+
+            self.credential_vault.set_auth_failure_recorder(_record_auth)
+
     def _start_browser_service(self) -> None:
         """Start the shared browser service container."""
         from src.host.runtime import DockerBackend

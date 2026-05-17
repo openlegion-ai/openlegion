@@ -328,6 +328,14 @@ class CredentialVault:
         self._openai_oauth_lock = asyncio.Lock()
         self._anthropic_oauth: dict | None = None
         self._anthropic_oauth_lock = asyncio.Lock()
+        # ``_auth_failure_recorder`` (Fix 4 in seam follow-up): optional
+        # callback ``(agent_id, provider, model, http_status) -> None``
+        # invoked when an LLM call raises ``LLMAuthError`` during
+        # ``execute_api_call``. Wired post-construction by the runtime to
+        # ``HealthMonitor.record_auth_failure``. This is the load-bearing
+        # path because the mesh-proxy boundary erases exception types
+        # before the agent can self-report.
+        self._auth_failure_recorder: Callable[[str, str, str, int], None] | None = None
         self._load_credentials()
         self._register_handlers()
 
@@ -362,6 +370,20 @@ class CredentialVault:
     def cleanup_agent(self, agent_id: str) -> None:
         """Remove per-agent state (budget locks) for a deregistered agent."""
         self._budget_locks.pop(agent_id, None)
+
+    def set_auth_failure_recorder(
+        self, recorder: Callable[[str, str, str, int], None] | None,
+    ) -> None:
+        """Wire the auth-failure recorder after construction (Fix 4).
+
+        ``CredentialVault`` is built before ``HealthMonitor`` in the
+        runtime bootstrap; this setter lets the monitor wire itself in
+        once constructed. Pass ``None`` to disable. The recorder is
+        invoked from ``execute_api_call`` whenever the upstream LLM call
+        raises ``LLMAuthError``, which is the only reliable way to
+        propagate quarantine signal across the mesh proxy boundary.
+        """
+        self._auth_failure_recorder = recorder
 
     def _load_credentials(self) -> None:
         """Load credentials from environment variables (two-phase).
@@ -621,6 +643,56 @@ class CredentialVault:
                         )
 
                 return response
+            except LLMAuthError as e:
+                # Fix 4 (seam follow-up): record mesh-side so quarantine
+                # triggers even when the agent loop only sees a generic
+                # ``APIProxyResponse(success=False)``. The mesh proxy
+                # boundary erases exception types — this is the only
+                # reliable propagation path.
+                logger.warning(
+                    "LLM auth failure for agent='%s' provider=%s model=%s: %s",
+                    agent_id, e.provider, e.model, e,
+                )
+                if self._auth_failure_recorder is not None and agent_id:
+                    try:
+                        self._auth_failure_recorder(
+                            agent_id, e.provider, e.model or "",
+                            e.http_status or 0,
+                        )
+                    except Exception as rec_err:
+                        logger.warning(
+                            "auth_failure_recorder raised: %s", rec_err,
+                        )
+                return APIProxyResponse(
+                    success=False, error=str(e),
+                    status_code=e.http_status,
+                    error_type="auth_failure",
+                    error_meta={
+                        "provider": e.provider,
+                        "model": e.model,
+                        "http_status": e.http_status,
+                    },
+                )
+            except LLMConfigError as e:
+                # Config errors are operator misconfig (model not in
+                # OAuth allowlist, typo, etc.) — surface the error type
+                # so the agent loop can present an actionable message
+                # without quarantining.
+                logger.info(
+                    "LLM config error for agent='%s' provider=%s model=%s: %s",
+                    agent_id, e.provider, e.model, e,
+                )
+                return APIProxyResponse(
+                    success=False, error=str(e),
+                    status_code=e.http_status,
+                    error_type="config_error",
+                    error_meta={
+                        "provider": e.provider,
+                        "model": e.model,
+                        "http_status": e.http_status,
+                        "allowed_models": sorted(e.allowed_models),
+                    },
+                )
             except Exception as e:
                 logger.error(f"API call failed for {request.service}/{request.action}: {e}")
                 return APIProxyResponse(
@@ -742,13 +814,22 @@ class CredentialVault:
     def get_credential_kind(self, provider: str) -> str:
         """Return what's configured for this provider.
 
-        Returns one of ``'api_key' | 'oauth' | 'both' | 'none'``.
+        Returns one of ``'api_key' | 'oauth' | 'both' | 'none'``. For
+        keyless providers (e.g. Ollama), an API base counts as
+        ``'api_key'`` since that's the runtime auth equivalent — the
+        provider is reachable without a credential.
+
         api_key gates take precedence — if both exist, model selection is
         unrestricted (api_key path can serve any model).
         """
         has_oauth = False
         has_api_key = False
-        if provider == "openai":
+        # Keyless providers: an api_base is the auth equivalent of an
+        # api_key. Without this branch, edit_agent + create_agent would
+        # reject Ollama models on every local-only deployment.
+        if provider in KEYLESS_PROVIDERS:
+            has_api_key = bool(self.api_bases.get(f"{provider}_api_base"))
+        elif provider == "openai":
             has_oauth = self._has_openai_oauth()
             has_api_key = bool(self.system_credentials.get("openai_api_key"))
         elif provider == "anthropic":
@@ -770,6 +851,12 @@ class CredentialVault:
         Returns ``(True, None)`` when usable, ``(False, actionable_reason)``
         otherwise. The reason string is shown directly to the operator —
         name the allowed alternatives so they don't have to guess.
+
+        Routing alignment: ``_handle_llm`` prefers OAuth when both creds
+        exist on a single provider, so ``both`` is treated like ``oauth``
+        here — restricted to the OAuth allowlist. The reason string for
+        the ``both`` case names the override env var so the operator
+        knows how to widen the OAuth subset.
         """
         from src.shared.models import resolve_provider_for_model
         provider = resolve_provider_for_model(model)
@@ -785,9 +872,12 @@ class CredentialVault:
                 f"Set OPENLEGION_SYSTEM_{provider.upper()}_API_KEY (preferred) "
                 f"or complete the OAuth setup."
             ))
-        if kind in ("api_key", "both"):
+        if kind == "api_key":
             return (True, None)
-        # oauth-only — must be in the per-provider OAuth allowlist
+        # ``oauth`` and ``both`` both go through the OAuth endpoint at
+        # runtime (see ``_handle_llm`` routing), so apply the OAuth
+        # allowlist. This prevents the "passes validation, fails on
+        # first call" gap codex flagged.
         allowed = _OAUTH_ALLOWED_MODELS.get(provider, frozenset())
         if model in allowed:
             return (True, None)
@@ -795,6 +885,15 @@ class CredentialVault:
             ", ".join(sorted(allowed))
             or "(no OAuth-allowed models defined for this provider)"
         )
+        if kind == "both":
+            return (False, (
+                f"Model '{model}' is not in the {provider} OAuth allowlist "
+                f"and OAuth is routed first when both credentials exist. "
+                f"OAuth-allowed models: {suggestion}. To unlock the full "
+                f"API-key catalog, either remove the OAuth credential or "
+                f"widen the OAuth allowlist via "
+                f"OPENLEGION_OAUTH_ALLOWED_MODELS_{provider.upper()}=...,..."
+            ))
         return (False, (
             f"Model '{model}' is not compatible with the {provider} OAuth "
             f"credential currently configured. OAuth-allowed models: "
@@ -805,8 +904,11 @@ class CredentialVault:
     def get_allowed_models(self, provider: str | None = None) -> dict[str, list[str]]:
         """Return per-provider allowed-model lists given current credentials.
 
-        - ``api_key`` / ``both`` → full ``_FEATURED_MODELS`` list for that provider
-        - ``oauth``-only → the OAuth-subset list for that provider
+        - ``api_key`` → full ``_FEATURED_MODELS`` list for that provider
+        - ``oauth`` → the OAuth-subset list for that provider
+        - ``both`` → the OAuth subset (matches runtime routing — OAuth
+          wins when both exist, see ``_handle_llm``). Operator widens
+          via ``OPENLEGION_OAUTH_ALLOWED_MODELS_<PROVIDER>``.
         - ``none`` → omitted from result entirely
         """
         from src.shared.models import _FEATURED_MODELS
@@ -816,9 +918,10 @@ class CredentialVault:
             kind = self.get_credential_kind(p)
             if kind == "none":
                 continue
-            if kind in ("api_key", "both"):
+            if kind == "api_key":
                 result[p] = sorted(_FEATURED_MODELS.get(p, []))
             else:
+                # ``oauth`` or ``both`` — OAuth path is routed at runtime.
                 result[p] = sorted(_OAUTH_ALLOWED_MODELS.get(p, []))
         return result
 
@@ -2532,22 +2635,74 @@ class CredentialVault:
 
         provider = self._resolve_provider(requested_model)
 
+        # OAuth paths can raise ``LLMAuthError`` / ``LLMConfigError`` from
+        # inside the SSE generator (Fix 3 in seam follow-up). Wrap each
+        # OAuth dispatch so the structured error is tagged on the wire
+        # AND recorded mesh-side, mirroring the non-streaming path in
+        # ``execute_api_call``. Without this wrapper, streaming chat
+        # paths would silently lose the quarantine signal.
+        async def _emit_distinguished_error(exc, *, kind: str) -> str:
+            payload: dict = {
+                "error": str(exc),
+                "error_type": kind,
+                "error_meta": {
+                    "provider": getattr(exc, "provider", "unknown"),
+                    "model": getattr(exc, "model", None),
+                    "http_status": getattr(exc, "http_status", None),
+                },
+            }
+            if kind == "config_error":
+                payload["error_meta"]["allowed_models"] = sorted(
+                    getattr(exc, "allowed_models", set()),
+                )
+            if kind == "auth_failure" and self._auth_failure_recorder and agent_id:
+                try:
+                    self._auth_failure_recorder(
+                        agent_id, getattr(exc, "provider", "unknown"),
+                        getattr(exc, "model", "") or "",
+                        getattr(exc, "http_status", 0) or 0,
+                    )
+                except Exception as rec_err:
+                    logger.warning("auth_failure_recorder raised: %s", rec_err)
+            return f"data: {json.dumps(payload)}\n\n"
+
         # OAuth takes priority over API keys — no cost tracking needed.
         if self._has_anthropic_oauth() and provider == "anthropic":
             access_token = await self._ensure_anthropic_oauth_token()
-            async for chunk in self._oauth_chat_stream(request, access_token, requested_model):
-                yield chunk
+            try:
+                async for chunk in self._oauth_chat_stream(
+                    request, access_token, requested_model,
+                ):
+                    yield chunk
+            except LLMAuthError as e:
+                yield await _emit_distinguished_error(e, kind="auth_failure")
+            except LLMConfigError as e:
+                yield await _emit_distinguished_error(e, kind="config_error")
             return
 
         api_key = self._get_api_key_for_model(requested_model)
         if api_key and is_oauth_token(api_key):
-            async for chunk in self._oauth_chat_stream(request, api_key, requested_model):
-                yield chunk
+            try:
+                async for chunk in self._oauth_chat_stream(
+                    request, api_key, requested_model,
+                ):
+                    yield chunk
+            except LLMAuthError as e:
+                yield await _emit_distinguished_error(e, kind="auth_failure")
+            except LLMConfigError as e:
+                yield await _emit_distinguished_error(e, kind="config_error")
             return
 
         if self._has_openai_oauth() and provider == "openai":
-            async for chunk in self._openai_oauth_chat_stream(request, requested_model):
-                yield chunk
+            try:
+                async for chunk in self._openai_oauth_chat_stream(
+                    request, requested_model,
+                ):
+                    yield chunk
+            except LLMAuthError as e:
+                yield await _emit_distinguished_error(e, kind="auth_failure")
+            except LLMConfigError as e:
+                yield await _emit_distinguished_error(e, kind="config_error")
             return
 
         if self.cost_tracker and agent_id and request.service == "llm":

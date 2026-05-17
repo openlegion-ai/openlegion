@@ -162,6 +162,32 @@ class LLMClient:
 
         if not data.get("success"):
             error_msg = data.get("error", "")
+            # Fix 3 (seam follow-up): the mesh proxy tags distinguished
+            # exceptions on APIProxyResponse.error_type so we can re-raise
+            # the same type the agent loop expects to catch. Without
+            # this, every credential failure looks like a generic
+            # RuntimeError to the loop and the quarantine path doesn't
+            # trigger via the agent's report channel (mesh also records
+            # directly, but the agent-side branches still need the type).
+            error_type = data.get("error_type")
+            error_meta = data.get("error_meta") or {}
+            if error_type == "auth_failure":
+                from src.shared.errors import LLMAuthError
+                raise LLMAuthError(
+                    error_msg,
+                    provider=error_meta.get("provider", "unknown"),
+                    model=error_meta.get("model"),
+                    http_status=error_meta.get("http_status"),
+                )
+            if error_type == "config_error":
+                from src.shared.errors import LLMConfigError
+                raise LLMConfigError(
+                    error_msg,
+                    provider=error_meta.get("provider", "unknown"),
+                    model=error_meta.get("model", ""),
+                    allowed_models=set(error_meta.get("allowed_models", [])),
+                    http_status=error_meta.get("http_status"),
+                )
             # Rate limits and transient errors should be retried
             _retryable = ("rate limit", "ratelimit", "429", "too many requests", "overloaded", "503")
             if any(kw in error_msg.lower() for kw in _retryable):
@@ -229,6 +255,28 @@ class LLMClient:
                     continue
 
                 if "error" in data:
+                    # Fix 3 (seam follow-up): distinguished error types
+                    # ride the SSE payload so the agent loop can route
+                    # to the auth-failure / config-error branches.
+                    error_type = data.get("error_type")
+                    error_meta = data.get("error_meta") or {}
+                    if error_type == "auth_failure":
+                        from src.shared.errors import LLMAuthError
+                        raise LLMAuthError(
+                            data["error"],
+                            provider=error_meta.get("provider", "unknown"),
+                            model=error_meta.get("model"),
+                            http_status=error_meta.get("http_status"),
+                        )
+                    if error_type == "config_error":
+                        from src.shared.errors import LLMConfigError
+                        raise LLMConfigError(
+                            data["error"],
+                            provider=error_meta.get("provider", "unknown"),
+                            model=error_meta.get("model", ""),
+                            allowed_models=set(error_meta.get("allowed_models", [])),
+                            http_status=error_meta.get("http_status"),
+                        )
                     raise RuntimeError(f"LLM stream error: {data['error']}")
 
                 if data.get("type") == "text_delta":

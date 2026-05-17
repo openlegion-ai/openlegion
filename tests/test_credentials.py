@@ -4187,6 +4187,81 @@ class TestCredentialKindAndModelCompat:
         # No anthropic creds → omitted entirely.
         assert "anthropic" not in result
 
+    # ── codex P2 follow-ups ──
+
+    def test_credential_kind_keyless_provider_with_api_base(self, monkeypatch):
+        """Keyless providers (Ollama) are 'api_key' when API base is set.
+
+        Without this, edit_agent / create_agent would reject Ollama
+        models on every local-only deployment even though
+        get_providers_with_credentials() reports the provider as
+        available.
+        """
+        self._purge_env(monkeypatch)
+        monkeypatch.setenv(
+            "OPENLEGION_SYSTEM_OLLAMA_API_BASE", "http://localhost:11434",
+        )
+        v = CredentialVault()
+        assert v.get_credential_kind("ollama") == "api_key"
+
+    def test_is_model_compatible_keyless_provider(self, monkeypatch):
+        """Ollama model is compatible when API base is configured."""
+        self._purge_env(monkeypatch)
+        monkeypatch.setenv(
+            "OPENLEGION_SYSTEM_OLLAMA_API_BASE", "http://localhost:11434",
+        )
+        v = CredentialVault()
+        ok, reason = v.is_model_compatible("ollama/llama3")
+        assert ok is True
+        assert reason is None
+
+    def test_credential_kind_keyless_provider_without_api_base(self, monkeypatch):
+        """No API base → keyless provider reports 'none'."""
+        self._purge_env(monkeypatch)
+        v = CredentialVault()
+        assert v.get_credential_kind("ollama") == "none"
+
+    def test_is_model_compatible_both_restricts_to_oauth_subset(self, monkeypatch):
+        """Codex P2: when both API key + OAuth exist, OAuth wins at
+        runtime so compat check restricts to the OAuth subset. Without
+        this, a non-OAuth-allowed model would pass validation and then
+        fail on its first call via the OAuth endpoint."""
+        self._purge_env(monkeypatch)
+        monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-test")
+        monkeypatch.setenv(
+            "OPENLEGION_SYSTEM_OPENAI_OAUTH",
+            '{"access_token":"tok","refresh_token":"ref"}',
+        )
+        v = CredentialVault()
+        assert v.get_credential_kind("openai") == "both"
+        # gpt-4.1-mini is NOT in the OAuth subset, even though api_key
+        # exists — reject because OAuth is routed first.
+        ok, reason = v.is_model_compatible("openai/gpt-4.1-mini")
+        assert ok is False
+        assert reason is not None
+        assert "OAuth is routed first" in reason
+        # Error reason names the override env var so the operator knows
+        # how to widen the OAuth allowlist.
+        assert "OPENLEGION_OAUTH_ALLOWED_MODELS_OPENAI" in reason
+        # OAuth-allowed model is fine.
+        ok2, reason2 = v.is_model_compatible("openai/gpt-5.3-codex")
+        assert ok2 is True
+
+    def test_get_allowed_models_both_kind_returns_oauth_subset(self, monkeypatch):
+        """``both`` kind returns the OAuth subset (matches runtime routing)."""
+        self._purge_env(monkeypatch)
+        monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-test")
+        monkeypatch.setenv(
+            "OPENLEGION_SYSTEM_OPENAI_OAUTH",
+            '{"access_token":"tok","refresh_token":"ref"}',
+        )
+        v = CredentialVault()
+        result = v.get_allowed_models()
+        models = set(result["openai"])
+        # Same as oauth-only — runtime would use OAuth.
+        assert "openai/gpt-5.3-codex" in models
+        assert "openai/gpt-4.1-mini" not in models
+
     def test_oauth_allowed_models_env_override(self, monkeypatch):
         """OPENLEGION_OAUTH_ALLOWED_MODELS_OPENAI overrides the default subset."""
         # The env override is read at module import time, so we have to
@@ -4320,3 +4395,80 @@ class TestLLMAuthAndConfigErrors:
                 pass
         assert ei.value.provider == "openai"
         assert ei.value.http_status == 400
+
+    @pytest.mark.asyncio
+    async def test_execute_api_call_records_auth_failure_mesh_side(
+        self, monkeypatch,
+    ):
+        """Codex P1: ``execute_api_call`` must invoke the auth-failure
+        recorder AND tag the response so quarantine triggers even though
+        the mesh-proxy boundary erases exception types."""
+        from src.shared.errors import LLMAuthError
+        from src.shared.types import APIProxyRequest
+        v = CredentialVault()
+        recorded: list[tuple] = []
+        v.set_auth_failure_recorder(
+            lambda agent_id, provider, model, http_status: recorded.append(
+                (agent_id, provider, model, http_status),
+            ),
+        )
+
+        # Stub the LLM handler to raise LLMAuthError.
+        async def _failing_handler(req):
+            raise LLMAuthError(
+                "creds blown", provider="openai",
+                model="openai/gpt-5", http_status=401,
+            )
+
+        v.service_handlers["llm"] = _failing_handler
+
+        req = APIProxyRequest(
+            service="llm", action="chat",
+            params={"model": "openai/gpt-5", "messages": []},
+        )
+        resp = await v.execute_api_call(req, agent_id="agent-a")
+        assert resp.success is False
+        # Tagged with structured error type so the agent loop can re-raise.
+        assert resp.error_type == "auth_failure"
+        assert resp.status_code == 401
+        assert resp.error_meta is not None
+        assert resp.error_meta["provider"] == "openai"
+        # Recorder fired once with the right tuple.
+        assert recorded == [("agent-a", "openai", "openai/gpt-5", 401)]
+
+    @pytest.mark.asyncio
+    async def test_execute_api_call_tags_config_error_without_recording(self):
+        """``execute_api_call`` tags config errors but does NOT call the
+        auth-failure recorder (config errors are operator misconfig, not
+        broken credentials, so they must not quarantine)."""
+        from src.shared.errors import LLMConfigError
+        from src.shared.types import APIProxyRequest
+        v = CredentialVault()
+        recorded: list[tuple] = []
+        v.set_auth_failure_recorder(
+            lambda *a: recorded.append(a),
+        )
+
+        async def _failing_handler(req):
+            raise LLMConfigError(
+                "model not supported", provider="openai",
+                model="openai/gpt-99",
+                allowed_models={"openai/gpt-5.3-codex"},
+                http_status=400,
+            )
+
+        v.service_handlers["llm"] = _failing_handler
+
+        req = APIProxyRequest(
+            service="llm", action="chat",
+            params={"model": "openai/gpt-99", "messages": []},
+        )
+        resp = await v.execute_api_call(req, agent_id="agent-a")
+        assert resp.success is False
+        assert resp.error_type == "config_error"
+        assert resp.status_code == 400
+        assert "openai/gpt-5.3-codex" in (
+            resp.error_meta or {}
+        ).get("allowed_models", [])
+        # Did NOT fire — config is misconfig, not credential failure.
+        assert recorded == []
