@@ -45,7 +45,7 @@ from jinja2 import Environment, FileSystemLoader
 
 from src.cli.proxy import build_proxy_env_vars, resolve_agent_proxy
 from src.dashboard.auth import verify_session_cookie
-from src.shared.utils import friendly_streaming_error, sanitize_for_prompt, setup_logging
+from src.shared.utils import dumps_safe, friendly_streaming_error, sanitize_for_prompt, setup_logging
 
 if TYPE_CHECKING:
     from src.dashboard.events import EventBus
@@ -3193,7 +3193,7 @@ def create_dashboard_router(
                     headers=_hdrs,
                 ):
                     if isinstance(event, dict):
-                        yield f"data: {json.dumps(event, default=str)}\n\n"
+                        yield f"data: {dumps_safe(event)}\n\n"
                         etype = event.get("type", "")
                         if event_bus:
                             if etype in ("tool_start", "tool_result", "text_delta"):
@@ -3341,7 +3341,7 @@ def create_dashboard_router(
                     event = await queue.get()
                     if event.get("type") == "agent_done":
                         done_count += 1
-                    yield f"data: {json.dumps(event, default=str)}\n\n"
+                    yield f"data: {dumps_safe(event)}\n\n"
             except asyncio.CancelledError:
                 for t in tasks:
                     t.cancel()
@@ -4699,7 +4699,7 @@ def create_dashboard_router(
                         result["preview"] = parsed[f][:200]
                         break
                 if "preview" not in result:
-                    result["preview"] = json.dumps(parsed, default=str)[:200]
+                    result["preview"] = dumps_safe(parsed)[:200]
             else:
                 result["preview"] = str(parsed)[:200]
         except (ValueError, TypeError):
@@ -4803,7 +4803,7 @@ def create_dashboard_router(
         value = body.get("value", {})
         if not isinstance(value, dict):
             raise HTTPException(status_code=400, detail="value must be a JSON object")
-        value_size = len(json.dumps(value, default=str))
+        value_size = len(dumps_safe(value))
         if value_size > _MAX_BB_VALUE_BYTES:
             raise HTTPException(
                 status_code=413,
@@ -6892,7 +6892,7 @@ def create_dashboard_router(
             text = value
         else:
             try:
-                text = json.dumps(value, indent=2, default=str)
+                text = dumps_safe(value, indent=2)
             except (TypeError, ValueError):
                 text = str(value)
         truncated = False

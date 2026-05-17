@@ -23,7 +23,7 @@ import httpx
 
 from src.browser import flags, timing
 from src.shared.redaction import redact_url
-from src.shared.utils import setup_logging
+from src.shared.utils import dumps_safe, setup_logging
 
 logger = setup_logging("browser.captcha")
 
@@ -513,7 +513,7 @@ def _extract_solution_token(solution: object, captcha_type: str) -> str | None:
         # cookies/userAgent/sensorData via the BrowserContext.
         if any(k in solution for k in _ANTIBOT_SOLUTION_KEYS):
             try:
-                return json.dumps(solution, sort_keys=True, default=str)
+                return dumps_safe(solution, sort_keys=True)
             except (TypeError, ValueError):
                 # Defensive — solution payloads are JSON over the wire
                 # so this shouldn't happen, but fall through cleanly

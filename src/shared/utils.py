@@ -8,8 +8,24 @@ import os
 import unicodedata
 import uuid
 from datetime import datetime, timezone
+from typing import Any
 
 UTC = timezone.utc
+
+
+def dumps_safe(obj: Any, **kwargs: Any) -> str:
+    """json.dumps with `default=str` — handles datetime, UUID, Decimal, Path.
+
+    Other ``json.dumps`` kwargs (``indent``, ``sort_keys``, ``separators``,
+    ``ensure_ascii``, …) pass through unchanged.
+
+    The helper enforces ``default=str``: do NOT pass ``default=`` (raises
+    ``TypeError: multiple values for keyword argument 'default'``) or
+    ``cls=CustomEncoder`` (custom encoder's default() may conflict with
+    the forced ``str`` callable). If you need a different encoder, call
+    ``json.dumps`` directly at that site.
+    """
+    return json.dumps(obj, default=str, **kwargs)
 
 
 def generate_id(prefix: str = "id") -> str:
@@ -26,7 +42,7 @@ def truncate(text: str, max_len: int = 200) -> str:
 
 def format_dict(d: dict) -> str:
     """Format a dict for inclusion in LLM prompts."""
-    return json.dumps(d, indent=2, default=str)
+    return dumps_safe(d, indent=2)
 
 
 # ── Prompt injection sanitization ────────────────────────────

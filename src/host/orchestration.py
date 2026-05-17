@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from src.shared.task_titles import normalize_title_and_description
-from src.shared.utils import setup_logging
+from src.shared.utils import dumps_safe, setup_logging
 
 logger = setup_logging("host.orchestration")
 
@@ -408,7 +408,7 @@ class Tasks:
             "VALUES (?, ?, ?, ?, ?)",
             (
                 task_id, event_kind, actor,
-                json.dumps(payload, default=str) if payload else None,
+                dumps_safe(payload) if payload else None,
                 time.time(),
             ),
         )

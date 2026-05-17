@@ -31,6 +31,7 @@ from src.cli.formatting import (
     display_stream_tool_start,
     user_prompt,
 )
+from src.shared.utils import dumps_safe
 
 if TYPE_CHECKING:
     from src.cli.runtime import RuntimeContext
@@ -859,7 +860,7 @@ class REPLSession:
                 return
             click.echo()
             for entry in entries:
-                val = json.dumps(entry.value, default=str)
+                val = dumps_safe(entry.value)
                 if len(val) > 80:
                     val = val[:80] + "..."
                 click.echo(f"  {entry.key:<40} {val}")
@@ -878,7 +879,7 @@ class REPLSession:
             click.echo(f"  Version:    {entry.version}")
             if entry.updated_at:
                 click.echo(f"  Updated:    {entry.updated_at}")
-            val_str = json.dumps(entry.value, indent=2, default=str)
+            val_str = dumps_safe(entry.value, indent=2)
             val_lines = val_str.split("\n")
             click.echo(f"  Value:      {val_lines[0]}")
             for vl in val_lines[1:]:

@@ -20,7 +20,7 @@ import httpx
 
 from src.shared.sqlite_helpers import open_db
 from src.shared.types import AgentMessage, BlackboardEntry
-from src.shared.utils import setup_logging
+from src.shared.utils import dumps_safe, setup_logging
 
 if TYPE_CHECKING:
     from src.host.permissions import PermissionMatrix
@@ -156,7 +156,7 @@ class Blackboard:
         ttl: int | None = None,
     ) -> BlackboardEntry:
         """Write or update a blackboard entry (atomic upsert)."""
-        value_json = json.dumps(value, default=str)
+        value_json = dumps_safe(value)
 
         with self._write_lock:
             cursor = self.db.execute(
@@ -208,7 +208,7 @@ class Blackboard:
         the version has changed (conflict).  Used for task claiming — only
         one agent can win the CAS race.
         """
-        value_json = json.dumps(value, default=str)
+        value_json = dumps_safe(value)
 
         with self._write_lock:
             cursor = self.db.execute(
@@ -706,7 +706,7 @@ class PubSub:
             if self._db is not None:
                 self._db.execute(
                     "INSERT INTO events (topic, data) VALUES (?, ?)",
-                    (topic, json.dumps(event, default=str)),
+                    (topic, dumps_safe(event)),
                 )
                 self._db.commit()
                 self._maybe_gc_events()

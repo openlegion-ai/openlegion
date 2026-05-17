@@ -35,7 +35,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from src.shared.utils import sanitize_for_prompt, setup_logging
+from src.shared.utils import dumps_safe, sanitize_for_prompt, setup_logging
 
 logger = setup_logging("agent.workspace")
 
@@ -693,7 +693,7 @@ class WorkspaceManager:
         try:
             self.root.mkdir(parents=True, exist_ok=True)
             with path.open("a") as f:
-                f.write(json.dumps(entry, default=str) + "\n")
+                f.write(dumps_safe(entry) + "\n")
             sentinel.touch()
             return True
         except OSError as e:
@@ -718,7 +718,7 @@ class WorkspaceManager:
             entry["tools"] = tool_names
         try:
             with path.open("a") as f:
-                f.write(json.dumps(entry, default=str) + "\n")
+                f.write(dumps_safe(entry) + "\n")
             # Rotate if too large — keep newest half
             if path.stat().st_size > self._MAX_TRANSCRIPT_SIZE:
                 lines = path.read_text(errors="replace").strip().split("\n")
@@ -801,7 +801,7 @@ class WorkspaceManager:
             entry["notifications"] = notifications
         try:
             with path.open("a") as f:
-                f.write(json.dumps(entry, default=str) + "\n")
+                f.write(dumps_safe(entry) + "\n")
             if path.stat().st_size > self._MAX_TRANSCRIPT_SIZE:
                 lines = path.read_text(errors="replace").strip().split("\n")
                 half = len(lines) // 2

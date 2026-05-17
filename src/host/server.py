@@ -50,7 +50,7 @@ from src.shared.types import (
     MeshEvent,
     NotifyRequest,
 )
-from src.shared.utils import sanitize_for_prompt, setup_logging
+from src.shared.utils import dumps_safe, sanitize_for_prompt, setup_logging
 
 logger = setup_logging("host.server")
 
@@ -1214,7 +1214,7 @@ def create_mesh_app(
         await _check_rate_limit("blackboard_write", agent_id)
         if len(key) > _MAX_BB_KEY_LEN:
             raise HTTPException(400, f"Key too long ({len(key)} chars, max {_MAX_BB_KEY_LEN})")
-        value_size = len(json.dumps(value, default=str))
+        value_size = len(dumps_safe(value))
         if value_size > _MAX_BB_VALUE_BYTES:
             raise HTTPException(413, f"Value too large ({value_size} bytes, max {_MAX_BB_VALUE_BYTES})")
         if ttl is not None and ttl <= 0:
@@ -1301,7 +1301,7 @@ def create_mesh_app(
         await _check_rate_limit("blackboard_write", agent_id)
         if len(key) > _MAX_BB_KEY_LEN:
             raise HTTPException(400, f"Key too long ({len(key)} chars, max {_MAX_BB_KEY_LEN})")
-        value_size = len(json.dumps(body.value, default=str))
+        value_size = len(dumps_safe(body.value))
         if value_size > _MAX_BB_VALUE_BYTES:
             raise HTTPException(413, f"Value too large ({value_size} bytes, max {_MAX_BB_VALUE_BYTES})")
         if not permissions.can_write_blackboard(agent_id, key):
@@ -1372,7 +1372,7 @@ def create_mesh_app(
             if lane_manager is not None and dispatch_loop is not None:
                 formatted_msg = (
                     f"[Event: {event.topic}] from {event.source}: "
-                    f"{json.dumps(event.payload, default=str)[:500]}"
+                    f"{dumps_safe(event.payload)[:500]}"
                 )
                 _notify_watchers_batch(subscribers, formatted_msg)
             else:
@@ -5600,7 +5600,7 @@ def create_mesh_app(
             summary = f"Update {agent_id}'s {humanized_field}"
         else:
             def _short(v: object, n: int = 40) -> str:
-                s = v if isinstance(v, str) else json.dumps(v, default=str)
+                s = v if isinstance(v, str) else dumps_safe(v)
                 s = s.replace("\n", " ").strip()
                 return s if len(s) <= n else s[: n - 1] + "…"
             summary = (
@@ -7819,7 +7819,7 @@ def create_mesh_app(
         snapshot_seq = event_bus.current_seq
         event_bus.subscribe(websocket, agents_filter, types_filter)
         for evt in event_bus.recent_events(agents_filter, types_filter, before_seq=snapshot_seq):
-            await websocket.send_text(json.dumps(evt, default=str))
+            await websocket.send_text(dumps_safe(evt))
         try:
             while True:
                 await websocket.receive_text()  # keep-alive

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import json
 import sys
 
 import click
+
+from src.shared.utils import dumps_safe
 
 # ── Tool formatters ─────────────────────────────────────────
 
@@ -44,7 +45,7 @@ def _format_tool_summary(name: str, inp: dict, out: dict) -> str:
     elif name == "memory_search":
         return inp.get("query", "")
     else:
-        text = json.dumps(inp, default=str)
+        text = dumps_safe(inp)
         if len(text) > 80:
             text = text[:77] + "..."
         return text

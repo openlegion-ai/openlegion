@@ -30,7 +30,7 @@ from sqlite_vec import serialize_float32
 
 from src.shared.sqlite_helpers import open_db
 from src.shared.types import MemoryFact, MemoryLog
-from src.shared.utils import generate_id, setup_logging
+from src.shared.utils import dumps_safe, generate_id, setup_logging
 
 logger = setup_logging("agent.memory")
 
@@ -527,7 +527,7 @@ class MemoryStore:
     @staticmethod
     def _compute_params_hash(arguments: dict | None) -> str:
         """SHA-256 of sorted JSON arguments for deduplication."""
-        raw = json.dumps(arguments or {}, sort_keys=True, default=str)
+        raw = dumps_safe(arguments or {}, sort_keys=True)
         return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
     def _store_tool_outcome_sync(
