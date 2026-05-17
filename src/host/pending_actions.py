@@ -30,7 +30,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from src.shared.utils import setup_logging
+from src.shared.utils import dumps_safe, setup_logging
 
 logger = setup_logging("host.pending_actions")
 
@@ -44,7 +44,7 @@ def _payload_digest(payload: Any) -> str:
     matching digests regardless of dict iteration order, and
     ``default=str`` so datetime / Decimal / etc. don't blow up serialization.
     """
-    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    blob = dumps_safe(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
@@ -216,7 +216,7 @@ class PendingActions:
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
                 (
                     nonce, actor, target_kind, target_id, action_kind,
-                    json.dumps(payload, default=str), digest, origin_kind,
+                    dumps_safe(payload), digest, origin_kind,
                     now, expires_at, summary, preview_diff,
                 ),
             )

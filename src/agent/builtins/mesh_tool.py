@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 
 from src.agent.skills import skill
-from src.shared.utils import sanitize_for_prompt, setup_logging
+from src.shared.utils import dumps_safe, sanitize_for_prompt, setup_logging
 
 logger = setup_logging("agent.builtins.mesh_tool")
 
@@ -231,7 +231,7 @@ async def list_blackboard(prefix: str = "", *, mesh_client=None) -> dict:
         entries = await mesh_client.list_blackboard(prefix)
         items = []
         for entry in entries:
-            raw = json.dumps(entry.get("value", {}), default=str)
+            raw = dumps_safe(entry.get("value", {}))
             preview = sanitize_for_prompt(raw[:200] + "..." if len(raw) > 200 else raw)
             items.append({
                 "key": sanitize_for_prompt(entry.get("key", "")),

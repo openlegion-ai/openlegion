@@ -20,7 +20,7 @@ from src.agent.attachments import enrich_message_with_attachments
 from src.agent.loop_detector import ToolLoopDetector
 from src.agent.workspace import INTROSPECT_PERM_KEYS
 from src.shared.types import SILENT_REPLY_TOKEN, AgentStatus, LLMResponse, TaskAssignment, TaskResult
-from src.shared.utils import format_dict, generate_id, sanitize_for_prompt, setup_logging, truncate
+from src.shared.utils import dumps_safe, format_dict, generate_id, sanitize_for_prompt, setup_logging, truncate
 
 if TYPE_CHECKING:
     from src.agent.context import ContextManager
@@ -2162,7 +2162,7 @@ class AgentLoop:
                 image_block = result.pop("_image", None)
 
             try:
-                result_str = json.dumps(result, default=str) if isinstance(result, dict) else str(result)
+                result_str = dumps_safe(result) if isinstance(result, dict) else str(result)
             except (TypeError, ValueError, OverflowError) as ser_err:
                 logger.warning("JSON serialization of %s result failed: %s", tool_call.name, ser_err)
                 result_str = str(result)[:2000]
@@ -2593,10 +2593,10 @@ class AgentLoop:
                     "name": name,
                     "status": "done",
                     "inputPreview": truncate(
-                        json.dumps(inp, default=str), 200,
+                        dumps_safe(inp), 200,
                     ) if inp else "",
                     "outputPreview": truncate(
-                        json.dumps(out, default=str), 200,
+                        dumps_safe(out), 200,
                     ) if out else "",
                 })
 

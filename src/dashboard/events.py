@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from src.shared.types import DashboardEvent
-from src.shared.utils import setup_logging
+from src.shared.utils import dumps_safe, setup_logging
 
 if TYPE_CHECKING:
     from fastapi import WebSocket
@@ -177,7 +177,7 @@ class EventBus:
     async def _broadcast(self, evt_dict: dict) -> None:
         """Send event to all matching subscribers. Remove dead connections."""
         dead: list[_Subscription] = []
-        payload = json.dumps(evt_dict, default=str)
+        payload = dumps_safe(evt_dict)
         for sub in self._clients:
             if not sub.matches(evt_dict):
                 continue

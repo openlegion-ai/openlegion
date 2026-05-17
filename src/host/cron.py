@@ -30,7 +30,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from src.shared.utils import generate_id, setup_logging
+from src.shared.utils import dumps_safe, generate_id, setup_logging
 
 logger = setup_logging("host.cron")
 
@@ -616,7 +616,7 @@ class CronScheduler:
             if probe and probe.triggered and probe.entries:
                 lines = []
                 for entry in probe.entries[:max_items]:
-                    val = json.dumps(entry.value, default=str)
+                    val = dumps_safe(entry.value)
                     if len(val) > 200:
                         val = val[:200] + "..."
                     lines.append(f"- `{entry.key}`: {val}")

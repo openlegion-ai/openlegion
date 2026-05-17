@@ -32,7 +32,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from src.shared.utils import setup_logging
+from src.shared.utils import dumps_safe, setup_logging
 
 logger = setup_logging("host.change_history")
 
@@ -158,8 +158,8 @@ class ChangeHistory:
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)",
                 (
                     undo_token, actor, agent_id, field,
-                    json.dumps(old_value, default=str),
-                    json.dumps(new_value, default=str),
+                    dumps_safe(old_value),
+                    dumps_safe(new_value),
                     summary, reason, now, expires_at,
                 ),
             )

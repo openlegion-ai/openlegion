@@ -28,6 +28,7 @@ from src.cli.config import (
     _load_config,
     _suppress_host_logs,
 )
+from src.shared.utils import dumps_safe
 
 logger = logging.getLogger("cli")
 
@@ -390,7 +391,7 @@ def _single_agent_repl(agent_name: str, agent_url: str, mesh_port: int = 8420) -
                         click.echo("  Blackboard is empty.")
                     else:
                         for e in entries:
-                            click.echo(f"  {e.get('key', '?')}: {_json.dumps(e.get('value', {}), default=str)[:60]}")
+                            click.echo(f"  {e.get('key', '?')}: {dumps_safe(e.get('value', {}))[:60]}")
                 except Exception as e:
                     click.echo(f"Error: {e}", err=True)
                 continue
@@ -648,7 +649,7 @@ def _run_teams_list(port: int, as_json: bool) -> None:
     teams = data.get("teams", []) if isinstance(data, dict) else []
     if as_json:
         # Emit both keys for back-compat with downstream JSON consumers.
-        click.echo(_json.dumps({"teams": teams, "projects": teams}, default=str))
+        click.echo(dumps_safe({"teams": teams, "projects": teams}))
         return
     if not teams:
         click.echo("No active teams.")
@@ -673,7 +674,7 @@ def _run_team_show(team_id: str, port: int, as_json: bool) -> None:
     if match is None:
         _fail(f"Team '{team_id}' not found")
     if as_json:
-        click.echo(_json.dumps(match, default=str))
+        click.echo(dumps_safe(match))
         return
     click.echo(f"Team: {match.get('name')}")
     click.echo(f"  Status:      {match.get('status', 'active')}")
@@ -772,13 +773,13 @@ def tasks_cmd(agent, team, project, status, port, as_json):
         data = {}
     if not data.get("enabled", True):
         if as_json:
-            click.echo(_json.dumps(data, default=str))
+            click.echo(dumps_safe(data))
         else:
             click.echo("Board disabled. Set OPENLEGION_ORCHESTRATION_TASKS_V2=1 and restart.")
         return
     tasks = data.get("tasks", [])
     if as_json:
-        click.echo(_json.dumps({"tasks": tasks}, default=str))
+        click.echo(dumps_safe({"tasks": tasks}))
         return
     if not tasks:
         click.echo("No tasks.")
@@ -803,7 +804,7 @@ def pending_cmd(port: int, as_json: bool):
     data = _mesh_get(port, "/dashboard/api/workplace/pending")
     rows = data.get("pending", []) if isinstance(data, dict) else []
     if as_json:
-        click.echo(_json.dumps({"pending": rows}, default=str))
+        click.echo(dumps_safe({"pending": rows}))
         return
     if not rows:
         click.echo("No pending actions.")
@@ -828,7 +829,7 @@ def confirm_cmd(nonce: str, port: int, as_json: bool):
     as_json = as_json or _json_mode
     result = _mesh_post(port, f"/mesh/pending/{nonce}/confirm")
     if as_json:
-        click.echo(_json.dumps(result, default=str))
+        click.echo(dumps_safe(result))
     else:
         click.echo(f"Confirmed: {nonce}")
 
@@ -842,7 +843,7 @@ def cancel_cmd(nonce: str, port: int, as_json: bool):
     as_json = as_json or _json_mode
     result = _mesh_post(port, f"/mesh/pending/{nonce}/cancel")
     if as_json:
-        click.echo(_json.dumps(result, default=str))
+        click.echo(dumps_safe(result))
     else:
         click.echo(f"Cancelled: {nonce}")
 

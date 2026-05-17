@@ -18,7 +18,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 
-from src.shared.utils import generate_id, sanitize_for_prompt, setup_logging
+from src.shared.utils import dumps_safe, generate_id, sanitize_for_prompt, setup_logging
 
 logger = setup_logging("host.webhooks")
 
@@ -191,7 +191,7 @@ class WebhookManager:
             hook["call_count"] = hook.get("call_count", 0) + 1
             manager._save()
 
-            message = _build_message(hook, json.dumps(body, indent=2, default=str))
+            message = _build_message(hook, dumps_safe(body, indent=2))
 
             if manager.dispatch_fn:
                 await manager.dispatch_fn(hook["agent"], message)
@@ -207,7 +207,7 @@ class WebhookManager:
             return None
 
         message = _build_message(
-            hook, json.dumps(payload, indent=2, default=str), test=True,
+            hook, dumps_safe(payload, indent=2), test=True,
         )
 
         if self.dispatch_fn:

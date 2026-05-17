@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 
 from src.shared.sqlite_helpers import open_db
-from src.shared.utils import setup_logging
+from src.shared.utils import dumps_safe, setup_logging
 
 logger = setup_logging("host.traces")
 
@@ -78,7 +78,7 @@ class TraceStore:
         meta: dict | None = None,
     ) -> None:
         """Insert a trace event."""
-        meta_json = json.dumps(meta, default=str) if meta else ""
+        meta_json = dumps_safe(meta) if meta else ""
         self._conn.execute(
             "INSERT INTO traces "
             "(trace_id, timestamp, source, agent, event_type, detail, duration_ms, status, error, meta_json) "

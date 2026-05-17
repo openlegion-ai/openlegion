@@ -19,7 +19,7 @@ import json
 from collections import Counter, deque
 from typing import Any
 
-from src.shared.utils import setup_logging
+from src.shared.utils import dumps_safe, setup_logging
 
 logger = setup_logging("agent.loop_detector")
 
@@ -34,7 +34,7 @@ _TERMINATE_THRESHOLD = 9  # >= 9 prior same tool+params (any result) → termina
 
 def _hash_json(data: Any) -> str:
     """SHA-256 of canonically-serialised JSON, truncated to 16 hex chars."""
-    raw = json.dumps(data, sort_keys=True, default=str)
+    raw = dumps_safe(data, sort_keys=True)
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
