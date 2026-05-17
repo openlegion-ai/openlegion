@@ -4,11 +4,10 @@ Each agent gets its own FIFO queue. Tasks within a lane execute serially
 (one at a time per agent), but lanes run in parallel (different agents
 can work simultaneously).
 
-Three queue modes control how incoming messages interact with busy agents:
+Two queue modes control how incoming messages interact with busy agents:
 
 - **followup** (default): FIFO — queue, process after current task.
 - **steer**: Inject into active conversation between tool rounds.
-- **collect**: Batch queued messages into a single dispatch when agent becomes free.
 """
 
 from __future__ import annotations
@@ -89,7 +88,6 @@ class LaneManager:
         self._queues: dict[str, asyncio.Queue[QueuedTask]] = {}
         self._workers: dict[str, asyncio.Task] = {}
         self._pending: dict[str, list[QueuedTask]] = {}
-        self._collect_buffers: dict[str, list[str]] = {}
         self._busy: dict[str, bool] = {}
         self._state_locks: dict[str, asyncio.Lock] = {}
         self._steer_wakeup_ts: dict[str, list[float]] = {}
@@ -127,7 +125,6 @@ class LaneManager:
             self._queues[agent] = asyncio.Queue()
             self._pending[agent] = []
             self._busy[agent] = False
-            self._collect_buffers[agent] = []
             self._state_locks[agent] = asyncio.Lock()
             self._workers[agent] = asyncio.create_task(self._worker(agent))
 
@@ -143,7 +140,6 @@ class LaneManager:
         Modes:
           followup — default FIFO, process after current task.
           steer    — inject into active conversation between tool rounds.
-          collect  — batch when busy, dispatch combined when agent becomes free.
 
         When ``origin`` and ``auto_notify=True`` are set, the lane worker will
         forward the completed task result back to the originating channel+user
@@ -151,21 +147,18 @@ class LaneManager:
 
         ``task_id`` (Bug 2/3 fix) plumbs through to the dispatched ``/chat``
         call so the recipient agent's loop can auto-close the task on
-        completion. Only honoured for ``followup`` mode; steer/collect
-        intentionally don't wire it (those aren't single-task semantics).
+        completion. Only honoured for ``followup`` mode; steer
+        intentionally doesn't wire it (it isn't single-task semantics).
         """
         self._ensure_lane(agent)
 
         if mode == "steer":
             return await self._handle_steer(agent, message)
-        elif mode == "collect":
-            return await self._handle_collect(agent, message)
-        else:
-            return await self._handle_followup(
-                agent, message, trace_id=trace_id,
-                origin=origin, auto_notify=auto_notify,
-                task_id=task_id,
-            )
+        return await self._handle_followup(
+            agent, message, trace_id=trace_id,
+            origin=origin, auto_notify=auto_notify,
+            task_id=task_id,
+        )
 
     async def _handle_followup(
         self, agent: str, message: str, *, trace_id: str | None = None,
@@ -227,58 +220,6 @@ class LaneManager:
         ts.append(now)
         self._steer_wakeup_ts[agent] = ts
         return True
-
-    async def _handle_collect(self, agent: str, message: str) -> str:
-        """Batch messages when agent is busy, dispatch immediately when idle."""
-        async with self._state_locks[agent]:
-            if self._busy.get(agent, False):
-                # Agent is busy — buffer the message
-                self._collect_buffers[agent].append(message)
-                logger.debug(
-                    f"Collected message for '{agent}' "
-                    f"(buffer size: {len(self._collect_buffers[agent])})"
-                )
-                return SILENT_REPLY_TOKEN
-
-        # Outside lock — agent was idle, dispatch immediately
-        return await self._handle_followup(agent, message)
-
-    def _flush_collect_buffer(self, agent: str) -> None:
-        """Drain the collect buffer and enqueue a combined message as followup."""
-        buffer = self._collect_buffers.get(agent, [])
-        if not buffer:
-            return
-
-        messages = list(buffer)
-        buffer.clear()
-
-        if len(messages) == 1:
-            combined = messages[0]
-        else:
-            parts = [f"[Message {i + 1}]: {msg}" for i, msg in enumerate(messages)]
-            combined = "\n\n".join(parts)
-
-        task = QueuedTask(
-            id=generate_id("lane"),
-            agent=agent,
-            message=combined,
-            mode="followup",
-        )
-        # Mark exceptions as retrieved (prevents "Future exception was never
-        # retrieved" warnings) since no caller awaits collected-batch futures.
-        def _handle_orphan_exception(f: asyncio.Future) -> None:
-            if f.cancelled():
-                return
-            exc = f.exception()
-            if exc:
-                logger.warning("Collected-batch task %s failed: %s", task.id, exc)
-
-        task.future.add_done_callback(_handle_orphan_exception)
-        self._pending[agent].append(task)
-        self._queues[agent].put_nowait(task)
-        logger.debug(
-            f"Flushed {len(messages)} collected message(s) as task {task.id} for '{agent}'"
-        )
 
     async def _worker(self, agent: str) -> None:
         """Worker loop: drains the queue for a single agent serially."""
@@ -463,16 +404,14 @@ class LaneManager:
                     if task in pending:
                         pending.remove(task)
                 queue.task_done()
-                self._flush_collect_buffer(agent)
 
     def get_status(self) -> dict[str, dict]:
-        """Return queue depth, pending task count, collected count, and busy flag per agent."""
+        """Return queue depth, pending task count, and busy flag per agent."""
         result = {}
         for agent, queue in self._queues.items():
             result[agent] = {
                 "queued": queue.qsize(),
                 "pending": len(self._pending.get(agent, [])),
-                "collected": len(self._collect_buffers.get(agent, [])),
                 "busy": self._busy.get(agent, False),
             }
         return result
@@ -500,7 +439,6 @@ class LaneManager:
             worker.cancel()
         self._queues.pop(agent, None)
         self._pending.pop(agent, None)
-        self._collect_buffers.pop(agent, None)
         self._busy.pop(agent, None)
         self._state_locks.pop(agent, None)
         self._steer_wakeup_ts.pop(agent, None)
