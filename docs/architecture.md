@@ -124,7 +124,7 @@ Each agent runs in an isolated Docker container with its own FastAPI server (28 
 | `introspect_tool.py` | Runtime state query — permissions, budget, fleet, cron, health. |
 | `skill_tool.py` | Self-authoring with AST validation. Forbidden imports/calls/attrs prevent `eval`, `exec`, `open`, `__subclasses__`, etc. |
 | `fleet_tool.py` | Operator-only fleet management — `list_templates`, `apply_template` (per-slot creation, not atomic across slots). |
-| `operator_tools.py` | Operator-only orchestration — `edit_agent` (collapses soft/hard branches), `undo_change`, `propose_edit` / `confirm_edit`, `save_observations`, `inspect_agents`, `inspect_teams` (alias `inspect_projects`), team/agent CRUD via `create_team` / `add_agents_to_team` / … (legacy `*_project` names still callable). |
+| `operator_tools.py` | Operator-only orchestration — `edit_agent` (single tool; all fields apply immediately and emit an undo receipt: 5-min for soft fields, 30-min for hard fields), `undo_change`, deprecated `confirm_edit` no-op stub (kept for in-flight LLM conversations), `save_observations`, `inspect_agents`, `inspect_teams` (alias `inspect_projects`), team/agent CRUD via `create_team` / `add_agents_to_team` / … (legacy `*_project` names still callable). |
 | `wallet_tool.py` | Wallet operations — get address, get balance, read contract, transfer, execute (Ethereum + Solana). |
 
 ### Browser Service (`src/browser/`)
