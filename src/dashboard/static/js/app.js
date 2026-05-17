@@ -1065,11 +1065,12 @@ function dashboard() {
     },
 
     get fleetHealthCounts() {
-      const counts = { healthy: 0, unhealthy: 0, failed: 0, unknown: 0, stopped: 0 };
+      const counts = { healthy: 0, unhealthy: 0, quarantined: 0, failed: 0, unknown: 0, stopped: 0 };
       for (const a of this.filteredAgents) {
         const s = a.health_status || 'unknown';
         if (s === 'stopped') counts.stopped++;
         else if (s === 'healthy') counts.healthy++;
+        else if (s === 'quarantined') counts.quarantined++;
         else if (s === 'unhealthy' || s === 'restarting') counts.unhealthy++;
         else if (s === 'failed') counts.failed++;
         else counts.unknown++;
@@ -4538,7 +4539,7 @@ function dashboard() {
     },
 
     healthLabel(status) {
-      const map = { healthy: 'Online', unhealthy: 'Degraded', restarting: 'Degraded', failed: 'Offline', unknown: 'Starting' };
+      const map = { healthy: 'Online', unhealthy: 'Degraded', restarting: 'Degraded', quarantined: 'Quarantined', failed: 'Offline', unknown: 'Starting' };
       return map[status] || 'Starting';
     },
 
@@ -7061,6 +7062,7 @@ function dashboard() {
       if (!agent) return 'bg-gray-500';
       const status = agent.health_status || 'unknown';
       if (status === 'healthy') return 'bg-green-500';
+      if (status === 'quarantined') return 'bg-orange-500';
       if (status === 'unhealthy' || status === 'restarting') return 'bg-amber-500';
       if (status === 'failed') return 'bg-red-500';
       return 'bg-gray-500';
@@ -10324,6 +10326,7 @@ function dashboard() {
         create_agent: 'adding a teammate',
         apply_template: 'building a team from a template',
         inspect_agents: 'reviewing the team',
+        list_available_models: 'checking available models',
       };
       if (map[toolName]) return map[toolName];
       // Fallback: humanise the snake_case tool name.

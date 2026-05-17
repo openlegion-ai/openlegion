@@ -253,7 +253,12 @@ class TestOperatorConstants:
         # tests/test_operator_internet_access.py).
         # Project→team rename PR 2 adds 8 canonical *_team tools alongside
         # the legacy *_project entries → 40.
-        assert len(_OPERATOR_ALLOWED_TOOLS) == 40
+        # Seam follow-up Fix 1 (this PR) adds 8 missing operator-gated
+        # tools: read_agent_config + list_peer_artifacts + read_peer_artifact
+        # + list_available_models + memory_save + memory_search
+        # + update_workspace + read_file → 48. (propose_edit was originally
+        # in this set but was retired in PR #927.)
+        assert len(_OPERATOR_ALLOWED_TOOLS) == 48
         assert len(_OPERATOR_HEARTBEAT_TOOLS) == 4
         # Heartbeat tools should be a subset of allowed tools
         assert set(_OPERATOR_HEARTBEAT_TOOLS).issubset(set(_OPERATOR_ALLOWED_TOOLS))
@@ -285,15 +290,41 @@ class TestOperatorConstants:
             assert tool not in _OPERATOR_ALLOWED_TOOLS
 
     def test_pr1_edit_tools_present(self):
-        """PR 1 — edit_agent + undo_change in allowlist; propose_edit removed."""
+        """PR 1 — edit_agent + undo_change in allowlist.
+
+        confirm_edit is kept as a deprecated stub for back-compat with
+        in-flight LLM conversations that may still emit it. propose_edit
+        was retired in PR #927 (no longer registered as a @skill, so
+        listing it in the allowlist would be a dangling reference).
+        """
         from src.cli.config import _OPERATOR_ALLOWED_TOOLS
         assert "edit_agent" in _OPERATOR_ALLOWED_TOOLS
         assert "undo_change" in _OPERATOR_ALLOWED_TOOLS
-        # propose_edit is no longer LLM-facing — the operator uses
-        # edit_agent which branches on field severity internally.
-        assert "propose_edit" not in _OPERATOR_ALLOWED_TOOLS
-        # confirm_edit is kept for the hard-field confirm step.
+        # confirm_edit kept as a deprecated stub.
         assert "confirm_edit" in _OPERATOR_ALLOWED_TOOLS
+        # propose_edit retired in #927 — must NOT be in the allowlist.
+        assert "propose_edit" not in _OPERATOR_ALLOWED_TOOLS
+
+    def test_seam_followup_fix1_missing_tools_added(self):
+        """Seam follow-up Fix 1: 9 operator-gated tools that were missing
+        from the allowlist must now be present, and write_file must
+        intentionally remain out (operator orchestrates, doesn't author
+        arbitrary files)."""
+        from src.cli.config import _OPERATOR_ALLOWED_TOOLS
+        # Canonical inverse of edit_agent + peer-artifact reads.
+        assert "read_agent_config" in _OPERATOR_ALLOWED_TOOLS
+        assert "list_peer_artifacts" in _OPERATOR_ALLOWED_TOOLS
+        assert "read_peer_artifact" in _OPERATOR_ALLOWED_TOOLS
+        # Credential-aware model discovery (new tool added by Fix 2).
+        assert "list_available_models" in _OPERATOR_ALLOWED_TOOLS
+        # Operator self-notes — was bouncing through hand_off-to-self.
+        assert "memory_save" in _OPERATOR_ALLOWED_TOOLS
+        assert "memory_search" in _OPERATOR_ALLOWED_TOOLS
+        # Workspace management — caps already enforce safety.
+        assert "update_workspace" in _OPERATOR_ALLOWED_TOOLS
+        assert "read_file" in _OPERATOR_ALLOWED_TOOLS
+        # Intentionally NOT granted — encourages anti-patterns.
+        assert "write_file" not in _OPERATOR_ALLOWED_TOOLS
 
     def test_request_browser_login_in_allowlist(self):
         """Operator must be allowed to delegate browser login requests to workers.

@@ -331,6 +331,13 @@
 }
 .health-unknown::before { background: #6b7280; }
 
+.health-quarantined {
+  background: rgba(249, 115, 22, 0.12);
+  color: #fb923c;
+  border: 1px solid rgba(249, 115, 22, 0.2);
+}
+.health-quarantined::before { background: #fb923c; }
+
 /* ── Empty states ─────────────────────────────────── */
 
 .empty-state-icon {

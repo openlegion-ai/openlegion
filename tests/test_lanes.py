@@ -586,3 +586,75 @@ class TestLaneWatchdog:
             await lm.enqueue("agent1", "stuck")  # no task_id
 
         tasks_store.update_status.assert_not_called()
+
+
+# ── Seam follow-up Fix 5: lane refuses dispatch to quarantined agent ──
+
+
+class TestLaneQuarantineGate:
+    """LaneManager.quarantine_check shorts the dispatch when the agent
+    is quarantined — protects the broken-credential path from queuing
+    more work onto an agent that can't run."""
+
+    @pytest.mark.asyncio
+    async def test_lane_refuses_dispatch_for_quarantined_agent(self):
+        dispatch = AsyncMock(return_value="should not be called")
+        quarantined = {"agent-a"}
+        lm = LaneManager(
+            dispatch_fn=dispatch,
+            quarantine_check=lambda a: a in quarantined,
+        )
+        with pytest.raises(RuntimeError) as ei:
+            await lm.enqueue("agent-a", "hello")
+        assert "quarantined" in str(ei.value).lower()
+        assert "edit_agent" in str(ei.value)
+        dispatch.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_lane_dispatches_when_not_quarantined(self):
+        dispatch = AsyncMock(return_value="ok")
+        quarantined: set[str] = set()
+        lm = LaneManager(
+            dispatch_fn=dispatch,
+            quarantine_check=lambda a: a in quarantined,
+        )
+        result = await lm.enqueue("agent-a", "hello")
+        assert result == "ok"
+        dispatch.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_lane_set_quarantine_check_setter(self):
+        dispatch = AsyncMock(return_value="ok")
+        lm = LaneManager(dispatch_fn=dispatch)
+        # First call goes through — no quarantine check wired.
+        r1 = await lm.enqueue("agent-a", "first")
+        assert r1 == "ok"
+        # Wire the check after construction.
+        lm.set_quarantine_check(lambda a: True)
+        with pytest.raises(RuntimeError):
+            await lm.enqueue("agent-a", "second")
+
+    @pytest.mark.asyncio
+    async def test_lane_closes_durable_task_on_quarantine_reject(self):
+        """Codex P2 follow-up: when a queued wake carries a task_id and
+        the assignee is quarantined, the durable task must be marked
+        failed so the originating agent's back-edge inbox sees a
+        terminal event instead of the task dangling in 'working'."""
+        dispatch = AsyncMock(return_value="ok")
+        tasks_store = MagicMock()
+        tasks_store.update_status = MagicMock()
+        lm = LaneManager(
+            dispatch_fn=dispatch,
+            tasks_store=tasks_store,
+            quarantine_check=lambda a: True,
+        )
+        with pytest.raises(RuntimeError):
+            await lm.enqueue(
+                "agent-a", "hello", task_id="task-abc",
+            )
+        tasks_store.update_status.assert_called_once()
+        call_kwargs = tasks_store.update_status.call_args
+        assert call_kwargs.args[0] == "task-abc"
+        assert call_kwargs.args[1] == "failed"
+        assert call_kwargs.kwargs.get("actor") == "lane_quarantine"
+        assert call_kwargs.kwargs.get("extra_payload", {}).get("error") == "agent_quarantined"

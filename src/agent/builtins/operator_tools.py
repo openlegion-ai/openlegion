@@ -419,6 +419,66 @@ async def read_peer_artifact(
 
 
 @skill(
+    name="list_available_models",
+    description=(
+        "List models currently usable given the active credential setup. "
+        "Use this BEFORE edit_agent or create_agent — never memorize the "
+        "OAuth model subsets, the system tracks them for you. Returns "
+        "per-provider lists and the credential kind (api_key / oauth / "
+        "both) so you know whether a model switch needs a new credential."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "provider": {
+                "type": "string",
+                "description": (
+                    "Optional filter (e.g., 'openai', 'anthropic'). "
+                    "Omit to list all configured providers."
+                ),
+            },
+        },
+        "required": [],
+    },
+)
+async def list_available_models(
+    provider: str | None = None, *, mesh_client=None, **_kw,
+) -> dict:
+    """Operator-only — return per-provider allowed-model lists.
+
+    Sourced from the mesh ``/mesh/introspect?section=llm`` payload so the
+    operator and runtime stay aligned. When ``provider`` is supplied, the
+    response narrows to that one provider.
+    """
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "mesh_client is required"}
+    try:
+        result = await mesh_client.introspect(section="llm")
+    except Exception as e:
+        return {"error": f"Failed to query mesh introspect: {str(e)[:200]}"}
+    llm = result.get("llm", result)
+    allowed = llm.get("allowed_models", {}) or {}
+    kinds = llm.get("credential_kinds", {}) or {}
+    if provider:
+        return {
+            "provider": provider,
+            "credential_kind": kinds.get(provider, "none"),
+            "allowed_models": allowed.get(provider, []),
+        }
+    return {
+        "providers": {
+            p: {
+                "credential_kind": kinds.get(p, "none"),
+                "allowed_models": allowed.get(p, []),
+            }
+            for p in allowed
+        },
+    }
+
+
+@skill(
     name="edit_agent",
     description=(
         "Change an agent's configuration. All edits apply IMMEDIATELY and "

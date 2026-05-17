@@ -287,11 +287,45 @@ class RuntimeContext:
         # Only register() is called here; start() happens in _start_background().
         from src.host.health import HealthMonitor
 
+        # Notifications store: instantiated up-front so the HealthMonitor can
+        # emit quarantine notifications (Fix 4). The dashboard router also
+        # uses a NotificationStore — when not supplied it auto-constructs
+        # one against the same default path, so both pointers reference the
+        # same SQLite file.
+        self._notification_store = None
+        try:
+            from src.dashboard.notifications import NotificationStore
+            self._notification_store = NotificationStore()
+        except Exception as e:
+            logger.warning("Failed to instantiate NotificationStore: %s", e)
+
         self.health_monitor = HealthMonitor(
             runtime=self.runtime, transport=self.transport, router=self.router,
             event_bus=self.event_bus,
             blackboard=self.blackboard,
+            notifications_store=self._notification_store,
         )
+
+        # Fix 4 (seam follow-up): wire the credential vault's auth-failure
+        # recorder to the health monitor. This is the load-bearing path
+        # for quarantine — the agent-side report channel can also fire,
+        # but the mesh-proxy boundary erases exception types so the
+        # mesh-side recording must be the authoritative trigger.
+        if self.credential_vault is not None:
+            def _record_auth(agent_id: str, provider: str, model: str, http_status: int) -> None:
+                try:
+                    self.health_monitor.record_auth_failure(
+                        agent_id, provider=provider, model=model,
+                        http_status=http_status,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "HealthMonitor.record_auth_failure failed for "
+                        "agent='%s': %s",
+                        agent_id, e,
+                    )
+
+            self.credential_vault.set_auth_failure_recorder(_record_auth)
 
     def _start_browser_service(self) -> None:
         """Start the shared browser service container."""
@@ -564,6 +598,10 @@ class RuntimeContext:
             dispatch_fn=_direct_dispatch, steer_fn=_direct_steer,
             trace_store=self.trace_store,
             notify_fn=self._handle_notify_origin,
+            quarantine_check=(
+                self.health_monitor.is_quarantined
+                if self.health_monitor is not None else None
+            ),
         )
         # Bug 1: hand the lane queue-depth lookup to the health monitor so
         # the staleness check (reachable+busy+no-tick → unhealthy) has
@@ -726,6 +764,7 @@ class RuntimeContext:
             api_key_manager=self._api_key_manager,
             pending_actions=getattr(app, "pending_actions", None),
             tasks_store=getattr(app, "tasks_store", None),
+            notification_store=self._notification_store,
         )
         app.include_router(dashboard_router)
         app.include_router(create_spa_catchall_router())  # Must be last — SPA deep linking
@@ -850,6 +889,7 @@ class RuntimeContext:
             context_fn=fetch_heartbeat_context,
             heartbeat_dispatch_fn=heartbeat_dispatch,
             event_bus=self.event_bus,
+            health_monitor=self.health_monitor,
         )
         self._cron_job_count = len(self.cron_scheduler.jobs)
 

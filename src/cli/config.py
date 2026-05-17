@@ -1322,6 +1322,22 @@ def _create_agent_from_template(
                 "pick a different model.",
             )
 
+    # Credential-kind-aware check (Fix 2 in seam follow-up): OAuth-only
+    # providers only accept specific models. Use a fresh vault so we
+    # pick up env-configured OAuth state without depending on a running
+    # mesh process — this path is CLI-side at fleet apply time.
+    try:
+        from src.host.credentials import CredentialVault
+        _vault = CredentialVault()
+        _vault._load_credentials()
+        _compatible, _reason = _vault.is_model_compatible(resolved_model)
+        if not _compatible:
+            raise ValueError(_reason or f"Model '{resolved_model}' is not compatible.")
+    except ImportError:
+        # ``host`` package may not be importable in trimmed test harnesses;
+        # the mesh-side check still fires on the create_agent path.
+        pass
+
     instructions = agent_def.get("instructions", "") or agent_def.get("system_prompt", "")
     soul = agent_def.get("soul", "")
     heartbeat = agent_def.get("heartbeat", "")
@@ -1569,14 +1585,25 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     "inspect_agents", "inspect_teams", "inspect_projects",
     "list_agent_queue", "get_team_outputs",
     "summarize_team_progress", "summarize_project_progress",
+    # Canonical inverse of edit_agent — operator reads the current
+    # config surface before mutating. Pair with list_peer_artifacts /
+    # read_peer_artifact for deeper inspection of peer-written files.
+    "read_agent_config",
+    "list_peer_artifacts", "read_peer_artifact",
     # Coordination + chat
     "list_templates", "apply_template", "hand_off", "check_inbox",
     # Configuration edits — edit_agent applies every field immediately
     # and emits an undo receipt (5min for soft fields, 30min for hard).
     # undo_change lets the operator self-revert within the TTL.
-    # confirm_edit kept for back-compat with in-flight conversations
-    # that may still call it; it is a no-op stub.
+    # confirm_edit is a deprecated stub kept for back-compat with in-flight
+    # LLM conversations that may still emit it (propose_edit was fully
+    # retired in #927).
     "edit_agent", "confirm_edit", "undo_change",
+    # Credential-aware model discovery — operator calls this BEFORE
+    # edit_agent / create_agent so it doesn't have to memorize which
+    # models are usable with the active credential setup (OAuth-allowed
+    # subsets vs full API-key catalog). See Fix 2 in the seam follow-up.
+    "list_available_models",
     # Creation
     "create_agent", "create_team", "create_project",
     # Team membership + context
@@ -1594,6 +1621,11 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     # (never values) so the operator can check what credentials already
     # exist before calling request_credential.
     "vault_list", "request_credential", "request_browser_login",
+    # Operator self-notes + workspace management. Workspace file caps
+    # already enforce safety on writes; write_file is intentionally NOT
+    # granted (operator orchestrates, doesn't author arbitrary files).
+    "memory_save", "memory_search",
+    "update_workspace", "read_file",
     # Internet access (gated by ``can_use_internet`` permission — the
     # agent's runtime filters these out of the effective allowlist when
     # the Operator Settings → Internet access toggle is OFF).

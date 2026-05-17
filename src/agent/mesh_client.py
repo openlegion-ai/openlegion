@@ -1293,6 +1293,32 @@ class MeshClient:
         response.raise_for_status()
         return response.json()
 
+    async def report_auth_failure(
+        self, *, provider: str, model: str, http_status: int,
+    ) -> dict:
+        """Self-report a credential failure so the mesh can quarantine.
+
+        Fire-and-forget from the agent's perspective: never raises out of
+        the loop. Returns ``{"recorded": False, "error": ...}`` on failure
+        so the caller can log without a try/except wrapper.
+        """
+        try:
+            client = await self._get_client()
+            response = await client.post(
+                f"{self.mesh_url}/mesh/agents/{self.agent_id}/auth-failure",
+                json={
+                    "provider": provider,
+                    "model": model,
+                    "http_status": http_status,
+                },
+                headers=self._trace_headers(),
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.warning("auth-failure self-report failed: %s", e)
+            return {"recorded": False, "error": str(e)}
+
     async def reroute_task(
         self, task_id: str, new_assignee: str, reason: str = "",
     ) -> dict:

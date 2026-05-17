@@ -729,6 +729,11 @@ def create_mesh_app(
         "agent_profile": (6000, 60),
         "upload_stage": (3000, 60),
         "upload_apply": (3000, 60),
+        # Self-reported LLM auth failures. Quarantine threshold is 3 so
+        # legitimate traffic never approaches this — the bucket exists to
+        # cap notification-store writes when a runaway agent retries on a
+        # broken credential before its lane gate latches.
+        "auth_failure": (60, 60),
     }
 
     async def _check_rate_limit(endpoint: str, agent_id: str) -> None:
@@ -2459,6 +2464,8 @@ def create_mesh_app(
             # paired with the mesh-side validation in
             # ``create_custom_agent``.
             available_providers: list[str] = []
+            allowed_models: dict[str, list[str]] = {}
+            credential_kinds: dict[str, str] = {}
             if credential_vault is not None:
                 try:
                     available_providers = sorted(
@@ -2466,7 +2473,22 @@ def create_mesh_app(
                     )
                 except Exception as e:
                     logger.debug("introspect available_providers failed: %s", e)
-            result["llm"] = {"available_providers": available_providers}
+                try:
+                    allowed_models = credential_vault.get_allowed_models()
+                except Exception as e:
+                    logger.debug("introspect allowed_models failed: %s", e)
+                try:
+                    credential_kinds = {
+                        p: credential_vault.get_credential_kind(p)
+                        for p in available_providers
+                    }
+                except Exception as e:
+                    logger.debug("introspect credential_kinds failed: %s", e)
+            result["llm"] = {
+                "available_providers": available_providers,
+                "allowed_models": allowed_models,
+                "credential_kinds": credential_kinds,
+            }
 
         return result
 
@@ -2976,6 +2998,12 @@ def create_mesh_app(
                         f"OPENLEGION_SYSTEM_{provider.upper()}_API_KEY or "
                         "pick a different model.",
                     )
+            # Credential-kind-aware check: OAuth-only providers only accept
+            # specific models. Surface the allowed list so the operator
+            # doesn't have to guess (see Fix 2 in the seam follow-up).
+            compatible, reason = credential_vault.is_model_compatible(model)
+            if not compatible:
+                raise HTTPException(400, reason or f"Model '{model}' is not compatible.")
 
         # Create agent config
         import random
@@ -3290,6 +3318,19 @@ def create_mesh_app(
             runtime_fields["spend_today_usd"] = spend_today_usd
             runtime_fields["spend_month_usd"] = spend_month_usd
 
+        # Quarantine fields (Fix 4/5 in seam follow-up). Always present so
+        # ``inspect_agents`` and the dashboard can render a stable shape,
+        # even when the agent isn't quarantined (operator surface clarity).
+        quarantined = False
+        quarantine_reason: str | None = None
+        consecutive_auth_failures = 0
+        if health_monitor is not None:
+            h_q = health_monitor.agents.get(agent_id)
+            if h_q is not None:
+                quarantined = h_q.quarantined
+                quarantine_reason = h_q.quarantine_reason
+                consecutive_auth_failures = h_q.consecutive_auth_failures
+
         response = {
             "agent_id": agent_id,
             "role": role,
@@ -3308,9 +3349,55 @@ def create_mesh_app(
             "expected_outputs": expected_outputs,
             "escalation_to": escalation_to,
             "forbidden": forbidden,
+            # Fix 4/5: quarantine state surface for inspect_agents/dashboard.
+            "quarantined": quarantined,
+            "quarantine_reason": quarantine_reason,
+            "consecutive_auth_failures": consecutive_auth_failures,
         }
         response.update(runtime_fields)
         return response
+
+    @app.post("/mesh/agents/{agent_id}/auth-failure")
+    async def report_auth_failure(
+        agent_id: str, body: dict, request: Request,
+    ) -> dict:
+        """Agent self-reports a credential failure (Fix 4 in seam follow-up).
+
+        The mesh counts consecutive failures and quarantines the agent
+        once ``HealthMonitor.AUTH_FAILURE_THRESHOLD`` is reached. Cleared
+        by a successful ``edit_agent(field='model', ...)`` or by the
+        auto-expiry sweeper (``OPENLEGION_QUARANTINE_AUTO_CLEAR_SECONDS``).
+
+        Self-report only — agents cannot report failures on each other's
+        behalf. Internal callers (``x-mesh-internal``) can report for any
+        agent_id (used by future heartbeat probes).
+        """
+        if not _is_internal_caller(request):
+            requesting = _resolve_agent_id(agent_id, request)
+            if requesting != agent_id:
+                _record_denial("scope")
+                raise HTTPException(
+                    403, "Agents can only report failures for themselves",
+                )
+            # Rate-limit only the agent-self-report path. Internal callers
+            # (mesh's own ``_record_auth`` recorder threading the proxy
+            # boundary) are the load-bearing trigger and must never be
+            # throttled — quarantine itself caps damage at threshold=3.
+            await _check_rate_limit("auth_failure", agent_id)
+        if health_monitor is None:
+            return {"recorded": False, "reason": "no health_monitor"}
+        if not isinstance(body, dict):
+            raise HTTPException(400, "body must be a JSON object")
+        provider = str(body.get("provider", "unknown"))[:64]
+        model = str(body.get("model", ""))[:120]
+        try:
+            http_status = int(body.get("http_status", 0))
+        except (TypeError, ValueError):
+            http_status = 0
+        quarantined = health_monitor.record_auth_failure(
+            agent_id, provider=provider, model=model, http_status=http_status,
+        )
+        return {"recorded": True, "quarantined": quarantined}
 
     # === Request Traces ===
 
@@ -5629,6 +5716,18 @@ def create_mesh_app(
             except Exception as e:
                 logger.debug("agent_config_updated emit failed: %s", e)
 
+        # Fix 4 (seam follow-up): a successful ``model`` change is the
+        # operator's "fix the credential" signal — clear any standing
+        # quarantine implicitly so the lane resumes dispatching. No
+        # separate ``clear_quarantine`` operator tool needed.
+        if field == "model" and health_monitor is not None:
+            try:
+                health_monitor.clear_quarantine(
+                    agent_id, reason="model changed via edit_agent",
+                )
+            except Exception as e:
+                logger.debug("clear_quarantine on edit failed: %s", e)
+
         return {"success": True, "agent_id": agent_id, "field": field}
 
     # === PR 1 — soft-edit / undo flow ===
@@ -5740,6 +5839,13 @@ def create_mesh_app(
                             f"OPENLEGION_SYSTEM_{_provider.upper()}_API_KEY or "
                             f"pick a different model.",
                         )
+                # Credential-kind-aware check: OAuth-only providers only
+                # accept specific models. See Fix 2 in seam follow-up.
+                _compatible, _reason = credential_vault.is_model_compatible(new_value)
+                if not _compatible:
+                    raise HTTPException(
+                        400, _reason or f"Model '{new_value}' is not compatible.",
+                    )
         elif field == "thinking":
             from src.agent.llm import LLMClient
             if new_value not in LLMClient.VALID_THINKING_LEVELS:
@@ -5874,6 +5980,18 @@ def create_mesh_app(
                     logger.debug(
                         "operator_action_receipt_superseded emit failed: %s", e,
                     )
+
+        # Fix 4 (seam follow-up): a successful ``model`` change is the
+        # operator's "fix the credential" signal — clear any standing
+        # quarantine implicitly so the lane resumes dispatching. No
+        # separate ``clear_quarantine`` operator tool needed.
+        if field == "model" and health_monitor is not None:
+            try:
+                health_monitor.clear_quarantine(
+                    agent_id, reason="model changed via edit_agent",
+                )
+            except Exception as e:
+                logger.debug("clear_quarantine on edit failed: %s", e)
 
         return {
             "success": True,

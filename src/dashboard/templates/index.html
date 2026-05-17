@@ -1613,6 +1613,9 @@
           <template x-if="fleetHealthCounts.unhealthy > 0">
             <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-amber-400 inline-block"></span><span x-text="fleetHealthCounts.unhealthy + ' unhealthy'"></span></span>
           </template>
+          <template x-if="fleetHealthCounts.quarantined > 0">
+            <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-orange-400 inline-block"></span><span x-text="fleetHealthCounts.quarantined + ' quarantined'"></span></span>
+          </template>
           <template x-if="fleetHealthCounts.failed > 0">
             <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-red-400 inline-block"></span><span x-text="fleetHealthCounts.failed + ' failed'"></span></span>
           </template>
@@ -2244,6 +2247,7 @@
                     <span class="health-badge"
                       :class="{
                         'health-healthy': agent.health_status === 'healthy',
+                        'health-quarantined': agent.health_status === 'quarantined',
                         'health-unhealthy': agent.health_status === 'unhealthy' || agent.health_status === 'restarting',
                         'health-failed': agent.health_status === 'failed',
                         'health-unknown': agent.health_status === 'unknown' || !agent.health_status,
@@ -2539,6 +2543,7 @@
                     <span class="health-badge shrink-0"
                       :class="{
                         'health-healthy': agentDetail.health?.status === 'healthy',
+                        'health-quarantined': agentDetail.health?.status === 'quarantined',
                         'health-unhealthy': agentDetail.health?.status === 'unhealthy' || agentDetail.health?.status === 'restarting',
                         'health-failed': agentDetail.health?.status === 'failed',
                         'health-unknown': !agentDetail.health?.status || agentDetail.health?.status === 'unknown',
@@ -6518,9 +6523,9 @@
               </div>
               <div class="ml-auto flex items-center gap-2">
                 <div style="width:8px; height:8px; border-radius:50%;"
-                  :style="opAgent && opAgent.health_status === 'healthy' ? 'background:#22c55e' : 'background:#6b7280'"></div>
-                <span class="text-xs" :class="opAgent && opAgent.health_status === 'healthy' ? 'text-emerald-400' : 'text-gray-500'"
-                  x-text="opAgent ? (opAgent.health_status === 'healthy' ? 'Healthy' : opAgent.health_status || 'Starting...') : 'Not running'"></span>
+                  :style="opAgent && opAgent.health_status === 'healthy' ? 'background:#22c55e' : (opAgent && opAgent.health_status === 'quarantined' ? 'background:#fb923c' : 'background:#6b7280')"></div>
+                <span class="text-xs" :class="opAgent && opAgent.health_status === 'healthy' ? 'text-emerald-400' : (opAgent && opAgent.health_status === 'quarantined' ? 'text-orange-400' : 'text-gray-500')"
+                  x-text="opAgent ? (opAgent.health_status === 'healthy' ? 'Healthy' : (opAgent.health_status === 'quarantined' ? 'Quarantined' : (opAgent.health_status || 'Starting...'))) : 'Not running'"></span>
               </div>
             </div>
 

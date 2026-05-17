@@ -52,6 +52,15 @@ class AgentHealth:
     last_check: float = 0.0
     last_healthy: float = 0.0
     status: str = "unknown"
+    # Quarantine state (Fix 4 in seam follow-up). Separate from the
+    # reachability-failure counter — an agent with a working /status but
+    # a broken LLM credential is healthy from the runtime's POV yet must
+    # not consume more work. Cleared by edit_agent on model change, or
+    # automatically after ``QUARANTINE_AUTO_CLEAR_SECONDS``.
+    consecutive_auth_failures: int = 0
+    quarantined: bool = False
+    quarantine_reason: str | None = None
+    quarantined_at: float | None = None
 
 
 class HealthMonitor:
@@ -61,6 +70,11 @@ class HealthMonitor:
     MAX_FAILURES = 3
     RESTART_LIMIT = 3
     RESTART_WINDOW = 3600
+    # Quarantine thresholds (Fix 4 in seam follow-up).
+    AUTH_FAILURE_THRESHOLD = 3
+    QUARANTINE_AUTO_CLEAR_SECONDS = int(
+        os.environ.get("OPENLEGION_QUARANTINE_AUTO_CLEAR_SECONDS", "1800"),
+    )
 
     def __init__(
         self,
@@ -71,6 +85,7 @@ class HealthMonitor:
         cleanup_agent_fn=None,
         blackboard=None,
         queue_depth_fn: Callable[[str], int] | None = None,
+        notifications_store=None,
     ):
         self.runtime = runtime
         self.transport = transport
@@ -84,6 +99,10 @@ class HealthMonitor:
         # detect a dead inner loop with a live FastAPI thread. Without it
         # the staleness check is a no-op (reachability behaviour unchanged).
         self._queue_depth_fn = queue_depth_fn
+        # ``notifications_store`` (Fix 4) — optional dashboard notifications
+        # sink. When wired, quarantine transitions emit a ``credential`` kind
+        # notification so the bell + Work tab surface it to the operator.
+        self._notifications_store = notifications_store
         self.agents: dict[str, AgentHealth] = {}
         self._agent_lock: asyncio.Lock | None = None
         self._agent_lock_loop: asyncio.AbstractEventLoop | None = None
@@ -111,10 +130,155 @@ class HealthMonitor:
         """
         self._queue_depth_fn = fn
 
+    def set_notifications_store(self, store) -> None:
+        """Wire (or unwire) the dashboard notifications sink after construction.
+
+        Mirrors the ``set_queue_depth_fn`` injection pattern (PR #918) —
+        notifications store can be constructed after ``HealthMonitor``
+        in the bootstrap path. ``None`` disables quarantine notifications.
+        """
+        self._notifications_store = store
+
+    # ── Quarantine API (Fix 4 in seam follow-up) ──────────────
+
+    def record_auth_failure(
+        self, agent_id: str, *, provider: str, model: str, http_status: int,
+    ) -> bool:
+        """Increment the per-agent auth-failure counter.
+
+        Returns ``True`` if this call transitioned the agent into
+        quarantine. The counter is cleared by ``clear_quarantine`` or by
+        the auto-expiry sweeper after ``QUARANTINE_AUTO_CLEAR_SECONDS``.
+        """
+        h = self.agents.get(agent_id)
+        if not h:
+            return False
+        h.consecutive_auth_failures += 1
+        just_quarantined = False
+        if (
+            h.consecutive_auth_failures >= self.AUTH_FAILURE_THRESHOLD
+            and not h.quarantined
+        ):
+            h.quarantined = True
+            h.quarantine_reason = (
+                f"{provider}/{model} auth failing (status={http_status}, "
+                f"{h.consecutive_auth_failures} consecutive failures)"
+            )
+            h.quarantined_at = time.time()
+            h.status = "quarantined"
+            just_quarantined = True
+            logger.warning(
+                "Agent '%s' quarantined: %s — fix credential or change "
+                "model via edit_agent",
+                agent_id, h.quarantine_reason,
+            )
+            if self._notifications_store is not None:
+                try:
+                    self._notifications_store.add(
+                        kind="credential",
+                        title=f"Agent '{agent_id}' quarantined: credential broken",
+                        body=(
+                            (h.quarantine_reason or "") + ". Lane has stopped "
+                            "dispatching new work. Rotate the credential or "
+                            "run edit_agent to pick a compatible model."
+                        ),
+                        agent_id=agent_id,
+                    )
+                except Exception as notif_err:
+                    logger.warning(
+                        "Failed to write quarantine notification: %s",
+                        notif_err,
+                    )
+            if self._event_bus:
+                try:
+                    self._event_bus.emit("health_change", agent=agent_id, data={
+                        "previous": "healthy", "current": "quarantined",
+                        "reason": h.quarantine_reason,
+                    })
+                except Exception as ev_err:
+                    logger.debug("health_change emit failed: %s", ev_err)
+        return just_quarantined
+
+    def clear_quarantine(self, agent_id: str, *, reason: str) -> bool:
+        """Lift quarantine.
+
+        Called by ``edit_agent`` (on a successful ``model`` change) and by
+        the auto-expiry sweeper. Returns ``True`` when the agent was
+        actually quarantined and got cleared, ``False`` when it was a no-op
+        with respect to the quarantine flag itself.
+
+        Codex P2 r3: always reset the pre-threshold auth-failure counter
+        too — when the credential or model changes, any partial-failure
+        history is no longer relevant. Without this reset, an agent that
+        accumulated 2 auth failures (below threshold), then had its model
+        switched, would quarantine on the very first failure on the new
+        model. The boolean return value still reflects the quarantine
+        flag transition, NOT the counter reset.
+        """
+        h = self.agents.get(agent_id)
+        if not h:
+            return False
+        # Reset the pre-threshold counter regardless of quarantine state —
+        # any pending failures are no longer relevant after a credential
+        # or model change.
+        if h.consecutive_auth_failures > 0:
+            logger.debug(
+                "Resetting auth-failure counter for '%s' (was %d): %s",
+                agent_id, h.consecutive_auth_failures, reason,
+            )
+            h.consecutive_auth_failures = 0
+        if not h.quarantined:
+            return False  # counter already reset above; nothing more to do
+        prev_status = h.status
+        h.quarantined = False
+        h.quarantine_reason = None
+        h.quarantined_at = None
+        # Codex r4 (principal-eng): don't clobber a more-severe runtime
+        # state. ``failed`` is terminal (MAX_FAILURES restarts exhausted
+        # — see :440/:471) and must never be revived to ``healthy`` by a
+        # credential-side clear. ``restarting`` is an in-flight state
+        # (set in :534) the restart path will reconcile on its own.
+        # ``unhealthy`` means reachability is genuinely broken — the
+        # next ``_check_agent`` poll will flip it back to ``healthy`` if
+        # the agent actually responds. Only flip to ``healthy`` when no
+        # other negative signal is in flight.
+        if h.status in ("failed", "restarting"):
+            pass  # preserve — terminal or in-flight runtime state
+        elif h.consecutive_failures > 0:
+            h.status = "unhealthy"
+        else:
+            h.status = "healthy"
+        logger.info("Agent '%s' quarantine cleared: %s", agent_id, reason)
+        if self._event_bus:
+            try:
+                self._event_bus.emit("health_change", agent=agent_id, data={
+                    "previous": prev_status, "current": h.status,
+                    "reason": reason,
+                })
+            except Exception as ev_err:
+                logger.debug("health_change emit failed: %s", ev_err)
+        return True
+
+    def is_quarantined(self, agent_id: str) -> bool:
+        h = self.agents.get(agent_id)
+        return bool(h and h.quarantined)
+
+    def _maybe_expire_quarantines(self, now: float) -> None:
+        """Auto-clear quarantines older than the TTL."""
+        for agent_id, h in list(self.agents.items()):
+            if (
+                h.quarantined and h.quarantined_at
+                and (now - h.quarantined_at) > self.QUARANTINE_AUTO_CLEAR_SECONDS
+            ):
+                self.clear_quarantine(agent_id, reason="auto-expiry after timeout")
+
     async def start(self) -> None:
         self._running = True
         logger.info(f"Health monitor started for {len(self.agents)} agents")
         while self._running:
+            # Auto-expire quarantines BEFORE the reachability check so a
+            # newly-cleared agent's status doesn't get clobbered.
+            self._maybe_expire_quarantines(time.time())
             await self._check_all()
             await asyncio.sleep(self.POLL_INTERVAL)
 
@@ -235,20 +399,35 @@ class HealthMonitor:
                 else:
                     health.consecutive_failures = 0
                     health.last_healthy = now
-                    new_status = "healthy"
-                    health.status = new_status
-                    if new_status != prev_status and self._event_bus:
-                        self._event_bus.emit("health_change", agent=agent_id, data={
-                            "previous": prev_status, "current": health.status,
-                            "failures": health.consecutive_failures,
-                            "restart_count": health.restart_count,
-                        })
+                    # Codex P2 follow-up: a successful reachability poll
+                    # must NOT clobber quarantined status — the agent is
+                    # reachable but its credentials are broken, which is
+                    # what lane/cron are skipping on. Status flips back
+                    # to healthy only via clear_quarantine (operator
+                    # edit_agent or TTL expiry).
+                    if not health.quarantined:
+                        new_status = "healthy"
+                        health.status = new_status
+                        if new_status != prev_status and self._event_bus:
+                            self._event_bus.emit("health_change", agent=agent_id, data={
+                                "previous": prev_status, "current": health.status,
+                                "failures": health.consecutive_failures,
+                                "restart_count": health.restart_count,
+                            })
                     return
         except Exception as e:
             logger.debug("Health check transport error for '%s': %s", agent_id, e)
 
         health.consecutive_failures += 1
-        health.status = "unhealthy"
+        # Codex P2 follow-up: don't flip quarantined → unhealthy on an
+        # unreachable poll either. The reachability tracker continues
+        # (failures counter ticks toward the restart path) but the
+        # status string stays "quarantined" so the dashboard and the
+        # lane stay in sync. Restart escalation below still fires if
+        # the agent is unreachable AND quarantined — the restart
+        # itself doesn't clear quarantine, only edit_agent or TTL does.
+        if not health.quarantined:
+            health.status = "unhealthy"
         if health.status != prev_status and self._event_bus:
             self._event_bus.emit("health_change", agent=agent_id, data={
                 "previous": prev_status, "current": health.status,
@@ -376,7 +555,18 @@ class HealthMonitor:
 
             ready = await self.runtime.wait_for_agent(agent_id, timeout=60)
             prev = health.status
-            health.status = "healthy" if ready else "unhealthy"
+            # Codex P2 follow-up: restart restores the runtime but does NOT
+            # rotate a broken credential. If the agent is still quarantined,
+            # snap the status string back to "quarantined" — symmetric with
+            # the ``_check_agent`` guards at lines 393 and 414 — so the
+            # dashboard and the lane stay in sync. ``unhealthy`` still wins
+            # when the runtime didn't come up, because the lane gate (bool
+            # flag) is unchanged either way and the operator needs to see
+            # the more urgent "still broken" signal.
+            if health.quarantined and ready:
+                health.status = "quarantined"
+            else:
+                health.status = "healthy" if ready else "unhealthy"
             if self._event_bus:
                 self._event_bus.emit("health_change", agent=agent_id, data={
                     "previous": prev, "current": health.status,
@@ -408,6 +598,9 @@ class HealthMonitor:
                 "restarts": h.restart_count,
                 "last_check": h.last_check,
                 "last_healthy": h.last_healthy,
+                "quarantined": h.quarantined,
+                "quarantine_reason": h.quarantine_reason,
+                "consecutive_auth_failures": h.consecutive_auth_failures,
             }
             for h in self.agents.values()
         ]
