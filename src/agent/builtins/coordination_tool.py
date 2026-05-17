@@ -671,12 +671,29 @@ async def _hand_off_v2(
     if artifact_ref:
         result["output_key"] = artifact_ref
     if wake_error is not None:
+        # Bug G (silent peer hand_off failure): the envelope used to set
+        # ``handed_off=false`` alongside a soft ``recovery_hint`` that read
+        # "Recipient will discover via next heartbeat" — LLMs would skim
+        # past the failure and report "task handed off" in their final
+        # reply. Surface the failure in an ``error`` key (the field name
+        # LLMs reliably react to) and make the recovery hint directive,
+        # not advisory. The durable task row still sits in SQLite at
+        # status='pending' for the next-heartbeat discovery path — we
+        # don't transition it to failed here because a transient wake
+        # error (network blip, agent restarting) shouldn't kill a task
+        # whose row was successfully persisted.
         result["task_queued"] = True
         result["wake_failed"] = True
         result["wake_error"] = wake_error
+        result["error"] = (
+            f"wake_failed: peer '{to}' did not wake ({wake_error}). "
+            "The task row is queued in SQLite but the recipient has not "
+            "been notified — you MUST NOT report success. Retry hand_off "
+            "or escalate to operator."
+        )
         result["recovery_hint"] = (
-            "Recipient will discover via next heartbeat (default 15min). "
-            "Operator can retry hand_off or wait."
+            "RETRY hand_off, OR notify operator via hand_off(to='operator'). "
+            "DO NOT mark this work as complete in your final response."
         )
     return result
 

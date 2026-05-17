@@ -935,6 +935,72 @@ class AgentLoop:
                         )
                         return result
 
+                    # Bug F (lazy completion) guard: when the LLM reaches the
+                    # final-answer branch having used zero tools across more
+                    # than one iteration, that's a "I'll do it now" / "Done!"
+                    # acknowledgment with no real work. The iter-0 nudge
+                    # above caught a single text-only response; this catches
+                    # the case where the LLM ignored the nudge and produced
+                    # a second text-only reply. PR #918's pathological-success
+                    # guard misses this because the LLM was actually called
+                    # (tokens > 0) and content is non-empty (it's chatter).
+                    # The discriminator: a real task either completes via a
+                    # tool action or via the nudged-first-reply path; reaching
+                    # iteration 2+ without ever calling a tool means the LLM
+                    # is stalling. Single-iteration text-only completion is
+                    # explicitly allowed (legitimate Q&A-style tasks).
+                    tool_calls_count = sum(
+                        len(m.get("tool_calls") or [])
+                        for m in messages
+                        if m.get("role") == "assistant"
+                    )
+                    if iterations_executed > 1 and tool_calls_count == 0:
+                        self.state = "idle"
+                        self.current_task = None
+                        self.tasks_failed += 1
+                        logger.error(
+                            "execute_task lazy-completion guard tripped for "
+                            "task=%s: iterations=%d tokens=%d tool_calls=0 — "
+                            "downgrading to failed (text-only response after "
+                            "nudge; no work performed)",
+                            assignment.task_id, iterations_executed, total_tokens,
+                        )
+                        if self.workspace:
+                            self.workspace.append_activity(
+                                trigger="task",
+                                summary=(
+                                    f"Task failed (no_action_taken): "
+                                    f"{assignment.task_type} | "
+                                    f"{iterations_executed} iterations, "
+                                    f"{total_tokens} tokens, {duration_s}s | "
+                                    "LLM acknowledged without calling any tools"
+                                ),
+                                tools_used=[],
+                                duration_ms=int(duration_s * 1000),
+                                tokens_used=total_tokens,
+                                outcome="failed",
+                            )
+                        result = TaskResult(
+                            task_id=assignment.task_id,
+                            status="failed",
+                            error=(
+                                "no_action_taken: the LLM produced a text-only "
+                                "acknowledgment without calling any tools across "
+                                f"{iterations_executed} iterations. Tasks that "
+                                "reach the loop are expected to perform work via "
+                                "tools, not just acknowledge intent."
+                            ),
+                            tokens_used=total_tokens,
+                            duration_ms=int(duration_s * 1000),
+                        )
+                        self._last_result = result
+                        logger.info(
+                            "execute_task exit branch=lazy_completion_guard "
+                            "status=%s iterations=%d tokens=%d",
+                            result.status, iterations_executed, total_tokens,
+                        )
+                        return result
+
                     self.state = "idle"
                     self.current_task = None
                     self.tasks_completed += 1
