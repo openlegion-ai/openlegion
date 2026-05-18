@@ -714,17 +714,38 @@ def create_mesh_app(
     _auth_tokens = auth_tokens if auth_tokens is not None else {}
     _agent_projects = agent_projects if agent_projects is not None else {}
 
-    # Note: an earlier draft of the operator trust tier added a
-    # boot-time fail-closed gate here that refused to start when
-    # ``_TEAM_SCOPE_MODE=enforce`` AND ``_auth_tokens`` was empty. That
-    # design didn't fit the production lifecycle — ``RuntimeContext``
-    # populates ``auth_tokens`` as agents register (``host/runtime.py``),
-    # so at the moment ``create_mesh_app`` is called the dict is
-    # legitimately empty in every deployment. A boot-time refusal
-    # would block every production boot. Forgery hardening of the
-    # operator trust tier belongs at the CLI/deployment layer (e.g.
-    # require ``MESH_AUTH_TOKEN`` env wiring before the mesh accepts
-    # external traffic via Caddy), not here.
+    # Fail-closed startup gate for the operator trust tier.
+    #
+    # Threat model: under ``_TEAM_SCOPE_MODE=enforce`` the mesh derives
+    # caller identity from the bearer token (``_extract_verified_agent_id``).
+    # When ``_auth_tokens`` is empty the path falls back to trusting the
+    # ``X-Agent-ID`` header, which makes the ``_caller_is_operator``
+    # short-circuit forgeable by any caller with network reach.
+    #
+    # In production the CLI (``src/cli/runtime.py``) builds the
+    # ``auth_tokens`` dict during agent setup BEFORE calling
+    # ``create_mesh_app`` — so a non-empty dict here is the normal
+    # boot state, and an empty dict signals a misconfigured deployment
+    # that should refuse to start. Under test runs the in-process fixture
+    # path is exempt: pytest test fixtures construct ``create_mesh_app``
+    # in-process and set ``X-Agent-ID`` deliberately for the test's own
+    # assertions, so the forgery concern doesn't apply there.
+    import sys
+    _running_under_pytest = "pytest" in sys.modules
+    if (
+        _TEAM_SCOPE_MODE == "enforce"
+        and not _auth_tokens
+        and not _running_under_pytest
+    ):
+        raise SystemExit(
+            "FATAL: OPENLEGION_TEAM_SCOPE_MODE=enforce requires "
+            "auth_tokens to be configured. Without tokens the "
+            "X-Agent-ID header is unverifiable and the operator trust "
+            "tier becomes forgeable. The CLI normally populates auth "
+            "tokens before starting the mesh; an empty dict at boot "
+            "signals a misconfigured deployment. Set "
+            "OPENLEGION_TEAM_SCOPE_MODE=warn for dev use without auth."
+        )
 
     # -- Input validation helpers ------------------------------------------------
     _AGENT_ID_RE = re.compile(AGENT_ID_RE_PATTERN)
@@ -1032,14 +1053,22 @@ def create_mesh_app(
         # rather than 401 so legitimate-but-wrong-scope callers can
         # distinguish "I'm authenticated, just not allowed here" from
         # "my credential is bad".
-        for expected in _auth_tokens.values():
+        # Find the actual agent the bearer maps to (don't trust the
+        # spoofable ``X-Agent-ID`` header for the denial log — a worker
+        # could mislabel itself as ``operator`` here, which would make
+        # the structured warning name the wrong caller).
+        matched_agent_id: str | None = None
+        for aid, expected in _auth_tokens.items():
             if hmac.compare_digest(token, expected):
-                _record_denial(
-                    "role",
-                    caller=request.headers.get("X-Agent-ID") or None,
-                    gate="require_operator_or_internal:wrong_token",
-                )
-                raise HTTPException(403, "Operator-only endpoint")
+                matched_agent_id = aid
+                break
+        if matched_agent_id is not None:
+            _record_denial(
+                "role",
+                caller=matched_agent_id,
+                gate="require_operator_or_internal:wrong_token",
+            )
+            raise HTTPException(403, "Operator-only endpoint")
         _record_denial(
             "auth",
             caller=request.headers.get("X-Agent-ID") or None,

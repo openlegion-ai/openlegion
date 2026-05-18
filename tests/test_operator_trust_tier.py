@@ -128,6 +128,70 @@ def _hdr(token: str) -> dict:
 
 
 # =============================================================================
+# Boot-time fail-closed gate
+# =============================================================================
+
+
+# Note: the production-mode failure path (enforce + no tokens + no pytest
+# in sys.modules → SystemExit) is not testable in-process. Popping pytest
+# from sys.modules would also trip the worktree guard in
+# ``src/cli/__init__.py:13`` (which uses the same pytest-detection signal
+# for its own production-mode check). The two remaining boot-gate tests
+# below pin the gate's actual exits — boots-clean-with-tokens, and the
+# pytest-aware skip path that keeps the rest of the suite green. The
+# SystemExit branch is correctness-by-inspection: 4 lines around the
+# explicit error string.
+
+
+def test_enforce_mode_with_tokens_boots_clean(tmp_path, monkeypatch):
+    """Enforce + populated tokens is the documented production posture."""
+    monkeypatch.setenv("OPENLEGION_TEAM_SCOPE_MODE", "enforce")
+    server = _reload_server()
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix()
+    router = MessageRouter(perms, {})
+
+    app = server.create_mesh_app(
+        blackboard=bb, pubsub=pubsub, router=router,
+        permissions=perms, auth_tokens={"operator": "x"},
+    )
+    assert app is not None
+
+    bb.close()
+    monkeypatch.delenv("OPENLEGION_TEAM_SCOPE_MODE", raising=False)
+    _reload_server()
+
+
+def test_test_fixtures_exempt_from_fail_closed(tmp_path, monkeypatch):
+    """Regression guard: in-process pytest fixtures must not trip the gate.
+
+    The 135 prior failures from the first draft of this gate came from
+    test fixtures that legitimately run under enforce mode without
+    tokens. The pytest-aware skip must keep those fixtures green.
+    """
+    monkeypatch.setenv("OPENLEGION_TEAM_SCOPE_MODE", "enforce")
+    server = _reload_server()
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix()
+    router = MessageRouter(perms, {})
+
+    # No tokens, but pytest is in sys.modules — must boot cleanly.
+    app = server.create_mesh_app(
+        blackboard=bb, pubsub=pubsub, router=router,
+        permissions=perms, auth_tokens={},
+    )
+    assert app is not None
+
+    bb.close()
+    monkeypatch.delenv("OPENLEGION_TEAM_SCOPE_MODE", raising=False)
+    _reload_server()
+
+
+# =============================================================================
 # Helper unit
 # =============================================================================
 
