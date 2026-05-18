@@ -132,15 +132,34 @@ def _hdr(token: str) -> dict:
 # =============================================================================
 
 
-# Note: the production-mode failure path (enforce + no tokens + no pytest
-# in sys.modules → SystemExit) is not testable in-process. Popping pytest
-# from sys.modules would also trip the worktree guard in
-# ``src/cli/__init__.py:13`` (which uses the same pytest-detection signal
-# for its own production-mode check). The two remaining boot-gate tests
-# below pin the gate's actual exits — boots-clean-with-tokens, and the
-# pytest-aware skip path that keeps the rest of the suite green. The
-# SystemExit branch is correctness-by-inspection: 4 lines around the
-# explicit error string.
+def test_enforce_mode_without_tokens_in_production_raises_systemexit(
+    tmp_path, monkeypatch,
+):
+    """Production-posture boot: enforce + no tokens + no bypass-var → SystemExit.
+
+    Conftest sets ``OPENLEGION_SKIP_TRUST_TIER_BOOT_GATE=1`` for the
+    test session so other fixtures can boot under enforce+no-tokens
+    safely. To exercise the production path we unset that var for the
+    duration of the call.
+    """
+    monkeypatch.setenv("OPENLEGION_TEAM_SCOPE_MODE", "enforce")
+    monkeypatch.delenv("OPENLEGION_SKIP_TRUST_TIER_BOOT_GATE", raising=False)
+    server = _reload_server()
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix()
+    router = MessageRouter(perms, {})
+
+    with pytest.raises(SystemExit, match="auth_tokens"):
+        server.create_mesh_app(
+            blackboard=bb, pubsub=pubsub, router=router,
+            permissions=perms, auth_tokens={},
+        )
+
+    bb.close()
+    monkeypatch.delenv("OPENLEGION_TEAM_SCOPE_MODE", raising=False)
+    _reload_server()
 
 
 def test_enforce_mode_with_tokens_boots_clean(tmp_path, monkeypatch):
@@ -165,13 +184,17 @@ def test_enforce_mode_with_tokens_boots_clean(tmp_path, monkeypatch):
 
 
 def test_test_fixtures_exempt_from_fail_closed(tmp_path, monkeypatch):
-    """Regression guard: in-process pytest fixtures must not trip the gate.
+    """Regression guard: the conftest bypass-var must let fixtures boot.
 
-    The 135 prior failures from the first draft of this gate came from
-    test fixtures that legitimately run under enforce mode without
-    tokens. The pytest-aware skip must keep those fixtures green.
+    The first draft of this gate broke 135 existing tests that
+    legitimately run under enforce mode without tokens. The
+    ``OPENLEGION_SKIP_TRUST_TIER_BOOT_GATE=1`` bypass (set globally in
+    ``tests/conftest.py``) must keep those fixtures green.
     """
     monkeypatch.setenv("OPENLEGION_TEAM_SCOPE_MODE", "enforce")
+    # Conftest already sets the bypass var — assert it's in effect.
+    import os
+    assert os.environ.get("OPENLEGION_SKIP_TRUST_TIER_BOOT_GATE") == "1"
     server = _reload_server()
 
     bb = Blackboard(db_path=str(tmp_path / "bb.db"))
@@ -179,7 +202,7 @@ def test_test_fixtures_exempt_from_fail_closed(tmp_path, monkeypatch):
     perms = PermissionMatrix()
     router = MessageRouter(perms, {})
 
-    # No tokens, but pytest is in sys.modules — must boot cleanly.
+    # No tokens, bypass var present — must boot cleanly.
     app = server.create_mesh_app(
         blackboard=bb, pubsub=pubsub, router=router,
         permissions=perms, auth_tokens={},

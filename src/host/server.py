@@ -726,16 +726,18 @@ def create_mesh_app(
     # ``auth_tokens`` dict during agent setup BEFORE calling
     # ``create_mesh_app`` — so a non-empty dict here is the normal
     # boot state, and an empty dict signals a misconfigured deployment
-    # that should refuse to start. Under test runs the in-process fixture
-    # path is exempt: pytest test fixtures construct ``create_mesh_app``
-    # in-process and set ``X-Agent-ID`` deliberately for the test's own
-    # assertions, so the forgery concern doesn't apply there.
-    import sys
-    _running_under_pytest = "pytest" in sys.modules
+    # that should refuse to start.
+    #
+    # The bypass signal is a DEDICATED env var, not an ambient
+    # ``"pytest" in sys.modules`` check: production deploys that
+    # transitively import pytest (coverage, CI quirks, a tool that
+    # depends on ``_pytest.outcomes``) would otherwise silently skip the
+    # gate exactly when it should fire. ``tests/conftest.py`` sets the
+    # var globally for the in-process test session.
     if (
         _TEAM_SCOPE_MODE == "enforce"
         and not _auth_tokens
-        and not _running_under_pytest
+        and os.environ.get("OPENLEGION_SKIP_TRUST_TIER_BOOT_GATE") != "1"
     ):
         raise SystemExit(
             "FATAL: OPENLEGION_TEAM_SCOPE_MODE=enforce requires "
