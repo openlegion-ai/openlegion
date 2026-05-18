@@ -160,7 +160,12 @@ class TestHandOff:
 
     @pytest.mark.asyncio
     async def test_hand_off_task_write_fails_reports_error(self):
-        """When task write fails after output write, error is returned."""
+        """When task write fails after output write, the Bug H
+        directive envelope is returned — not a bare error string.
+        Details on the new shape live in
+        ``TestHandOffCreateFailureSurfacing``; this is the legacy
+        smoke check that the failure still surfaces with handed_off
+        flipped off and the new ``create_failed`` flag set."""
         from src.agent.builtins.coordination_tool import hand_off
 
         mc = _make_mesh_client(agent_id="scout")
@@ -179,7 +184,10 @@ class TestHandOff:
         )
 
         assert "error" in result
-        assert "Failed to create task" in result["error"]
+        assert result["handed_off"] is False
+        assert result["create_failed"] is True
+        assert "create_failed" in result["error"]
+        assert "connection lost" in result["create_error"]
 
     @pytest.mark.asyncio
     async def test_hand_off_invalid_agent_id_format(self):
@@ -378,6 +386,10 @@ class TestUpdateStatus:
 
     @pytest.mark.asyncio
     async def test_update_status_write_fails(self):
+        """Bug H (codex r5): failure now returns the directive
+        envelope instead of a bare error string. Full shape coverage
+        lives in ``TestUpdateStatusFailureEnvelope``; this is the
+        legacy smoke check that the failure still surfaces."""
         from src.agent.builtins.coordination_tool import update_status
 
         mc = _make_mesh_client(agent_id="engineer")
@@ -386,7 +398,9 @@ class TestUpdateStatus:
         result = await update_status(state="working", summary="test", mesh_client=mc)
 
         assert "error" in result
-        assert "Failed to update status" in result["error"]
+        assert result["update_status_failed"] is True
+        assert "update_status_failed" in result["error"]
+        assert "mesh down" in result["detail"]
 
     @pytest.mark.asyncio
     async def test_update_status_sanitizes_summary(self):
@@ -486,6 +500,8 @@ class TestCompleteTask:
 
     @pytest.mark.asyncio
     async def test_complete_task_delete_fails(self):
+        """Bug H (codex r5): same envelope upgrade — full shape
+        coverage in ``TestCompleteTaskFailureEnvelope``."""
         from src.agent.builtins.coordination_tool import complete_task
 
         mc = _make_mesh_client(agent_id="engineer")
@@ -497,7 +513,9 @@ class TestCompleteTask:
         )
 
         assert "error" in result
-        assert "Failed to complete task" in result["error"]
+        assert result["complete_task_failed"] is True
+        assert "complete_task_failed" in result["error"]
+        assert "mesh down" in result["detail"]
 
     @pytest.mark.asyncio
     async def test_complete_task_standalone(self):
@@ -1687,3 +1705,504 @@ class TestHandOffWakeFailureSurfacing:
         assert "DO NOT mark" in result["recovery_hint"]
         # And the unambiguous ``error`` field LLMs reliably react to.
         assert "wake_failed" in result["error"]
+
+
+# ── Bug H: surface create_task / write_blackboard failures in hand_off ─
+
+
+class TestHandOffCreateFailureSurfacing:
+    """Operator-reported Bug H: when ``create_task`` or
+    ``write_blackboard`` raised inside ``hand_off``, the bare
+    ``{"error": "Failed to create task: ..."}`` envelope was easy for
+    LLMs to gloss past — the in-prod case had seo-strategist call
+    hand_off, create_task raise, and the agent reply "Brief completed"
+    with no task ever queued for page-writer.
+
+    The fix mirrors the Bug G envelope shape — explicit
+    ``handed_off=False``, ``error`` field with "MUST NOT report
+    success" language, and a directive ``recovery_hint``. ``task_queued``
+    is now ``False`` (vs ``True`` for wake_failed) so the LLM can
+    tell the difference between "row exists, wake didn't fire" and
+    "row never made it".
+    """
+
+    @pytest.mark.asyncio
+    async def test_v2_create_task_failure_returns_directive_envelope(self):
+        """v2 path: ``mesh_client.create_task`` raising surfaces the
+        full Bug-G-style directive envelope, not a bare error."""
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="seo-strategist", v2_enabled=True)
+        mc.list_agents.return_value = {"page-writer": {"role": "writer"}}
+        mc.create_task.side_effect = RuntimeError("mesh /tasks 503")
+
+        result = await hand_off(
+            to="page-writer",
+            summary="Brief: langchain-vs-openlegion",
+            mesh_client=mc,
+        )
+
+        # LLM-facing contract: handed_off must be False so the agent
+        # cannot silently report "done".
+        assert result["handed_off"] is False, (
+            "create_task raised but handed_off is True — LLM will lie"
+        )
+        # task_queued=False distinguishes this from wake-failed (where
+        # the row IS in SQLite). Here no row was persisted.
+        assert result["task_queued"] is False
+        assert result["create_failed"] is True
+        assert result["to"] == "page-writer"
+        # ``error`` is the field LLMs react to most strongly.
+        assert "create_failed" in result["error"]
+        assert "MUST NOT report success" in result["error"]
+        assert "page-writer" in result["error"]
+        # ``recovery_hint`` is directive, not advisory.
+        assert "DO NOT mark this work as complete" in result["recovery_hint"]
+        assert "page-writer" in result["recovery_hint"]
+        # create_error carries the redacted exception detail for
+        # operators who want the raw message without parsing ``error``.
+        assert "mesh /tasks 503" in result["create_error"]
+
+    @pytest.mark.asyncio
+    async def test_v2_create_task_failure_redacts_credentials(self):
+        """v2 path: the exception from create_task can carry the mesh
+        URL with an api_key in the query string. The error envelope
+        is read back into the LLM context — credentials must be
+        redacted before truncation, same precaution as wake_error.
+        """
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="seo-strategist", v2_enabled=True)
+        mc.list_agents.return_value = {"page-writer": {"role": "writer"}}
+        leaky_token = "sk-" + "a" * 40
+        leaky = (
+            f"POST https://mesh.internal/tasks?api_key={leaky_token} "
+            f"failed with 500"
+        )
+        mc.create_task.side_effect = RuntimeError(leaky)
+
+        result = await hand_off(
+            to="page-writer",
+            summary="Brief: x",
+            mesh_client=mc,
+        )
+
+        assert result["create_failed"] is True
+        # Credential must not appear anywhere LLM-readable.
+        assert leaky_token not in result["create_error"]
+        assert leaky_token not in result["error"]
+        assert leaky_token not in result["recovery_hint"]
+
+    @pytest.mark.asyncio
+    async def test_v2_output_write_failure_returns_directive_envelope(self):
+        """v2 path: ``write_blackboard`` for the handoff artifact
+        raising surfaces the directive envelope too. This is the
+        earliest failure point — no task row, no artifact persisted."""
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="trend-scout", v2_enabled=True)
+        mc.list_agents.return_value = {
+            "seo-strategist": {"role": "strategist"},
+        }
+        mc.write_blackboard.side_effect = RuntimeError("blackboard EBUSY")
+
+        result = await hand_off(
+            to="seo-strategist",
+            summary="Top 5 trends for week of 2026-05-18",
+            data='{"trends": ["a", "b"]}',
+            mesh_client=mc,
+        )
+
+        assert result["handed_off"] is False
+        assert result["task_queued"] is False
+        assert result["output_write_failed"] is True
+        assert result["to"] == "seo-strategist"
+        assert "output_write_failed" in result["error"]
+        assert "MUST NOT report success" in result["error"]
+        assert "DO NOT mark this work as complete" in result["recovery_hint"]
+        # ``create_task`` must NOT have been reached — the write failed
+        # first, so trying to create the task would have written into
+        # a half-populated state.
+        assert mc.create_task.await_count == 0
+        # write_error carries the redacted exception detail.
+        assert "blackboard EBUSY" in result["write_error"]
+
+    @pytest.mark.asyncio
+    async def test_legacy_task_write_failure_returns_directive_envelope(self):
+        """Legacy path (orchestration v2 OFF): the blackboard task
+        write raising surfaces the same directive shape — operators
+        who haven't migrated to v2 still need the LLM-resistant signal.
+        """
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="seo-strategist", v2_enabled=False)
+        mc.list_agents.return_value = {"page-writer": {"role": "writer"}}
+
+        # Make write_blackboard fail only on the task-key write (the
+        # second call). The first write is for output data, which
+        # only runs when ``data`` is supplied — omit ``data`` so we
+        # cleanly target the task write.
+        mc.write_blackboard.side_effect = RuntimeError("bb shard offline")
+
+        result = await hand_off(
+            to="page-writer",
+            summary="Brief: langchain-vs-openlegion",
+            mesh_client=mc,
+        )
+
+        assert result["handed_off"] is False
+        assert result["task_queued"] is False
+        assert result["create_failed"] is True
+        assert result["to"] == "page-writer"
+        assert "create_failed" in result["error"]
+        assert "MUST NOT report success" in result["error"]
+        assert "DO NOT mark this work as complete" in result["recovery_hint"]
+        assert "bb shard offline" in result["create_error"]
+        # ``wake_agent`` must NOT have been called — the task didn't
+        # land, no point in waking the recipient.
+        assert mc.wake_agent.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_legacy_output_write_failure_returns_directive_envelope(self):
+        """Legacy path: when the output write fails (before the task
+        write), the directive envelope still fires — operator needs
+        to know data never persisted."""
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="trend-scout", v2_enabled=False)
+        mc.list_agents.return_value = {
+            "seo-strategist": {"role": "strategist"},
+        }
+        mc.write_blackboard.side_effect = RuntimeError("disk full")
+
+        result = await hand_off(
+            to="seo-strategist",
+            summary="Trends",
+            data='{"trends": ["a"]}',
+            mesh_client=mc,
+        )
+
+        assert result["handed_off"] is False
+        assert result["task_queued"] is False
+        assert result["output_write_failed"] is True
+        assert "output_write_failed" in result["error"]
+        assert "MUST NOT report success" in result["error"]
+        # Only one write_blackboard attempt — the output one. The
+        # task write must not have been reached.
+        assert mc.write_blackboard.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_v2_create_failure_does_not_call_wake_agent(self):
+        """Defense-in-depth: a create_task failure must short-circuit
+        before ``wake_agent`` is called — waking a peer for a task
+        that doesn't exist would spam them with a phantom notification.
+        """
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="strategist", v2_enabled=True)
+        mc.list_agents.return_value = {"writer": {"role": "writer"}}
+        mc.create_task.side_effect = RuntimeError("scope rejected")
+
+        await hand_off(
+            to="writer",
+            summary="x",
+            mesh_client=mc,
+        )
+
+        assert mc.wake_agent.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_v2_success_envelope_omits_create_failure_keys(self):
+        """Regression guard: the happy path must not leak any of the
+        new failure flags into the success envelope."""
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="strategist", v2_enabled=True)
+        mc.list_agents.return_value = {"writer": {"role": "writer"}}
+
+        result = await hand_off(
+            to="writer",
+            summary="ok",
+            mesh_client=mc,
+        )
+
+        assert result["handed_off"] is True
+        assert "create_failed" not in result
+        assert "output_write_failed" not in result
+        assert "create_error" not in result
+        assert "write_error" not in result
+
+
+# ── Bug H codex r5: redaction coverage for the remaining sites ──────
+
+
+class TestHandOffFailureRedaction:
+    """Codex r5 finding: redaction was only asserted on the v2
+    create_task path. Cover the three remaining sites (v2 output_write,
+    legacy output_write, legacy task_write) so dropping
+    ``redact_text_with_urls`` from any of them is caught. v2
+    create_task redaction lives in ``TestHandOffCreateFailureSurfacing``
+    (``test_v2_create_task_failure_redacts_credentials``)."""
+
+    LEAKY = "sk-" + "a" * 40
+    LEAKY_URL = f"POST https://mesh.internal/x?api_key={LEAKY} failed 500"
+
+    @pytest.mark.asyncio
+    async def test_v2_output_write_redacts(self):
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="trend-scout", v2_enabled=True)
+        mc.list_agents.return_value = {
+            "seo-strategist": {"role": "strategist"},
+        }
+        mc.write_blackboard.side_effect = RuntimeError(self.LEAKY_URL)
+
+        result = await hand_off(
+            to="seo-strategist",
+            summary="x",
+            data='{"a": 1}',
+            mesh_client=mc,
+        )
+
+        assert result["output_write_failed"] is True
+        for f in ("error", "recovery_hint", "write_error"):
+            assert self.LEAKY not in result[f]
+
+    @pytest.mark.asyncio
+    async def test_legacy_output_write_redacts(self):
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="trend-scout", v2_enabled=False)
+        mc.list_agents.return_value = {
+            "seo-strategist": {"role": "strategist"},
+        }
+        mc.write_blackboard.side_effect = RuntimeError(self.LEAKY_URL)
+
+        result = await hand_off(
+            to="seo-strategist",
+            summary="x",
+            data='{"a": 1}',
+            mesh_client=mc,
+        )
+
+        assert result["output_write_failed"] is True
+        for f in ("error", "recovery_hint", "write_error"):
+            assert self.LEAKY not in result[f]
+
+    @pytest.mark.asyncio
+    async def test_legacy_task_write_redacts(self):
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="strategist", v2_enabled=False)
+        mc.list_agents.return_value = {"writer": {"role": "writer"}}
+        # Only the task-write call fails (no ``data`` → no output write
+        # — the lone write_blackboard call is the task one).
+        mc.write_blackboard.side_effect = RuntimeError(self.LEAKY_URL)
+
+        result = await hand_off(
+            to="writer",
+            summary="x",
+            mesh_client=mc,
+        )
+
+        assert result["create_failed"] is True
+        for f in ("error", "recovery_hint", "create_error"):
+            assert self.LEAKY not in result[f]
+
+
+# ── Bug H codex r5: directive envelopes on terminal-transition tools ─
+
+
+class TestUpdateStatusFailureEnvelope:
+    """update_status with state='done' or 'blocked' is a terminal-
+    transition operation — the LLM uses it to signal completion. A
+    silent failure here would let the agent claim done with no record."""
+
+    @pytest.mark.asyncio
+    async def test_v2_done_transition_failure_returns_directive(self):
+        from src.agent.builtins.coordination_tool import update_status
+
+        mc = _make_mesh_client(agent_id="writer", v2_enabled=True)
+        mc.list_task_inbox = AsyncMock(return_value=[
+            {"id": "task_xyz", "status": "working", "title": "draft"},
+        ])
+        mc.set_task_status.side_effect = RuntimeError("db locked")
+
+        result = await update_status(
+            "done", "finished draft", mesh_client=mc,
+        )
+
+        assert result["update_status_failed"] is True
+        assert "MUST NOT report success" in result["error"]
+        assert "DO NOT mark this work as complete" in result["recovery_hint"]
+        assert "db locked" in result["detail"]
+        assert result["state"] == "done"
+        assert result["task_id"] == "task_xyz"
+
+    @pytest.mark.asyncio
+    async def test_legacy_done_transition_failure_returns_directive(self):
+        from src.agent.builtins.coordination_tool import update_status
+
+        mc = _make_mesh_client(agent_id="writer", v2_enabled=False)
+        mc.write_blackboard.side_effect = RuntimeError("bb shard offline")
+
+        result = await update_status(
+            "done", "finished draft", mesh_client=mc,
+        )
+
+        assert result["update_status_failed"] is True
+        assert "MUST NOT report success" in result["error"]
+        assert "DO NOT mark this work as complete" in result["recovery_hint"]
+        assert "bb shard offline" in result["detail"]
+        assert result["state"] == "done"
+
+    @pytest.mark.asyncio
+    async def test_v2_done_failure_redacts_credentials(self):
+        from src.agent.builtins.coordination_tool import update_status
+
+        mc = _make_mesh_client(agent_id="writer", v2_enabled=True)
+        mc.list_task_inbox = AsyncMock(return_value=[
+            {"id": "task_xyz", "status": "working", "title": "draft"},
+        ])
+        leaky = "sk-" + "z" * 40
+        mc.set_task_status.side_effect = RuntimeError(
+            f"PUT https://mesh/x?api_key={leaky}",
+        )
+
+        result = await update_status("done", "ok", mesh_client=mc)
+
+        assert result["update_status_failed"] is True
+        for f in ("error", "recovery_hint", "detail"):
+            assert leaky not in result[f]
+
+    @pytest.mark.asyncio
+    async def test_legacy_done_failure_redacts_credentials(self):
+        """Codex r6: parity with the v2 redaction test — drop of
+        redact_text_with_urls from the legacy path must also be caught."""
+        from src.agent.builtins.coordination_tool import update_status
+
+        mc = _make_mesh_client(agent_id="writer", v2_enabled=False)
+        leaky = "sk-" + "q" * 40
+        mc.write_blackboard.side_effect = RuntimeError(
+            f"PUT https://mesh/x?api_key={leaky}",
+        )
+
+        result = await update_status("done", "ok", mesh_client=mc)
+
+        assert result["update_status_failed"] is True
+        for f in ("error", "recovery_hint", "detail"):
+            assert leaky not in result[f]
+
+
+class TestCompleteTaskFailureEnvelope:
+    """complete_task is the explicit "I'm done with this work" signal —
+    silent failure here is the highest-risk misreport surface."""
+
+    @pytest.mark.asyncio
+    async def test_v2_failure_returns_directive(self):
+        from src.agent.builtins.coordination_tool import complete_task
+
+        mc = _make_mesh_client(agent_id="writer", v2_enabled=True)
+        mc.set_task_status.side_effect = RuntimeError("set_status 503")
+
+        result = await complete_task(
+            "task_abc123def456", mesh_client=mc,
+        )
+
+        assert result["complete_task_failed"] is True
+        assert "MUST NOT report success" in result["error"]
+        assert "DO NOT mark this work as complete" in result["recovery_hint"]
+        assert "set_status 503" in result["detail"]
+        assert result["task_id"] == "task_abc123def456"
+
+    @pytest.mark.asyncio
+    async def test_legacy_failure_returns_directive(self):
+        from src.agent.builtins.coordination_tool import complete_task
+
+        mc = _make_mesh_client(agent_id="writer", v2_enabled=False)
+        mc.read_blackboard = AsyncMock(return_value={
+            "value": {"from": "strategist", "summary": "x"},
+        })
+        mc.delete_blackboard.side_effect = RuntimeError("delete failed")
+
+        result = await complete_task(
+            "tasks/writer/ho_abc", mesh_client=mc,
+        )
+
+        assert result["complete_task_failed"] is True
+        assert "MUST NOT report success" in result["error"]
+        assert "DO NOT mark this work as complete" in result["recovery_hint"]
+        assert "delete failed" in result["detail"]
+        assert result["task_key"] == "tasks/writer/ho_abc"
+
+    @pytest.mark.asyncio
+    async def test_v2_failure_redacts_credentials(self):
+        from src.agent.builtins.coordination_tool import complete_task
+
+        mc = _make_mesh_client(agent_id="writer", v2_enabled=True)
+        leaky = "sk-" + "b" * 40
+        mc.set_task_status.side_effect = RuntimeError(
+            f"PUT https://mesh/x?api_key={leaky}",
+        )
+
+        result = await complete_task("task_xyz", mesh_client=mc)
+
+        assert result["complete_task_failed"] is True
+        for f in ("error", "recovery_hint", "detail"):
+            assert leaky not in result[f]
+
+    @pytest.mark.asyncio
+    async def test_legacy_failure_redacts_credentials(self):
+        """Codex r6: parity with the v2 redaction test on legacy path."""
+        from src.agent.builtins.coordination_tool import complete_task
+
+        mc = _make_mesh_client(agent_id="writer", v2_enabled=False)
+        mc.read_blackboard = AsyncMock(return_value={
+            "value": {"from": "strategist", "summary": "x"},
+        })
+        leaky = "sk-" + "w" * 40
+        mc.delete_blackboard.side_effect = RuntimeError(
+            f"DELETE https://mesh/bb?api_key={leaky}",
+        )
+
+        result = await complete_task(
+            "tasks/writer/ho_abc", mesh_client=mc,
+        )
+
+        assert result["complete_task_failed"] is True
+        for f in ("error", "recovery_hint", "detail"):
+            assert leaky not in result[f]
+
+
+class TestFailedTransitionEnvelopeHelper:
+    """Codex r6: the helper merges ``extras`` BEFORE the sentinel
+    keys are written, so a caller that accidentally passes
+    ``extras={"error": "..."}`` cannot shadow the directive field.
+    Pinned here so a future refactor that flips the merge order is
+    caught.
+    """
+
+    def test_extras_cannot_shadow_sentinel_keys(self):
+        from src.agent.builtins.coordination_tool import (
+            _failed_transition_envelope,
+        )
+
+        result = _failed_transition_envelope(
+            kind="test_failed",
+            detail="something broke",
+            exc=RuntimeError("oops"),
+            extras={
+                "error": "MALICIOUS — should be overwritten",
+                "recovery_hint": "MALICIOUS — should be overwritten",
+                "detail": "MALICIOUS — should be overwritten",
+                "task_id": "task_abc",
+            },
+        )
+
+        # Sentinel fields untouched.
+        assert "MUST NOT report success" in result["error"]
+        assert "DO NOT mark this work as complete" in result["recovery_hint"]
+        assert result["detail"] == "oops"
+        assert result["test_failed"] is True
+        # Non-sentinel extras flow through.
+        assert result["task_id"] == "task_abc"

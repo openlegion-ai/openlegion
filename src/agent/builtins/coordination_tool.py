@@ -46,6 +46,62 @@ _HANDOFF_TTL = 86_400  # 24 hours — safety net for unprocessed handoffs
 _TERMINAL_STATES: frozenset[str] = frozenset({"done", "failed", "cancelled"})
 
 
+def _failed_transition_envelope(
+    *, kind: str, detail: str, exc: Exception, extras: dict | None = None,
+) -> dict:
+    """Build the directive failure envelope used by terminal-transition
+    coordination tools (``update_status`` / ``complete_task``).
+
+    Mirrors the Bug G ``wake_failed`` shape and the Bug H
+    ``create_failed`` / ``output_write_failed`` envelopes used by
+    ``hand_off`` — handed_off-style boolean flag (``<kind>``) + an
+    ``error`` field with "MUST NOT report success" + a directive
+    ``recovery_hint`` that tells the LLM to surface to the operator
+    rather than silently retrying.
+
+    ``exc`` is redacted (``redact_text_with_urls``) and truncated to 200
+    chars before reaching the LLM context — HTTP-level exceptions from
+    the mesh client can quote URLs with ``?api_key=...`` in the query
+    string, same precaution as the wake_error path.
+
+    Codex r6: ``extras`` are merged FIRST, then sentinel fields
+    (``<kind>``, ``error``, ``recovery_hint``, ``detail``) overwrite —
+    so a future caller cannot accidentally shadow a sentinel by passing
+    e.g. ``extras={"error": "..."}``. Reserved keys are documented in
+    ``_RESERVED_ENVELOPE_KEYS`` for fast inspection.
+    """
+    redacted = redact_text_with_urls(str(exc))[:200]
+    envelope: dict = dict(extras) if extras else {}
+    envelope.update({
+        kind: True,
+        "error": (
+            f"{kind}: {detail} ({redacted}). The transition may not "
+            "have landed — verify before continuing. You MUST NOT "
+            "report success."
+        ),
+        "recovery_hint": (
+            "Surface the failure to the operator/user. DO NOT mark "
+            "this work as complete in your final response. A blind "
+            "retry is unsafe — the underlying failure may have left "
+            "the state partially applied."
+        ),
+        "detail": redacted,
+    })
+    return envelope
+
+
+# Keys reserved by ``_failed_transition_envelope``. Callers passing
+# ``extras`` containing any of these will see their value overwritten
+# by the helper. ``kind`` is variable, so the set lists the static
+# sentinels only — the dynamic flag (e.g. ``update_status_failed``,
+# ``complete_task_failed``) is also reserved but cannot be enumerated
+# statically. Documented here so future maintainers don't bury a
+# silent overwrite in production.
+_RESERVED_ENVELOPE_KEYS: frozenset[str] = frozenset(
+    {"error", "recovery_hint", "detail"},
+)
+
+
 @skill(
     name="hand_off",
     description=(
@@ -175,7 +231,35 @@ async def hand_off(
                 project=write_project, global_scope=write_global,
             )
         except Exception as e:
-            return {"error": f"Failed to write output: {e}"}
+            # Bug H (legacy path mirror): see _hand_off_v2 — the bare
+            # error envelope lets LLMs report success silently.
+            redacted = redact_text_with_urls(str(e))[:200]
+            logger.warning(
+                "hand_off output write for %s failed: %s", to, redacted,
+            )
+            return {
+                "handed_off": False,
+                "task_queued": False,
+                "output_write_failed": True,
+                "to": to,
+                "write_error": redacted,
+                "error": (
+                    f"output_write_failed: hand_off to '{to}' did not "
+                    f"complete ({redacted}). The handoff data may not "
+                    "have landed and no task was created — verify "
+                    "before retrying. You MUST NOT report success."
+                ),
+                "recovery_hint": (
+                    f"Surface the failure to the operator/user — "
+                    f"hand_off to peer '{to}' did not complete. DO NOT "
+                    "mark this work as complete in your final "
+                    "response. DO NOT retry hand_off without verifying "
+                    "via check_inbox or asking the operator to inspect "
+                    "the recipient's queue — a post-commit failure may "
+                    "have left a partial artifact, and a blind retry "
+                    "would create a duplicate."
+                ),
+            }
 
     # Create task in recipient's inbox
     task_record = {
@@ -203,10 +287,36 @@ async def hand_off(
             project=write_project, global_scope=write_global,
         )
     except Exception as e:
-        # Clean up orphaned output if task write fails
+        # Bug H (legacy path mirror): see _hand_off_v2. The legacy
+        # storage layer is the blackboard, so the failure surface is
+        # ``write_blackboard`` rather than ``create_task`` — but the
+        # LLM-silencing problem is identical. Reuse the same envelope.
+        # Existing orphaned-output log preserved for ops visibility.
         if output_key:
             logger.warning("Task write failed, orphaned output at %s", output_key)
-        return {"error": f"Failed to create task: {e}"}
+        redacted = redact_text_with_urls(str(e))[:200]
+        logger.warning("hand_off task write for %s failed: %s", to, redacted)
+        return {
+            "handed_off": False,
+            "task_queued": False,
+            "create_failed": True,
+            "to": to,
+            "create_error": redacted,
+            "error": (
+                f"create_failed: hand_off to '{to}' did not complete "
+                f"({redacted}). The task row may not exist — verify "
+                "before retrying. You MUST NOT report success."
+            ),
+            "recovery_hint": (
+                f"Surface the failure to the operator/user — hand_off "
+                f"to peer '{to}' did not complete. DO NOT mark this "
+                "work as complete in your final response. DO NOT retry "
+                "hand_off without first verifying via check_inbox or "
+                "asking the operator to inspect the recipient's queue "
+                "— a post-commit failure may have left a partial row, "
+                "and a blind retry would create a duplicate."
+            ),
+        }
 
     # Wake the target agent so it processes the task immediately
     # instead of waiting for its next heartbeat.  Pass origin so
@@ -426,7 +536,18 @@ async def update_status(
             status_key, status_data, global_scope=is_operator,
         )
     except Exception as e:
-        return {"error": f"Failed to update status: {e}"}
+        # Bug H (codex r5): mirror the hand_off envelope on terminal-
+        # transition tools so a state='done' / 'blocked' write that
+        # fails can't be silently glossed over by the LLM.
+        return _failed_transition_envelope(
+            kind="update_status_failed",
+            detail=(
+                f"could not write status='{state}' for agent "
+                f"'{agent_id}'"
+            ),
+            exc=e,
+            extras={"state": state},
+        )
 
     return {"updated": True, "state": state}
 
@@ -515,7 +636,15 @@ async def complete_task(task_key: str, *, mesh_client=None) -> dict:
                 except Exception as exc:
                     logger.debug("Output cleanup for %s skipped: %s", output_key, exc)
     except Exception as e:
-        return {"error": f"Failed to complete task: {e}"}
+        # Bug H (codex r5): completing a task is a terminal transition —
+        # if the underlying delete fails, the task stays in inbox and a
+        # silent "completed" reply leaves orphan state. Directive envelope.
+        return _failed_transition_envelope(
+            kind="complete_task_failed",
+            detail=f"could not mark task '{task_key}' as done",
+            exc=e,
+            extras={"task_key": task_key},
+        )
 
     return {"completed": True, "task_key": task_key}
 
@@ -620,7 +749,37 @@ async def _hand_off_v2(
                 project=write_project,
             )
         except Exception as e:
-            return {"error": f"Failed to write output: {e}"}
+            # Bug H: same silent-LLM failure mode as create_task — the
+            # bare ``{"error": ...}`` envelope let agents report "done"
+            # to the user while no handoff data ever reached the peer.
+            # Mirror the Bug G directive shape.
+            redacted = redact_text_with_urls(str(e))[:200]
+            logger.warning(
+                "hand_off output write for %s failed: %s", to, redacted,
+            )
+            return {
+                "handed_off": False,
+                "task_queued": False,
+                "output_write_failed": True,
+                "to": to,
+                "write_error": redacted,
+                "error": (
+                    f"output_write_failed: hand_off to '{to}' did not "
+                    f"complete ({redacted}). The handoff data may not "
+                    "have landed and no task was created — verify "
+                    "before retrying. You MUST NOT report success."
+                ),
+                "recovery_hint": (
+                    f"Surface the failure to the operator/user — "
+                    f"hand_off to peer '{to}' did not complete. DO NOT "
+                    "mark this work as complete in your final "
+                    "response. DO NOT retry hand_off without verifying "
+                    "via check_inbox or asking the operator to inspect "
+                    "the recipient's queue — a post-commit failure may "
+                    "have left a partial artifact, and a blind retry "
+                    "would create a duplicate."
+                ),
+            }
 
     # Read the origin contextvar once so both create_task and wake_agent
     # propagate the same provenance. Without origin on create_task the
@@ -641,7 +800,47 @@ async def _hand_off_v2(
             origin=origin,
         )
     except Exception as e:
-        return {"error": f"Failed to create task: {e}"}
+        # Bug H: the bare ``{"error": ...}`` envelope was easy for LLMs
+        # to gloss past — operator hit a live case where seo-strategist
+        # called hand_off, create_task raised, and the agent still
+        # reported "Brief completed" in its final reply. The recipient
+        # never received the task. Mirror the Bug G envelope shape
+        # (handed_off=False, explicit ``error`` + directive
+        # ``recovery_hint``) so the LLM cannot silently report success.
+        # Distinct flag ``create_failed`` (vs wake's ``wake_failed``)
+        # and ``task_queued=False`` (vs wake's ``True``) tell the
+        # caller the row was NEVER persisted, so retry is not a
+        # duplicate-creating operation — but the LLM must still
+        # surface the failure rather than silently retrying.
+        #
+        # ``redact_text_with_urls`` strips credentials before the
+        # exception string reaches the LLM's context — same precaution
+        # as the wake_error path. HTTP-level exceptions from the mesh
+        # client frequently quote the failing URL with an api_key in
+        # the query string.
+        redacted = redact_text_with_urls(str(e))[:200]
+        logger.warning("create_task for %s failed: %s", to, redacted)
+        return {
+            "handed_off": False,
+            "task_queued": False,
+            "create_failed": True,
+            "to": to,
+            "create_error": redacted,
+            "error": (
+                f"create_failed: hand_off to '{to}' did not complete "
+                f"({redacted}). The task row may not exist — verify "
+                "before retrying. You MUST NOT report success."
+            ),
+            "recovery_hint": (
+                f"Surface the failure to the operator/user — hand_off "
+                f"to peer '{to}' did not complete. DO NOT mark this "
+                "work as complete in your final response. DO NOT retry "
+                "hand_off without first verifying via check_inbox or "
+                "asking the operator to inspect the recipient's queue "
+                "— a post-commit failure may have left a partial row, "
+                "and a blind retry would create a duplicate."
+            ),
+        }
 
     task_id = record.get("id", "")
 
@@ -854,7 +1053,19 @@ async def _update_status_v2(
             target["id"], state, blocker_note=blocker_note,
         )
     except Exception as e:
-        return {"error": f"Failed to update status: {e}"}
+        # Bug H (codex r5): set_task_status to a terminal state
+        # ('done' / 'failed' / 'cancelled') that raises post-commit
+        # could leave the row mid-transition. Directive envelope so
+        # the LLM doesn't claim success on a state that didn't land.
+        return _failed_transition_envelope(
+            kind="update_status_failed",
+            detail=(
+                f"could not transition task '{target['id']}' to "
+                f"state='{state}'"
+            ),
+            exc=e,
+            extras={"state": state, "task_id": target["id"]},
+        )
     return {"updated": True, "state": state, "task_id": target["id"]}
 
 
@@ -868,7 +1079,15 @@ async def _complete_task_v2(task_key: str, *, mesh_client) -> dict:
     try:
         record = await mesh_client.set_task_status(task_id, "done")
     except Exception as e:
-        return {"error": f"Failed to complete task: {e}"}
+        # Bug H (codex r5): same directive shape as the legacy
+        # complete_task path so the LLM can't silently report a task
+        # as done when the transition failed.
+        return _failed_transition_envelope(
+            kind="complete_task_failed",
+            detail=f"could not mark task '{task_id}' as done",
+            exc=e,
+            extras={"task_id": task_id, "task_key": task_key},
+        )
     return {
         "completed": True,
         "task_key": task_key,
