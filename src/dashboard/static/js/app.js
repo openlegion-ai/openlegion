@@ -2867,16 +2867,25 @@ function dashboard() {
     },
 
     async loadWorkplaceSummaries() {
+      // Monotonic serial. ``loadWorkplaceSummaries`` can be called
+      // concurrently (initial load + WS-debounce + manual retry); the
+      // older fetch's resolve must not clobber a newer fetch's data.
+      // We capture the serial at start and bail out at every write
+      // point if a newer fetch has been kicked off since.
+      const serial = (this._summariesFetchSerial || 0) + 1;
+      this._summariesFetchSerial = serial;
       this.workplaceSectionLoading.summaries = true;
       this.workplaceErrors.summaries = '';
       try {
         const resp = await fetch(`${window.__config.apiBase}/workplace/summaries`);
+        if (serial !== this._summariesFetchSerial) return;  // superseded
         if (!resp.ok) {
           this.workplaceErrors.summaries =
             `Couldn't load summaries (HTTP ${resp.status})`;
           return;
         }
         const data = await resp.json();
+        if (serial !== this._summariesFetchSerial) return;  // superseded
         // Before replacing the list, cancel any pending deferred-apply
         // timers + pins on the old row objects. Without this cleanup
         // those setTimeout callbacks fire on rows no longer in the
@@ -2896,11 +2905,17 @@ function dashboard() {
         }
         this.workplaceSummaries = data.summaries || [];
       } catch (e) {
+        if (serial !== this._summariesFetchSerial) return;  // superseded
         this.workplaceErrors.summaries =
           (e && e.message) ? `Couldn't load summaries: ${e.message}`
                            : "Couldn't load summaries";
       } finally {
-        this.workplaceSectionLoading.summaries = false;
+        // Only clear the loading flag for the LATEST serial — earlier
+        // fetches' finally blocks must not flip the spinner off while
+        // a newer fetch is still in-flight.
+        if (serial === this._summariesFetchSerial) {
+          this.workplaceSectionLoading.summaries = false;
+        }
       }
     },
 

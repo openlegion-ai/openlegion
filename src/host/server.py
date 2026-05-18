@@ -4172,6 +4172,20 @@ def create_mesh_app(
             _create_project(name, description=description, members=members)
         except ValueError as e:
             raise HTTPException(400, str(e))
+        # Real-time cron lifecycle (codex r1 P2): schedule the daily
+        # work-summary fire on team creation so the operator doesn't
+        # have to wait for the next mesh restart for the reconcile
+        # to pick it up. Best-effort — a missing cron_scheduler or
+        # a failure here mustn't fail the team-create response.
+        if cron_scheduler is not None:
+            try:
+                cron_scheduler.ensure_summary_job(
+                    scope_kind="team", scope_id=name,
+                )
+            except Exception as e:
+                logger.warning(
+                    "ensure_summary_job on team create %s failed: %s", name, e,
+                )
         _emit_team_event(
             event_bus, "project_created", agent="operator", name=name,
             extra={"description": description, "members": list(members)},
@@ -5303,6 +5317,20 @@ def create_mesh_app(
             _archive_project(team_name)
         except ValueError as e:
             raise HTTPException(404, str(e))
+        # Real-time cron lifecycle (codex r1 P2): remove the daily
+        # work-summary cron so an archived team doesn't keep firing
+        # empty-state summaries until the next mesh restart. Operator
+        # explicitly archived — they don't want activity here.
+        if cron_scheduler is not None:
+            try:
+                existing = cron_scheduler.find_summary_job("team", team_name)
+                if existing is not None:
+                    cron_scheduler.remove_job(existing.id)
+            except Exception as e:
+                logger.warning(
+                    "remove summary cron on archive %s failed: %s",
+                    team_name, e,
+                )
         _emit_team_event(event_bus, "project_archived", agent="operator", name=team_name)
         return {
             "archived": True, "project": team_name, "team": team_name,
@@ -5322,6 +5350,18 @@ def create_mesh_app(
             _unarchive_project(team_name)
         except ValueError as e:
             raise HTTPException(404, str(e))
+        # Re-attach the daily work-summary cron when a team is
+        # unarchived. Symmetric to the archive path above.
+        if cron_scheduler is not None:
+            try:
+                cron_scheduler.ensure_summary_job(
+                    scope_kind="team", scope_id=team_name,
+                )
+            except Exception as e:
+                logger.warning(
+                    "ensure_summary_job on unarchive %s failed: %s",
+                    team_name, e,
+                )
         _emit_team_event(event_bus, "project_unarchived", agent="operator", name=team_name)
         return {
             "archived": False, "project": team_name, "team": team_name,
@@ -5554,6 +5594,21 @@ def create_mesh_app(
                 _delete_project(target_id)
             except ValueError as e:
                 raise HTTPException(404, str(e))
+            # Real-time cron lifecycle (codex r1 P2): delete the
+            # daily work-summary cron when the team itself is
+            # deleted. Symmetric to the archive path; archive already
+            # removed it but a delete-without-archive would leak the
+            # cron otherwise.
+            if cron_scheduler is not None:
+                try:
+                    existing = cron_scheduler.find_summary_job("team", target_id)
+                    if existing is not None:
+                        cron_scheduler.remove_job(existing.id)
+                except Exception as e:
+                    logger.warning(
+                        "remove summary cron on delete %s failed: %s",
+                        target_id, e,
+                    )
             # New audit rows use ``delete_team``; historical
             # ``delete_project`` rows in archived audit data are
             # untouched and still queryable (they retain the legacy

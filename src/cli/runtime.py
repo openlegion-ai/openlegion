@@ -937,6 +937,12 @@ class RuntimeContext:
         # extension point is the canonical settings dict, not a
         # special top-level metadata field. The default schedule is
         # baked into ``CronScheduler.ensure_summary_job`` (daily 9am).
+        #
+        # ``ensure_summary_job`` returns an EXISTING job unchanged
+        # when one already exists — so a metadata edit that changes
+        # the schedule wouldn't propagate without help. Compare the
+        # existing job's schedule to the desired value and reschedule
+        # via ``update_job`` when they drift.
         active_team_names: set[str] = set()
         for name, meta in teams.items():
             if (meta.get("status") or "active") == "archived":
@@ -945,9 +951,43 @@ class RuntimeContext:
             settings = meta.get("settings") or {}
             schedule = settings.get("summary_schedule")
             try:
-                self.cron_scheduler.ensure_summary_job(
+                existing_before = self.cron_scheduler.find_summary_job(
+                    "team", name,
+                )
+                job = self.cron_scheduler.ensure_summary_job(
                     scope_kind="team", scope_id=name, schedule=schedule,
                 )
+                # Schedule-drift sync. ``ensure_summary_job`` only
+                # creates when absent; if a per-team metadata edit
+                # changed the cadence between boots, push the new
+                # schedule onto the existing job. Safe to mutate
+                # synchronously here — reconcile runs in
+                # ``_start_background`` BEFORE the cron loop thread
+                # starts, so the async per-job lock isn't yet
+                # contended (only the loop's tick coroutine acquires
+                # it). Validate the schedule first to surface a bad
+                # team-metadata value as a warning, not a crash on
+                # the next tick.
+                desired = schedule or self.cron_scheduler.DEFAULT_SUMMARY_SCHEDULE
+                if existing_before is not None and job.schedule != desired:
+                    validation_error = self.cron_scheduler._validate_schedule(
+                        desired,
+                    )
+                    if validation_error:
+                        logger.warning(
+                            "team %s has invalid summary_schedule %r: %s — "
+                            "keeping existing schedule %r",
+                            name, desired, validation_error, job.schedule,
+                        )
+                    else:
+                        previous = job.schedule
+                        job.schedule = desired
+                        self.cron_scheduler._compute_next_run(job)
+                        self.cron_scheduler._save()
+                        logger.info(
+                            "rescheduled work-summary cron for team %s: %s → %s",
+                            name, previous, desired,
+                        )
             except Exception as e:
                 logger.warning(
                     "ensure_summary_job for team %s failed: %s", name, e,

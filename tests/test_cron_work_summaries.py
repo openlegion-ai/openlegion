@@ -244,6 +244,72 @@ def test_reconcile_prunes_summary_jobs_for_archived_teams(tmp_path, monkeypatch)
     assert scope_ids == ["alpha"]
 
 
+def test_reconcile_reschedules_drift_to_new_cadence(tmp_path, monkeypatch):
+    """When team metadata's summary_schedule changes between boots,
+    the reconcile path must update the existing job's schedule —
+    ensure_summary_job alone returns the existing job unchanged
+    (codex r1 P2)."""
+    projects_dir = tmp_path / "config" / "projects"
+    projects_dir.mkdir(parents=True)
+    _seed_team(projects_dir, "alpha", schedule="0 9 * * *")
+    import src.cli.config as _cli_config
+    monkeypatch.setattr(_cli_config, "PROJECTS_DIR", projects_dir)
+    monkeypatch.setattr(_cli_config, "TEAMS_DIR", projects_dir)
+
+    from src.host.cron import CronScheduler
+    scheduler = CronScheduler()
+
+    class _Stub:
+        cron_scheduler = scheduler
+    from src.cli.runtime import RuntimeContext
+
+    # First boot — daily.
+    RuntimeContext._reconcile_work_summary_jobs(_Stub())
+    job_id_before = scheduler.find_summary_job("team", "alpha").id
+
+    # Operator edits the metadata to weekly cadence between boots.
+    _seed_team(projects_dir, "alpha", schedule="0 9 * * 1")
+
+    # Second boot — should reschedule the SAME job, not create a new one.
+    RuntimeContext._reconcile_work_summary_jobs(_Stub())
+    found = scheduler.find_summary_job("team", "alpha")
+    assert found is not None
+    assert found.id == job_id_before  # same job, not recreated
+    assert found.schedule == "0 9 * * 1"
+
+
+def test_reconcile_logs_warning_on_invalid_schedule_metadata(
+    tmp_path, monkeypatch,
+):
+    """Bad team metadata (invalid cron expr) must NOT crash reconcile
+    or apply the bad schedule — log a warning and keep the existing."""
+    projects_dir = tmp_path / "config" / "projects"
+    projects_dir.mkdir(parents=True)
+    _seed_team(projects_dir, "alpha", schedule="0 9 * * *")
+    import src.cli.config as _cli_config
+    monkeypatch.setattr(_cli_config, "PROJECTS_DIR", projects_dir)
+    monkeypatch.setattr(_cli_config, "TEAMS_DIR", projects_dir)
+
+    from src.host.cron import CronScheduler
+    scheduler = CronScheduler()
+
+    class _Stub:
+        cron_scheduler = scheduler
+    from src.cli.runtime import RuntimeContext
+
+    RuntimeContext._reconcile_work_summary_jobs(_Stub())
+    job_before = scheduler.find_summary_job("team", "alpha")
+    schedule_before = job_before.schedule
+
+    # Corrupt the metadata.
+    _seed_team(projects_dir, "alpha", schedule="this is not cron")
+
+    # Must not raise.
+    RuntimeContext._reconcile_work_summary_jobs(_Stub())
+    job_after = scheduler.find_summary_job("team", "alpha")
+    assert job_after.schedule == schedule_before  # preserved
+
+
 def test_reconcile_leaves_non_summary_tool_jobs_alone(tmp_path, monkeypatch):
     """An unrelated tool-cron must not be pruned by the summary
     reconcile, even when its tool_params can't be parsed."""
