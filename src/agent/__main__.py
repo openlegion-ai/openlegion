@@ -25,6 +25,7 @@ from src.agent.mesh_client import MeshClient
 from src.agent.server import create_agent_app
 from src.agent.skills import SkillRegistry
 from src.agent.workspace import WorkspaceManager
+from src.shared.trace import new_trace_id
 from src.shared.utils import setup_logging
 
 logger = setup_logging("agent.main")
@@ -197,7 +198,6 @@ def main() -> None:
             try:
                 cp = await loop.memory._run_db(loop.memory.load_task_checkpoint)
                 if cp:
-                    from src.shared.trace import new_trace_id
                     from src.shared.types import TaskAssignment
                     _resume_trace_id = new_trace_id()
                     assignment = TaskAssignment.model_validate_json(cp["assignment_json"])
