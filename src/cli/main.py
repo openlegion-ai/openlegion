@@ -746,25 +746,19 @@ def project_cmd(project_id: str, port: int, as_json: bool):
 @click.option("--agent", default=None, help="Filter by assignee")
 @click.option("--team", default=None, help="Filter by team ID")
 @click.option(
-    "--project", default=None,
-    help="[deprecated] alias for --team",
-)
-@click.option(
     "--status", default=None,
     help="Filter by status (pending/accepted/working/blocked/done/failed/cancelled)",
 )
 @click.option("--port", default=8420, type=int, help="Mesh host port")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def tasks_cmd(agent, team, project, status, port, as_json):
+def tasks_cmd(agent, team, status, port, as_json):
     """List/filter durable task records."""
     as_json = as_json or _json_mode
-    # ``--team`` wins when both are supplied; fall back to legacy ``--project``.
-    team_filter = team if team is not None else project
     qs = []
     if agent:
         qs.append(f"assignee={agent}")
-    if team_filter:
-        qs.append(f"project_id={team_filter}")
+    if team:
+        qs.append(f"project_id={team}")
     if status:
         qs.append(f"status={status}")
     suffix = ("?" + "&".join(qs)) if qs else ""

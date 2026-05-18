@@ -19,10 +19,7 @@ Layout:
 All files are plain Markdown. Human-readable, git-versionable.
 TEAM.md is shared across all team members — it defines what the team
 is building, the current priority, and hard constraints. Identity
-files (SOUL.md, INSTRUCTIONS.md, USER.md) are per-agent. PR 3 of the
-project→team rename dropped the legacy ``PROJECT.md`` write path; a
-read-only fallback in the bootstrap loader still resolves stray files
-left behind by an old migration.
+files (SOUL.md, INSTRUCTIONS.md, USER.md) are per-agent.
 """
 
 from __future__ import annotations
@@ -69,7 +66,6 @@ _MAX_SYSTEM = 6_000
 # its own markdown heading (``# ...``).
 _BOOTSTRAP_HEADERS: dict[str, str] = {
     "TEAM.md": "Fleet-Wide Context",
-    "PROJECT.md": "Fleet-Wide Context",
     "SYSTEM.md": "System Architecture",
     "INSTRUCTIONS.md": "Your Operating Procedures & Domain Knowledge",
     "SOUL.md": "Your Identity & Personality",
@@ -360,14 +356,9 @@ class WorkspaceManager:
         return "\n\n".join(parts) if parts else ""
 
     # Bootstrap files searched in order. ``TEAM.md`` / ``team.md`` are
-    # the canonical names; ``PROJECT.md`` / ``project.md`` survive as
-    # read-only fallbacks so workspaces that pre-date the migration
-    # still load their shared-context content. PR 3 dropped every
-    # *write* path to the legacy names — the read fallback is the only
-    # remaining concession.
+    # the canonical names — ``team.md`` is the dashboard-pushed variant.
     _BOOTSTRAP_FILES = (
         "TEAM.md", "team.md",
-        "PROJECT.md", "project.md",
         "SYSTEM.md", "INSTRUCTIONS.md", "SOUL.md", "USER.md", "MEMORY.md",
     )
 
@@ -417,17 +408,8 @@ class WorkspaceManager:
 
         parts: list[str] = []
 
-        # TEAM.md (canonical) / team.md (dashboard-pushed) come first;
-        # PROJECT.md / project.md remain as a read-only fallback for
-        # workspaces that pre-date the rename and haven't been touched
-        # by the startup migrator yet. Every write path was dropped in
-        # PR 3 — only the read shim remains.
-        team = (
-            self._read_file("TEAM.md")
-            or self._read_file("team.md")
-            or self._read_file("PROJECT.md")
-            or self._read_file("project.md")
-        )
+        # TEAM.md (canonical) / team.md (dashboard-pushed) come first.
+        team = self._read_file("TEAM.md") or self._read_file("team.md")
         if team and team.strip():
             parts.append(_maybe_add_header("TEAM.md", team.strip()))
         # Note: missing TEAM.md is normal for solo agents (not in a

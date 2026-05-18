@@ -716,19 +716,11 @@ def create_dashboard_router(
     # Plan limits — read once at startup; provisioner restarts engine after updating .env
     # 0 = unlimited (self-hosted / open-source) unless env var is explicitly set to 0
     _max_agents = int(os.environ.get("OPENLEGION_MAX_AGENTS", "0"))
-    # Plan-tier cap honors both OPENLEGION_MAX_TEAMS (canonical) and
-    # OPENLEGION_MAX_PROJECTS (legacy alias). Either env var being set
-    # disables team/project creation when its value is 0 — otherwise the
-    # caller could bypass the disabled state by setting only one name.
-    _max_projects = int(
-        os.environ.get(
-            "OPENLEGION_MAX_TEAMS",
-            os.environ.get("OPENLEGION_MAX_PROJECTS", "0"),
-        )
-    )
-    _projects_disabled = _max_projects == 0 and (
-        "OPENLEGION_MAX_TEAMS" in os.environ
-        or "OPENLEGION_MAX_PROJECTS" in os.environ
+    # Plan-tier cap — when OPENLEGION_MAX_TEAMS is set to 0, team/project
+    # creation is disabled entirely.
+    _max_projects = int(os.environ.get("OPENLEGION_MAX_TEAMS", "0"))
+    _projects_disabled = (
+        _max_projects == 0 and "OPENLEGION_MAX_TEAMS" in os.environ
     )
 
     # Team-lifecycle WebSocket events: callers still pass the pre-rename

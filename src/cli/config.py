@@ -665,7 +665,7 @@ def _validate_project_name(name: str) -> str:
 
 def _load_projects() -> dict[str, dict]:
     """Scan config/projects/*/metadata.yaml and return {name: metadata}."""
-    from src.shared.types import ProjectMetadata
+    from src.shared.types import TeamMetadata
 
     projects: dict[str, dict] = {}
     if not PROJECTS_DIR.exists():
@@ -675,7 +675,7 @@ def _load_projects() -> dict[str, dict]:
             dir_name = meta_file.parent.name
             with open(meta_file) as f:
                 data = yaml.safe_load(f) or {}
-            pm = ProjectMetadata(**data)
+            pm = TeamMetadata(**data)
             projects[dir_name] = pm.model_dump()
         except Exception as e:
             logger.warning("Failed to load project %s: %s", meta_file, e)
@@ -709,9 +709,9 @@ def _create_project(
 
     from datetime import datetime, timezone
 
-    from src.shared.types import ProjectMetadata
+    from src.shared.types import TeamMetadata
 
-    pm = ProjectMetadata(
+    pm = TeamMetadata(
         name=name,
         description=description,
         created_at=datetime.now(timezone.utc).isoformat(),
@@ -1599,24 +1599,20 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     # Configuration edits — edit_agent applies every field immediately
     # and emits an undo receipt (5min for soft fields, 30min for hard).
     # undo_change lets the operator self-revert within the TTL.
-    # confirm_edit is a deprecated stub kept for back-compat with in-flight
-    # LLM conversations that may still emit it (propose_edit was fully
-    # retired in #927).
-    "edit_agent", "confirm_edit", "undo_change",
+    "edit_agent", "undo_change",
     # Credential-aware model discovery — operator calls this BEFORE
     # edit_agent / create_agent so it doesn't have to memorize which
     # models are usable with the active credential setup (OAuth-allowed
     # subsets vs full API-key catalog). See Fix 2 in the seam follow-up.
     "list_available_models",
     # Creation
-    "create_agent", "create_team", "create_project",
+    "create_agent", "create_team",
     # Team membership + context
     "add_agents_to_team", "remove_agents_from_team", "update_team_context",
-    "add_agents_to_project", "remove_agents_from_project", "update_project_context",
     # PR 5 — north-star setter is no-confirmation meta-config.
-    "set_team_goal", "set_project_goal",
+    "set_team_goal",
     # Lifecycle (consolidated archive/delete)
-    "manage_team", "manage_project", "manage_agent", "manage_task",
+    "manage_team", "manage_agent", "manage_task",
     # Self-cleanup — operator can clear stale pending actions and prune
     # the audit log without waiting for TTL. ``list_pending`` lets the
     # operator find the nonce before calling cancel_pending_action.
