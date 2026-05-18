@@ -488,40 +488,63 @@ async def test_operator_wallet_still_gated(mesh_setup):
 
 
 def test_operator_still_gated_surfaces_not_in_bypass_grep(mesh_setup):
-    """Static-inspection regression: vault/credential/wallet/browser-drive
-    gates must NOT be wrapped in ``_caller_is_operator`` short-circuits.
+    """Static-inspection regression: every carve-out gate must NOT be
+    wrapped in a ``_caller_is_operator`` short-circuit.
 
-    Hitting these endpoints via the HTTP layer requires a fully-wired
-    credential vault + wallet service in the fixture, which would expand
-    the test surface beyond the trust tier. Instead, grep the source: a
-    bypass added by accident to one of these gates would show up here.
+    Hitting these endpoints via the HTTP layer requires fully-wired
+    credential vault, wallet service, and browser service fixtures, which
+    would balloon the test surface beyond the trust tier. Instead, grep
+    the source: a bypass added by accident to one of these gates would
+    show up here.
+
+    Contract this test pins (fragile, but a deliberate trip-wire):
+    - The ``_caller_is_operator(...)`` short-circuit lives within the 5
+      lines immediately above the corresponding ``permissions.can_*``
+      check. If a future refactor moves bypass to a same-line clause
+      (``if _caller_is_operator(...) or not permissions.can_use_wallet(...)``)
+      or to a helper variable assigned earlier in the function, this
+      test silently passes. Keep the bypass flush against the gate.
+    - Code comments mentioning the gate name are excluded from the scan
+      (a comment like ``# this is NOT can_use_wallet`` near an unrelated
+      bypass would otherwise false-positive).
 
     The wallet-route test above proves the principle end-to-end at the
     HTTP layer; this test pins the static-inspection invariant for the
-    other still-gated families.
+    full carve-out family.
     """
     server_path = mesh_setup["server"].__file__
     with open(server_path) as f:
         source_lines = f.readlines()
 
-    # For each gated check below, walk back ~4 lines and assert the
-    # preceding scope does NOT contain ``_caller_is_operator`` — that
-    # would be the wrapping pattern used elsewhere in this PR.
+    # Full carve-out: every gate operator MUST NOT bypass. Wallet ops are
+    # irreversible (crypto); vault management exposes cred metadata;
+    # cred-value reads expose secrets; ``can_use_browser`` and
+    # ``can_browser_action`` gate real browser drive actions (operator
+    # coordinates the fleet but doesn't drive the browser).
     gated_gates = [
         "permissions.can_use_wallet(",
         "permissions.can_use_wallet_chain(",
         "permissions.can_access_wallet_contract(",
         "permissions.can_manage_vault(",
         "permissions.can_access_credential(",
+        "permissions.can_use_browser(",
+        "permissions.can_browser_action(",
     ]
     for gate in gated_gates:
-        gate_lines = [
-            (i, line) for i, line in enumerate(source_lines)
-            if gate in line and "def " not in line and "import " not in line
-        ]
+        gate_lines = []
+        for i, line in enumerate(source_lines):
+            if gate not in line:
+                continue
+            # Skip non-call contexts: def lines, imports, and comments
+            # (a comment naming the gate near unrelated code shouldn't
+            # trip the scan).
+            stripped = line.lstrip()
+            if stripped.startswith(("def ", "import ", "#")):
+                continue
+            gate_lines.append((i, line))
         assert gate_lines, f"Could not find any callsite for {gate!r}"
         for idx, line in gate_lines:
-            # Look back 5 lines for a ``_caller_is_operator`` wrap.
+            # Walk back 5 lines for a ``_caller_is_operator`` wrap.
             preceding = "".join(source_lines[max(0, idx - 5):idx])
             assert "_caller_is_operator" not in preceding, (
                 f"Unexpected operator bypass before {gate!r} at line {idx + 1}. "
