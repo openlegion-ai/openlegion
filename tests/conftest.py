@@ -46,7 +46,11 @@ import pytest
 # env var (not an ambient ``"pytest" in sys.modules`` check) keeps the
 # bypass explicit and out of reach of any production import-graph
 # accident that drags pytest into a live mesh process.
-os.environ.setdefault("OPENLEGION_SKIP_TRUST_TIER_BOOT_GATE", "1")
+#
+# Hard assignment (not ``setdefault``) — if a CI runner has pre-set
+# the var to ``""`` or ``"0"`` the gate would fire and break the
+# whole session. The test session unconditionally needs the bypass.
+os.environ["OPENLEGION_SKIP_TRUST_TIER_BOOT_GATE"] = "1"
 
 # Time-returning helpers consumed by ``src.browser.service`` via
 # ``from src.browser.timing import X``. ``scroll_increment`` and

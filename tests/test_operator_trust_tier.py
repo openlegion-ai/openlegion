@@ -183,6 +183,40 @@ def test_enforce_mode_with_tokens_boots_clean(tmp_path, monkeypatch):
     _reload_server()
 
 
+@pytest.mark.parametrize(
+    "bypass_value",
+    ["", "0", "true", "True", "yes", " 1", "1 ", "false", "anything-else"],
+)
+def test_bypass_var_only_accepts_exact_string_one(
+    tmp_path, monkeypatch, bypass_value,
+):
+    """Strict-value check: only ``"1"`` exactly bypasses.
+
+    Regression guard against a future refactor flipping the check to a
+    truthy form (``if os.environ.get(...):``) which would silently
+    accept ``"true"`` / ``"yes"`` / whitespace and weaken the gate.
+    """
+    monkeypatch.setenv("OPENLEGION_TEAM_SCOPE_MODE", "enforce")
+    monkeypatch.setenv("OPENLEGION_SKIP_TRUST_TIER_BOOT_GATE", bypass_value)
+    server = _reload_server()
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix()
+    router = MessageRouter(perms, {})
+
+    with pytest.raises(SystemExit, match="auth_tokens"):
+        server.create_mesh_app(
+            blackboard=bb, pubsub=pubsub, router=router,
+            permissions=perms, auth_tokens={},
+        )
+
+    bb.close()
+    monkeypatch.delenv("OPENLEGION_TEAM_SCOPE_MODE", raising=False)
+    monkeypatch.delenv("OPENLEGION_SKIP_TRUST_TIER_BOOT_GATE", raising=False)
+    _reload_server()
+
+
 def test_test_fixtures_exempt_from_fail_closed(tmp_path, monkeypatch):
     """Regression guard: the conftest bypass-var must let fixtures boot.
 
