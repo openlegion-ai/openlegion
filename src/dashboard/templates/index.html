@@ -3799,12 +3799,215 @@
           </button>
         </div>
 
+        <!-- PR-B: Back link when viewing the kanban under a team filter
+             (reached via "Expand task list" from a summary card). The
+             user came from summaries — let them get back without
+             touching the URL bar. -->
+        <div x-show="homeTab === 'kanban' && workplaceTeamFilter"
+             x-cloak class="mb-3 flex items-center justify-between gap-2">
+          <button type="button"
+            @click="workplaceTeamFilter = ''; switchHomeTab('summaries'); loadWorkplaceTasks();"
+            class="text-[12px] text-gray-400 hover:text-gray-200 inline-flex items-center gap-1 transition-colors"
+            data-testid="home-back-to-summaries">
+            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+            Back to team summaries
+          </button>
+          <span class="text-[11px] text-gray-500"
+                data-testid="kanban-team-filter-label">
+            Filtered: <span class="text-gray-300" x-text="workplaceTeamFilter"></span>
+          </span>
+        </div>
+
         <!-- Empty state when orchestration v2 is disabled -->
         <template x-if="!workplaceEnabled">
           <div class="bg-gray-800/40 border border-gray-700/50 rounded-xl p-6 text-center">
             <div class="text-gray-300 text-sm font-medium mb-2">Work is disabled</div>
             <div class="text-xs text-gray-400 max-w-md mx-auto">
               Contact support to enable.
+            </div>
+          </div>
+        </template>
+
+        <!-- PR-B — Summary cards (homeTab === 'summaries'). Default
+             landing when ≥1 team exists. One card per team renders
+             the operator-composed daily summary: narrative (rendered
+             markdown), metrics row, recommendations bullet list, and
+             👍 / ➖ / 👎 rating buttons. 👎 opens an inline feedback
+             box; submission feeds the next summary's prompt. The
+             "Expand task list →" disclosure drills into the kanban
+             pre-filtered to that team — same kanban code, just scoped.
+        -->
+        <template x-if="workplaceEnabled && homeTab === 'summaries'">
+          <div class="space-y-3" data-testid="workplace-summaries-view">
+            <!-- Error banner (retry path matches the other sections) -->
+            <template x-if="workplaceErrors.summaries">
+              <div class="bg-red-900/20 border border-red-800/40 rounded-lg p-3 mb-1 flex flex-wrap items-center gap-2"
+                   role="alert" data-testid="workplace-summaries-error">
+                <span class="text-xs text-red-200 flex-1" x-text="workplaceErrors.summaries"></span>
+                <button type="button" @click="retryWorkplaceSection('summaries')"
+                  class="text-[11px] font-medium px-2.5 py-1 rounded bg-red-800/40 hover:bg-red-700/50 text-red-100 transition-colors">Retry</button>
+              </div>
+            </template>
+
+            <!-- Skeleton — three placeholder cards while loading. -->
+            <template x-if="workplaceSectionLoading.summaries && !workplaceSummaries.length && !workplaceErrors.summaries">
+              <div class="space-y-3" data-testid="workplace-summaries-skeleton">
+                <template x-for="i in 3" :key="i">
+                  <div class="bg-gray-800/40 border border-gray-700/50 rounded-lg p-4">
+                    <div class="h-3 w-1/3 bg-gray-800 rounded animate-pulse mb-3"></div>
+                    <div class="h-2.5 w-2/3 bg-gray-800 rounded animate-pulse mb-2"></div>
+                    <div class="h-2.5 w-1/2 bg-gray-800 rounded animate-pulse"></div>
+                  </div>
+                </template>
+              </div>
+            </template>
+
+            <!-- Empty state — teams exist but no summaries yet. -->
+            <template x-if="!workplaceSectionLoading.summaries && !workplaceErrors.summaries && !workplaceSummaries.length">
+              <div class="bg-gray-800/40 border border-gray-700/50 rounded-xl p-6 text-center"
+                   data-testid="workplace-summaries-empty">
+                <div class="text-gray-300 text-sm font-medium mb-2">No summaries yet</div>
+                <div class="text-xs text-gray-400 max-w-md mx-auto">
+                  Daily team summaries appear here once operator composes the
+                  first one (via heartbeat or the
+                  <code class="bg-gray-800 px-1 rounded">compose_work_summary</code>
+                  skill in chat). Ask the operator to draft one for any team.
+                </div>
+              </div>
+            </template>
+
+            <!-- One card per summary. Cards are ordered newest-first
+                 by ``generated_at`` (server-side). Unrated cards keep
+                 the 👍 / ➖ / 👎 buttons; rated ones show the outcome
+                 chip + the operator's feedback when 👎 was given. -->
+            <template x-for="s in workplaceSummaries" :key="s.id">
+              <div class="bg-gray-800/40 border border-gray-700/50 rounded-lg p-4"
+                   data-testid="workplace-summary-card"
+                   :data-summary-id="s.id">
+                <!-- Header: scope + period + relative timestamp -->
+                <div class="flex items-start justify-between gap-3 mb-2">
+                  <div class="flex-1 min-w-0">
+                    <div class="text-[11px] uppercase tracking-wide text-gray-500"
+                         x-text="s.scope_kind === 'solo' ? 'Solo agent' : 'Team'"></div>
+                    <div class="text-sm font-semibold text-gray-100 truncate"
+                         x-text="s.scope_id"></div>
+                  </div>
+                  <div class="text-[11px] text-gray-500 shrink-0"
+                       :title="new Date((s.generated_at || 0) * 1000).toLocaleString()"
+                       x-text="relativeTime(s.generated_at)"></div>
+                </div>
+
+                <!-- Narrative (markdown → safe HTML via renderSummaryMarkdown). -->
+                <div class="space-y-1.5 mb-3"
+                     data-testid="summary-narrative"
+                     x-html="renderSummaryMarkdown(s.narrative_md)"></div>
+
+                <!-- Recommendations -->
+                <template x-if="(s.recommendations || []).length">
+                  <div class="mb-3">
+                    <div class="text-[11px] uppercase tracking-wide text-gray-500 mb-1">
+                      Recommendations
+                    </div>
+                    <ul class="list-disc ml-4 space-y-0.5">
+                      <template x-for="(rec, idx) in s.recommendations" :key="idx">
+                        <li class="text-xs text-gray-300" x-text="rec"></li>
+                      </template>
+                    </ul>
+                  </div>
+                </template>
+
+                <!-- Footer: rating buttons (unrated) or outcome chip (rated). -->
+                <div class="flex items-center justify-between gap-2 pt-2 border-t border-gray-700/30">
+                  <!-- Drill-in to scoped kanban -->
+                  <button type="button"
+                    x-show="s.scope_kind === 'team'"
+                    @click="drillIntoTeamKanban(s.scope_id)"
+                    class="text-[11px] text-indigo-300 hover:text-indigo-100 inline-flex items-center gap-1 transition-colors"
+                    data-testid="summary-expand-tasks">
+                    Expand task list &rarr;
+                  </button>
+                  <div x-show="s.scope_kind !== 'team'" class="text-[11px] text-gray-500">
+                    Solo agent — no scoped kanban
+                  </div>
+
+                  <!-- Rating buttons (only when unrated) -->
+                  <template x-if="!s.rating">
+                    <div class="flex items-center gap-1"
+                         data-testid="summary-rate-buttons">
+                      <button type="button"
+                        @click.stop="rateSummary(s.id, 'accepted')"
+                        title="Accept — good summary"
+                        aria-label="Accept this summary"
+                        class="text-sm px-1.5 py-0.5 rounded hover:bg-emerald-500/20 text-emerald-300">&#x1F44D;</button>
+                      <button type="button"
+                        @click.stop="rateSummary(s.id, 'acknowledged')"
+                        title="Acknowledge — neutral"
+                        aria-label="Acknowledge this summary without judgement"
+                        class="text-sm px-1.5 py-0.5 rounded hover:bg-gray-500/20 text-gray-400">&#x2796;</button>
+                      <button type="button"
+                        @click.stop="openSummaryFeedback(s.id)"
+                        title="Rework — add feedback"
+                        aria-label="Mark this summary for rework"
+                        class="text-sm px-1.5 py-0.5 rounded hover:bg-amber-500/20 text-amber-300">&#x1F44E;</button>
+                    </div>
+                  </template>
+
+                  <!-- Outcome chip (rated) -->
+                  <template x-if="s.rating">
+                    <span class="text-[11px] px-2 py-0.5 rounded-full font-medium"
+                          :class="{
+                            'bg-emerald-500/20 text-emerald-200': s.rating === 'accepted',
+                            'bg-gray-500/20 text-gray-300': s.rating === 'acknowledged',
+                            'bg-amber-500/20 text-amber-200': s.rating === 'rework',
+                          }"
+                          data-testid="summary-outcome-chip"
+                          x-text="s.rating">
+                    </span>
+                  </template>
+                </div>
+
+                <!-- Feedback already attached (after rating) -->
+                <template x-if="s.feedback && s.rating">
+                  <div class="mt-2 text-[11px] text-gray-400 italic"
+                       data-testid="summary-feedback-display">
+                    "<span x-text="s.feedback"></span>"
+                  </div>
+                </template>
+
+                <!-- Inline feedback box (open via 👎). Submitting fires
+                     rateSummary(id, 'rework', feedback). Cancel clears
+                     the draft. Empty submit is blocked at the handler. -->
+                <template x-if="s.id in summaryFeedbackDrafts && !s.rating">
+                  <div class="mt-2 pt-2 border-t border-gray-700/30"
+                       data-testid="summary-feedback-box">
+                    <textarea
+                      x-model="summaryFeedbackDrafts[s.id]"
+                      placeholder="What should operator do differently next time?"
+                      rows="2"
+                      class="w-full text-xs bg-gray-900/60 border border-gray-700 rounded px-2 py-1 text-gray-200 placeholder:text-gray-500 focus:outline-none focus:border-amber-500/50"
+                    ></textarea>
+                    <div class="flex items-center justify-end gap-2 mt-2">
+                      <button type="button"
+                        @click="cancelSummaryFeedback(s.id)"
+                        class="text-[11px] text-gray-400 hover:text-gray-200 px-2 py-1">Cancel</button>
+                      <button type="button"
+                        :disabled="!(summaryFeedbackDrafts[s.id] || '').trim()"
+                        @click="rateSummary(s.id, 'rework', summaryFeedbackDrafts[s.id])"
+                        class="text-[11px] font-medium px-2.5 py-1 rounded bg-amber-600/40 hover:bg-amber-500/50 text-amber-100 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+                        Submit rework
+                      </button>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </template>
+
+            <!-- Footer link to kanban — for users who want the per-task
+                 view as a power-user override. -->
+            <div class="mt-2 text-center">
+              <button type="button" @click="switchHomeTab('kanban')"
+                class="text-[12px] text-gray-400 hover:text-indigo-200 transition-colors"
+                data-testid="summaries-view-kanban">View kanban &rarr;</button>
             </div>
           </div>
         </template>
@@ -4304,7 +4507,12 @@
                /home/activity; users land here only if they click in
                (back-compat with the Phase 3 default that opened the
                feed first). -->
-          <div class="mt-4 text-center">
+          <div class="mt-4 text-center flex items-center justify-center gap-4">
+            <button type="button"
+              x-show="workplaceTeams.length >= 1 || workplaceSummaries.length >= 1"
+              @click="switchHomeTab('summaries')"
+              class="text-[12px] text-gray-400 hover:text-indigo-200 transition-colors"
+              data-testid="board-view-summaries">View team summaries &rarr;</button>
             <button type="button" @click="switchHomeTab('activity')"
               class="text-[12px] text-gray-400 hover:text-indigo-200 transition-colors"
               data-testid="board-view-activity">View activity feed &rarr;</button>

@@ -419,6 +419,31 @@ function dashboard() {
     workplaceTasks: [],
     workplaceBlockers: [],
     workplaceOutputs: [],
+    // Work summaries surface (PR-B). One row per team per period. The
+    // user rates 👍/➖/👎 with optional feedback; rating + feedback
+    // flow back into operator's next composition. List is ordered
+    // newest-first by ``generated_at``.
+    workplaceSummaries: [],
+    // Per-summary inline feedback box state. Keyed by summary id;
+    // value is the current draft feedback string. The user opens the
+    // box by clicking 👎 → enters reason → submits → entry is cleared.
+    summaryFeedbackDrafts: {},
+    // Monotonic per-summary rating sequence. ``rateSummary`` bumps the
+    // value on each request, captures it locally, and the
+    // ``work_summary_rated`` WS handler ignores any event whose
+    // implicit "before" state predates the latest local in-flight
+    // request. Prevents a delayed/stale WS event from clobbering the
+    // newer POST result (codex r1 P2 — rapid rating-edit race).
+    _summaryRateSeq: {},
+    // Set of summary ids whose rating POST is currently in flight.
+    // The template uses this to disable the rating buttons + show a
+    // subtle loading affordance, preventing double-fires.
+    _summaryRateInFlight: {},
+    // ``true`` once the user has explicitly chosen a homeTab (via the
+    // sub-nav toggle). Until then, the default lands on 'summaries'
+    // when at least one team exists. Small fleets (no teams) skip
+    // straight to the kanban because the team layer would be empty.
+    homeTabUserChosen: false,
     // Memoised slice for the Activity feed's "Recently delivered"
     // header — recomputed in ``loadWorkplaceOutputs`` so the template
     // doesn't re-run the filter on every Alpine reactive read. See
@@ -442,6 +467,7 @@ function dashboard() {
       outputs: false,
       pending: false,
       feed: false,
+      summaries: false,
     },
     workplaceErrors: {
       teams: '',
@@ -450,6 +476,7 @@ function dashboard() {
       outputs: '',
       pending: '',
       feed: '',
+      summaries: '',
     },
     // Per-task artifact preview cache for the "Recently delivered"
     // section. Keyed by task_id so each row's preview is fetched once
@@ -777,7 +804,9 @@ function dashboard() {
       // the same default in ``_parsePath`` (kanban IS the default,
       // so old bookmarks survive without a redirect).
       if (this.activeTab === 'workplace') {
-        return this.homeTab === 'activity' ? '/home/activity' : '/home';
+        if (this.homeTab === 'activity') return '/home/activity';
+        if (this.homeTab === 'summaries') return '/home/summaries';
+        return '/home';
       }
       return '/';
     },
@@ -815,12 +844,27 @@ function dashboard() {
       // ``/home/tasks`` (Phase 3 kanban sub-page URL) still resolves
       // to the kanban — the kanban IS the default now, so old
       // bookmarks survive without a redirect.
+      // PR-B — explicit Work sub-routes all set ``homeTabUserChosen``
+      // so the post-load ``_applyDefaultHomeTab`` doesn't override a
+      // user's deep link. Bare ``/home`` is the only path that lets
+      // the auto-default decide between summaries and kanban based on
+      // team count.
       if (clean === 'home') { route.tab = 'workplace'; route.homeTab = 'kanban'; return route; }
       if (clean === 'home/activity' || clean.startsWith('home/activity')) {
-        route.tab = 'workplace'; route.homeTab = 'activity'; return route;
+        route.tab = 'workplace'; route.homeTab = 'activity';
+        route.homeTabUserChosen = true;
+        return route;
+      }
+      if (clean === 'home/summaries' || clean.startsWith('home/summaries')) {
+        route.tab = 'workplace'; route.homeTab = 'summaries';
+        route.homeTabUserChosen = true;
+        return route;
       }
       if (clean === 'home/tasks' || clean.startsWith('home/tasks')) {
-        route.tab = 'workplace'; route.homeTab = 'kanban'; return route;
+        // Legacy bookmark — explicit kanban request.
+        route.tab = 'workplace'; route.homeTab = 'kanban';
+        route.homeTabUserChosen = true;
+        return route;
       }
 
       const agentMatch = clean.match(/^agents\/([^/]+)(?:\/([^/]+))?$/);
@@ -889,6 +933,7 @@ function dashboard() {
             }
             if (route.tab === 'workplace') {
               this.homeTab = route.homeTab || 'kanban';
+              if (route.homeTabUserChosen) this.homeTabUserChosen = true;
             }
             this.switchTab(route.tab);
           } else if (route.tab === 'workplace') {
@@ -897,6 +942,7 @@ function dashboard() {
             if (this.homeTab !== (route.homeTab || 'kanban')) {
               this.homeTab = route.homeTab || 'kanban';
             }
+            if (route.homeTabUserChosen) this.homeTabUserChosen = true;
           } else if (route.tab === 'system') {
             if (this.systemTab !== route.systemTab) {
               if (this.systemTab === 'activity') this._stopActivityRefresh();
@@ -2669,9 +2715,17 @@ function dashboard() {
     // button returns to the previous sub-page (or out of Board
     // entirely if the user navigated in).
     switchHomeTab(tabId) {
-      const target = tabId === 'activity' ? 'activity' : 'kanban';
+      // Accept the three valid sub-nav values; coerce anything else
+      // to the kanban default so legacy call sites keep working.
+      let target = 'kanban';
+      if (tabId === 'activity') target = 'activity';
+      else if (tabId === 'summaries') target = 'summaries';
       if (this.homeTab === target) return;
       this.homeTab = target;
+      // Explicit user toggle locks in their choice — the
+      // ``_applyDefaultHomeTab`` auto-pick on the next loadWorkplace
+      // will leave it alone.
+      this.homeTabUserChosen = true;
       this._pushUrl(false);
     },
 
@@ -2782,7 +2836,12 @@ function dashboard() {
           this.loadWorkplaceOutputs(),
           this.loadWorkplaceFeed(),
           this.loadWorkplacePending(),
+          this.loadWorkplaceSummaries(),
         ]);
+        // After all loads settle, pick the default homeTab if the user
+        // hasn't yet chosen one. Teams present → summary cards as the
+        // landing surface (PR-B). Solo / single-team fleets → kanban.
+        this._applyDefaultHomeTab();
       } finally {
         this.workplaceLoading = false;
       }
@@ -2802,8 +2861,167 @@ function dashboard() {
         outputs: this.loadWorkplaceOutputs,
         pending: this.loadWorkplacePending,
         feed: this.loadWorkplaceFeed,
+        summaries: this.loadWorkplaceSummaries,
       }[section];
       if (fn) fn.call(this);
+    },
+
+    async loadWorkplaceSummaries() {
+      this.workplaceSectionLoading.summaries = true;
+      this.workplaceErrors.summaries = '';
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/workplace/summaries`);
+        if (!resp.ok) {
+          this.workplaceErrors.summaries =
+            `Couldn't load summaries (HTTP ${resp.status})`;
+          return;
+        }
+        const data = await resp.json();
+        // ``enabled: false`` means the dashboard's mesh app didn't wire
+        // the summaries store (e.g. legacy deploy). Hide the section
+        // cleanly — the kanban tab is still usable.
+        if (data.enabled === false) {
+          this.workplaceSummaries = [];
+          return;
+        }
+        this.workplaceSummaries = data.summaries || [];
+      } catch (e) {
+        this.workplaceErrors.summaries =
+          (e && e.message) ? `Couldn't load summaries: ${e.message}`
+                           : "Couldn't load summaries";
+      } finally {
+        this.workplaceSectionLoading.summaries = false;
+      }
+    },
+
+    // Pick the default homeTab on first Work-tab visit. If the user
+    // already toggled the sub-nav (``homeTabUserChosen``) or arrived
+    // via an explicit deep link (every Work sub-route except bare
+    // ``/home`` sets the flag), respect that. Otherwise: summaries
+    // exist (either via team membership or solo-agent rows) →
+    // summaries; otherwise kanban (codex r1 P2 — solo-only fleets).
+    _applyDefaultHomeTab() {
+      if (this.homeTabUserChosen) return;
+      const hasTeams = (this.workplaceTeams || []).length >= 1;
+      const hasSummaries = (this.workplaceSummaries || []).length >= 1;
+      if (hasTeams || hasSummaries) {
+        if (this.homeTab !== 'summaries') {
+          this.homeTab = 'summaries';
+        }
+      } else if (this.homeTab === 'summaries') {
+        // Edge case: route landed on summaries but neither teams nor
+        // summaries exist. Fall back to kanban so the page isn't empty.
+        this.homeTab = 'kanban';
+      }
+    },
+
+    // Submit a 👍 / ➖ rating for a summary. Optimistically updates the
+    // local row + closes any open feedback box. Bumps the per-summary
+    // rate-sequence so a delayed ``work_summary_rated`` WS event
+    // can't roll back to a stale state (codex r1 P2). Returns early
+    // if a request for the same summary is already in flight to
+    // prevent double-fires.
+    async rateSummary(summaryId, rating, feedback = '') {
+      const trimmed = (feedback || '').trim();
+      if (rating === 'rework' && !trimmed) {
+        // The template enforces this too, but defend at the handler
+        // so a stray keyboard shortcut can't post a bare 👎.
+        return;
+      }
+      if (this._summaryRateInFlight[summaryId]) return;
+      this._summaryRateInFlight[summaryId] = true;
+      const seq = (this._summaryRateSeq[summaryId] || 0) + 1;
+      this._summaryRateSeq[summaryId] = seq;
+      const body = trimmed ? { rating, feedback: trimmed } : { rating };
+      try {
+        const resp = await fetch(
+          `${window.__config.apiBase}/workplace/summaries/${encodeURIComponent(summaryId)}/rating`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Requested-With': 'XMLHttpRequest',
+            },
+            body: JSON.stringify(body),
+          },
+        );
+        if (!resp.ok) {
+          let detail = '';
+          try { detail = (await resp.json()).detail || ''; } catch (_) {}
+          this.workplaceErrors.summaries =
+            `Rating failed (HTTP ${resp.status}${detail ? ': ' + detail : ''})`;
+          return;
+        }
+        const updated = await resp.json();
+        // Optimistic state sync. The WebSocket event will arrive
+        // shortly and ratify (matching pin → clears pin) or be a
+        // stale echo of an older POST (non-matching, within pin TTL
+        // → stashed and applied after TTL).
+        const list = this.workplaceSummaries || [];
+        const row = list.find(r => r.id === summaryId);
+        if (row) {
+          // Clear any leftover stale-event timer + stash from a
+          // PREVIOUS pin cycle on the same row — without this, a
+          // deferred apply scheduled by an earlier 👍 → 👎 sequence
+          // could fire AFTER a newer rating and overwrite it with
+          // its stale stashed event (codex r5 P2 — overlapping pin
+          // race).
+          if (row._pendingExternalTimer) {
+            clearTimeout(row._pendingExternalTimer);
+            delete row._pendingExternalTimer;
+          }
+          delete row._pendingExternal;
+          row.rating = updated.rating;
+          row.feedback = updated.feedback;
+          row.rated_at = updated.rated_at;
+          row.rated_by = updated.rated_by;
+          row._lastLocalRateSeq = seq;
+          // Local-state pin: for the next ``_RATE_PIN_TTL`` seconds,
+          // the locally-confirmed rating is authoritative. The WS
+          // handler treats any incoming event that doesn't match
+          // the pin as a stale delayed echo (no server-side rev
+          // counter to compare, so client state is the anchor).
+          // Pin clears on the matching ratification event OR on
+          // TTL expiry.
+          row._localPin = {
+            rating: updated.rating,
+            feedback: updated.feedback || null,
+            ts: Date.now() / 1000,
+          };
+        }
+        delete this.summaryFeedbackDrafts[summaryId];
+      } catch (e) {
+        this.workplaceErrors.summaries =
+          (e && e.message) ? `Rating failed: ${e.message}` : 'Rating failed';
+      } finally {
+        delete this._summaryRateInFlight[summaryId];
+      }
+    },
+
+    openSummaryFeedback(summaryId) {
+      // Initialise the draft so the textarea binding has a key. Idempotent.
+      if (!(summaryId in this.summaryFeedbackDrafts)) {
+        this.summaryFeedbackDrafts[summaryId] = '';
+      }
+    },
+
+    cancelSummaryFeedback(summaryId) {
+      delete this.summaryFeedbackDrafts[summaryId];
+    },
+
+    // Drill from a summary card into the scoped kanban for that team.
+    // Clears ``workplaceTasks`` BEFORE the sub-nav flip so a stale
+    // unfiltered render can't briefly leak cross-team tasks while
+    // the filtered fetch resolves (codex r1 P2). The skeleton
+    // loader fills the gap.
+    drillIntoTeamKanban(teamName) {
+      this.workplaceTeamFilter = teamName || '';
+      this.workplaceTasks = [];
+      this.workplaceSectionLoading.tasks = true;
+      this.homeTab = 'kanban';
+      this.homeTabUserChosen = true;
+      this.loadWorkplaceTasks();
+      this._pushUrl(false);
     },
 
     async loadWorkplaceTeams() {
@@ -4282,6 +4500,101 @@ function dashboard() {
           this.drillInData.task.outcome = data.outcome;
           this.drillInData.task.feedback_text = data.feedback || null;
         }
+      } else if (evt.type === 'work_summary_created') {
+        // New summary card landed. Prepend so newest-first ordering
+        // is preserved without a full reload. Dedupe by id (the cron
+        // can fire concurrently with a manual compose).
+        if (data.summary_id && !(this.workplaceSummaries || []).find(
+              s => s.id === data.summary_id)) {
+          // Lightweight stub — the full record is one fetch away if the
+          // user clicks. Avoids racing the dashboard with the mesh's
+          // store-write completion when the WS arrives first.
+          this.loadWorkplaceSummaries();
+        }
+      } else if (evt.type === 'work_summary_rated') {
+        // Reflect the rating live on the summary card UNLESS the
+        // local user just posted a fresher rating that hasn't been
+        // ratified yet. ``_lastLocalRateSeq`` is the monotonic
+        // counter stamped by ``rateSummary`` after a successful
+        // POST; while a newer request is in flight, ignore the WS
+        // event so a delayed echo of the prior rating can't roll
+        // back our state (codex r1 P2 — rapid rating-edit race).
+        const row = (this.workplaceSummaries || []).find(
+          s => s.id === data.summary_id);
+        if (row) {
+          // If a POST is currently in flight, skip — the response
+          // handler will write the canonical state.
+          if (this._summaryRateInFlight[data.summary_id]) return;
+          // Local-state pin: a recent local POST anchors the row's
+          // rating for ``_RATE_PIN_TTL`` seconds. Within that window,
+          // WS events that DON'T match the pin are EITHER stale
+          // delayed echoes of an older POST (should drop) OR
+          // legitimate external mutations from somewhere else
+          // (operator re-rating via chat, etc.). Without a server-
+          // side revision counter we can't tell them apart, so we
+          // stash the latest non-matching event and apply it after
+          // the pin's TTL elapses. The matching ratification clears
+          // both the pin and any stashed pending event.
+          const _RATE_PIN_TTL_S = 10;
+          const pin = row._localPin;
+          if (pin) {
+            const pinAge = Date.now() / 1000 - pin.ts;
+            if (pinAge < _RATE_PIN_TTL_S) {
+              const eventMatchesPin = (
+                data.rating === pin.rating
+                && (data.feedback || null) === pin.feedback
+              );
+              if (eventMatchesPin) {
+                // Ratification of our local POST — clear both the
+                // pin and any stashed external event (the canonical
+                // state is the pin's anchor).
+                delete row._localPin;
+                if (row._pendingExternalTimer) {
+                  clearTimeout(row._pendingExternalTimer);
+                  delete row._pendingExternalTimer;
+                }
+                delete row._pendingExternal;
+                return;
+              }
+              // Non-matching event while pin is fresh. Stash the
+              // latest non-matching event; schedule a deferred
+              // apply for when the pin's TTL elapses. If a newer
+              // non-matching event arrives, it replaces the stash
+              // (the timer keeps the original deadline so we don't
+              // extend the pin indefinitely).
+              row._pendingExternal = data;
+              if (!row._pendingExternalTimer) {
+                const ttlRemainingMs = Math.max(
+                  100, (pin.ts + _RATE_PIN_TTL_S - Date.now() / 1000) * 1000 + 50,
+                );
+                row._pendingExternalTimer = setTimeout(() => {
+                  const ev = row._pendingExternal;
+                  if (ev) {
+                    row.rating = ev.rating;
+                    row.feedback = ev.feedback || row.feedback || null;
+                    row.rated_at = ev.ts || row.rated_at;
+                    row.rated_by = ev.actor || row.rated_by;
+                  }
+                  delete row._pendingExternal;
+                  delete row._pendingExternalTimer;
+                  delete row._localPin;
+                }, ttlRemainingMs);
+              }
+              return;
+            }
+            // TTL expired — clear pin and fall through to apply.
+            delete row._localPin;
+            if (row._pendingExternalTimer) {
+              clearTimeout(row._pendingExternalTimer);
+              delete row._pendingExternalTimer;
+            }
+            delete row._pendingExternal;
+          }
+          row.rating = data.rating;
+          row.feedback = data.feedback || row.feedback || null;
+          row.rated_at = data.ts || row.rated_at;
+          row.rated_by = data.actor || row.rated_by;
+        }
       } else if (evt.type === 'pending_action_created') {
         if (!this.workplacePending.find(p => p.nonce === data.nonce)) {
           this.workplacePending.push({
@@ -4612,7 +4925,11 @@ function dashboard() {
       if (evt.type === 'task_created' || evt.type === 'task_status_changed' ||
           evt.type === 'task_outcome' ||
           evt.type === 'pending_action_created' || evt.type === 'pending_action_resolved' ||
-          evt.type === 'pending_action_expired') {
+          evt.type === 'pending_action_expired' ||
+          // PR-B — work summary lifecycle on the Work tab. Without
+          // these entries the handler arms below stay dead and the
+          // summaries view doesn't update live.
+          evt.type === 'work_summary_created' || evt.type === 'work_summary_rated') {
         this.handleWorkplaceEvent(evt);
       }
 
@@ -10350,6 +10667,56 @@ function dashboard() {
         rejected: 'had work marked rejected',
       };
       return map[status] || `moved a task to ${status.replace(/_/g, ' ')}`;
+    },
+
+    // Tiny markdown renderer for summary narratives. Handles the
+    // shapes ``compose_work_summary`` emits: ``## H2``, ``**bold**``,
+    // ``- bullet``, paragraph breaks. HTML-escapes input first so a
+    // hostile narrative (or one that quoted user text) can't inject.
+    // Bigger surfaces (chat history, etc.) use a real renderer; this
+    // is the right grain for the summary cards.
+    renderSummaryMarkdown(md) {
+      if (!md) return '';
+      const esc = (s) => s
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+      const lines = esc(String(md)).split(/\r?\n/);
+      const out = [];
+      let inList = false;
+      const closeList = () => { if (inList) { out.push('</ul>'); inList = false; } };
+      for (const raw of lines) {
+        const line = raw.trimEnd();
+        if (!line.trim()) { closeList(); continue; }
+        if (line.startsWith('## ')) {
+          closeList();
+          out.push(`<h3 class="font-semibold text-gray-100 text-sm">${line.slice(3)}</h3>`);
+          continue;
+        }
+        if (line.startsWith('- ')) {
+          if (!inList) { out.push('<ul class="list-disc ml-4 space-y-0.5">'); inList = true; }
+          const item = line.slice(2).replace(/\*\*(.+?)\*\*/g,
+            '<strong class="text-gray-100">$1</strong>');
+          out.push(`<li class="text-xs text-gray-300">${item}</li>`);
+          continue;
+        }
+        closeList();
+        const para = line.replace(/\*\*(.+?)\*\*/g,
+          '<strong class="text-gray-100">$1</strong>');
+        out.push(`<p class="text-xs text-gray-300">${para}</p>`);
+      }
+      closeList();
+      return out.join('');
+    },
+
+    // Human-readable relative timestamp for summary cards. ``ts`` is
+    // a unix seconds float (matches ``generated_at`` / ``rated_at``).
+    relativeTime(ts) {
+      if (!ts) return '';
+      const seconds = Math.max(0, Date.now() / 1000 - Number(ts));
+      if (seconds < 60) return 'just now';
+      if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
+      if (seconds < 86400) return `${Math.round(seconds / 3600)}h ago`;
+      return `${Math.round(seconds / 86400)}d ago`;
     },
 
     // Pretty-print an agent id for the activity feed. Operator gets

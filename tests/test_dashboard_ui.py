@@ -882,10 +882,13 @@ class TestHomeRouting:
     """
 
     def test_build_path_emits_home_route(self, app_js: str):
-        # ``_buildPath`` returns ``/home`` (kanban default) and
-        # ``/home/activity`` for the workplace tab depending on
-        # ``homeTab``.
-        assert "this.homeTab === 'activity' ? '/home/activity' : '/home'" in app_js
+        # ``_buildPath`` emits the three workplace sub-routes based on
+        # ``homeTab``: ``/home`` (kanban default), ``/home/activity``,
+        # ``/home/summaries`` (PR-B). Updated from the legacy ternary
+        # to an if-chain when the summaries arm was added.
+        assert "if (this.homeTab === 'activity') return '/home/activity'" in app_js
+        assert "if (this.homeTab === 'summaries') return '/home/summaries'" in app_js
+        assert "return '/home'" in app_js
 
     def test_parse_path_recognizes_home_routes(self, app_js: str):
         # ``_parsePath`` accepts the new routes and maps them to the
