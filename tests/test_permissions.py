@@ -878,7 +878,7 @@ class TestControlPlanePermissions:
 
     The six bits split off ``can_spawn``:
       * ``can_manage_fleet``           — create/register named agents
-      * ``can_manage_projects``        — create/archive projects, membership
+      * ``can_manage_teams``           — create/archive teams, membership
       * ``can_edit_agent_config``      — propose/confirm config edits
       * ``can_view_fleet_metrics``     — fleet-wide metrics endpoints
       * ``can_route_tasks``            — durable task records (Task 6)
@@ -920,6 +920,13 @@ class TestControlPlanePermissions:
         op = on_disk["permissions"]["operator"]
         for field in self._CONTROL_PLANE_FIELDS:
             assert op.get(field) is True, field
+        # Legacy can_manage_projects must NOT be persisted into new
+        # configs — Pydantic still mirrors it as a read-time alias for
+        # on-disk back-compat, but new writes use the canonical name.
+        assert "can_manage_projects" not in op, (
+            "operator permissions.json should not carry the legacy "
+            "can_manage_projects key on fresh setup"
+        )
 
     def test_can_manage_fleet_method(self, tmp_path):
         m = self._matrix(tmp_path, {
