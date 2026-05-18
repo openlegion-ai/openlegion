@@ -4172,6 +4172,31 @@ def create_mesh_app(
             _create_project(name, description=description, members=members)
         except ValueError as e:
             raise HTTPException(400, str(e))
+        # Real-time cron lifecycle: schedule the daily work-summary
+        # fire on team creation so the operator doesn't have to wait
+        # for the next mesh restart for the reconcile to pick it up.
+        # Best-effort — a missing cron_scheduler or a failure here
+        # mustn't fail the team-create response.
+        #
+        # Reads the persisted metadata back (``_create_project`` wrote
+        # the file with default ``settings={}``; the read is for
+        # forward-compatibility with a future create endpoint that
+        # accepts initial settings, and to keep behavior consistent
+        # with the unarchive path which also reads metadata).
+        if cron_scheduler is not None:
+            try:
+                persisted = _load_projects().get(name) or {}
+                _custom_schedule = (
+                    (persisted.get("settings") or {}).get("summary_schedule")
+                )
+                cron_scheduler.ensure_summary_job(
+                    scope_kind="team", scope_id=name,
+                    schedule=_custom_schedule,
+                )
+            except Exception as e:
+                logger.warning(
+                    "ensure_summary_job on team create %s failed: %s", name, e,
+                )
         _emit_team_event(
             event_bus, "project_created", agent="operator", name=name,
             extra={"description": description, "members": list(members)},
@@ -4222,6 +4247,22 @@ def create_mesh_app(
             _delete_project(team_name)
         except ValueError as e:
             raise HTTPException(404, str(e))
+        # Real-time cron lifecycle: drop the daily work-summary cron
+        # for the deleted team. This is the mesh DIRECT-delete path
+        # (distinct from the propose/confirm flow, which also cleans
+        # up). Without this the team is gone but its cron keeps
+        # firing daily empty-state summaries until the next mesh
+        # restart catches the orphan (codex r3 P2).
+        if cron_scheduler is not None:
+            try:
+                existing = cron_scheduler.find_summary_job("team", team_name)
+                if existing is not None:
+                    cron_scheduler.remove_job(existing.id)
+            except Exception as e:
+                logger.warning(
+                    "remove summary cron on mesh team-delete %s failed: %s",
+                    team_name, e,
+                )
         _emit_team_event(event_bus, "project_deleted", agent="operator", name=team_name)
         return {
             "deleted": True, "name": team_name,
@@ -4882,6 +4923,13 @@ def create_mesh_app(
             raise HTTPException(400, "metrics must be a JSON object")
         if not isinstance(recommendations, list):
             raise HTTPException(400, "recommendations must be a JSON array")
+        from src.host.summaries import MAX_NARRATIVE_CHARS
+        if len(narrative_md) > MAX_NARRATIVE_CHARS:
+            raise HTTPException(
+                413,
+                f"narrative_md exceeds {MAX_NARRATIVE_CHARS} chars "
+                f"(got {len(narrative_md)})",
+            )
         try:
             from src.host.summaries import InvalidScope
             row = summaries_store.create(
@@ -5296,6 +5344,20 @@ def create_mesh_app(
             _archive_project(team_name)
         except ValueError as e:
             raise HTTPException(404, str(e))
+        # Real-time cron lifecycle (codex r1 P2): remove the daily
+        # work-summary cron so an archived team doesn't keep firing
+        # empty-state summaries until the next mesh restart. Operator
+        # explicitly archived — they don't want activity here.
+        if cron_scheduler is not None:
+            try:
+                existing = cron_scheduler.find_summary_job("team", team_name)
+                if existing is not None:
+                    cron_scheduler.remove_job(existing.id)
+            except Exception as e:
+                logger.warning(
+                    "remove summary cron on archive %s failed: %s",
+                    team_name, e,
+                )
         _emit_team_event(event_bus, "project_archived", agent="operator", name=team_name)
         return {
             "archived": True, "project": team_name, "team": team_name,
@@ -5315,6 +5377,27 @@ def create_mesh_app(
             _unarchive_project(team_name)
         except ValueError as e:
             raise HTTPException(404, str(e))
+        # Re-attach the daily work-summary cron when a team is
+        # unarchived. Symmetric to the archive path above. Read the
+        # team's persisted ``settings.summary_schedule`` so a custom
+        # cadence configured before archive is preserved on unarchive
+        # — without this lookup, archive → unarchive silently reset
+        # the schedule to default (codex r2 P2).
+        if cron_scheduler is not None:
+            try:
+                team_meta = _load_projects().get(team_name) or {}
+                _custom_schedule = (
+                    (team_meta.get("settings") or {}).get("summary_schedule")
+                )
+                cron_scheduler.ensure_summary_job(
+                    scope_kind="team", scope_id=team_name,
+                    schedule=_custom_schedule,
+                )
+            except Exception as e:
+                logger.warning(
+                    "ensure_summary_job on unarchive %s failed: %s",
+                    team_name, e,
+                )
         _emit_team_event(event_bus, "project_unarchived", agent="operator", name=team_name)
         return {
             "archived": False, "project": team_name, "team": team_name,
@@ -5547,6 +5630,21 @@ def create_mesh_app(
                 _delete_project(target_id)
             except ValueError as e:
                 raise HTTPException(404, str(e))
+            # Real-time cron lifecycle (codex r1 P2): delete the
+            # daily work-summary cron when the team itself is
+            # deleted. Symmetric to the archive path; archive already
+            # removed it but a delete-without-archive would leak the
+            # cron otherwise.
+            if cron_scheduler is not None:
+                try:
+                    existing = cron_scheduler.find_summary_job("team", target_id)
+                    if existing is not None:
+                        cron_scheduler.remove_job(existing.id)
+                except Exception as e:
+                    logger.warning(
+                        "remove summary cron on delete %s failed: %s",
+                        target_id, e,
+                    )
             # New audit rows use ``delete_team``; historical
             # ``delete_project`` rows in archived audit data are
             # untouched and still queryable (they retain the legacy

@@ -2867,16 +2867,35 @@ function dashboard() {
     },
 
     async loadWorkplaceSummaries() {
+      // Monotonic serial. ``loadWorkplaceSummaries`` can be called
+      // concurrently (initial load + WS-debounce + manual retry); the
+      // older fetch's resolve must not clobber a newer fetch's data.
+      // We capture the serial at start and bail out at every write
+      // point if a newer fetch has been kicked off since.
+      const serial = (this._summariesFetchSerial || 0) + 1;
+      this._summariesFetchSerial = serial;
       this.workplaceSectionLoading.summaries = true;
       this.workplaceErrors.summaries = '';
       try {
         const resp = await fetch(`${window.__config.apiBase}/workplace/summaries`);
+        if (serial !== this._summariesFetchSerial) return;  // superseded
         if (!resp.ok) {
           this.workplaceErrors.summaries =
             `Couldn't load summaries (HTTP ${resp.status})`;
           return;
         }
         const data = await resp.json();
+        if (serial !== this._summariesFetchSerial) return;  // superseded
+        // Before replacing the list, cancel any pending deferred-apply
+        // timers + pins on the old row objects. Without this cleanup
+        // those setTimeout callbacks fire on rows no longer in the
+        // displayed list (orphan mutations, wasted work). Each row's
+        // `_pendingExternalTimer` is cleared by id-keyed dedupe.
+        for (const row of (this.workplaceSummaries || [])) {
+          if (row && row._pendingExternalTimer) {
+            clearTimeout(row._pendingExternalTimer);
+          }
+        }
         // ``enabled: false`` means the dashboard's mesh app didn't wire
         // the summaries store (e.g. legacy deploy). Hide the section
         // cleanly — the kanban tab is still usable.
@@ -2886,11 +2905,17 @@ function dashboard() {
         }
         this.workplaceSummaries = data.summaries || [];
       } catch (e) {
+        if (serial !== this._summariesFetchSerial) return;  // superseded
         this.workplaceErrors.summaries =
           (e && e.message) ? `Couldn't load summaries: ${e.message}`
                            : "Couldn't load summaries";
       } finally {
-        this.workplaceSectionLoading.summaries = false;
+        // Only clear the loading flag for the LATEST serial — earlier
+        // fetches' finally blocks must not flip the spinner off while
+        // a newer fetch is still in-flight.
+        if (serial === this._summariesFetchSerial) {
+          this.workplaceSectionLoading.summaries = false;
+        }
       }
     },
 
@@ -4501,15 +4526,22 @@ function dashboard() {
           this.drillInData.task.feedback_text = data.feedback || null;
         }
       } else if (evt.type === 'work_summary_created') {
-        // New summary card landed. Prepend so newest-first ordering
-        // is preserved without a full reload. Dedupe by id (the cron
-        // can fire concurrently with a manual compose).
+        // New summary card landed. Re-fetch the list (the full record
+        // is one fetch away; avoids racing the store-write completion
+        // when the WS event arrives first). Dedupe by id.
+        // Debounced to 250ms so the daily cron firing across N teams
+        // in the same second triggers ONE re-fetch, not N. Without
+        // this guard a 30-team fleet would N-storm the dashboard's
+        // /api/workplace/summaries route at every cron tick.
         if (data.summary_id && !(this.workplaceSummaries || []).find(
               s => s.id === data.summary_id)) {
-          // Lightweight stub — the full record is one fetch away if the
-          // user clicks. Avoids racing the dashboard with the mesh's
-          // store-write completion when the WS arrives first.
-          this.loadWorkplaceSummaries();
+          if (this._summariesRefetchDebounce) {
+            clearTimeout(this._summariesRefetchDebounce);
+          }
+          this._summariesRefetchDebounce = setTimeout(() => {
+            this._summariesRefetchDebounce = null;
+            this.loadWorkplaceSummaries();
+          }, 250);
         }
       } else if (evt.type === 'work_summary_rated') {
         // Reflect the rating live on the summary card UNLESS the

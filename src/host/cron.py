@@ -254,6 +254,62 @@ class CronScheduler:
             message=f"Heartbeat check for {agent}", heartbeat=True,
         )
 
+    # Default daily-summary schedule. 9am cron format. Per-team override
+    # via team metadata ``summary_schedule``. Operator can also update
+    # via ``PUT /mesh/cron/{id}`` once the job exists.
+    DEFAULT_SUMMARY_SCHEDULE = "0 9 * * *"
+
+    def find_summary_job(
+        self, scope_kind: str, scope_id: str,
+    ) -> CronJob | None:
+        """Find existing daily-summary cron job for a given scope.
+
+        Matches on ``tool_name == "compose_work_summary"`` plus the
+        ``scope_kind`` / ``scope_id`` pair inside the job's
+        ``tool_params`` JSON. Returns None when no match.
+        """
+        for job in self.jobs.values():
+            if job.tool_name != "compose_work_summary":
+                continue
+            try:
+                params = json.loads(job.tool_params or "{}")
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if (params.get("scope_kind") == scope_kind
+                    and params.get("scope_id") == scope_id):
+                return job
+        return None
+
+    def ensure_summary_job(
+        self,
+        *,
+        scope_kind: str,
+        scope_id: str,
+        schedule: str | None = None,
+        operator_id: str = "operator",
+    ) -> CronJob:
+        """Idempotently ensure a daily ``compose_work_summary`` cron
+        job exists for a given scope.
+
+        Fires the tool directly (``tool_name="compose_work_summary"``)
+        so each tick is a deterministic skill invocation — no LLM call
+        per fire. Per-team schedule customization arrives via the
+        ``schedule`` arg (sourced from team metadata at boot) or via
+        the existing ``PUT /mesh/cron/{id}`` operator endpoint.
+        """
+        existing = self.find_summary_job(scope_kind, scope_id)
+        if existing:
+            return existing
+        return self.add_job(
+            agent=operator_id,
+            schedule=schedule or self.DEFAULT_SUMMARY_SCHEDULE,
+            tool_name="compose_work_summary",
+            tool_params=json.dumps({
+                "scope_kind": scope_kind,
+                "scope_id": scope_id,
+            }),
+        )
+
     _UPDATABLE_FIELDS = frozenset({
         "schedule", "message", "enabled", "suppress_empty",
         "tool_name", "tool_params",
