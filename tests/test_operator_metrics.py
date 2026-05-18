@@ -32,10 +32,9 @@ def _make_perms(*agent_ids: str) -> PermissionMatrix:
 @pytest.fixture
 def metrics_app(tmp_path, monkeypatch):
     """Build a mesh app with health monitor, cost tracker, and lane manager."""
-    # PR-J' — point tasks_v2 at a per-test sqlite file so the stale /
-    # outcome / failure counts surface in ``system_metrics`` without
-    # touching ``data/tasks.db`` on the developer's machine.
-    monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "1")
+    # PR-J' — point the tasks store at a per-test sqlite file so the
+    # stale / outcome / failure counts surface in ``system_metrics``
+    # without touching ``data/tasks.db`` on the developer's machine.
     monkeypatch.setenv(
         "OPENLEGION_ORCHESTRATION_TASKS_DB", str(tmp_path / "tasks.db"),
     )
@@ -98,7 +97,6 @@ def metrics_app(tmp_path, monkeypatch):
     bb.close()
     # Reload the module so the env var change doesn't leak into other
     # tests that run later in the session.
-    monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_V2", raising=False)
     monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)
     importlib.reload(server_module)
 

@@ -1,21 +1,19 @@
 """Coordination tools: structured multi-agent handoffs and status.
 
-Higher-level wrappers over the blackboard that encode the standard
-coordination protocol.  Agents use these instead of raw blackboard
-operations for inter-agent work handoffs.
-
-Task 6 introduces a durable ``tasks`` SQLite table behind the
-``OPENLEGION_ORCHESTRATION_TASKS_V2`` flag. When the mesh advertises
-that the flag is on (probed once via ``mesh_client.orchestration_v2_enabled``),
-each tool routes through the new ``/mesh/tasks*`` endpoints. When off,
-the legacy blackboard path runs unchanged.
+Higher-level wrappers over the durable ``tasks`` SQLite table that
+encode the standard coordination protocol. Agents use these instead
+of raw blackboard / task-store operations for inter-agent work
+handoffs. The 4 tools (``hand_off`` / ``check_inbox`` /
+``update_status`` / ``complete_task``) all route through the mesh's
+``/mesh/tasks*`` endpoints — the legacy blackboard-dict path was
+sunset after the v2 rollout (PR #835) and removed entirely once no
+production fleet was running with the kill-switch off.
 """
 
 from __future__ import annotations
 
 import json
 import re
-import time
 
 from src.agent.skills import skill
 from src.shared.redaction import redact_text_with_urls
@@ -28,16 +26,10 @@ from src.shared.utils import generate_id, sanitize_for_prompt, setup_logging
 
 logger = setup_logging("agent.builtins.coordination_tool")
 
-# Keys follow the standard protocol sections:
-#   status/{agent_id}         — current state
-#   output/{agent_id}/{name}  — completed work products
-#   tasks/{agent_id}/{id}     — inbox (pending work)
-
-_STANDALONE_ERROR = (
-    "Not available — this agent is not assigned to a project. "
-    "Use memory_save/memory_search for private storage."
-)
-
+# Inbox / status / completion live in the durable tasks table. Handoff
+# artifacts (the optional ``data`` payload) still go to the blackboard
+# under ``output/{agent_id}/{handoff_id}`` — the task record carries
+# only the artifact_ref, keeping the SQLite table small.
 _HANDOFF_TTL = 86_400  # 24 hours — safety net for unprocessed handoffs
 
 # Mirrors ``host/orchestration.TERMINAL_STATUSES`` — the set of statuses
@@ -159,21 +151,24 @@ async def hand_off(
     if not re.fullmatch(AGENT_ID_RE_PATTERN, to):
         return {"error": f"Invalid agent ID: '{to}'"}
 
-    # Task 6: route through the durable tasks table when the mesh
-    # advertises v2. Probe is cached per process. On any error we fall
-    # through to the legacy blackboard path so existing fleets keep
-    # working until the flag is flipped.
-    try:
-        v2_enabled = await mesh_client.orchestration_v2_enabled()
-    except Exception:
-        v2_enabled = False
-    if v2_enabled:
-        return await _hand_off_v2(to, summary, data, mesh_client=mesh_client)
+    summary = sanitize_for_prompt(summary)
+    # The handoff ``summary`` carries both the headline (becomes the
+    # task title) and the full instruction (becomes the description).
+    # Agents historically dumped multi-sentence instructions into
+    # ``summary`` — that produced wall-of-text titles in the dashboard.
+    # ``Tasks.create`` applies the same policy as a backstop, but we
+    # mirror it here so the title we surface in result envelopes, wake
+    # messages, and downstream logs is already short.
+    if len(summary) > LONG_TITLE_THRESHOLD:
+        title, description = normalize_title_and_description(summary, None)
+    else:
+        title = summary
+        description = summary
+    artifact_ref: str | None = None
 
-    # Resolve target agent's project for cross-project coordination, and
-    # detect whether it advertises a fleet-global scope (operator-style).
+    # Validate target exists in the registry — fail closed if the roster
+    # is unreachable and we can't resolve the target's project scope.
     target_project: str | None = None
-    target_is_global = False
     try:
         registry = await mesh_client.list_agents()
         if to not in registry:
@@ -182,57 +177,45 @@ async def hand_off(
         target_info = registry.get(to, {})
         if isinstance(target_info, dict):
             target_project = target_info.get("project")
-            target_is_global = target_info.get("scope") == "global"
     except Exception as e:
-        # Standalone senders MUST resolve the target project to write to
-        # the correct namespace.  Fail closed rather than writing to the
-        # global scope where the recipient will never find the task.
+        # Standalone senders need to resolve target project to write
+        # the task into the correct scope.
         if not mesh_client.team_name:
             return {"error": f"Cannot hand off: fleet roster unavailable ({e})"}
         logger.debug("Fleet roster check failed, proceeding with validated ID: %s", e)
 
-    # Determine which project scope to use for blackboard writes.
-    # Fleet-global agents (operator) need their inbox in a global namespace
-    # because they have no project scope to read from. We trigger on the
-    # literal reserved name AND on the registry hint, so the path stays
-    # correct even when the registry roster lookup fails (no hint available)
-    # and forward-compatible if other global agents are added later.
-    write_project: str | None = None  # None = use sender's default scope
-    write_global = False
-    if to == "operator" or target_is_global:
-        write_global = True
-    elif target_project and target_project != mesh_client.team_name:
+    # Pick the project scope:
+    #   - operator handoffs: project=None (fleet-global)
+    #   - cross-project worker handoffs: target's project
+    #   - same-project handoffs: caller's project
+    if to == "operator":
+        write_project = None
+    elif target_project:
         write_project = target_project
+    else:
+        write_project = mesh_client.team_name
 
-    handoff_id = generate_id("ho")
-    from_agent = mesh_client.agent_id
-    summary = sanitize_for_prompt(summary)
-    output_key = None
-
-    # Propagate origin so the target agent's lane can auto-notify the
-    # originating channel user when the handed-off task completes.
-    from src.shared.trace import current_origin as _current_origin
-    origin = _current_origin.get()
-
-    # Write output data if provided
     if data and data.strip():
+        # Optional: stash the payload under an artifact_ref the
+        # recipient can fetch later. We reuse the blackboard for the
+        # actual bytes — the task carries only the reference. This
+        # keeps the table small and matches the pre-existing
+        # output/{from}/{handoff_id} convention.
         try:
             parsed_data = json.loads(data)
         except json.JSONDecodeError:
             parsed_data = {"text": data}
-        output_key = (
-            f"global/output/{from_agent}/{handoff_id}"
-            if write_global
-            else f"output/{from_agent}/{handoff_id}"
-        )
+        artifact_ref = f"output/{mesh_client.agent_id}/{generate_id('ho')}"
         try:
             await mesh_client.write_blackboard(
-                output_key, parsed_data, ttl=_HANDOFF_TTL,
-                project=write_project, global_scope=write_global,
+                artifact_ref, parsed_data, ttl=_HANDOFF_TTL,
+                project=write_project,
             )
         except Exception as e:
-            # Bug H (legacy path mirror): see _hand_off_v2 — the bare
-            # error envelope lets LLMs report success silently.
+            # Bug H: a bare ``{"error": ...}`` envelope lets agents
+            # report "done" to the user while no handoff data ever
+            # reached the peer. Directive shape with explicit MUST NOT
+            # report success + DO NOT mark complete in the recovery hint.
             redacted = redact_text_with_urls(str(e))[:200]
             logger.warning(
                 "hand_off output write for %s failed: %s", to, redacted,
@@ -261,41 +244,29 @@ async def hand_off(
                 ),
             }
 
-    # Create task in recipient's inbox
-    task_record = {
-        "from": from_agent,
-        "summary": summary,
-        "status": "pending",
-        "ts": time.time(),
-    }
-    if output_key:
-        task_record["output_key"] = output_key
-    if origin:
-        # Persist as plain dict so the blackboard JSON write doesn't
-        # choke on a Pydantic instance and downstream readers see the
-        # same shape they always have.
-        task_record["origin"] = origin.model_dump()
+    # Read the origin contextvar once so both create_task and wake_agent
+    # propagate the same provenance.
+    from src.shared.trace import current_origin as _current_origin
+    origin = _current_origin.get()
 
-    task_key = (
-        f"global/tasks/{to}/{handoff_id}"
-        if write_global
-        else f"tasks/{to}/{handoff_id}"
-    )
     try:
-        await mesh_client.write_blackboard(
-            task_key, task_record, ttl=_HANDOFF_TTL,
-            project=write_project, global_scope=write_global,
+        record = await mesh_client.create_task(
+            assignee=to,
+            title=title or "(handoff)",
+            description=description,
+            project=write_project,
+            priority=0,
+            artifact_refs=[artifact_ref] if artifact_ref else None,
+            origin=origin,
         )
     except Exception as e:
-        # Bug H (legacy path mirror): see _hand_off_v2. The legacy
-        # storage layer is the blackboard, so the failure surface is
-        # ``write_blackboard`` rather than ``create_task`` — but the
-        # LLM-silencing problem is identical. Reuse the same envelope.
-        # Existing orphaned-output log preserved for ops visibility.
-        if output_key:
-            logger.warning("Task write failed, orphaned output at %s", output_key)
+        # Bug H: operator hit a live case where seo-strategist called
+        # hand_off, create_task raised, and the agent still reported
+        # "Brief completed" — recipient never received the task.
+        # ``redact_text_with_urls`` strips URL credentials before the
+        # exception string reaches the LLM context.
         redacted = redact_text_with_urls(str(e))[:200]
-        logger.warning("hand_off task write for %s failed: %s", to, redacted)
+        logger.warning("create_task for %s failed: %s", to, redacted)
         return {
             "handed_off": False,
             "task_queued": False,
@@ -318,64 +289,59 @@ async def hand_off(
             ),
         }
 
-    # Wake the target agent so it processes the task immediately
-    # instead of waiting for its next heartbeat.  Pass origin so
-    # the mesh lane worker can auto-notify the originating user.
-    # Bug 2 fix: when the wake fails the contract used to claim
-    # ``handed_off: true`` AND ``wake_failed: true`` — LLMs read
-    # ``handed_off`` and reported success to the user while the recipient
-    # never woke. We now flip ``handed_off: false`` and add
-    # ``task_queued: true`` so the LLM sees a partial outcome and can
-    # decide whether to retry or wait for the recipient's heartbeat.
+    task_id = record.get("id", "")
+
+    # Wake the target so they pick up the task immediately. The task
+    # is queued in SQLite either way; wake failures surface via
+    # ``handed_off=False`` + ``task_queued=True`` so the caller can
+    # decide whether to retry the wake or wait for the recipient's
+    # next cron. Forward task_id so the recipient's lane → /chat → loop
+    # chain auto-closes the task on completion (Constraint #16).
     wake_error: str | None = None
     try:
         await mesh_client.wake_agent(
-            to, f"New task from {from_agent}: {summary[:200]}",
+            to, f"New task from {mesh_client.agent_id}: {summary[:200]}",
             origin=origin,
+            task_id=task_id or None,
         )
     except Exception as e:
-        # Redact credentials BEFORE truncation — an HTTP-level exception
-        # may carry the failing URL with an API key in the query string.
-        # ``redact_text_with_urls`` runs ``redact_url`` on embedded URLs
-        # (catches arbitrary ``?api_key=…`` values whose key signals a
-        # credential) AND ``redact_string`` for token-shaped secrets
-        # outside URL context. Codex P1 from PR R1 review: plain
-        # ``redact_string`` left ``?api_key=anything`` intact and
-        # leaked into the LLM via the returned wake_error.
+        # Redact BEFORE truncation — HTTP-level exceptions can quote
+        # the failing URL with an API key in the query string.
         wake_error = redact_text_with_urls(str(e))[:200]
         logger.warning("Wake for %s failed (task still queued): %s", to, e)
 
     result = {
         "handed_off": wake_error is None,
         "to": to,
-        "task_key": task_key,
-        "handoff_id": handoff_id,
+        "handoff_id": task_id,
+        "task_key": task_id,
+        "task_id": task_id,
     }
-    if output_key:
-        result["output_key"] = output_key
+    if artifact_ref:
+        result["output_key"] = artifact_ref
     if wake_error is not None:
-        # Bug G (codex r4): mirror the v2 envelope on the legacy path —
-        # same silent-failure mode applies when ``orchestration_v2_enabled()``
-        # is False or the probe fails. Without the explicit ``error``
-        # key + directive language, LLMs paper over the soft
-        # ``wake_failed=true`` flag and report success in their next
-        # reply. ``task_key`` (legacy) plays the same role as ``task_id``
-        # (v2) — operator can use it to look up the queued task.
+        # Bug G: the durable task row sits in SQLite at status='pending'
+        # for the next-heartbeat discovery path — we don't transition it
+        # to failed because a transient wake error (network blip, agent
+        # restarting) shouldn't kill a task whose row was persisted.
+        # Recovery hint MUST NOT instruct "retry hand_off" — each call
+        # creates a brand-new task row, so a retry leaves orphan
+        # duplicates. Direct callers to notify operator with the task_id.
         result["task_queued"] = True
         result["wake_failed"] = True
         result["wake_error"] = wake_error
         result["error"] = (
             f"wake_failed: peer '{to}' did not wake ({wake_error}). "
-            f"The task is queued on the blackboard (task_key={task_key}) "
-            "but the recipient has not been notified — you MUST NOT "
-            "report success. Surface this to the operator so they can "
-            "re-wake or reroute."
+            f"The task row is queued in SQLite (task_id={task_id}) but "
+            "the recipient has not been notified — you MUST NOT report "
+            "success. Surface this to the operator with the task_id so "
+            "they can re-wake or reroute."
         )
         result["recovery_hint"] = (
-            f"Notify operator with task_key={task_key} so they can "
-            f"re-wake '{to}' or reroute. DO NOT retry hand_off (creates "
-            "a duplicate task entry). DO NOT mark this work as complete "
-            "in your final response."
+            f"Notify operator with task_id={task_id} so they can re-wake "
+            f"'{to}' or reroute. DO NOT retry hand_off (creates a "
+            "duplicate row). DO NOT mark this work as complete in your "
+            "final response."
         )
     return result
 
@@ -397,68 +363,52 @@ async def hand_off(
     parameters={},
 )
 async def check_inbox(*, mesh_client=None) -> dict:
+    """Read the agent's task inbox from the durable tasks table, plus
+    any back-edge events from the blackboard at
+    ``inbox/{agent_id}/task_event/`` so an originating agent learns when
+    a handed-off task reached a terminal state. The event fetch is
+    best-effort — a blackboard hiccup degrades to an empty event list
+    rather than failing the whole call (Constraint #16).
+    """
     if mesh_client is None:
         return {"error": "No mesh_client available"}
 
-    agent_id = mesh_client.agent_id
-    is_operator = (agent_id == "operator")
-
-    # Task 6: route through the durable tasks table when v2 is on.
     try:
-        v2_enabled = await mesh_client.orchestration_v2_enabled()
-    except Exception:
-        v2_enabled = False
-    if v2_enabled:
-        return await _check_inbox_v2(mesh_client=mesh_client)
+        rows = await mesh_client.list_task_inbox(mesh_client.agent_id)
+    except Exception as e:
+        return {"error": f"Failed to check inbox: {e}"}
+    tasks = [_task_to_inbox_row(r) for r in rows]
 
-    # Standalone agents normally have no inbox (blackboard is project-scoped).
-    # The operator is the exception: its inbox lives in a fleet-global namespace
-    # so cross-project workers can hand off back to it without knowing its scope.
-    if mesh_client.is_standalone and not is_operator:
-        return {"error": _STANDALONE_ERROR}
+    events: list[dict] = []
+    try:
+        prefix = f"inbox/{mesh_client.agent_id}/task_event/"
+        entries = await mesh_client.list_blackboard(prefix, global_scope=True)
+        for entry in entries:
+            value = entry.get("value") or {}
+            events.append({
+                "key": entry.get("key", ""),
+                "kind": value.get("kind", ""),
+                "task_id": value.get("task_id", ""),
+                "recipient": value.get("recipient", ""),
+                "title": value.get("title", ""),
+                "status": value.get("status", ""),
+                "ts": value.get("ts"),
+                "summary": value.get("summary", ""),
+                "error": value.get("error", ""),
+                "blocker_note": value.get("blocker_note", ""),
+            })
+    except Exception as e:
+        logger.warning(
+            "check_inbox event fetch failed for %s: %s",
+            mesh_client.agent_id, e,
+        )
 
-    if is_operator:
-        prefix = "global/tasks/operator/"
-        try:
-            entries = await mesh_client.list_blackboard(prefix, global_scope=True)
-        except Exception as e:
-            return {"error": f"Failed to check inbox: {e}"}
-    else:
-        prefix = f"tasks/{agent_id}/"
-        try:
-            entries = await mesh_client.list_blackboard(prefix)
-        except Exception as e:
-            return {"error": f"Failed to check inbox: {e}"}
-
-    tasks = []
-    for entry in entries:
-        value = entry.get("value", {})
-        if isinstance(value, str):
-            try:
-                value = json.loads(value)
-            except json.JSONDecodeError:
-                value = {"text": value}
-        # Ensure value is a dict (guard against corrupted entries)
-        if not isinstance(value, dict):
-            value = {"text": str(value)}
-        # Skip completed tasks
-        if value.get("status") == "done":
-            continue
-        task = {
-            "key": sanitize_for_prompt(entry.get("key", "")),
-            "from": sanitize_for_prompt(str(value.get("from", "unknown"))),
-            "summary": sanitize_for_prompt(str(value.get("summary", ""))),
-            "status": value.get("status", "pending"),
-        }
-        output_key = value.get("output_key")
-        if output_key:
-            task["output_key"] = sanitize_for_prompt(str(output_key))
-        ts = value.get("ts")
-        if ts:
-            task["ts"] = ts
-        tasks.append(task)
-
-    return {"tasks": tasks, "count": len(tasks)}
+    return {
+        "tasks": tasks,
+        "count": len(tasks),
+        "events": events,
+        "event_count": len(events),
+    }
 
 
 @skill(
@@ -498,481 +448,7 @@ async def update_status(
     state: str, summary: str = "", task_id: str = "",
     *, mesh_client=None,
 ) -> dict:
-    if mesh_client is None:
-        return {"error": "No mesh_client available"}
-
-    agent_id = mesh_client.agent_id
-    is_operator = (agent_id == "operator")
-
-    # Task 6: when v2 is on, ``update_status`` updates the assignee's
-    # currently-active task. The legacy blackboard ``status/{agent_id}``
-    # write still happens for back-compat surfaces that read directly
-    # from the blackboard, but only when v2 is OFF — under v2 the
-    # per-task status is the source of truth.
-    try:
-        v2_enabled = await mesh_client.orchestration_v2_enabled()
-    except Exception:
-        v2_enabled = False
-    if v2_enabled:
-        return await _update_status_v2(
-            state, summary, task_id=task_id or None, mesh_client=mesh_client,
-        )
-
-    if mesh_client.is_standalone and not is_operator:
-        return {"error": _STANDALONE_ERROR}
-
-    status_data = {
-        "state": state,
-        "summary": sanitize_for_prompt(summary),
-        "ts": time.time(),
-    }
-
-    # Operator status writes to the fleet-global status namespace so it
-    # is reachable from any project scope (operator has no project of its
-    # own to scope writes to).
-    status_key = f"global/status/{agent_id}" if is_operator else f"status/{agent_id}"
-    try:
-        await mesh_client.write_blackboard(
-            status_key, status_data, global_scope=is_operator,
-        )
-    except Exception as e:
-        # Bug H (codex r5): mirror the hand_off envelope on terminal-
-        # transition tools so a state='done' / 'blocked' write that
-        # fails can't be silently glossed over by the LLM.
-        return _failed_transition_envelope(
-            kind="update_status_failed",
-            detail=(
-                f"could not write status='{state}' for agent "
-                f"'{agent_id}'"
-            ),
-            exc=e,
-            extras={"state": state},
-        )
-
-    return {"updated": True, "state": state}
-
-
-@skill(
-    name="complete_task",
-    description=(
-        "Mark a task from your inbox as done so it won't appear in "
-        "check_inbox() again. Call this after you've finished processing "
-        "a task. Pass the task key from the check_inbox() result."
-    ),
-    parameters={
-        "task_key": {
-            "type": "string",
-            "description": "The task key from check_inbox() (e.g. 'tasks/you/ho_abc123')",
-        },
-    },
-)
-async def complete_task(task_key: str, *, mesh_client=None) -> dict:
-    if mesh_client is None:
-        return {"error": "No mesh_client available"}
-
-    agent_id = mesh_client.agent_id
-    is_operator = (agent_id == "operator")
-
-    # Task 6: when v2 is on, ``task_key`` is the task id (the storage
-    # layer's primary key). The hand_off v2 path returns this id as
-    # ``handoff_id`` for back-compat with the old result shape.
-    try:
-        v2_enabled = await mesh_client.orchestration_v2_enabled()
-    except Exception:
-        v2_enabled = False
-    if v2_enabled:
-        return await _complete_task_v2(task_key, mesh_client=mesh_client)
-
-    if mesh_client.is_standalone and not is_operator:
-        return {"error": _STANDALONE_ERROR}
-
-    # Ownership check — only complete tasks in your own inbox
-    allowed_prefixes = [f"tasks/{agent_id}/"]
-    if is_operator:
-        allowed_prefixes.append("global/tasks/operator/")
-    if not any(task_key.startswith(p) for p in allowed_prefixes):
-        return {"error": f"Can only complete your own tasks (expected prefix: tasks/{agent_id}/)"}
-
-    is_global_task = task_key.startswith("global/")
-
-    try:
-        # Read task to find associated output for cleanup
-        existing = await mesh_client.read_blackboard(task_key, global_scope=is_global_task)
-        if existing is None:
-            return {"error": f"Task '{task_key}' not found"}
-
-        # Delete the task entry
-        await mesh_client.delete_blackboard(task_key, global_scope=is_global_task)
-
-        # Best-effort cleanup of associated output data
-        value = existing.get("value", existing)
-        if isinstance(value, str):
-            try:
-                value = json.loads(value)
-            except json.JSONDecodeError:
-                value = {}
-        if isinstance(value, dict):
-            output_key = value.get("output_key")
-            if isinstance(output_key, str) and output_key:
-                try:
-                    handoff_id = task_key.rsplit("/", 1)[-1]
-                    sender = value.get("from")
-                    expected_output = None
-                    if isinstance(sender, str) and re.fullmatch(AGENT_ID_RE_PATTERN, sender):
-                        expected_output = (
-                            f"global/output/{sender}/{handoff_id}"
-                            if is_global_task
-                            else f"output/{sender}/{handoff_id}"
-                        )
-                    if output_key == expected_output:
-                        await mesh_client.delete_blackboard(
-                            output_key, global_scope=is_global_task,
-                        )
-                    else:
-                        logger.debug(
-                            "Skipping unexpected output cleanup for task %s: %s",
-                            task_key, output_key,
-                        )
-                except Exception as exc:
-                    logger.debug("Output cleanup for %s skipped: %s", output_key, exc)
-    except Exception as e:
-        # Bug H (codex r5): completing a task is a terminal transition —
-        # if the underlying delete fails, the task stays in inbox and a
-        # silent "completed" reply leaves orphan state. Directive envelope.
-        return _failed_transition_envelope(
-            kind="complete_task_failed",
-            detail=f"could not mark task '{task_key}' as done",
-            exc=e,
-            extras={"task_key": task_key},
-        )
-
-    return {"completed": True, "task_key": task_key}
-
-
-# ── Task 6: durable orchestration tasks v2 helpers ─────────────────
-
-
-def _v2_task_to_legacy_dict(task: dict) -> dict:
-    """Map a v2 task record to the legacy ``check_inbox`` row shape.
-
-    The LLM-facing tool surface stayed the same so existing prompts and
-    skills don't need to change when the flag flips. ``key`` is the
-    task id (also exposed as ``task_id`` for clarity), ``output_key``
-    is the first artifact_ref if present.
-    """
-    artifact_refs = task.get("artifact_refs") or []
-    out: dict = {
-        "key": sanitize_for_prompt(str(task.get("id", ""))),
-        "task_id": str(task.get("id", "")),
-        "from": sanitize_for_prompt(str(task.get("creator", "unknown"))),
-        "summary": sanitize_for_prompt(str(task.get("title", ""))),
-        "status": str(task.get("status", "pending")),
-    }
-    if artifact_refs:
-        out["output_key"] = sanitize_for_prompt(str(artifact_refs[0]))
-    created_at = task.get("created_at")
-    if created_at:
-        out["ts"] = created_at
-    return out
-
-
-async def _hand_off_v2(
-    to: str, summary: str, data: str, *, mesh_client,
-) -> dict:
-    """Task 6 hand_off path — creates a durable task row.
-
-    Mirrors the legacy result shape (``handed_off``, ``to``,
-    ``handoff_id``, ``output_key``, ``task_key``) so callers don't need
-    a flag-aware result handler.
-    """
-    summary = sanitize_for_prompt(summary)
-    # The handoff ``summary`` carries both the headline (becomes the
-    # task title) and the full instruction (becomes the description).
-    # Agents historically dumped multi-sentence instructions into
-    # ``summary`` — that produced wall-of-text titles in the dashboard.
-    # ``Tasks.create`` applies the same policy as a backstop, but we
-    # mirror it here so the title we surface in result envelopes, wake
-    # messages, and downstream logs is already short.
-    if len(summary) > LONG_TITLE_THRESHOLD:
-        title, description = normalize_title_and_description(summary, None)
-        # ``description`` is the full original ``summary`` here — keep
-        # it intact so the recipient still sees the complete instruction.
-    else:
-        title = summary
-        description = summary
-    artifact_ref: str | None = None
-
-    # Validate target exists in the registry — same fail-closed behavior
-    # as the legacy path.
-    target_project: str | None = None
-    try:
-        registry = await mesh_client.list_agents()
-        if to not in registry:
-            available = ", ".join(sorted(registry.keys()))
-            return {"error": f"Agent '{to}' not found. Available: {available}"}
-        target_info = registry.get(to, {})
-        if isinstance(target_info, dict):
-            target_project = target_info.get("project")
-    except Exception as e:
-        # Standalone senders need to resolve target project to write
-        # the task into the correct scope.
-        if not mesh_client.team_name:
-            return {"error": f"Cannot hand off: fleet roster unavailable ({e})"}
-        logger.debug("Fleet roster check failed, proceeding with validated ID: %s", e)
-
-    # Pick the project scope:
-    #   - operator handoffs: project=None (fleet-global)
-    #   - cross-project worker handoffs: target's project
-    #   - same-project handoffs: caller's project
-    if to == "operator":
-        write_project = None
-    elif target_project:
-        write_project = target_project
-    else:
-        write_project = mesh_client.team_name
-
-    if data and data.strip():
-        # Optional: stash the payload under an artifact_ref the
-        # recipient can fetch later. We reuse the blackboard for the
-        # actual bytes — the v2 task carries only the reference. This
-        # keeps the table small and matches the pre-existing
-        # output/{from}/{handoff_id} convention.
-        try:
-            parsed_data = json.loads(data)
-        except json.JSONDecodeError:
-            parsed_data = {"text": data}
-        # Generate a placeholder ref now — we'll write under that key.
-        artifact_ref = f"output/{mesh_client.agent_id}/{generate_id('ho')}"
-        try:
-            await mesh_client.write_blackboard(
-                artifact_ref, parsed_data, ttl=_HANDOFF_TTL,
-                project=write_project,
-            )
-        except Exception as e:
-            # Bug H: same silent-LLM failure mode as create_task — the
-            # bare ``{"error": ...}`` envelope let agents report "done"
-            # to the user while no handoff data ever reached the peer.
-            # Mirror the Bug G directive shape.
-            redacted = redact_text_with_urls(str(e))[:200]
-            logger.warning(
-                "hand_off output write for %s failed: %s", to, redacted,
-            )
-            return {
-                "handed_off": False,
-                "task_queued": False,
-                "output_write_failed": True,
-                "to": to,
-                "write_error": redacted,
-                "error": (
-                    f"output_write_failed: hand_off to '{to}' did not "
-                    f"complete ({redacted}). The handoff data may not "
-                    "have landed and no task was created — verify "
-                    "before retrying. You MUST NOT report success."
-                ),
-                "recovery_hint": (
-                    f"Surface the failure to the operator/user — "
-                    f"hand_off to peer '{to}' did not complete. DO NOT "
-                    "mark this work as complete in your final "
-                    "response. DO NOT retry hand_off without verifying "
-                    "via check_inbox or asking the operator to inspect "
-                    "the recipient's queue — a post-commit failure may "
-                    "have left a partial artifact, and a blind retry "
-                    "would create a duplicate."
-                ),
-            }
-
-    # Read the origin contextvar once so both create_task and wake_agent
-    # propagate the same provenance. Without origin on create_task the
-    # receiving agent's lane worker has no way to auto-notify the
-    # originating channel/user when the handed-off task completes —
-    # wake_agent already passes it; this brings create_task into parity.
-    from src.shared.trace import current_origin as _current_origin
-    origin = _current_origin.get()
-
-    try:
-        record = await mesh_client.create_task(
-            assignee=to,
-            title=title or "(handoff)",
-            description=description,
-            project=write_project,
-            priority=0,
-            artifact_refs=[artifact_ref] if artifact_ref else None,
-            origin=origin,
-        )
-    except Exception as e:
-        # Bug H: the bare ``{"error": ...}`` envelope was easy for LLMs
-        # to gloss past — operator hit a live case where seo-strategist
-        # called hand_off, create_task raised, and the agent still
-        # reported "Brief completed" in its final reply. The recipient
-        # never received the task. Mirror the Bug G envelope shape
-        # (handed_off=False, explicit ``error`` + directive
-        # ``recovery_hint``) so the LLM cannot silently report success.
-        # Distinct flag ``create_failed`` (vs wake's ``wake_failed``)
-        # and ``task_queued=False`` (vs wake's ``True``) tell the
-        # caller the row was NEVER persisted, so retry is not a
-        # duplicate-creating operation — but the LLM must still
-        # surface the failure rather than silently retrying.
-        #
-        # ``redact_text_with_urls`` strips credentials before the
-        # exception string reaches the LLM's context — same precaution
-        # as the wake_error path. HTTP-level exceptions from the mesh
-        # client frequently quote the failing URL with an api_key in
-        # the query string.
-        redacted = redact_text_with_urls(str(e))[:200]
-        logger.warning("create_task for %s failed: %s", to, redacted)
-        return {
-            "handed_off": False,
-            "task_queued": False,
-            "create_failed": True,
-            "to": to,
-            "create_error": redacted,
-            "error": (
-                f"create_failed: hand_off to '{to}' did not complete "
-                f"({redacted}). The task row may not exist — verify "
-                "before retrying. You MUST NOT report success."
-            ),
-            "recovery_hint": (
-                f"Surface the failure to the operator/user — hand_off "
-                f"to peer '{to}' did not complete. DO NOT mark this "
-                "work as complete in your final response. DO NOT retry "
-                "hand_off without first verifying via check_inbox or "
-                "asking the operator to inspect the recipient's queue "
-                "— a post-commit failure may have left a partial row, "
-                "and a blind retry would create a duplicate."
-            ),
-        }
-
-    task_id = record.get("id", "")
-
-    # Wake the target so they pick up the task immediately. The task
-    # is queued in SQLite either way; wake failures are surfaced to the
-    # caller via ``handed_off=False`` + ``task_queued=True`` so they can
-    # decide whether to retry the wake or wait for the recipient's next
-    # cron. Bug 2 (PR R2): the prior contract claimed ``handed_off: true``
-    # alongside ``wake_failed: true`` — LLMs read ``handed_off`` and
-    # reported success while the recipient never woke. ``task_queued``
-    # signals the durable row exists; the recovery hint tells the LLM
-    # what will happen next.
-    #
-    # Bug 2 fix (earlier): forward the task_id on the wake so the
-    # recipient's lane → /chat → loop chain auto-closes the task on
-    # completion. Without this, the Task row would sit at pending forever.
-    wake_error: str | None = None
-    try:
-        await mesh_client.wake_agent(
-            to, f"New task from {mesh_client.agent_id}: {summary[:200]}",
-            origin=origin,
-            task_id=task_id or None,
-        )
-    except Exception as e:
-        # Redact credentials BEFORE truncation — an HTTP-level exception
-        # may carry the failing URL with an API key in the query string.
-        # ``redact_text_with_urls`` runs ``redact_url`` on embedded URLs
-        # (catches arbitrary ``?api_key=…`` values whose key signals a
-        # credential) AND ``redact_string`` for token-shaped secrets
-        # outside URL context. Codex P1 from PR R1 review: plain
-        # ``redact_string`` left ``?api_key=anything`` intact and
-        # leaked into the LLM via the returned wake_error.
-        wake_error = redact_text_with_urls(str(e))[:200]
-        logger.warning("Wake for %s failed (task still queued): %s", to, e)
-
-    result = {
-        "handed_off": wake_error is None,
-        "to": to,
-        "handoff_id": task_id,
-        "task_key": task_id,
-        "task_id": task_id,
-    }
-    if artifact_ref:
-        result["output_key"] = artifact_ref
-    if wake_error is not None:
-        # Bug G (silent peer hand_off failure): the envelope used to set
-        # ``handed_off=false`` alongside a soft ``recovery_hint`` that
-        # read "Recipient will discover via next heartbeat" — LLMs would
-        # skim past the failure and report "task handed off" in their
-        # final reply. Surface the failure in an ``error`` key (the
-        # field name LLMs reliably react to) and make the recovery hint
-        # directive, not advisory. The durable task row still sits in
-        # SQLite at status='pending' for the next-heartbeat discovery
-        # path — we don't transition it to failed here because a
-        # transient wake error (network blip, agent restarting) shouldn't
-        # kill a task whose row was successfully persisted.
-        #
-        # Codex r4: the hint must NOT say "retry hand_off" — each call
-        # creates a brand-new task row, so a retry leaves orphan
-        # duplicates. Direct callers to notify operator with the
-        # ``task_id`` (so operator can re-wake or reroute the existing
-        # row) or wait for the recipient's next heartbeat.
-        result["task_queued"] = True
-        result["wake_failed"] = True
-        result["wake_error"] = wake_error
-        result["error"] = (
-            f"wake_failed: peer '{to}' did not wake ({wake_error}). "
-            f"The task row is queued in SQLite (task_id={task_id}) but "
-            "the recipient has not been notified — you MUST NOT report "
-            "success. Surface this to the operator with the task_id so "
-            "they can re-wake or reroute."
-        )
-        result["recovery_hint"] = (
-            f"Notify operator with task_id={task_id} so they can re-wake "
-            f"'{to}' or reroute. DO NOT retry hand_off (creates a "
-            "duplicate row). DO NOT mark this work as complete in your "
-            "final response."
-        )
-    return result
-
-
-async def _check_inbox_v2(*, mesh_client) -> dict:
-    """Task 6 check_inbox path — reads the durable tasks table.
-
-    Bug 3 fix: also fetches back-edge events from the blackboard at
-    ``inbox/{agent_id}/task_event/`` so an originating agent learns when
-    a handed-off task reached a terminal state. The event fetch is
-    best-effort — a blackboard hiccup degrades to an empty event list
-    rather than failing the whole check_inbox call.
-    """
-    try:
-        rows = await mesh_client.list_task_inbox(mesh_client.agent_id)
-    except Exception as e:
-        return {"error": f"Failed to check inbox: {e}"}
-    tasks = [_v2_task_to_legacy_dict(r) for r in rows]
-
-    events: list[dict] = []
-    try:
-        prefix = f"inbox/{mesh_client.agent_id}/task_event/"
-        entries = await mesh_client.list_blackboard(prefix, global_scope=True)
-        for entry in entries:
-            value = entry.get("value") or {}
-            events.append({
-                "key": entry.get("key", ""),
-                "kind": value.get("kind", ""),
-                "task_id": value.get("task_id", ""),
-                "recipient": value.get("recipient", ""),
-                "title": value.get("title", ""),
-                "status": value.get("status", ""),
-                "ts": value.get("ts"),
-                "summary": value.get("summary", ""),
-                "error": value.get("error", ""),
-                "blocker_note": value.get("blocker_note", ""),
-            })
-    except Exception as e:
-        logger.warning(
-            "check_inbox event fetch failed for %s: %s",
-            mesh_client.agent_id, e,
-        )
-
-    return {
-        "tasks": tasks,
-        "count": len(tasks),
-        "events": events,
-        "event_count": len(events),
-    }
-
-
-async def _update_status_v2(
-    state: str, summary: str, *, task_id: str | None = None, mesh_client,
-) -> dict:
-    """Task 6 update_status path — transitions one of the agent's tasks.
+    """Transition one of the agent's tasks on the durable tasks table.
 
     When the agent has exactly one non-terminal task we transition it
     transparently. When the agent has 2+ non-terminal tasks and no
@@ -982,12 +458,16 @@ async def _update_status_v2(
     the wrong task ``done``. When ``task_id`` is supplied we route the
     transition to that exact task or return ``task_not_found``.
     """
-    # Map the legacy ``state`` to the v2 status name.  Both share the
-    # same vocabulary except the legacy ``idle`` which has no v2
-    # equivalent — we treat it as a no-op since "idle" wasn't a per-task
-    # status to begin with.
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+
+    task_id = task_id or None
+
+    # ``idle`` was a legacy blackboard-only state with no per-task
+    # mapping — preserved as a no-op so existing prompts don't error.
     if state == "idle":
-        return {"updated": True, "state": state, "noop": "idle has no v2 mapping"}
+        return {"updated": True, "state": state, "noop": "idle has no task mapping"}
+
     try:
         rows = await mesh_client.list_task_inbox(mesh_client.agent_id)
     except Exception as e:
@@ -999,9 +479,6 @@ async def _update_status_v2(
             if str(r.get("status", "")) not in _TERMINAL_STATES
         ]
         if len(active) > 1:
-            # Augment the active list with title + state so the LLM can
-            # pick a ``task_id`` directly without a follow-up
-            # ``check_inbox`` call.
             active_summaries = [
                 {
                     "id": r.get("id"),
@@ -1020,23 +497,7 @@ async def _update_status_v2(
             }
         if active:
             target = active[0]
-        elif rows:
-            # No active rows but inbox has terminal entries — preserve
-            # the legacy "most recent wins" no-op behavior so the call
-            # still resolves to {updated: False, reason: ...} downstream
-            # rather than blowing up. Picking the last terminal row is
-            # deliberately benign: ``set_task_status`` will reject any
-            # transition out of a terminal state, so the call surfaces
-            # the failure as an error rather than silently mutating
-            # something the caller didn't intend.
-            return {
-                "updated": False, "state": state, "reason": "no active tasks",
-            }
         else:
-            # Empty inbox — standalone agents and just-joined agents on a
-            # fresh fleet hit this constantly. Return the legacy
-            # ``{updated: False, ...}`` no-op shape so callers don't see
-            # an LLM-visible error for the common "no work yet" case.
             return {
                 "updated": False, "state": state, "reason": "no active tasks",
             }
@@ -1053,10 +514,10 @@ async def _update_status_v2(
             target["id"], state, blocker_note=blocker_note,
         )
     except Exception as e:
-        # Bug H (codex r5): set_task_status to a terminal state
-        # ('done' / 'failed' / 'cancelled') that raises post-commit
-        # could leave the row mid-transition. Directive envelope so
-        # the LLM doesn't claim success on a state that didn't land.
+        # Bug H: set_task_status to a terminal state ('done' / 'failed'
+        # / 'cancelled') that raises post-commit could leave the row
+        # mid-transition. Directive envelope so the LLM doesn't claim
+        # success on a state that didn't land.
         return _failed_transition_envelope(
             kind="update_status_failed",
             detail=(
@@ -1069,19 +530,37 @@ async def _update_status_v2(
     return {"updated": True, "state": state, "task_id": target["id"]}
 
 
-async def _complete_task_v2(task_key: str, *, mesh_client) -> dict:
-    """Task 6 complete_task path — transitions a task to ``done``."""
-    # ``task_key`` may be either the raw task id (preferred) or one of
-    # the legacy blackboard-style keys (``tasks/x/ho_abc``). Strip the
-    # legacy prefix when present so flag-flipped fleets can still pass
-    # through the old key shapes for one transition cycle.
+@skill(
+    name="complete_task",
+    description=(
+        "Mark a task from your inbox as done so it won't appear in "
+        "check_inbox() again. Call this after you've finished processing "
+        "a task. Pass the task key from the check_inbox() result."
+    ),
+    parameters={
+        "task_key": {
+            "type": "string",
+            "description": "The task key from check_inbox() (e.g. 'tasks/you/ho_abc123')",
+        },
+    },
+)
+async def complete_task(task_key: str, *, mesh_client=None) -> dict:
+    """Mark a task done on the durable tasks table.
+
+    ``task_key`` is the task id (preferred). Legacy callers may pass
+    one of the old blackboard-style keys (``tasks/x/ho_abc``); we
+    strip the prefix and use the trailing segment as the id so prompts
+    that still mention the legacy shape resolve cleanly.
+    """
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+
     task_id = task_key.rsplit("/", 1)[-1] if "/" in task_key else task_key
     try:
         record = await mesh_client.set_task_status(task_id, "done")
     except Exception as e:
-        # Bug H (codex r5): same directive shape as the legacy
-        # complete_task path so the LLM can't silently report a task
-        # as done when the transition failed.
+        # Bug H: terminal transition — silent failure would leave the
+        # task pending while the agent claims completion.
         return _failed_transition_envelope(
             kind="complete_task_failed",
             detail=f"could not mark task '{task_id}' as done",
@@ -1093,3 +572,28 @@ async def _complete_task_v2(task_key: str, *, mesh_client) -> dict:
         "task_key": task_key,
         "task_id": record.get("id", task_id),
     }
+
+
+# ── Helpers ─────────────────────────────────────────────────────────
+
+
+def _task_to_inbox_row(task: dict) -> dict:
+    """Map a durable task record to the LLM-facing inbox row shape.
+
+    ``key`` is the task id (also exposed as ``task_id`` for clarity),
+    ``output_key`` is the first artifact_ref if present.
+    """
+    artifact_refs = task.get("artifact_refs") or []
+    out: dict = {
+        "key": sanitize_for_prompt(str(task.get("id", ""))),
+        "task_id": str(task.get("id", "")),
+        "from": sanitize_for_prompt(str(task.get("creator", "unknown"))),
+        "summary": sanitize_for_prompt(str(task.get("title", ""))),
+        "status": str(task.get("status", "pending")),
+    }
+    if artifact_refs:
+        out["output_key"] = sanitize_for_prompt(str(artifact_refs[0]))
+    created_at = task.get("created_at")
+    if created_at:
+        out["ts"] = created_at
+    return out

@@ -17,7 +17,7 @@ Tests:
 6. /mesh/tasks/{id}/status skips back-edge for ``human`` origin.
 7. /mesh/tasks/{id}/status skips back-edge for self-handoff
    (origin_user == assignee — no inbox spam).
-8. coordination_tool._check_inbox_v2 surfaces back-edge events.
+8. coordination_tool.check_inbox surfaces back-edge events.
 """
 
 from __future__ import annotations
@@ -507,17 +507,13 @@ def _setup_mesh_app(tmp_path):
     router.register_agent("alpha", "http://alpha:8400", [])
     router.register_agent("beta", "http://beta:8400", [])
 
-    # v2 tasks store is on by default ("1"). Point its DB at tmp_path so
-    # we don't pollute the repo root with a real ``data/tasks.db``. Also
-    # patch the module-level flag in case a sibling test set the env var
-    # to "0" earlier in the suite (the flag is captured at import time).
-    os.environ["OPENLEGION_ORCHESTRATION_TASKS_V2"] = "1"
+    # Point the tasks store at tmp_path so we don't pollute the repo
+    # root with a real ``data/tasks.db``.
     os.environ["OPENLEGION_ORCHESTRATION_TASKS_DB"] = str(
         tmp_path / "tasks.db",
     )
 
     import src.host.server as server_mod
-    server_mod._ORCHESTRATION_TASKS_V2 = True
 
     app = server_mod.create_mesh_app(
         blackboard=bb, pubsub=pubsub, router=router, permissions=perms,
@@ -537,7 +533,6 @@ def _teardown_mesh(bb, tasks_store):
         bb.close()
     except Exception:
         pass
-    os.environ.pop("OPENLEGION_ORCHESTRATION_TASKS_V2", None)
     os.environ.pop("OPENLEGION_ORCHESTRATION_TASKS_DB", None)
 
 
@@ -748,8 +743,8 @@ async def test_terminal_transition_skips_back_edge_for_self(tmp_path):
 
 @pytest.mark.asyncio
 async def test_check_inbox_surfaces_back_edge_events():
-    """_check_inbox_v2 returns events alongside tasks."""
-    from src.agent.builtins.coordination_tool import _check_inbox_v2
+    """check_inbox returns events alongside tasks."""
+    from src.agent.builtins.coordination_tool import check_inbox
 
     mesh_client = MagicMock()
     mesh_client.agent_id = "alpha"
@@ -768,7 +763,7 @@ async def test_check_inbox_surfaces_back_edge_events():
         },
     }])
 
-    result = await _check_inbox_v2(mesh_client=mesh_client)
+    result = await check_inbox(mesh_client=mesh_client)
 
     assert result["count"] == 0
     assert result["event_count"] == 1
@@ -779,7 +774,9 @@ async def test_check_inbox_surfaces_back_edge_events():
     assert ev["summary"] == "finished it"
     assert ev["key"] == "inbox/alpha/task_event/task_abc"
 
-    # The blackboard list call used the right prefix + global_scope.
+    # The durable task inbox endpoint is called, then the blackboard
+    # back-edge prefix.
+    mesh_client.list_task_inbox.assert_awaited_once_with("alpha")
     mesh_client.list_blackboard.assert_awaited_once()
     call = mesh_client.list_blackboard.await_args
     assert call.args[0] == "inbox/alpha/task_event/"
@@ -789,14 +786,14 @@ async def test_check_inbox_surfaces_back_edge_events():
 @pytest.mark.asyncio
 async def test_check_inbox_degrades_when_event_fetch_fails():
     """A blackboard hiccup must not fail the whole check_inbox call."""
-    from src.agent.builtins.coordination_tool import _check_inbox_v2
+    from src.agent.builtins.coordination_tool import check_inbox
 
     mesh_client = MagicMock()
     mesh_client.agent_id = "alpha"
     mesh_client.list_task_inbox = AsyncMock(return_value=[])
     mesh_client.list_blackboard = AsyncMock(side_effect=RuntimeError("boom"))
 
-    result = await _check_inbox_v2(mesh_client=mesh_client)
+    result = await check_inbox(mesh_client=mesh_client)
 
     assert "error" not in result
     assert result["count"] == 0

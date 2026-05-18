@@ -1,18 +1,15 @@
-"""One-shot blackboard → orchestration tasks migration (Task 6).
+"""One-shot blackboard → orchestration tasks migration.
 
 Walks every legacy ``tasks/{agent}/{handoff_id}`` and
 ``global/tasks/operator/{handoff_id}`` (and their project-prefixed
 forms ``projects/{name}/tasks/{agent}/{handoff_id}``) blackboard entry,
-inserts a corresponding row in the new ``tasks`` table, and deletes
+inserts a corresponding row in the durable ``tasks`` table, and deletes
 the legacy keys on success.
 
-NOT auto-run. Operators invoke ``migrate_blackboard_to_tasks`` manually
-once after flipping ``OPENLEGION_ORCHESTRATION_TASKS_V2=1`` and verifying
-the new path in staging.
-
-Idempotent: tasks are keyed on the legacy ``handoff_id`` so re-running
-the migration after a partial run skips already-migrated handoffs.
-Returns ``{migrated, skipped, deleted, errors}`` summary.
+Auto-runs at mesh startup so existing fleets transition seamlessly.
+Idempotent — tasks are keyed on the legacy ``handoff_id`` so a partial
+run + restart skips already-migrated handoffs. Returns
+``{migrated, skipped, deleted, errors}`` summary.
 """
 
 from __future__ import annotations

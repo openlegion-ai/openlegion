@@ -335,21 +335,6 @@ if _TEAM_SCOPE_MODE not in {"warn", "enforce"}:
 _PROJECT_SCOPE_MODE = _TEAM_SCOPE_MODE
 
 
-# ── Task 6: Durable orchestration task records ────────────────────────
-#
-# ``OPENLEGION_ORCHESTRATION_TASKS_V2`` is the kill switch for the
-# durable-tasks rollout. Default ``1`` (enabled) — the mesh constructs
-# a ``Tasks`` SQLite store and the coordination tool routes hand_off /
-# check_inbox / update_status / complete_task through the new
-# endpoints. Setting the env var to ``0`` is preserved as an emergency
-# rollback that falls back to the legacy blackboard-dict path in
-# ``coordination_tool``. **No dual-write.** Read once at module import;
-# runtime flips require a restart.
-_ORCHESTRATION_TASKS_V2 = (
-    os.environ.get("OPENLEGION_ORCHESTRATION_TASKS_V2", "1") == "1"
-)
-
-
 # Counter surfaced on ``/mesh/system/metrics`` as ``scope_warn_total``.
 # Incremented every time a worker's call would have returned a smaller
 # response under enforce mode. Lets ops gauge soak-window readiness
@@ -593,22 +578,17 @@ def create_mesh_app(
     except Exception as e:
         logger.error("team_migration failed at startup: %s — continuing", e, exc_info=True)
 
-    # Task 6: durable orchestration task records. The store is only
-    # constructed when the feature flag is on; when off, the new
-    # ``/mesh/tasks*`` endpoints return HTTP 503 so coordination_tool
-    # falls through to the legacy blackboard path.
-    # ``OPENLEGION_ORCHESTRATION_TASKS_DB`` overrides the path — used by
-    # tests to keep the db inside ``tmp_path`` instead of polluting cwd.
-    tasks_store: Tasks | None = None
-    if _ORCHESTRATION_TASKS_V2:
-        _tasks_db_path = os.environ.get(
-            "OPENLEGION_ORCHESTRATION_TASKS_DB", "data/tasks.db",
-        )
-        tasks_store = Tasks(db_path=_tasks_db_path)
+    # Durable orchestration task records. ``OPENLEGION_ORCHESTRATION_TASKS_DB``
+    # overrides the on-disk path — used by tests to keep the db inside
+    # ``tmp_path`` instead of polluting cwd.
+    _tasks_db_path = os.environ.get(
+        "OPENLEGION_ORCHESTRATION_TASKS_DB", "data/tasks.db",
+    )
+    tasks_store = Tasks(db_path=_tasks_db_path)
     app.tasks_store = tasks_store  # exposed for tests/dashboard
-    # Task 9 — wire EventBus so create / update_status / reroute /
-    # cancel emit ``task_*`` events to the dashboard.
-    if tasks_store is not None and event_bus is not None:
+    # Wire EventBus so create / update_status / reroute / cancel emit
+    # ``task_*`` events to the dashboard.
+    if event_bus is not None:
         tasks_store.set_event_bus(event_bus)
 
     # In-memory registry of open "agent asks user for help" requests:
@@ -646,38 +626,33 @@ def create_mesh_app(
         }
         return request_id
 
-    # Rollout: auto-run the legacy blackboard → tasks migration once
-    # at startup so existing fleets transition seamlessly when the v2
-    # flag flips on. The helper is idempotent (keyed on the legacy
-    # ``handoff_id`` → new ``task_id``) so subsequent restarts find
-    # nothing to migrate and are no-ops. Migration failures are logged
-    # but never crash mesh startup — the legacy keys remain in place
-    # and operators can re-run the helper manually.
-    if _ORCHESTRATION_TASKS_V2 and tasks_store is not None:
-        from src.host.orchestration_migration import migrate_blackboard_to_tasks
-        try:
-            _migration_result = migrate_blackboard_to_tasks(blackboard, tasks_store)
-            _migrated = int(_migration_result.get("migrated", 0) or 0)
-            _skipped = int(_migration_result.get("skipped", 0) or 0)
-            _deleted = int(_migration_result.get("deleted", 0) or 0)
-            _errors = _migration_result.get("errors", []) or []
-            _error_count = len(_errors) if isinstance(_errors, list) else int(_errors)
-            if _migrated > 0 or _deleted > 0:
-                logger.info(
-                    "orchestration migration: migrated=%d skipped=%d deleted=%d errors=%d",
-                    _migrated, _skipped, _deleted, _error_count,
-                )
-            else:
-                logger.debug("orchestration migration: no legacy tasks found")
-        except Exception as e:
-            # Migration failure must not crash mesh startup. Logged
-            # loudly so ops can investigate; legacy tasks stay in place
-            # and can be migrated manually later.
-            logger.error(
-                "orchestration migration failed at startup: %s — legacy tasks preserved",
-                e,
-                exc_info=True,
+    # Idempotent legacy-data migration. Existing fleets that had
+    # blackboard-stored tasks before the v2 rollout (PR #835) get them
+    # imported into the durable store on first restart. Subsequent
+    # restarts find nothing to migrate and the helper is a no-op.
+    # Migration failures are logged loudly but never crash startup —
+    # legacy keys stay in place and ops can re-run the helper manually.
+    from src.host.orchestration_migration import migrate_blackboard_to_tasks
+    try:
+        _migration_result = migrate_blackboard_to_tasks(blackboard, tasks_store)
+        _migrated = int(_migration_result.get("migrated", 0) or 0)
+        _skipped = int(_migration_result.get("skipped", 0) or 0)
+        _deleted = int(_migration_result.get("deleted", 0) or 0)
+        _errors = _migration_result.get("errors", []) or []
+        _error_count = len(_errors) if isinstance(_errors, list) else int(_errors)
+        if _migrated > 0 or _deleted > 0:
+            logger.info(
+                "orchestration migration: migrated=%d skipped=%d deleted=%d errors=%d",
+                _migrated, _skipped, _deleted, _error_count,
             )
+        else:
+            logger.debug("orchestration migration: no legacy tasks found")
+    except Exception as e:
+        logger.error(
+            "orchestration migration failed at startup: %s — legacy tasks preserved",
+            e,
+            exc_info=True,
+        )
 
     _auth_tokens = auth_tokens if auth_tokens is not None else {}
     _agent_projects = agent_projects if agent_projects is not None else {}
@@ -3839,13 +3814,6 @@ def create_mesh_app(
             raise HTTPException(
                 400, "threshold_hours must be between 1 and 168 (1 hour to 7 days)",
             )
-        if tasks_store is None:
-            return {
-                "agent_id": agent_id,
-                "threshold_hours": threshold_hours,
-                "count": 0,
-                "task_ids": [],
-            }
         threshold_seconds = float(threshold_hours) * 3600.0
         try:
             ids = tasks_store.list_stale_for_assignee(
@@ -4121,22 +4089,10 @@ def create_mesh_app(
             "success_criteria": success_criteria,
         }
 
-    # === Orchestration Tasks v2 (Task 6) ===
-
-    def _require_tasks_v2() -> Tasks:
-        """Return the tasks store or raise 503 when the flag is off."""
-        if tasks_store is None:
-            raise HTTPException(
-                503,
-                "Orchestration tasks v2 not enabled. "
-                "Set OPENLEGION_ORCHESTRATION_TASKS_V2=1 to opt in.",
-            )
-        return tasks_store
+    # === Orchestration Tasks ===
 
     def _reap_tasks_opportunistically() -> None:
         """Cheap reap on read paths so retention drops don't need a scheduler."""
-        if tasks_store is None:
-            return
         try:
             deleted = tasks_store.reap_expired()
             if deleted:
@@ -4150,19 +4106,6 @@ def create_mesh_app(
             return True
         return project_id in _caller_projects(agent_id)
 
-    @app.get("/mesh/orchestration/status")
-    async def orchestration_status(request: Request) -> dict:
-        """Probe endpoint — agents call this to detect whether v2 is on.
-
-        Returns ``{"enabled": True}`` when the store is wired; HTTP 503
-        when the feature flag is off (so callers fail-closed to the
-        legacy blackboard path).
-        """
-        _require_any_auth(request)
-        if tasks_store is None:
-            raise HTTPException(503, "Orchestration tasks v2 not enabled")
-        return {"enabled": True}
-
     @app.post("/mesh/tasks")
     async def create_task(request: Request) -> dict:
         """Create a durable task record.
@@ -4172,7 +4115,7 @@ def create_mesh_app(
         project?, parent_task_id?, priority?, dependencies?}``.
         Origin is sourced from the validated ``X-Origin`` header.
         """
-        store = _require_tasks_v2()
+        store = tasks_store
         caller = _extract_verified_agent_id(request)
         # ``can_route_tasks`` is the structured permission. The mesh
         # pseudo-id and operator are auto-permitted by the matrix.
@@ -4227,7 +4170,7 @@ def create_mesh_app(
         The assignee themself, the operator, and loopback-internal
         callers are permitted. Other callers receive 403.
         """
-        store = _require_tasks_v2()
+        store = tasks_store
         caller = _extract_verified_agent_id(request)
         if (
             caller != assignee
@@ -4248,7 +4191,7 @@ def create_mesh_app(
 
         Caller must be a member of the team (or operator / internal).
         """
-        store = _require_tasks_v2()
+        store = tasks_store
         caller = _extract_verified_agent_id(request)
         if not _is_project_member(caller, team_id):
             raise HTTPException(
@@ -4266,7 +4209,7 @@ def create_mesh_app(
         Visible to creator, assignee, project members, operator, and
         internal callers. Other callers receive 403.
         """
-        store = _require_tasks_v2()
+        store = tasks_store
         caller = _extract_verified_agent_id(request)
         record = store.get(task_id)
         if record is None:
@@ -4283,7 +4226,7 @@ def create_mesh_app(
     @app.get("/mesh/tasks/{task_id}/events")
     async def list_task_events(task_id: str, request: Request) -> dict:
         """Audit history for a task. Same visibility rules as get_task."""
-        store = _require_tasks_v2()
+        store = tasks_store
         caller = _extract_verified_agent_id(request)
         record = store.get(task_id)
         if record is None:
@@ -4315,7 +4258,7 @@ def create_mesh_app(
         keep an originator's inbox clean. Failures are logged, never
         raised — the status update itself stays authoritative.
         """
-        store = _require_tasks_v2()
+        store = tasks_store
         caller = _extract_verified_agent_id(request)
         body = await request.json()
         status = body.get("status", "")
@@ -4477,7 +4420,7 @@ def create_mesh_app(
         Cost-aware: refuses to reroute onto an agent that is already
         over its daily or monthly budget (HTTP 400, structured error).
         """
-        store = _require_tasks_v2()
+        store = tasks_store
         caller = _extract_verified_agent_id(request)
         if not (
             caller == "operator"
@@ -4540,7 +4483,7 @@ def create_mesh_app(
         Cost-aware: refuses if the (possibly overridden) target assignee
         is over budget.
         """
-        store = _require_tasks_v2()
+        store = tasks_store
         caller = _extract_verified_agent_id(request)
         if not (
             caller == "operator"
@@ -4614,10 +4557,8 @@ def create_mesh_app(
     #
     # Read endpoints surfaced as operator skills. They aggregate over
     # the tasks store + project metadata and respect the same scoping
-    # rules as the Task 6 endpoints (operator + internal can see all,
-    # other callers can see only their own projects). All return HTTP
-    # 503 when ``OPENLEGION_ORCHESTRATION_TASKS_V2`` is off so the
-    # operator tools can surface a clean error instead of garbled data.
+    # rules as the task-store endpoints (operator + internal can see all,
+    # other callers can see only their own projects).
 
     def _summarize_tasks(rows: list[dict]) -> dict:
         """Reduce a list of task rows to status counts + recent slices.
@@ -4670,7 +4611,7 @@ def create_mesh_app(
         the same structure as ``_summarize_tasks`` plus a ``project``
         / ``team`` field carrying name and archive status.
         """
-        store = _require_tasks_v2()
+        store = tasks_store
         caller = _extract_verified_agent_id(request)
         if not _is_project_member(caller, team_id):
             raise HTTPException(
@@ -4704,7 +4645,7 @@ def create_mesh_app(
         ``counts``/``blockers``/``recent_done`` shape as the per-team
         endpoint, plus the team name and status.
         """
-        store = _require_tasks_v2()
+        store = tasks_store
         caller = _extract_verified_agent_id(request)
         from src.cli.config import _load_projects
         projects = _load_projects()
@@ -4740,7 +4681,7 @@ def create_mesh_app(
         loopback-internal callers, and project members of the agent's
         project.
         """
-        store = _require_tasks_v2()
+        store = tasks_store
         caller = _extract_verified_agent_id(request)
         if not (
             caller == agent_id
@@ -4815,7 +4756,7 @@ def create_mesh_app(
         completed task with its title, assignee, completion time, and
         artifact refs.
         """
-        store = _require_tasks_v2()
+        store = tasks_store
         caller = _extract_verified_agent_id(request)
         if not _is_project_member(caller, team_id):
             raise HTTPException(
@@ -4854,7 +4795,7 @@ def create_mesh_app(
         prose so the operator's prompt machinery doesn't have to format
         it again.
         """
-        store = _require_tasks_v2()
+        store = tasks_store
         caller = _extract_verified_agent_id(request)
         if not _is_project_member(caller, team_id):
             raise HTTPException(
@@ -5226,7 +5167,7 @@ def create_mesh_app(
     @app.post("/mesh/tasks/{task_id}/cancel")
     async def cancel_task(task_id: str, request: Request) -> dict:
         """Cancel a task. Creator, assignee, or operator/internal."""
-        store = _require_tasks_v2()
+        store = tasks_store
         caller = _extract_verified_agent_id(request)
         record = store.get(task_id)
         if record is None:

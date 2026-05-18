@@ -4883,8 +4883,8 @@ class TestDashboardOriginStamp:
 
 class TestWorkplaceTabRoutes:
     """Verify the new /api/workplace/* endpoints respond with the right
-    shape for both ``OPENLEGION_ORCHESTRATION_TASKS_V2=0`` (empty state)
-    and the v2-on / store-attached case (real data)."""
+    shape for both the empty-state path and the store-attached path
+    (real data)."""
 
     def setup_method(self):
         self._tmpdir = tempfile.mkdtemp()
@@ -4911,21 +4911,11 @@ class TestWorkplaceTabRoutes:
             pass
         _teardown(self.components)
         shutil.rmtree(self._tmpdir, ignore_errors=True)
-        os.environ.pop("OPENLEGION_ORCHESTRATION_TASKS_V2", None)
 
-    def _set_v2(self, enabled: bool):
-        """Set the runtime flag on the live env. Caller is responsible
-        for restoring it via ``teardown_method``'s shutil cleanup of the
-        tmp_path or via ``self._restore_v2()`` when running multiple
-        clients in one test.
-        """
-        if enabled:
-            os.environ["OPENLEGION_ORCHESTRATION_TASKS_V2"] = "1"
-        else:
-            os.environ["OPENLEGION_ORCHESTRATION_TASKS_V2"] = "0"
-
-    def _client_with_v2(self, enabled: bool):
-        self._set_v2(enabled)
+    def _client_with_v2(self, enabled: bool = True):
+        # ``enabled`` is retained as a no-op parameter so the many
+        # existing call sites that pass ``True``/``False`` keep working
+        # after the orchestration-v2 gate was removed from source.
         return _make_client(self.components)
 
     def _patch_pending_proxy(self):
@@ -4981,15 +4971,6 @@ class TestWorkplaceTabRoutes:
         from unittest.mock import patch
         return patch("httpx.AsyncClient", _StubClient)
 
-    def test_workplace_tasks_empty_state_when_v2_off(self):
-        client = self._client_with_v2(False)
-        resp = client.get("/dashboard/api/workplace/tasks")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["enabled"] is False
-        assert data["tasks"] == []
-        assert "OPENLEGION_ORCHESTRATION_TASKS_V2" in data["hint"]
-
     def test_workplace_tasks_returns_rows_when_v2_on(self):
         client = self._client_with_v2(True)
         rec = self.tasks_store.create(
@@ -5011,22 +4992,6 @@ class TestWorkplaceTabRoutes:
         assert resp.status_code == 200
         rows = resp.json()["tasks"]
         assert all(r["assignee"] == "alpha" for r in rows)
-
-    def test_workplace_teams_empty_state(self):
-        client = self._client_with_v2(False)
-        resp = client.get("/dashboard/api/workplace/teams")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["enabled"] is False
-        assert data["teams"] == []
-
-    def test_workplace_blockers_empty_state(self):
-        client = self._client_with_v2(False)
-        resp = client.get("/dashboard/api/workplace/blockers")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["enabled"] is False
-        assert data["blockers"] == []
 
     def test_workplace_blockers_returns_blocked_tasks(self):
         client = self._client_with_v2(True)

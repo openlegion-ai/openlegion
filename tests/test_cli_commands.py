@@ -1543,15 +1543,6 @@ class TestWorkplaceCLICommands:
         assert "task_abc" in result.output
         assert "working" in result.output
 
-    def test_tasks_command_disabled_state(self):
-        runner = CliRunner()
-        body = {"enabled": False, "tasks": [],
-                "hint": "Set OPENLEGION_ORCHESTRATION_TASKS_V2=1"}
-        with self._patched_get(body):
-            result = runner.invoke(cli, ["tasks"])
-        assert result.exit_code == 0
-        assert "disabled" in result.output.lower()
-
     def test_pending_command_table(self):
         runner = CliRunner()
         body = {"pending": [

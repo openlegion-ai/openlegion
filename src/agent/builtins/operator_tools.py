@@ -974,20 +974,6 @@ async def set_project_goal(*_args, **_kw) -> dict:
 # ── Task 7: Operator product tools ───────────────────────────
 
 
-_TASKS_V2_DISABLED = (
-    "Orchestration tasks not enabled — flip OPENLEGION_ORCHESTRATION_TASKS_V2=1"
-)
-
-
-def _orchestration_v2_on() -> bool:
-    """Read the orchestration v2 flag at call time so monkeypatch tests work.
-
-    Default-on (rollout). Setting the env var to ``0`` disables the v2
-    path; any other value is treated as on.
-    """
-    return os.environ.get("OPENLEGION_ORCHESTRATION_TASKS_V2", "1") != "0"
-
-
 def _parse_over_budget(error: Exception) -> dict | None:
     """If a mesh HTTP error wraps an over_budget JSON payload, surface it.
 
@@ -1051,8 +1037,6 @@ async def list_agent_queue(
         return {"error": "This tool is only available to the operator agent."}
     if mesh_client is None:
         return {"error": "No mesh_client available"}
-    if not _orchestration_v2_on():
-        return {"error": _TASKS_V2_DISABLED}
     try:
         return await mesh_client.agent_queue(agent_id, limit=limit)
     except Exception as e:
@@ -1090,8 +1074,6 @@ async def get_team_outputs(
         return {"error": "This tool is only available to the operator agent."}
     if mesh_client is None:
         return {"error": "No mesh_client available"}
-    if not _orchestration_v2_on():
-        return {"error": _TASKS_V2_DISABLED}
     try:
         return await mesh_client.project_outputs(project_id, since=since)
     except Exception as e:
@@ -1316,8 +1298,6 @@ async def manage_task(
         return {"error": "This tool is only available to the operator agent."}
     if mesh_client is None:
         return {"error": "No mesh_client available"}
-    if not _orchestration_v2_on():
-        return {"error": _TASKS_V2_DISABLED}
 
     if action == "cancel":
         try:
@@ -1657,8 +1637,6 @@ async def inspect_teams(
         return {"error": f"Team '{target}' not found"}
 
     if detail == "status":
-        if not _orchestration_v2_on():
-            return {"error": _TASKS_V2_DISABLED}
         try:
             return await mesh_client.all_teams_status()
         except Exception as e:
@@ -1901,8 +1879,6 @@ async def summarize_team_progress(
         return {"error": "This tool is only available to the operator agent."}
     if mesh_client is None:
         return {"error": "No mesh_client available"}
-    if not _orchestration_v2_on():
-        return {"error": _TASKS_V2_DISABLED}
     target = team_id or project_id
     try:
         return await mesh_client.team_summary(target)

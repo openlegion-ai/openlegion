@@ -1677,7 +1677,6 @@ class TestVocabSweepGaps:
             "cron job",
             "cron jobs",
             "Board is disabled",
-            "OPENLEGION_ORCHESTRATION_TASKS_V2",
         ]
         for term in forbidden:
             assert term not in visible, (

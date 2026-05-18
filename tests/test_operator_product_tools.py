@@ -52,78 +52,12 @@ def _fake_budget_http_error(agent: str, monthly_used: float = 50.0) -> httpx.HTT
     return httpx.HTTPStatusError("400 Bad Request", request=request, response=response)
 
 
-# ── v2 flag gate ──────────────────────────────────────────────
+# ── Archive/delete tools (flag-independent) ───────────────────
 
 
 @pytest.mark.asyncio
-async def test_inspect_teams_status_requires_v2_flag(monkeypatch):
-    """Read tools that consume tasks return a clean error when v2 off.
-
-    The flag now defaults to ``1`` (rollout) so the off path must
-    explicitly set ``OPENLEGION_ORCHESTRATION_TASKS_V2=0`` rather than
-    relying on the env var being unset.
-    """
-    monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "0")
-    from src.agent.builtins.operator_tools import inspect_teams
-    result = await inspect_teams(detail="status", mesh_client=MagicMock())
-    assert "error" in result
-    assert "OPENLEGION_ORCHESTRATION_TASKS_V2" in result["error"]
-
-
-@pytest.mark.asyncio
-async def test_list_agent_queue_requires_v2_flag(monkeypatch):
-    monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "0")
-    from src.agent.builtins.operator_tools import list_agent_queue
-    result = await list_agent_queue("a1", mesh_client=MagicMock())
-    assert "error" in result
-    assert "OPENLEGION_ORCHESTRATION_TASKS_V2" in result["error"]
-
-
-@pytest.mark.asyncio
-async def test_get_team_outputs_requires_v2_flag(monkeypatch):
-    monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "0")
-    from src.agent.builtins.operator_tools import get_team_outputs
-    result = await get_team_outputs("p1", mesh_client=MagicMock())
-    assert "error" in result
-
-
-@pytest.mark.asyncio
-async def test_summarize_team_progress_requires_v2_flag(monkeypatch):
-    monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "0")
-    from src.agent.builtins.operator_tools import summarize_team_progress
-    result = await summarize_team_progress("p1", mesh_client=MagicMock())
-    assert "error" in result
-
-
-@pytest.mark.asyncio
-async def test_manage_task_reroute_requires_v2_flag(monkeypatch):
-    monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_V2", raising=False)
-    from src.agent.builtins.operator_tools import manage_task
-    result = await manage_task("t1", "reroute", new_assignee="writer",
-                                mesh_client=MagicMock())
-    assert "error" in result
-
-
-@pytest.mark.asyncio
-async def test_manage_task_cancel_requires_v2_flag(monkeypatch):
-    monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_V2", raising=False)
-    from src.agent.builtins.operator_tools import manage_task
-    result = await manage_task("t1", "cancel", mesh_client=MagicMock())
-    assert "error" in result
-
-
-@pytest.mark.asyncio
-async def test_manage_task_retry_requires_v2_flag(monkeypatch):
-    monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_V2", raising=False)
-    from src.agent.builtins.operator_tools import manage_task
-    result = await manage_task("t1", "retry", mesh_client=MagicMock())
-    assert "error" in result
-
-
-@pytest.mark.asyncio
-async def test_manage_team_archive_works_without_v2_flag(monkeypatch):
-    """Archive/delete team tools work regardless of the v2 flag."""
-    monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_V2", raising=False)
+async def test_manage_team_archive_works():
+    """Archive/delete team tools work regardless of orchestration flags."""
     from src.agent.builtins.operator_tools import manage_team
     mc = MagicMock()
     mc.archive_team = AsyncMock(return_value={"archived": True, "team": "growth"})
@@ -138,7 +72,6 @@ async def test_manage_team_archive_works_without_v2_flag(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_inspect_teams_status_all_teams(monkeypatch):
-    monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "1")
     from src.agent.builtins.operator_tools import inspect_teams
     mc = MagicMock()
     mc.all_teams_status = AsyncMock(
@@ -153,7 +86,6 @@ async def test_inspect_teams_status_all_teams(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_list_agent_queue_calls_mesh(monkeypatch):
-    monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "1")
     from src.agent.builtins.operator_tools import list_agent_queue
     mc = MagicMock()
     mc.agent_queue = AsyncMock(
@@ -166,7 +98,6 @@ async def test_list_agent_queue_calls_mesh(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_get_team_outputs_passes_since(monkeypatch):
-    monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "1")
     from src.agent.builtins.operator_tools import get_team_outputs
     mc = MagicMock()
     mc.project_outputs = AsyncMock(return_value={"outputs": []})
@@ -176,7 +107,6 @@ async def test_get_team_outputs_passes_since(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_summarize_team_progress_calls_mesh(monkeypatch):
-    monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "1")
     from src.agent.builtins.operator_tools import summarize_team_progress
     mc = MagicMock()
     mc.team_summary = AsyncMock(
@@ -228,7 +158,6 @@ async def test_inspect_agents_profile_returns_structured_routing_fields():
 
 @pytest.mark.asyncio
 async def test_manage_task_reroute_success(monkeypatch):
-    monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "1")
     from src.agent.builtins.operator_tools import manage_task
     mc = MagicMock()
     mc.reroute_task = AsyncMock(
@@ -243,7 +172,6 @@ async def test_manage_task_reroute_success(monkeypatch):
 @pytest.mark.asyncio
 async def test_manage_task_reroute_requires_new_assignee(monkeypatch):
     """`reroute` action without new_assignee returns a clear error."""
-    monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "1")
     from src.agent.builtins.operator_tools import manage_task
     result = await manage_task("task_1", "reroute", mesh_client=MagicMock())
     assert "error" in result
@@ -253,7 +181,6 @@ async def test_manage_task_reroute_requires_new_assignee(monkeypatch):
 @pytest.mark.asyncio
 async def test_manage_task_reroute_over_budget_returns_structured_error(monkeypatch):
     """Over-budget surface from the mesh wraps a structured payload."""
-    monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "1")
     from src.agent.builtins.operator_tools import manage_task
     mc = MagicMock()
     mc.reroute_task = AsyncMock(side_effect=_fake_budget_http_error("writer"))
@@ -265,7 +192,6 @@ async def test_manage_task_reroute_over_budget_returns_structured_error(monkeypa
 
 @pytest.mark.asyncio
 async def test_manage_task_cancel_success(monkeypatch):
-    monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "1")
     from src.agent.builtins.operator_tools import manage_task
     mc = MagicMock()
     mc.cancel_task = AsyncMock(return_value={"id": "task_1", "status": "cancelled"})
@@ -277,7 +203,6 @@ async def test_manage_task_cancel_success(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_manage_task_retry_with_changes(monkeypatch):
-    monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "1")
     from src.agent.builtins.operator_tools import manage_task
     mc = MagicMock()
     mc.retry_task = AsyncMock(
@@ -296,7 +221,6 @@ async def test_manage_task_retry_with_changes(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_manage_task_retry_over_budget(monkeypatch):
-    monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "1")
     from src.agent.builtins.operator_tools import manage_task
     mc = MagicMock()
     mc.retry_task = AsyncMock(side_effect=_fake_budget_http_error("scout"))
@@ -437,10 +361,7 @@ async def test_manage_agent_delete_returns_nonce():
 
 def _reload_server(monkeypatch, *, v2: bool, tasks_db: str):
     if v2:
-        monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "1")
         monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_DB", tasks_db)
-    else:
-        monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_V2", raising=False)
     import src.host.server as server_module
     importlib.reload(server_module)
     return server_module
@@ -546,7 +467,6 @@ def v2_app(tmp_path, monkeypatch):
     )
     yield app, server_module, tmp_path
     bb.close()
-    monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_V2", raising=False)
     monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)
     importlib.reload(server_module)
 
@@ -932,7 +852,6 @@ def v2_app_with_bus(tmp_path, monkeypatch):
     )
     yield app, server_module, tmp_path, bus
     bb.close()
-    monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_V2", raising=False)
     monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)
     importlib.reload(server_module)
 
@@ -1236,7 +1155,6 @@ def v2_app_with_lanes(tmp_path, monkeypatch):
         yield app, lane_calls
     finally:
         teardown()
-        monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_V2", raising=False)
         monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)
         importlib.reload(server_module)
 
