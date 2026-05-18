@@ -2877,6 +2877,16 @@ function dashboard() {
           return;
         }
         const data = await resp.json();
+        // Before replacing the list, cancel any pending deferred-apply
+        // timers + pins on the old row objects. Without this cleanup
+        // those setTimeout callbacks fire on rows no longer in the
+        // displayed list (orphan mutations, wasted work). Each row's
+        // `_pendingExternalTimer` is cleared by id-keyed dedupe.
+        for (const row of (this.workplaceSummaries || [])) {
+          if (row && row._pendingExternalTimer) {
+            clearTimeout(row._pendingExternalTimer);
+          }
+        }
         // ``enabled: false`` means the dashboard's mesh app didn't wire
         // the summaries store (e.g. legacy deploy). Hide the section
         // cleanly — the kanban tab is still usable.
@@ -4501,15 +4511,22 @@ function dashboard() {
           this.drillInData.task.feedback_text = data.feedback || null;
         }
       } else if (evt.type === 'work_summary_created') {
-        // New summary card landed. Prepend so newest-first ordering
-        // is preserved without a full reload. Dedupe by id (the cron
-        // can fire concurrently with a manual compose).
+        // New summary card landed. Re-fetch the list (the full record
+        // is one fetch away; avoids racing the store-write completion
+        // when the WS event arrives first). Dedupe by id.
+        // Debounced to 250ms so the daily cron firing across N teams
+        // in the same second triggers ONE re-fetch, not N. Without
+        // this guard a 30-team fleet would N-storm the dashboard's
+        // /api/workplace/summaries route at every cron tick.
         if (data.summary_id && !(this.workplaceSummaries || []).find(
               s => s.id === data.summary_id)) {
-          // Lightweight stub — the full record is one fetch away if the
-          // user clicks. Avoids racing the dashboard with the mesh's
-          // store-write completion when the WS arrives first.
-          this.loadWorkplaceSummaries();
+          if (this._summariesRefetchDebounce) {
+            clearTimeout(this._summariesRefetchDebounce);
+          }
+          this._summariesRefetchDebounce = setTimeout(() => {
+            this._summariesRefetchDebounce = null;
+            this.loadWorkplaceSummaries();
+          }, 250);
         }
       } else if (evt.type === 'work_summary_rated') {
         // Reflect the rating live on the summary card UNLESS the

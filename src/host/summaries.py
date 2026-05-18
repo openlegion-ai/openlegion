@@ -59,6 +59,13 @@ DEFAULT_RETENTION_SECONDS = 30 * 86400
 # Hard cap on feedback length so a runaway prompt can't bloat the DB.
 MAX_FEEDBACK_CHARS = 4000
 
+# Hard cap on narrative length. The deterministic composer writes
+# structured prose well under 2KB; 32KB is a generous ceiling that
+# still bounds the LLM context cost when prior narratives get
+# injected into the next compose's prompt. Defended at both the
+# store layer (here) and the mesh endpoint.
+MAX_NARRATIVE_CHARS = 32_000
+
 # After the first rating lands, the user has this long to revise it
 # before the row locks. 24h is the standard "you slept on it" window.
 RATING_EDIT_WINDOW_SECONDS = 24 * 3600
@@ -258,8 +265,15 @@ class WorkSummariesStore:
             )
         if not scope_id:
             raise ValueError("scope_id is required")
+        if not (generated_by or "").strip():
+            raise ValueError("generated_by is required")
         if period_end < period_start:
             raise ValueError("period_end must be >= period_start")
+        if narrative_md is not None and len(narrative_md) > MAX_NARRATIVE_CHARS:
+            raise ValueError(
+                f"narrative_md exceeds {MAX_NARRATIVE_CHARS} chars "
+                f"(got {len(narrative_md)})"
+            )
         from src.shared.utils import generate_id
         sid = summary_id or generate_id("ws")
         now = time.time()

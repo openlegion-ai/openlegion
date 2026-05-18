@@ -4882,6 +4882,13 @@ def create_mesh_app(
             raise HTTPException(400, "metrics must be a JSON object")
         if not isinstance(recommendations, list):
             raise HTTPException(400, "recommendations must be a JSON array")
+        from src.host.summaries import MAX_NARRATIVE_CHARS
+        if len(narrative_md) > MAX_NARRATIVE_CHARS:
+            raise HTTPException(
+                413,
+                f"narrative_md exceeds {MAX_NARRATIVE_CHARS} chars "
+                f"(got {len(narrative_md)})",
+            )
         try:
             from src.host.summaries import InvalidScope
             row = summaries_store.create(

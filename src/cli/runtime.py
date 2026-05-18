@@ -914,8 +914,74 @@ class RuntimeContext:
             agent_schedule = "every 15m" if agent_id == _OPERATOR_AGENT_ID else schedule
             self.cron_scheduler.ensure_heartbeat(agent_id, agent_schedule)
 
+    def _reconcile_work_summary_jobs(self) -> None:
+        """Ensure each active team has a daily ``compose_work_summary``
+        cron job, and prune jobs for teams that no longer exist or are
+        archived. Idempotent — runs at every mesh startup so the cron
+        set converges with the on-disk team metadata.
+
+        Per-team cadence override: ``summary_schedule`` field on the
+        team's ``metadata.yaml``. Defaults to ``DEFAULT_SUMMARY_SCHEDULE``
+        (daily at 9am) when absent.
+        """
+        if not self.cron_scheduler:
+            return
+        from src.cli.config import _load_projects
+        try:
+            teams = _load_projects()
+        except Exception as e:
+            logger.warning("work-summary cron bootstrap failed to load teams: %s", e)
+            return
+        # Build the desired set + ensure each. Per-team cadence
+        # overrides live in ``team.settings.summary_schedule`` so the
+        # extension point is the canonical settings dict, not a
+        # special top-level metadata field. The default schedule is
+        # baked into ``CronScheduler.ensure_summary_job`` (daily 9am).
+        active_team_names: set[str] = set()
+        for name, meta in teams.items():
+            if (meta.get("status") or "active") == "archived":
+                continue
+            active_team_names.add(name)
+            settings = meta.get("settings") or {}
+            schedule = settings.get("summary_schedule")
+            try:
+                self.cron_scheduler.ensure_summary_job(
+                    scope_kind="team", scope_id=name, schedule=schedule,
+                )
+            except Exception as e:
+                logger.warning(
+                    "ensure_summary_job for team %s failed: %s", name, e,
+                )
+        # Prune orphan summary jobs for teams that no longer exist
+        # (renamed, deleted, archived). Tool jobs whose tool_params we
+        # can't parse are left alone — they're not ours to manage.
+        import json as _json
+        for job in list(self.cron_scheduler.jobs.values()):
+            if job.tool_name != "compose_work_summary":
+                continue
+            try:
+                params = _json.loads(job.tool_params or "{}")
+            except (_json.JSONDecodeError, TypeError):
+                continue
+            if params.get("scope_kind") != "team":
+                continue
+            scope_id = params.get("scope_id")
+            if scope_id and scope_id not in active_team_names:
+                try:
+                    self.cron_scheduler.remove_job(job.id)
+                    logger.info(
+                        "pruned work-summary cron for archived/deleted team %s",
+                        scope_id,
+                    )
+                except Exception as e:
+                    logger.debug(
+                        "failed to prune orphan summary cron %s: %s",
+                        job.id, e,
+                    )
+
     def _start_background(self) -> None:
         self._reconcile_heartbeats()
+        self._reconcile_work_summary_jobs()
 
         # Start cron
         def run_cron():

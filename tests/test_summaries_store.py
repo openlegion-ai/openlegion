@@ -129,6 +129,38 @@ def test_create_rejects_empty_scope_id(store):
         )
 
 
+def test_create_rejects_empty_generated_by(store):
+    with pytest.raises(ValueError, match="generated_by"):
+        store.create(
+            scope_kind="team", scope_id="x",
+            period_start=0, period_end=1,
+            narrative_md="n", metrics={}, generated_by="",
+        )
+
+
+def test_create_rejects_oversize_narrative(store):
+    from src.host.summaries import MAX_NARRATIVE_CHARS
+    with pytest.raises(ValueError, match="narrative_md exceeds"):
+        store.create(
+            scope_kind="team", scope_id="x",
+            period_start=0, period_end=1,
+            narrative_md="n" * (MAX_NARRATIVE_CHARS + 1),
+            metrics={}, generated_by="operator",
+        )
+
+
+def test_create_accepts_narrative_at_cap(store):
+    from src.host.summaries import MAX_NARRATIVE_CHARS
+    # Exact-cap narrative is allowed (boundary check).
+    r = store.create(
+        scope_kind="team", scope_id="x",
+        period_start=0, period_end=1,
+        narrative_md="n" * MAX_NARRATIVE_CHARS,
+        metrics={}, generated_by="operator",
+    )
+    assert r["id"].startswith("ws_")
+
+
 def test_create_rejects_inverted_period(store):
     with pytest.raises(ValueError, match="period_end"):
         store.create(
