@@ -1,10 +1,9 @@
 """Rollout defaults — opt-in flags flipped to default-on.
 
 Verifies the orchestration roadmap rollout: ``OPENLEGION_TEAM_SCOPE_MODE``
-defaults to ``enforce`` and ``OPENLEGION_ORCHESTRATION_TASKS_V2`` defaults
-to ``1``. Also confirms the emergency-rollback off-switches still work
-(setting either env var back to its legacy value re-enters the legacy
-behavior path).
+defaults to ``enforce``. Also confirms the emergency-rollback off-switch
+still works (setting the env var back to its legacy value re-enters the
+legacy behavior path).
 
 The flag is read once at module import in ``src.host.server`` so the
 tests reload the module after each ``monkeypatch.setenv`` /
@@ -35,27 +34,6 @@ def test_team_scope_mode_default_is_enforce(monkeypatch):
     finally:
         # Reload once more to leave the module in a clean default state
         # for the rest of the suite.
-        _reload_server()
-
-
-def test_orchestration_tasks_v2_default_on(monkeypatch):
-    """With the env var unset, ``_ORCHESTRATION_TASKS_V2`` is True."""
-    monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_V2", raising=False)
-    server_module = _reload_server()
-    try:
-        assert server_module._ORCHESTRATION_TASKS_V2 is True
-    finally:
-        _reload_server()
-
-
-def test_orchestration_tasks_v2_can_be_disabled(monkeypatch):
-    """``OPENLEGION_ORCHESTRATION_TASKS_V2=0`` is the rollback off-switch."""
-    monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "0")
-    server_module = _reload_server()
-    try:
-        assert server_module._ORCHESTRATION_TASKS_V2 is False
-    finally:
-        monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_V2", raising=False)
         _reload_server()
 
 
