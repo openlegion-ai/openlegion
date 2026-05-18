@@ -20,6 +20,7 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from src.browser.service import BrowserManager, BrowserPoolExhausted
+from src.shared.paths import resolve_under_root
 from src.shared.trace import TRACE_HEADER, current_trace_id
 from src.shared.types import AGENT_ID_RE_PATTERN
 from src.shared.utils import setup_logging
@@ -1064,15 +1065,14 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         root = Path(_UPLOADS_ROOT)
         if not root.is_dir():
             raise HTTPException(503, "Uploads directory not available")
-        root = root.resolve()
         try:
             p = Path(path)
         except ValueError:
             raise HTTPException(400, "Invalid path")
         if p.is_absolute() or ".." in p.parts:
             raise HTTPException(400, "Invalid path")
-        candidate = (root / path).resolve()
-        if not candidate.is_relative_to(root):
+        candidate = resolve_under_root(root, path)
+        if candidate is None:
             raise HTTPException(400, "Path traversal not allowed")
         if not candidate.exists() or not candidate.is_file():
             raise HTTPException(404, f"Upload not found: {path}")

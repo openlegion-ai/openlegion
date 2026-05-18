@@ -45,6 +45,7 @@ from jinja2 import Environment, FileSystemLoader
 
 from src.cli.proxy import build_proxy_env_vars, resolve_agent_proxy
 from src.dashboard.auth import verify_session_cookie
+from src.shared.paths import resolve_under_root
 from src.shared.sqlite_helpers import open_db
 from src.shared.utils import dumps_safe, friendly_streaming_error, sanitize_for_prompt, setup_logging
 
@@ -6305,9 +6306,8 @@ def create_dashboard_router(
             raise HTTPException(400, "Invalid path")
         if p.is_absolute() or ".." in p.parts:
             raise HTTPException(400, "Invalid path")
-        root = _uploads_dir().resolve()
-        candidate = (root / name).resolve()
-        if not candidate.is_relative_to(root):
+        candidate = resolve_under_root(_uploads_dir(), name)
+        if candidate is None:
             raise HTTPException(400, "Path traversal not allowed")
         return candidate
 
