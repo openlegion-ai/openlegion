@@ -1887,6 +1887,180 @@ async def summarize_team_progress(
 
 
 @skill(
+    name="compose_work_summary",
+    description=(
+        "Compose and persist a work summary for a team or solo agent "
+        "(the Work tab's default landing surface). Reads the team's "
+        "recent task activity, drafts a narrative + metrics + 1-3 "
+        "recommendations, and writes a row to ``work_summaries`` so "
+        "the dashboard renders it as a card the user can rate. The "
+        "user's rating + feedback flows back into future composition "
+        "calls via the prior-feedback bullet block. Use this as a "
+        "periodic (daily) check-in surface, not a per-task tracker."
+    ),
+    parameters={
+        "scope_kind": {
+            "type": "string",
+            "description": "One of 'team' or 'solo'.",
+        },
+        "scope_id": {
+            "type": "string",
+            "description": (
+                "Team name (for ``scope_kind=team``) or agent id (for "
+                "``scope_kind=solo``)."
+            ),
+        },
+        "period_hours": {
+            "type": "integer",
+            "description": (
+                "Look-back window in hours. Default 24 for daily summaries; "
+                "use 168 for weekly. Constrained to 1..720."
+            ),
+        },
+    },
+)
+async def compose_work_summary(
+    scope_kind: str = "team",
+    scope_id: str = "",
+    period_hours: int = 24,
+    *,
+    mesh_client=None,
+    **_kw,
+) -> dict:
+    """Operator-only. Composes a work summary deterministically from the
+    team-summary endpoint + prior rating feedback, then persists via
+    ``POST /mesh/work-summaries``. The narrative is a structured prose
+    rendering of the team's recent counts and blockers — not an LLM
+    paraphrase — so the summary is reproducible, cheap, and never
+    hallucinates a metric. PR-B adds the UI; this skill is the
+    backend-side composer that the cron and the operator both use.
+    """
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    if scope_kind not in ("team", "solo"):
+        return {
+            "error": f"scope_kind must be 'team' or 'solo', got {scope_kind!r}",
+        }
+    if not scope_id:
+        return {"error": "scope_id is required"}
+    try:
+        period_hours = max(1, min(int(period_hours), 720))
+    except (TypeError, ValueError):
+        period_hours = 24
+    import time as _time
+    now = _time.time()
+    period_start = now - period_hours * 3600
+    period_end = now
+
+    # Pull the existing team summary as the base.
+    base: dict = {}
+    if scope_kind == "team":
+        try:
+            base = await mesh_client.team_summary(scope_id)
+        except Exception as e:
+            return {"error": f"Failed to fetch team summary for {scope_id!r}: {e}"}
+    counts = (base.get("counts") if isinstance(base, dict) else {}) or {}
+    top_blockers = (base.get("top_blockers") if isinstance(base, dict) else []) or []
+    recent_completions = (
+        base.get("recent_completions") if isinstance(base, dict) else []
+    ) or []
+
+    # Pull prior rated feedback to inject into recommendations.
+    prior_feedback: list[dict] = []
+    try:
+        resp = await mesh_client.list_work_summaries(
+            scope_kind=scope_kind, scope_id=scope_id, limit=5,
+        )
+        for s in (resp.get("summaries") or []):
+            if s.get("rating") and s.get("feedback"):
+                prior_feedback.append({
+                    "rating": s["rating"],
+                    "feedback": s["feedback"],
+                    "rated_at": s.get("rated_at"),
+                })
+    except Exception:
+        # Best-effort — composing a summary must not depend on prior-
+        # feedback fetch succeeding.
+        prior_feedback = []
+
+    # Build the metrics block.
+    metrics = {
+        "period_hours": period_hours,
+        "tasks_active": int(counts.get("active", 0) or 0),
+        "tasks_blocked": int(counts.get("blocked", 0) or 0),
+        "tasks_done": int(counts.get("done", 0) or 0),
+        "tasks_failed": int(counts.get("failed", 0) or 0),
+        "top_blocker_count": len(top_blockers),
+        "recent_completion_count": len(recent_completions),
+    }
+
+    # Build narrative — deterministic, no LLM. Markdown so dashboard can
+    # render with light formatting (PR-B handles the render).
+    narrative_lines: list[str] = []
+    label = "Team" if scope_kind == "team" else "Solo agent"
+    narrative_lines.append(f"## {label} `{scope_id}` — last {period_hours}h")
+    narrative_lines.append("")
+    if scope_kind == "team" and base.get("status_text"):
+        narrative_lines.append(str(base["status_text"]).strip())
+        narrative_lines.append("")
+    narrative_lines.append(
+        f"**Activity**: {metrics['tasks_active']} active · "
+        f"{metrics['tasks_blocked']} blocked · "
+        f"{metrics['tasks_done']} delivered · "
+        f"{metrics['tasks_failed']} failed."
+    )
+    if top_blockers:
+        narrative_lines.append("")
+        narrative_lines.append("**Top blockers**:")
+        for b in top_blockers[:3]:
+            title = (b.get("title") or "")[:80]
+            assignee = b.get("assignee") or "?"
+            narrative_lines.append(f"- {title} ({assignee})")
+    if recent_completions:
+        narrative_lines.append("")
+        narrative_lines.append("**Recent deliveries**:")
+        for c in recent_completions[:3]:
+            title = (c.get("title") or "")[:80]
+            assignee = c.get("assignee") or "?"
+            narrative_lines.append(f"- {title} ({assignee})")
+    narrative_md = "\n".join(narrative_lines)
+
+    # Build 1-3 recommendations. Prioritize: top blockers, then prior
+    # negative feedback, then a generic continue-as-is line if quiet.
+    recommendations: list[str] = []
+    if top_blockers:
+        first = top_blockers[0]
+        recommendations.append(
+            f"Unblock '{(first.get('title') or '?')[:60]}' "
+            f"({first.get('assignee') or '?'}) — top blocker in window."
+        )
+    for fb in prior_feedback[:2]:
+        if fb["rating"] == "rework":
+            recommendations.append(
+                f"Address prior 👎 feedback: {fb['feedback'][:120]}"
+            )
+    if not recommendations:
+        recommendations.append(
+            "No blockers and no negative prior feedback — stay the course."
+        )
+
+    try:
+        return await mesh_client.create_work_summary(
+            scope_kind=scope_kind,
+            scope_id=scope_id,
+            period_start=period_start,
+            period_end=period_end,
+            narrative_md=narrative_md,
+            metrics=metrics,
+            recommendations=recommendations[:3],
+        )
+    except Exception as e:
+        return {"error": f"Failed to persist work summary: {e}"}
+
+
+@skill(
     name="manage_team",
     description=(
         "Team lifecycle action (archive / unarchive / propose-delete). "

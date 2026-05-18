@@ -1439,6 +1439,79 @@ class MeshClient:
         """DEPRECATED: alias for :meth:`team_summary`."""
         return await self.team_summary(project_id)
 
+    # ---- Work summaries (PR-A) -----------------------------------------
+    async def create_work_summary(
+        self,
+        *,
+        scope_kind: str,
+        scope_id: str,
+        period_start: float,
+        period_end: float,
+        narrative_md: str,
+        metrics: dict,
+        recommendations: list[str] | None = None,
+    ) -> dict:
+        """Operator-only: create a new work summary record."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/work-summaries",
+            json={
+                "scope_kind": scope_kind,
+                "scope_id": scope_id,
+                "period_start": period_start,
+                "period_end": period_end,
+                "narrative_md": narrative_md,
+                "metrics": metrics,
+                "recommendations": recommendations or [],
+            },
+            headers=self._trace_headers(),
+        )
+        _raise_with_body(response)
+        return response.json()
+
+    async def list_work_summaries(
+        self,
+        *,
+        scope_kind: str | None = None,
+        scope_id: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict:
+        """List recent summaries, scope-filtered."""
+        params: dict = {"limit": limit, "offset": offset}
+        if scope_kind:
+            params["scope_kind"] = scope_kind
+        if scope_id:
+            params["scope_id"] = scope_id
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/work-summaries", params=params,
+        )
+        _raise_with_body(response)
+        return response.json()
+
+    async def get_work_summary(self, summary_id: str) -> dict:
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/work-summaries/{summary_id}",
+        )
+        _raise_with_body(response)
+        return response.json()
+
+    async def rate_work_summary(
+        self,
+        summary_id: str,
+        rating: str,
+        feedback: str | None = None,
+    ) -> dict:
+        """Operator-only: rate a summary."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/work-summaries/{summary_id}/rating",
+            json={"rating": rating, "feedback": feedback},
+            headers=self._trace_headers(),
+        )
+        _raise_with_body(response)
+        return response.json()
+
     async def archive_team(self, name: str) -> dict:
         """Archive a team."""
         client = await self._get_client()

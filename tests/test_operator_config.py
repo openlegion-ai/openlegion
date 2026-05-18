@@ -258,7 +258,8 @@ class TestOperatorConstants:
         # + list_available_models + memory_save + memory_search
         # + update_workspace + read_file → 48. (propose_edit was originally
         # in this set but was retired in PR #927.)
-        assert len(_OPERATOR_ALLOWED_TOOLS) == 48
+        # Work-summaries backend PR adds compose_work_summary → 49.
+        assert len(_OPERATOR_ALLOWED_TOOLS) == 49
         assert len(_OPERATOR_HEARTBEAT_TOOLS) == 4
         # Heartbeat tools should be a subset of allowed tools
         assert set(_OPERATOR_HEARTBEAT_TOOLS).issubset(set(_OPERATOR_ALLOWED_TOOLS))

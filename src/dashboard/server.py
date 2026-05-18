@@ -662,6 +662,10 @@ def create_dashboard_router(
     # the relevant store is absent.
     pending_actions: Any = None,
     tasks_store: Any = None,
+    # PR-A — Work summaries backing the new Work-tab default landing.
+    # Optional so existing dashboard tests that don't construct one keep
+    # working; the endpoints return ``{enabled: False}`` when absent.
+    summaries_store: Any = None,
     # Phase -1 onboarding wizard — tracks first-visit activation. Optional
     # so existing tests that don't pass it keep working; we lazy-init a
     # default :class:`DashboardTelemetry` against ``data/telemetry.db``
@@ -6459,6 +6463,99 @@ def create_dashboard_router(
                 "blockers": blockers,
             })
         return {"enabled": True, "teams": result}
+
+    @api_router.get("/api/workplace/summaries")
+    async def api_workplace_summaries(
+        scope_kind: str | None = None,
+        scope_id: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict:
+        """Work summaries for the Work-tab default landing (PR-B).
+
+        Returns ``{enabled: False, summaries: []}`` when the store
+        isn't wired (legacy dashboards / standalone tests). Scope
+        filter is server-side; the dashboard already runs as the
+        operator persona, so visibility expansion is unnecessary —
+        operator sees everything via the mesh endpoint's bypass.
+        """
+        if summaries_store is None:
+            return {"enabled": False, "summaries": []}
+        limit = max(1, min(int(limit or 100), 500))
+        offset = max(0, int(offset or 0))
+        try:
+            rows = summaries_store.list_recent(
+                scope_kind=scope_kind, scope_id=scope_id,
+                limit=limit, offset=offset,
+            )
+            summaries_store._safe_reap()
+        except Exception as e:
+            logger.warning("workplace summaries listing failed: %s", e)
+            return {"enabled": True, "summaries": [], "error": str(e)}
+        return {"enabled": True, "summaries": rows}
+
+    @api_router.get("/api/workplace/summaries/{summary_id}")
+    async def api_workplace_summary_detail(summary_id: str) -> dict:
+        if summaries_store is None:
+            raise HTTPException(404, "Summaries store not configured")
+        row = summaries_store.get(summary_id)
+        if row is None:
+            raise HTTPException(404, f"Summary {summary_id!r} not found")
+        return row
+
+    @api_router.post("/api/workplace/summaries/{summary_id}/rating")
+    async def api_workplace_summary_rate(
+        summary_id: str, request: Request,
+    ) -> dict:
+        """Operator persona (dashboard) records the user's rating.
+
+        CSRF is enforced by the router-level ``_csrf_check`` dependency.
+        Body: ``{rating: "accepted"|"acknowledged"|"rework", feedback: str}``.
+        ``rework`` requires non-empty feedback so the next summary's
+        composition has something to act on (mirrors the per-task
+        outcome rule).
+        """
+        if summaries_store is None:
+            raise HTTPException(404, "Summaries store not configured")
+        from src.host.summaries import (
+            MAX_FEEDBACK_CHARS,
+            RatingLocked,
+            SummaryNotFound,
+            VALID_RATINGS,
+        )
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError) as e:
+            raise HTTPException(400, "Invalid JSON body") from e
+        if not isinstance(body, dict):
+            raise HTTPException(400, "Body must be a JSON object")
+        rating = body.get("rating")
+        feedback = body.get("feedback") or ""
+        if rating not in VALID_RATINGS:
+            raise HTTPException(
+                400, f"rating must be one of {sorted(VALID_RATINGS)}",
+            )
+        if not isinstance(feedback, str):
+            raise HTTPException(400, "feedback must be a string")
+        feedback = feedback.strip()
+        if len(feedback) > MAX_FEEDBACK_CHARS:
+            raise HTTPException(
+                400, f"feedback exceeds {MAX_FEEDBACK_CHARS} chars",
+            )
+        if rating == "rework" and not feedback:
+            raise HTTPException(
+                400, "feedback is required for rating='rework'",
+            )
+        try:
+            return summaries_store.set_rating(
+                summary_id, rating, feedback or None, actor="operator",
+            )
+        except SummaryNotFound:
+            raise HTTPException(404, f"Summary {summary_id!r} not found")
+        except RatingLocked as e:
+            raise HTTPException(409, str(e))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
 
     @api_router.get("/api/workplace/blockers")
     async def api_workplace_blockers() -> dict:
