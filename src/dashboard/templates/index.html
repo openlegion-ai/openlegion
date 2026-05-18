@@ -4509,7 +4509,7 @@
                feed first). -->
           <div class="mt-4 text-center flex items-center justify-center gap-4">
             <button type="button"
-              x-show="workplaceTeams.length >= 1"
+              x-show="workplaceTeams.length >= 1 || workplaceSummaries.length >= 1"
               @click="switchHomeTab('summaries')"
               class="text-[12px] text-gray-400 hover:text-indigo-200 transition-colors"
               data-testid="board-view-summaries">View team summaries &rarr;</button>

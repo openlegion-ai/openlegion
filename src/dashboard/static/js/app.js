@@ -428,6 +428,17 @@ function dashboard() {
     // value is the current draft feedback string. The user opens the
     // box by clicking 👎 → enters reason → submits → entry is cleared.
     summaryFeedbackDrafts: {},
+    // Monotonic per-summary rating sequence. ``rateSummary`` bumps the
+    // value on each request, captures it locally, and the
+    // ``work_summary_rated`` WS handler ignores any event whose
+    // implicit "before" state predates the latest local in-flight
+    // request. Prevents a delayed/stale WS event from clobbering the
+    // newer POST result (codex r1 P2 — rapid rating-edit race).
+    _summaryRateSeq: {},
+    // Set of summary ids whose rating POST is currently in flight.
+    // The template uses this to disable the rating buttons + show a
+    // subtle loading affordance, preventing double-fires.
+    _summaryRateInFlight: {},
     // ``true`` once the user has explicitly chosen a homeTab (via the
     // sub-nav toggle). Until then, the default lands on 'summaries'
     // when at least one team exists. Small fleets (no teams) skip
@@ -833,20 +844,27 @@ function dashboard() {
       // ``/home/tasks`` (Phase 3 kanban sub-page URL) still resolves
       // to the kanban — the kanban IS the default now, so old
       // bookmarks survive without a redirect.
+      // PR-B — explicit Work sub-routes all set ``homeTabUserChosen``
+      // so the post-load ``_applyDefaultHomeTab`` doesn't override a
+      // user's deep link. Bare ``/home`` is the only path that lets
+      // the auto-default decide between summaries and kanban based on
+      // team count.
       if (clean === 'home') { route.tab = 'workplace'; route.homeTab = 'kanban'; return route; }
       if (clean === 'home/activity' || clean.startsWith('home/activity')) {
-        route.tab = 'workplace'; route.homeTab = 'activity'; return route;
+        route.tab = 'workplace'; route.homeTab = 'activity';
+        route.homeTabUserChosen = true;
+        return route;
       }
       if (clean === 'home/summaries' || clean.startsWith('home/summaries')) {
-        // PR-B — summary-card default landing for multi-team fleets.
-        // Deep-linkable; ``homeTabUserChosen`` is set so the
-        // auto-default logic doesn't override on first paint.
         route.tab = 'workplace'; route.homeTab = 'summaries';
         route.homeTabUserChosen = true;
         return route;
       }
       if (clean === 'home/tasks' || clean.startsWith('home/tasks')) {
-        route.tab = 'workplace'; route.homeTab = 'kanban'; return route;
+        // Legacy bookmark — explicit kanban request.
+        route.tab = 'workplace'; route.homeTab = 'kanban';
+        route.homeTabUserChosen = true;
+        return route;
       }
 
       const agentMatch = clean.match(/^agents\/([^/]+)(?:\/([^/]+))?$/);
@@ -2878,25 +2896,31 @@ function dashboard() {
 
     // Pick the default homeTab on first Work-tab visit. If the user
     // already toggled the sub-nav (``homeTabUserChosen``) or arrived
-    // via a deep link (``_parsePath`` already set homeTab), respect
-    // that. Otherwise: teams present → summaries; otherwise kanban.
+    // via an explicit deep link (every Work sub-route except bare
+    // ``/home`` sets the flag), respect that. Otherwise: summaries
+    // exist (either via team membership or solo-agent rows) →
+    // summaries; otherwise kanban (codex r1 P2 — solo-only fleets).
     _applyDefaultHomeTab() {
       if (this.homeTabUserChosen) return;
-      if ((this.workplaceTeams || []).length >= 1) {
+      const hasTeams = (this.workplaceTeams || []).length >= 1;
+      const hasSummaries = (this.workplaceSummaries || []).length >= 1;
+      if (hasTeams || hasSummaries) {
         if (this.homeTab !== 'summaries') {
           this.homeTab = 'summaries';
         }
       } else if (this.homeTab === 'summaries') {
-        // Edge case: user landed on /home/summaries but there are no
-        // teams. Fall back to kanban so the page isn't empty.
+        // Edge case: route landed on summaries but neither teams nor
+        // summaries exist. Fall back to kanban so the page isn't empty.
         this.homeTab = 'kanban';
       }
     },
 
     // Submit a 👍 / ➖ rating for a summary. Optimistically updates the
-    // local row + closes any open feedback box. The follow-up
-    // ``work_summary_rated`` WebSocket event reconciles state with the
-    // server (no-op if the optimistic write already matched).
+    // local row + closes any open feedback box. Bumps the per-summary
+    // rate-sequence so a delayed ``work_summary_rated`` WS event
+    // can't roll back to a stale state (codex r1 P2). Returns early
+    // if a request for the same summary is already in flight to
+    // prevent double-fires.
     async rateSummary(summaryId, rating, feedback = '') {
       const trimmed = (feedback || '').trim();
       if (rating === 'rework' && !trimmed) {
@@ -2904,6 +2928,10 @@ function dashboard() {
         // so a stray keyboard shortcut can't post a bare 👎.
         return;
       }
+      if (this._summaryRateInFlight[summaryId]) return;
+      this._summaryRateInFlight[summaryId] = true;
+      const seq = (this._summaryRateSeq[summaryId] || 0) + 1;
+      this._summaryRateSeq[summaryId] = seq;
       const body = trimmed ? { rating, feedback: trimmed } : { rating };
       try {
         const resp = await fetch(
@@ -2926,7 +2954,7 @@ function dashboard() {
         }
         const updated = await resp.json();
         // Optimistic state sync. The WebSocket event will arrive
-        // shortly and ratify; this prevents a perceptible flicker.
+        // shortly and ratify (or be ignored as stale by the seq guard).
         const list = this.workplaceSummaries || [];
         const row = list.find(r => r.id === summaryId);
         if (row) {
@@ -2934,11 +2962,14 @@ function dashboard() {
           row.feedback = updated.feedback;
           row.rated_at = updated.rated_at;
           row.rated_by = updated.rated_by;
+          row._lastLocalRateSeq = seq;
         }
         delete this.summaryFeedbackDrafts[summaryId];
       } catch (e) {
         this.workplaceErrors.summaries =
           (e && e.message) ? `Rating failed: ${e.message}` : 'Rating failed';
+      } finally {
+        delete this._summaryRateInFlight[summaryId];
       }
     },
 
@@ -2954,10 +2985,14 @@ function dashboard() {
     },
 
     // Drill from a summary card into the scoped kanban for that team.
-    // Sets the filter, switches the sub-nav, re-loads tasks under the
-    // filter, and pushes the URL so the deep link is bookmarkable.
+    // Clears ``workplaceTasks`` BEFORE the sub-nav flip so a stale
+    // unfiltered render can't briefly leak cross-team tasks while
+    // the filtered fetch resolves (codex r1 P2). The skeleton
+    // loader fills the gap.
     drillIntoTeamKanban(teamName) {
       this.workplaceTeamFilter = teamName || '';
+      this.workplaceTasks = [];
+      this.workplaceSectionLoading.tasks = true;
       this.homeTab = 'kanban';
       this.homeTabUserChosen = true;
       this.loadWorkplaceTasks();
@@ -4452,10 +4487,26 @@ function dashboard() {
           this.loadWorkplaceSummaries();
         }
       } else if (evt.type === 'work_summary_rated') {
-        // Reflect the rating live on the summary card.
+        // Reflect the rating live on the summary card UNLESS the
+        // local user just posted a fresher rating that hasn't been
+        // ratified yet. ``_lastLocalRateSeq`` is the monotonic
+        // counter stamped by ``rateSummary`` after a successful
+        // POST; while a newer request is in flight, ignore the WS
+        // event so a delayed echo of the prior rating can't roll
+        // back our state (codex r1 P2 — rapid rating-edit race).
         const row = (this.workplaceSummaries || []).find(
           s => s.id === data.summary_id);
         if (row) {
+          // If a POST is currently in flight, skip — the response
+          // handler will write the canonical state.
+          if (this._summaryRateInFlight[data.summary_id]) return;
+          // If this WS event matches the latest local POST result
+          // (same rating + feedback), it's the ratification — no-op.
+          const matchesLocal = (
+            row.rating === data.rating
+            && (row.feedback || null) === (data.feedback || null)
+          );
+          if (matchesLocal) return;
           row.rating = data.rating;
           row.feedback = data.feedback || row.feedback || null;
           row.rated_at = data.ts || row.rated_at;
