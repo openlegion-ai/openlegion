@@ -160,7 +160,12 @@ class TestHandOff:
 
     @pytest.mark.asyncio
     async def test_hand_off_task_write_fails_reports_error(self):
-        """When task write fails after output write, error is returned."""
+        """When task write fails after output write, the Bug H
+        directive envelope is returned — not a bare error string.
+        Details on the new shape live in
+        ``TestHandOffCreateFailureSurfacing``; this is the legacy
+        smoke check that the failure still surfaces with handed_off
+        flipped off and the new ``create_failed`` flag set."""
         from src.agent.builtins.coordination_tool import hand_off
 
         mc = _make_mesh_client(agent_id="scout")
@@ -179,7 +184,10 @@ class TestHandOff:
         )
 
         assert "error" in result
-        assert "Failed to create task" in result["error"]
+        assert result["handed_off"] is False
+        assert result["create_failed"] is True
+        assert "create_failed" in result["error"]
+        assert "connection lost" in result["create_error"]
 
     @pytest.mark.asyncio
     async def test_hand_off_invalid_agent_id_format(self):
@@ -1687,3 +1695,229 @@ class TestHandOffWakeFailureSurfacing:
         assert "DO NOT mark" in result["recovery_hint"]
         # And the unambiguous ``error`` field LLMs reliably react to.
         assert "wake_failed" in result["error"]
+
+
+# ── Bug H: surface create_task / write_blackboard failures in hand_off ─
+
+
+class TestHandOffCreateFailureSurfacing:
+    """Operator-reported Bug H: when ``create_task`` or
+    ``write_blackboard`` raised inside ``hand_off``, the bare
+    ``{"error": "Failed to create task: ..."}`` envelope was easy for
+    LLMs to gloss past — the in-prod case had seo-strategist call
+    hand_off, create_task raise, and the agent reply "Brief completed"
+    with no task ever queued for page-writer.
+
+    The fix mirrors the Bug G envelope shape — explicit
+    ``handed_off=False``, ``error`` field with "MUST NOT report
+    success" language, and a directive ``recovery_hint``. ``task_queued``
+    is now ``False`` (vs ``True`` for wake_failed) so the LLM can
+    tell the difference between "row exists, wake didn't fire" and
+    "row never made it".
+    """
+
+    @pytest.mark.asyncio
+    async def test_v2_create_task_failure_returns_directive_envelope(self):
+        """v2 path: ``mesh_client.create_task`` raising surfaces the
+        full Bug-G-style directive envelope, not a bare error."""
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="seo-strategist", v2_enabled=True)
+        mc.list_agents.return_value = {"page-writer": {"role": "writer"}}
+        mc.create_task.side_effect = RuntimeError("mesh /tasks 503")
+
+        result = await hand_off(
+            to="page-writer",
+            summary="Brief: langchain-vs-openlegion",
+            mesh_client=mc,
+        )
+
+        # LLM-facing contract: handed_off must be False so the agent
+        # cannot silently report "done".
+        assert result["handed_off"] is False, (
+            "create_task raised but handed_off is True — LLM will lie"
+        )
+        # task_queued=False distinguishes this from wake-failed (where
+        # the row IS in SQLite). Here no row was persisted.
+        assert result["task_queued"] is False
+        assert result["create_failed"] is True
+        assert result["to"] == "page-writer"
+        # ``error`` is the field LLMs react to most strongly.
+        assert "create_failed" in result["error"]
+        assert "MUST NOT report success" in result["error"]
+        assert "page-writer" in result["error"]
+        # ``recovery_hint`` is directive, not advisory.
+        assert "DO NOT mark this work as complete" in result["recovery_hint"]
+        assert "page-writer" in result["recovery_hint"]
+        # create_error carries the redacted exception detail for
+        # operators who want the raw message without parsing ``error``.
+        assert "mesh /tasks 503" in result["create_error"]
+
+    @pytest.mark.asyncio
+    async def test_v2_create_task_failure_redacts_credentials(self):
+        """v2 path: the exception from create_task can carry the mesh
+        URL with an api_key in the query string. The error envelope
+        is read back into the LLM context — credentials must be
+        redacted before truncation, same precaution as wake_error.
+        """
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="seo-strategist", v2_enabled=True)
+        mc.list_agents.return_value = {"page-writer": {"role": "writer"}}
+        leaky_token = "sk-" + "a" * 40
+        leaky = (
+            f"POST https://mesh.internal/tasks?api_key={leaky_token} "
+            f"failed with 500"
+        )
+        mc.create_task.side_effect = RuntimeError(leaky)
+
+        result = await hand_off(
+            to="page-writer",
+            summary="Brief: x",
+            mesh_client=mc,
+        )
+
+        assert result["create_failed"] is True
+        # Credential must not appear anywhere LLM-readable.
+        assert leaky_token not in result["create_error"]
+        assert leaky_token not in result["error"]
+        assert leaky_token not in result["recovery_hint"]
+
+    @pytest.mark.asyncio
+    async def test_v2_output_write_failure_returns_directive_envelope(self):
+        """v2 path: ``write_blackboard`` for the handoff artifact
+        raising surfaces the directive envelope too. This is the
+        earliest failure point — no task row, no artifact persisted."""
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="trend-scout", v2_enabled=True)
+        mc.list_agents.return_value = {
+            "seo-strategist": {"role": "strategist"},
+        }
+        mc.write_blackboard.side_effect = RuntimeError("blackboard EBUSY")
+
+        result = await hand_off(
+            to="seo-strategist",
+            summary="Top 5 trends for week of 2026-05-18",
+            data='{"trends": ["a", "b"]}',
+            mesh_client=mc,
+        )
+
+        assert result["handed_off"] is False
+        assert result["task_queued"] is False
+        assert result["output_write_failed"] is True
+        assert result["to"] == "seo-strategist"
+        assert "output_write_failed" in result["error"]
+        assert "MUST NOT report success" in result["error"]
+        assert "DO NOT mark this work as complete" in result["recovery_hint"]
+        # ``create_task`` must NOT have been reached — the write failed
+        # first, so trying to create the task would have written into
+        # a half-populated state.
+        assert mc.create_task.await_count == 0
+        # write_error carries the redacted exception detail.
+        assert "blackboard EBUSY" in result["write_error"]
+
+    @pytest.mark.asyncio
+    async def test_legacy_task_write_failure_returns_directive_envelope(self):
+        """Legacy path (orchestration v2 OFF): the blackboard task
+        write raising surfaces the same directive shape — operators
+        who haven't migrated to v2 still need the LLM-resistant signal.
+        """
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="seo-strategist", v2_enabled=False)
+        mc.list_agents.return_value = {"page-writer": {"role": "writer"}}
+
+        # Make write_blackboard fail only on the task-key write (the
+        # second call). The first write is for output data, which
+        # only runs when ``data`` is supplied — omit ``data`` so we
+        # cleanly target the task write.
+        mc.write_blackboard.side_effect = RuntimeError("bb shard offline")
+
+        result = await hand_off(
+            to="page-writer",
+            summary="Brief: langchain-vs-openlegion",
+            mesh_client=mc,
+        )
+
+        assert result["handed_off"] is False
+        assert result["task_queued"] is False
+        assert result["create_failed"] is True
+        assert result["to"] == "page-writer"
+        assert "create_failed" in result["error"]
+        assert "MUST NOT report success" in result["error"]
+        assert "DO NOT mark this work as complete" in result["recovery_hint"]
+        assert "bb shard offline" in result["create_error"]
+        # ``wake_agent`` must NOT have been called — the task didn't
+        # land, no point in waking the recipient.
+        assert mc.wake_agent.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_legacy_output_write_failure_returns_directive_envelope(self):
+        """Legacy path: when the output write fails (before the task
+        write), the directive envelope still fires — operator needs
+        to know data never persisted."""
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="trend-scout", v2_enabled=False)
+        mc.list_agents.return_value = {
+            "seo-strategist": {"role": "strategist"},
+        }
+        mc.write_blackboard.side_effect = RuntimeError("disk full")
+
+        result = await hand_off(
+            to="seo-strategist",
+            summary="Trends",
+            data='{"trends": ["a"]}',
+            mesh_client=mc,
+        )
+
+        assert result["handed_off"] is False
+        assert result["task_queued"] is False
+        assert result["output_write_failed"] is True
+        assert "output_write_failed" in result["error"]
+        assert "MUST NOT report success" in result["error"]
+        # Only one write_blackboard attempt — the output one. The
+        # task write must not have been reached.
+        assert mc.write_blackboard.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_v2_create_failure_does_not_call_wake_agent(self):
+        """Defense-in-depth: a create_task failure must short-circuit
+        before ``wake_agent`` is called — waking a peer for a task
+        that doesn't exist would spam them with a phantom notification.
+        """
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="strategist", v2_enabled=True)
+        mc.list_agents.return_value = {"writer": {"role": "writer"}}
+        mc.create_task.side_effect = RuntimeError("scope rejected")
+
+        await hand_off(
+            to="writer",
+            summary="x",
+            mesh_client=mc,
+        )
+
+        assert mc.wake_agent.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_v2_success_envelope_omits_create_failure_keys(self):
+        """Regression guard: the happy path must not leak any of the
+        new failure flags into the success envelope."""
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="strategist", v2_enabled=True)
+        mc.list_agents.return_value = {"writer": {"role": "writer"}}
+
+        result = await hand_off(
+            to="writer",
+            summary="ok",
+            mesh_client=mc,
+        )
+
+        assert result["handed_off"] is True
+        assert "create_failed" not in result
+        assert "output_write_failed" not in result
+        assert "create_error" not in result
+        assert "write_error" not in result

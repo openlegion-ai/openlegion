@@ -175,7 +175,31 @@ async def hand_off(
                 project=write_project, global_scope=write_global,
             )
         except Exception as e:
-            return {"error": f"Failed to write output: {e}"}
+            # Bug H (legacy path mirror): see _hand_off_v2 — the bare
+            # error envelope lets LLMs report success silently.
+            redacted = redact_text_with_urls(str(e))[:200]
+            logger.warning(
+                "hand_off output write for %s failed: %s", to, redacted,
+            )
+            return {
+                "handed_off": False,
+                "task_queued": False,
+                "output_write_failed": True,
+                "to": to,
+                "write_error": redacted,
+                "error": (
+                    f"output_write_failed: could not persist handoff "
+                    f"data for peer '{to}' ({redacted}). The task was "
+                    "NOT created — recipient has no record. You MUST "
+                    "NOT report success."
+                ),
+                "recovery_hint": (
+                    f"Surface the failure to the operator/user — the "
+                    f"handoff data did not reach peer '{to}' and no "
+                    "task was queued. DO NOT mark this work as "
+                    "complete in your final response."
+                ),
+            }
 
     # Create task in recipient's inbox
     task_record = {
@@ -203,10 +227,37 @@ async def hand_off(
             project=write_project, global_scope=write_global,
         )
     except Exception as e:
-        # Clean up orphaned output if task write fails
+        # Bug H (legacy path mirror): see _hand_off_v2. The legacy
+        # storage layer is the blackboard, so the failure surface is
+        # ``write_blackboard`` rather than ``create_task`` — but the
+        # LLM-silencing problem is identical. Reuse the same envelope.
+        # Existing orphaned-output log preserved for ops visibility.
         if output_key:
             logger.warning("Task write failed, orphaned output at %s", output_key)
-        return {"error": f"Failed to create task: {e}"}
+        redacted = redact_text_with_urls(str(e))[:200]
+        logger.warning("hand_off task write for %s failed: %s", to, redacted)
+        return {
+            "handed_off": False,
+            "task_queued": False,
+            "create_failed": True,
+            "to": to,
+            "create_error": redacted,
+            "error": (
+                f"create_failed: could not persist the task for peer "
+                f"'{to}' ({redacted}). The task row was NOT created — "
+                "recipient has no record of this work. You MUST NOT "
+                "report success."
+            ),
+            "recovery_hint": (
+                f"Surface the failure to the operator/user — peer "
+                f"'{to}' was not reached and no task was queued. "
+                "DO NOT mark this work as complete in your final "
+                "response. Retry only after the underlying issue "
+                "(mesh restart, scope misconfiguration, etc.) is "
+                "resolved — a retry is safe (no duplicate row) but "
+                "blind retries waste tokens."
+            ),
+        }
 
     # Wake the target agent so it processes the task immediately
     # instead of waiting for its next heartbeat.  Pass origin so
@@ -620,7 +671,33 @@ async def _hand_off_v2(
                 project=write_project,
             )
         except Exception as e:
-            return {"error": f"Failed to write output: {e}"}
+            # Bug H: same silent-LLM failure mode as create_task — the
+            # bare ``{"error": ...}`` envelope let agents report "done"
+            # to the user while no handoff data ever reached the peer.
+            # Mirror the Bug G directive shape.
+            redacted = redact_text_with_urls(str(e))[:200]
+            logger.warning(
+                "hand_off output write for %s failed: %s", to, redacted,
+            )
+            return {
+                "handed_off": False,
+                "task_queued": False,
+                "output_write_failed": True,
+                "to": to,
+                "write_error": redacted,
+                "error": (
+                    f"output_write_failed: could not persist handoff "
+                    f"data for peer '{to}' ({redacted}). The task was "
+                    "NOT created — recipient has no record. You MUST "
+                    "NOT report success."
+                ),
+                "recovery_hint": (
+                    f"Surface the failure to the operator/user — the "
+                    f"handoff data did not reach peer '{to}' and no "
+                    "task was queued. DO NOT mark this work as "
+                    "complete in your final response."
+                ),
+            }
 
     # Read the origin contextvar once so both create_task and wake_agent
     # propagate the same provenance. Without origin on create_task the
@@ -641,7 +718,48 @@ async def _hand_off_v2(
             origin=origin,
         )
     except Exception as e:
-        return {"error": f"Failed to create task: {e}"}
+        # Bug H: the bare ``{"error": ...}`` envelope was easy for LLMs
+        # to gloss past — operator hit a live case where seo-strategist
+        # called hand_off, create_task raised, and the agent still
+        # reported "Brief completed" in its final reply. The recipient
+        # never received the task. Mirror the Bug G envelope shape
+        # (handed_off=False, explicit ``error`` + directive
+        # ``recovery_hint``) so the LLM cannot silently report success.
+        # Distinct flag ``create_failed`` (vs wake's ``wake_failed``)
+        # and ``task_queued=False`` (vs wake's ``True``) tell the
+        # caller the row was NEVER persisted, so retry is not a
+        # duplicate-creating operation — but the LLM must still
+        # surface the failure rather than silently retrying.
+        #
+        # ``redact_text_with_urls`` strips credentials before the
+        # exception string reaches the LLM's context — same precaution
+        # as the wake_error path. HTTP-level exceptions from the mesh
+        # client frequently quote the failing URL with an api_key in
+        # the query string.
+        redacted = redact_text_with_urls(str(e))[:200]
+        logger.warning("create_task for %s failed: %s", to, redacted)
+        return {
+            "handed_off": False,
+            "task_queued": False,
+            "create_failed": True,
+            "to": to,
+            "create_error": redacted,
+            "error": (
+                f"create_failed: could not persist the task for peer "
+                f"'{to}' ({redacted}). The task row was NOT created — "
+                "recipient has no record of this work. You MUST NOT "
+                "report success."
+            ),
+            "recovery_hint": (
+                f"Surface the failure to the operator/user — peer "
+                f"'{to}' was not reached and no task was queued. "
+                "DO NOT mark this work as complete in your final "
+                "response. Retry only after the underlying issue "
+                "(mesh restart, scope misconfiguration, etc.) is "
+                "resolved — a retry is safe (no duplicate row) but "
+                "blind retries waste tokens."
+            ),
+        }
 
     task_id = record.get("id", "")
 
