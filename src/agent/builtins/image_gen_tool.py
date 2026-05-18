@@ -13,6 +13,7 @@ import re
 from pathlib import Path
 
 from src.agent.skills import skill
+from src.shared.paths import resolve_under_root
 from src.shared.utils import setup_logging
 
 logger = setup_logging("agent.image_gen")
@@ -90,9 +91,13 @@ async def generate_image(
     if "." not in filename:
         filename += ".png"
 
-    # Final safety check: ensure resolved path stays within artifacts dir
-    resolved = (_ARTIFACTS_DIR / filename).resolve()
-    if not str(resolved).startswith(str(_ARTIFACTS_DIR.resolve())):
+    # Final safety check: ensure resolved path stays within artifacts dir.
+    # NOTE: the prior check used str().startswith() which has a latent
+    # suffix-collision bug (``/x/artifacts2`` would false-pass against root
+    # ``/x/artifacts``); resolve_under_root uses is_relative_to which
+    # correctly rejects that case.
+    resolved = resolve_under_root(_ARTIFACTS_DIR, filename)
+    if resolved is None:
         return {"error": "Invalid filename — path traversal not allowed"}
 
     try:

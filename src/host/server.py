@@ -36,6 +36,7 @@ from src.host.orchestration import (
     Tasks,
 )
 from src.host.pending_actions import PendingActions
+from src.shared.paths import resolve_under_root
 from src.shared.redaction import redact_url
 from src.shared.types import (
     AGENT_ID_RE_PATTERN,
@@ -6870,14 +6871,10 @@ def create_mesh_app(
         _UPLOAD_STAGE_MAX_MB = 50
     _UPLOAD_STAGE_MAX_BYTES = _UPLOAD_STAGE_MAX_MB * 1024 * 1024
 
-    _stage_dir_resolved = _UPLOAD_STAGE_DIR.resolve()
-
     def _stage_paths(handle: str) -> tuple[_Path, _Path]:
-        bin_path = (_UPLOAD_STAGE_DIR / f"{handle}.bin").resolve()
-        meta_path = (_UPLOAD_STAGE_DIR / f"{handle}.json").resolve()
-        if not bin_path.is_relative_to(_stage_dir_resolved):
-            raise HTTPException(400, "invalid handle")
-        if not meta_path.is_relative_to(_stage_dir_resolved):
+        bin_path = resolve_under_root(_UPLOAD_STAGE_DIR, f"{handle}.bin")
+        meta_path = resolve_under_root(_UPLOAD_STAGE_DIR, f"{handle}.json")
+        if bin_path is None or meta_path is None:
             raise HTTPException(400, "invalid handle")
         return bin_path, meta_path
 

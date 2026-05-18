@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+from src.shared.paths import resolve_under_root
 from src.shared.types import (
     AgentMessage,
     ChatMessage,
@@ -608,8 +609,8 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         if not _ARTIFACT_NAME_RE.match(name):
             raise HTTPException(400, f"Invalid artifact name: {name}")
         artifacts_dir = Path(loop.workspace.root) / "artifacts"
-        filepath = (artifacts_dir / name).resolve()
-        if not filepath.is_relative_to(artifacts_dir.resolve()):
+        filepath = resolve_under_root(artifacts_dir, name)
+        if filepath is None:
             raise HTTPException(400, "Path traversal not allowed")
         if not filepath.is_file():
             raise HTTPException(404, f"Artifact not found: {name}")
@@ -703,9 +704,8 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
 
         artifacts_dir = Path(loop.workspace.root) / "artifacts"
         artifacts_dir.mkdir(parents=True, exist_ok=True)
-        target = (artifacts_dir / name).resolve()
-        resolved_dir = artifacts_dir.resolve()
-        if not target.is_relative_to(resolved_dir):
+        target = resolve_under_root(artifacts_dir, name)
+        if target is None:
             raise HTTPException(400, "Path traversal not allowed")
         target.parent.mkdir(parents=True, exist_ok=True)
 
@@ -745,7 +745,7 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
             raise HTTPException(400, "Empty request body")
 
         os.replace(partial, final)
-        rel_name = str(final.relative_to(resolved_dir))
+        rel_name = str(final.relative_to(artifacts_dir.resolve()))
         mime = mimetypes.guess_type(rel_name)[0] or "application/octet-stream"
         logger.info(
             "Ingested artifact %s (%d bytes)", rel_name, bytes_written,
@@ -765,8 +765,8 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         if not _ARTIFACT_NAME_RE.match(name):
             raise HTTPException(400, f"Invalid artifact name: {name}")
         artifacts_dir = Path(loop.workspace.root) / "artifacts"
-        filepath = (artifacts_dir / name).resolve()
-        if not filepath.is_relative_to(artifacts_dir.resolve()):
+        filepath = resolve_under_root(artifacts_dir, name)
+        if filepath is None:
             raise HTTPException(400, "Path traversal not allowed")
         if not filepath.is_file():
             raise HTTPException(404, f"Artifact not found: {name}")

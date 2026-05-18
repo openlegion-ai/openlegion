@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 
 from src.agent.skills import skill
+from src.shared.paths import resolve_under_root
 from src.shared.utils import dumps_safe, sanitize_for_prompt, setup_logging
 
 logger = setup_logging("agent.builtins.mesh_tool")
@@ -415,8 +416,8 @@ async def save_artifact(
     try:
         artifacts_dir = Path(workspace_manager.root) / "artifacts"
         artifacts_dir.mkdir(parents=True, exist_ok=True)
-        filepath = (artifacts_dir / name).resolve()
-        if not filepath.is_relative_to(artifacts_dir.resolve()):
+        filepath = resolve_under_root(artifacts_dir, name)
+        if filepath is None:
             return {"error": f"Invalid artifact name: {name}"}
         filepath.parent.mkdir(parents=True, exist_ok=True)
         filepath.write_text(content)

@@ -35,6 +35,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from src.shared.paths import resolve_under_root
 from src.shared.utils import dumps_safe, sanitize_for_prompt, setup_logging
 
 logger = setup_logging("agent.workspace")
@@ -465,9 +466,8 @@ class WorkspaceManager:
         return combined
 
     def _read_file(self, relative_path: str) -> str | None:
-        path = self.root / relative_path
-        resolved = path.resolve()
-        if not resolved.is_relative_to(self.root.resolve()):
+        path = resolve_under_root(self.root, relative_path)
+        if path is None:
             return None
         if not path.exists() or not path.is_file():
             return None
@@ -514,9 +514,9 @@ class WorkspaceManager:
         if len(content) > self._MAX_WRITABLE_SIZE:
             return {"error": f"Content too large ({len(content)} chars). Max is {self._MAX_WRITABLE_SIZE}."}
 
-        path = (self.root / filename).resolve()
         # Defense-in-depth: ensure resolved path stays within workspace
-        if not path.is_relative_to(self.root.resolve()):
+        path = resolve_under_root(self.root, filename)
+        if path is None:
             return {"error": f"Invalid filename: {filename}"}
         backup_dir = self.root / "backups"
         backup_dir.mkdir(exist_ok=True)
