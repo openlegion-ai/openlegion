@@ -22,6 +22,48 @@ if TYPE_CHECKING:
 logger = setup_logging("agent.mesh_client")
 
 
+def _raise_with_body(response: httpx.Response) -> None:
+    """``response.raise_for_status`` plus the body's ``detail`` field.
+
+    The mesh server wraps every denial in a descriptive ``HTTPException``
+    detail (e.g. ``"Agent X cannot wake Y"``, ``"Caller Z is not a
+    member of project 'foo'"``). Plain ``raise_for_status`` discards
+    that body — the exception string is just ``"Client error '403
+    Forbidden' for url ..."``, leaving the caller to guess which gate
+    fired. Wrapping it here means every coordination skill's failure
+    envelope (``wake_failed``, ``create_failed``, ``output_write_failed``,
+    ``update_status_failed``, ``complete_task_failed``) surfaces the
+    gate reason in its ``error`` field without changes at the callsites.
+    """
+    if response.is_success:
+        return
+    body_detail = ""
+    try:
+        parsed = response.json()
+        if isinstance(parsed, dict) and "detail" in parsed:
+            body_detail = str(parsed["detail"])[:500]
+    except (ValueError, TypeError):
+        try:
+            body_detail = response.text[:500]
+        except Exception:
+            body_detail = ""
+    # Call httpx's stock raiser directly — referring to the bound method
+    # via ``type(response)`` sidesteps the module's ``response.raise_for_status``
+    # replace-all that produced this wrapper in the first place. Without
+    # this dance the helper would recurse into itself.
+    raiser = httpx.Response.raise_for_status
+    try:
+        raiser(response)
+    except httpx.HTTPStatusError as e:
+        if body_detail:
+            raise httpx.HTTPStatusError(
+                f"{e}: {body_detail}",
+                request=e.request,
+                response=e.response,
+            ) from None
+        raise
+
+
 class MeshClient:
     """HTTP client for agent-to-mesh communication.
 
@@ -158,7 +200,7 @@ class MeshClient:
             timeout=timeout,
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
 
     async def read_blackboard(self, key: str, *, global_scope: bool = False) -> dict | None:
         """Read a value from the shared blackboard.
@@ -174,7 +216,7 @@ class MeshClient:
         )
         if response.status_code == 404:
             return None
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def write_blackboard(
@@ -207,7 +249,7 @@ class MeshClient:
             json=value,
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def delete_blackboard(self, key: str, *, global_scope: bool = False) -> dict:
@@ -223,7 +265,7 @@ class MeshClient:
             params={"agent_id": self.agent_id},
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def claim_blackboard(
@@ -244,7 +286,7 @@ class MeshClient:
         )
         if response.status_code == 409:
             return None
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def list_blackboard(
@@ -261,7 +303,7 @@ class MeshClient:
             f"{self.mesh_url}/mesh/blackboard/",
             params={"agent_id": self.agent_id, "prefix": scoped},
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         entries = response.json()
         # Strip project prefix only when we used project scoping
         if not global_scope and self.project_name:
@@ -280,7 +322,7 @@ class MeshClient:
             json={"agent_id": self.agent_id, "message": message},
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
 
     async def wake_agent(
         self, target: str, message: str = "",
@@ -304,7 +346,7 @@ class MeshClient:
             params={"target": target, "message": message},
             headers=headers,
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def publish_event(self, topic: str, payload: dict | None = None) -> dict:
@@ -317,7 +359,7 @@ class MeshClient:
             json=event.model_dump(mode="json"),
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def subscribe_topic(self, topic: str) -> dict:
@@ -329,7 +371,7 @@ class MeshClient:
             params={"topic": scoped, "agent_id": self.agent_id},
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def watch_blackboard(self, pattern: str) -> dict:
@@ -341,7 +383,7 @@ class MeshClient:
             json={"agent_id": self.agent_id, "pattern": scoped},
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def list_agents(self) -> dict:
@@ -358,7 +400,7 @@ class MeshClient:
             f"{self.mesh_url}/mesh/agents",
             params=params,
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def create_cron(
@@ -382,7 +424,7 @@ class MeshClient:
             json=body,
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def list_cron(self) -> list[dict]:
@@ -391,7 +433,7 @@ class MeshClient:
             f"{self.mesh_url}/mesh/cron",
             params={"agent_id": self.agent_id},
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def update_cron(self, job_id: str, **kwargs) -> dict:
@@ -402,7 +444,7 @@ class MeshClient:
             json=kwargs,
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def remove_cron(self, job_id: str) -> dict:
@@ -412,7 +454,7 @@ class MeshClient:
             f"{self.mesh_url}/mesh/cron/{job_id}",
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def spawn_agent(
@@ -436,7 +478,7 @@ class MeshClient:
             timeout=90,
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def create_custom_agent(
@@ -458,7 +500,7 @@ class MeshClient:
             timeout=120,
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def get_agent_history(self, agent_id: str) -> dict:
@@ -467,7 +509,7 @@ class MeshClient:
             f"{self.mesh_url}/mesh/agents/{agent_id}/history",
             params={"requesting_agent": self.agent_id},
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def get_agent_profile(self, agent_id: str) -> dict:
@@ -476,7 +518,7 @@ class MeshClient:
             f"{self.mesh_url}/mesh/agents/{agent_id}/profile",
             params={"requesting_agent": self.agent_id},
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     # === Vault (credential management) ===
@@ -496,7 +538,7 @@ class MeshClient:
             },
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def request_browser_login(
@@ -524,7 +566,7 @@ class MeshClient:
             json=body,
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def request_captcha_help(
@@ -552,7 +594,7 @@ class MeshClient:
             json=body,
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def vault_store(self, name: str, value: str) -> dict:
@@ -563,7 +605,7 @@ class MeshClient:
             json={"agent_id": self.agent_id, "name": name, "value": value},
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def vault_list(self) -> list[str]:
@@ -572,7 +614,7 @@ class MeshClient:
             f"{self.mesh_url}/mesh/vault/list",
             params={"agent_id": self.agent_id},
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json().get("credentials", [])
 
     async def vault_status(self, name: str) -> dict:
@@ -581,7 +623,7 @@ class MeshClient:
             f"{self.mesh_url}/mesh/vault/status/{name}",
             params={"agent_id": self.agent_id},
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def vault_resolve(self, name: str) -> str | None:
@@ -598,7 +640,7 @@ class MeshClient:
         )
         if response.status_code == 404:
             return None
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json().get("value")
 
     async def introspect(self, section: str = "all") -> dict:
@@ -608,7 +650,7 @@ class MeshClient:
             params={"section": section},
             headers={"X-Agent-ID": self.agent_id},
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     # === Wallet (blockchain transactions via mesh signing service) ===
@@ -619,7 +661,7 @@ class MeshClient:
             f"{self.mesh_url}/mesh/wallet/address",
             params={"agent_id": self.agent_id, "chain": chain},
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def wallet_get_balance(self, chain: str, token: str = "native") -> dict:
@@ -628,7 +670,7 @@ class MeshClient:
             f"{self.mesh_url}/mesh/wallet/balance",
             params={"agent_id": self.agent_id, "chain": chain, "token": token},
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def wallet_read_contract(
@@ -645,7 +687,7 @@ class MeshClient:
             timeout=30,
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def wallet_transfer(
@@ -662,7 +704,7 @@ class MeshClient:
             timeout=60,
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def wallet_execute(
@@ -690,7 +732,7 @@ class MeshClient:
             timeout=60,
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     # === Image generation (via mesh API proxy) ===
@@ -718,7 +760,7 @@ class MeshClient:
             timeout=timeout,
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     # === Fleet Templates ===
@@ -726,7 +768,7 @@ class MeshClient:
     async def list_fleet_templates(self) -> dict:
         """List available fleet templates from the mesh."""
         response = await self._get_with_retry(f"{self.mesh_url}/mesh/fleet/templates")
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def apply_fleet_template(
@@ -758,7 +800,7 @@ class MeshClient:
             timeout=120,
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     # === Browser (shared browser service via mesh proxy) ===
@@ -777,7 +819,7 @@ class MeshClient:
             json={"change_id": change_id, "confirmed_by": self.agent_id},
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def edit_soft(self, agent_id: str, field: str, value, reason: str) -> dict:
@@ -797,7 +839,7 @@ class MeshClient:
             json={"field": field, "value": value, "reason": reason},
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def undo_change(self, undo_token: str) -> dict:
@@ -813,7 +855,7 @@ class MeshClient:
             json={},
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def get_agent_config(
@@ -832,7 +874,7 @@ class MeshClient:
             f"{self.mesh_url}/mesh/agents/{agent_id}/config",
             params=params,
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def list_peer_artifacts(self, agent_id: str) -> dict:
@@ -846,7 +888,7 @@ class MeshClient:
             f"{self.mesh_url}/mesh/agents/{agent_id}/artifacts",
             params={"requesting_agent": self.agent_id},
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def read_peer_artifact(self, agent_id: str, name: str) -> dict:
@@ -861,7 +903,7 @@ class MeshClient:
             f"{self.mesh_url}/mesh/agents/{agent_id}/artifacts/{name}",
             params={"requesting_agent": self.agent_id},
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def cancel_pending_action(self, nonce: str) -> dict:
@@ -878,7 +920,7 @@ class MeshClient:
             json={},
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def list_pending_actions(self) -> dict:
@@ -894,7 +936,7 @@ class MeshClient:
             f"{self.mesh_url}/mesh/pending",
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def archive_audit_before(self, before_date: str) -> dict:
@@ -909,7 +951,7 @@ class MeshClient:
             json={"before_date": before_date},
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     # === Team management (mesh proxy endpoints) ===
@@ -925,7 +967,7 @@ class MeshClient:
         response = await self._get_with_retry(
             f"{self.mesh_url}/mesh/teams",
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def list_projects(self) -> dict:
@@ -946,7 +988,7 @@ class MeshClient:
             },
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def create_project(
@@ -963,7 +1005,7 @@ class MeshClient:
             json={"agent": agent_id},
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def add_agent_to_project(self, project_name: str, agent_id: str) -> dict:
@@ -979,7 +1021,7 @@ class MeshClient:
             f"{self.mesh_url}/mesh/teams/{team_name}/members/{agent_id}",
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def remove_agent_from_project(
@@ -998,7 +1040,7 @@ class MeshClient:
             json={"context": context},
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def update_project_context(
@@ -1023,7 +1065,7 @@ class MeshClient:
             },
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def set_project_goal(
@@ -1061,7 +1103,7 @@ class MeshClient:
             timeout=60,
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def browser_upload_stage(
@@ -1086,7 +1128,7 @@ class MeshClient:
             headers=headers,
             timeout=120,
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def browser_upload_apply(self, body: dict) -> dict:
@@ -1104,7 +1146,7 @@ class MeshClient:
             timeout=120,
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def browser_download(
@@ -1132,7 +1174,7 @@ class MeshClient:
         try:
             data = response.json()
         except Exception:
-            response.raise_for_status()
+            _raise_with_body(response)
             raise
         # Pass through structured error envelopes (e.g. operator kill switch
         # returning ``BROWSER_DOWNLOADS_DISABLED``) so the calling skill can
@@ -1145,7 +1187,7 @@ class MeshClient:
                 and envelope.get("success") is False
             ):
                 return envelope
-        response.raise_for_status()
+        _raise_with_body(response)
         if not isinstance(data, dict):
             raise ValueError(
                 f"Unexpected browser_download response: {type(data).__name__}",
@@ -1198,7 +1240,7 @@ class MeshClient:
             json=body,
             headers=headers,
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def get_task(self, task_id: str) -> dict | None:
@@ -1208,7 +1250,7 @@ class MeshClient:
         )
         if response.status_code == 404:
             return None
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def list_task_inbox(self, assignee: str | None = None) -> list[dict]:
@@ -1217,7 +1259,7 @@ class MeshClient:
         response = await self._get_with_retry(
             f"{self.mesh_url}/mesh/tasks/inbox/{target}",
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         data = response.json()
         return data.get("tasks", []) if isinstance(data, dict) else []
 
@@ -1226,7 +1268,7 @@ class MeshClient:
         response = await self._get_with_retry(
             f"{self.mesh_url}/mesh/tasks/team/{team_id}",
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         data = response.json()
         return data.get("tasks", []) if isinstance(data, dict) else []
 
@@ -1260,7 +1302,7 @@ class MeshClient:
             json=body,
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def report_auth_failure(
@@ -1283,7 +1325,7 @@ class MeshClient:
                 },
                 headers=self._trace_headers(),
             )
-            response.raise_for_status()
+            _raise_with_body(response)
             return response.json()
         except Exception as e:
             logger.warning("auth-failure self-report failed: %s", e)
@@ -1299,7 +1341,7 @@ class MeshClient:
             json={"new_assignee": new_assignee, "reason": reason},
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def cancel_task(self, task_id: str, reason: str = "") -> dict:
@@ -1310,7 +1352,7 @@ class MeshClient:
             json={"reason": reason},
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def retry_task(
@@ -1333,7 +1375,7 @@ class MeshClient:
             json=body,
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     # ── Operator product surface (Task 7) ────────────────────────
@@ -1343,7 +1385,7 @@ class MeshClient:
         response = await self._get_with_retry(
             f"{self.mesh_url}/mesh/teams/{team_id}/status",
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def project_status(self, project_id: str) -> dict:
@@ -1355,7 +1397,7 @@ class MeshClient:
         response = await self._get_with_retry(
             f"{self.mesh_url}/mesh/teams/status",
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def all_projects_status(self) -> dict:
@@ -1368,7 +1410,7 @@ class MeshClient:
             f"{self.mesh_url}/mesh/agents/{agent_id}/queue",
             params={"limit": limit},
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def team_outputs(self, team_id: str, since: str = "") -> dict:
@@ -1378,7 +1420,7 @@ class MeshClient:
             f"{self.mesh_url}/mesh/teams/{team_id}/outputs",
             params=params,
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def project_outputs(self, project_id: str, since: str = "") -> dict:
@@ -1390,7 +1432,7 @@ class MeshClient:
         response = await self._get_with_retry(
             f"{self.mesh_url}/mesh/teams/{team_id}/summary",
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def project_summary(self, project_id: str) -> dict:
@@ -1404,7 +1446,7 @@ class MeshClient:
             f"{self.mesh_url}/mesh/teams/{name}/archive",
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def archive_project(self, name: str) -> dict:
@@ -1418,7 +1460,7 @@ class MeshClient:
             f"{self.mesh_url}/mesh/teams/{name}/unarchive",
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def unarchive_project(self, name: str) -> dict:
@@ -1432,7 +1474,7 @@ class MeshClient:
             f"{self.mesh_url}/mesh/agents/{agent_id}/archive",
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def propose_delete_team(self, name: str) -> dict:
@@ -1442,7 +1484,7 @@ class MeshClient:
             f"{self.mesh_url}/mesh/teams/{name}/propose-delete",
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def propose_delete_project(self, name: str) -> dict:
@@ -1456,7 +1498,7 @@ class MeshClient:
             f"{self.mesh_url}/mesh/agents/{agent_id}/propose-delete",
             headers=self._trace_headers(),
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def list_task_events(self, task_id: str) -> list[dict]:
@@ -1464,7 +1506,7 @@ class MeshClient:
         response = await self._get_with_retry(
             f"{self.mesh_url}/mesh/tasks/{task_id}/events",
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         data = response.json()
         return data.get("events", []) if isinstance(data, dict) else []
 
@@ -1475,7 +1517,7 @@ class MeshClient:
         response = await self._get_with_retry(
             f"{self.mesh_url}/mesh/system/metrics",
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def get_agent_metrics(self, agent_id: str) -> dict:
@@ -1483,7 +1525,7 @@ class MeshClient:
         response = await self._get_with_retry(
             f"{self.mesh_url}/mesh/agents/{agent_id}/metrics",
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
     async def get_agent_stale_tasks(
@@ -1499,7 +1541,7 @@ class MeshClient:
             f"{self.mesh_url}/mesh/agents/{agent_id}/stale-tasks"
             f"?threshold_hours={int(threshold_hours)}",
         )
-        response.raise_for_status()
+        _raise_with_body(response)
         return response.json()
 
 

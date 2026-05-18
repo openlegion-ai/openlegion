@@ -42,6 +42,10 @@ async def test_wake_agent_propagates_task_id_header():
 
     class _FakeResp:
         status_code = 200
+        # ``is_success`` mirrors ``httpx.Response.is_success`` (2xx) so the
+        # ``_raise_with_body`` helper in ``mesh_client`` can short-circuit
+        # without inspecting status semantics.
+        is_success = True
 
         def json(self) -> dict:
             return {"woken": True, "target": "beta"}

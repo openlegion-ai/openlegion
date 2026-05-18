@@ -155,6 +155,36 @@ def _ttl_for_field(field: str | None) -> int:
 _PAIRED_CHANNELS = frozenset({"telegram", "discord", "slack", "whatsapp", "webhook"})
 _TRUSTED_ORIGIN_CALLERS = frozenset({"mesh", "operator"})
 
+
+def _caller_is_operator(caller: str, request: Request) -> bool:
+    """Return True iff ``caller`` is the verified operator persona.
+
+    The single source of truth for the operator trust tier introduced
+    alongside the structured-denial work: the operator is the user's
+    extension at the chat/UI layer, where user-control surfaces (revoke
+    credentials, revoke browser, budget caps, destructive-action nonces)
+    already gate the things that matter. Treating operator as a worker
+    behind the same scope/permission gates produced opaque 403s on
+    coordination paths and was the proximate cause of every silent
+    pipeline stall in early-2026 incident reports.
+
+    Trust derivation: ``caller`` is the bearer-verified agent id from
+    ``_extract_verified_agent_id``. In production (tokens configured)
+    the value can only be ``"operator"`` if the HMAC compare against
+    ``_auth_tokens["operator"]`` succeeded. In dev mode (no tokens)
+    ``X-Agent-ID`` is trusted by the same rules as every other identity
+    in the file — the fail-closed startup check refuses to boot under
+    ``OPENLEGION_TEAM_SCOPE_MODE=enforce`` without tokens, which
+    is the configuration where forgery would matter.
+
+    ``request`` is unused today but kept on the signature so a future
+    extension (e.g. promoting loopback ``x-mesh-internal`` to operator-
+    equivalent for a specific gate) lands in one place instead of
+    re-threading the request argument through every callsite.
+    """
+    del request  # reserved for future use; see docstring
+    return caller == "operator"
+
 # Tiny TTL cache for pairing-record reads. The on-disk file changes only
 # on ``/pair`` operations, which are rare. 5s staleness is acceptable for
 # a defense-in-depth gate; ``_invalidate_pairing_cache`` lets the pair/
@@ -446,13 +476,26 @@ _denial_counter: dict[str, int] = defaultdict(int)
 _denial_counter_reset_day: list[int] = [int(time.time() // 86400)]
 
 
-def _record_denial(category: str) -> None:
-    """Bump the per-category 24h denial counter.
+def _record_denial(
+    category: str,
+    *,
+    caller: str | None = None,
+    target: str | None = None,
+    gate: str | None = None,
+    extra: dict | None = None,
+) -> None:
+    """Bump the per-category 24h denial counter and emit a structured log line.
 
     Day rollover is detected lazily by comparing the current epoch-day
     against the last reset day — when they differ the counter clears
     before the increment so the ``tool_denials_24h`` field on
     ``/mesh/system/metrics`` reflects the current-day window.
+
+    The keyword fields exist so denials are debuggable from the mesh
+    log alone — the previous opaque counter forced operators to cross-
+    reference HTTPException bodies with request logs to figure out
+    which gate fired. ``caller``/``target``/``gate`` flow through as
+    structured ``extra`` on the warning so JSON-mode logs index them.
     """
     if category not in _DENIAL_CATEGORIES:
         return
@@ -461,6 +504,19 @@ def _record_denial(category: str) -> None:
         _denial_counter.clear()
         _denial_counter_reset_day[0] = today
     _denial_counter[category] += 1
+    log_payload: dict[str, object] = {
+        "denial_category": category,
+        "denial_caller": caller,
+        "denial_target": target,
+        "denial_gate": gate,
+    }
+    if extra:
+        log_payload["denial_extra"] = extra
+    logger.warning(
+        "mesh denial: category=%s gate=%s caller=%s target=%s",
+        category, gate or "?", caller or "?", target or "?",
+        extra=log_payload,
+    )
 
 
 def _caller_projects(agent_id: str) -> set[str]:
@@ -658,6 +714,18 @@ def create_mesh_app(
     _auth_tokens = auth_tokens if auth_tokens is not None else {}
     _agent_projects = agent_projects if agent_projects is not None else {}
 
+    # Note: an earlier draft of the operator trust tier added a
+    # boot-time fail-closed gate here that refused to start when
+    # ``_TEAM_SCOPE_MODE=enforce`` AND ``_auth_tokens`` was empty. That
+    # design didn't fit the production lifecycle — ``RuntimeContext``
+    # populates ``auth_tokens`` as agents register (``host/runtime.py``),
+    # so at the moment ``create_mesh_app`` is called the dict is
+    # legitimately empty in every deployment. A boot-time refusal
+    # would block every production boot. Forgery hardening of the
+    # operator trust tier belongs at the CLI/deployment layer (e.g.
+    # require ``MESH_AUTH_TOKEN`` env wiring before the mesh accepts
+    # external traffic via Caddy), not here.
+
     # -- Input validation helpers ------------------------------------------------
     _AGENT_ID_RE = re.compile(AGENT_ID_RE_PATTERN)
 
@@ -723,7 +791,9 @@ def create_mesh_app(
             while bucket and bucket[0] <= cutoff:
                 bucket.popleft()
             if len(bucket) >= limit:
-                _record_denial("rate")
+                _record_denial(
+                    "rate", caller=agent_id, gate=f"rate_limit:{endpoint}",
+                )
                 raise HTTPException(429, f"Rate limit exceeded for {endpoint}")
             bucket.append(now)
 
@@ -830,13 +900,21 @@ def create_mesh_app(
             return request.headers.get("X-Agent-ID", "unknown")
         auth_header = request.headers.get("authorization", "")
         if not auth_header.startswith("Bearer "):
-            _record_denial("auth")
+            _record_denial(
+                "auth",
+                caller=request.headers.get("X-Agent-ID") or None,
+                gate="extract_verified_agent_id:missing_bearer",
+            )
             raise HTTPException(401, "Missing authentication token")
         token = auth_header[7:]
         for aid, expected in _auth_tokens.items():
             if hmac.compare_digest(token, expected):
                 return aid
-        _record_denial("auth")
+        _record_denial(
+            "auth",
+            caller=request.headers.get("X-Agent-ID") or None,
+            gate="extract_verified_agent_id:invalid_token",
+        )
         raise HTTPException(401, "Invalid authentication token")
 
     def _resolve_agent_id(agent_id: str, request: Request) -> str:
@@ -908,13 +986,21 @@ def create_mesh_app(
                 pass  # Not a valid IP — fall through to Bearer token check
         auth_header = request.headers.get("authorization", "")
         if not auth_header.startswith("Bearer "):
-            _record_denial("auth")
+            _record_denial(
+                "auth",
+                caller=request.headers.get("X-Agent-ID") or None,
+                gate="require_any_auth:missing_bearer",
+            )
             raise HTTPException(401, "Missing authentication token")
         token = auth_header[7:]
         for expected in _auth_tokens.values():
             if hmac.compare_digest(token, expected):
                 return
-        _record_denial("auth")
+        _record_denial(
+            "auth",
+            caller=request.headers.get("X-Agent-ID") or None,
+            gate="require_any_auth:invalid_token",
+        )
         raise HTTPException(401, "Invalid authentication token")
 
     def _require_operator_or_internal(request: Request) -> None:
@@ -948,9 +1034,17 @@ def create_mesh_app(
         # "my credential is bad".
         for expected in _auth_tokens.values():
             if hmac.compare_digest(token, expected):
-                _record_denial("role")
+                _record_denial(
+                    "role",
+                    caller=request.headers.get("X-Agent-ID") or None,
+                    gate="require_operator_or_internal:wrong_token",
+                )
                 raise HTTPException(403, "Operator-only endpoint")
-        _record_denial("auth")
+        _record_denial(
+            "auth",
+            caller=request.headers.get("X-Agent-ID") or None,
+            gate="require_operator_or_internal:invalid_token",
+        )
         raise HTTPException(401, "Invalid authentication token")
 
     # === System Messaging (mesh → agent) ===
@@ -975,8 +1069,18 @@ def create_mesh_app(
         caller = _extract_verified_agent_id(request)
         if not target:
             raise HTTPException(400, "target is required")
-        if not permissions.can_message(caller, target):
-            raise HTTPException(403, f"Agent {caller} cannot wake {target}")
+        # Operator trust tier: operator coordinates the fleet by design,
+        # so wake denials based on its per-agent can_message grant are
+        # the wrong layer of enforcement (the user-control layer already
+        # gates anything reachable from operator). Workers stay subject
+        # to the matrix.
+        if not _caller_is_operator(caller, request):
+            if not permissions.can_message(caller, target):
+                _record_denial(
+                    "permission", caller=caller, target=target,
+                    gate="wake:can_message",
+                )
+                raise HTTPException(403, f"Agent {caller} cannot wake {target}")
         await _check_rate_limit("blackboard_write", caller)  # reuse bb rate limit
         if target not in router.agent_registry:
             raise HTTPException(404, f"Agent '{target}' not registered")
@@ -1012,7 +1116,7 @@ def create_mesh_app(
         #     survived ``_validated_origin``'s pairing recheck.
         if (
             target == "operator"
-            and caller != "operator"
+            and not _caller_is_operator(caller, request)
             and not _is_internal_caller(request)
             and (origin is None or origin.kind != "human")
         ):
@@ -1065,9 +1169,13 @@ def create_mesh_app(
         """List blackboard entries by prefix."""
         agent_id = _resolve_agent_id(agent_id, request)
         await _check_rate_limit("blackboard_read", agent_id)
-        if not permissions.can_read_blackboard(agent_id, prefix):
-            _record_denial("permission")
-            raise HTTPException(403, f"Agent {agent_id} cannot read {prefix}")
+        if not _caller_is_operator(agent_id, request):
+            if not permissions.can_read_blackboard(agent_id, prefix):
+                _record_denial(
+                    "permission", caller=agent_id, target=prefix,
+                    gate="blackboard.list:can_read_blackboard",
+                )
+                raise HTTPException(403, f"Agent {agent_id} cannot read {prefix}")
         entries = blackboard.list_by_prefix(prefix)
         return [e.model_dump(mode="json") for e in entries]
 
@@ -1076,9 +1184,13 @@ def create_mesh_app(
         """Read a blackboard entry. Agent must have read permission."""
         agent_id = _resolve_agent_id(agent_id, request)
         await _check_rate_limit("blackboard_read", agent_id)
-        if not permissions.can_read_blackboard(agent_id, key):
-            _record_denial("permission")
-            raise HTTPException(403, f"Agent {agent_id} cannot read {key}")
+        if not _caller_is_operator(agent_id, request):
+            if not permissions.can_read_blackboard(agent_id, key):
+                _record_denial(
+                    "permission", caller=agent_id, target=key,
+                    gate="blackboard.read:can_read_blackboard",
+                )
+                raise HTTPException(403, f"Agent {agent_id} cannot read {key}")
         entry = blackboard.read(key)
         if not entry:
             raise HTTPException(404, f"Key not found: {key}")
@@ -1106,9 +1218,13 @@ def create_mesh_app(
             raise HTTPException(413, f"Value too large ({value_size} bytes, max {_MAX_BB_VALUE_BYTES})")
         if ttl is not None and ttl <= 0:
             raise HTTPException(400, "TTL must be positive")
-        if not permissions.can_write_blackboard(agent_id, key):
-            _record_denial("permission")
-            raise HTTPException(403, f"Agent {agent_id} cannot write {key}")
+        if not _caller_is_operator(agent_id, request):
+            if not permissions.can_write_blackboard(agent_id, key):
+                _record_denial(
+                    "permission", caller=agent_id, target=key,
+                    gate="blackboard.write:can_write_blackboard",
+                )
+                raise HTTPException(403, f"Agent {agent_id} cannot write {key}")
         # Phase 3 Slice 1 telemetry: count cross-project writes against an
         # EXISTING entry (new keys are by definition not cross-project).
         # Skip internal/operator callers (fleet-global by design).
@@ -1140,9 +1256,13 @@ def create_mesh_app(
         """Delete a blackboard entry. Agent must have write permission."""
         agent_id = _resolve_agent_id(agent_id, request)
         await _check_rate_limit("blackboard_write", agent_id)
-        if not permissions.can_write_blackboard(agent_id, key):
-            _record_denial("permission")
-            raise HTTPException(403, f"Agent {agent_id} cannot write {key}")
+        if not _caller_is_operator(agent_id, request):
+            if not permissions.can_write_blackboard(agent_id, key):
+                _record_denial(
+                    "permission", caller=agent_id, target=key,
+                    gate="blackboard.delete:can_write_blackboard",
+                )
+                raise HTTPException(403, f"Agent {agent_id} cannot write {key}")
         # Protect history namespace (including project-scoped keys)
         bare = key.split("/", 2)[2] if key.startswith("projects/") and key.count("/") >= 2 else key
         if bare.startswith("history/"):
@@ -1174,9 +1294,13 @@ def create_mesh_app(
         """Register a glob pattern watch on blackboard keys."""
         agent_id = _resolve_agent_id(data.agent_id, request)
         pattern = data.pattern
-        if not permissions.can_read_blackboard(agent_id, pattern):
-            _record_denial("permission")
-            raise HTTPException(403, f"Agent {agent_id} cannot read pattern '{pattern}'")
+        if not _caller_is_operator(agent_id, request):
+            if not permissions.can_read_blackboard(agent_id, pattern):
+                _record_denial(
+                    "permission", caller=agent_id, target=pattern,
+                    gate="blackboard.watch:can_read_blackboard",
+                )
+                raise HTTPException(403, f"Agent {agent_id} cannot read pattern '{pattern}'")
         blackboard.add_watch(agent_id, pattern)
         return {"watching": True, "pattern": pattern}
 
@@ -1191,9 +1315,13 @@ def create_mesh_app(
         value_size = len(dumps_safe(body.value))
         if value_size > _MAX_BB_VALUE_BYTES:
             raise HTTPException(413, f"Value too large ({value_size} bytes, max {_MAX_BB_VALUE_BYTES})")
-        if not permissions.can_write_blackboard(agent_id, key):
-            _record_denial("permission")
-            raise HTTPException(403, f"Agent {agent_id} cannot write {key}")
+        if not _caller_is_operator(agent_id, request):
+            if not permissions.can_write_blackboard(agent_id, key):
+                _record_denial(
+                    "permission", caller=agent_id, target=key,
+                    gate="blackboard.claim:can_write_blackboard",
+                )
+                raise HTTPException(403, f"Agent {agent_id} cannot write {key}")
         # Phase 3 Slice 1 telemetry: count cross-project CAS writes against
         # an EXISTING entry. Skip internal/operator callers.
         if not _is_internal_caller(request):
@@ -1238,14 +1366,23 @@ def create_mesh_app(
         if source_project:
             expected_prefix = f"projects/{source_project}/"
             if not event.topic.startswith(expected_prefix):
-                _record_denial("scope")
+                _record_denial(
+                    "scope", caller=event.source, target=event.topic,
+                    gate="publish:project_prefix",
+                    extra={"caller_project": source_project},
+                )
                 raise HTTPException(
                     403,
                     f"Agent {event.source} (project={source_project}) cannot publish to topic '{event.topic}'"
                 )
 
-        if not permissions.can_publish(event.source, event.topic):
-            raise HTTPException(403, f"Agent {event.source} cannot publish to {event.topic}")
+        if not _caller_is_operator(event.source, request):
+            if not permissions.can_publish(event.source, event.topic):
+                _record_denial(
+                    "permission", caller=event.source, target=event.topic,
+                    gate="publish:can_publish",
+                )
+                raise HTTPException(403, f"Agent {event.source} cannot publish to {event.topic}")
         if trace_store:
             req_trace_id = request.headers.get("x-trace-id")
             if req_trace_id:
@@ -1284,14 +1421,23 @@ def create_mesh_app(
         if sub_project:
             expected_prefix = f"projects/{sub_project}/"
             if not topic.startswith(expected_prefix):
-                _record_denial("scope")
+                _record_denial(
+                    "scope", caller=agent_id, target=topic,
+                    gate="subscribe:project_prefix",
+                    extra={"caller_project": sub_project},
+                )
                 raise HTTPException(
                     403,
                     f"Agent {agent_id} (project={sub_project}) cannot subscribe to topic '{topic}'"
                 )
 
-        if not permissions.can_subscribe(agent_id, topic):
-            raise HTTPException(403, f"Agent {agent_id} cannot subscribe to {topic}")
+        if not _caller_is_operator(agent_id, request):
+            if not permissions.can_subscribe(agent_id, topic):
+                _record_denial(
+                    "permission", caller=agent_id, target=topic,
+                    gate="subscribe:can_subscribe",
+                )
+                raise HTTPException(403, f"Agent {agent_id} cannot subscribe to {topic}")
         pubsub.subscribe(topic, agent_id)
         return {"subscribed": True}
 
@@ -2069,7 +2215,7 @@ def create_mesh_app(
         # Loopback or operator only — same access model as the dashboard
         # cancel proxy that fronts this.
         caller = _extract_verified_agent_id(request)
-        if caller != "operator" and not _is_internal_caller(request):
+        if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(
                 403, "Only the operator can cancel a credential request",
             )
@@ -2108,7 +2254,7 @@ def create_mesh_app(
     ) -> dict:
         """User cancelled a pending browser login request."""
         caller = _extract_verified_agent_id(request)
-        if caller != "operator" and not _is_internal_caller(request):
+        if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(
                 403, "Only the operator can cancel a browser login request",
             )
@@ -2147,7 +2293,7 @@ def create_mesh_app(
     ) -> dict:
         """User cancelled a pending CAPTCHA-help request."""
         caller = _extract_verified_agent_id(request)
-        if caller != "operator" and not _is_internal_caller(request):
+        if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(
                 403, "Only the operator can cancel a CAPTCHA-help request",
             )
@@ -2218,7 +2364,7 @@ def create_mesh_app(
             except HTTPException:
                 # Already passed _require_any_auth, but be defensive.
                 caller = "unknown"
-        caller_is_global = caller_is_internal or caller == "operator"
+        caller_is_global = caller_is_internal or _caller_is_operator(caller, request)
 
         # Task 8 — pull structured routing fields from agents.yaml. The
         # ``capabilities`` key on the entry is the runtime tool list
@@ -2270,9 +2416,9 @@ def create_mesh_app(
                 logger.warning(
                     "scope-warn: caller=%s requested /mesh/agents?project=%s "
                     "but is not a member; mode=%s",
-                    caller, project, _PROJECT_SCOPE_MODE,
+                    caller, project, _TEAM_SCOPE_MODE,
                 )
-                if _PROJECT_SCOPE_MODE == "enforce":
+                if _TEAM_SCOPE_MODE == "enforce":
                     return {}
 
             result = {
@@ -2327,9 +2473,9 @@ def create_mesh_app(
             logger.warning(
                 "scope-warn: caller=%s requested /mesh/agents (no project filter); "
                 "would return %d under enforce, returning %d under %s",
-                caller, len(filtered), len(full_fleet), _PROJECT_SCOPE_MODE,
+                caller, len(filtered), len(full_fleet), _TEAM_SCOPE_MODE,
             )
-            if _PROJECT_SCOPE_MODE == "enforce":
+            if _TEAM_SCOPE_MODE == "enforce":
                 return filtered
         return full_fleet
 
@@ -2374,7 +2520,7 @@ def create_mesh_app(
             # Operator also needs per-agent model so dashboard-initiated
             # model changes don't leave its mental state stale. Load the
             # YAML once; other agents don't see models (noise for peers).
-            include_models = agent_id == "operator"
+            include_models = _caller_is_operator(agent_id, request)
             agent_models: dict[str, str] = {}
             if include_models:
                 from src.cli.config import _load_config
@@ -2396,7 +2542,7 @@ def create_mesh_app(
                     entry["model"] = agent_models.get(aid, "")
                 return entry
 
-            if agent_id == "operator":
+            if _caller_is_operator(agent_id, request):
                 result["fleet"] = [
                     _fleet_entry(aid) for aid in router.agent_registry
                 ]
@@ -3264,7 +3410,7 @@ def create_mesh_app(
         #     the caller isn't operator-or-internal keeps the hot path lean.
         caller_for_gate = _resolve_agent_id("", request)
         runtime_visible = (
-            caller_for_gate == "operator" or _is_internal_caller(request)
+            _caller_is_operator(caller_for_gate, request) or _is_internal_caller(request)
         )
 
         runtime_fields: dict[str, object] = {}
@@ -3351,7 +3497,10 @@ def create_mesh_app(
         if not _is_internal_caller(request):
             requesting = _resolve_agent_id(agent_id, request)
             if requesting != agent_id:
-                _record_denial("scope")
+                _record_denial(
+                    "scope", caller=requesting, target=agent_id,
+                    gate="auth_failure:self_report_only",
+                )
                 raise HTTPException(
                     403, "Agents can only report failures for themselves",
                 )
@@ -3847,7 +3996,7 @@ def create_mesh_app(
         either field keep working.
         """
         caller = _extract_verified_agent_id(request)
-        if caller != "operator" and not _is_internal_caller(request):
+        if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(403, "Only the operator can manage teams")
         from src.cli.config import _load_projects
         projects = _load_projects()
@@ -4015,7 +4164,7 @@ def create_mesh_app(
         """
         _require_any_auth(request)
         caller = _extract_verified_agent_id(request)
-        if caller != "operator" and not _is_internal_caller(request):
+        if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(403, "Only the operator can manage teams")
         from src.cli.config import PROJECTS_DIR, _load_projects
 
@@ -4119,12 +4268,19 @@ def create_mesh_app(
         store = tasks_store
         caller = _extract_verified_agent_id(request)
         # ``can_route_tasks`` is the structured permission. The mesh
-        # pseudo-id and operator are auto-permitted by the matrix.
-        if not permissions.can_route_tasks(caller):
-            raise HTTPException(
-                403,
-                f"Agent {caller} cannot route tasks (can_route_tasks not granted)",
-            )
+        # pseudo-id and operator are auto-permitted by the matrix; the
+        # operator trust tier also bypasses unconditionally so a
+        # misconfigured grant cannot silently break task routing.
+        if not _caller_is_operator(caller, request):
+            if not permissions.can_route_tasks(caller):
+                _record_denial(
+                    "permission", caller=caller,
+                    gate="tasks.create:can_route_tasks",
+                )
+                raise HTTPException(
+                    403,
+                    f"Agent {caller} cannot route tasks (can_route_tasks not granted)",
+                )
         body = await request.json()
         assignee = body.get("assignee", "")
         title = sanitize_for_prompt(body.get("title", "")).strip()
@@ -4175,7 +4331,7 @@ def create_mesh_app(
         caller = _extract_verified_agent_id(request)
         if (
             caller != assignee
-            and caller != "operator"
+            and not _caller_is_operator(caller, request)
             and not _is_internal_caller(request)
         ):
             raise HTTPException(
@@ -4217,7 +4373,7 @@ def create_mesh_app(
             raise HTTPException(404, f"Task '{task_id}' not found")
         if (
             caller in (record["creator"], record["assignee"])
-            or caller == "operator"
+            or _caller_is_operator(caller, request)
             or _is_internal_caller(request)
             or (record["project_id"] and _is_project_member(caller, record["project_id"]))
         ):
@@ -4234,7 +4390,7 @@ def create_mesh_app(
             raise HTTPException(404, f"Task '{task_id}' not found")
         if not (
             caller in (record["creator"], record["assignee"])
-            or caller == "operator"
+            or _caller_is_operator(caller, request)
             or _is_internal_caller(request)
             or (record["project_id"] and _is_project_member(caller, record["project_id"]))
         ):
@@ -4274,7 +4430,7 @@ def create_mesh_app(
             raise HTTPException(404, f"Task '{task_id}' not found")
         if not (
             caller in (record["creator"], record["assignee"])
-            or caller == "operator"
+            or _caller_is_operator(caller, request)
             or _is_internal_caller(request)
         ):
             raise HTTPException(
@@ -4424,7 +4580,7 @@ def create_mesh_app(
         store = tasks_store
         caller = _extract_verified_agent_id(request)
         if not (
-            caller == "operator"
+            _caller_is_operator(caller, request)
             or _is_internal_caller(request)
             or permissions.can_route_tasks(caller)
         ):
@@ -4487,7 +4643,7 @@ def create_mesh_app(
         store = tasks_store
         caller = _extract_verified_agent_id(request)
         if not (
-            caller == "operator"
+            _caller_is_operator(caller, request)
             or _is_internal_caller(request)
             or permissions.can_route_tasks(caller)
         ):
@@ -4651,7 +4807,7 @@ def create_mesh_app(
         from src.cli.config import _load_projects
         projects = _load_projects()
         visible: list[str]
-        if caller == "operator" or _is_internal_caller(request):
+        if _caller_is_operator(caller, request) or _is_internal_caller(request):
             visible = list(projects.keys())
         else:
             visible = sorted(_caller_projects(caller))
@@ -4686,7 +4842,7 @@ def create_mesh_app(
         caller = _extract_verified_agent_id(request)
         if not (
             caller == agent_id
-            or caller == "operator"
+            or _caller_is_operator(caller, request)
             or _is_internal_caller(request)
         ):
             agent_proj = _agent_projects.get(agent_id)
@@ -4857,7 +5013,7 @@ def create_mesh_app(
     async def archive_team_endpoint(team_name: str, request: Request) -> dict:
         """Archive a team (operator-only). Idempotent."""
         caller = _extract_verified_agent_id(request)
-        if caller != "operator" and not _is_internal_caller(request):
+        if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(403, "Only the operator can archive teams")
         from src.cli.config import _archive_project, _load_projects
         if team_name not in _load_projects():
@@ -4876,7 +5032,7 @@ def create_mesh_app(
     async def unarchive_team_endpoint(team_name: str, request: Request) -> dict:
         """Unarchive a team (operator-only). Idempotent."""
         caller = _extract_verified_agent_id(request)
-        if caller != "operator" and not _is_internal_caller(request):
+        if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(403, "Only the operator can unarchive teams")
         from src.cli.config import _load_projects, _unarchive_project
         if team_name not in _load_projects():
@@ -4900,7 +5056,7 @@ def create_mesh_app(
         unarchived later. Container is best-effort stopped.
         """
         caller = _extract_verified_agent_id(request)
-        if caller != "operator" and not _is_internal_caller(request):
+        if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(403, "Only the operator can archive agents")
         if agent_id == "operator":
             raise HTTPException(400, "The operator agent cannot be archived")
@@ -4938,7 +5094,7 @@ def create_mesh_app(
     async def unarchive_agent_endpoint(agent_id: str, request: Request) -> dict:
         """Unarchive an agent (operator-only). Restart left to operator."""
         caller = _extract_verified_agent_id(request)
-        if caller != "operator" and not _is_internal_caller(request):
+        if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(403, "Only the operator can unarchive agents")
         from src.cli.config import _load_config, _unarchive_agent
         cfg = _load_config()
@@ -4975,7 +5131,7 @@ def create_mesh_app(
         backend value, not a domain term.
         """
         caller = _extract_verified_agent_id(request)
-        if caller != "operator" and not _is_internal_caller(request):
+        if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(403, "Only the operator can delete teams")
         from src.cli.config import _load_projects, _project_status
         projects = _load_projects()
@@ -5045,7 +5201,7 @@ def create_mesh_app(
           * agent is not ``operator``
         """
         caller = _extract_verified_agent_id(request)
-        if caller != "operator" and not _is_internal_caller(request):
+        if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(403, "Only the operator can delete agents")
         if agent_id == "operator":
             raise HTTPException(400, "The operator agent cannot be deleted")
@@ -5175,7 +5331,7 @@ def create_mesh_app(
             raise HTTPException(404, f"Task '{task_id}' not found")
         if not (
             caller in (record["creator"], record["assignee"])
-            or caller == "operator"
+            or _caller_is_operator(caller, request)
             or _is_internal_caller(request)
         ):
             raise HTTPException(
@@ -5248,7 +5404,7 @@ def create_mesh_app(
         """
         _require_any_auth(request)
         caller = _resolve_agent_id("", request)
-        if not (caller == "operator" or _is_internal_caller(request)):
+        if not (_caller_is_operator(caller, request) or _is_internal_caller(request)):
             raise HTTPException(403, "Only the operator can read agent configs")
         await _check_rate_limit("agent_profile", "operator")
 
@@ -5346,7 +5502,7 @@ def create_mesh_app(
         """
         _require_any_auth(request)
         caller = _resolve_agent_id("", request)
-        if not (caller == "operator" or _is_internal_caller(request)):
+        if not (_caller_is_operator(caller, request) or _is_internal_caller(request)):
             raise HTTPException(403, "Only the operator can read peer artifacts")
         if agent_id not in router.agent_registry:
             raise HTTPException(404, f"Agent '{agent_id}' not found")
@@ -5372,7 +5528,7 @@ def create_mesh_app(
         """
         _require_any_auth(request)
         caller = _resolve_agent_id("", request)
-        if not (caller == "operator" or _is_internal_caller(request)):
+        if not (_caller_is_operator(caller, request) or _is_internal_caller(request)):
             raise HTTPException(403, "Only the operator can read peer artifacts")
         _validate_peer_artifact_name(name)
         if agent_id not in router.agent_registry:
@@ -5730,7 +5886,7 @@ def create_mesh_app(
         """
         _require_any_auth(request)
         caller = _extract_verified_agent_id(request)
-        if caller != "operator" and not _is_internal_caller(request):
+        if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(403, "Only the operator can edit agent config")
         # We require *a* validatable origin so request-level audit fields
         # are populated; we do NOT require human kind (see docstring).
@@ -5972,7 +6128,7 @@ def create_mesh_app(
         """
         _require_any_auth(request)
         caller = _extract_verified_agent_id(request)
-        if caller != "operator" and not _is_internal_caller(request):
+        if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(
                 403, "Only the operator can toggle internet access",
             )
@@ -6062,7 +6218,7 @@ def create_mesh_app(
         """
         _require_any_auth(request)
         caller = _extract_verified_agent_id(request)
-        if caller != "operator" and not _is_internal_caller(request):
+        if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(
                 403, "Only the operator can read internet-access state",
             )
@@ -6082,7 +6238,7 @@ def create_mesh_app(
         """
         _require_any_auth(request)
         caller = _extract_verified_agent_id(request)
-        if caller != "operator" and not _is_internal_caller(request):
+        if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(403, "Only the operator can undo changes")
 
         record = change_history.consume_for_undo(undo_token)
@@ -6188,7 +6344,7 @@ def create_mesh_app(
         non-human caller can't flip the lever.
         """
         caller = _extract_verified_agent_id(request)
-        if caller != "operator" and not _is_internal_caller(request):
+        if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(403, "Only the operator can confirm config changes")
         _confirm_origin_check(request, caller)
         data = await request.json()
@@ -6296,7 +6452,7 @@ def create_mesh_app(
         clear immediately.
         """
         caller = _extract_verified_agent_id(request)
-        if caller != "operator" and not _is_internal_caller(request):
+        if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(403, "Only the operator can cancel pending actions")
         record = pending_actions.cancel(nonce, actor=caller or "operator")
         if record is None:
@@ -6324,7 +6480,7 @@ def create_mesh_app(
         rows are hidden.
         """
         caller = _extract_verified_agent_id(request)
-        if caller != "operator" and not _is_internal_caller(request):
+        if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(403, "Only the operator can archive audit entries")
         try:
             body = await request.json()
