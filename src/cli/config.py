@@ -1585,6 +1585,10 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     "inspect_agents", "inspect_teams", "inspect_projects",
     "list_agent_queue", "get_team_outputs",
     "summarize_team_progress", "summarize_project_progress",
+    # Composes and persists a work summary card for the Work tab.
+    # Backed by ``WorkSummariesStore``; the daily cron invokes this
+    # tool directly (no LLM cost per fire). User rates via dashboard.
+    "compose_work_summary",
     # Canonical inverse of edit_agent — operator reads the current
     # config surface before mutating. Pair with list_peer_artifacts /
     # read_peer_artifact for deeper inspection of peer-written files.

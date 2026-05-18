@@ -648,6 +648,19 @@ def create_mesh_app(
     if event_bus is not None:
         tasks_store.set_event_bus(event_bus)
 
+    # Durable work-summaries store. One row per (scope, period_start);
+    # operator generates via the ``compose_work_summary`` skill or the
+    # per-team cron, user rates via the dashboard. The bus emit drives
+    # the Work tab's summary cards live (PR-B).
+    from src.host.summaries import WorkSummariesStore
+    _summaries_db_path = os.environ.get(
+        "OPENLEGION_WORK_SUMMARIES_DB", "data/work_summaries.db",
+    )
+    summaries_store = WorkSummariesStore(
+        db_path=_summaries_db_path, event_bus=event_bus,
+    )
+    app.summaries_store = summaries_store  # exposed for tests/dashboard
+
     # In-memory registry of open "agent asks user for help" requests:
     # credential_request, browser_login_request, browser_captcha_help_request.
     # Keyed by request_id (uuid). The dict lets the cancel endpoints
@@ -4808,6 +4821,168 @@ def create_mesh_app(
             origin,
         )
         return {"clone": clone, "original_id": original["id"]}
+
+    # === Work Summaries ===
+    #
+    # Operator-generated team / solo-agent summaries. Replace the
+    # per-task Work-tab firehose at scale: at 30+ agents the operator's
+    # mental unit shifts from individual tasks to team-level health,
+    # and the user rates one summary per team per period instead of
+    # rating every delivery. Operator generates via the
+    # ``compose_work_summary`` skill (or cron); user (operator persona
+    # via dashboard) rates via ``POST /mesh/work-summaries/{id}/rating``.
+    #
+    # Visibility: operator + loopback-internal see all summaries.
+    # Workers see only summaries for teams they belong to (mirrors
+    # ``_is_project_member`` semantics). Solo summaries are scoped to
+    # the agent id — only the agent itself + operator can read.
+    #
+    # Permission: create + rating are operator-or-internal. Read is
+    # any-auth with scope filter.
+
+    def _can_read_summary(caller: str, request: Request, row: dict) -> bool:
+        if _caller_is_operator(caller, request) or _is_internal_caller(request):
+            return True
+        if row["scope_kind"] == "solo":
+            return caller == row["scope_id"]
+        if row["scope_kind"] == "team":
+            return _is_project_member(caller, row["scope_id"])
+        return False
+
+    @app.post("/mesh/work-summaries")
+    async def create_work_summary(data: dict, request: Request) -> dict:
+        """Operator (or internal) creates a new work summary."""
+        caller = _extract_verified_agent_id(request)
+        if not (_caller_is_operator(caller, request) or _is_internal_caller(request)):
+            _record_denial(
+                "role", caller=caller,
+                gate="work_summaries.create:operator_or_internal",
+            )
+            raise HTTPException(
+                403, "Only the operator can create work summaries",
+            )
+        scope_kind = (data.get("scope_kind") or "").strip()
+        scope_id = (data.get("scope_id") or "").strip()
+        period_start = data.get("period_start")
+        period_end = data.get("period_end")
+        narrative_md = (data.get("narrative_md") or "").strip()
+        metrics = data.get("metrics") or {}
+        recommendations = data.get("recommendations") or []
+        if not (
+            scope_kind and scope_id and narrative_md
+            and isinstance(period_start, (int, float))
+            and isinstance(period_end, (int, float))
+        ):
+            raise HTTPException(
+                400,
+                "Required fields: scope_kind, scope_id, period_start "
+                "(number), period_end (number), narrative_md",
+            )
+        if not isinstance(metrics, dict):
+            raise HTTPException(400, "metrics must be a JSON object")
+        if not isinstance(recommendations, list):
+            raise HTTPException(400, "recommendations must be a JSON array")
+        try:
+            from src.host.summaries import InvalidScope
+            row = summaries_store.create(
+                scope_kind=scope_kind,
+                scope_id=scope_id,
+                period_start=float(period_start),
+                period_end=float(period_end),
+                narrative_md=sanitize_for_prompt(narrative_md),
+                metrics=metrics,
+                recommendations=[
+                    sanitize_for_prompt(str(r))[:500] for r in recommendations
+                ],
+                generated_by=caller,
+            )
+        except InvalidScope as e:
+            raise HTTPException(400, str(e))
+        except ValueError as e:
+            # UNIQUE collision or validation failure — already-exists is
+            # the common case under retries / concurrent crons.
+            raise HTTPException(409, str(e))
+        return row
+
+    @app.get("/mesh/work-summaries")
+    async def list_work_summaries(
+        request: Request,
+        scope_kind: str | None = None,
+        scope_id: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict:
+        """List recent summaries. Scope-filtered for workers."""
+        caller = _extract_verified_agent_id(request)
+        summaries_store._safe_reap()
+        try:
+            from src.host.summaries import InvalidScope
+            rows = summaries_store.list_recent(
+                scope_kind=scope_kind, scope_id=scope_id,
+                limit=limit, offset=offset,
+            )
+        except InvalidScope as e:
+            raise HTTPException(400, str(e))
+        # Apply per-row visibility filter for non-operator callers.
+        visible = [r for r in rows if _can_read_summary(caller, request, r)]
+        return {"summaries": visible, "count": len(visible)}
+
+    @app.get("/mesh/work-summaries/{summary_id}")
+    async def get_work_summary(summary_id: str, request: Request) -> dict:
+        """Fetch a single summary by id. Scope-checked."""
+        caller = _extract_verified_agent_id(request)
+        row = summaries_store.get(summary_id)
+        if row is None:
+            raise HTTPException(404, f"Summary {summary_id!r} not found")
+        if not _can_read_summary(caller, request, row):
+            _record_denial(
+                "scope", caller=caller, target=summary_id,
+                gate="work_summaries.get:scope",
+            )
+            raise HTTPException(
+                403, f"Caller {caller} cannot read summary {summary_id!r}",
+            )
+        return row
+
+    @app.post("/mesh/work-summaries/{summary_id}/rating")
+    async def rate_work_summary(
+        summary_id: str, data: dict, request: Request,
+    ) -> dict:
+        """Operator (acting for the user) rates a summary.
+
+        Editable for 24h after first rating, then locked. The first
+        ``rated_at`` is preserved across edits so the UI shows the
+        original-rating timestamp, not the latest revision.
+        """
+        caller = _extract_verified_agent_id(request)
+        if not (_caller_is_operator(caller, request) or _is_internal_caller(request)):
+            _record_denial(
+                "role", caller=caller, target=summary_id,
+                gate="work_summaries.rate:operator_or_internal",
+            )
+            raise HTTPException(
+                403, "Only the operator can rate work summaries",
+            )
+        rating = (data.get("rating") or "").strip()
+        feedback = data.get("feedback")
+        if feedback is not None and not isinstance(feedback, str):
+            raise HTTPException(400, "feedback must be a string or null")
+        try:
+            from src.host.summaries import (
+                RatingLocked,
+                SummaryNotFound,
+            )
+            return summaries_store.set_rating(
+                summary_id, rating,
+                feedback=sanitize_for_prompt(feedback) if feedback else None,
+                actor=caller,
+            )
+        except SummaryNotFound:
+            raise HTTPException(404, f"Summary {summary_id!r} not found")
+        except RatingLocked as e:
+            raise HTTPException(409, str(e))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
 
     # === Operator product surface (Task 7) — read tools ===
     #

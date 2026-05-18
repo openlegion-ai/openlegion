@@ -653,6 +653,13 @@ class DashboardEvent(BaseModel):
         # notifications producer below never sees deliveries.
         "task_outcome",
         "task_artifact_added",
+        # Work summaries — emitted by ``host/summaries.WorkSummariesStore``
+        # on create / set_rating. Drives the Summary cards on the Work
+        # tab's new default landing (PR-B). Without these literals the
+        # emits get rejected by Pydantic validation and the dashboard
+        # silently misses the live update.
+        "work_summary_created",
+        "work_summary_rated",
         "pending_action_created",
         "pending_action_resolved",
         "pending_action_expired",
