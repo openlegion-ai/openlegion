@@ -2956,10 +2956,21 @@ function dashboard() {
         // Optimistic state sync. The WebSocket event will arrive
         // shortly and ratify (matching pin → clears pin) or be a
         // stale echo of an older POST (non-matching, within pin TTL
-        // → skipped).
+        // → stashed and applied after TTL).
         const list = this.workplaceSummaries || [];
         const row = list.find(r => r.id === summaryId);
         if (row) {
+          // Clear any leftover stale-event timer + stash from a
+          // PREVIOUS pin cycle on the same row — without this, a
+          // deferred apply scheduled by an earlier 👍 → 👎 sequence
+          // could fire AFTER a newer rating and overwrite it with
+          // its stale stashed event (codex r5 P2 — overlapping pin
+          // race).
+          if (row._pendingExternalTimer) {
+            clearTimeout(row._pendingExternalTimer);
+            delete row._pendingExternalTimer;
+          }
+          delete row._pendingExternal;
           row.rating = updated.rating;
           row.feedback = updated.feedback;
           row.rated_at = updated.rated_at;
@@ -4914,7 +4925,11 @@ function dashboard() {
       if (evt.type === 'task_created' || evt.type === 'task_status_changed' ||
           evt.type === 'task_outcome' ||
           evt.type === 'pending_action_created' || evt.type === 'pending_action_resolved' ||
-          evt.type === 'pending_action_expired') {
+          evt.type === 'pending_action_expired' ||
+          // PR-B — work summary lifecycle on the Work tab. Without
+          // these entries the handler arms below stay dead and the
+          // summaries view doesn't update live.
+          evt.type === 'work_summary_created' || evt.type === 'work_summary_rated') {
         this.handleWorkplaceEvent(evt);
       }
 
