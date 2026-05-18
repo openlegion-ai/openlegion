@@ -30,10 +30,27 @@ rely on the ``real_timing`` opt-out for the dedicated pacing tests.
 
 from __future__ import annotations
 
+import os
 import sys
 from typing import Any
 
 import pytest
+
+# Bypass the mesh's fail-closed trust-tier startup gate for in-process
+# test fixtures. The gate refuses to boot when
+# ``OPENLEGION_TEAM_SCOPE_MODE=enforce`` (the default) and ``auth_tokens``
+# is empty — the production "no tokens were ever configured" scenario.
+# Tests legitimately construct ``create_mesh_app`` without tokens and
+# drive identity via ``X-Agent-ID`` for their own assertions, which is
+# exactly the forgery the production gate guards against. The dedicated
+# env var (not an ambient ``"pytest" in sys.modules`` check) keeps the
+# bypass explicit and out of reach of any production import-graph
+# accident that drags pytest into a live mesh process.
+#
+# Hard assignment (not ``setdefault``) — if a CI runner has pre-set
+# the var to ``""`` or ``"0"`` the gate would fire and break the
+# whole session. The test session unconditionally needs the bypass.
+os.environ["OPENLEGION_SKIP_TRUST_TIER_BOOT_GATE"] = "1"
 
 # Time-returning helpers consumed by ``src.browser.service`` via
 # ``from src.browser.timing import X``. ``scroll_increment`` and
