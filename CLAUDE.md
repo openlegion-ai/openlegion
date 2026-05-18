@@ -47,7 +47,7 @@ Only modules with non-obvious quirks worth flagging are listed. The rest are vis
 | `src/agent/builtins/http_tool.py` | HTTP with CRED handles, SSRF protection, cross-origin auth header stripping |
 | `src/agent/builtins/skill_tool.py` | Self-authoring with AST validation (`_FORBIDDEN_IMPORTS` / `_FORBIDDEN_CALLS` / `_FORBIDDEN_ATTRS`) |
 | `src/agent/builtins/fleet_tool.py` | Operator-only `list_templates` / `apply_template`. Validates upfront; create loop is per-slot, not atomic (Constraint #3). |
-| `src/agent/builtins/operator_tools.py` | Operator-only orchestration. `edit_agent` is the unified edit surface (all fields apply immediately + undo receipt). `read_agent_config` is its inverse. 8 legacy `*_project` tools are recoverable error stubs returning `{"error": "renamed", "new_tool": "*_team", ...}`. `_OPERATOR_PERMISSION_CEILING` blocks `can_spawn` / `can_use_wallet`. |
+| `src/agent/builtins/operator_tools.py` | Operator-only orchestration. `edit_agent` is the unified edit surface (all fields apply immediately + undo receipt). `read_agent_config` is its inverse. `_OPERATOR_PERMISSION_CEILING` blocks `can_spawn` / `can_use_wallet`. |
 | `src/host/server.py` | Mesh FastAPI app — 100 endpoints, all permission-checked. `_RATE_LIMITS` enforces per-category limits. `_require_operator_or_internal` is a permission tier between standard agent auth and loopback-only `x-mesh-internal`. `pending_actions` is now delete-confirmations only. |
 | `src/host/runtime.py` | RuntimeBackend ABC → DockerBackend / SandboxBackend. Container hardening enforced here. |
 | `src/host/credentials.py` | Two-tier credential vault (SYSTEM_*/CRED_*) + LLM API proxy. OpenAI OAuth support. |
@@ -61,6 +61,8 @@ Only modules with non-obvious quirks worth flagging are listed. The rest are vis
 | `src/browser/server.py` | Raises on startup if `MESH_AUTH_TOKEN` set but `BROWSER_AUTH_TOKEN` missing |
 | `src/browser/session_persistence.py` | Session continuity; opt-in via `BROWSER_SESSION_PERSISTENCE_ENABLED` (default false) |
 | `src/dashboard/server.py` | FastAPI router + 143 endpoints + VNC URL injection. Alpine.js SPA, Jinja autoescape, CSP, CSRF via `X-Requested-With`. Four top-nav tabs (`chat`/`workplace`/`fleet`/`system`) — IDs frozen for URL stability (Constraint #5). |
+| `src/dashboard/notifications.py` | Persistent notifications store (`dashboard_notifications` SQLite, WAL). Frozen `_KNOWN_KINDS` for top-nav bell. |
+| `src/dashboard/telemetry.py` | Telemetry sink (`dashboard_telemetry` table) with `_MAX_EVENTS=100_000` retention cap and per-session rate limit. |
 | `src/channels/whatsapp.py` | WhatsApp Cloud API (`X-Hub-Signature-256` verification, warns when disabled) |
 | `src/templates/` | YAML fleet templates (starter, content, deep-research, devteam, monitor, sales, etc.) |
 
@@ -141,6 +143,7 @@ Provisioner manages engine instances via Docker/systemd on Hetzner VPS:
 8. **Module-level globals.** `_skill_staging` in `skills.py` (threading-lock protected), `_client` in `http_tool.py` (connection pool). Avoid adding more.
 9. **Project→team rename completed 2026-05.** Remaining shims: `MeshClient.*_project` proxies + `AgentPermissions.can_manage_projects` validator (internal callers, deferred); `tasks.project_id` dict-key emission alongside `team_id` (pending external-consumer audit). Internal namespaces unchanged: blackboard `projects/{name}/` prefix, `target_kind="project"` on `pending_actions`. `src/host/team_migration.py` startup migrator scheduled for removal next release.
 10. **Coordination-tool failure envelopes.** Errors from `hand_off` / `update_status` / `complete_task` wrap exceptions via `_failed_transition_envelope` so the LLM sees `handed_off=False` + a directive `error` ("MUST NOT report success") + `recovery_hint`. Sentinel keys merge AFTER caller `extras` to prevent shadowing. Without this shape, LLMs silently report success when handoffs fail post-commit.
+11. **Wizard state machine: `idle | ask | confirming | building | first-output | build_failed`.** Persisted to `localStorage.ol_wizard`; resets to `idle` on unknown values. Wizard mounts only when `step !== 'idle'`. Mutually exclusive with the "What's new" tour (existing-fleet users only, in-memory state).
 
 ## Git Workflow
 
