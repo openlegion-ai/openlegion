@@ -1814,6 +1814,16 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
         _OPERATOR_AGENT_ID,
         permissions={
             "can_spawn": True,
+            # Operator has ``can_use_browser=False`` by design: it
+            # coordinates the fleet but does not drive browsers itself.
+            # ``request_browser_login`` / ``request_captcha_help``
+            # work through the delegation path — operator calls the
+            # skill with ``agent_id=target_worker`` so cookies / session
+            # state land in the worker's browser profile (the agent
+            # that will actually use them). See
+            # ``src/shared/operator_playbooks.py`` for the documented
+            # delegation pattern and ``tests/test_operator_config.py``
+            # for the design test.
             "can_use_browser": False,
             # Operator gets internet (HTTPS + web search) by default so
             # it can fetch reference material and answer factual

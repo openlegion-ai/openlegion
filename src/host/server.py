@@ -2396,11 +2396,12 @@ def create_mesh_app(
 
         Task 5 layered a per-caller filter on the unscoped path. Today's
         legacy behavior is "every authenticated agent sees the full
-        fleet" — under ``OPENLEGION_PROJECT_SCOPE_MODE=enforce`` workers
-        see only members of their own projects (plus the always-global
-        operator). Under ``warn`` (the default), the response shape
-        stays legacy and a structured ``scope-warn`` log line is emitted
-        so operators can soak before flipping.
+        fleet" — under ``OPENLEGION_TEAM_SCOPE_MODE=enforce`` (the
+        default; legacy ``OPENLEGION_PROJECT_SCOPE_MODE`` still honored
+        as a back-compat alias) workers see only members of their own
+        projects (plus the always-global operator). Under ``warn`` the
+        response shape stays legacy and a structured ``scope-warn`` log
+        line is emitted so operators can soak before flipping.
         """
         if agent_id:
             agent_id = _resolve_agent_id(agent_id, request)
