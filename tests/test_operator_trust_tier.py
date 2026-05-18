@@ -552,6 +552,65 @@ def test_operator_still_gated_surfaces_not_in_bypass_grep(mesh_setup):
             )
 
 
+def test_operator_bypass_pattern_present_at_every_bypassed_gate(mesh_setup):
+    """Counterpart to the carve-out scan: every gate that SHOULD bypass
+    operator MUST have ``_caller_is_operator`` within 5 lines above it.
+
+    Without this regression guard, a refactor that silently removes the
+    operator-bypass from one of the round-4 gates (api / cron / spawn /
+    fleet / message / profile / browser-delegate / blackboard / publish /
+    subscribe / route_tasks / wake) would slip through CI: the
+    carve-out test asserts the *negation*, but a missing bypass on a
+    bypass-family gate produces no observable error other than
+    operator-coordination 403s in production — the exact failure mode
+    this PR exists to eliminate.
+
+    Same contract as the carve-out scan: the ``_caller_is_operator``
+    short-circuit must live in the 5 lines flush above the gate. The
+    inline-or form used in reroute/retry handlers (``or
+    _caller_is_operator(...) or _is_internal_caller(...) or
+    permissions.can_route_tasks(...)``) is also accepted — the helper
+    appears within window above the gate's line.
+    """
+    server_path = mesh_setup["server"].__file__
+    with open(server_path) as f:
+        source_lines = f.readlines()
+
+    bypassed_gates = [
+        "permissions.can_message(",
+        "permissions.can_read_blackboard(",
+        "permissions.can_write_blackboard(",
+        "permissions.can_publish(",
+        "permissions.can_subscribe(",
+        "permissions.can_use_api(",
+        "permissions.can_manage_cron(",
+        "permissions.can_spawn(",
+        "permissions.can_manage_fleet(",
+        "permissions.can_route_tasks(",
+    ]
+    for gate in bypassed_gates:
+        gate_lines = []
+        for i, line in enumerate(source_lines):
+            if gate not in line:
+                continue
+            stripped = line.lstrip()
+            # Skip non-call contexts: def / import / comment / filter
+            # expression inside a list comprehension (matched by ``if``
+            # at the start without parens — these aren't gates).
+            if stripped.startswith(("def ", "import ", "#")):
+                continue
+            gate_lines.append((i, line))
+        assert gate_lines, f"Could not find any callsite for {gate!r}"
+        for idx, line in gate_lines:
+            preceding = "".join(source_lines[max(0, idx - 5):idx])
+            assert "_caller_is_operator" in preceding, (
+                f"Missing operator bypass before {gate!r} at line {idx + 1}. "
+                f"Coordination/management gates must have a "
+                f"`_caller_is_operator(...)` short-circuit within 5 lines "
+                f"above the gate. Bypass family contract: see PR #943."
+            )
+
+
 # =============================================================================
 # Forgery rejection — bearer-derived identity wins over X-Agent-ID header
 # =============================================================================
