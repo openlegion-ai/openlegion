@@ -4176,16 +4176,19 @@ def create_mesh_app(
         # fire on team creation so the operator doesn't have to wait
         # for the next mesh restart for the reconcile to pick it up.
         # Best-effort — a missing cron_scheduler or a failure here
-        # mustn't fail the team-create response. Honors any
-        # ``settings.summary_schedule`` the create call supplied (none
-        # for the default mesh path, but the schedule= forwarded here
-        # is the same shape ``_reconcile_work_summary_jobs`` reads at
-        # startup — codex r2 P2 caught that runtime create silently
-        # reset custom schedules).
+        # mustn't fail the team-create response.
+        #
+        # Reads the persisted metadata back (``_create_project`` wrote
+        # the file with default ``settings={}``; the read is for
+        # forward-compatibility with a future create endpoint that
+        # accepts initial settings, and to keep behavior consistent
+        # with the unarchive path which also reads metadata).
         if cron_scheduler is not None:
             try:
-                team_settings = body.get("settings") or {}
-                _custom_schedule = team_settings.get("summary_schedule")
+                persisted = _load_projects().get(name) or {}
+                _custom_schedule = (
+                    (persisted.get("settings") or {}).get("summary_schedule")
+                )
                 cron_scheduler.ensure_summary_job(
                     scope_kind="team", scope_id=name,
                     schedule=_custom_schedule,
@@ -4244,6 +4247,22 @@ def create_mesh_app(
             _delete_project(team_name)
         except ValueError as e:
             raise HTTPException(404, str(e))
+        # Real-time cron lifecycle: drop the daily work-summary cron
+        # for the deleted team. This is the mesh DIRECT-delete path
+        # (distinct from the propose/confirm flow, which also cleans
+        # up). Without this the team is gone but its cron keeps
+        # firing daily empty-state summaries until the next mesh
+        # restart catches the orphan (codex r3 P2).
+        if cron_scheduler is not None:
+            try:
+                existing = cron_scheduler.find_summary_job("team", team_name)
+                if existing is not None:
+                    cron_scheduler.remove_job(existing.id)
+            except Exception as e:
+                logger.warning(
+                    "remove summary cron on mesh team-delete %s failed: %s",
+                    team_name, e,
+                )
         _emit_team_event(event_bus, "project_deleted", agent="operator", name=team_name)
         return {
             "deleted": True, "name": team_name,
