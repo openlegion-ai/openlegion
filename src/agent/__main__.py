@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import secrets
 import sys
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
@@ -26,6 +25,7 @@ from src.agent.mesh_client import MeshClient
 from src.agent.server import create_agent_app
 from src.agent.skills import SkillRegistry
 from src.agent.workspace import WorkspaceManager
+from src.shared.trace import new_trace_id
 from src.shared.utils import setup_logging
 
 logger = setup_logging("agent.main")
@@ -199,7 +199,7 @@ def main() -> None:
                 cp = await loop.memory._run_db(loop.memory.load_task_checkpoint)
                 if cp:
                     from src.shared.types import TaskAssignment
-                    _resume_trace_id = f"tr_{secrets.token_hex(6)}"
+                    _resume_trace_id = new_trace_id()
                     assignment = TaskAssignment.model_validate_json(cp["assignment_json"])
                     logger.info(
                         "Auto-resuming task %s from checkpoint (iteration %d) trace=%s",

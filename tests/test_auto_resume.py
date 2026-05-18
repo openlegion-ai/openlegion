@@ -92,15 +92,14 @@ class TestAutoResume:
         # We test the lifespan logic by importing and simulating the relevant
         # section. Since lifespan is tightly coupled to __main__.py, we
         # replicate the core logic here and verify behavior.
-        import secrets
-
+        from src.shared.trace import new_trace_id
         from src.shared.types import TaskAssignment as TA
 
         # Simulate the auto-resume block
         if loop.memory:
             result_cp = await loop.memory._run_db(loop.memory.load_task_checkpoint)
             if result_cp:
-                _resume_trace_id = f"tr_{secrets.token_hex(6)}"
+                _resume_trace_id = new_trace_id()
                 parsed = TA.model_validate_json(result_cp["assignment_json"])
                 loop.state = "working"
                 loop.current_task = parsed.task_id
