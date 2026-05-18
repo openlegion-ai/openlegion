@@ -2954,7 +2954,8 @@ function dashboard() {
         }
         const updated = await resp.json();
         // Optimistic state sync. The WebSocket event will arrive
-        // shortly and ratify (or be ignored as stale by the seq guard).
+        // shortly and ratify (or be ignored as stale by the watermark
+        // guard in the WS handler).
         const list = this.workplaceSummaries || [];
         const row = list.find(r => r.id === summaryId);
         if (row) {
@@ -2963,6 +2964,13 @@ function dashboard() {
           row.rated_at = updated.rated_at;
           row.rated_by = updated.rated_by;
           row._lastLocalRateSeq = seq;
+          // Wall-clock watermark for the WS-staleness check. The
+          // server's ``rated_at`` is COALESCEd (preserves the first-
+          // rating ts across edits), so it can't be used to detect
+          // a delayed WS event from an OLDER rating. Stamp client
+          // wall-clock at the moment of the local POST; WS events
+          // whose server ``ts`` predates this by > grace are stale.
+          row._lastLocalEditTs = Date.now() / 1000;
         }
         delete this.summaryFeedbackDrafts[summaryId];
       } catch (e) {
@@ -4500,6 +4508,21 @@ function dashboard() {
           // If a POST is currently in flight, skip — the response
           // handler will write the canonical state.
           if (this._summaryRateInFlight[data.summary_id]) return;
+          // Watermark check: if the event's server timestamp predates
+          // our last local POST by more than a clock-drift grace
+          // window, the event is a delayed echo of an older rating
+          // (e.g. user changed 👍 → 👎; the older 👍 event arrives
+          // after our 👎 POST resolved). Skip it. 5s grace handles
+          // typical client/server clock skew. Only applies when we
+          // actually have a local edit watermark recorded.
+          const _GRACE_S = 5;
+          if (
+            row._lastLocalEditTs
+            && typeof data.ts === 'number'
+            && data.ts < row._lastLocalEditTs - _GRACE_S
+          ) {
+            return;
+          }
           // If this WS event matches the latest local POST result
           // (same rating + feedback), it's the ratification — no-op.
           const matchesLocal = (
