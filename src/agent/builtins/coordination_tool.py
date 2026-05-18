@@ -169,6 +169,7 @@ async def hand_off(
     # Validate target exists in the registry — fail closed if the roster
     # is unreachable and we can't resolve the target's project scope.
     target_project: str | None = None
+    target_is_global = False
     try:
         registry = await mesh_client.list_agents()
         if to not in registry:
@@ -177,6 +178,7 @@ async def hand_off(
         target_info = registry.get(to, {})
         if isinstance(target_info, dict):
             target_project = target_info.get("project")
+            target_is_global = target_info.get("scope") == "global"
     except Exception as e:
         # Standalone senders need to resolve target project to write
         # the task into the correct scope.
@@ -185,10 +187,14 @@ async def hand_off(
         logger.debug("Fleet roster check failed, proceeding with validated ID: %s", e)
 
     # Pick the project scope:
-    #   - operator handoffs: project=None (fleet-global)
+    #   - operator + any other fleet-global agent (``scope: "global"``
+    #     on the registry): project=None. Triggering on both the literal
+    #     reserved name AND the registry hint keeps the path correct
+    #     when the roster lookup fails (no hint available) AND stays
+    #     forward-compatible if other global agents are added later.
     #   - cross-project worker handoffs: target's project
     #   - same-project handoffs: caller's project
-    if to == "operator":
+    if to == "operator" or target_is_global:
         write_project = None
     elif target_project:
         write_project = target_project
