@@ -25,6 +25,37 @@ def test_absolute_path_escapes_returns_none(tmp_path: Path):
     assert resolve_under_root(tmp_path, "/etc/passwd") is None
 
 
+def test_absolute_path_inside_root_still_rejected(tmp_path: Path):
+    """Even an absolute name that *would* land inside root is rejected.
+
+    This pins the unconditional ``is_absolute()`` guard: callers must pass
+    relative names, otherwise a tightly-targeted absolute path could
+    accept a fully-qualified path that happens to fall under root and
+    bypass relative-name input validation upstream.
+    """
+    # Construct an absolute path whose resolved value IS under tmp_path.
+    absolute_inside = str((tmp_path / "subdir" / "file.txt").resolve())
+    assert resolve_under_root(tmp_path, absolute_inside) is None
+
+
+def test_symlink_inside_root_resolves(tmp_path: Path):
+    """Positive case: symlink whose target IS inside root must succeed.
+
+    Pairs with the negative ``test_symlink_escape_returns_none`` — the
+    helper must not reject all symlinks, only those whose target escapes.
+    """
+    target = tmp_path / "real_file.txt"
+    target.write_text("hi")
+    link = tmp_path / "link_to_real"
+    os.symlink(target, link)
+    try:
+        result = resolve_under_root(tmp_path, "link_to_real")
+        assert result == target.resolve()
+    finally:
+        link.unlink()
+        target.unlink()
+
+
 def test_symlink_escape_returns_none(tmp_path: Path):
     """A symlink whose target is outside root must be rejected."""
     outside = tmp_path.parent / "outside_target.txt"

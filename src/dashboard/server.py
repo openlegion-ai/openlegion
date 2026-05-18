@@ -7154,8 +7154,8 @@ def create_dashboard_router(
 
     @api_router.get("/static/{file_path:path}")
     async def static_file(file_path: str, v: str | None = None) -> FileResponse:
-        full = (_STATIC_DIR / file_path).resolve()
-        if not str(full).startswith(str(_STATIC_DIR)) or not full.is_file():
+        full = resolve_under_root(_STATIC_DIR, file_path)
+        if full is None or not full.is_file():
             raise HTTPException(status_code=404, detail="Not found")
         suffix = full.suffix.lower()
         # When served with a versioned URL (?v=<hash>), cache aggressively —

@@ -16,14 +16,17 @@ def resolve_under_root(root: Path, name: str | Path) -> Path | None:
     ``..`` collapsed) so the check rejects:
 
     - traversal via ``..`` (e.g. ``"../etc/passwd"``)
-    - absolute paths (e.g. ``"/etc/passwd"`` — Python's ``/`` operator
-      lets an absolute right-hand side override the left)
+    - **any absolute ``name``** (e.g. ``"/etc/passwd"``, or even
+      ``"/x/root_resolved/file"`` that happens to land inside ``root`` —
+      relative-name semantics are enforced unconditionally so callers
+      never accidentally accept a fully-qualified path)
     - symlinks whose target escapes ``root``
     - suffix-collision prefixes (e.g. ``/tmp/artifacts2`` is NOT inside
       ``/tmp/artifacts`` — ``startswith`` would false-positive here)
 
-    Returns ``None`` when the resolved path escapes ``root``. Callers own
-    the error response (HTTPException, dict-error, silent ``None``).
+    Returns ``None`` when ``name`` is absolute or when the resolved path
+    escapes ``root``. Callers own the error response (HTTPException,
+    dict-error, silent ``None``).
 
     Not solved by this helper:
 
@@ -32,6 +35,8 @@ def resolve_under_root(root: Path, name: str | Path) -> Path | None:
       itself and pass the containment check; callers should reject those
       upstream via regex/allowlist)
     """
+    if Path(name).is_absolute():
+        return None
     root_resolved = root.resolve()
     target = (root_resolved / name).resolve()
     if not target.is_relative_to(root_resolved):
