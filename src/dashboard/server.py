@@ -4516,6 +4516,21 @@ def create_dashboard_router(
             _delete_project(team_name)
         except ValueError as e:
             raise HTTPException(status_code=404, detail=str(e))
+        # Real-time cron lifecycle: drop the daily work-summary cron
+        # for the deleted team. The mesh propose/confirm delete path
+        # already does this; the dashboard direct-delete had to mirror
+        # the cleanup or a deleted team would keep firing its summary
+        # cron until the next mesh restart (codex r2 P2).
+        if cron_scheduler is not None:
+            try:
+                existing = cron_scheduler.find_summary_job("team", team_name)
+                if existing is not None:
+                    cron_scheduler.remove_job(existing.id)
+            except Exception as e:
+                logger.warning(
+                    "remove summary cron on dashboard team-delete %s failed: %s",
+                    team_name, e,
+                )
         _emit_team_event(
             "project_deleted", agent="operator",
             data={"project_id": team_name, "name": team_name},

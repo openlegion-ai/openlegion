@@ -4172,15 +4172,23 @@ def create_mesh_app(
             _create_project(name, description=description, members=members)
         except ValueError as e:
             raise HTTPException(400, str(e))
-        # Real-time cron lifecycle (codex r1 P2): schedule the daily
-        # work-summary fire on team creation so the operator doesn't
-        # have to wait for the next mesh restart for the reconcile
-        # to pick it up. Best-effort — a missing cron_scheduler or
-        # a failure here mustn't fail the team-create response.
+        # Real-time cron lifecycle: schedule the daily work-summary
+        # fire on team creation so the operator doesn't have to wait
+        # for the next mesh restart for the reconcile to pick it up.
+        # Best-effort — a missing cron_scheduler or a failure here
+        # mustn't fail the team-create response. Honors any
+        # ``settings.summary_schedule`` the create call supplied (none
+        # for the default mesh path, but the schedule= forwarded here
+        # is the same shape ``_reconcile_work_summary_jobs`` reads at
+        # startup — codex r2 P2 caught that runtime create silently
+        # reset custom schedules).
         if cron_scheduler is not None:
             try:
+                team_settings = body.get("settings") or {}
+                _custom_schedule = team_settings.get("summary_schedule")
                 cron_scheduler.ensure_summary_job(
                     scope_kind="team", scope_id=name,
+                    schedule=_custom_schedule,
                 )
             except Exception as e:
                 logger.warning(
@@ -5351,11 +5359,20 @@ def create_mesh_app(
         except ValueError as e:
             raise HTTPException(404, str(e))
         # Re-attach the daily work-summary cron when a team is
-        # unarchived. Symmetric to the archive path above.
+        # unarchived. Symmetric to the archive path above. Read the
+        # team's persisted ``settings.summary_schedule`` so a custom
+        # cadence configured before archive is preserved on unarchive
+        # — without this lookup, archive → unarchive silently reset
+        # the schedule to default (codex r2 P2).
         if cron_scheduler is not None:
             try:
+                team_meta = _load_projects().get(team_name) or {}
+                _custom_schedule = (
+                    (team_meta.get("settings") or {}).get("summary_schedule")
+                )
                 cron_scheduler.ensure_summary_job(
                     scope_kind="team", scope_id=team_name,
+                    schedule=_custom_schedule,
                 )
             except Exception as e:
                 logger.warning(

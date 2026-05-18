@@ -920,9 +920,23 @@ class RuntimeContext:
         archived. Idempotent — runs at every mesh startup so the cron
         set converges with the on-disk team metadata.
 
-        Per-team cadence override: ``summary_schedule`` field on the
-        team's ``metadata.yaml``. Defaults to ``DEFAULT_SUMMARY_SCHEDULE``
+        Per-team cadence override: ``settings.summary_schedule`` on
+        the team's ``metadata.yaml`` (the canonical extension dict on
+        ``TeamMetadata``). Defaults to ``DEFAULT_SUMMARY_SCHEDULE``
         (daily at 9am) when absent.
+
+        IMPORTANT — runtime metadata-edit contract: the mesh team
+        endpoints only mutate the team's *description* (PUT
+        ``/mesh/teams/{name}/context``) and *goal* (POST
+        ``/mesh/teams/{name}/goal``) at runtime; there is no live
+        endpoint for editing ``settings.summary_schedule``. Operators
+        who need to change a cron cadence today edit the metadata
+        file on disk + restart the mesh — this reconcile catches the
+        drift and reschedules via ``_validate_schedule`` +
+        ``_compute_next_run`` below. If a future PR adds a live
+        settings-edit endpoint, it MUST also call
+        ``ensure_summary_job`` / mutate the existing job's schedule
+        + ``_compute_next_run`` to keep runtime behavior aligned.
         """
         if not self.cron_scheduler:
             return
