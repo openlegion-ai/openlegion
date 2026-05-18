@@ -4516,11 +4516,14 @@ function dashboard() {
           if (this._summaryRateInFlight[data.summary_id]) return;
           // Local-state pin: a recent local POST anchors the row's
           // rating for ``_RATE_PIN_TTL`` seconds. Within that window,
-          // WS events that DON'T match the pin are stale delayed
-          // echoes of an older POST (e.g. user changed 👍 → 👎; the
-          // older 👍 event arrives after the 👎 POST). Skip them.
-          // The matching ratification clears the pin and is a no-op.
-          // Beyond the TTL, normal apply.
+          // WS events that DON'T match the pin are EITHER stale
+          // delayed echoes of an older POST (should drop) OR
+          // legitimate external mutations from somewhere else
+          // (operator re-rating via chat, etc.). Without a server-
+          // side revision counter we can't tell them apart, so we
+          // stash the latest non-matching event and apply it after
+          // the pin's TTL elapses. The matching ratification clears
+          // both the pin and any stashed pending event.
           const _RATE_PIN_TTL_S = 10;
           const pin = row._localPin;
           if (pin) {
@@ -4531,17 +4534,50 @@ function dashboard() {
                 && (data.feedback || null) === pin.feedback
               );
               if (eventMatchesPin) {
-                // Ratification — clear the pin so subsequent events
-                // apply normally.
+                // Ratification of our local POST — clear both the
+                // pin and any stashed external event (the canonical
+                // state is the pin's anchor).
                 delete row._localPin;
+                if (row._pendingExternalTimer) {
+                  clearTimeout(row._pendingExternalTimer);
+                  delete row._pendingExternalTimer;
+                }
+                delete row._pendingExternal;
                 return;
               }
-              // Non-matching event arrived while local state is
-              // pinned: treat as stale, do not overwrite.
+              // Non-matching event while pin is fresh. Stash the
+              // latest non-matching event; schedule a deferred
+              // apply for when the pin's TTL elapses. If a newer
+              // non-matching event arrives, it replaces the stash
+              // (the timer keeps the original deadline so we don't
+              // extend the pin indefinitely).
+              row._pendingExternal = data;
+              if (!row._pendingExternalTimer) {
+                const ttlRemainingMs = Math.max(
+                  100, (pin.ts + _RATE_PIN_TTL_S - Date.now() / 1000) * 1000 + 50,
+                );
+                row._pendingExternalTimer = setTimeout(() => {
+                  const ev = row._pendingExternal;
+                  if (ev) {
+                    row.rating = ev.rating;
+                    row.feedback = ev.feedback || row.feedback || null;
+                    row.rated_at = ev.ts || row.rated_at;
+                    row.rated_by = ev.actor || row.rated_by;
+                  }
+                  delete row._pendingExternal;
+                  delete row._pendingExternalTimer;
+                  delete row._localPin;
+                }, ttlRemainingMs);
+              }
               return;
             }
-            // TTL expired — clear and fall through.
+            // TTL expired — clear pin and fall through to apply.
             delete row._localPin;
+            if (row._pendingExternalTimer) {
+              clearTimeout(row._pendingExternalTimer);
+              delete row._pendingExternalTimer;
+            }
+            delete row._pendingExternal;
           }
           row.rating = data.rating;
           row.feedback = data.feedback || row.feedback || null;
