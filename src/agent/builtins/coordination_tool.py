@@ -46,6 +46,45 @@ _HANDOFF_TTL = 86_400  # 24 hours — safety net for unprocessed handoffs
 _TERMINAL_STATES: frozenset[str] = frozenset({"done", "failed", "cancelled"})
 
 
+def _failed_transition_envelope(
+    *, kind: str, detail: str, exc: Exception, extras: dict | None = None,
+) -> dict:
+    """Build the directive failure envelope used by terminal-transition
+    coordination tools (``update_status`` / ``complete_task``).
+
+    Mirrors the Bug G ``wake_failed`` shape and the Bug H
+    ``create_failed`` / ``output_write_failed`` envelopes used by
+    ``hand_off`` — handed_off-style boolean flag (``<kind>``) + an
+    ``error`` field with "MUST NOT report success" + a directive
+    ``recovery_hint`` that tells the LLM to surface to the operator
+    rather than silently retrying.
+
+    ``exc`` is redacted (``redact_text_with_urls``) and truncated to 200
+    chars before reaching the LLM context — HTTP-level exceptions from
+    the mesh client can quote URLs with ``?api_key=...`` in the query
+    string, same precaution as the wake_error path.
+    """
+    redacted = redact_text_with_urls(str(exc))[:200]
+    envelope: dict = {
+        kind: True,
+        "error": (
+            f"{kind}: {detail} ({redacted}). The transition may not "
+            "have landed — verify before continuing. You MUST NOT "
+            "report success."
+        ),
+        "recovery_hint": (
+            "Surface the failure to the operator/user. DO NOT mark "
+            "this work as complete in your final response. A blind "
+            "retry is unsafe — the underlying failure may have left "
+            "the state partially applied."
+        ),
+        "detail": redacted,
+    }
+    if extras:
+        envelope.update(extras)
+    return envelope
+
+
 @skill(
     name="hand_off",
     description=(
@@ -188,16 +227,20 @@ async def hand_off(
                 "to": to,
                 "write_error": redacted,
                 "error": (
-                    f"output_write_failed: could not persist handoff "
-                    f"data for peer '{to}' ({redacted}). The task was "
-                    "NOT created — recipient has no record. You MUST "
-                    "NOT report success."
+                    f"output_write_failed: hand_off to '{to}' did not "
+                    f"complete ({redacted}). The handoff data may not "
+                    "have landed and no task was created — verify "
+                    "before retrying. You MUST NOT report success."
                 ),
                 "recovery_hint": (
-                    f"Surface the failure to the operator/user — the "
-                    f"handoff data did not reach peer '{to}' and no "
-                    "task was queued. DO NOT mark this work as "
-                    "complete in your final response."
+                    f"Surface the failure to the operator/user — "
+                    f"hand_off to peer '{to}' did not complete. DO NOT "
+                    "mark this work as complete in your final "
+                    "response. DO NOT retry hand_off without verifying "
+                    "via check_inbox or asking the operator to inspect "
+                    "the recipient's queue — a post-commit failure may "
+                    "have left a partial artifact, and a blind retry "
+                    "would create a duplicate."
                 ),
             }
 
@@ -243,19 +286,18 @@ async def hand_off(
             "to": to,
             "create_error": redacted,
             "error": (
-                f"create_failed: could not persist the task for peer "
-                f"'{to}' ({redacted}). The task row was NOT created — "
-                "recipient has no record of this work. You MUST NOT "
-                "report success."
+                f"create_failed: hand_off to '{to}' did not complete "
+                f"({redacted}). The task row may not exist — verify "
+                "before retrying. You MUST NOT report success."
             ),
             "recovery_hint": (
-                f"Surface the failure to the operator/user — peer "
-                f"'{to}' was not reached and no task was queued. "
-                "DO NOT mark this work as complete in your final "
-                "response. Retry only after the underlying issue "
-                "(mesh restart, scope misconfiguration, etc.) is "
-                "resolved — a retry is safe (no duplicate row) but "
-                "blind retries waste tokens."
+                f"Surface the failure to the operator/user — hand_off "
+                f"to peer '{to}' did not complete. DO NOT mark this "
+                "work as complete in your final response. DO NOT retry "
+                "hand_off without first verifying via check_inbox or "
+                "asking the operator to inspect the recipient's queue "
+                "— a post-commit failure may have left a partial row, "
+                "and a blind retry would create a duplicate."
             ),
         }
 
@@ -477,7 +519,18 @@ async def update_status(
             status_key, status_data, global_scope=is_operator,
         )
     except Exception as e:
-        return {"error": f"Failed to update status: {e}"}
+        # Bug H (codex r5): mirror the hand_off envelope on terminal-
+        # transition tools so a state='done' / 'blocked' write that
+        # fails can't be silently glossed over by the LLM.
+        return _failed_transition_envelope(
+            kind="update_status_failed",
+            detail=(
+                f"could not write status='{state}' for agent "
+                f"'{agent_id}'"
+            ),
+            exc=e,
+            extras={"state": state},
+        )
 
     return {"updated": True, "state": state}
 
@@ -566,7 +619,15 @@ async def complete_task(task_key: str, *, mesh_client=None) -> dict:
                 except Exception as exc:
                     logger.debug("Output cleanup for %s skipped: %s", output_key, exc)
     except Exception as e:
-        return {"error": f"Failed to complete task: {e}"}
+        # Bug H (codex r5): completing a task is a terminal transition —
+        # if the underlying delete fails, the task stays in inbox and a
+        # silent "completed" reply leaves orphan state. Directive envelope.
+        return _failed_transition_envelope(
+            kind="complete_task_failed",
+            detail=f"could not mark task '{task_key}' as done",
+            exc=e,
+            extras={"task_key": task_key},
+        )
 
     return {"completed": True, "task_key": task_key}
 
@@ -686,16 +747,20 @@ async def _hand_off_v2(
                 "to": to,
                 "write_error": redacted,
                 "error": (
-                    f"output_write_failed: could not persist handoff "
-                    f"data for peer '{to}' ({redacted}). The task was "
-                    "NOT created — recipient has no record. You MUST "
-                    "NOT report success."
+                    f"output_write_failed: hand_off to '{to}' did not "
+                    f"complete ({redacted}). The handoff data may not "
+                    "have landed and no task was created — verify "
+                    "before retrying. You MUST NOT report success."
                 ),
                 "recovery_hint": (
-                    f"Surface the failure to the operator/user — the "
-                    f"handoff data did not reach peer '{to}' and no "
-                    "task was queued. DO NOT mark this work as "
-                    "complete in your final response."
+                    f"Surface the failure to the operator/user — "
+                    f"hand_off to peer '{to}' did not complete. DO NOT "
+                    "mark this work as complete in your final "
+                    "response. DO NOT retry hand_off without verifying "
+                    "via check_inbox or asking the operator to inspect "
+                    "the recipient's queue — a post-commit failure may "
+                    "have left a partial artifact, and a blind retry "
+                    "would create a duplicate."
                 ),
             }
 
@@ -745,19 +810,18 @@ async def _hand_off_v2(
             "to": to,
             "create_error": redacted,
             "error": (
-                f"create_failed: could not persist the task for peer "
-                f"'{to}' ({redacted}). The task row was NOT created — "
-                "recipient has no record of this work. You MUST NOT "
-                "report success."
+                f"create_failed: hand_off to '{to}' did not complete "
+                f"({redacted}). The task row may not exist — verify "
+                "before retrying. You MUST NOT report success."
             ),
             "recovery_hint": (
-                f"Surface the failure to the operator/user — peer "
-                f"'{to}' was not reached and no task was queued. "
-                "DO NOT mark this work as complete in your final "
-                "response. Retry only after the underlying issue "
-                "(mesh restart, scope misconfiguration, etc.) is "
-                "resolved — a retry is safe (no duplicate row) but "
-                "blind retries waste tokens."
+                f"Surface the failure to the operator/user — hand_off "
+                f"to peer '{to}' did not complete. DO NOT mark this "
+                "work as complete in your final response. DO NOT retry "
+                "hand_off without first verifying via check_inbox or "
+                "asking the operator to inspect the recipient's queue "
+                "— a post-commit failure may have left a partial row, "
+                "and a blind retry would create a duplicate."
             ),
         }
 
@@ -972,7 +1036,19 @@ async def _update_status_v2(
             target["id"], state, blocker_note=blocker_note,
         )
     except Exception as e:
-        return {"error": f"Failed to update status: {e}"}
+        # Bug H (codex r5): set_task_status to a terminal state
+        # ('done' / 'failed' / 'cancelled') that raises post-commit
+        # could leave the row mid-transition. Directive envelope so
+        # the LLM doesn't claim success on a state that didn't land.
+        return _failed_transition_envelope(
+            kind="update_status_failed",
+            detail=(
+                f"could not transition task '{target['id']}' to "
+                f"state='{state}'"
+            ),
+            exc=e,
+            extras={"state": state, "task_id": target["id"]},
+        )
     return {"updated": True, "state": state, "task_id": target["id"]}
 
 
@@ -986,7 +1062,15 @@ async def _complete_task_v2(task_key: str, *, mesh_client) -> dict:
     try:
         record = await mesh_client.set_task_status(task_id, "done")
     except Exception as e:
-        return {"error": f"Failed to complete task: {e}"}
+        # Bug H (codex r5): same directive shape as the legacy
+        # complete_task path so the LLM can't silently report a task
+        # as done when the transition failed.
+        return _failed_transition_envelope(
+            kind="complete_task_failed",
+            detail=f"could not mark task '{task_id}' as done",
+            exc=e,
+            extras={"task_id": task_id, "task_key": task_key},
+        )
     return {
         "completed": True,
         "task_key": task_key,
