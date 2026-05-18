@@ -180,15 +180,15 @@ def test_migration_handles_corrupt_value_gracefully(tmp_path):
 
 
 def _reload_server(monkeypatch, *, v2_on: bool, tasks_db: str):
-    """Reload ``src.host.server`` after pinning the env vars so the
-    module-level ``_ORCHESTRATION_TASKS_V2`` constant picks up the new
-    value.
+    """Reload ``src.host.server`` after pinning the tasks DB path so the
+    auto-migration sees a fresh on-disk store.
+
+    The ``v2_on`` parameter is retained for call-site compatibility but
+    no longer toggles a flag — v2 orchestration is unconditional.
     """
     if v2_on:
-        monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "1")
         monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_DB", tasks_db)
     else:
-        monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_V2", raising=False)
         monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)
     import src.host.server as server_module
     importlib.reload(server_module)
@@ -239,7 +239,6 @@ def test_migration_auto_runs_at_startup(tmp_path, monkeypatch):
         bb.close()
         # Restore the suite's idea of "default" by reloading once more
         # without the env vars set.
-        monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_V2", raising=False)
         monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)
         import src.host.server as server_module
         importlib.reload(server_module)
@@ -287,7 +286,6 @@ def test_migration_auto_runs_idempotent(tmp_path, monkeypatch):
         assert bb.read("tasks/scout/ho_idem") is None
     finally:
         bb.close()
-        monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_V2", raising=False)
         monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)
         import src.host.server as server_module
         importlib.reload(server_module)
@@ -334,41 +332,6 @@ def test_migration_failure_does_not_crash_startup(tmp_path, monkeypatch, caplog)
         )
     finally:
         bb.close()
-        monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_V2", raising=False)
-        monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)
-        import src.host.server as server_module
-        importlib.reload(server_module)
-
-
-def test_migration_skipped_when_v2_disabled(tmp_path, monkeypatch):
-    """When v2 is OFF, the auto-run is skipped — legacy keys remain in
-    place so an operator who deliberately disabled v2 doesn't have
-    their data silently moved.
-    """
-    bb_path = str(tmp_path / "bb.db")
-    bb = Blackboard(db_path=bb_path)
-    bb.write(
-        "tasks/scout/ho_skip",
-        {"from": "operator", "summary": "do not auto-migrate"},
-        written_by="operator",
-    )
-
-    try:
-        server_module = _reload_server(monkeypatch, v2_on=False, tasks_db="")
-        # Set v2 explicitly off.
-        monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "0")
-        importlib.reload(server_module)
-
-        app = _build_app(server_module, bb)
-
-        # No tasks store was constructed.
-        assert app.tasks_store is None
-        # Legacy key is still present.
-        entry = bb.read("tasks/scout/ho_skip")
-        assert entry is not None
-    finally:
-        bb.close()
-        monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_V2", raising=False)
         monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)
         import src.host.server as server_module
         importlib.reload(server_module)

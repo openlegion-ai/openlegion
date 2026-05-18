@@ -1,10 +1,12 @@
-"""Durable orchestration task records (Task 6).
+"""Durable orchestration task records.
 
 Replaces the legacy blackboard-dict handoff format
 (``tasks/{agent_id}/{handoff_id}`` and ``global/tasks/operator/{handoff_id}``)
-with a typed SQLite table. Behind ``OPENLEGION_ORCHESTRATION_TASKS_V2`` —
-when enabled, ``coordination_tool`` reads/writes here; when disabled, the
-existing blackboard path runs unchanged. **No dual-write.**
+with a typed SQLite table. ``coordination_tool`` reads/writes here for
+all of hand_off / check_inbox / update_status / complete_task. The
+legacy blackboard path was sunset after the v2 rollout — see
+``orchestration_migration.py`` for the one-shot data conversion that
+runs at mesh startup.
 
 Schema mirrors the Blackboard pattern in ``src/host/mesh.py`` and
 ``src/host/pending_actions.py``: SQLite WAL, ``busy_timeout=30000``,

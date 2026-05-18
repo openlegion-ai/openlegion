@@ -81,7 +81,6 @@ class TestWorkplaceOutcome:
 
     def setup_method(self):
         self._tmp = tempfile.mkdtemp()
-        os.environ["OPENLEGION_ORCHESTRATION_TASKS_V2"] = "1"
         self.components = _make_components(self._tmp)
         self.tasks = Tasks(db_path=os.path.join(self._tmp, "tasks.db"))
         self.client = _make_client(self.components, self.tasks)
@@ -94,7 +93,6 @@ class TestWorkplaceOutcome:
         self.components["cost_tracker"].close()
         self.components["trace_store"].close()
         self.components["blackboard"].close()
-        os.environ.pop("OPENLEGION_ORCHESTRATION_TASKS_V2", None)
         shutil.rmtree(self._tmp, ignore_errors=True)
 
     def test_outcome_accept_no_feedback(self):

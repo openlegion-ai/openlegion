@@ -74,7 +74,6 @@ class TestWorkplaceDrillIn:
 
     def setup_method(self):
         self._tmp = tempfile.mkdtemp()
-        os.environ["OPENLEGION_ORCHESTRATION_TASKS_V2"] = "1"
         self.components = _make_components(self._tmp)
         self.tasks = Tasks(db_path=os.path.join(self._tmp, "tasks.db"))
         self.client = _make_client(self.components, self.tasks)
@@ -87,7 +86,6 @@ class TestWorkplaceDrillIn:
         self.components["cost_tracker"].close()
         self.components["trace_store"].close()
         self.components["blackboard"].close()
-        os.environ.pop("OPENLEGION_ORCHESTRATION_TASKS_V2", None)
         shutil.rmtree(self._tmp, ignore_errors=True)
 
     def test_drill_in_404_when_task_missing(self):
@@ -177,8 +175,7 @@ class TestWorkplaceDrillIn:
         assert a["content_truncated"] is True
         assert len(a["content"]) == 10_000
 
-    def test_drill_in_disabled_when_v2_off(self):
-        os.environ["OPENLEGION_ORCHESTRATION_TASKS_V2"] = "0"
+    def test_drill_in_404_when_unknown_task(self):
         resp = self.client.get("/dashboard/api/workplace/tasks/whatever")
         assert resp.status_code == 404
 

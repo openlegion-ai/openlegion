@@ -1,8 +1,8 @@
 """HTTP endpoint tests for orchestration tasks v2 (Task 6).
 
-Boots the mesh app with ``OPENLEGION_ORCHESTRATION_TASKS_V2=1``, drives
-the new ``/mesh/tasks*`` routes through ``ASGITransport``, and verifies
-the permission gates and 503 fall-through.
+Boots the mesh app, drives the ``/mesh/tasks*`` routes through
+``ASGITransport``, and verifies the permission gates and 503
+fall-through.
 """
 
 from __future__ import annotations
@@ -18,23 +18,14 @@ from src.host.permissions import PermissionMatrix
 from src.shared.types import AgentPermissions
 
 
-def _reload_server(monkeypatch, *, v2: bool, tasks_db: str):
-    """Reload ``src.host.server`` after pinning the env vars.
+def _reload_server(monkeypatch, *, tasks_db: str):
+    """Reload ``src.host.server`` after pinning the tasks DB path.
 
-    The orchestration v2 flag is read at module import. Tests that
-    flip the flag must reload the module so ``_ORCHESTRATION_TASKS_V2``
-    picks up the new value.
-
-    Note: the v2 flag now defaults to ``1`` (rollout) so the off path
-    must explicitly set ``OPENLEGION_ORCHESTRATION_TASKS_V2=0`` rather
-    than relying on the env var being unset.
+    The tasks-store DB path is read at module import via env var so a
+    test that wants to point it at ``tmp_path`` must reload the module
+    after ``setenv``.
     """
-    if v2:
-        monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "1")
-        monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_DB", tasks_db)
-    else:
-        monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_V2", "0")
-        monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)
+    monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_DB", tasks_db)
     import src.host.server as server_module
     importlib.reload(server_module)
     return server_module
@@ -80,7 +71,7 @@ def _projects_layout(tmp_path):
 def v2_app(tmp_path, monkeypatch):
     """Build a fresh v2-enabled mesh app for each test."""
     server_module = _reload_server(
-        monkeypatch, v2=True, tasks_db=str(tmp_path / "tasks.db"),
+        monkeypatch, tasks_db=str(tmp_path / "tasks.db"),
     )
     perms_map = {
         "operator": {"can_route_tasks": True},
@@ -100,49 +91,8 @@ def v2_app(tmp_path, monkeypatch):
     )
     yield app, server_module, tmp_path
     bb.close()
-    # Reset the v2 flag so other tests see legacy default.
-    monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_V2", raising=False)
     monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)
     importlib.reload(server_module)
-
-
-@pytest.mark.asyncio
-async def test_status_endpoint_when_disabled_returns_503(tmp_path, monkeypatch):
-    server_module = _reload_server(monkeypatch, v2=False, tasks_db="")
-    app, bb = _build_app(
-        tmp_path, server_module, perms_map={"scout": {}},
-        agents={"scout": "http://scout:8400"},
-    )
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-        r = await c.get("/mesh/orchestration/status", headers={"X-Agent-ID": "scout"})
-    assert r.status_code == 503
-    bb.close()
-
-
-@pytest.mark.asyncio
-async def test_status_endpoint_when_enabled_returns_200(v2_app):
-    app, server_module, _ = v2_app
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-        r = await c.get("/mesh/orchestration/status", headers={"X-Agent-ID": "scout"})
-    assert r.status_code == 200
-    assert r.json() == {"enabled": True}
-
-
-@pytest.mark.asyncio
-async def test_tasks_endpoints_503_when_disabled(tmp_path, monkeypatch):
-    server_module = _reload_server(monkeypatch, v2=False, tasks_db="")
-    app, bb = _build_app(
-        tmp_path, server_module, perms_map={"scout": {"can_route_tasks": True}},
-        agents={"scout": "http://scout:8400"},
-    )
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-        r = await c.post(
-            "/mesh/tasks",
-            json={"assignee": "analyst", "title": "x"},
-            headers={"X-Agent-ID": "scout"},
-        )
-    assert r.status_code == 503
-    bb.close()
 
 
 @pytest.mark.asyncio
@@ -475,7 +425,7 @@ async def test_pending_cancel_unknown_returns_404(v2_app):
 def v2_app_with_auth(tmp_path, monkeypatch):
     """v2 mesh app with auth tokens configured (production-like)."""
     server_module = _reload_server(
-        monkeypatch, v2=True, tasks_db=str(tmp_path / "tasks.db"),
+        monkeypatch, tasks_db=str(tmp_path / "tasks.db"),
     )
     perms_map = {
         "operator": {"can_route_tasks": True},
@@ -506,7 +456,6 @@ def v2_app_with_auth(tmp_path, monkeypatch):
     )
     yield app, server_module
     blackboard.close()
-    monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_V2", raising=False)
     monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)
     importlib.reload(server_module)
 

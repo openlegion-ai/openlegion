@@ -381,9 +381,8 @@ function dashboard() {
 
     // Task 9 — Workplace tab (peer of Chat / Agents / System).
     // Sub-tabs: project status, kanban task board, blockers, team outputs.
-    // ``workplaceEnabled`` mirrors the server-side flag
-    // OPENLEGION_ORCHESTRATION_TASKS_V2 so the empty state can hint how
-    // to enable the surface without rendering an error.
+    // ``workplaceEnabled`` reflects whether the tasks store responded
+    // — kept for graceful empty-state rendering on transient errors.
     // PR 5: feed becomes the default workplace landing — kanban demoted
     // to a non-default sub-tab; standalone blockers tab removed
     // (pinned at the top of the feed instead).

@@ -6384,17 +6384,9 @@ def create_dashboard_router(
     #
     # The Workplace tab is a top-level peer of Chat / Agents / System
     # under ``src/dashboard/static/js/app.js``. It surfaces the durable
-    # task records (Task 6) and the pending-action queue (Task 2d) so a
-    # human can run an agent team end-to-end without inspecting
-    # blackboard keys directly. All endpoints degrade gracefully when
-    # the underlying store is None (orchestration v2 disabled, or
-    # called from a test harness that didn't pass the stores).
-
-    def _orchestration_v2_on() -> bool:
-        # Default-on (rollout). Setting the env var to ``0`` disables
-        # the v2 path; any other value is treated as on so misconfigured
-        # operators don't silently fall back to the legacy path.
-        return os.environ.get("OPENLEGION_ORCHESTRATION_TASKS_V2", "1") != "0"
+    # task records and the pending-action queue (Task 2d) so a human
+    # can run an agent team end-to-end without inspecting blackboard
+    # keys directly.
 
     @api_router.get("/api/workplace/tasks")
     async def api_workplace_tasks(
@@ -6408,15 +6400,6 @@ def create_dashboard_router(
         disabled so the SPA can render the empty state with a hint to
         flip the flag — matches the contract in tests.
         """
-        if tasks_store is None or not _orchestration_v2_on():
-            return {
-                "enabled": False,
-                "tasks": [],
-                "hint": (
-                    "Set OPENLEGION_ORCHESTRATION_TASKS_V2=1 to enable durable "
-                    "task records and the Workplace board."
-                ),
-            }
         try:
             if assignee:
                 rows = tasks_store.list_inbox(
@@ -6444,8 +6427,6 @@ def create_dashboard_router(
     @api_router.get("/api/workplace/teams")
     async def api_workplace_teams() -> dict:
         """Team status rollups for the Workplace > team-status tab."""
-        if tasks_store is None or not _orchestration_v2_on():
-            return {"enabled": False, "teams": []}
         from src.cli.config import _load_projects
         projects = _load_projects()
         result = []
@@ -6482,8 +6463,6 @@ def create_dashboard_router(
     @api_router.get("/api/workplace/blockers")
     async def api_workplace_blockers() -> dict:
         """Fleet-wide blocked-task list for the Workplace > blockers tab."""
-        if tasks_store is None or not _orchestration_v2_on():
-            return {"enabled": False, "blockers": []}
         try:
             with tasks_store._conn() as conn:
                 sql = (
@@ -6503,8 +6482,6 @@ def create_dashboard_router(
         limit: int = 100,
     ) -> dict:
         """Completed task artifacts for the Workplace > team-outputs tab."""
-        if tasks_store is None or not _orchestration_v2_on():
-            return {"enabled": False, "outputs": []}
         limit = max(1, min(int(limit or 100), 500))
         try:
             with tasks_store._conn() as conn:
@@ -6540,8 +6517,6 @@ def create_dashboard_router(
         Sorted descending by event timestamp; ``limit`` is clamped to
         ``[1, 500]``.
         """
-        if tasks_store is None or not _orchestration_v2_on():
-            return {"enabled": False, "feed": []}
         limit = max(1, min(int(limit or 100), 500))
         try:
             team_col = tasks_store._team_col
@@ -6917,8 +6892,6 @@ def create_dashboard_router(
         10 k chars, missing/error refs return a ``kind`` marker rather
         than 500'ing so a partial timeline still renders.
         """
-        if tasks_store is None or not _orchestration_v2_on():
-            raise HTTPException(404, "Tasks store not available")
         try:
             task = tasks_store.get(task_id)
         except Exception as e:
@@ -6937,8 +6910,6 @@ def create_dashboard_router(
     @api_router.get("/api/workplace/tasks/{task_id}/events")
     async def api_workplace_task_events(task_id: str) -> dict:
         """Return just the event timeline for a task (cheap to poll)."""
-        if tasks_store is None or not _orchestration_v2_on():
-            raise HTTPException(404, "Tasks store not available")
         if tasks_store.get(task_id) is None:
             raise HTTPException(404, "Task not found")
         try:
@@ -6968,8 +6939,6 @@ def create_dashboard_router(
         Returns: the updated task record (``status="cancelled"``) so
         the caller can patch the UI optimistically.
         """
-        if tasks_store is None or not _orchestration_v2_on():
-            raise HTTPException(404, "Tasks store not available")
         try:
             body = await request.json() if (await request.body()) else {}
         except (json.JSONDecodeError, ValueError):
@@ -7027,8 +6996,6 @@ def create_dashboard_router(
             InvalidStatusTransition,
             TaskNotFound,
         )
-        if tasks_store is None or not _orchestration_v2_on():
-            raise HTTPException(404, "Tasks store not available")
         try:
             body = await request.json()
         except (json.JSONDecodeError, ValueError) as e:

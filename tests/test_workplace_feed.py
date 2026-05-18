@@ -5,9 +5,9 @@ The feed is the new default landing for the workplace tab; it joins
 event so the operator can see what the fleet is doing without inspecting
 columns or drilling into individual records.
 
-Covers: empty state when v2 off, happy path with shape assertions,
-project filter, limit clamping, descending order, and the summary text
-for each event_kind we support.
+Covers: happy path with shape assertions, project filter, limit
+clamping, descending order, and the summary text for each event_kind we
+support.
 """
 
 from __future__ import annotations
@@ -49,24 +49,11 @@ class TestWorkplaceFeed:
             pass
         _teardown(self.components)
         shutil.rmtree(self._tmpdir, ignore_errors=True)
-        os.environ.pop("OPENLEGION_ORCHESTRATION_TASKS_V2", None)
 
-    def _client(self, *, v2: bool):
-        if v2:
-            os.environ["OPENLEGION_ORCHESTRATION_TASKS_V2"] = "1"
-        else:
-            os.environ["OPENLEGION_ORCHESTRATION_TASKS_V2"] = "0"
+    def _client(self, *, v2: bool = True):
         return _make_client_with_stores(self.components)
 
-    # ── Disabled / empty state ────────────────────────────────────
-
-    def test_feed_empty_state_when_v2_off(self):
-        client = self._client(v2=False)
-        resp = client.get("/dashboard/api/workplace/feed")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["enabled"] is False
-        assert data["feed"] == []
+    # ── Empty state ───────────────────────────────────────────────
 
     def test_feed_empty_when_no_events(self):
         client = self._client(v2=True)

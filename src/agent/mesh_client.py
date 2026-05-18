@@ -1152,37 +1152,7 @@ class MeshClient:
             )
         return data
 
-    # ── Orchestration tasks v2 (Task 6) ─────────────────────────
-
-    # Cached probe result. Set on first call so the agent doesn't
-    # round-trip to /mesh/orchestration/status on every coordination
-    # call. ``None`` = not yet probed; ``True``/``False`` once known.
-    _orchestration_v2_cache: bool | None = None
-
-    async def orchestration_v2_enabled(self) -> bool:
-        """Return True when the mesh has v2 enabled. Fail-closed.
-
-        Cached for the process lifetime — the env var only changes on
-        mesh restart, and a restart drops this whole client. Any error
-        (network, 503, malformed JSON) is treated as "v2 off" so the
-        coordination tool falls back to the legacy blackboard path.
-        """
-        if self._orchestration_v2_cache is not None:
-            return self._orchestration_v2_cache
-        try:
-            response = await self._get_with_retry(
-                f"{self.mesh_url}/mesh/orchestration/status",
-                timeout=5,
-            )
-            if response.status_code == 200:
-                data = response.json()
-                self._orchestration_v2_cache = bool(data.get("enabled"))
-            else:
-                self._orchestration_v2_cache = False
-        except Exception as e:
-            logger.debug("orchestration_v2 probe failed (fail-closed): %s", e)
-            self._orchestration_v2_cache = False
-        return self._orchestration_v2_cache
+    # ── Orchestration tasks ─────────────────────────────────────
 
     async def create_task(
         self,

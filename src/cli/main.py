@@ -771,12 +771,6 @@ def tasks_cmd(agent, team, project, status, port, as_json):
     data = _mesh_get(port, f"/dashboard/api/workplace/tasks{suffix}")
     if not isinstance(data, dict):
         data = {}
-    if not data.get("enabled", True):
-        if as_json:
-            click.echo(dumps_safe(data))
-        else:
-            click.echo("Board disabled. Set OPENLEGION_ORCHESTRATION_TASKS_V2=1 and restart.")
-        return
     tasks = data.get("tasks", [])
     if as_json:
         click.echo(dumps_safe({"tasks": tasks}))

@@ -5,12 +5,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 
-def _make_mesh_client(agent_id="scout", standalone=False, v2_enabled=False):
+def _make_mesh_client(agent_id="scout", standalone=False):
     """Create a mock mesh_client with sensible defaults.
 
-    ``v2_enabled`` toggles the Task 6 orchestration-tasks path. Default
-    False keeps the legacy blackboard route on so the existing test
-    suite continues to assert legacy semantics.
+    All coordination tools now route exclusively through the durable
+    tasks store, so this helper no longer needs a ``v2_enabled`` toggle.
     """
     mc = MagicMock()
     mc.agent_id = agent_id
@@ -26,8 +25,6 @@ def _make_mesh_client(agent_id="scout", standalone=False, v2_enabled=False):
     mc.list_blackboard = AsyncMock(return_value=[])
     mc.delete_blackboard = AsyncMock(return_value={"deleted": True})
     mc.wake_agent = AsyncMock(return_value={"woken": True})
-    # Task 6 v2 hooks. Default off so legacy tests run unchanged.
-    mc.orchestration_v2_enabled = AsyncMock(return_value=v2_enabled)
     mc.create_task = AsyncMock(return_value={
         "id": "task_abc123def456",
         "creator": agent_id,
@@ -44,44 +41,6 @@ def _make_mesh_client(agent_id="scout", standalone=False, v2_enabled=False):
 
 class TestHandOff:
     @pytest.mark.asyncio
-    async def test_hand_off_basic(self):
-        from src.agent.builtins.coordination_tool import hand_off
-
-        mc = _make_mesh_client(agent_id="scout")
-        mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
-
-        result = await hand_off(
-            to="analyst",
-            summary="research done",
-            data='{"sources": [1,2,3]}',
-            mesh_client=mc,
-        )
-
-        assert result["handed_off"] is True
-        assert result["to"] == "analyst"
-        assert result["output_key"].startswith("output/scout/")
-        # Two writes: one for output data, one for task record
-        assert mc.write_blackboard.call_count == 2
-
-    @pytest.mark.asyncio
-    async def test_hand_off_no_data(self):
-        from src.agent.builtins.coordination_tool import hand_off
-
-        mc = _make_mesh_client(agent_id="scout")
-        mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
-
-        result = await hand_off(
-            to="analyst",
-            summary="quick note",
-            mesh_client=mc,
-        )
-
-        assert result["handed_off"] is True
-        assert "output_key" not in result
-        # Only one write: the task record (no output data)
-        assert mc.write_blackboard.call_count == 1
-
-    @pytest.mark.asyncio
     async def test_hand_off_invalid_target(self):
         from src.agent.builtins.coordination_tool import hand_off
 
@@ -96,29 +55,6 @@ class TestHandOff:
 
         assert "error" in result
         assert "not found" in result["error"]
-
-    @pytest.mark.asyncio
-    async def test_hand_off_standalone_cross_project(self):
-        """Standalone agent (e.g. operator) can hand off to project-scoped agent."""
-        from src.agent.builtins.coordination_tool import hand_off
-
-        mc = _make_mesh_client(standalone=True)
-        mc.list_agents.return_value = {
-            "analyst": {"url": "http://analyst:8400", "project": "research"},
-        }
-
-        result = await hand_off(
-            to="analyst",
-            summary="analyze this",
-            mesh_client=mc,
-        )
-
-        assert result.get("handed_off") is True
-        assert result["to"] == "analyst"
-        # Should write to the target's project scope
-        mc.write_blackboard.assert_called_once()
-        call_kwargs = mc.write_blackboard.call_args
-        assert call_kwargs.kwargs.get("project") == "research"
 
     @pytest.mark.asyncio
     async def test_hand_off_standalone_fails_closed_on_roster_error(self):
@@ -159,35 +95,120 @@ class TestHandOff:
         assert output_call[0][1] == {"text": "not valid json {{{"}
 
     @pytest.mark.asyncio
-    async def test_hand_off_task_write_fails_reports_error(self):
-        """When task write fails after output write, the Bug H
-        directive envelope is returned — not a bare error string.
-        Details on the new shape live in
-        ``TestHandOffCreateFailureSurfacing``; this is the legacy
-        smoke check that the failure still surfaces with handed_off
-        flipped off and the new ``create_failed`` flag set."""
+    async def test_hand_off_to_operator_writes_with_global_scope(self):
+        """Operator handoffs route to the global namespace (project=None)
+        on ``create_task``. Codex r1 finding on the legacy-removal PR:
+        the v2 collapse needs explicit coverage that the operator's
+        fleet-global scope is preserved end-to-end.
+
+        Codex r2: this pin must NOT also set ``scope: "global"`` on the
+        operator's registry entry — that would let the routing union
+        succeed via arm B (``target_is_global``) even if arm A (the
+        literal-name check) is dropped. The whole point is to pin arm
+        A independently. The operator entry here has an explicit
+        non-global project value so arm B is FALSE, forcing arm A to
+        carry the test.
+        """
         from src.agent.builtins.coordination_tool import hand_off
 
-        mc = _make_mesh_client(agent_id="scout")
-        mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
-        # First write (output) succeeds, second write (task) fails
-        mc.write_blackboard.side_effect = [
-            {"version": 1},
-            Exception("connection lost"),
-        ]
+        mc = _make_mesh_client(agent_id="strategist")
+        # NB: no ``scope: "global"`` here — arm A independence relies on it.
+        mc.list_agents.return_value = {"operator": {"project": "ops"}}
 
         result = await hand_off(
-            to="analyst",
-            summary="research done",
-            data='{"sources": [1]}',
+            to="operator",
+            summary="status report",
             mesh_client=mc,
         )
 
-        assert "error" in result
-        assert result["handed_off"] is False
-        assert result["create_failed"] is True
-        assert "create_failed" in result["error"]
-        assert "connection lost" in result["create_error"]
+        assert result["handed_off"] is True
+        # The create_task call must carry project=None so the row lands
+        # in the fleet-global scope. A non-None project here would land
+        # the task in the caller's project and operator wouldn't see it.
+        kwargs = mc.create_task.call_args.kwargs
+        assert kwargs["project"] is None, (
+            f"operator handoff must write with project=None, got "
+            f"{kwargs.get('project')!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_hand_off_to_global_scope_agent_writes_with_global_scope(self):
+        """Forward-compat: any agent with ``scope: "global"`` on the
+        registry (not just the literal name "operator") routes with
+        project=None. Codex r1 flagged that the v2 collapse dropped
+        the broader detection — restored with this test as the pin."""
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="worker")
+        # A hypothetical future global agent — e.g. a fleet-wide
+        # monitor that isn't called "operator" but has the same
+        # cross-project addressability.
+        mc.list_agents.return_value = {
+            "fleet-monitor": {"scope": "global", "role": "monitor"},
+        }
+
+        result = await hand_off(
+            to="fleet-monitor",
+            summary="anomaly detected",
+            mesh_client=mc,
+        )
+
+        assert result["handed_off"] is True
+        kwargs = mc.create_task.call_args.kwargs
+        assert kwargs["project"] is None, (
+            f"scope=global handoff must write with project=None, got "
+            f"{kwargs.get('project')!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_hand_off_cross_project_routes_to_target_project(self):
+        """Worker → worker in a different project: task lands in the
+        TARGET's project namespace, not the caller's. Without this the
+        recipient's inbox scan (filtered by their own project) would
+        never see the task. Codex r1 coverage pin."""
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="scout")
+        mc.team_name = "research-team"
+        mc.list_agents.return_value = {
+            "publisher": {"role": "writer", "project": "publishing-team"},
+        }
+
+        result = await hand_off(
+            to="publisher",
+            summary="ship the draft",
+            mesh_client=mc,
+        )
+
+        assert result["handed_off"] is True
+        kwargs = mc.create_task.call_args.kwargs
+        assert kwargs["project"] == "publishing-team", (
+            f"cross-project handoff must write into the TARGET's "
+            f"project, got {kwargs.get('project')!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_hand_off_same_project_uses_callers_team_name(self):
+        """Worker → worker in the same project (no explicit
+        ``project`` on the registry entry): task lands in the caller's
+        own project. The previous test covers cross-project; this one
+        pins the default fall-through."""
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="scout")
+        mc.team_name = "research-team"
+        # No ``project`` key on the target — same-project default.
+        mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
+
+        result = await hand_off(
+            to="analyst",
+            summary="review findings",
+            mesh_client=mc,
+        )
+
+        assert result["handed_off"] is True
+        kwargs = mc.create_task.call_args.kwargs
+        assert kwargs["project"] == "research-team"
 
     @pytest.mark.asyncio
     async def test_hand_off_invalid_agent_id_format(self):
@@ -206,27 +227,6 @@ class TestHandOff:
         assert "Invalid agent ID" in result["error"]
 
     @pytest.mark.asyncio
-    async def test_hand_off_sanitizes_summary(self):
-        """Summary is sanitized before writing to blackboard."""
-        from src.agent.builtins.coordination_tool import hand_off
-
-        mc = _make_mesh_client(agent_id="scout")
-        mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
-
-        # Unicode zero-width chars should be stripped by sanitize_for_prompt
-        result = await hand_off(
-            to="analyst",
-            summary="clean\u200btext",  # zero-width space
-            mesh_client=mc,
-        )
-
-        assert result["handed_off"] is True
-        # The task record should have sanitized summary
-        task_call = mc.write_blackboard.call_args_list[0]
-        written_summary = task_call[0][1]["summary"]
-        assert "\u200b" not in written_summary
-
-    @pytest.mark.asyncio
     async def test_hand_off_list_agents_fails_proceeds(self):
         """When list_agents fails but ID format is valid, hand_off proceeds."""
         from src.agent.builtins.coordination_tool import hand_off
@@ -242,71 +242,14 @@ class TestHandOff:
 
         assert result["handed_off"] is True
 
-    @pytest.mark.asyncio
-    async def test_hand_off_sets_ttl(self):
-        """Both output and task writes include a 24h TTL."""
-        from src.agent.builtins.coordination_tool import _HANDOFF_TTL, hand_off
-
-        mc = _make_mesh_client(agent_id="scout")
-        mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
-
-        result = await hand_off(
-            to="analyst",
-            summary="research done",
-            data='{"sources": [1,2,3]}',
-            mesh_client=mc,
-        )
-
-        assert result["handed_off"] is True
-        # Two writes: output data then task record
-        assert mc.write_blackboard.call_count == 2
-        for call in mc.write_blackboard.call_args_list:
-            assert call.kwargs.get("ttl") == _HANDOFF_TTL
-
 
 class TestCheckInbox:
-    @pytest.mark.asyncio
-    async def test_check_inbox_with_tasks(self):
-        from src.agent.builtins.coordination_tool import check_inbox
-
-        mc = _make_mesh_client(agent_id="analyst")
-        mc.list_blackboard.return_value = [
-            {
-                "key": "tasks/analyst/ho_abc123",
-                "value": {
-                    "from": "scout",
-                    "summary": "research done",
-                    "status": "pending",
-                    "ts": 1700000000.0,
-                    "output_key": "output/scout/ho_abc123",
-                },
-            },
-            {
-                "key": "tasks/analyst/ho_def456",
-                "value": {
-                    "from": "writer",
-                    "summary": "draft complete",
-                    "status": "done",
-                    "ts": 1700000001.0,
-                },
-            },
-        ]
-
-        result = await check_inbox(mesh_client=mc)
-
-        # Only the pending task should be returned (done is filtered)
-        assert result["count"] == 1
-        assert len(result["tasks"]) == 1
-        task = result["tasks"][0]
-        assert task["from"] == "scout"
-        assert task["summary"] == "research done"
-        assert task["output_key"] == "output/scout/ho_abc123"
-
     @pytest.mark.asyncio
     async def test_check_inbox_empty(self):
         from src.agent.builtins.coordination_tool import check_inbox
 
         mc = _make_mesh_client(agent_id="analyst")
+        mc.list_task_inbox.return_value = []
         mc.list_blackboard.return_value = []
 
         result = await check_inbox(mesh_client=mc)
@@ -315,377 +258,17 @@ class TestCheckInbox:
         assert result["tasks"] == []
 
 
-    @pytest.mark.asyncio
-    async def test_check_inbox_list_blackboard_fails(self):
-        """check_inbox returns error when list_blackboard fails."""
-        from src.agent.builtins.coordination_tool import check_inbox
-
-        mc = _make_mesh_client(agent_id="analyst")
-        mc.list_blackboard.side_effect = Exception("mesh down")
-
-        result = await check_inbox(mesh_client=mc)
-
-        assert "error" in result
-        assert "Failed to check inbox" in result["error"]
-
-    @pytest.mark.asyncio
-    async def test_check_inbox_malformed_string_value(self):
-        """check_inbox handles entries with string values that aren't JSON."""
-        from src.agent.builtins.coordination_tool import check_inbox
-
-        mc = _make_mesh_client(agent_id="analyst")
-        mc.list_blackboard.return_value = [
-            {"key": "tasks/analyst/ho_1", "value": "just a string"},
-        ]
-
-        result = await check_inbox(mesh_client=mc)
-
-        assert result["count"] == 1
-        assert result["tasks"][0]["from"] == "unknown"
-
-    @pytest.mark.asyncio
-    async def test_check_inbox_non_dict_value(self):
-        """check_inbox handles entries with non-dict values (e.g. list)."""
-        from src.agent.builtins.coordination_tool import check_inbox
-
-        mc = _make_mesh_client(agent_id="analyst")
-        mc.list_blackboard.return_value = [
-            {"key": "tasks/analyst/ho_1", "value": [1, 2, 3]},
-        ]
-
-        result = await check_inbox(mesh_client=mc)
-
-        assert result["count"] == 1
-        assert result["tasks"][0]["from"] == "unknown"
-
-
-class TestUpdateStatus:
-    @pytest.mark.asyncio
-    async def test_update_status(self):
-        from src.agent.builtins.coordination_tool import update_status
-
-        mc = _make_mesh_client(agent_id="engineer")
-
-        result = await update_status(
-            state="working",
-            summary="implementing login",
-            mesh_client=mc,
-        )
-
-        assert result["updated"] is True
-        assert result["state"] == "working"
-
-        # Verify the blackboard write
-        mc.write_blackboard.assert_called_once()
-        call_args = mc.write_blackboard.call_args
-        assert call_args[0][0] == "status/engineer"
-        written_data = call_args[0][1]
-        assert written_data["state"] == "working"
-        assert written_data["summary"] == "implementing login"
-        assert "ts" in written_data
-
-    @pytest.mark.asyncio
-    async def test_update_status_write_fails(self):
-        """Bug H (codex r5): failure now returns the directive
-        envelope instead of a bare error string. Full shape coverage
-        lives in ``TestUpdateStatusFailureEnvelope``; this is the
-        legacy smoke check that the failure still surfaces."""
-        from src.agent.builtins.coordination_tool import update_status
-
-        mc = _make_mesh_client(agent_id="engineer")
-        mc.write_blackboard.side_effect = Exception("mesh down")
-
-        result = await update_status(state="working", summary="test", mesh_client=mc)
-
-        assert "error" in result
-        assert result["update_status_failed"] is True
-        assert "update_status_failed" in result["error"]
-        assert "mesh down" in result["detail"]
-
-    @pytest.mark.asyncio
-    async def test_update_status_sanitizes_summary(self):
-        from src.agent.builtins.coordination_tool import update_status
-
-        mc = _make_mesh_client(agent_id="engineer")
-
-        await update_status(
-            state="working",
-            summary="doing\u200bthings",  # zero-width space
-            mesh_client=mc,
-        )
-
-        written_data = mc.write_blackboard.call_args[0][1]
-        assert "\u200b" not in written_data["summary"]
-
-    @pytest.mark.asyncio
-    async def test_update_status_standalone(self):
-        from src.agent.builtins.coordination_tool import update_status
-
-        mc = _make_mesh_client(standalone=True)
-
-        result = await update_status(
-            state="idle",
-            mesh_client=mc,
-        )
-
-        assert "error" in result
-        assert "not assigned" in result["error"]
-
-
-class TestCompleteTask:
-    @pytest.mark.asyncio
-    async def test_complete_task_deletes_and_cleans_output(self):
-        from src.agent.builtins.coordination_tool import complete_task
-
-        mc = _make_mesh_client(agent_id="engineer")
-        # Simulate existing task record on blackboard
-        mc.read_blackboard = AsyncMock(return_value={
-            "value": {
-                "from": "pm",
-                "summary": "implement login",
-                "status": "pending",
-                "output_key": "output/pm/ho_abc123",
-                "ts": 1700000000.0,
-            },
-        })
-
-        result = await complete_task(
-            task_key="tasks/engineer/ho_abc123",
-            mesh_client=mc,
-        )
-
-        assert result["completed"] is True
-        # Task entry should be deleted
-        delete_calls = mc.delete_blackboard.call_args_list
-        assert any(c[0][0] == "tasks/engineer/ho_abc123" for c in delete_calls)
-        # Associated output should also be cleaned up
-        assert any(c[0][0] == "output/pm/ho_abc123" for c in delete_calls)
-
-    @pytest.mark.asyncio
-    async def test_complete_task_not_found(self):
-        from src.agent.builtins.coordination_tool import complete_task
-
-        mc = _make_mesh_client(agent_id="engineer")
-        mc.read_blackboard = AsyncMock(return_value=None)
-
-        result = await complete_task(
-            task_key="tasks/engineer/ho_nonexistent",
-            mesh_client=mc,
-        )
-
-        assert "error" in result
-        assert "not found" in result["error"]
-
-    @pytest.mark.asyncio
-    async def test_complete_task_string_value_on_blackboard(self):
-        """complete_task handles string values and extracts output_key."""
-        from src.agent.builtins.coordination_tool import complete_task
-
-        mc = _make_mesh_client(agent_id="engineer")
-        mc.read_blackboard = AsyncMock(return_value={
-            "value": '{"from": "pm", "status": "pending", "output_key": "output/pm/ho_abc123"}',
-        })
-
-        result = await complete_task(
-            task_key="tasks/engineer/ho_abc123",
-            mesh_client=mc,
-        )
-
-        assert result["completed"] is True
-        # Task deleted
-        delete_calls = mc.delete_blackboard.call_args_list
-        assert any(c[0][0] == "tasks/engineer/ho_abc123" for c in delete_calls)
-        # Output cleaned up from parsed string value
-        assert any(c[0][0] == "output/pm/ho_abc123" for c in delete_calls)
-
-    @pytest.mark.asyncio
-    async def test_complete_task_delete_fails(self):
-        """Bug H (codex r5): same envelope upgrade — full shape
-        coverage in ``TestCompleteTaskFailureEnvelope``."""
-        from src.agent.builtins.coordination_tool import complete_task
-
-        mc = _make_mesh_client(agent_id="engineer")
-        mc.delete_blackboard.side_effect = Exception("mesh down")
-
-        result = await complete_task(
-            task_key="tasks/engineer/ho_abc123",
-            mesh_client=mc,
-        )
-
-        assert "error" in result
-        assert result["complete_task_failed"] is True
-        assert "complete_task_failed" in result["error"]
-        assert "mesh down" in result["detail"]
-
-    @pytest.mark.asyncio
-    async def test_complete_task_standalone(self):
-        from src.agent.builtins.coordination_tool import complete_task
-
-        mc = _make_mesh_client(standalone=True)
-
-        result = await complete_task(
-            task_key="tasks/x/ho_1",
-            mesh_client=mc,
-        )
-
-        assert "error" in result
-        assert "not assigned" in result["error"]
-
-    @pytest.mark.asyncio
-    async def test_complete_task_wrong_agent(self):
-        """Agent can only complete tasks in their own inbox."""
-        from src.agent.builtins.coordination_tool import complete_task
-
-        mc = _make_mesh_client(agent_id="engineer")
-
-        result = await complete_task(
-            task_key="tasks/other-agent/ho_123",
-            mesh_client=mc,
-        )
-
-        assert "error" in result
-        assert "Can only complete your own tasks" in result["error"]
-
-    @pytest.mark.asyncio
-    async def test_complete_task_output_cleanup_failure_still_succeeds(self):
-        """Task completes successfully even if output cleanup fails."""
-        from src.agent.builtins.coordination_tool import complete_task
-
-        mc = _make_mesh_client(agent_id="engineer")
-        mc.read_blackboard = AsyncMock(return_value={
-            "value": {
-                "from": "pm",
-                "summary": "implement login",
-                "status": "pending",
-                "output_key": "output/pm/ho_abc123",
-            },
-        })
-        # Task delete succeeds, but output delete fails
-        mc.delete_blackboard = AsyncMock(side_effect=[
-            {"deleted": True},           # task delete succeeds
-            Exception("output expired"),  # output delete fails
-        ])
-
-        result = await complete_task(
-            task_key="tasks/engineer/ho_abc123",
-            mesh_client=mc,
-        )
-
-        # Should still succeed — output cleanup is best-effort
-        assert result["completed"] is True
-        assert mc.delete_blackboard.call_count == 2
-
-
-# ── Fix 4: origin propagation in hand_off ───────────────────────
-
-
 class TestHandOffOriginPropagation:
-    @pytest.mark.asyncio
-    async def test_hand_off_reads_and_propagates_current_origin(self):
-        """hand_off reads current_origin contextvar and passes it to wake_agent."""
-        from src.agent.builtins.coordination_tool import hand_off
-        from src.shared.trace import current_origin
-        from src.shared.types import MessageOrigin
-
-        mc = _make_mesh_client(agent_id="operator")
-        mc.list_agents.return_value = {"chef": {"role": "chef"}}
-
-        origin = MessageOrigin(kind="human", channel="whatsapp", user="+1234")
-        token = current_origin.set(origin)
-        try:
-            result = await hand_off(
-                to="chef",
-                summary="make dinner",
-                mesh_client=mc,
-            )
-        finally:
-            current_origin.reset(token)
-
-        assert result["handed_off"] is True
-        # wake_agent should have been called with origin kwarg
-        mc.wake_agent.assert_awaited_once()
-        call_kwargs = mc.wake_agent.call_args
-        assert call_kwargs.kwargs.get("origin") == origin
-
-    @pytest.mark.asyncio
-    async def test_hand_off_stores_origin_in_task_record(self):
-        """Origin is stored in the task_record written to the blackboard."""
-        from src.agent.builtins.coordination_tool import hand_off
-        from src.shared.trace import current_origin
-        from src.shared.types import MessageOrigin
-
-        mc = _make_mesh_client(agent_id="operator")
-        mc.list_agents.return_value = {"chef": {"role": "chef"}}
-
-        origin = MessageOrigin(kind="human", channel="telegram", user="99")
-        token = current_origin.set(origin)
-        try:
-            await hand_off(to="chef", summary="do work", mesh_client=mc)
-        finally:
-            current_origin.reset(token)
-
-        # The task_record write is the last write_blackboard call
-        last_call = mc.write_blackboard.call_args_list[-1]
-        task_record = last_call.args[1]
-        # Origin is persisted as a plain dict so the JSON write doesn't
-        # choke on a Pydantic instance.
-        assert task_record.get("origin") == origin.model_dump()
-
-    @pytest.mark.asyncio
-    async def test_hand_off_stores_typed_origin_as_plain_dict(self):
-        """Typed origins must be JSON-serializable when written to blackboard."""
-        from src.agent.builtins.coordination_tool import hand_off
-        from src.shared.trace import current_origin
-        from src.shared.types import MessageOrigin
-
-        mc = _make_mesh_client(agent_id="operator")
-        mc.list_agents.return_value = {"chef": {"role": "chef"}}
-
-        origin = MessageOrigin(kind="human", channel="cli", user="jeff")
-        token = current_origin.set(origin)
-        try:
-            await hand_off(to="chef", summary="do work", mesh_client=mc)
-        finally:
-            current_origin.reset(token)
-
-        task_record = mc.write_blackboard.call_args_list[-1].args[1]
-        assert task_record.get("origin") == {
-            "kind": "human",
-            "channel": "cli",
-            "user": "jeff",
-        }
-
-    @pytest.mark.asyncio
-    async def test_hand_off_no_origin_no_origin_in_task_record(self):
-        """When current_origin is None, task_record has no 'origin' key."""
-        from src.agent.builtins.coordination_tool import hand_off
-        from src.shared.trace import current_origin
-
-        mc = _make_mesh_client(agent_id="operator")
-        mc.list_agents.return_value = {"chef": {"role": "chef"}}
-
-        token = current_origin.set(None)
-        try:
-            await hand_off(to="chef", summary="do work", mesh_client=mc)
-        finally:
-            current_origin.reset(token)
-
-        last_call = mc.write_blackboard.call_args_list[-1]
-        task_record = last_call.args[1]
-        assert "origin" not in task_record
-
-
-class TestHandOffV2OriginPropagation:
     """PR-K' fix 1: ``hand_off`` v2 path must propagate origin to ``create_task``."""
 
     @pytest.mark.asyncio
-    async def test_hand_off_v2_passes_origin_to_create_task(self):
+    async def test_hand_off_passes_origin_to_create_task(self):
         """v2 hand_off reads current_origin and forwards it to create_task."""
         from src.agent.builtins.coordination_tool import hand_off
         from src.shared.trace import current_origin
         from src.shared.types import MessageOrigin
 
-        mc = _make_mesh_client(agent_id="scout", v2_enabled=True)
+        mc = _make_mesh_client(agent_id="scout")
         mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
         mc.create_task.return_value = {"id": "task_v2_xyz", "status": "pending"}
 
@@ -710,12 +293,12 @@ class TestHandOffV2OriginPropagation:
         assert wake_kwargs.get("origin") == origin
 
     @pytest.mark.asyncio
-    async def test_hand_off_v2_no_origin_passes_none_to_create_task(self):
+    async def test_hand_off_no_origin_passes_none_to_create_task(self):
         """When current_origin is None, create_task receives origin=None."""
         from src.agent.builtins.coordination_tool import hand_off
         from src.shared.trace import current_origin
 
-        mc = _make_mesh_client(agent_id="scout", v2_enabled=True)
+        mc = _make_mesh_client(agent_id="scout")
         mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
         mc.create_task.return_value = {"id": "task_v2_xyz", "status": "pending"}
 
@@ -792,296 +375,17 @@ class TestMeshClientCreateTaskOriginHeader:
         assert not any("origin" in k.lower() for k in headers)
 
 
-class TestOperatorHandoff:
-    """Coverage for the project_agent → operator handoff path (Task 0 hotfix)."""
-
-    @pytest.mark.asyncio
-    async def test_worker_to_operator_writes_to_global_namespace(self):
-        from src.agent.builtins.coordination_tool import hand_off
-
-        mc = _make_mesh_client(agent_id="scout")
-        mc.project_name = "growth"
-        mc.is_standalone = False
-        mc.list_agents.return_value = {
-            "operator": {"url": "http://operator:8400", "scope": "global"},
-        }
-
-        result = await hand_off(
-            to="operator",
-            summary="follow up with the user",
-            data='{"note": "ok"}',
-            mesh_client=mc,
-        )
-
-        assert result["handed_off"] is True
-        assert result["task_key"].startswith("global/tasks/operator/")
-        assert result["output_key"].startswith("global/output/scout/")
-        # Both writes must use global_scope=True (NOT the sender's project scope)
-        assert mc.write_blackboard.call_count == 2
-        for call in mc.write_blackboard.call_args_list:
-            assert call.kwargs.get("global_scope") is True
-            assert call.kwargs.get("project") is None
-
-    @pytest.mark.asyncio
-    async def test_operator_check_inbox_lists_global_namespace(self):
-        from src.agent.builtins.coordination_tool import check_inbox
-
-        mc = _make_mesh_client(agent_id="operator", standalone=True)
-        mc.list_blackboard.return_value = [
-            {
-                "key": "global/tasks/operator/ho_xyz",
-                "value": {
-                    "from": "scout",
-                    "summary": "user wants a recap",
-                    "status": "pending",
-                    "ts": 1700000000.0,
-                },
-            },
-        ]
-
-        result = await check_inbox(mesh_client=mc)
-
-        assert "error" not in result
-        assert result["count"] == 1
-        assert result["tasks"][0]["from"] == "scout"
-        # Must be called with global_scope=True
-        mc.list_blackboard.assert_called_once()
-        call = mc.list_blackboard.call_args
-        assert call.args[0] == "global/tasks/operator/"
-        assert call.kwargs.get("global_scope") is True
-
-    @pytest.mark.asyncio
-    async def test_non_operator_standalone_still_blocked(self):
-        """Regression: standalone agents that are not the operator still get the standalone error."""
-        from src.agent.builtins.coordination_tool import check_inbox
-
-        mc = _make_mesh_client(agent_id="lone-wolf", standalone=True)
-
-        result = await check_inbox(mesh_client=mc)
-
-        assert "error" in result
-        assert "not assigned" in result["error"]
-        mc.list_blackboard.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_operator_completes_global_task(self):
-        from src.agent.builtins.coordination_tool import complete_task
-
-        mc = _make_mesh_client(agent_id="operator", standalone=True)
-        mc.read_blackboard = AsyncMock(return_value={
-            "value": {
-                "from": "scout",
-                "summary": "follow up",
-                "status": "pending",
-                "output_key": "global/output/scout/ho_xyz",
-            },
-        })
-
-        result = await complete_task(
-            task_key="global/tasks/operator/ho_xyz",
-            mesh_client=mc,
-        )
-
-        assert result["completed"] is True
-        # Read on the task must use global_scope=True so the standalone
-        # operator's MeshClient does not auto-prefix with project scope.
-        mc.read_blackboard.assert_awaited_once()
-        read_call = mc.read_blackboard.call_args
-        assert read_call.args[0] == "global/tasks/operator/ho_xyz"
-        assert read_call.kwargs.get("global_scope") is True
-        # Both task delete and output delete must use global_scope=True
-        delete_calls = mc.delete_blackboard.call_args_list
-        keys_deleted = [c.args[0] for c in delete_calls]
-        assert "global/tasks/operator/ho_xyz" in keys_deleted
-        assert "global/output/scout/ho_xyz" in keys_deleted
-        for call in delete_calls:
-            assert call.kwargs.get("global_scope") is True
-
-    @pytest.mark.asyncio
-    async def test_operator_complete_global_task_skips_unexpected_output_key(self):
-        """A queued operator task cannot make complete_task delete arbitrary global keys."""
-        from src.agent.builtins.coordination_tool import complete_task
-
-        mc = _make_mesh_client(agent_id="operator", standalone=True)
-        mc.read_blackboard = AsyncMock(return_value={
-            "value": {
-                "from": "scout",
-                "summary": "follow up",
-                "status": "pending",
-                "output_key": "global/status/operator",
-            },
-        })
-
-        result = await complete_task(
-            task_key="global/tasks/operator/ho_xyz",
-            mesh_client=mc,
-        )
-
-        assert result["completed"] is True
-        deleted = [c.args[0] for c in mc.delete_blackboard.call_args_list]
-        assert deleted == ["global/tasks/operator/ho_xyz"]
-
-    @pytest.mark.asyncio
-    async def test_hand_off_uses_registry_scope_hint(self):
-        """Defense-in-depth: a registry entry with scope=global triggers
-        global writes even if the target name is not the literal 'operator'.
-        Future-proofs against additional global agents being introduced."""
-        from src.agent.builtins.coordination_tool import hand_off
-
-        mc = _make_mesh_client(agent_id="scout")
-        mc.project_name = "growth"
-        mc.is_standalone = False
-        # Hypothetical future global agent — registry advertises scope.
-        mc.list_agents.return_value = {
-            "fleet-monitor": {
-                "url": "http://fleet-monitor:8400",
-                "scope": "global",
-            },
-        }
-
-        result = await hand_off(
-            to="fleet-monitor",
-            summary="alert: agent X failing",
-            mesh_client=mc,
-        )
-
-        assert result["handed_off"] is True
-        assert result["task_key"].startswith("global/tasks/fleet-monitor/")
-        write_call = mc.write_blackboard.call_args
-        assert write_call.kwargs.get("global_scope") is True
-        assert write_call.kwargs.get("project") is None
-
-    @pytest.mark.asyncio
-    async def test_hand_off_to_operator_when_roster_lookup_fails(self):
-        """Resilience: even if list_agents fails, the literal 'operator' name
-        still routes the handoff to the global namespace. The roster-failure
-        path must not silently fall back to project scope, which would make
-        the operator unreachable."""
-        from src.agent.builtins.coordination_tool import hand_off
-
-        mc = _make_mesh_client(agent_id="scout")
-        mc.project_name = "growth"
-        mc.is_standalone = False
-        mc.list_agents.side_effect = Exception("mesh down")
-
-        result = await hand_off(
-            to="operator",
-            summary="user wants a recap",
-            mesh_client=mc,
-        )
-
-        assert result["handed_off"] is True
-        assert result["task_key"].startswith("global/tasks/operator/")
-        write_call = mc.write_blackboard.call_args
-        assert write_call.kwargs.get("global_scope") is True
-
-    @pytest.mark.asyncio
-    async def test_operator_update_status_writes_global(self):
-        """Operator's status update goes to the fleet-global namespace —
-        previously it errored out via the standalone gate, leaving status
-        updates broken for the only agent that legitimately needs to write
-        them at the fleet level."""
-        from src.agent.builtins.coordination_tool import update_status
-
-        mc = _make_mesh_client(agent_id="operator", standalone=True)
-
-        result = await update_status(
-            state="working", summary="reviewing fleet", mesh_client=mc,
-        )
-
-        assert "error" not in result
-        assert result["updated"] is True
-        mc.write_blackboard.assert_awaited_once()
-        call = mc.write_blackboard.call_args
-        assert call.args[0] == "global/status/operator"
-        assert call.kwargs.get("global_scope") is True
-
-    @pytest.mark.asyncio
-    async def test_hand_off_to_operator_survives_wake_failure(self):
-        """Regression: wake_agent failure must not prevent the task from
-        being queued. The operator picks it up on its next heartbeat.
-
-        Bug 2 (operator-seam): the contract was flipped so wake failure
-        surfaces ``handed_off: false`` + ``task_queued: true`` — the
-        write still succeeds, just the wake signal didn't land."""
-        from src.agent.builtins.coordination_tool import hand_off
-
-        mc = _make_mesh_client(agent_id="scout")
-        mc.project_name = "growth"
-        mc.is_standalone = False
-        mc.list_agents.return_value = {
-            "operator": {"url": "http://operator:8400", "scope": "global"},
-        }
-        mc.wake_agent.side_effect = Exception("wake failed: 403")
-
-        result = await hand_off(
-            to="operator", summary="follow up", mesh_client=mc,
-        )
-
-        # Wake failed — handed_off MUST be False so the LLM doesn't lie.
-        assert result["handed_off"] is False
-        # The durable row still landed; the operator's next heartbeat
-        # picks it up.
-        assert result["task_queued"] is True
-        assert result["task_key"].startswith("global/tasks/operator/")
-        # The task write happened before the wake attempt.
-        mc.write_blackboard.assert_awaited()
-
-    @pytest.mark.asyncio
-    async def test_operator_cannot_complete_other_global_inbox(self):
-        """Defense: operator can only complete its own global tasks."""
-        from src.agent.builtins.coordination_tool import complete_task
-
-        mc = _make_mesh_client(agent_id="operator", standalone=True)
-
-        result = await complete_task(
-            task_key="global/tasks/someone-else/ho_1",
-            mesh_client=mc,
-        )
-
-        assert "error" in result
-        assert "your own tasks" in result["error"]
-
-    @pytest.mark.asyncio
-    async def test_worker_to_project_peer_unaffected(self):
-        """Regression: cross-project worker → worker handoff still uses project scoping."""
-        from src.agent.builtins.coordination_tool import hand_off
-
-        mc = _make_mesh_client(agent_id="scout")
-        mc.project_name = "growth"
-        mc.is_standalone = False
-        mc.list_agents.return_value = {
-            "analyst": {"url": "http://analyst:8400", "project": "research"},
-        }
-
-        result = await hand_off(
-            to="analyst",
-            summary="check this",
-            mesh_client=mc,
-        )
-
-        assert result["handed_off"] is True
-        assert result["task_key"].startswith("tasks/analyst/")
-        # write_project should be the target's project, NOT global
-        write_call = mc.write_blackboard.call_args
-        assert write_call.kwargs.get("project") == "research"
-        assert write_call.kwargs.get("global_scope") is False
-
-
-# ── Task 6: orchestration-tasks v2 integration ──────────────────────
-
-
-class TestCoordinationV2:
-    """When ``orchestration_v2_enabled`` is True, coordination_tool
-    routes hand_off / check_inbox / update_status / complete_task
-    through the durable tasks endpoints instead of the blackboard.
+class TestCoordination:
+    """coordination_tool routes hand_off / check_inbox /
+    update_status / complete_task through the durable tasks
+    endpoints (the v2 fallback to blackboard storage is gone).
     """
 
     @pytest.mark.asyncio
-    async def test_hand_off_v2_creates_task_row(self):
+    async def test_hand_off_creates_task_row(self):
         from src.agent.builtins.coordination_tool import hand_off
 
-        mc = _make_mesh_client(agent_id="scout", v2_enabled=True)
+        mc = _make_mesh_client(agent_id="scout")
         mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
         mc.create_task.return_value = {
             "id": "task_xyz", "creator": "scout", "assignee": "analyst",
@@ -1107,7 +411,7 @@ class TestCoordinationV2:
         assert "research handoff" in call_kwargs["title"]
 
     @pytest.mark.asyncio
-    async def test_hand_off_v2_wake_failure_surfaces_error_field(self):
+    async def test_hand_off_wake_failure_surfaces_error_field(self):
         """Bug G (silent peer hand_off failure): when wake_agent raises
         AFTER the task row was successfully created, the result envelope
         must carry an ``error`` key — not just a soft ``wake_failed=true``
@@ -1121,7 +425,7 @@ class TestCoordinationV2:
         """
         from src.agent.builtins.coordination_tool import hand_off
 
-        mc = _make_mesh_client(agent_id="scout", v2_enabled=True)
+        mc = _make_mesh_client(agent_id="scout")
         mc.list_agents.return_value = {"page-writer": {"role": "writer"}}
         mc.create_task.return_value = {
             "id": "task_orphan_42", "creator": "scout",
@@ -1159,10 +463,10 @@ class TestCoordinationV2:
         assert "operator" in result["recovery_hint"].lower()
 
     @pytest.mark.asyncio
-    async def test_hand_off_v2_with_data_writes_artifact(self):
+    async def test_hand_off_with_data_writes_artifact(self):
         from src.agent.builtins.coordination_tool import hand_off
 
-        mc = _make_mesh_client(agent_id="scout", v2_enabled=True)
+        mc = _make_mesh_client(agent_id="scout")
         mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
         mc.create_task.return_value = {
             "id": "task_xyz", "creator": "scout", "assignee": "analyst",
@@ -1183,10 +487,10 @@ class TestCoordinationV2:
         mc.write_blackboard.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_check_inbox_v2_returns_legacy_dict_shape(self):
+    async def test_check_inbox_returns_legacy_dict_shape(self):
         from src.agent.builtins.coordination_tool import check_inbox
 
-        mc = _make_mesh_client(agent_id="analyst", v2_enabled=True)
+        mc = _make_mesh_client(agent_id="analyst")
         mc.list_task_inbox.return_value = [
             {
                 "id": "task_a", "creator": "scout", "assignee": "analyst",
@@ -1218,10 +522,10 @@ class TestCoordinationV2:
         )
 
     @pytest.mark.asyncio
-    async def test_complete_task_v2_transitions_to_done(self):
+    async def test_complete_task_transitions_to_done(self):
         from src.agent.builtins.coordination_tool import complete_task
 
-        mc = _make_mesh_client(agent_id="analyst", v2_enabled=True)
+        mc = _make_mesh_client(agent_id="analyst")
         mc.set_task_status.return_value = {
             "id": "task_xyz", "status": "done",
         }
@@ -1235,11 +539,11 @@ class TestCoordinationV2:
         mc.delete_blackboard.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_complete_task_v2_strips_legacy_prefix(self):
+    async def test_complete_task_strips_legacy_prefix(self):
         """Legacy ``tasks/x/ho_abc`` keys still resolve to the bare id."""
         from src.agent.builtins.coordination_tool import complete_task
 
-        mc = _make_mesh_client(agent_id="analyst", v2_enabled=True)
+        mc = _make_mesh_client(agent_id="analyst")
         mc.set_task_status.return_value = {"id": "ho_abc", "status": "done"}
 
         await complete_task("tasks/analyst/ho_abc", mesh_client=mc)
@@ -1247,11 +551,11 @@ class TestCoordinationV2:
         mc.set_task_status.assert_called_once_with("ho_abc", "done")
 
     @pytest.mark.asyncio
-    async def test_update_status_v2_single_active_no_task_id(self):
+    async def test_update_status_single_active_no_task_id(self):
         """One active task + no task_id → that task is updated transparently."""
         from src.agent.builtins.coordination_tool import update_status
 
-        mc = _make_mesh_client(agent_id="analyst", v2_enabled=True)
+        mc = _make_mesh_client(agent_id="analyst")
         mc.list_task_inbox.return_value = [
             {"id": "task_only", "status": "pending"},
         ]
@@ -1265,10 +569,10 @@ class TestCoordinationV2:
         )
 
     @pytest.mark.asyncio
-    async def test_update_status_v2_blocker_note_passes_summary(self):
+    async def test_update_status_blocker_note_passes_summary(self):
         from src.agent.builtins.coordination_tool import update_status
 
-        mc = _make_mesh_client(agent_id="analyst", v2_enabled=True)
+        mc = _make_mesh_client(agent_id="analyst")
         mc.list_task_inbox.return_value = [{"id": "task_x", "status": "working"}]
 
         await update_status("blocked", "waiting on creds", mesh_client=mc)
@@ -1278,7 +582,7 @@ class TestCoordinationV2:
         )
 
     @pytest.mark.asyncio
-    async def test_update_status_v2_ambiguous_with_multiple_active(self):
+    async def test_update_status_ambiguous_with_multiple_active(self):
         """2+ active tasks + no task_id → ambiguous_task with active list + hint.
 
         The active list carries ``{id, title, state}`` entries so the LLM
@@ -1287,7 +591,7 @@ class TestCoordinationV2:
         """
         from src.agent.builtins.coordination_tool import update_status
 
-        mc = _make_mesh_client(agent_id="analyst", v2_enabled=True)
+        mc = _make_mesh_client(agent_id="analyst")
         mc.list_task_inbox.return_value = [
             {"id": "task_a", "title": "Draft report", "status": "pending"},
             {"id": "task_b", "title": "Review pricing", "status": "working"},
@@ -1312,7 +616,7 @@ class TestCoordinationV2:
         mc.set_task_status.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_update_status_v2_empty_inbox_returns_legacy_noop(self):
+    async def test_update_status_empty_inbox_returns_legacy_noop(self):
         """Empty inbox → legacy ``{updated: False, ...}`` no-op shape.
 
         Standalone agents and just-joined agents on a fresh fleet hit
@@ -1322,7 +626,7 @@ class TestCoordinationV2:
         """
         from src.agent.builtins.coordination_tool import update_status
 
-        mc = _make_mesh_client(agent_id="analyst", v2_enabled=True)
+        mc = _make_mesh_client(agent_id="analyst")
         mc.list_task_inbox.return_value = []
 
         result = await update_status("working", mesh_client=mc)
@@ -1335,11 +639,11 @@ class TestCoordinationV2:
         mc.set_task_status.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_update_status_v2_multiple_active_with_explicit_task_id(self):
+    async def test_update_status_multiple_active_with_explicit_task_id(self):
         """2+ active tasks + valid task_id → that task is updated."""
         from src.agent.builtins.coordination_tool import update_status
 
-        mc = _make_mesh_client(agent_id="analyst", v2_enabled=True)
+        mc = _make_mesh_client(agent_id="analyst")
         mc.list_task_inbox.return_value = [
             {"id": "task_a", "status": "pending"},
             {"id": "task_b", "status": "working"},
@@ -1356,11 +660,11 @@ class TestCoordinationV2:
         )
 
     @pytest.mark.asyncio
-    async def test_update_status_v2_unknown_task_id_returns_task_not_found(self):
+    async def test_update_status_unknown_task_id_returns_task_not_found(self):
         """Explicit task_id not in inbox → ``task_not_found`` error."""
         from src.agent.builtins.coordination_tool import update_status
 
-        mc = _make_mesh_client(agent_id="analyst", v2_enabled=True)
+        mc = _make_mesh_client(agent_id="analyst")
         mc.list_task_inbox.return_value = [
             {"id": "task_a", "status": "pending"},
         ]
@@ -1372,24 +676,6 @@ class TestCoordinationV2:
         assert result.get("error") == "task_not_found"
         assert result.get("task_id") == "task_missing"
         mc.set_task_status.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_v2_probe_failure_falls_back_to_legacy(self):
-        """If the v2 probe raises, hand_off falls through to legacy."""
-        from src.agent.builtins.coordination_tool import hand_off
-
-        mc = _make_mesh_client(agent_id="scout")
-        mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
-        mc.orchestration_v2_enabled = AsyncMock(side_effect=RuntimeError("boom"))
-
-        result = await hand_off(
-            to="analyst", summary="legacy fallback", mesh_client=mc,
-        )
-
-        assert result["handed_off"] is True
-        # Legacy blackboard write happened (no v2 path taken).
-        mc.write_blackboard.assert_called_once()
-        mc.create_task.assert_not_called()
 
 
 class TestHandOffTitleQuality:
@@ -1407,7 +693,7 @@ class TestHandOffTitleQuality:
         """Summary ≤ 100 chars: title and description both equal it."""
         from src.agent.builtins.coordination_tool import hand_off
 
-        mc = _make_mesh_client(agent_id="scout", v2_enabled=True)
+        mc = _make_mesh_client(agent_id="scout")
         mc.list_agents.return_value = {"writer": {"role": "writer"}}
         mc.create_task.return_value = {
             "id": "task_abc", "creator": "scout", "assignee": "writer",
@@ -1433,7 +719,7 @@ class TestHandOffTitleQuality:
         from src.agent.builtins.coordination_tool import hand_off
         from src.shared.task_titles import SHORT_TITLE_TARGET
 
-        mc = _make_mesh_client(agent_id="scout", v2_enabled=True)
+        mc = _make_mesh_client(agent_id="scout")
         mc.list_agents.return_value = {"writer": {"role": "writer"}}
         mc.create_task.return_value = {
             "id": "task_abc", "creator": "scout", "assignee": "writer",
@@ -1619,52 +905,10 @@ class TestHandOffWakeFailureSurfacing:
             f"opaque query-param value leaked: {result['wake_error']!r}"
         )
 
-    @pytest.mark.asyncio
-    async def test_hand_off_v2_returns_wake_failed_when_wake_raises(self):
-        """V2 path: wake failure flips ``handed_off=False`` and surfaces
-        ``task_queued=True`` + ``wake_failed`` + ``wake_error`` +
-        ``recovery_hint`` (Bug 2 contract honesty)."""
-        from src.agent.builtins.coordination_tool import hand_off
-
-        mc = _make_mesh_client(agent_id="scout", v2_enabled=True)
-        mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
-        mc.create_task.return_value = {"id": "task_v2_abc", "status": "pending"}
-        mc.wake_agent.side_effect = RuntimeError("auth token rejected")
-
-        result = await hand_off(
-            to="analyst",
-            summary="enrich the lead",
-            mesh_client=mc,
-        )
-
-        assert result["handed_off"] is False
-        assert result["task_queued"] is True
-        assert result["wake_failed"] is True
-        assert "auth token rejected" in result["wake_error"]
-        assert "recovery_hint" in result
 
     @pytest.mark.asyncio
-    async def test_hand_off_v2_success_omits_wake_failure_keys(self):
-        """V2 path: successful wake leaves no wake_failed/wake_error keys."""
-        from src.agent.builtins.coordination_tool import hand_off
-
-        mc = _make_mesh_client(agent_id="scout", v2_enabled=True)
-        mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
-        mc.create_task.return_value = {"id": "task_v2_abc", "status": "pending"}
-
-        result = await hand_off(
-            to="analyst",
-            summary="enrich the lead",
-            mesh_client=mc,
-        )
-
-        assert result["handed_off"] is True
-        assert "wake_failed" not in result
-        assert "wake_error" not in result
-
-    @pytest.mark.asyncio
-    async def test_hand_off_v2_wake_failure_reports_handed_off_false(self):
-        """Pins the new contract: on wake failure ``_hand_off_v2`` MUST
+    async def test_hand_off_wake_failure_reports_handed_off_false(self):
+        """Pins the new contract: on wake failure ``hand_off`` MUST
         flip ``handed_off`` to False and emit ``task_queued=True``
         alongside the wake_failed signal. Pre-fix this returned
         ``handed_off:true`` AND ``wake_failed:true`` — the LLM picked up
@@ -1672,7 +916,7 @@ class TestHandOffWakeFailureSurfacing:
         actually woke (Bug 2)."""
         from src.agent.builtins.coordination_tool import hand_off
 
-        mc = _make_mesh_client(agent_id="scout", v2_enabled=True)
+        mc = _make_mesh_client(agent_id="scout")
         mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
         mc.create_task.return_value = {"id": "task_v2_xyz", "status": "pending"}
         mc.wake_agent.side_effect = RuntimeError("network unreachable")
@@ -1727,12 +971,12 @@ class TestHandOffCreateFailureSurfacing:
     """
 
     @pytest.mark.asyncio
-    async def test_v2_create_task_failure_returns_directive_envelope(self):
+    async def test_create_task_failure_returns_directive_envelope(self):
         """v2 path: ``mesh_client.create_task`` raising surfaces the
         full Bug-G-style directive envelope, not a bare error."""
         from src.agent.builtins.coordination_tool import hand_off
 
-        mc = _make_mesh_client(agent_id="seo-strategist", v2_enabled=True)
+        mc = _make_mesh_client(agent_id="seo-strategist")
         mc.list_agents.return_value = {"page-writer": {"role": "writer"}}
         mc.create_task.side_effect = RuntimeError("mesh /tasks 503")
 
@@ -1764,7 +1008,7 @@ class TestHandOffCreateFailureSurfacing:
         assert "mesh /tasks 503" in result["create_error"]
 
     @pytest.mark.asyncio
-    async def test_v2_create_task_failure_redacts_credentials(self):
+    async def test_create_task_failure_redacts_credentials(self):
         """v2 path: the exception from create_task can carry the mesh
         URL with an api_key in the query string. The error envelope
         is read back into the LLM context — credentials must be
@@ -1772,7 +1016,7 @@ class TestHandOffCreateFailureSurfacing:
         """
         from src.agent.builtins.coordination_tool import hand_off
 
-        mc = _make_mesh_client(agent_id="seo-strategist", v2_enabled=True)
+        mc = _make_mesh_client(agent_id="seo-strategist")
         mc.list_agents.return_value = {"page-writer": {"role": "writer"}}
         leaky_token = "sk-" + "a" * 40
         leaky = (
@@ -1794,13 +1038,13 @@ class TestHandOffCreateFailureSurfacing:
         assert leaky_token not in result["recovery_hint"]
 
     @pytest.mark.asyncio
-    async def test_v2_output_write_failure_returns_directive_envelope(self):
+    async def test_output_write_failure_returns_directive_envelope(self):
         """v2 path: ``write_blackboard`` for the handoff artifact
         raising surfaces the directive envelope too. This is the
         earliest failure point — no task row, no artifact persisted."""
         from src.agent.builtins.coordination_tool import hand_off
 
-        mc = _make_mesh_client(agent_id="trend-scout", v2_enabled=True)
+        mc = _make_mesh_client(agent_id="trend-scout")
         mc.list_agents.return_value = {
             "seo-strategist": {"role": "strategist"},
         }
@@ -1827,79 +1071,16 @@ class TestHandOffCreateFailureSurfacing:
         # write_error carries the redacted exception detail.
         assert "blackboard EBUSY" in result["write_error"]
 
-    @pytest.mark.asyncio
-    async def test_legacy_task_write_failure_returns_directive_envelope(self):
-        """Legacy path (orchestration v2 OFF): the blackboard task
-        write raising surfaces the same directive shape — operators
-        who haven't migrated to v2 still need the LLM-resistant signal.
-        """
-        from src.agent.builtins.coordination_tool import hand_off
-
-        mc = _make_mesh_client(agent_id="seo-strategist", v2_enabled=False)
-        mc.list_agents.return_value = {"page-writer": {"role": "writer"}}
-
-        # Make write_blackboard fail only on the task-key write (the
-        # second call). The first write is for output data, which
-        # only runs when ``data`` is supplied — omit ``data`` so we
-        # cleanly target the task write.
-        mc.write_blackboard.side_effect = RuntimeError("bb shard offline")
-
-        result = await hand_off(
-            to="page-writer",
-            summary="Brief: langchain-vs-openlegion",
-            mesh_client=mc,
-        )
-
-        assert result["handed_off"] is False
-        assert result["task_queued"] is False
-        assert result["create_failed"] is True
-        assert result["to"] == "page-writer"
-        assert "create_failed" in result["error"]
-        assert "MUST NOT report success" in result["error"]
-        assert "DO NOT mark this work as complete" in result["recovery_hint"]
-        assert "bb shard offline" in result["create_error"]
-        # ``wake_agent`` must NOT have been called — the task didn't
-        # land, no point in waking the recipient.
-        assert mc.wake_agent.await_count == 0
 
     @pytest.mark.asyncio
-    async def test_legacy_output_write_failure_returns_directive_envelope(self):
-        """Legacy path: when the output write fails (before the task
-        write), the directive envelope still fires — operator needs
-        to know data never persisted."""
-        from src.agent.builtins.coordination_tool import hand_off
-
-        mc = _make_mesh_client(agent_id="trend-scout", v2_enabled=False)
-        mc.list_agents.return_value = {
-            "seo-strategist": {"role": "strategist"},
-        }
-        mc.write_blackboard.side_effect = RuntimeError("disk full")
-
-        result = await hand_off(
-            to="seo-strategist",
-            summary="Trends",
-            data='{"trends": ["a"]}',
-            mesh_client=mc,
-        )
-
-        assert result["handed_off"] is False
-        assert result["task_queued"] is False
-        assert result["output_write_failed"] is True
-        assert "output_write_failed" in result["error"]
-        assert "MUST NOT report success" in result["error"]
-        # Only one write_blackboard attempt — the output one. The
-        # task write must not have been reached.
-        assert mc.write_blackboard.await_count == 1
-
-    @pytest.mark.asyncio
-    async def test_v2_create_failure_does_not_call_wake_agent(self):
+    async def test_create_failure_does_not_call_wake_agent(self):
         """Defense-in-depth: a create_task failure must short-circuit
         before ``wake_agent`` is called — waking a peer for a task
         that doesn't exist would spam them with a phantom notification.
         """
         from src.agent.builtins.coordination_tool import hand_off
 
-        mc = _make_mesh_client(agent_id="strategist", v2_enabled=True)
+        mc = _make_mesh_client(agent_id="strategist")
         mc.list_agents.return_value = {"writer": {"role": "writer"}}
         mc.create_task.side_effect = RuntimeError("scope rejected")
 
@@ -1912,12 +1093,12 @@ class TestHandOffCreateFailureSurfacing:
         assert mc.wake_agent.await_count == 0
 
     @pytest.mark.asyncio
-    async def test_v2_success_envelope_omits_create_failure_keys(self):
+    async def test_success_envelope_omits_create_failure_keys(self):
         """Regression guard: the happy path must not leak any of the
         new failure flags into the success envelope."""
         from src.agent.builtins.coordination_tool import hand_off
 
-        mc = _make_mesh_client(agent_id="strategist", v2_enabled=True)
+        mc = _make_mesh_client(agent_id="strategist")
         mc.list_agents.return_value = {"writer": {"role": "writer"}}
 
         result = await hand_off(
@@ -1942,16 +1123,16 @@ class TestHandOffFailureRedaction:
     legacy output_write, legacy task_write) so dropping
     ``redact_text_with_urls`` from any of them is caught. v2
     create_task redaction lives in ``TestHandOffCreateFailureSurfacing``
-    (``test_v2_create_task_failure_redacts_credentials``)."""
+    (``test_create_task_failure_redacts_credentials``)."""
 
     LEAKY = "sk-" + "a" * 40
     LEAKY_URL = f"POST https://mesh.internal/x?api_key={LEAKY} failed 500"
 
     @pytest.mark.asyncio
-    async def test_v2_output_write_redacts(self):
+    async def test_output_write_redacts(self):
         from src.agent.builtins.coordination_tool import hand_off
 
-        mc = _make_mesh_client(agent_id="trend-scout", v2_enabled=True)
+        mc = _make_mesh_client(agent_id="trend-scout")
         mc.list_agents.return_value = {
             "seo-strategist": {"role": "strategist"},
         }
@@ -1966,47 +1147,6 @@ class TestHandOffFailureRedaction:
 
         assert result["output_write_failed"] is True
         for f in ("error", "recovery_hint", "write_error"):
-            assert self.LEAKY not in result[f]
-
-    @pytest.mark.asyncio
-    async def test_legacy_output_write_redacts(self):
-        from src.agent.builtins.coordination_tool import hand_off
-
-        mc = _make_mesh_client(agent_id="trend-scout", v2_enabled=False)
-        mc.list_agents.return_value = {
-            "seo-strategist": {"role": "strategist"},
-        }
-        mc.write_blackboard.side_effect = RuntimeError(self.LEAKY_URL)
-
-        result = await hand_off(
-            to="seo-strategist",
-            summary="x",
-            data='{"a": 1}',
-            mesh_client=mc,
-        )
-
-        assert result["output_write_failed"] is True
-        for f in ("error", "recovery_hint", "write_error"):
-            assert self.LEAKY not in result[f]
-
-    @pytest.mark.asyncio
-    async def test_legacy_task_write_redacts(self):
-        from src.agent.builtins.coordination_tool import hand_off
-
-        mc = _make_mesh_client(agent_id="strategist", v2_enabled=False)
-        mc.list_agents.return_value = {"writer": {"role": "writer"}}
-        # Only the task-write call fails (no ``data`` → no output write
-        # — the lone write_blackboard call is the task one).
-        mc.write_blackboard.side_effect = RuntimeError(self.LEAKY_URL)
-
-        result = await hand_off(
-            to="writer",
-            summary="x",
-            mesh_client=mc,
-        )
-
-        assert result["create_failed"] is True
-        for f in ("error", "recovery_hint", "create_error"):
             assert self.LEAKY not in result[f]
 
 
@@ -2019,10 +1159,10 @@ class TestUpdateStatusFailureEnvelope:
     silent failure here would let the agent claim done with no record."""
 
     @pytest.mark.asyncio
-    async def test_v2_done_transition_failure_returns_directive(self):
+    async def test_done_transition_failure_returns_directive(self):
         from src.agent.builtins.coordination_tool import update_status
 
-        mc = _make_mesh_client(agent_id="writer", v2_enabled=True)
+        mc = _make_mesh_client(agent_id="writer")
         mc.list_task_inbox = AsyncMock(return_value=[
             {"id": "task_xyz", "status": "working", "title": "draft"},
         ])
@@ -2039,51 +1179,17 @@ class TestUpdateStatusFailureEnvelope:
         assert result["state"] == "done"
         assert result["task_id"] == "task_xyz"
 
-    @pytest.mark.asyncio
-    async def test_legacy_done_transition_failure_returns_directive(self):
-        from src.agent.builtins.coordination_tool import update_status
-
-        mc = _make_mesh_client(agent_id="writer", v2_enabled=False)
-        mc.write_blackboard.side_effect = RuntimeError("bb shard offline")
-
-        result = await update_status(
-            "done", "finished draft", mesh_client=mc,
-        )
-
-        assert result["update_status_failed"] is True
-        assert "MUST NOT report success" in result["error"]
-        assert "DO NOT mark this work as complete" in result["recovery_hint"]
-        assert "bb shard offline" in result["detail"]
-        assert result["state"] == "done"
 
     @pytest.mark.asyncio
-    async def test_v2_done_failure_redacts_credentials(self):
+    async def test_done_failure_redacts_credentials(self):
         from src.agent.builtins.coordination_tool import update_status
 
-        mc = _make_mesh_client(agent_id="writer", v2_enabled=True)
+        mc = _make_mesh_client(agent_id="writer")
         mc.list_task_inbox = AsyncMock(return_value=[
             {"id": "task_xyz", "status": "working", "title": "draft"},
         ])
         leaky = "sk-" + "z" * 40
         mc.set_task_status.side_effect = RuntimeError(
-            f"PUT https://mesh/x?api_key={leaky}",
-        )
-
-        result = await update_status("done", "ok", mesh_client=mc)
-
-        assert result["update_status_failed"] is True
-        for f in ("error", "recovery_hint", "detail"):
-            assert leaky not in result[f]
-
-    @pytest.mark.asyncio
-    async def test_legacy_done_failure_redacts_credentials(self):
-        """Codex r6: parity with the v2 redaction test — drop of
-        redact_text_with_urls from the legacy path must also be caught."""
-        from src.agent.builtins.coordination_tool import update_status
-
-        mc = _make_mesh_client(agent_id="writer", v2_enabled=False)
-        leaky = "sk-" + "q" * 40
-        mc.write_blackboard.side_effect = RuntimeError(
             f"PUT https://mesh/x?api_key={leaky}",
         )
 
@@ -2099,10 +1205,10 @@ class TestCompleteTaskFailureEnvelope:
     silent failure here is the highest-risk misreport surface."""
 
     @pytest.mark.asyncio
-    async def test_v2_failure_returns_directive(self):
+    async def test_failure_returns_directive(self):
         from src.agent.builtins.coordination_tool import complete_task
 
-        mc = _make_mesh_client(agent_id="writer", v2_enabled=True)
+        mc = _make_mesh_client(agent_id="writer")
         mc.set_task_status.side_effect = RuntimeError("set_status 503")
 
         result = await complete_task(
@@ -2115,59 +1221,18 @@ class TestCompleteTaskFailureEnvelope:
         assert "set_status 503" in result["detail"]
         assert result["task_id"] == "task_abc123def456"
 
-    @pytest.mark.asyncio
-    async def test_legacy_failure_returns_directive(self):
-        from src.agent.builtins.coordination_tool import complete_task
-
-        mc = _make_mesh_client(agent_id="writer", v2_enabled=False)
-        mc.read_blackboard = AsyncMock(return_value={
-            "value": {"from": "strategist", "summary": "x"},
-        })
-        mc.delete_blackboard.side_effect = RuntimeError("delete failed")
-
-        result = await complete_task(
-            "tasks/writer/ho_abc", mesh_client=mc,
-        )
-
-        assert result["complete_task_failed"] is True
-        assert "MUST NOT report success" in result["error"]
-        assert "DO NOT mark this work as complete" in result["recovery_hint"]
-        assert "delete failed" in result["detail"]
-        assert result["task_key"] == "tasks/writer/ho_abc"
 
     @pytest.mark.asyncio
-    async def test_v2_failure_redacts_credentials(self):
+    async def test_failure_redacts_credentials(self):
         from src.agent.builtins.coordination_tool import complete_task
 
-        mc = _make_mesh_client(agent_id="writer", v2_enabled=True)
+        mc = _make_mesh_client(agent_id="writer")
         leaky = "sk-" + "b" * 40
         mc.set_task_status.side_effect = RuntimeError(
             f"PUT https://mesh/x?api_key={leaky}",
         )
 
         result = await complete_task("task_xyz", mesh_client=mc)
-
-        assert result["complete_task_failed"] is True
-        for f in ("error", "recovery_hint", "detail"):
-            assert leaky not in result[f]
-
-    @pytest.mark.asyncio
-    async def test_legacy_failure_redacts_credentials(self):
-        """Codex r6: parity with the v2 redaction test on legacy path."""
-        from src.agent.builtins.coordination_tool import complete_task
-
-        mc = _make_mesh_client(agent_id="writer", v2_enabled=False)
-        mc.read_blackboard = AsyncMock(return_value={
-            "value": {"from": "strategist", "summary": "x"},
-        })
-        leaky = "sk-" + "w" * 40
-        mc.delete_blackboard.side_effect = RuntimeError(
-            f"DELETE https://mesh/bb?api_key={leaky}",
-        )
-
-        result = await complete_task(
-            "tasks/writer/ho_abc", mesh_client=mc,
-        )
 
         assert result["complete_task_failed"] is True
         for f in ("error", "recovery_hint", "detail"):
