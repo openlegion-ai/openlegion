@@ -63,6 +63,14 @@ MAX_FEEDBACK_CHARS = 4000
 # before the row locks. 24h is the standard "you slept on it" window.
 RATING_EDIT_WINDOW_SECONDS = 24 * 3600
 
+# Minimum seconds between opportunistic ``_safe_reap()`` invocations.
+# The list endpoint calls reap on every fire; without this guard a
+# sustained list-traffic pattern (e.g. dashboard tab open + polling)
+# would run an unbounded ``DELETE`` repeatedly. 60s is short enough
+# that expired rows clear within a minute of becoming reapable but
+# long enough that the DELETE doesn't dominate the hot path.
+_SAFE_REAP_MIN_INTERVAL_SECONDS = 60
+
 
 class SummaryNotFound(KeyError):
     """Raised when a summary id doesn't exist."""
@@ -102,6 +110,10 @@ class WorkSummariesStore:
         self.db_path = db_path
         self.retention_seconds = retention_seconds
         self._event_bus = event_bus
+        # Last opportunistic-reap wall-clock time. The list endpoint
+        # calls ``_safe_reap()`` on every fire; this stamp gates how
+        # often the unbounded DELETE actually runs.
+        self._last_reap_ts: float = 0.0
         if db_path != ":memory:":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         # In-memory mode keeps a single shared connection so the schema
@@ -361,6 +373,13 @@ class WorkSummariesStore:
         ``rated_at`` is preserved across edits (``COALESCE``) so the
         UI knows "rated 12h ago" rather than "rated 2 minutes ago" on
         every revision.
+
+        TOCTOU-free: the edit-window check lives in the SQL UPDATE
+        predicate, not a separate SELECT. Two concurrent writers
+        racing on the same row can't both succeed past the lock —
+        whichever runs second sees ``rowcount == 0`` and a follow-up
+        SELECT decides whether the row was missing (404) or locked
+        (409).
         """
         if rating not in VALID_RATINGS:
             raise ValueError(
@@ -376,30 +395,36 @@ class WorkSummariesStore:
         conn = self._conn()
         try:
             cur = conn.execute(
-                "SELECT rated_at FROM work_summaries WHERE id = ?",
-                (summary_id,),
-            )
-            row = cur.fetchone()
-            if row is None:
-                raise SummaryNotFound(summary_id)
-            (existing_rated_at,) = row
-            if existing_rated_at is not None:
-                # Edit window: locked past 24h since first rating.
-                if now - existing_rated_at > RATING_EDIT_WINDOW_SECONDS:
-                    raise RatingLocked(
-                        f"summary {summary_id} rating locked "
-                        f"({int(now - existing_rated_at)}s past first rating; "
-                        f"edit window is {RATING_EDIT_WINDOW_SECONDS}s)"
-                    )
-            conn.execute(
                 "UPDATE work_summaries SET "
                 "rating = ?, feedback = ?, "
                 "rated_at = COALESCE(rated_at, ?), "
                 "rated_by = ? "
-                "WHERE id = ?",
-                (rating, feedback_clean, now, actor, summary_id),
+                "WHERE id = ? AND ("
+                "  rated_at IS NULL "
+                "  OR (? - rated_at) <= ?"
+                ")",
+                (
+                    rating, feedback_clean, now, actor,
+                    summary_id, now, RATING_EDIT_WINDOW_SECONDS,
+                ),
             )
             conn.commit()
+            if cur.rowcount == 0:
+                # Update matched nothing — either the row doesn't exist
+                # or it exists but the edit window has expired.
+                existing = conn.execute(
+                    "SELECT rated_at FROM work_summaries WHERE id = ?",
+                    (summary_id,),
+                ).fetchone()
+                if existing is None:
+                    raise SummaryNotFound(summary_id)
+                (existing_rated_at,) = existing
+                raise RatingLocked(
+                    f"summary {summary_id} rating locked "
+                    f"({int(now - (existing_rated_at or now))}s past "
+                    f"first rating; edit window is "
+                    f"{RATING_EDIT_WINDOW_SECONDS}s)"
+                )
         finally:
             if self._shared_conn is None:
                 conn.close()
@@ -436,11 +461,26 @@ class WorkSummariesStore:
                 conn.close()
 
     def _safe_reap(self) -> None:
-        """Reap-expired wrapper that never raises on the hot path."""
+        """Reap-expired wrapper that never raises on the hot path.
+
+        Rate-limited to once per ``_SAFE_REAP_MIN_INTERVAL_SECONDS``
+        so a sustained list-traffic pattern (dashboard polling) can't
+        run the unbounded DELETE on every fire. Last-reap timestamp
+        is best-effort instance state — multi-process deployments
+        will reap up to once per process per interval, which is fine.
+        """
+        now = time.time()
+        if now - self._last_reap_ts < _SAFE_REAP_MIN_INTERVAL_SECONDS:
+            return
         try:
             self.reap_expired()
+            self._last_reap_ts = now
         except Exception as e:
             logger.debug("opportunistic reap_expired failed: %s", e)
+            # Stamp even on failure to avoid hammering a broken DB on
+            # the hot path. Worst case the next attempt is delayed by
+            # the rate-limit interval.
+            self._last_reap_ts = now
 
     # ------------------------------------------------------------ FEEDBACK FETCH
     def recent_feedback(

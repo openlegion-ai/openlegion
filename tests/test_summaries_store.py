@@ -291,6 +291,64 @@ def test_safe_reap_swallows_errors(store, monkeypatch):
     store._safe_reap()
 
 
+def test_safe_reap_rate_limited(monkeypatch):
+    """Multiple back-to-back _safe_reap calls must not each run DELETE.
+
+    Without the rate-limit guard, sustained dashboard list-traffic
+    would run the unbounded ``DELETE FROM work_summaries`` on every
+    fire (codex r1 P2).
+    """
+    s = WorkSummariesStore(":memory:")
+    call_count = [0]
+
+    def counting_reap():
+        call_count[0] += 1
+        return 0
+
+    monkeypatch.setattr(s, "reap_expired", counting_reap)
+    # First call fires; subsequent calls inside the rate-limit window
+    # do not.
+    s._safe_reap()
+    s._safe_reap()
+    s._safe_reap()
+    s._safe_reap()
+    assert call_count[0] == 1
+    s.close()
+
+
+def test_safe_reap_fires_again_after_interval(monkeypatch):
+    """After the rate-limit interval, _safe_reap fires again."""
+    from src.host.summaries import _SAFE_REAP_MIN_INTERVAL_SECONDS
+    s = WorkSummariesStore(":memory:")
+    call_count = [0]
+
+    def counting_reap():
+        call_count[0] += 1
+        return 0
+
+    monkeypatch.setattr(s, "reap_expired", counting_reap)
+    s._safe_reap()  # fires
+    # Simulate clock past the interval.
+    real_time = time.time
+    fake = real_time() + _SAFE_REAP_MIN_INTERVAL_SECONDS + 1
+    monkeypatch.setattr(time, "time", lambda: fake)
+    s._safe_reap()  # fires again
+    assert call_count[0] == 2
+    s.close()
+
+
+def test_set_rating_locked_404_when_summary_missing(store):
+    """When the summary doesn't exist AT ALL, set_rating raises
+    SummaryNotFound (not RatingLocked).
+
+    The atomic-update path matches no rows in both cases; the
+    follow-up SELECT distinguishes missing from locked. Regression
+    guard for the TOCTOU-free path (codex r1 Q1).
+    """
+    with pytest.raises(SummaryNotFound):
+        store.set_rating("ws_does_not_exist", "accepted")
+
+
 # =============================================================================
 # Feedback fetch (for next-summary prompt injection)
 # =============================================================================
