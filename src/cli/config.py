@@ -1578,13 +1578,9 @@ _OPERATOR_AGENT_ID = "operator"
 _OPERATOR_ALLOWED_TOOLS: list[str] = [
     # Monitoring + heartbeat
     "get_system_status", "notify_user", "save_observations",
-    # Inspection (consolidated read tools). Team-named tools (PR 2)
-    # are the canonical surface; project-named legacy entries are
-    # retained alongside them through PR 3 so SDK consumers that
-    # invoke either name keep working.
-    "inspect_agents", "inspect_teams", "inspect_projects",
+    "inspect_agents", "inspect_teams",
     "list_agent_queue", "get_team_outputs",
-    "summarize_team_progress", "summarize_project_progress",
+    "summarize_team_progress",
     # Composes and persists a work summary card for the Work tab.
     # Backed by ``WorkSummariesStore``; the daily cron invokes this
     # tool directly (no LLM cost per fire). User rates via dashboard.
