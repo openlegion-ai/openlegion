@@ -1938,8 +1938,11 @@ class TestHandOffCreateFailureSurfacing:
 
 class TestHandOffFailureRedaction:
     """Codex r5 finding: redaction was only asserted on the v2
-    create_task path. Parameterize across all four sites so dropping
-    ``redact_text_with_urls`` from any one of them is caught."""
+    create_task path. Cover the three remaining sites (v2 output_write,
+    legacy output_write, legacy task_write) so dropping
+    ``redact_text_with_urls`` from any of them is caught. v2
+    create_task redaction lives in ``TestHandOffCreateFailureSurfacing``
+    (``test_v2_create_task_failure_redacts_credentials``)."""
 
     LEAKY = "sk-" + "a" * 40
     LEAKY_URL = f"POST https://mesh.internal/x?api_key={LEAKY} failed 500"
@@ -2072,6 +2075,24 @@ class TestUpdateStatusFailureEnvelope:
         for f in ("error", "recovery_hint", "detail"):
             assert leaky not in result[f]
 
+    @pytest.mark.asyncio
+    async def test_legacy_done_failure_redacts_credentials(self):
+        """Codex r6: parity with the v2 redaction test — drop of
+        redact_text_with_urls from the legacy path must also be caught."""
+        from src.agent.builtins.coordination_tool import update_status
+
+        mc = _make_mesh_client(agent_id="writer", v2_enabled=False)
+        leaky = "sk-" + "q" * 40
+        mc.write_blackboard.side_effect = RuntimeError(
+            f"PUT https://mesh/x?api_key={leaky}",
+        )
+
+        result = await update_status("done", "ok", mesh_client=mc)
+
+        assert result["update_status_failed"] is True
+        for f in ("error", "recovery_hint", "detail"):
+            assert leaky not in result[f]
+
 
 class TestCompleteTaskFailureEnvelope:
     """complete_task is the explicit "I'm done with this work" signal —
@@ -2129,3 +2150,59 @@ class TestCompleteTaskFailureEnvelope:
         assert result["complete_task_failed"] is True
         for f in ("error", "recovery_hint", "detail"):
             assert leaky not in result[f]
+
+    @pytest.mark.asyncio
+    async def test_legacy_failure_redacts_credentials(self):
+        """Codex r6: parity with the v2 redaction test on legacy path."""
+        from src.agent.builtins.coordination_tool import complete_task
+
+        mc = _make_mesh_client(agent_id="writer", v2_enabled=False)
+        mc.read_blackboard = AsyncMock(return_value={
+            "value": {"from": "strategist", "summary": "x"},
+        })
+        leaky = "sk-" + "w" * 40
+        mc.delete_blackboard.side_effect = RuntimeError(
+            f"DELETE https://mesh/bb?api_key={leaky}",
+        )
+
+        result = await complete_task(
+            "tasks/writer/ho_abc", mesh_client=mc,
+        )
+
+        assert result["complete_task_failed"] is True
+        for f in ("error", "recovery_hint", "detail"):
+            assert leaky not in result[f]
+
+
+class TestFailedTransitionEnvelopeHelper:
+    """Codex r6: the helper merges ``extras`` BEFORE the sentinel
+    keys are written, so a caller that accidentally passes
+    ``extras={"error": "..."}`` cannot shadow the directive field.
+    Pinned here so a future refactor that flips the merge order is
+    caught.
+    """
+
+    def test_extras_cannot_shadow_sentinel_keys(self):
+        from src.agent.builtins.coordination_tool import (
+            _failed_transition_envelope,
+        )
+
+        result = _failed_transition_envelope(
+            kind="test_failed",
+            detail="something broke",
+            exc=RuntimeError("oops"),
+            extras={
+                "error": "MALICIOUS — should be overwritten",
+                "recovery_hint": "MALICIOUS — should be overwritten",
+                "detail": "MALICIOUS — should be overwritten",
+                "task_id": "task_abc",
+            },
+        )
+
+        # Sentinel fields untouched.
+        assert "MUST NOT report success" in result["error"]
+        assert "DO NOT mark this work as complete" in result["recovery_hint"]
+        assert result["detail"] == "oops"
+        assert result["test_failed"] is True
+        # Non-sentinel extras flow through.
+        assert result["task_id"] == "task_abc"

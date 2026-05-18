@@ -63,9 +63,16 @@ def _failed_transition_envelope(
     chars before reaching the LLM context — HTTP-level exceptions from
     the mesh client can quote URLs with ``?api_key=...`` in the query
     string, same precaution as the wake_error path.
+
+    Codex r6: ``extras`` are merged FIRST, then sentinel fields
+    (``<kind>``, ``error``, ``recovery_hint``, ``detail``) overwrite —
+    so a future caller cannot accidentally shadow a sentinel by passing
+    e.g. ``extras={"error": "..."}``. Reserved keys are documented in
+    ``_RESERVED_ENVELOPE_KEYS`` for fast inspection.
     """
     redacted = redact_text_with_urls(str(exc))[:200]
-    envelope: dict = {
+    envelope: dict = dict(extras) if extras else {}
+    envelope.update({
         kind: True,
         "error": (
             f"{kind}: {detail} ({redacted}). The transition may not "
@@ -79,10 +86,20 @@ def _failed_transition_envelope(
             "the state partially applied."
         ),
         "detail": redacted,
-    }
-    if extras:
-        envelope.update(extras)
+    })
     return envelope
+
+
+# Keys reserved by ``_failed_transition_envelope``. Callers passing
+# ``extras`` containing any of these will see their value overwritten
+# by the helper. ``kind`` is variable, so the set lists the static
+# sentinels only — the dynamic flag (e.g. ``update_status_failed``,
+# ``complete_task_failed``) is also reserved but cannot be enumerated
+# statically. Documented here so future maintainers don't bury a
+# silent overwrite in production.
+_RESERVED_ENVELOPE_KEYS: frozenset[str] = frozenset(
+    {"error", "recovery_hint", "detail"},
+)
 
 
 @skill(
