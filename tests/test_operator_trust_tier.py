@@ -395,6 +395,71 @@ async def test_operator_publish_bypasses_can_publish(mesh_setup):
     assert resp.status_code != 403, resp.text
 
 
+@pytest.mark.asyncio
+async def test_operator_message_bypasses_can_message(mesh_setup):
+    """``/mesh/message`` accepts operator → any-target even with empty grant.
+
+    Distinct from ``/mesh/wake``: wake is the followup-lane notify path;
+    /mesh/message is the standard router-routed message. Both check
+    ``can_message``; both must bypass for operator.
+    """
+    app = mesh_setup["app"]
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test",
+    ) as client:
+        try:
+            resp = await client.post(
+                "/mesh/message",
+                json={
+                    "from_agent": "operator", "to": "seo-strategist",
+                    "type": "task_request", "payload": {"x": 1},
+                },
+                headers=_hdr(mesh_setup["tokens"]["operator"]),
+            )
+            assert resp.status_code != 403, resp.text
+        except Exception as e:  # noqa: BLE001
+            # Downstream routing requires real transport; the gate's
+            # the only thing under test here.
+            assert "403" not in str(e)
+
+
+@pytest.mark.asyncio
+async def test_operator_subscribe_bypasses_can_subscribe(mesh_setup):
+    """Subscribing operator to any topic must not 403 on the grant gate."""
+    app = mesh_setup["app"]
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test",
+    ) as client:
+        resp = await client.post(
+            "/mesh/subscribe",
+            params={"topic": "any/topic", "agent_id": "operator"},
+            headers=_hdr(mesh_setup["tokens"]["operator"]),
+        )
+    assert resp.status_code != 403, resp.text
+
+
+@pytest.mark.asyncio
+async def test_operator_route_tasks_bypasses_grant(mesh_setup):
+    """``POST /mesh/tasks`` accepts operator without can_route_tasks grant."""
+    app = mesh_setup["app"]
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test",
+    ) as client:
+        try:
+            resp = await client.post(
+                "/mesh/tasks",
+                json={
+                    "assignee": "seo-strategist",
+                    "title": "Test task",
+                    "description": "operator-routed work",
+                },
+                headers=_hdr(mesh_setup["tokens"]["operator"]),
+            )
+            assert resp.status_code != 403, resp.text
+        except Exception as e:  # noqa: BLE001
+            assert "403" not in str(e)
+
+
 # =============================================================================
 # Still gated — operator has no special pass on real-blast-radius surfaces
 # =============================================================================
@@ -420,6 +485,48 @@ async def test_operator_wallet_still_gated(mesh_setup):
         )
     # Operator's permissions do not include can_use_wallet — must 403.
     assert resp.status_code == 403
+
+
+def test_operator_still_gated_surfaces_not_in_bypass_grep(mesh_setup):
+    """Static-inspection regression: vault/credential/wallet/browser-drive
+    gates must NOT be wrapped in ``_caller_is_operator`` short-circuits.
+
+    Hitting these endpoints via the HTTP layer requires a fully-wired
+    credential vault + wallet service in the fixture, which would expand
+    the test surface beyond the trust tier. Instead, grep the source: a
+    bypass added by accident to one of these gates would show up here.
+
+    The wallet-route test above proves the principle end-to-end at the
+    HTTP layer; this test pins the static-inspection invariant for the
+    other still-gated families.
+    """
+    server_path = mesh_setup["server"].__file__
+    with open(server_path) as f:
+        source_lines = f.readlines()
+
+    # For each gated check below, walk back ~4 lines and assert the
+    # preceding scope does NOT contain ``_caller_is_operator`` — that
+    # would be the wrapping pattern used elsewhere in this PR.
+    gated_gates = [
+        "permissions.can_use_wallet(",
+        "permissions.can_use_wallet_chain(",
+        "permissions.can_access_wallet_contract(",
+        "permissions.can_manage_vault(",
+        "permissions.can_access_credential(",
+    ]
+    for gate in gated_gates:
+        gate_lines = [
+            (i, line) for i, line in enumerate(source_lines)
+            if gate in line and "def " not in line and "import " not in line
+        ]
+        assert gate_lines, f"Could not find any callsite for {gate!r}"
+        for idx, line in gate_lines:
+            # Look back 5 lines for a ``_caller_is_operator`` wrap.
+            preceding = "".join(source_lines[max(0, idx - 5):idx])
+            assert "_caller_is_operator" not in preceding, (
+                f"Unexpected operator bypass before {gate!r} at line {idx + 1}. "
+                f"Real-blast-radius gates must check operator's own grant."
+            )
 
 
 # =============================================================================
@@ -462,7 +569,14 @@ async def test_x_agent_id_operator_with_worker_token_does_not_bypass(mesh_setup)
 
 
 def test_record_denial_emits_structured_log_fields(caplog):
-    """``_record_denial`` must include caller/target/gate as structured extra."""
+    """``_record_denial`` must include caller/target/gate in both the
+    formatted message AND the structured ``extra`` dict.
+
+    JSON-mode production logs serialize the LogRecord's attributes —
+    the formatted message is human-readable, but JSON consumers depend
+    on the canonical keys ``denial_category`` / ``denial_caller`` /
+    ``denial_target`` / ``denial_gate`` being attached to the record.
+    """
     import logging
 
     server = _reload_server()
@@ -471,9 +585,8 @@ def test_record_denial_emits_structured_log_fields(caplog):
         "permission", caller="trend-scout", target="projects/x/k",
         gate="blackboard.write:can_write_blackboard",
     )
-    # The warning log line must surface the structured fields. We assert
-    # on the formatted message (which embeds caller/target/gate) so the
-    # test stays meaningful under both human and JSON log formats.
+
+    # Message-format assertion (human-readable).
     matched = [
         r for r in caplog.records
         if "mesh denial" in r.getMessage()
@@ -481,6 +594,15 @@ def test_record_denial_emits_structured_log_fields(caplog):
         and "blackboard.write" in r.getMessage()
     ]
     assert matched, [r.getMessage() for r in caplog.records]
+
+    # Structured-extra assertion (machine-readable). The ``extra=``
+    # kwarg on ``logger.warning`` sets each key as an attribute on
+    # the LogRecord, so JSON formatters pick them up directly.
+    record = matched[0]
+    assert record.denial_category == "permission"
+    assert record.denial_caller == "trend-scout"
+    assert record.denial_target == "projects/x/k"
+    assert record.denial_gate == "blackboard.write:can_write_blackboard"
 
 
 def test_record_denial_unknown_category_is_silent():

@@ -951,7 +951,9 @@ def create_mesh_app(
             return _extract_verified_agent_id(request)
         return agent_id
 
-    def _resolve_browser_target(caller_id: str, target_claim: object) -> str:
+    def _resolve_browser_target(
+        caller_id: str, target_claim: object, request: Request,
+    ) -> str:
         """Resolve the effective browser-target agent_id for self/delegation paths.
 
         - ``None``/empty/whitespace target_claim → self path (returns ``caller_id``).
@@ -976,11 +978,21 @@ def create_mesh_app(
         target = target_claim.strip()
         if not target or target == caller_id:
             return caller_id
-        if not permissions.can_message(caller_id, target):
-            raise HTTPException(
-                403,
-                "Cannot delegate browser: target is not in your can_message allowlist",
-            )
+        # Operator trust tier: operator coordinates the fleet, so its
+        # delegation reach is not gated by the per-agent can_message
+        # matrix. The target-side ``can_use_browser`` check below still
+        # fires — operator can only delegate to agents whose own grant
+        # actually enables browser access.
+        if not _caller_is_operator(caller_id, request):
+            if not permissions.can_message(caller_id, target):
+                _record_denial(
+                    "permission", caller=caller_id, target=target,
+                    gate="browser_delegate:can_message",
+                )
+                raise HTTPException(
+                    403,
+                    "Cannot delegate browser: target is not in your can_message allowlist",
+                )
         if not permissions.can_use_browser(target):
             raise HTTPException(
                 403,
@@ -1084,8 +1096,13 @@ def create_mesh_app(
     async def send_message(msg: AgentMessage, request: Request) -> dict:
         """Route a message to an agent via the mesh router."""
         msg.from_agent = _resolve_agent_id(msg.from_agent, request)
-        if not permissions.can_message(msg.from_agent, msg.to):
-            raise HTTPException(403, f"Agent {msg.from_agent} cannot message {msg.to}")
+        if not _caller_is_operator(msg.from_agent, request):
+            if not permissions.can_message(msg.from_agent, msg.to):
+                _record_denial(
+                    "permission", caller=msg.from_agent, target=msg.to,
+                    gate="message:can_message",
+                )
+                raise HTTPException(403, f"Agent {msg.from_agent} cannot message {msg.to}")
         return await router.route(msg)
 
     @app.post("/mesh/wake")
@@ -1481,8 +1498,13 @@ def create_mesh_app(
         await _check_rate_limit("api_proxy", agent_id)
         if api_request.service in _RATE_LIMITS:
             await _check_rate_limit(api_request.service, agent_id)
-        if not permissions.can_use_api(agent_id, api_request.service):
-            raise HTTPException(403, f"Agent {agent_id} cannot access {api_request.service}")
+        if not _caller_is_operator(agent_id, request):
+            if not permissions.can_use_api(agent_id, api_request.service):
+                _record_denial(
+                    "permission", caller=agent_id, target=api_request.service,
+                    gate="api:can_use_api",
+                )
+                raise HTTPException(403, f"Agent {agent_id} cannot access {api_request.service}")
         if credential_vault is None:
             return APIProxyResponse(success=False, error="No credential vault configured")
 
@@ -1577,8 +1599,13 @@ def create_mesh_app(
         """Streaming API proxy. Returns SSE stream for LLM completions."""
         agent_id = _resolve_agent_id(agent_id, request)
         await _check_rate_limit("api_proxy", agent_id)
-        if not permissions.can_use_api(agent_id, api_request.service):
-            raise HTTPException(403, f"Agent {agent_id} cannot access {api_request.service}")
+        if not _caller_is_operator(agent_id, request):
+            if not permissions.can_use_api(agent_id, api_request.service):
+                _record_denial(
+                    "permission", caller=agent_id, target=api_request.service,
+                    gate="api_stream:can_use_api",
+                )
+                raise HTTPException(403, f"Agent {agent_id} cannot access {api_request.service}")
         if credential_vault is None:
             raise HTTPException(503, "No credential vault configured")
 
@@ -2066,7 +2093,7 @@ def create_mesh_app(
         """
         caller_id = _resolve_agent_id(data.get("agent_id", ""), request)
         agent_id = _resolve_browser_target(
-            caller_id, data.get("target_agent_id") or "",
+            caller_id, data.get("target_agent_id") or "", request,
         )
 
         # Per-action gate applies to the EFFECTIVE target (`agent_id`), same
@@ -2137,7 +2164,7 @@ def create_mesh_app(
         """
         caller_id = _resolve_agent_id(data.get("agent_id", ""), request)
         agent_id = _resolve_browser_target(
-            caller_id, data.get("target_agent_id") or "",
+            caller_id, data.get("target_agent_id") or "", request,
         )
 
         # Per-action gate (mirrors ``browser_login_request`` and
@@ -2668,8 +2695,13 @@ def create_mesh_app(
         if agent_id:
             _validate_agent_id(agent_id)
             agent_id = _resolve_agent_id(agent_id, request)
-            if not permissions.can_manage_cron(agent_id):
-                raise HTTPException(403, f"Agent {agent_id} is not allowed to manage cron jobs")
+            if not _caller_is_operator(agent_id, request):
+                if not permissions.can_manage_cron(agent_id):
+                    _record_denial(
+                        "permission", caller=agent_id,
+                        gate="cron.create:can_manage_cron",
+                    )
+                    raise HTTPException(403, f"Agent {agent_id} is not allowed to manage cron jobs")
             await _check_rate_limit("cron_create", agent_id)
         schedule = data.get("schedule")
         message = data.get("message", "")
@@ -2712,8 +2744,13 @@ def create_mesh_app(
     async def update_cron_job(job_id: str, request: Request) -> dict:
         """Update a cron job by ID. Body: fields to update (schedule, enabled, etc)."""
         agent_id = _resolve_agent_id("", request)
-        if not permissions.can_manage_cron(agent_id):
-            raise HTTPException(403, f"Agent {agent_id} cannot manage cron jobs")
+        if not _caller_is_operator(agent_id, request):
+            if not permissions.can_manage_cron(agent_id):
+                _record_denial(
+                    "permission", caller=agent_id,
+                    gate="cron.update:can_manage_cron",
+                )
+                raise HTTPException(403, f"Agent {agent_id} cannot manage cron jobs")
         if cron_scheduler is None:
             raise HTTPException(503, "Cron scheduler not available")
         job = cron_scheduler.jobs.get(job_id)
@@ -2736,8 +2773,13 @@ def create_mesh_app(
     async def delete_cron_job(job_id: str, request: Request) -> dict:
         """Remove a cron job by ID."""
         agent_id = _resolve_agent_id("", request)
-        if not permissions.can_manage_cron(agent_id):
-            raise HTTPException(403, f"Agent {agent_id} cannot manage cron jobs")
+        if not _caller_is_operator(agent_id, request):
+            if not permissions.can_manage_cron(agent_id):
+                _record_denial(
+                    "permission", caller=agent_id,
+                    gate="cron.delete:can_manage_cron",
+                )
+                raise HTTPException(403, f"Agent {agent_id} cannot manage cron jobs")
         if cron_scheduler is None:
             raise HTTPException(503, "Cron scheduler not available")
         job = cron_scheduler.jobs.get(job_id)
@@ -2761,8 +2803,13 @@ def create_mesh_app(
             raise HTTPException(400, "role must be a string of at most 64 chars")
         spawned_by = _resolve_agent_id(data.get("spawned_by", "unknown"), request)
         await _check_rate_limit("spawn", spawned_by)
-        if not permissions.can_spawn(spawned_by):
-            raise HTTPException(403, f"Agent {spawned_by} is not allowed to spawn agents")
+        if not _caller_is_operator(spawned_by, request):
+            if not permissions.can_spawn(spawned_by):
+                _record_denial(
+                    "permission", caller=spawned_by,
+                    gate="spawn:can_spawn",
+                )
+                raise HTTPException(403, f"Agent {spawned_by} is not allowed to spawn agents")
         model = data.get("model", "")
         ttl = data.get("ttl", 3600)
         if not isinstance(ttl, (int, float)) or ttl < 60 or ttl > 86400:
@@ -2845,11 +2892,16 @@ def create_mesh_app(
             # Applying a fleet template creates DURABLE named agents — Task 3
             # split this off ``can_spawn`` (which is now ephemeral-only) onto
             # the new control-plane permission ``can_manage_fleet``.
-            if not permissions.can_manage_fleet(spawned_by):
-                raise HTTPException(
-                    403,
-                    f"Agent {spawned_by} is not allowed to apply fleet templates "
-                    "(requires can_manage_fleet)",
+            if not _caller_is_operator(spawned_by, request):
+                if not permissions.can_manage_fleet(spawned_by):
+                    _record_denial(
+                        "permission", caller=spawned_by,
+                        gate="fleet.apply:can_manage_fleet",
+                    )
+                    raise HTTPException(
+                        403,
+                        f"Agent {spawned_by} is not allowed to apply fleet templates "
+                        "(requires can_manage_fleet)",
                 )
 
         template_name = data.get("template", "").strip()
@@ -3083,12 +3135,17 @@ def create_mesh_app(
         # the dedicated ``can_manage_fleet`` capability.
         agent_id = _resolve_agent_id(data.get("agent_id", ""), request)
         await _check_rate_limit("spawn", agent_id)
-        if not permissions.can_manage_fleet(agent_id):
-            raise HTTPException(
-                403,
-                f"Agent {agent_id} is not allowed to create agents "
-                "(requires can_manage_fleet)",
-            )
+        if not _caller_is_operator(agent_id, request):
+            if not permissions.can_manage_fleet(agent_id):
+                _record_denial(
+                    "permission", caller=agent_id,
+                    gate="agent.create:can_manage_fleet",
+                )
+                raise HTTPException(
+                    403,
+                    f"Agent {agent_id} is not allowed to create agents "
+                    "(requires can_manage_fleet)",
+                )
 
         # Validate inputs
         name = data.get("name", "")
@@ -3274,8 +3331,13 @@ def create_mesh_app(
         """Retrieve an agent's daily logs. Permission-checked."""
         if requesting_agent:
             requesting_agent = _resolve_agent_id(requesting_agent, request)
-            if not permissions.can_message(requesting_agent, agent_id):
-                raise HTTPException(403, f"Agent {requesting_agent} cannot read history of {agent_id}")
+            if not _caller_is_operator(requesting_agent, request):
+                if not permissions.can_message(requesting_agent, agent_id):
+                    _record_denial(
+                        "permission", caller=requesting_agent, target=agent_id,
+                        gate="agent.history:can_message",
+                    )
+                    raise HTTPException(403, f"Agent {requesting_agent} cannot read history of {agent_id}")
         else:
             _require_any_auth(request)
             logger.debug("History access for %s without requesting_agent (mesh-internal)", agent_id)
@@ -3312,8 +3374,13 @@ def create_mesh_app(
         if requesting_agent:
             requesting_agent = _resolve_agent_id(requesting_agent, request)
             await _check_rate_limit("agent_profile", requesting_agent)
-            if not permissions.can_message(requesting_agent, agent_id):
-                raise HTTPException(403, f"Agent {requesting_agent} cannot read profile of {agent_id}")
+            if not _caller_is_operator(requesting_agent, request):
+                if not permissions.can_message(requesting_agent, agent_id):
+                    _record_denial(
+                        "permission", caller=requesting_agent, target=agent_id,
+                        gate="agent.profile:can_message",
+                    )
+                    raise HTTPException(403, f"Agent {requesting_agent} cannot read profile of {agent_id}")
         else:
             _require_any_auth(request)
 
@@ -6907,7 +6974,7 @@ def create_mesh_app(
         caller_id = _extract_verified_agent_id(request)
         body = await request.json()
         req_agent_id = _resolve_browser_target(
-            caller_id, body.get("target_agent_id") or "",
+            caller_id, body.get("target_agent_id") or "", request,
         )
 
         action = body.get("action", "")
@@ -7275,7 +7342,7 @@ def create_mesh_app(
         await _check_rate_limit("upload_apply", caller_id)
         body = await request.json()
         req_agent_id = _resolve_browser_target(
-            caller_id, body.get("target_agent_id") or "",
+            caller_id, body.get("target_agent_id") or "", request,
         )
 
         if not permissions.can_browser_action(req_agent_id, "upload_file"):
@@ -7605,7 +7672,7 @@ def create_mesh_app(
         caller_id = _extract_verified_agent_id(request)
         body = await request.json()
         req_agent_id = _resolve_browser_target(
-            caller_id, body.get("target_agent_id") or "",
+            caller_id, body.get("target_agent_id") or "", request,
         )
 
         if get_bool("BROWSER_DOWNLOADS_DISABLED", False, agent_id=req_agent_id):
