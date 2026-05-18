@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import secrets
 import sys
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
@@ -198,8 +197,9 @@ def main() -> None:
             try:
                 cp = await loop.memory._run_db(loop.memory.load_task_checkpoint)
                 if cp:
+                    from src.shared.trace import new_trace_id
                     from src.shared.types import TaskAssignment
-                    _resume_trace_id = f"tr_{secrets.token_hex(6)}"
+                    _resume_trace_id = new_trace_id()
                     assignment = TaskAssignment.model_validate_json(cp["assignment_json"])
                     logger.info(
                         "Auto-resuming task %s from checkpoint (iteration %d) trace=%s",
