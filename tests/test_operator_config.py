@@ -244,33 +244,23 @@ class TestOperatorConstants:
 
     def test_allowed_tools_populated(self):
         from src.cli.config import _OPERATOR_ALLOWED_TOOLS, _OPERATOR_HEARTBEAT_TOOLS
-        # PR 0 consolidated to 24, PR 5 added set_project_goal (=25),
-        # PR 1 swaps propose_edit (-1) for edit_agent + undo_change (+2) → 26.
-        # Self-cleanup PR adds cancel_pending_action + archive_audit_before (+2) → 28.
-        # PR F adds list_pending + vault_list (+2) → 30.
-        # Internet-access PR adds http_request + web_search (+2) → 32 (gated
-        # by the can_use_internet permission + runtime filter; see
-        # tests/test_operator_internet_access.py).
-        # Project→team rename PR 2 adds 8 canonical *_team tools alongside
-        # the legacy *_project entries → 40.
-        # Seam follow-up Fix 1 (this PR) adds 8 missing operator-gated
-        # tools: read_agent_config + list_peer_artifacts + read_peer_artifact
-        # + list_available_models + memory_save + memory_search
-        # + update_workspace + read_file → 48. (propose_edit was originally
-        # in this set but was retired in PR #927.)
-        # Work-summaries backend PR adds compose_work_summary → 49.
-        assert len(_OPERATOR_ALLOWED_TOOLS) == 49
+        # Phase 1 of the back-compat cleanup retired the propose/confirm
+        # config flow and the legacy ``*_project`` operator tools. The
+        # post-cleanup allowlist is checked by membership rather than
+        # a magic number so additions like ``compose_work_summary`` from
+        # the work-summaries backend don't require recounting.
+        assert _OPERATOR_ALLOWED_TOOLS  # non-empty
         assert len(_OPERATOR_HEARTBEAT_TOOLS) == 4
         # Heartbeat tools should be a subset of allowed tools
         assert set(_OPERATOR_HEARTBEAT_TOOLS).issubset(set(_OPERATOR_ALLOWED_TOOLS))
         # Consolidated product tools (read + lifecycle) must be present.
         for tool in (
-            "inspect_projects", "inspect_agents",
+            "inspect_teams", "inspect_agents",
             "list_agent_queue", "get_team_outputs",
-            "summarize_project_progress",
-            "manage_project", "manage_agent", "manage_task",
+            "summarize_team_progress",
+            "manage_team", "manage_agent", "manage_task",
             # PR 5 — north-star setter is no-confirmation meta-config.
-            "set_project_goal",
+            "set_team_goal",
             # Self-cleanup — operator can clear stale pending actions
             # and prune the audit log itself.
             "list_pending", "cancel_pending_action", "archive_audit_before",
@@ -287,24 +277,30 @@ class TestOperatorConstants:
             "archive_project", "delete_project",
             "archive_agent", "delete_agent",
             "reroute_task", "cancel_task", "retry_failed_task",
+            # Phase 1 back-compat deletions — propose/confirm flow and
+            # the renamed-stub ``*_project`` tools are gone.
+            "propose_edit", "confirm_edit",
+            "create_project", "add_agents_to_project",
+            "remove_agents_from_project", "update_project_context",
+            "set_project_goal", "manage_project",
         ):
             assert tool not in _OPERATOR_ALLOWED_TOOLS
 
     def test_pr1_edit_tools_present(self):
         """PR 1 — edit_agent + undo_change in allowlist.
 
-        confirm_edit is kept as a deprecated stub for back-compat with
-        in-flight LLM conversations that may still emit it. propose_edit
-        was retired in PR #927 (no longer registered as a @skill, so
-        listing it in the allowlist would be a dangling reference).
+        propose_edit + confirm_edit were retired by Phase 1 of the
+        back-compat cleanup (config edits now apply immediately via
+        edit_agent with a built-in undo receipt, so there is nothing
+        to propose or confirm). Neither name is registered as a
+        @skill anymore.
         """
         from src.cli.config import _OPERATOR_ALLOWED_TOOLS
         assert "edit_agent" in _OPERATOR_ALLOWED_TOOLS
         assert "undo_change" in _OPERATOR_ALLOWED_TOOLS
-        # confirm_edit kept as a deprecated stub.
-        assert "confirm_edit" in _OPERATOR_ALLOWED_TOOLS
-        # propose_edit retired in #927 — must NOT be in the allowlist.
+        # propose/confirm retired — neither must appear in the allowlist.
         assert "propose_edit" not in _OPERATOR_ALLOWED_TOOLS
+        assert "confirm_edit" not in _OPERATOR_ALLOWED_TOOLS
 
     def test_seam_followup_fix1_missing_tools_added(self):
         """Seam follow-up Fix 1: 9 operator-gated tools that were missing
@@ -428,11 +424,12 @@ class TestOperatorConstants:
             _PLAYBOOK_TEAM_BUILD,
         )
 
-        # PR 1 — playbook now references edit_agent for soft fields and
-        # confirm_edit for the hard-field follow-up step.
+        # PR 1 — playbook references edit_agent for all config edits
+        # (the propose/confirm flow was retired in Phase 1 of the
+        # back-compat cleanup; edits apply immediately with an undo
+        # receipt, so confirm_edit no longer appears in any playbook).
         assert "edit_agent" in _PLAYBOOK_TEAM_BUILD
         assert "edit_agent" in _PLAYBOOK_EDIT
-        assert "confirm_edit" in _PLAYBOOK_EDIT
         assert "inspect_agents" in _PLAYBOOK_MONITOR
         assert "request_credential" in _PLAYBOOK_CREDENTIALS
 

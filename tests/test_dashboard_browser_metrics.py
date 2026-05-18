@@ -8,8 +8,9 @@ here so we'd notice if the contract drifts).
 
 Also covers Phase 7 §10.2: the env-var read at
 ``src/browser/__main__._resolve_max_browsers`` honors
-``OPENLEGION_BROWSER_MAX_CONCURRENT`` with the legacy ``MAX_BROWSERS``
-fallback and a default of 5.
+``OPENLEGION_BROWSER_MAX_CONCURRENT`` with a default of 5. The legacy
+``MAX_BROWSERS`` fallback was removed in the Phase 1 back-compat
+cleanup.
 """
 
 from __future__ import annotations
@@ -626,23 +627,15 @@ class TestMaxConcurrentEnvVar:
         # against the patched environment.
         with mock.patch.dict(os.environ, {}, clear=False), self._patch_no_memory():
             os.environ.pop("OPENLEGION_BROWSER_MAX_CONCURRENT", None)
-            os.environ.pop("MAX_BROWSERS", None)
             from src.browser.__main__ import _resolve_max_browsers
             assert _resolve_max_browsers() == 5
 
     def test_canonical_var_wins(self):
         with mock.patch.dict(os.environ, {
             "OPENLEGION_BROWSER_MAX_CONCURRENT": "12",
-            "MAX_BROWSERS": "3",
         }), self._patch_no_memory():
             from src.browser.__main__ import _resolve_max_browsers
             assert _resolve_max_browsers() == 12
-
-    def test_legacy_var_used_when_canonical_unset(self):
-        with mock.patch.dict(os.environ, {"MAX_BROWSERS": "9"}, clear=False), self._patch_no_memory():
-            os.environ.pop("OPENLEGION_BROWSER_MAX_CONCURRENT", None)
-            from src.browser.__main__ import _resolve_max_browsers
-            assert _resolve_max_browsers() == 9
 
     def test_clamped_to_min(self):
         with mock.patch.dict(os.environ, {
@@ -662,17 +655,9 @@ class TestMaxConcurrentEnvVar:
         with mock.patch.dict(os.environ, {
             "OPENLEGION_BROWSER_MAX_CONCURRENT": "not-a-number",
         }), self._patch_no_memory():
-            os.environ.pop("MAX_BROWSERS", None)
             from src.browser.__main__ import _resolve_max_browsers
-            # flags.get_int falls back to its default (legacy) which is 5
-            # via the autodetect fallback when MAX_BROWSERS is also absent.
-            assert _resolve_max_browsers() == 5
-
-    def test_garbage_legacy_var_does_not_crash_import(self):
-        with mock.patch.dict(os.environ, {"MAX_BROWSERS": "not-a-number"}), self._patch_no_memory():
-            os.environ.pop("OPENLEGION_BROWSER_MAX_CONCURRENT", None)
-            from src.browser.__main__ import _resolve_max_browsers
-
+            # flags.get_int falls back to its default which is 5 via the
+            # autodetect fallback when the canonical env is unparseable.
             assert _resolve_max_browsers() == 5
 
     def test_env_var_documented_in_known_flags(self):

@@ -1,4 +1,4 @@
-"""Tests for operator tools: confirm_edit, observations, history, create, projects."""
+"""Tests for operator tools: observations, history, create, projects."""
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -9,42 +9,7 @@ import pytest
 @pytest.fixture(autouse=True)
 def _set_operator_env(monkeypatch):
     """Operator tools require ALLOWED_TOOLS to be set (defence-in-depth guard)."""
-    monkeypatch.setenv("ALLOWED_TOOLS", "edit_agent,confirm_edit")
-
-
-@pytest.mark.asyncio
-async def test_confirm_edit_is_deprecated_noop():
-    """confirm_edit is now a no-op deprecation stub — returns applied=False
-    with a deprecation_notice regardless of arguments. The legacy provenance
-    gate has been removed (config edits now apply immediately via edit_agent
-    with a built-in undo receipt, so there is nothing to confirm)."""
-    from src.agent.builtins.operator_tools import confirm_edit
-
-    mc = MagicMock()
-    mc.confirm_config_change = AsyncMock()  # should NEVER be called
-    result = await confirm_edit("abc", mesh_client=mc, _messages=None)
-    assert result["success"] is True
-    assert result["applied"] is False
-    notice = result["deprecation_notice"].lower()
-    assert "no-op" in notice or "deprecat" in notice
-    mc.confirm_config_change.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_confirm_edit_deprecation_notice_regardless_of_messages():
-    """confirm_edit no-ops the same way whether or not _messages is set
-    (no provenance check anymore)."""
-    from src.agent.builtins.operator_tools import confirm_edit
-
-    mc = MagicMock()
-    mc.confirm_config_change = AsyncMock()
-    messages = [{"role": "user", "content": "yes", "_origin": "user"}]
-    result = await confirm_edit("abc", mesh_client=mc, _messages=messages)
-    assert result["success"] is True
-    assert result["applied"] is False
-    notice = result["deprecation_notice"].lower()
-    assert "no-op" in notice or "deprecat" in notice
-    mc.confirm_config_change.assert_not_awaited()
+    monkeypatch.setenv("ALLOWED_TOOLS", "edit_agent")
 
 
 # ── _last_message_is_user_origin tests ────────────────────
@@ -553,86 +518,7 @@ async def test_create_agent_conflict():
     assert "already exists" in result["error"]
 
 
-# ── Legacy project_* tools — PR 3 sunset stubs ───────────────
-#
-# After PR 3 the eight legacy ``*_project`` tools no longer reach the
-# mesh; they return a recoverable ``{"error": "renamed", ...}`` so a
-# stale LLM prompt fails fast and retries with the canonical ``*_team``
-# name. The exhaustive per-tool behavior tests landed in PR 2 are
-# preserved on the ``*_team`` siblings; here we assert only the stub
-# shape so future regressions on the redirect surface are caught.
-
-
-_LEGACY_REDIRECTS = [
-    ("inspect_projects", "inspect_teams"),
-    ("create_project", "create_team"),
-    ("add_agents_to_project", "add_agents_to_team"),
-    ("remove_agents_from_project", "remove_agents_from_team"),
-    ("update_project_context", "update_team_context"),
-    ("set_project_goal", "set_team_goal"),
-    ("summarize_project_progress", "summarize_team_progress"),
-    ("manage_project", "manage_team"),
-]
-
-
-@pytest.mark.parametrize("legacy, canonical", _LEGACY_REDIRECTS)
-@pytest.mark.asyncio
-async def test_legacy_project_tool_returns_renamed_stub(legacy, canonical):
-    """Each retired project_* tool returns the standard sunset shape."""
-    import src.agent.builtins.operator_tools as ot
-
-    fn = getattr(ot, legacy)
-    # Stubs accept anything positionally/keyword and ignore it; pass a
-    # representative payload so the test mirrors a real call.
-    result = await fn(
-        "ignored",
-        "also ignored",
-        mesh_client=object(),
-    )
-    assert result == {
-        "error": "renamed",
-        "new_tool": canonical,
-        "note": (
-            f"Use {canonical} instead. This deprecated alias was "
-            "removed in PR 3 of the project→team rename."
-        ),
-    }
-
-
 # ── PR 1 — edit_agent and undo_change ───────────────────────
-
-
-@pytest.mark.asyncio
-async def test_confirm_edit_returns_deprecation_stub():
-    """Pin the EXACT no-op response shape of the deprecated confirm_edit stub.
-
-    confirm_edit was retired alongside the propose+confirm config flow
-    (config edits now apply immediately via edit_agent and emit an undo
-    receipt). The skill is kept registered so in-flight LLM conversations
-    that still emit it don't crash. This test locks the response so a
-    future cleanup pass can't silently drop a key or alter the message —
-    the contract is what an in-flight conversation will observe.
-    """
-    from src.agent.builtins.operator_tools import confirm_edit
-
-    mc = MagicMock()
-    mc.confirm_config_change = AsyncMock()
-    result = await confirm_edit("any-change-id", mesh_client=mc, _messages=None)
-
-    # Exact response shape — three keys, nothing more.
-    assert set(result.keys()) == {"success", "applied", "deprecation_notice"}
-    assert result["success"] is True
-    assert result["applied"] is False
-    # Pin the exact deprecation_notice string. If the wording needs to
-    # change, update this test deliberately so the contract change is
-    # reviewed.
-    assert result["deprecation_notice"] == (
-        "confirm_edit is a no-op. Config edits now apply immediately "
-        "when you call edit_agent; the user sees an undo receipt with a "
-        "5–30 minute revert window. Don't call confirm_edit anymore."
-    )
-    # No mesh round-trip happens — the stub returns synchronously.
-    mc.confirm_config_change.assert_not_awaited()
 
 
 @pytest.mark.asyncio

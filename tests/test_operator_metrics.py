@@ -134,14 +134,20 @@ class TestSystemMetrics:
 
     def test_plan_limits(self, metrics_app):
         client = metrics_app["client"]
-        # Set env vars for plan limits
+        # Set env vars for plan limits. The legacy
+        # ``OPENLEGION_MAX_PROJECTS`` env var was removed in the Phase 1
+        # back-compat cleanup; the response still carries a
+        # ``max_projects`` key alongside ``max_teams`` for consumer
+        # back-compat.
         with pytest.MonkeyPatch.context() as mp:
             mp.setenv("OPENLEGION_MAX_AGENTS", "10")
-            mp.setenv("OPENLEGION_MAX_PROJECTS", "5")
+            mp.setenv("OPENLEGION_MAX_TEAMS", "5")
             resp = client.get("/mesh/system/metrics")
 
         data = resp.json()
         assert data["plan_limits"]["max_agents"] == 10
+        assert data["plan_limits"]["max_teams"] == 5
+        # Legacy alias retained on the response shape.
         assert data["plan_limits"]["max_projects"] == 5
         assert data["plan_limits"]["current_agents"] == 2
 
