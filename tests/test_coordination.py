@@ -99,11 +99,21 @@ class TestHandOff:
         """Operator handoffs route to the global namespace (project=None)
         on ``create_task``. Codex r1 finding on the legacy-removal PR:
         the v2 collapse needs explicit coverage that the operator's
-        fleet-global scope is preserved end-to-end."""
+        fleet-global scope is preserved end-to-end.
+
+        Codex r2: this pin must NOT also set ``scope: "global"`` on the
+        operator's registry entry — that would let the routing union
+        succeed via arm B (``target_is_global``) even if arm A (the
+        literal-name check) is dropped. The whole point is to pin arm
+        A independently. The operator entry here has an explicit
+        non-global project value so arm B is FALSE, forcing arm A to
+        carry the test.
+        """
         from src.agent.builtins.coordination_tool import hand_off
 
         mc = _make_mesh_client(agent_id="strategist")
-        mc.list_agents.return_value = {"operator": {"scope": "global"}}
+        # NB: no ``scope: "global"`` here — arm A independence relies on it.
+        mc.list_agents.return_value = {"operator": {"project": "ops"}}
 
         result = await hand_off(
             to="operator",
