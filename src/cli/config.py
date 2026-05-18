@@ -527,7 +527,7 @@ def _add_agent_permissions(name: str, permissions: dict | None = None) -> None:
         # permissions.json instead of being silently dropped.
         for key in (
             "can_use_browser", "can_spawn", "can_manage_cron",
-            "can_manage_fleet", "can_manage_teams", "can_manage_projects", "can_edit_agent_config",
+            "can_manage_fleet", "can_manage_teams", "can_edit_agent_config",
             "can_view_fleet_metrics", "can_route_tasks",
             "can_request_user_credentials",
         ):
@@ -1765,10 +1765,6 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
         if not op_perms.get("can_manage_teams", False):
             op_perms["can_manage_teams"] = True
             needs_update = True
-        if not op_perms.get("can_manage_projects", False):
-            # Back-compat alias — kept until PR 3.
-            op_perms["can_manage_projects"] = True
-            needs_update = True
         if not op_perms.get("can_edit_agent_config", False):
             op_perms["can_edit_agent_config"] = True
             needs_update = True
@@ -1833,11 +1829,8 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
             "can_publish": ["*"],
             "can_subscribe": ["*"],
             # Control-plane permissions (Task 3) — operator gets all six.
-            # ``can_manage_teams`` is canonical (PR 2 rename);
-            # ``can_manage_projects`` retained as a back-compat alias.
             "can_manage_fleet": True,
             "can_manage_teams": True,
-            "can_manage_projects": True,
             "can_edit_agent_config": True,
             "can_view_fleet_metrics": True,
             "can_route_tasks": True,

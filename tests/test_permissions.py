@@ -887,7 +887,7 @@ class TestControlPlanePermissions:
 
     _CONTROL_PLANE_FIELDS = (
         "can_manage_fleet",
-        "can_manage_projects",
+        "can_manage_teams",
         "can_edit_agent_config",
         "can_view_fleet_metrics",
         "can_route_tasks",
