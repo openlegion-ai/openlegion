@@ -4497,6 +4497,28 @@ def create_dashboard_router(
             _create_project(name, description=description, members=members)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
+        # Real-time cron lifecycle: schedule the daily work-summary
+        # for the newly-created team. Without this, dashboard-created
+        # teams went without a live cron until the next mesh restart
+        # caught them in reconcile (codex r4 P2). Mirrors the mesh
+        # direct-create path's metadata read pattern so a future
+        # initial-settings enhancement Just Works on both surfaces.
+        if cron_scheduler is not None:
+            try:
+                from src.cli.config import _load_projects as _load_projects_for_cron
+                persisted = _load_projects_for_cron().get(name) or {}
+                _custom_schedule = (
+                    (persisted.get("settings") or {}).get("summary_schedule")
+                )
+                cron_scheduler.ensure_summary_job(
+                    scope_kind="team", scope_id=name,
+                    schedule=_custom_schedule,
+                )
+            except Exception as e:
+                logger.warning(
+                    "ensure_summary_job on dashboard team-create %s failed: %s",
+                    name, e,
+                )
         _emit_team_event(
             "project_created", agent="operator",
             data={
