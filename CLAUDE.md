@@ -73,7 +73,7 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 | `transport.py` | Transport ABC → HttpTransport / SandboxTransport |
 | `credentials.py` | Two-tier credential vault (SYSTEM_*/CRED_*) + LLM API proxy. OpenAI OAuth support. |
 | `permissions.py` | Per-agent ACL enforcement (glob patterns, deny-all default). `can_spawn`, `can_manage_cron`, `can_browser_action`. `KNOWN_BROWSER_ACTIONS` frozenset (mesh-side input validator; rejects typos with HTTP 400). `browser_actions: list[str] \| None` on `AgentPermissions`: `None` = all known actions allowed (default), `["*"]` = explicit allow-all, `[]` = deny-all, specific list = opt-out narrowing. |
-| `lanes.py` | Per-agent FIFO task queues (followup/steer/collect modes) |
+| `lanes.py` | Per-agent FIFO task queues (followup/steer modes) |
 | `health.py` | Health monitor with auto-restart and rate limiting |
 | `costs.py` | Per-agent cost tracking + budget enforcement (SQLite) |
 | `cron.py` | Persistent cron scheduler with heartbeat probes. `_UPDATABLE_FIELDS` frozenset allowlist. |

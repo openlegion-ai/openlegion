@@ -1556,7 +1556,7 @@ class TestDashboardQueues:
 
     def test_queues_with_data(self):
         self.components["lane_manager"].get_status.return_value = {
-            "alpha": {"queued": 2, "pending": 1, "collected": 0, "busy": True},
+            "alpha": {"queued": 2, "pending": 1, "busy": True},
         }
         resp = self.client.get("/dashboard/api/queues")
         data = resp.json()

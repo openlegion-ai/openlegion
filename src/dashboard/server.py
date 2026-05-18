@@ -5035,7 +5035,7 @@ def create_dashboard_router(
         queues = {}
         for agent_id in agent_registry:
             queues[agent_id] = lane_status.get(agent_id, {
-                "queued": 0, "pending": 0, "collected": 0, "busy": False,
+                "queued": 0, "pending": 0, "busy": False,
             })
         # Include any lanes for agents not in registry (shouldn't happen, but safe)
         for agent_id, status in lane_status.items():

@@ -72,8 +72,8 @@ def metrics_app(tmp_path, monkeypatch):
     # Lane manager mock
     lane_manager = MagicMock()
     lane_manager.get_status.return_value = {
-        "alpha": {"queued": 2, "busy": True, "pending": 0, "collected": 0},
-        "beta": {"queued": 0, "busy": False, "pending": 0, "collected": 0},
+        "alpha": {"queued": 2, "busy": True, "pending": 0},
+        "beta": {"queued": 0, "busy": False, "pending": 0},
     }
 
     app = server_module.create_mesh_app(

@@ -1686,7 +1686,7 @@ def ext_api_components(tmp_path, monkeypatch):
 
     lane_manager = MagicMock()
     lane_manager.get_status.return_value = {
-        "card-agent": {"queued": 0, "pending": 0, "collected": 0, "busy": False},
+        "card-agent": {"queued": 0, "pending": 0, "busy": False},
     }
 
     app = create_mesh_app(

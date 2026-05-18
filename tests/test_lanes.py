@@ -3,8 +3,7 @@
 Covers:
 - Followup: basic dispatch, serial per agent, parallel across agents
 - Steer: calls steer_fn, falls back to followup, steer to idle agent
-- Collect: single idle dispatch, batching when busy, SILENT_REPLY_TOKEN
-- Status: includes collected count and busy flag
+- Status: queue depth and busy flag
 - Stop: cancels workers cleanly
 """
 
@@ -224,95 +223,12 @@ async def test_steer_fn_exception_falls_back_to_followup():
     assert result == "dispatched"
 
 
-# ── Collect mode ─────────────────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_collect_single_idle_dispatches_normally():
-    """Collect when idle dispatches immediately like followup."""
-    dispatch = AsyncMock(return_value="immediate")
-    lm = LaneManager(dispatch_fn=dispatch)
-
-    result = await lm.enqueue("agent1", "msg", mode="collect")
-    assert result == "immediate"
-
-
-@pytest.mark.asyncio
-async def test_collect_batches_when_busy():
-    """Collect returns SILENT_REPLY_TOKEN for secondary callers when agent is busy."""
-    dispatch_event = asyncio.Event()
-    dispatch_done = asyncio.Event()
-
-    async def blocking_dispatch(agent: str, message: str) -> str:
-        dispatch_event.set()
-        await dispatch_done.wait()
-        return f"done:{message}"
-
-    lm = LaneManager(dispatch_fn=blocking_dispatch)
-
-    # Start a followup task to make agent busy
-    task1 = asyncio.create_task(lm.enqueue("agent1", "primary"))
-    await dispatch_event.wait()  # Wait until dispatch is running
-
-    # Now agent is busy — collect should return SILENT_REPLY_TOKEN
-    result = await lm.enqueue("agent1", "batched1", mode="collect")
-    assert result == SILENT_REPLY_TOKEN
-
-    result2 = await lm.enqueue("agent1", "batched2", mode="collect")
-    assert result2 == SILENT_REPLY_TOKEN
-
-    # Release the first task
-    dispatch_done.set()
-    primary_result = await task1
-    assert primary_result == "done:primary"
-
-    # The flushed collect buffer should have created a combined task
-    # Wait for the worker to process it
-    await asyncio.sleep(0.1)
-
-
-@pytest.mark.asyncio
-async def test_collect_combined_message_format():
-    """Collected messages are combined with [Message N] format."""
-    captured_messages = []
-    dispatch_event = asyncio.Event()
-    dispatch_done = asyncio.Event()
-
-    async def capturing_dispatch(agent: str, message: str) -> str:
-        captured_messages.append(message)
-        if not dispatch_event.is_set():
-            dispatch_event.set()
-            await dispatch_done.wait()
-        return "ok"
-
-    lm = LaneManager(dispatch_fn=capturing_dispatch)
-
-    # Start a task to make agent busy
-    task1 = asyncio.create_task(lm.enqueue("agent1", "primary"))
-    await dispatch_event.wait()
-
-    # Collect two messages
-    await lm.enqueue("agent1", "msg A", mode="collect")
-    await lm.enqueue("agent1", "msg B", mode="collect")
-
-    # Release primary task — flush will create combined message
-    dispatch_done.set()
-    await task1
-    await asyncio.sleep(0.1)
-
-    # The combined message should have been dispatched
-    assert len(captured_messages) >= 2
-    combined = captured_messages[1]
-    assert "[Message 1]: msg A" in combined
-    assert "[Message 2]: msg B" in combined
-
-
 # ── Status ───────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_status_includes_collected_and_busy():
-    """Status includes collected count and busy flag."""
+async def test_status_reports_busy_and_queue_depth():
+    """Status reports busy flag and queue depth per agent."""
     dispatch_event = asyncio.Event()
     dispatch_done = asyncio.Event()
 
@@ -329,12 +245,10 @@ async def test_status_includes_collected_and_busy():
     status = lm.get_status()
     assert "agent1" in status
     assert status["agent1"]["busy"] is True
-    assert "collected" in status["agent1"]
-
-    # Collect a message while busy
-    await lm.enqueue("agent1", "extra", mode="collect")
-    status = lm.get_status()
-    assert status["agent1"]["collected"] == 1
+    assert status["agent1"]["queued"] == 0
+    assert status["agent1"]["pending"] == 1
+    # collect mode removed — no collected key should appear
+    assert "collected" not in status["agent1"]
 
     dispatch_done.set()
     await task1

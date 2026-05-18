@@ -77,7 +77,7 @@ The mesh host runs on the user's machine as a single FastAPI process. It is the 
 | `health.py` | Health monitor with auto-restart (`MAX_FAILURES=3`, `RESTART_LIMIT=3` per `RESTART_WINDOW=3600s`) and exponential backoff. |
 | `costs.py` | Per-agent LLM cost tracking and post-hoc budget warnings (`data/costs.db`, SQLite WAL). |
 | `cron.py` | Persistent cron scheduler with heartbeat probes. Accepts 5-field cron or `every N[s/m/h/d]`. |
-| `lanes.py` | Per-agent FIFO task queues with three modes: `followup` (default), `steer` (inject into running chat), `collect` (buffer while busy, drain on idle). Auto-notify forwards results back via `MessageOrigin`. |
+| `lanes.py` | Per-agent FIFO task queues with two modes: `followup` (default), `steer` (inject into running chat). Auto-notify forwards results back via `MessageOrigin`. |
 | `failover.py` | Model health tracking and failover chains (in-memory). |
 | `webhooks.py` | Named webhook endpoints (sanitized payloads, 1MB body size limit, optional HMAC). |
 | `traces.py` | Request tracing + grouped summaries. Uses `busy_timeout=5000` (lower than the 30000 used elsewhere). |
@@ -267,7 +267,7 @@ mounted read-only into member containers).
 User -> CLI/Channel/Dashboard -> Agent /task endpoint
   (CLI talks directly; channels and dashboard funnel through the mesh
    for routing/permission/origin stamping, then dispatch via LaneManager)
-  LaneManager -> followup/steer/collect mode -> agent /task or /chat/steer
+  LaneManager -> followup/steer mode -> agent /task or /chat/steer
   Agent: load context -> LLM call (via mesh proxy) -> tool execution -> iterate
   Agent -> result via MessageOrigin -> auto-notify back to originating channel
 ```
