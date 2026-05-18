@@ -2163,6 +2163,30 @@ async def test_heartbeat_skips_when_no_rules():
 
 
 @pytest.mark.asyncio
+async def test_heartbeat_dispatch_handles_missing_file():
+    """Lazy-create contract: missing HEARTBEAT.md must dispatch like empty.
+
+    After the lazy-bootstrap refactor, ``load_heartbeat_rules()`` returns
+    ``""`` (not a "# Heartbeat Rules\n" stub) when no file exists on disk.
+    ``_is_heartbeat_empty("")`` must still treat that as "no rules",
+    fire the ``no_heartbeat_rules`` skip without crashing, and never
+    reach the LLM. This pins the boundary so a future reader that grows
+    a strict-existence check can't silently break agents created after
+    the lazy-bootstrap change.
+    """
+    loop = _make_loop()
+    loop.workspace = MagicMock()
+    # Simulate the missing-file state — load_heartbeat_rules returns "".
+    loop.workspace.load_heartbeat_rules = MagicMock(return_value="")
+    loop._fetch_goals = AsyncMock(return_value=None)
+
+    result = await loop.execute_heartbeat("Check stuff")
+    assert result["skipped"] is True
+    assert result["reason"] == "no_heartbeat_rules"
+    loop.llm.chat.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_heartbeat_force_llm_bypasses_no_heartbeat_rules_skip():
     """Bug 6 (codex P2 r2): force_llm=True must reach the LLM even with empty rules.
 

@@ -44,9 +44,18 @@ _SCAFFOLD_FILES: dict[str, str] = {
     "SOUL.md": "# Identity\n",
     "USER.md": "# User Context\n",
     "MEMORY.md": "# Long-Term Memory\n",
-    "HEARTBEAT.md": "# Heartbeat Rules\n",
     "INTERFACE.md": "# Interface\n",
 }
+# HEARTBEAT.md is intentionally NOT bootstrapped. Most agents never write
+# heartbeat rules — leaving the file absent (vs. empty) keeps the workspace
+# directory clean and avoids signalling "this agent has rules" when it
+# doesn't. Readers (loop._is_heartbeat_empty, workspace.load_heartbeat_rules,
+# /heartbeat-context, /workspace listing) all treat missing identically to
+# empty. The file is created lazily on first write — via either
+# ``edit_agent(field="heartbeat")`` (mesh-side PUT /workspace/HEARTBEAT.md),
+# the ``update_workspace`` agent tool, or the dashboard editor. Templates
+# that ship explicit heartbeat rules still seed the file via
+# ``initial_heartbeat`` below.
 
 _MAX_FILE_SIZE = 200_000
 
@@ -308,13 +317,6 @@ class WorkspaceManager:
                         + "\n"
                     )
                     path.write_text(content)
-                elif filename == "HEARTBEAT.md" and self._initial_heartbeat:
-                    content = (
-                        "# Heartbeat Rules\n\n"
-                        + self._initial_heartbeat.strip()
-                        + "\n"
-                    )
-                    path.write_text(content)
                 elif filename == "INTERFACE.md" and self._initial_interface:
                     content = (
                         "# Interface\n\n"
@@ -325,6 +327,18 @@ class WorkspaceManager:
                 else:
                     path.write_text(default_content)
                 logger.info(f"Created {filename}")
+
+        # HEARTBEAT.md: lazy-create. Only seed when a template supplied
+        # explicit rules; otherwise leave the file absent until first edit.
+        # See the _SCAFFOLD_FILES comment for the rationale.
+        heartbeat_path = self.root / self.HEARTBEAT_FILE
+        if not heartbeat_path.exists() and self._initial_heartbeat:
+            heartbeat_path.write_text(
+                "# Heartbeat Rules\n\n"
+                + self._initial_heartbeat.strip()
+                + "\n"
+            )
+            logger.info("Created %s (seeded from template)", self.HEARTBEAT_FILE)
 
     # ── Reading ──────────────────────────────────────────────
 

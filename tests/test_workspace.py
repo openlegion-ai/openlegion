@@ -30,10 +30,27 @@ class TestWorkspaceScaffold:
         assert (root / "SOUL.md").exists()
         assert (root / "USER.md").exists()
         assert (root / "MEMORY.md").exists()
-        assert (root / "HEARTBEAT.md").exists()
         assert (root / "INTERFACE.md").exists()
+        # HEARTBEAT.md is lazy-created — see test_new_agent_has_no_heartbeat_file
+        assert not (root / "HEARTBEAT.md").exists()
         assert (root / "memory").is_dir()
         assert (root / "learnings").is_dir()
+
+    def test_new_agent_has_no_heartbeat_file(self):
+        """Pin the lazy-create contract: HEARTBEAT.md must NOT be bootstrapped.
+
+        Most agents never write heartbeat rules. Creating an empty file
+        signals "this agent has rules" when it doesn't, clutters the
+        workspace listing, and forces every reader to handle the empty
+        case anyway. The file is created lazily on first write.
+        """
+        root = Path(self._tmpdir)
+        assert not (root / "HEARTBEAT.md").exists()
+        # Re-instantiating must not create it either (no eager bootstrap).
+        WorkspaceManager(workspace_dir=self._tmpdir)
+        assert not (root / "HEARTBEAT.md").exists()
+        # Readers degrade gracefully on missing file
+        assert self.ws.load_heartbeat_rules() == ""
 
     def test_scaffold_preserves_existing_files(self):
         root = Path(self._tmpdir)
@@ -601,6 +618,13 @@ class TestLearnings:
         assert new_lines < original_lines
 
     def test_load_heartbeat_rules(self):
+        # No HEARTBEAT.md on a fresh workspace — lazy-create contract.
+        # See TestHeartbeatFile.test_load_heartbeat_rules_missing_file_returns_empty.
+        assert self.ws.load_heartbeat_rules() == ""
+        # Write some rules; reload reflects them.
+        (Path(self._tmpdir) / "HEARTBEAT.md").write_text(
+            "# Heartbeat Rules\n- ping inbox",
+        )
         rules = self.ws.load_heartbeat_rules()
         assert "Heartbeat Rules" in rules
 
@@ -631,12 +655,17 @@ class TestPerAgentSoul:
         assert "# Identity" in content
 
     def test_all_identity_files_scaffolded(self):
-        """All identity/workspace files are created with default content."""
+        """All identity/workspace files (sans HEARTBEAT.md) get default content.
+
+        HEARTBEAT.md is intentionally excluded — see
+        test_new_agent_has_no_heartbeat_file for the lazy-create rationale.
+        """
         root = Path(self._tmpdir)
-        for filename in ("SOUL.md", "INSTRUCTIONS.md", "USER.md", "MEMORY.md", "HEARTBEAT.md", "INTERFACE.md"):
+        for filename in ("SOUL.md", "INSTRUCTIONS.md", "USER.md", "MEMORY.md", "INTERFACE.md"):
             assert (root / filename).exists(), f"{filename} not scaffolded"
             content = (root / filename).read_text()
             assert content.strip(), f"{filename} has empty scaffold"
+        assert not (root / "HEARTBEAT.md").exists()
 
 
 class TestHeartbeatFile:
@@ -647,11 +676,27 @@ class TestHeartbeatFile:
     def teardown_method(self):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
-    def test_heartbeat_scaffold(self):
+    def test_heartbeat_not_scaffolded(self):
+        """HEARTBEAT.md is lazy-created — no file present on a fresh workspace."""
         root = Path(self._tmpdir)
+        assert not (root / "HEARTBEAT.md").exists()
+
+    def test_first_heartbeat_write_creates_file(self):
+        """First write via update_file auto-creates HEARTBEAT.md.
+
+        This is the dashboard / edit_agent / update_workspace tool path:
+        no eager bootstrap, but the very first heartbeat edit must succeed
+        without a separate "initialize" step.
+        """
+        root = Path(self._tmpdir)
+        assert not (root / "HEARTBEAT.md").exists()
+        result = self.ws.update_file(
+            "HEARTBEAT.md", "# My Rules\n- Check inbox every hour",
+        )
+        assert result.get("updated") is True
         assert (root / "HEARTBEAT.md").exists()
-        content = (root / "HEARTBEAT.md").read_text()
-        assert "Heartbeat Rules" in content
+        rules = self.ws.load_heartbeat_rules()
+        assert "Check inbox every hour" in rules
 
     def test_custom_heartbeat_rules(self):
         root = Path(self._tmpdir)
@@ -659,6 +704,18 @@ class TestHeartbeatFile:
         ws = WorkspaceManager(workspace_dir=self._tmpdir)
         rules = ws.load_heartbeat_rules()
         assert "Check email" in rules
+
+    def test_load_heartbeat_rules_missing_file_returns_empty(self):
+        """load_heartbeat_rules returns "" when HEARTBEAT.md doesn't exist.
+
+        This is the contract every reader relies on — _is_heartbeat_empty,
+        the /heartbeat-context endpoint, and the cron skip-LLM optimization
+        all expect "" for a missing file, semantically identical to
+        "no rules".
+        """
+        root = Path(self._tmpdir)
+        assert not (root / "HEARTBEAT.md").exists()
+        assert self.ws.load_heartbeat_rules() == ""
 
 
 class TestUpdateFile:
