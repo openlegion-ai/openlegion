@@ -2919,24 +2919,22 @@ function dashboard() {
       }
     },
 
-    // Pick the default homeTab on first Work-tab visit. If the user
-    // already toggled the sub-nav (``homeTabUserChosen``) or arrived
-    // via an explicit deep link (every Work sub-route except bare
-    // ``/home`` sets the flag), respect that. Otherwise: summaries
-    // exist (either via team membership or solo-agent rows) →
-    // summaries; otherwise kanban (codex r1 P2 — solo-only fleets).
+    // Pick the default homeTab on first Work-tab visit. Summaries
+    // is the unconditional default — operator-led strategy view is
+    // the primary mental model at every fleet size, not just at
+    // 30-agent scale. Empty state ("No summaries yet — ask
+    // operator") is the consistent landing for fresh installs. The
+    // sub-nav tab bar makes Kanban + Activity one-click reachable
+    // so the kanban-first power user is never more than a click
+    // away from their view.
+    //
+    // ``homeTabUserChosen`` is respected: an explicit user toggle
+    // or deep-link sub-route (every Work URL except bare ``/home``
+    // sets the flag) overrides the default.
     _applyDefaultHomeTab() {
       if (this.homeTabUserChosen) return;
-      const hasTeams = (this.workplaceTeams || []).length >= 1;
-      const hasSummaries = (this.workplaceSummaries || []).length >= 1;
-      if (hasTeams || hasSummaries) {
-        if (this.homeTab !== 'summaries') {
-          this.homeTab = 'summaries';
-        }
-      } else if (this.homeTab === 'summaries') {
-        // Edge case: route landed on summaries but neither teams nor
-        // summaries exist. Fall back to kanban so the page isn't empty.
-        this.homeTab = 'kanban';
+      if (this.homeTab !== 'summaries') {
+        this.homeTab = 'summaries';
       }
     },
 
