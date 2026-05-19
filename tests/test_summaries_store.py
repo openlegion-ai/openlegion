@@ -389,7 +389,7 @@ def test_set_rating_locked_404_when_summary_missing(store):
 def test_recent_feedback_returns_only_rated_in_scope(store):
     r1 = _make(store, scope_id="x", now=time.time())
     time.sleep(0.001)
-    r2 = _make(store, scope_id="y", now=time.time())
+    _make(store, scope_id="y", now=time.time())
     # Only r1 gets rated.
     store.set_rating(r1["id"], "rework", feedback="improve velocity")
     fb_x = store.recent_feedback(scope_kind="team", scope_id="x")

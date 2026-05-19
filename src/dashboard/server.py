@@ -6548,9 +6548,9 @@ def create_dashboard_router(
             raise HTTPException(404, "Summaries store not configured")
         from src.host.summaries import (
             MAX_FEEDBACK_CHARS,
+            VALID_RATINGS,
             RatingLocked,
             SummaryNotFound,
-            VALID_RATINGS,
         )
         try:
             body = await request.json()

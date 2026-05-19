@@ -13,7 +13,7 @@ The skill is deterministic (no LLM call) and composes from the existing
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 

@@ -16,7 +16,6 @@ from httpx import ASGITransport, AsyncClient
 from src.host.costs import CostTracker
 from src.host.mesh import Blackboard, MessageRouter, PubSub
 from src.host.permissions import AgentPermissions, PermissionMatrix
-from src.host.summaries import WorkSummariesStore
 from src.host.traces import TraceStore
 
 
