@@ -804,8 +804,16 @@ function dashboard() {
       // the same default in ``_parsePath`` (kanban IS the default,
       // so old bookmarks survive without a redirect).
       if (this.activeTab === 'workplace') {
+        // Every explicit Work sub-view gets its own URL so reloads
+        // preserve the user's tab choice. Bare ``/home`` means
+        // "no opinion" — ``_applyDefaultHomeTab`` decides
+        // (summaries by current policy). Without explicit
+        // ``/home/kanban``, clicking the Kanban tab produced
+        // ``/home`` which on reload reverted to summaries —
+        // the user's choice didn't survive page reloads.
         if (this.homeTab === 'activity') return '/home/activity';
         if (this.homeTab === 'summaries') return '/home/summaries';
+        if (this.homeTab === 'kanban') return '/home/kanban';
         return '/home';
       }
       return '/';
@@ -844,12 +852,18 @@ function dashboard() {
       // ``/home/tasks`` (Phase 3 kanban sub-page URL) still resolves
       // to the kanban — the kanban IS the default now, so old
       // bookmarks survive without a redirect.
-      // PR-B — explicit Work sub-routes all set ``homeTabUserChosen``
-      // so the post-load ``_applyDefaultHomeTab`` doesn't override a
-      // user's deep link. Bare ``/home`` is the only path that lets
-      // the auto-default decide between summaries and kanban based on
-      // team count.
-      if (clean === 'home') { route.tab = 'workplace'; route.homeTab = 'kanban'; return route; }
+      // Explicit Work sub-routes all set ``homeTabUserChosen`` so the
+      // post-load ``_applyDefaultHomeTab`` doesn't override a user's
+      // deep link. Bare ``/home`` is the only path that lets the
+      // auto-default decide (currently summaries, unconditional).
+      if (clean === 'home') {
+        // Default landing — ``_applyDefaultHomeTab`` picks the tab
+        // after load. Mark with ``kanban`` here only as the
+        // placeholder until the default policy runs; do NOT set
+        // ``homeTabUserChosen``.
+        route.tab = 'workplace'; route.homeTab = 'kanban';
+        return route;
+      }
       if (clean === 'home/activity' || clean.startsWith('home/activity')) {
         route.tab = 'workplace'; route.homeTab = 'activity';
         route.homeTabUserChosen = true;
@@ -860,8 +874,18 @@ function dashboard() {
         route.homeTabUserChosen = true;
         return route;
       }
+      if (clean === 'home/kanban' || clean.startsWith('home/kanban')) {
+        // PR — explicit kanban deep-link, symmetric with
+        // ``/home/summaries`` and ``/home/activity``. Without this
+        // route, clicking the Kanban tab produced ``/home`` and
+        // the user's choice was lost on the next reload (the
+        // post-load ``_applyDefaultHomeTab`` reverted to summaries).
+        route.tab = 'workplace'; route.homeTab = 'kanban';
+        route.homeTabUserChosen = true;
+        return route;
+      }
       if (clean === 'home/tasks' || clean.startsWith('home/tasks')) {
-        // Legacy bookmark — explicit kanban request.
+        // Legacy Phase-3 bookmark — explicit kanban request.
         route.tab = 'workplace'; route.homeTab = 'kanban';
         route.homeTabUserChosen = true;
         return route;

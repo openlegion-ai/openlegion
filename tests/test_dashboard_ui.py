@@ -892,21 +892,50 @@ class TestHomeRouting:
     """
 
     def test_build_path_emits_home_route(self, app_js: str):
-        # ``_buildPath`` emits the three workplace sub-routes based on
-        # ``homeTab``: ``/home`` (kanban default), ``/home/activity``,
-        # ``/home/summaries`` (PR-B). Updated from the legacy ternary
-        # to an if-chain when the summaries arm was added.
+        # ``_buildPath`` emits four workplace sub-routes based on
+        # ``homeTab``: ``/home`` (no-opinion landing), ``/home/activity``,
+        # ``/home/summaries``, and ``/home/kanban`` (explicit kanban —
+        # added so the user's tab choice survives page reload).
         assert "if (this.homeTab === 'activity') return '/home/activity'" in app_js
         assert "if (this.homeTab === 'summaries') return '/home/summaries'" in app_js
+        assert "if (this.homeTab === 'kanban') return '/home/kanban'" in app_js
         assert "return '/home'" in app_js
 
     def test_parse_path_recognizes_home_routes(self, app_js: str):
-        # ``_parsePath`` accepts the new routes and maps them to the
-        # workplace tab + correct sub-page. ``home/tasks`` (legacy)
-        # still resolves so old bookmarks survive.
+        # ``_parsePath`` accepts every Work sub-route + legacy
+        # ``/home/tasks`` for back-compat with Phase 3 bookmarks.
         assert "clean === 'home'" in app_js
         assert "clean === 'home/activity'" in app_js or "home/activity" in app_js
+        assert "clean === 'home/summaries'" in app_js or "home/summaries" in app_js
+        assert "clean === 'home/kanban'" in app_js or "home/kanban" in app_js
         assert "clean === 'home/tasks'" in app_js or "home/tasks" in app_js
+
+    def test_kanban_deep_link_sets_user_chosen(self, app_js: str):
+        # Explicit ``/home/kanban`` must mark ``homeTabUserChosen``
+        # so the post-load auto-default doesn't revert to summaries
+        # (regression: without this, clicking the Kanban tab
+        # produced ``/home`` which on reload lost the choice).
+        idx = app_js.find("clean === 'home/kanban'")
+        assert idx > 0
+        block = app_js[idx:idx + 800]
+        assert "route.homeTab = 'kanban'" in block
+        assert "route.homeTabUserChosen = true" in block
+
+    def test_always_summaries_default_no_conditional(self, app_js: str):
+        # ``_applyDefaultHomeTab`` must NOT condition on team /
+        # summary count any more — summaries is the unconditional
+        # default landing regardless of fleet size. Find the
+        # METHOD DEFINITION (``_applyDefaultHomeTab() {``), not
+        # a callsite — the inner body is what carries the policy.
+        idx = app_js.find("_applyDefaultHomeTab() {")
+        assert idx > 0
+        body = app_js[idx:idx + 800]
+        # No team/summary counter checks; the only guard is the
+        # user-chosen flag.
+        assert "workplaceTeams" not in body
+        assert "workplaceSummaries" not in body
+        # And it does write summaries.
+        assert "this.homeTab = 'summaries'" in body
 
     def test_switch_home_tab_helper_present(self, app_js: str):
         assert "switchHomeTab(tabId)" in app_js
