@@ -443,7 +443,7 @@ class DockerBackend(RuntimeBackend):
         environment = {
             "BROWSER_AUTH_TOKEN": self.browser_auth_token,
             "MESH_URL": f"http://{mesh_host}:{self.mesh_host_port}",
-            "MAX_BROWSERS": str(max_browsers),
+            "OPENLEGION_BROWSER_MAX_CONCURRENT": str(max_browsers),
             "IDLE_TIMEOUT_MINUTES": str(idle_timeout_minutes),
         }
 

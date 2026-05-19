@@ -43,7 +43,7 @@ class TestExtractTriggeredPlaybooks:
         msgs = [
             {"role": "assistant", "tool_calls": [
                 {"function": {"name": "create_agent"}, "id": "tc1", "type": "function"},
-                {"function": {"name": "create_project"}, "id": "tc2", "type": "function"},
+                {"function": {"name": "create_team"}, "id": "tc2", "type": "function"},
             ]},
         ]
         assert extract_triggered_playbooks(msgs) == {"team_build"}
@@ -137,26 +137,14 @@ class TestPlaybookConstants:
     def test_tool_map_covers_all_action_tools(self):
         # The approval-workflow redesign dropped propose_edit/confirm_edit
         # from the playbook map: edit_agent is the single immediate-apply
-        # path (5-min undo for soft fields, 30-min for hard). propose_edit
-        # has been deleted; confirm_edit remains registered as a deprecated
-        # no-op stub in operator_tools.py for back-compat with in-flight
-        # LLM conversations, but the playbook map only advertises the new
-        # flow so the LLM picks one path.
-        # Team-named canonical entries (PR 2 of the project→team rename)
-        # sit alongside their legacy ``*_project`` aliases in
-        # ``_TOOL_PLAYBOOK_MAP``. Both names route to the same playbook so
-        # either tool invocation pulls in the build guidance. We assert
-        # the legacy + canonical pairs explicitly plus the non-domain
-        # shared tools — every other entry should be one of these.
+        # path (5-min undo for soft fields, 30-min for hard). Phase 1 of
+        # the back-compat cleanup then deleted both propose_edit and
+        # confirm_edit entirely (no more dangling registrations).
+        # The legacy ``*_project`` aliases in ``_TOOL_PLAYBOOK_MAP`` were
+        # also dropped — only the canonical ``*_team`` names trigger the
+        # build playbook now.
         keys = set(_TOOL_PLAYBOOK_MAP.keys())
-        # Every legacy *_project tool MUST still be registered.
-        for legacy in {
-            "create_project", "add_agents_to_project",
-            "remove_agents_from_project", "update_project_context",
-            "set_project_goal",
-        }:
-            assert legacy in keys, f"legacy tool {legacy} missing from playbook map"
-        # Every new *_team canonical tool MUST be registered too.
+        # Every canonical *_team tool must be registered.
         for canonical in {
             "create_team", "add_agents_to_team",
             "remove_agents_from_team", "update_team_context",
@@ -170,6 +158,14 @@ class TestPlaybookConstants:
             "request_credential", "request_browser_login",
         }:
             assert shared in keys, f"core tool {shared} missing from playbook map"
+        # Phase 1 deletions — the legacy *_project aliases must NOT be
+        # present anymore.
+        for legacy in {
+            "create_project", "add_agents_to_project",
+            "remove_agents_from_project", "update_project_context",
+            "set_project_goal", "propose_edit", "confirm_edit",
+        }:
+            assert legacy not in keys, f"deleted shim {legacy} still in playbook map"
 
     def test_sticky_turns_reasonable(self):
         assert 3 <= PLAYBOOK_STICKY_TURNS <= 10
@@ -195,8 +191,9 @@ class TestPlaybookConstants:
         assert "request_browser_login" in _PLAYBOOK_TEAM_BUILD
 
         assert "edit_agent" in _PLAYBOOK_EDIT
-        assert "confirm_edit" in _PLAYBOOK_EDIT
         # New guidance for the act-and-undo posture must be present.
+        # (Phase 1 deleted confirm_edit — edits apply immediately and
+        # the playbook no longer references the retired stub.)
         assert "Undo" in _PLAYBOOK_EDIT
         assert "soft" in _PLAYBOOK_EDIT.lower()
         assert "hard" in _PLAYBOOK_EDIT.lower()

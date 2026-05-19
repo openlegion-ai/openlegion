@@ -163,36 +163,6 @@ def _validate_edit(agent_id: str, field: str, value) -> dict | None:
 
 
 @skill(
-    name="confirm_edit",
-    description=(
-        "DEPRECATED — no-op. Config edits now apply immediately via "
-        "edit_agent and emit an undo receipt, so there is no pending change "
-        "to confirm. Tool retained only so in-flight conversations don't "
-        "break; do not call from new code."
-    ),
-    parameters={
-        "change_id": {
-            "type": "string",
-            "description": "Legacy change_id (ignored)",
-        },
-    },
-)
-async def confirm_edit(change_id: str, *, mesh_client=None, _messages=None, **_kw) -> dict:
-    """Deprecated no-op. Returns a friendly hint to use edit_agent."""
-    if not _is_operator():
-        return {"error": "This tool is only available to the operator agent."}
-    return {
-        "success": True,
-        "applied": False,
-        "deprecation_notice": (
-            "confirm_edit is a no-op. Config edits now apply immediately "
-            "when you call edit_agent; the user sees an undo receipt with a "
-            "5–30 minute revert window. Don't call confirm_edit anymore."
-        ),
-    }
-
-
-@skill(
     name="read_agent_config",
     description=(
         "Read an agent's current configuration. Symmetric inverse of "
@@ -810,167 +780,6 @@ async def create_agent(
         return {"error": f"Failed to create agent: {e}"}
 
 
-# ── Project Management ───────────────────────────────────────
-
-
-# ── Legacy project_* tools — PR 3 sunset stubs ────────────────────
-#
-# Each ``*_project`` skill below is now a thin redirector: the
-# ``@skill`` registration stays so the LLM still discovers the tool
-# name and the JSON-schema-validated call doesn't raise, but the
-# body returns ``{"error": "renamed", "new_tool": "...", ...}`` so a
-# stale prompt fails fast and recoverably instead of executing
-# duplicate logic. Real behavior lives on the canonical ``*_team``
-# tools defined later in this module.
-#
-# The parameter schemas are preserved verbatim so a tool call that
-# was JSON-schema-valid pre-rename remains valid here — the LLM gets
-# the error in the tool result, not as a schema-validation HTTP 4xx
-# upstream.
-
-
-def _renamed_stub(new_tool: str) -> dict:
-    """Standard sunset-stub payload."""
-    return {
-        "error": "renamed",
-        "new_tool": new_tool,
-        "note": (
-            f"Use {new_tool} instead. This deprecated alias was removed "
-            "in PR 3 of the project→team rename."
-        ),
-    }
-
-
-@skill(
-    name="inspect_projects",
-    description="[REMOVED — call inspect_teams]",
-    parameters={
-        "detail": {
-            "type": "string",
-            "description": "names | status | full",
-            "enum": ["names", "status", "full"],
-            "default": "names",
-        },
-        "project_name": {
-            "type": "string",
-            "description": "Optional — return full detail for this project only",
-            "default": "",
-        },
-    },
-)
-async def inspect_projects(*_args, **_kw) -> dict:
-    """Sunset stub — redirects to ``inspect_teams``."""
-    return _renamed_stub("inspect_teams")
-
-
-@skill(
-    name="create_project",
-    description="[REMOVED — call create_team]",
-    parameters={
-        "name": {
-            "type": "string",
-            "description": "Project name",
-        },
-        "description": {
-            "type": "string",
-            "description": "Project brief / description",
-        },
-        "agent_ids": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Agent IDs to assign to the project",
-            "default": [],
-        },
-    },
-)
-async def create_project(*_args, **_kw) -> dict:
-    """Sunset stub — redirects to ``create_team``."""
-    return _renamed_stub("create_team")
-
-
-@skill(
-    name="add_agents_to_project",
-    description="[REMOVED — call add_agents_to_team]",
-    parameters={
-        "project_name": {
-            "type": "string",
-            "description": "Project name",
-        },
-        "agent_ids": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Agent IDs to add",
-        },
-    },
-)
-async def add_agents_to_project(*_args, **_kw) -> dict:
-    """Sunset stub — redirects to ``add_agents_to_team``."""
-    return _renamed_stub("add_agents_to_team")
-
-
-@skill(
-    name="remove_agents_from_project",
-    description="[REMOVED — call remove_agents_from_team]",
-    parameters={
-        "project_name": {
-            "type": "string",
-            "description": "Project name",
-        },
-        "agent_ids": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Agent IDs to remove",
-        },
-    },
-)
-async def remove_agents_from_project(*_args, **_kw) -> dict:
-    """Sunset stub — redirects to ``remove_agents_from_team``."""
-    return _renamed_stub("remove_agents_from_team")
-
-
-@skill(
-    name="update_project_context",
-    description="[REMOVED — call update_team_context]",
-    parameters={
-        "project_name": {
-            "type": "string",
-            "description": "Project name",
-        },
-        "context": {
-            "type": "string",
-            "description": "New project description / context text",
-        },
-    },
-)
-async def update_project_context(*_args, **_kw) -> dict:
-    """Sunset stub — redirects to ``update_team_context``."""
-    return _renamed_stub("update_team_context")
-
-
-@skill(
-    name="set_project_goal",
-    description="[REMOVED — call set_team_goal]",
-    parameters={
-        "project_name": {
-            "type": "string",
-            "description": "Project to set the goal on",
-        },
-        "north_star": {
-            "type": "string",
-            "description": "Free-text vision statement, ≤2000 characters.",
-        },
-        "success_criteria": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Up to 10 measurable outcomes, each ≤200 characters.",
-        },
-    },
-)
-async def set_project_goal(*_args, **_kw) -> dict:
-    """Sunset stub — redirects to ``set_team_goal``."""
-    return _renamed_stub("set_team_goal")
-
-
 # ── Task 7: Operator product tools ───────────────────────────
 
 
@@ -1078,21 +887,6 @@ async def get_team_outputs(
         return await mesh_client.project_outputs(project_id, since=since)
     except Exception as e:
         return {"error": f"Failed to read outputs for {project_id}: {e}"}
-
-
-@skill(
-    name="summarize_project_progress",
-    description="[REMOVED — call summarize_team_progress]",
-    parameters={
-        "project_id": {
-            "type": "string",
-            "description": "Project ID",
-        },
-    },
-)
-async def summarize_project_progress(*_args, **_kw) -> dict:
-    """Sunset stub — redirects to ``summarize_team_progress``."""
-    return _renamed_stub("summarize_team_progress")
 
 
 @skill(
@@ -1352,26 +1146,6 @@ async def manage_task(
 
 
 @skill(
-    name="manage_project",
-    description="[REMOVED — call manage_team]",
-    parameters={
-        "project_name": {
-            "type": "string",
-            "description": "Project name",
-        },
-        "action": {
-            "type": "string",
-            "description": "archive | delete",
-            "enum": ["archive", "delete"],
-        },
-    },
-)
-async def manage_project(*_args, **_kw) -> dict:
-    """Sunset stub — redirects to ``manage_team``."""
-    return _renamed_stub("manage_team")
-
-
-@skill(
     name="manage_agent",
     description=(
         "Archive or delete an agent. action='archive' is reversible and "
@@ -1581,13 +1355,10 @@ async def archive_audit_before(
 
 # ── Team-named canonical aliases (PR 2 of the project→team rename) ────
 #
-# These register the new ``*_team`` tool names on top of the existing
-# ``*_project`` skills. Each canonical tool accepts BOTH ``team_name``
-# and ``project_name`` kwargs and forwards to the legacy implementation
-# unchanged. The legacy tool names remain registered with their original
-# descriptions so SDK consumers that grep for ``create_project`` still
-# match — only the docstring on each legacy tool gets a soft deprecation
-# nudge. PR 3 will retire the aliases.
+# Canonical ``*_team`` tools. Each accepts BOTH ``team_name`` and
+# (legacy) ``project_name`` kwargs so in-flight LLM conversations that
+# still emit the old kwarg name keep working — the function body
+# coalesces them.
 
 
 @skill(
@@ -2083,12 +1854,7 @@ async def manage_team(
     _messages=None,
     **_kw,
 ) -> dict:
-    """Team lifecycle dispatcher — archive, unarchive, or propose deletion.
-
-    Dispatches each action to the matching mesh endpoint rather than
-    delegating to :func:`manage_project`, whose action surface predates
-    the rename and only covers ``archive``/``delete``.
-    """
+    """Team lifecycle dispatcher — archive, unarchive, or propose deletion."""
     if not _is_operator():
         return {"error": "This tool is only available to the operator agent."}
     if mesh_client is None:

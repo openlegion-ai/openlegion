@@ -35,12 +35,12 @@ def _prefill_rate_bucket(app, endpoint: str, agent_id: str, count: int) -> None:
 def mesh_components(tmp_path, monkeypatch):
     """Create all mesh components with test configuration.
 
-    Pinned to ``OPENLEGION_PROJECT_SCOPE_MODE=warn`` because these tests
+    Pinned to ``OPENLEGION_TEAM_SCOPE_MODE=warn`` because these tests
     hit ``/mesh/agents`` with anonymous TestClient calls; the new
     ``enforce`` default would filter the response down to {operator}
     and break the contract assertions.
     """
-    monkeypatch.setenv("OPENLEGION_PROJECT_SCOPE_MODE", "warn")
+    monkeypatch.setenv("OPENLEGION_TEAM_SCOPE_MODE", "warn")
     import src.host.server as server_module
     importlib.reload(server_module)
     # Use the freshly-reloaded module's factory so the new
@@ -80,7 +80,7 @@ def mesh_components(tmp_path, monkeypatch):
 
     yield {"client": client, "blackboard": bb, "pubsub": pubsub, "router": router, "perms": perms}
 
-    monkeypatch.delenv("OPENLEGION_PROJECT_SCOPE_MODE", raising=False)
+    monkeypatch.delenv("OPENLEGION_TEAM_SCOPE_MODE", raising=False)
     importlib.reload(server_module)
 
 

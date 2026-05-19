@@ -527,7 +527,7 @@ def _add_agent_permissions(name: str, permissions: dict | None = None) -> None:
         # permissions.json instead of being silently dropped.
         for key in (
             "can_use_browser", "can_spawn", "can_manage_cron",
-            "can_manage_fleet", "can_manage_teams", "can_manage_projects", "can_edit_agent_config",
+            "can_manage_fleet", "can_manage_teams", "can_edit_agent_config",
             "can_view_fleet_metrics", "can_route_tasks",
             "can_request_user_credentials",
         ):
@@ -665,7 +665,7 @@ def _validate_project_name(name: str) -> str:
 
 def _load_projects() -> dict[str, dict]:
     """Scan config/projects/*/metadata.yaml and return {name: metadata}."""
-    from src.shared.types import ProjectMetadata
+    from src.shared.types import TeamMetadata
 
     projects: dict[str, dict] = {}
     if not PROJECTS_DIR.exists():
@@ -675,7 +675,7 @@ def _load_projects() -> dict[str, dict]:
             dir_name = meta_file.parent.name
             with open(meta_file) as f:
                 data = yaml.safe_load(f) or {}
-            pm = ProjectMetadata(**data)
+            pm = TeamMetadata(**data)
             projects[dir_name] = pm.model_dump()
         except Exception as e:
             logger.warning("Failed to load project %s: %s", meta_file, e)
@@ -709,9 +709,9 @@ def _create_project(
 
     from datetime import datetime, timezone
 
-    from src.shared.types import ProjectMetadata
+    from src.shared.types import TeamMetadata
 
-    pm = ProjectMetadata(
+    pm = TeamMetadata(
         name=name,
         description=description,
         created_at=datetime.now(timezone.utc).isoformat(),
@@ -1578,13 +1578,9 @@ _OPERATOR_AGENT_ID = "operator"
 _OPERATOR_ALLOWED_TOOLS: list[str] = [
     # Monitoring + heartbeat
     "get_system_status", "notify_user", "save_observations",
-    # Inspection (consolidated read tools). Team-named tools (PR 2)
-    # are the canonical surface; project-named legacy entries are
-    # retained alongside them through PR 3 so SDK consumers that
-    # invoke either name keep working.
-    "inspect_agents", "inspect_teams", "inspect_projects",
+    "inspect_agents", "inspect_teams",
     "list_agent_queue", "get_team_outputs",
-    "summarize_team_progress", "summarize_project_progress",
+    "summarize_team_progress",
     # Composes and persists a work summary card for the Work tab.
     # Backed by ``WorkSummariesStore``; the daily cron invokes this
     # tool directly (no LLM cost per fire). User rates via dashboard.
@@ -1599,24 +1595,20 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     # Configuration edits — edit_agent applies every field immediately
     # and emits an undo receipt (5min for soft fields, 30min for hard).
     # undo_change lets the operator self-revert within the TTL.
-    # confirm_edit is a deprecated stub kept for back-compat with in-flight
-    # LLM conversations that may still emit it (propose_edit was fully
-    # retired in #927).
-    "edit_agent", "confirm_edit", "undo_change",
+    "edit_agent", "undo_change",
     # Credential-aware model discovery — operator calls this BEFORE
     # edit_agent / create_agent so it doesn't have to memorize which
     # models are usable with the active credential setup (OAuth-allowed
     # subsets vs full API-key catalog). See Fix 2 in the seam follow-up.
     "list_available_models",
     # Creation
-    "create_agent", "create_team", "create_project",
+    "create_agent", "create_team",
     # Team membership + context
     "add_agents_to_team", "remove_agents_from_team", "update_team_context",
-    "add_agents_to_project", "remove_agents_from_project", "update_project_context",
     # PR 5 — north-star setter is no-confirmation meta-config.
-    "set_team_goal", "set_project_goal",
+    "set_team_goal",
     # Lifecycle (consolidated archive/delete)
-    "manage_team", "manage_project", "manage_agent", "manage_task",
+    "manage_team", "manage_agent", "manage_task",
     # Self-cleanup — operator can clear stale pending actions and prune
     # the audit log without waiting for TTL. ``list_pending`` lets the
     # operator find the nonce before calling cancel_pending_action.
@@ -1773,10 +1765,6 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
         if not op_perms.get("can_manage_teams", False):
             op_perms["can_manage_teams"] = True
             needs_update = True
-        if not op_perms.get("can_manage_projects", False):
-            # Back-compat alias — kept until PR 3.
-            op_perms["can_manage_projects"] = True
-            needs_update = True
         if not op_perms.get("can_edit_agent_config", False):
             op_perms["can_edit_agent_config"] = True
             needs_update = True
@@ -1841,11 +1829,8 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
             "can_publish": ["*"],
             "can_subscribe": ["*"],
             # Control-plane permissions (Task 3) — operator gets all six.
-            # ``can_manage_teams`` is canonical (PR 2 rename);
-            # ``can_manage_projects`` retained as a back-compat alias.
             "can_manage_fleet": True,
             "can_manage_teams": True,
-            "can_manage_projects": True,
             "can_edit_agent_config": True,
             "can_view_fleet_metrics": True,
             "can_route_tasks": True,

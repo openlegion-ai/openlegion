@@ -426,10 +426,6 @@ class TeamMetadata(BaseModel):
     first-class fields. Both are nullable for backwards compatibility —
     teams that predate this schema simply have ``None`` and the UI
     renders an empty-state placeholder.
-
-    A back-compat alias :data:`ProjectMetadata` is exported below — it
-    points at the same class so existing imports keep working through
-    the project→team rename. PR 3 removes the alias.
     """
 
     name: str
@@ -440,10 +436,6 @@ class TeamMetadata(BaseModel):
     settings: dict[str, Any] = {}
     north_star: str | None = None
     success_criteria: list[str] | None = None
-
-
-# Back-compat alias — keep until PR 3.
-ProjectMetadata = TeamMetadata
 
 
 # === Coordination Requests ===

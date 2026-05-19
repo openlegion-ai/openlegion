@@ -310,13 +310,6 @@ receipt + undo is the safety net — but the user sees that you initiated it.
 - budget (hard, 30min undo) — object: {"daily_usd": float, "monthly_usd": float}
 - permissions (hard, 30min undo) — object: {"can_use_browser": bool, ...}
 
-## Deprecated
-
-`confirm_edit` is a deprecated no-op kept only so in-flight LLM \
-conversations that still emit it don't error. Edits apply immediately \
-via edit_agent and emit an undo receipt; there is nothing to confirm. \
-Don't call confirm_edit from new conversations — use edit_agent directly.
-
 ## Self-cleanup
 
 To trim old audit history, call archive_audit_before(date) (soft-delete; \
@@ -429,26 +422,13 @@ logged in, and what's still pending."""
 _TOOL_PLAYBOOK_MAP: dict[str, str] = {
     "create_agent": "team_build",
     "apply_template": "team_build",
-    # Team-named canonical tools (PR 2) — kept alongside the legacy
-    # project-named entries through PR 3 so either tool invocation
-    # surfaces the build playbook.
     "create_team": "team_build",
     "add_agents_to_team": "team_build",
     "remove_agents_from_team": "team_build",
     "update_team_context": "team_build",
     "set_team_goal": "team_build",
-    "create_project": "team_build",
-    "add_agents_to_project": "team_build",
-    "remove_agents_from_project": "team_build",
-    "update_project_context": "team_build",
-    "set_project_goal": "team_build",
     "edit_agent": "edit",
     "undo_change": "edit",
-    # ``confirm_edit`` retired as a gated flow — it remains registered
-    # in operator_tools.py as a deprecated no-op stub for back-compat
-    # with any in-flight LLM conversations that already mentioned it,
-    # but the operator's allowed-tools list and playbook map both
-    # advertise only ``edit_agent`` so the model picks one path.
     "save_observations": "monitor",
     "request_credential": "credentials",
     "request_browser_login": "credentials",

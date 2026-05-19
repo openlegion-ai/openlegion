@@ -342,27 +342,22 @@ def _validated_origin(
 
 # ── Task 5: Team scope isolation (default enforce) ────────────────────
 #
-# ``OPENLEGION_TEAM_SCOPE_MODE`` (new canonical; ``OPENLEGION_PROJECT_SCOPE_MODE``
-# kept as a back-compat fallback) is the kill switch for the team
+# ``OPENLEGION_TEAM_SCOPE_MODE`` is the kill switch for the team
 # isolation rollout. Default ``enforce`` — workers see only their own
 # team members on ``/mesh/agents`` and only their own team blackboard
 # ACLs. ``warn`` is preserved as an emergency rollback that restores the
 # legacy fleet-wide visibility while still emitting structured warnings
 # on every call that would have been denied under enforce. Read once at
 # module import (env vars don't change at runtime); invalid values fall
-# back to ``enforce`` with a logged warning. PR 3 removes the legacy
-# env var fallback.
-_TEAM_SCOPE_MODE = os.environ.get(
-    "OPENLEGION_TEAM_SCOPE_MODE",
-    os.environ.get("OPENLEGION_PROJECT_SCOPE_MODE", "enforce"),
-).lower()
+# back to ``enforce`` with a logged warning.
+_TEAM_SCOPE_MODE = os.environ.get("OPENLEGION_TEAM_SCOPE_MODE", "enforce").lower()
 if _TEAM_SCOPE_MODE not in {"warn", "enforce"}:
     logger.warning(
         "Invalid OPENLEGION_TEAM_SCOPE_MODE=%r, defaulting to enforce",
         _TEAM_SCOPE_MODE,
     )
     _TEAM_SCOPE_MODE = "enforce"
-# Back-compat alias — keep until PR 3.
+# Internal alias — kept for the existing scope-gate call sites below.
 _PROJECT_SCOPE_MODE = _TEAM_SCOPE_MODE
 
 
@@ -2410,11 +2405,10 @@ def create_mesh_app(
         Task 5 layered a per-caller filter on the unscoped path. Today's
         legacy behavior is "every authenticated agent sees the full
         fleet" — under ``OPENLEGION_TEAM_SCOPE_MODE=enforce`` (the
-        default; legacy ``OPENLEGION_PROJECT_SCOPE_MODE`` still honored
-        as a back-compat alias) workers see only members of their own
-        projects (plus the always-global operator). Under ``warn`` the
-        response shape stays legacy and a structured ``scope-warn`` log
-        line is emitted so operators can soak before flipping.
+        default) workers see only members of their own projects (plus
+        the always-global operator). Under ``warn`` the response shape
+        stays legacy and a structured ``scope-warn`` log line is
+        emitted so operators can soak before flipping.
         """
         if agent_id:
             agent_id = _resolve_agent_id(agent_id, request)
@@ -3897,17 +3891,9 @@ def create_mesh_app(
                 })
 
         # -- Plan limits from env vars --
-        # ``OPENLEGION_MAX_TEAMS`` is the new canonical env var name;
-        # ``OPENLEGION_MAX_PROJECTS`` kept as a back-compat fallback
-        # through PR 3.
         import os
         max_agents = int(os.environ.get("OPENLEGION_MAX_AGENTS", "0"))
-        max_teams = int(
-            os.environ.get(
-                "OPENLEGION_MAX_TEAMS",
-                os.environ.get("OPENLEGION_MAX_PROJECTS", "0"),
-            )
-        )
+        max_teams = int(os.environ.get("OPENLEGION_MAX_TEAMS", "0"))
 
         # Count actual teams
         from src.cli.config import _load_projects
@@ -4137,10 +4123,7 @@ def create_mesh_app(
 
         from src.cli.config import _create_project, _load_config, _load_projects
 
-        _max_teams_env = _os.environ.get(
-            "OPENLEGION_MAX_TEAMS",
-            _os.environ.get("OPENLEGION_MAX_PROJECTS"),
-        )
+        _max_teams_env = _os.environ.get("OPENLEGION_MAX_TEAMS")
         if _max_teams_env is not None:
             _max_teams = int(_max_teams_env)
             if _max_teams == 0:

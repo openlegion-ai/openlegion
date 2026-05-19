@@ -1,7 +1,6 @@
 """Tests for the north-star path on the team-domain entity: the
-``set_team_goal`` operator tool (still under its legacy name as
-back-compat through PR 3), the ``POST /mesh/projects/{name}/goal``
-endpoint, and the ``ProjectMetadata`` schema that lets a team carry its
+``set_team_goal`` operator tool, the ``POST /mesh/teams/{name}/goal``
+endpoint, and the ``TeamMetadata`` schema that lets a team carry its
 goal as a first-class artifact.
 
 These exercise:
@@ -24,7 +23,7 @@ from httpx import ASGITransport, AsyncClient
 
 from src.host.mesh import Blackboard, MessageRouter, PubSub
 from src.host.permissions import PermissionMatrix
-from src.shared.types import AgentPermissions, ProjectMetadata
+from src.shared.types import AgentPermissions, TeamMetadata
 
 
 @pytest.fixture(autouse=True)
@@ -33,17 +32,17 @@ def _set_operator_env(monkeypatch):
     monkeypatch.setenv("ALLOWED_TOOLS", "set_team_goal")
 
 
-# ── Schema: ProjectMetadata accepts north_star + success_criteria ─────
+# ── Schema: TeamMetadata accepts north_star + success_criteria ─────
 
 
-class TestProjectMetadataSchema:
+class TestTeamMetadataSchema:
     def test_defaults_are_none(self):
-        pm = ProjectMetadata(name="x")
+        pm = TeamMetadata(name="x")
         assert pm.north_star is None
         assert pm.success_criteria is None
 
     def test_round_trip_with_goal(self):
-        pm = ProjectMetadata(
+        pm = TeamMetadata(
             name="x",
             north_star="Ship $10k MRR landing page in 2 weeks",
             success_criteria=["100 daily uniques", "5 demo bookings/wk"],
@@ -54,22 +53,22 @@ class TestProjectMetadataSchema:
             "100 daily uniques", "5 demo bookings/wk",
         ]
         # Round-trip back through the model so the YAML on-disk shape works.
-        pm2 = ProjectMetadata(**dumped)
+        pm2 = TeamMetadata(**dumped)
         assert pm2.north_star == pm.north_star
         assert pm2.success_criteria == pm.success_criteria
 
     def test_legacy_metadata_without_goal_loads(self):
-        """A project written before this PR has no north_star / success_criteria
+        """A team written before this PR has no north_star / success_criteria
         and must still load cleanly (defaulting to ``None``)."""
         legacy = {
             "name": "legacy",
-            "description": "old project",
+            "description": "old team",
             "members": ["a"],
             "created_at": "2025-12-01T00:00:00+00:00",
             "status": "active",
             "settings": {},
         }
-        pm = ProjectMetadata(**legacy)
+        pm = TeamMetadata(**legacy)
         assert pm.north_star is None
         assert pm.success_criteria is None
 

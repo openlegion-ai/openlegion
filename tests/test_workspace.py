@@ -298,7 +298,7 @@ class TestBootstrapContent:
         (root / "SOUL.md").write_text("S" * 4_000)
         (root / "USER.md").write_text("U" * 4_000)
         (root / "MEMORY.md").write_text("M" * 16_000)
-        (root / "PROJECT.md").write_text("P" * 15_000)
+        (root / "TEAM.md").write_text("T" * 15_000)
         ws = WorkspaceManager(workspace_dir=self._tmpdir)
         content = ws.get_bootstrap_content()
         assert len(content) <= 48_000 + 100  # small margin for truncation text
@@ -322,13 +322,6 @@ class TestBootstrapContent:
         ws = WorkspaceManager(workspace_dir=self._tmpdir)
         content = ws.get_bootstrap_content()
         assert "Daily log entry here" not in content
-
-    def test_bootstrap_includes_project_md(self):
-        root = Path(self._tmpdir)
-        (root / "PROJECT.md").write_text("## Project\nWe are building X.")
-        ws = WorkspaceManager(workspace_dir=self._tmpdir)
-        content = ws.get_bootstrap_content()
-        assert "We are building X" in content
 
     def test_bootstrap_adds_header_when_no_heading(self):
         """Files without a markdown heading get a descriptive header prepended."""
@@ -357,16 +350,6 @@ class TestBootstrapContent:
         ws = WorkspaceManager(workspace_dir=self._tmpdir)
         content = ws.get_bootstrap_content()
         assert "## TEAM.md — Fleet-Wide Context" in content
-
-    def test_bootstrap_falls_back_to_project_md(self):
-        """Legacy PROJECT.md (no TEAM.md present) still loads, rendered under TEAM.md header."""
-        root = Path(self._tmpdir)
-        (root / "PROJECT.md").write_text("We are building a fleet.")
-        ws = WorkspaceManager(workspace_dir=self._tmpdir)
-        content = ws.get_bootstrap_content()
-        assert "## TEAM.md — Fleet-Wide Context" in content
-        assert "We are building a fleet." in content
-
 
 class TestMaybeAddHeader:
     def test_adds_header_for_known_file(self):

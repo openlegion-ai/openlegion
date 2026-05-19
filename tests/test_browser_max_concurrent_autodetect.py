@@ -5,7 +5,6 @@ Covers:
   * cgroups v2 path takes precedence over /proc/meminfo
   * graceful fallback when both probes fail
   * ``OPENLEGION_BROWSER_MAX_CONCURRENT`` env override beats autodetect
-  * legacy ``MAX_BROWSERS`` env override also wins over autodetect
   * clamp to [1, 64]
 """
 
@@ -229,24 +228,13 @@ class TestResolveMaxBrowsers:
 
     def test_canonical_env_wins_over_autodetect(self, monkeypatch):
         """``OPENLEGION_BROWSER_MAX_CONCURRENT`` is the explicit-override path
-        the provisioner uses; it must win over both legacy and autodetect."""
+        the provisioner uses; it must win over autodetect."""
         monkeypatch.setenv("OPENLEGION_BROWSER_MAX_CONCURRENT", "20")
-        monkeypatch.delenv("MAX_BROWSERS", raising=False)
         with patch(
             "src.browser.__main__._detect_total_memory_mb",
             return_value=4 * 1024,  # autodetects to 2
         ):
             assert _resolve_max_browsers() == 20
-
-    def test_legacy_env_wins_over_autodetect(self, monkeypatch):
-        """``MAX_BROWSERS`` (legacy name) still works when canonical unset."""
-        monkeypatch.delenv("OPENLEGION_BROWSER_MAX_CONCURRENT", raising=False)
-        monkeypatch.setenv("MAX_BROWSERS", "12")
-        with patch(
-            "src.browser.__main__._detect_total_memory_mb",
-            return_value=4 * 1024,
-        ):
-            assert _resolve_max_browsers() == 12
 
     def test_autodetect_used_when_no_env(self, monkeypatch):
         """Self-host path: no env → autodetect is the floor.
@@ -255,22 +243,11 @@ class TestResolveMaxBrowsers:
         no override is in play.
         """
         monkeypatch.delenv("OPENLEGION_BROWSER_MAX_CONCURRENT", raising=False)
-        monkeypatch.delenv("MAX_BROWSERS", raising=False)
         with patch(
             "src.browser.__main__._detect_total_memory_mb",
             return_value=16 * 1024,
         ):
             assert _resolve_max_browsers() == 29
-
-    def test_canonical_env_overrides_legacy(self, monkeypatch):
-        """When both are set, the canonical name takes precedence."""
-        monkeypatch.setenv("OPENLEGION_BROWSER_MAX_CONCURRENT", "30")
-        monkeypatch.setenv("MAX_BROWSERS", "5")
-        with patch(
-            "src.browser.__main__._detect_total_memory_mb",
-            return_value=4 * 1024,
-        ):
-            assert _resolve_max_browsers() == 30
 
     def test_clamp_applies_to_env_overrides(self, monkeypatch):
         """``OPENLEGION_BROWSER_MAX_CONCURRENT=999`` clamps to 64, not crash."""
@@ -293,7 +270,6 @@ class TestResolveMaxBrowsers:
     def test_falls_back_to_default_when_memory_undetectable(self, monkeypatch):
         """Detection failure + no env override → :data:`_FALLBACK_DEFAULT`."""
         monkeypatch.delenv("OPENLEGION_BROWSER_MAX_CONCURRENT", raising=False)
-        monkeypatch.delenv("MAX_BROWSERS", raising=False)
         with patch(
             "src.browser.__main__._detect_total_memory_mb",
             return_value=None,

@@ -560,7 +560,7 @@ class TestDockerBackendSlimResources:
         assert run_call.kwargs.get("shm_size") == exp_shm
         assert run_call.kwargs.get("cpu_quota") == exp_cpu
         env = run_call.kwargs.get("environment", {})
-        assert env.get("MAX_BROWSERS") == str(exp_max_browsers)
+        assert env.get("OPENLEGION_BROWSER_MAX_CONCURRENT") == str(exp_max_browsers)
 
     def test_browser_max_concurrent_env_forwarded(self):
         """OPENLEGION_BROWSER_MAX_CONCURRENT (provisioner-set per-instance scale
@@ -586,10 +586,12 @@ class TestDockerBackendSlimResources:
         env = run_call.kwargs.get("environment", {})
         assert env.get("OPENLEGION_BROWSER_MAX_CONCURRENT") == "7"
 
-    def test_browser_max_concurrent_env_absent_when_unset(self):
-        """When OPENLEGION_BROWSER_MAX_CONCURRENT is not in the host env, do
-        NOT inject an empty value into the container env (browser container
-        falls back to its own default via _resolve_max_browsers)."""
+    def test_browser_max_concurrent_env_set_from_tier_when_host_env_unset(self):
+        """When OPENLEGION_BROWSER_MAX_CONCURRENT is not in the host env, the
+        runtime still seeds the container's env with the tier-derived
+        max_browsers value (the legacy MAX_BROWSERS alias was retired in
+        the Phase 1 back-compat cleanup, so the canonical name carries
+        the value in either path)."""
         import os as _os
 
         import docker as _docker
@@ -609,7 +611,11 @@ class TestDockerBackendSlimResources:
 
         run_call = mock_client.containers.run.call_args
         env = run_call.kwargs.get("environment", {})
-        assert "OPENLEGION_BROWSER_MAX_CONCURRENT" not in env
+        # Canonical env var is always set to the tier value, even if the
+        # host's own env doesn't define it (the value comes from the
+        # OPENLEGION_MAX_AGENTS-driven tier table).
+        assert "OPENLEGION_BROWSER_MAX_CONCURRENT" in env
+        assert env["OPENLEGION_BROWSER_MAX_CONCURRENT"].isdigit()
 
     def test_browser_has_net_admin_in_bridge_mode(self):
         """Browser container gets the minimal cap set its entrypoint needs in bridge mode."""

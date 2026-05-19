@@ -133,11 +133,11 @@ def _max_from_memory(total_mb: int | None) -> int:
 def _autodetect_default_max_browsers() -> int:
     """Estimate a safe default cap from observable memory.
 
-    Used only when neither ``OPENLEGION_BROWSER_MAX_CONCURRENT`` nor
-    ``MAX_BROWSERS`` is set — i.e. self-host installs that haven't
-    tuned anything.  Hetzner-provisioned VPSes get the cap from the
-    provisioner, which always wins over the autodetect (the env-var
-    layer is checked first in :func:`_resolve_max_browsers`).
+    Used only when ``OPENLEGION_BROWSER_MAX_CONCURRENT`` is unset —
+    i.e. self-host installs that haven't tuned anything. Hetzner-
+    provisioned VPSes get the cap from the provisioner, which always
+    wins over the autodetect (the env-var layer is checked first in
+    :func:`_resolve_max_browsers`).
 
     Reference table:
 
@@ -159,12 +159,10 @@ def _resolve_max_browsers() -> int:
     review flagged the runtime path's complexity.
 
     Precedence (highest → lowest):
-      1. ``OPENLEGION_BROWSER_MAX_CONCURRENT`` — canonical name, set by
-         the provisioner per VPS plan and overridable by self-hosters.
-         Listed in :data:`src.browser.flags.KNOWN_FLAGS`.
-      2. ``MAX_BROWSERS`` — legacy name kept for back-compat with existing
-         deployments / Docker compose files. Removable after one release.
-      3. Memory-derived autodetect (:func:`_autodetect_default_max_browsers`).
+      1. ``OPENLEGION_BROWSER_MAX_CONCURRENT`` — canonical env override,
+         set by the provisioner per VPS plan and overridable by
+         self-hosters. Listed in :data:`src.browser.flags.KNOWN_FLAGS`.
+      2. Memory-derived autodetect (:func:`_autodetect_default_max_browsers`).
          Replaces the previous hardcoded ``5`` floor — a 4 GB laptop and
          a 32 GB VPS deserve different defaults.
     """
@@ -181,12 +179,9 @@ def _resolve_max_browsers() -> int:
     # acquire loop). ``max_value=64`` matches the display-allocator pool
     # ceiling — raising one without the other would cause allocator
     # exhaustion under per-agent display mode.
-    legacy_default = get_int(
-        "MAX_BROWSERS", autodetected, min_value=1, max_value=_MAX_CAP,
-    )
     final = get_int(
         "OPENLEGION_BROWSER_MAX_CONCURRENT",
-        legacy_default,
+        autodetected,
         min_value=1,
         max_value=_MAX_CAP,
     )
