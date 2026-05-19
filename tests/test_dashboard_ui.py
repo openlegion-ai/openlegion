@@ -846,24 +846,34 @@ class TestHomeSingleScrollLayout:
             "board-kanban-card",
             "board-kanban-card-cancel",
             "board-stuck-tasks",
-            "board-view-activity",
+            # Footer-link affordance ``board-view-activity`` was replaced
+            # by the persistent ``workplace-subnav-activity`` tab bar
+            # button. Same target, more prominent.
+            "workplace-subnav-summaries",
+            "workplace-subnav-kanban",
+            "workplace-subnav-activity",
             "cancel-task-modal",
             "cancel-task-confirm",
         ):
             assert f'data-testid="{testid}"' in index_html, \
                 f"Missing testid: {testid}"
 
-    def test_subtab_bar_removed(self, index_html: str):
-        # The legacy sub-tab bar must be gone — searching for the unique
-        # ``workplaceTab = wt.id`` click handler (sub-tab buttons) should
-        # no longer find it.
+    def test_subtab_bar_replaces_legacy_workplace_tab(self, index_html: str):
+        # The persistent sub-nav tab bar replaces the legacy
+        # ``workplaceTab = wt.id`` click handler. All three Work
+        # sub-views (Summaries / Kanban / Activity) are reachable in
+        # one click; no view is buried behind a footer link.
         assert "workplaceTab = wt.id; loadWorkplace()" not in index_html
-
-    def test_back_to_board_link_in_activity_subpage(self, index_html: str):
-        # Activity sub-page exposes a back link that returns to the
-        # kanban (the new default).
-        assert 'data-testid="home-back-to-main"' in index_html
+        assert 'data-testid="workplace-subnav"' in index_html
+        assert "switchHomeTab('summaries')" in index_html
         assert "switchHomeTab('kanban')" in index_html
+        assert "switchHomeTab('activity')" in index_html
+
+    def test_activity_subpage_reachable_via_subnav(self, index_html: str):
+        # The activity sub-page is reached via the persistent tab bar,
+        # not a "Back to Work" button. Asserts the new tab affordance.
+        assert 'data-testid="workplace-subnav-activity"' in index_html
+        assert "switchHomeTab('activity')" in index_html
 
     def test_legacy_subtabs_hidden_with_back_compat_gate(self, index_html: str):
         # The old team-status / team-outputs renders are kept in
@@ -996,11 +1006,14 @@ class TestBoardKanbanDefaultUI:
         assert "get workplaceFeedVisible()" in app_js
         assert "event_type !== 'status_unchanged'" in app_js
 
-    def test_activity_sub_page_accessible_via_link(self, index_html: str):
-        # The kanban surface ends with a "View activity feed →" link
-        # that switches to the activity sub-page.
-        assert 'data-testid="board-view-activity"' in index_html
-        idx = index_html.find('data-testid="board-view-activity"')
+    def test_activity_sub_page_accessible_via_subnav(self, index_html: str):
+        # Activity is reachable in one click via the persistent
+        # Summaries/Kanban/Activity tab bar at the top of the Work
+        # tab. The legacy footer-link ``board-view-activity`` was
+        # removed when the tab bar landed — same target, less
+        # buried.
+        assert 'data-testid="workplace-subnav-activity"' in index_html
+        idx = index_html.find('data-testid="workplace-subnav-activity"')
         nearby = index_html[max(0, idx - 200):idx + 200]
         assert "switchHomeTab('activity')" in nearby
 
