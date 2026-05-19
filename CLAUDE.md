@@ -53,6 +53,8 @@ Only modules with non-obvious quirks worth flagging are listed. The rest are vis
 | `src/host/credentials.py` | Two-tier credential vault (SYSTEM_*/CRED_*) + LLM API proxy. OpenAI OAuth support. |
 | `src/host/permissions.py` | Per-agent ACL (glob patterns, deny-all default). `browser_actions: list[str] \| None` narrows per-action surface (`None` = all allowed, `[]` = deny all). |
 | `src/host/mesh.py` | Blackboard (SQLite WAL), PubSub, MessageRouter, `audit_log` with `undoable` + `archived` |
+| `src/host/lanes.py` | `LaneManager` per-agent FIFO task queues (followup/steer modes). `QueuedTask.task_id` field threads through `_direct_dispatch` to make auto-close work (Constraint #6). |
+| `src/host/cron.py` | Persistent cron scheduler. `_UPDATABLE_FIELDS` frozenset allowlist. `CronScheduler.ensure_summary_job` / `find_summary_job` bootstrap per-team daily summary jobs at `DEFAULT_SUMMARY_SCHEDULE = "0 9 * * *"`. |
 | `src/host/summaries.py` | `WorkSummariesStore` (SQLite WAL, 30-day reap). One row per `(scope_kind, scope_id, period_start)` — `scope_kind ∈ {team, solo}`. Ratings (`accepted`/`acknowledged`/`rework`) lock after `RATING_EDIT_WINDOW_SECONDS=86400`. |
 | `src/browser/service.py` | BrowserManager with per-agent Camoufox + X11 WID tracking. Fingerprint health monitor with burn detection; operator clears burn manually. |
 | `src/browser/captcha.py` | 2captcha + capsolver. Behavioral kinds rejected via `request_captcha_help` handoff. Millicent cost accounting, per-agent + per-tenant caps, kill switch, circuit breaker. |
