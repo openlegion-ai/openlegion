@@ -125,50 +125,53 @@ class TestDrainMetrics:
         assert inst.drain_metrics()["click_success"] == 2
 
 
+@pytest.fixture(autouse=True)
+def _isolate_emit_metrics(monkeypatch):
+    """Isolate ``_emit_metrics`` callers from module-level audit state.
+
+    ``BrowserManager._emit_metrics`` does six auxiliary passes after the
+    per-agent loop — four module-level drain functions (``_drain_captcha_audit``
+    / ``_drain_session_audit`` / ``_drain_fingerprint_audit`` /
+    ``_drain_platform_timing_audit``) plus ``_periodic_session_snapshots``
+    and ``_emit_tenant_threshold_alerts``. Each reads its own module-level
+    bucket / counter that earlier tests (``test_session_persistence.py``
+    records session audit events; ``test_fingerprint_health.py`` records
+    fingerprint outcomes; etc.) may have populated within the same xdist
+    worker process.
+
+    Without isolation, those leftover events flow into the metrics_sink and
+    also bump ``self._metrics_seq``, so tests in this module that assert
+    exact ``current_seq`` / ``len(metrics)`` (TestEmitMetrics,
+    TestMetricsHistoryBuffer, TestBrowserMetricsEndpoint) all become
+    vulnerable to the historical 3.11-shard-1 flake. Stub the six paths
+    module-wide so every ``_emit_metrics`` call in this file exercises
+    only the per-agent loop. ``monkeypatch`` auto-reverts per-test;
+    classes that don't call ``_emit_metrics`` are unaffected.
+    """
+    async def _empty_list() -> list:
+        return []
+
+    async def _noop_self(self) -> None:
+        return None
+
+    async def _noop_self_now(self, now) -> None:
+        return None
+
+    from src.browser import service as svc
+
+    monkeypatch.setattr(svc, "_drain_captcha_audit", _empty_list)
+    monkeypatch.setattr(svc, "_drain_session_audit", _empty_list)
+    monkeypatch.setattr(svc, "_drain_fingerprint_audit", _empty_list)
+    monkeypatch.setattr(svc, "_drain_platform_timing_audit", _empty_list)
+    monkeypatch.setattr(
+        svc.BrowserManager, "_periodic_session_snapshots", _noop_self,
+    )
+    monkeypatch.setattr(
+        svc.BrowserManager, "_emit_tenant_threshold_alerts", _noop_self_now,
+    )
+
+
 class TestEmitMetrics:
-    @pytest.fixture(autouse=True)
-    def _isolate_emit_metrics(self, monkeypatch):
-        """Isolate per-agent emission from module-level audit state.
-
-        ``BrowserManager._emit_metrics`` does six auxiliary passes after
-        the per-agent loop — four module-level drain functions
-        (``_drain_captcha_audit`` / ``_drain_session_audit`` /
-        ``_drain_fingerprint_audit`` / ``_drain_platform_timing_audit``)
-        plus ``_periodic_session_snapshots`` and
-        ``_emit_tenant_threshold_alerts``. Each of those reads its own
-        module-level bucket / counter that earlier tests
-        (``test_session_persistence.py`` records session audit events,
-        ``test_fingerprint_health.py`` records fingerprint outcomes, etc.)
-        may have populated within the same xdist worker process.
-
-        Without isolation, those leftover events flow into the test's
-        ``metrics_sink`` and ``sink_calls`` ends up with N>>2 entries —
-        the historical 3.11-shard-1 flake (``assert 8 == 2``). Stub the
-        six paths to no-ops so these tests only exercise the per-agent
-        emission loop. ``monkeypatch`` auto-reverts per-test.
-        """
-        async def _empty_list() -> list:
-            return []
-
-        async def _noop_self(self) -> None:
-            return None
-
-        async def _noop_self_now(self, now) -> None:
-            return None
-
-        from src.browser import service as svc
-
-        monkeypatch.setattr(svc, "_drain_captcha_audit", _empty_list)
-        monkeypatch.setattr(svc, "_drain_session_audit", _empty_list)
-        monkeypatch.setattr(svc, "_drain_fingerprint_audit", _empty_list)
-        monkeypatch.setattr(svc, "_drain_platform_timing_audit", _empty_list)
-        monkeypatch.setattr(
-            svc.BrowserManager, "_periodic_session_snapshots", _noop_self,
-        )
-        monkeypatch.setattr(
-            svc.BrowserManager, "_emit_tenant_threshold_alerts", _noop_self_now,
-        )
-
     @pytest.mark.asyncio
     async def test_emit_calls_sink_per_instance(self, tmp_path):
         sink_calls: list[dict] = []
