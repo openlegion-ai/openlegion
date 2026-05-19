@@ -804,16 +804,25 @@ function dashboard() {
       // the same default in ``_parsePath`` (kanban IS the default,
       // so old bookmarks survive without a redirect).
       if (this.activeTab === 'workplace') {
-        // Every explicit Work sub-view gets its own URL so reloads
+        // Every EXPLICIT Work sub-view gets its own URL so reloads
         // preserve the user's tab choice. Bare ``/home`` means
         // "no opinion" — ``_applyDefaultHomeTab`` decides
-        // (summaries by current policy). Without explicit
-        // ``/home/kanban``, clicking the Kanban tab produced
-        // ``/home`` which on reload reverted to summaries —
-        // the user's choice didn't survive page reloads.
+        // (summaries by current policy). The kanban arm is gated
+        // on ``homeTabUserChosen`` to avoid canonicalizing bare
+        // ``/home`` into ``/home/kanban`` while the default policy
+        // is still about to fire — without that gate, ``_parsePath``
+        // seeds ``homeTab='kanban'`` as a placeholder on bare
+        // ``/home`` loads, the initial ``_pushUrl`` would emit
+        // ``/home/kanban``, and the URL bar would flicker before
+        // settling on ``/home/summaries`` once the default ran.
+        // The activity/summaries arms don't need the same guard —
+        // their only way of being set is via an explicit deep link
+        // or user click, both of which set ``homeTabUserChosen``.
         if (this.homeTab === 'activity') return '/home/activity';
         if (this.homeTab === 'summaries') return '/home/summaries';
-        if (this.homeTab === 'kanban') return '/home/kanban';
+        if (this.homeTab === 'kanban' && this.homeTabUserChosen) {
+          return '/home/kanban';
+        }
         return '/home';
       }
       return '/';
@@ -857,34 +866,41 @@ function dashboard() {
       // deep link. Bare ``/home`` is the only path that lets the
       // auto-default decide (currently summaries, unconditional).
       if (clean === 'home') {
-        // Default landing — ``_applyDefaultHomeTab`` picks the tab
-        // after load. Mark with ``kanban`` here only as the
-        // placeholder until the default policy runs; do NOT set
-        // ``homeTabUserChosen``.
-        route.tab = 'workplace'; route.homeTab = 'kanban';
+        // Default landing. Seed ``homeTab='summaries'`` directly
+        // here (matching the always-summaries policy that
+        // ``_applyDefaultHomeTab`` would set after load anyway) so
+        // the initial render lands on summaries without a visual
+        // flicker through the kanban placeholder. Do NOT set
+        // ``homeTabUserChosen`` — the user didn't choose; we
+        // defaulted on their behalf. That distinction matters for
+        // ``_buildPath``'s canonicalization gate.
+        route.tab = 'workplace'; route.homeTab = 'summaries';
         return route;
       }
-      if (clean === 'home/activity' || clean.startsWith('home/activity')) {
+      // Segment-boundary-safe prefix match: ``startsWith('home/X/')``
+      // (with trailing slash) avoids false matches like
+      // ``home/kanbanabc`` which would otherwise canonicalize to a
+      // different tab.
+      if (clean === 'home/activity' || clean.startsWith('home/activity/')) {
         route.tab = 'workplace'; route.homeTab = 'activity';
         route.homeTabUserChosen = true;
         return route;
       }
-      if (clean === 'home/summaries' || clean.startsWith('home/summaries')) {
+      if (clean === 'home/summaries' || clean.startsWith('home/summaries/')) {
         route.tab = 'workplace'; route.homeTab = 'summaries';
         route.homeTabUserChosen = true;
         return route;
       }
-      if (clean === 'home/kanban' || clean.startsWith('home/kanban')) {
-        // PR — explicit kanban deep-link, symmetric with
-        // ``/home/summaries`` and ``/home/activity``. Without this
-        // route, clicking the Kanban tab produced ``/home`` and
-        // the user's choice was lost on the next reload (the
+      if (clean === 'home/kanban' || clean.startsWith('home/kanban/')) {
+        // Explicit kanban deep-link, symmetric with the other Work
+        // sub-routes. Without it, clicking the Kanban tab produced
+        // ``/home`` and the user's choice was lost on reload (the
         // post-load ``_applyDefaultHomeTab`` reverted to summaries).
         route.tab = 'workplace'; route.homeTab = 'kanban';
         route.homeTabUserChosen = true;
         return route;
       }
-      if (clean === 'home/tasks' || clean.startsWith('home/tasks')) {
+      if (clean === 'home/tasks' || clean.startsWith('home/tasks/')) {
         // Legacy Phase-3 bookmark — explicit kanban request.
         route.tab = 'workplace'; route.homeTab = 'kanban';
         route.homeTabUserChosen = true;
@@ -2744,13 +2760,23 @@ function dashboard() {
       let target = 'kanban';
       if (tabId === 'activity') target = 'activity';
       else if (tabId === 'summaries') target = 'summaries';
-      if (this.homeTab === target) return;
+      // Push URL whenever EITHER the target changes OR the
+      // user-chosen flag flips false→true. The second case handles
+      // the bare ``/home`` landing: ``_parsePath`` seeded
+      // ``homeTab='summaries'`` without setting userChosen, so the
+      // URL is still bare ``/home``. Clicking the Summaries tab
+      // (or any tab matching the current state) must canonicalize
+      // the URL to ``/home/summaries`` — without this, the early
+      // ``return`` on same-target dropped the canonicalization and
+      // the URL stayed bare ``/home`` despite an explicit user
+      // gesture.
+      const targetChanged = this.homeTab !== target;
+      const userChosenFlipped = !this.homeTabUserChosen;
       this.homeTab = target;
-      // Explicit user toggle locks in their choice — the
-      // ``_applyDefaultHomeTab`` auto-pick on the next loadWorkplace
-      // will leave it alone.
       this.homeTabUserChosen = true;
-      this._pushUrl(false);
+      if (targetChanged || userChosenFlipped) {
+        this._pushUrl(false);
+      }
     },
 
     switchSystemTab(tabId) {

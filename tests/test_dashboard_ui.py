@@ -895,11 +895,50 @@ class TestHomeRouting:
         # ``_buildPath`` emits four workplace sub-routes based on
         # ``homeTab``: ``/home`` (no-opinion landing), ``/home/activity``,
         # ``/home/summaries``, and ``/home/kanban`` (explicit kanban —
-        # added so the user's tab choice survives page reload).
+        # added so the user's tab choice survives page reload). The
+        # kanban arm is GATED on ``this.homeTabUserChosen`` so a bare
+        # ``/home`` placeholder doesn't canonicalize to ``/home/kanban``
+        # before the always-summaries default settles.
         assert "if (this.homeTab === 'activity') return '/home/activity'" in app_js
         assert "if (this.homeTab === 'summaries') return '/home/summaries'" in app_js
-        assert "if (this.homeTab === 'kanban') return '/home/kanban'" in app_js
+        assert "this.homeTab === 'kanban' && this.homeTabUserChosen" in app_js
+        assert "return '/home/kanban'" in app_js
         assert "return '/home'" in app_js
+
+    def test_bare_home_parses_to_summaries_no_flicker(self, app_js: str):
+        # Bare ``/home`` is parsed directly to ``homeTab='summaries'``
+        # so the initial render lands on summaries without flickering
+        # through the kanban placeholder. The post-load
+        # ``_applyDefaultHomeTab`` ratifies the same value as a
+        # belt-and-suspenders no-op.
+        idx = app_js.find("if (clean === 'home') {")
+        assert idx > 0
+        # Window large enough to capture the full block + the
+        # ``return route`` line. The comment header in the block
+        # is multi-line so the actual assignment is past line 500.
+        block = app_js[idx:idx + 1200]
+        assert "route.homeTab = 'summaries'" in block
+        # And must NOT set userChosen for the bare-/home case — the
+        # user didn't choose; we defaulted on their behalf.
+        # Scope the check to JUST the bare-/home branch (find the
+        # next ``return route;`` to bound it).
+        return_idx = block.find("return route;")
+        assert return_idx > 0
+        bare_branch = block[:return_idx]
+        assert "route.homeTabUserChosen" not in bare_branch
+
+    def test_switch_home_tab_canonicalizes_url_on_same_target(self, app_js: str):
+        # When ``switchHomeTab`` is called with the same tab as the
+        # current ``homeTab``, it MUST still push the URL if
+        # ``homeTabUserChosen`` was false (bare ``/home`` landing).
+        # Without this canonicalization the URL stays bare ``/home``
+        # after the user explicitly clicks Summaries on a fresh load.
+        idx = app_js.find("switchHomeTab(tabId) {")
+        assert idx > 0
+        body = app_js[idx:idx + 1200]
+        # Push fires on target change OR user-chosen flip.
+        assert "targetChanged" in body
+        assert "userChosenFlipped" in body
 
     def test_parse_path_recognizes_home_routes(self, app_js: str):
         # ``_parsePath`` accepts every Work sub-route + legacy
