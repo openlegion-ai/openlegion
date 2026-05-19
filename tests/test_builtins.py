@@ -505,9 +505,28 @@ class TestUpdateWorkspaceTool:
 class TestHttpTool:
     @pytest.mark.asyncio
     async def test_http_get(self):
+        """Happy-path GET — verifies response shape (status_code/body keys).
+
+        Mocks ``_request_with_pinned_dns`` to keep the test off the network.
+        Real-network coverage (DNS pinning, TLS, SSRF gates) lives in the
+        dedicated ``_request_with_pinned_dns`` unit tests + ``test_e2e*``.
+        Previously this test hit ``https://httpbin.org/get`` directly and
+        flaked on the busy CI shard whenever the upstream was slow.
+        """
+        from unittest.mock import AsyncMock, patch
+
         from src.agent.builtins.http_tool import http_request
 
-        result = await http_request(url="https://httpbin.org/get", timeout=10)
+        mock_response = AsyncMock()
+        mock_response.status_code = 200
+        mock_response.text = '{"url": "https://example/get"}'
+        mock_response.headers = {"content-type": "application/json"}
+
+        with patch(
+            "src.agent.builtins.http_tool._request_with_pinned_dns",
+            return_value=mock_response,
+        ):
+            result = await http_request(url="https://example.com/get", timeout=10)
         assert result["status_code"] == 200
         assert "body" in result
 
