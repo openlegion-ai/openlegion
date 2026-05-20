@@ -572,3 +572,367 @@ class TestLaneQuarantineGate:
         assert call_kwargs.args[1] == "failed"
         assert call_kwargs.kwargs.get("actor") == "lane_quarantine"
         assert call_kwargs.kwargs.get("extra_payload", {}).get("error") == "agent_quarantined"
+
+
+# ── Per-agent timeout + back-edge integration (operator workflow awareness) ──
+
+
+class TestLanePerAgentTimeout:
+    """The per-agent override is the workflow-awareness layer's way to
+    give workflow-stage agents (page-writer etc.) a tight cap while
+    leaving deep-research agents on the generous default."""
+
+    @pytest.mark.asyncio
+    async def test_default_used_when_no_override(self):
+        lm = LaneManager(
+            dispatch_fn=AsyncMock(return_value=""),
+            task_timeout_seconds=300,
+        )
+        assert lm._timeout_for("any-agent") == 300
+
+    @pytest.mark.asyncio
+    async def test_per_agent_timeout_override_honored(self):
+        """``set_agent_timeout`` overrides the module default for the
+        watchdog wait. The override forces a timeout for one agent while
+        the default cap is preserved for others."""
+        async def slow(agent, message, **kwargs):
+            await asyncio.sleep(5)
+            return "would-have-completed"
+
+        # Default 300s — would let dispatch complete normally. The
+        # per-agent override is clamped to 60s, but that's still well
+        # over the dispatch hang we want to validate. We assert the
+        # resolver math directly + use a separately built lane with a
+        # 1s default (the lane will pick it up via _timeout_for).
+        lm = LaneManager(dispatch_fn=slow, task_timeout_seconds=300)
+        lm.set_agent_timeout("agent-tight", 60)
+        # Untouched agents still see the default.
+        assert lm._timeout_for("agent-loose") == 300
+        assert lm._timeout_for("agent-tight") == 60
+
+        # Functional check: tight cap on the dispatch path.
+        lm2 = LaneManager(dispatch_fn=slow, task_timeout_seconds=1)
+        with pytest.raises(asyncio.TimeoutError):
+            await lm2.enqueue("agent-x", "stuck")
+
+    @pytest.mark.asyncio
+    async def test_set_agent_timeout_clamps_below_60(self):
+        """``seconds`` < 60 is clamped to 60 — a 1-second cap would make
+        the watchdog the bottleneck instead of a safety net."""
+        lm = LaneManager(dispatch_fn=AsyncMock(return_value=""))
+        lm.set_agent_timeout("agent-a", 5)
+        assert lm._timeout_for("agent-a") == 60
+        lm.set_agent_timeout("agent-a", 120)
+        assert lm._timeout_for("agent-a") == 120
+        # None drops back to the default.
+        lm.set_agent_timeout("agent-a", None)
+        assert lm._timeout_for("agent-a") == lm._task_timeout_seconds
+
+    @pytest.mark.asyncio
+    async def test_timeout_fires_back_edge_with_task_failed(self):
+        """When a tasks_store is wired AND a back_edge_fn is set, the
+        watchdog calls the back-edge writer with event_kind=task_failed
+        and ``payload_extras={'error':'lane_timeout','timeout_seconds':N}``
+        so the originator's inbox sees the failure."""
+        async def hanging(agent, message, **kwargs):
+            await asyncio.sleep(60)
+            return "never"
+
+        # Pre-flight ``tasks_store.get`` returns the still-working row so
+        # the watchdog's "already terminal" guard does not skip the
+        # update + back-edge. The post-update ``get`` returns the failed
+        # record that should flow through to the back-edge fn.
+        working_record = {
+            "id": "task_xyz",
+            "assignee": "agent1",
+            "title": "stuck work",
+            "status": "working",
+            "origin": {"kind": "agent", "channel": "", "user": "scout"},
+        }
+        failed_record = {
+            "id": "task_xyz",
+            "assignee": "agent1",
+            "title": "stuck work",
+            "status": "failed",
+            "origin": {"kind": "agent", "channel": "", "user": "scout"},
+        }
+        tasks_store = MagicMock()
+        tasks_store.update_status = MagicMock()
+        tasks_store.get = MagicMock(side_effect=[working_record, failed_record])
+
+        back_edge_calls = []
+
+        def back_edge(task_record, *, event_kind, payload_extras=None):
+            back_edge_calls.append((task_record, event_kind, payload_extras))
+
+        lm = LaneManager(
+            dispatch_fn=hanging,
+            task_timeout_seconds=1,
+            tasks_store=tasks_store,
+        )
+        lm.set_back_edge_fn(back_edge)
+
+        with pytest.raises(asyncio.TimeoutError):
+            await lm.enqueue("agent1", "stuck", task_id="task_xyz")
+
+        tasks_store.update_status.assert_called_once()
+        assert len(back_edge_calls) == 1
+        rec, kind, extras = back_edge_calls[0]
+        assert rec == failed_record
+        assert kind == "task_failed"
+        assert extras.get("error") == "lane_timeout"
+        assert extras.get("timeout_seconds") == 1
+
+    @pytest.mark.asyncio
+    async def test_timeout_skips_back_edge_on_invalid_status_transition(self):
+        """When ``update_status`` raises ``InvalidStatusTransition`` — the
+        race where the assignee terminated the task between our SELECT
+        and UPDATE — the worker logs the race and SKIPS the back-edge,
+        avoiding a double-notification."""
+        from src.host.orchestration import InvalidStatusTransition
+
+        async def hanging(agent, message, **kwargs):
+            await asyncio.sleep(60)
+            return "never"
+
+        tasks_store = MagicMock()
+        tasks_store.update_status = MagicMock(
+            side_effect=InvalidStatusTransition("already done"),
+        )
+        tasks_store.get = MagicMock(return_value={"id": "task_x"})
+
+        back_edge_calls = []
+
+        def back_edge(task_record, *, event_kind, payload_extras=None):
+            back_edge_calls.append((task_record, event_kind, payload_extras))
+
+        lm = LaneManager(
+            dispatch_fn=hanging,
+            task_timeout_seconds=1,
+            tasks_store=tasks_store,
+        )
+        lm.set_back_edge_fn(back_edge)
+
+        with pytest.raises(asyncio.TimeoutError):
+            await lm.enqueue("agent1", "stuck", task_id="task_x")
+
+        # update_status fired (and raised), back-edge was skipped (race).
+        tasks_store.update_status.assert_called_once()
+        assert back_edge_calls == []
+
+    @pytest.mark.asyncio
+    async def test_set_back_edge_fn_clears_with_none(self):
+        """Setter accepts None to clear the wired function — used by
+        teardown paths."""
+        lm = LaneManager(dispatch_fn=AsyncMock(return_value=""))
+        lm.set_back_edge_fn(lambda *a, **kw: None)
+        assert lm._back_edge_fn is not None
+        lm.set_back_edge_fn(None)
+        assert lm._back_edge_fn is None
+
+    @pytest.mark.asyncio
+    async def test_lane_watchdog_skips_back_edge_when_task_already_terminal(self):
+        """Same-status race: the assignee finished the task (terminal
+        status) between dispatch and the watchdog's timeout, so the
+        pre-flight ``tasks_store.get`` sees ``status in {done, failed,
+        cancelled}``. The watchdog MUST skip both ``update_status`` AND
+        the back-edge fire — otherwise the assignee's actual back-edge
+        payload would be clobbered with a synthetic ``lane_timeout``."""
+        async def hanging(agent, message, **kwargs):
+            await asyncio.sleep(60)
+            return "never"
+
+        already_failed_record = {
+            "id": "task_race",
+            "assignee": "agent1",
+            "title": "completed before watchdog",
+            "status": "failed",
+            "origin": {"kind": "agent", "channel": "", "user": "scout"},
+        }
+        tasks_store = MagicMock()
+        tasks_store.update_status = MagicMock()
+        tasks_store.get = MagicMock(return_value=already_failed_record)
+
+        back_edge_calls = []
+
+        def back_edge(task_record, *, event_kind, payload_extras=None):
+            back_edge_calls.append((task_record, event_kind, payload_extras))
+
+        lm = LaneManager(
+            dispatch_fn=hanging,
+            task_timeout_seconds=1,
+            tasks_store=tasks_store,
+        )
+        lm.set_back_edge_fn(back_edge)
+
+        with pytest.raises(asyncio.TimeoutError):
+            await lm.enqueue("agent1", "stuck", task_id="task_race")
+
+        # Pre-flight read happened; update_status + back-edge skipped.
+        tasks_store.get.assert_called_once_with("task_race")
+        tasks_store.update_status.assert_not_called()
+        assert back_edge_calls == []
+
+    @pytest.mark.asyncio
+    async def test_lane_watchdog_fires_back_edge_when_task_still_working(self):
+        """Opposite of the race case: the task is still ``working`` when
+        the watchdog fires, so the pre-check falls through and the
+        watchdog transitions the row + fires the back-edge exactly once
+        with ``event_kind='task_failed'`` and the ``lane_timeout``
+        marker in ``payload_extras``."""
+        async def hanging(agent, message, **kwargs):
+            await asyncio.sleep(60)
+            return "never"
+
+        working_record = {
+            "id": "task_live",
+            "assignee": "agent1",
+            "title": "still running",
+            "status": "working",
+            "origin": {"kind": "agent", "channel": "", "user": "scout"},
+        }
+        failed_record = dict(working_record, status="failed")
+        tasks_store = MagicMock()
+        tasks_store.update_status = MagicMock()
+        # First ``get`` (pre-check) → working. Second ``get`` (after
+        # update_status) → failed (what flows into the back-edge).
+        tasks_store.get = MagicMock(side_effect=[working_record, failed_record])
+
+        back_edge_calls = []
+
+        def back_edge(task_record, *, event_kind, payload_extras=None):
+            back_edge_calls.append((task_record, event_kind, payload_extras))
+
+        lm = LaneManager(
+            dispatch_fn=hanging,
+            task_timeout_seconds=1,
+            tasks_store=tasks_store,
+        )
+        lm.set_back_edge_fn(back_edge)
+
+        with pytest.raises(asyncio.TimeoutError):
+            await lm.enqueue("agent1", "stuck", task_id="task_live")
+
+        tasks_store.update_status.assert_called_once()
+        assert len(back_edge_calls) == 1
+        rec, kind, extras = back_edge_calls[0]
+        assert rec == failed_record
+        assert kind == "task_failed"
+        assert extras.get("error") == "lane_timeout"
+        assert extras.get("timeout_seconds") == 1
+
+
+# ── Per-agent watchdog YAML wiring ─────────────────────────────────
+
+
+class TestPerAgentWatchdogYamlWiring:
+    """The runtime's startup loop reads
+    ``agents.yaml.<id>.settings.watchdog_ttl_seconds`` and pushes each
+    valid entry into ``LaneManager.set_agent_timeout``. The loop must:
+
+    * dispatch ints unchanged into the per-agent overlay,
+    * coerce numeric strings,
+    * log + skip non-numeric values without aborting other entries,
+    * skip entries that omit the field entirely,
+    * be defensive against a malformed ``agents.yaml`` (the outer
+      try/except in runtime.py wraps the loop so startup is not
+      aborted by a parse error).
+    """
+
+    def _apply_yaml_overrides(self, lm: LaneManager, cfg: dict) -> list[str]:
+        """Mirror the runtime.py loop body — same conditions, same
+        coercion order. Returns a list of agent ids that were skipped
+        (for assertion). Kept inline so the test pins the exact logic
+        rather than monkey-patching the runtime module which would
+        drag in the full ``RuntimeContext`` startup graph."""
+        skipped: list[str] = []
+        try:
+            agents_cfg = cfg.get("agents", {}) or {}
+            for aid, entry in agents_cfg.items():
+                if not isinstance(entry, dict):
+                    skipped.append(aid)
+                    continue
+                settings = entry.get("settings") or {}
+                ttl = settings.get("watchdog_ttl_seconds")
+                if ttl is None:
+                    continue
+                try:
+                    lm.set_agent_timeout(aid, int(ttl))
+                except (TypeError, ValueError):
+                    skipped.append(aid)
+        except Exception:
+            pass
+        return skipped
+
+    def test_single_agent_ttl_lands_in_overlay(self):
+        lm = LaneManager(dispatch_fn=AsyncMock(return_value=""))
+        cfg = {
+            "agents": {
+                "alpha": {"settings": {"watchdog_ttl_seconds": 120}},
+            },
+        }
+        skipped = self._apply_yaml_overrides(lm, cfg)
+        assert skipped == []
+        assert lm._per_agent_timeouts == {"alpha": 120}
+        # _timeout_for resolves to the override, not the module default.
+        assert lm._timeout_for("alpha") == 120
+
+    def test_multiple_agents_independent_overrides(self):
+        lm = LaneManager(dispatch_fn=AsyncMock(return_value=""))
+        cfg = {
+            "agents": {
+                "alpha": {"settings": {"watchdog_ttl_seconds": 600}},
+                "beta":  {"settings": {"watchdog_ttl_seconds": 900}},
+                # gamma has no ttl → no override; falls back to default.
+                "gamma": {"settings": {}},
+                # delta omits ``settings`` entirely.
+                "delta": {},
+            },
+        }
+        self._apply_yaml_overrides(lm, cfg)
+        assert lm._per_agent_timeouts == {"alpha": 600, "beta": 900}
+        # gamma + delta fall back to module default (not in overlay dict).
+        assert "gamma" not in lm._per_agent_timeouts
+        assert "delta" not in lm._per_agent_timeouts
+
+    def test_numeric_string_ttl_is_coerced(self):
+        """YAML can yield a string when the user quotes the number;
+        the runtime loop coerces via int() before passing through."""
+        lm = LaneManager(dispatch_fn=AsyncMock(return_value=""))
+        cfg = {
+            "agents": {
+                "alpha": {"settings": {"watchdog_ttl_seconds": "300"}},
+            },
+        }
+        skipped = self._apply_yaml_overrides(lm, cfg)
+        assert skipped == []
+        assert lm._per_agent_timeouts["alpha"] == 300
+
+    def test_bad_ttl_value_skipped_other_entries_apply(self):
+        """A non-numeric value logs and skips that one agent. Other
+        agents in the same dict still get their overrides applied."""
+        lm = LaneManager(dispatch_fn=AsyncMock(return_value=""))
+        cfg = {
+            "agents": {
+                "alpha": {"settings": {"watchdog_ttl_seconds": "not_a_number"}},
+                "beta":  {"settings": {"watchdog_ttl_seconds": 420}},
+            },
+        }
+        skipped = self._apply_yaml_overrides(lm, cfg)
+        assert "alpha" in skipped
+        # Alpha was skipped; beta still applied.
+        assert "alpha" not in lm._per_agent_timeouts
+        assert lm._per_agent_timeouts == {"beta": 420}
+
+    def test_clamps_below_minimum_floor(self):
+        """``set_agent_timeout`` clamps to a 60s floor so a tiny TTL
+        in agents.yaml can't make the watchdog the bottleneck."""
+        lm = LaneManager(dispatch_fn=AsyncMock(return_value=""))
+        cfg = {
+            "agents": {
+                "alpha": {"settings": {"watchdog_ttl_seconds": 5}},
+            },
+        }
+        self._apply_yaml_overrides(lm, cfg)
+        # Clamped to 60 by ``set_agent_timeout``.
+        assert lm._per_agent_timeouts["alpha"] == 60

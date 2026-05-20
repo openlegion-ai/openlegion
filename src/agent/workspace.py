@@ -337,6 +337,42 @@ class WorkspaceManager:
             )
             logger.info("Created %s (seeded from template)", self.HEARTBEAT_FILE)
 
+        # Idempotent heartbeat refresh: mirrors the INSTRUCTIONS.md
+        # playbook_v2 sentinel pattern above. When the template carries a
+        # versioned marker (currently ``heartbeat_v2_workflow_aware`` —
+        # the operator workflow-awareness rewrite) and the live file
+        # lacks it, overwrite from the template. Versioned markers let
+        # us roll system-managed heartbeat updates forward without
+        # touching user-customised heartbeats (which won't have the
+        # marker because they replaced the template). New markers added
+        # in future revisions can extend this tuple.
+        from src.shared.types import HEARTBEAT_SENTINELS
+        if (
+            heartbeat_path.exists()
+            and self._initial_heartbeat
+            and any(
+                f"<!-- {m} -->" in self._initial_heartbeat
+                for m in HEARTBEAT_SENTINELS
+            )
+        ):
+            try:
+                existing = heartbeat_path.read_text(errors="replace")
+            except Exception:
+                existing = ""
+            needs_refresh = not any(
+                f"<!-- {m} -->" in existing for m in HEARTBEAT_SENTINELS
+            )
+            if needs_refresh:
+                heartbeat_path.write_text(
+                    "# Heartbeat Rules\n\n"
+                    + self._initial_heartbeat.strip()
+                    + "\n"
+                )
+                logger.info(
+                    "Refreshed %s from versioned template",
+                    self.HEARTBEAT_FILE,
+                )
+
     # ── Reading ──────────────────────────────────────────────
 
     def load_memory(self) -> str:

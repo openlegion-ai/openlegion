@@ -550,3 +550,85 @@ async def test_public_caller_with_valid_bearer_succeeds(v2_app_with_auth):
             },
         )
         assert r.status_code == 200, r.text
+
+
+# ── GET /mesh/tasks/workflow/{root_task_id} (operator workflow awareness) ──
+
+
+@pytest.mark.asyncio
+async def test_workflow_snapshot_endpoint_operator_only(v2_app):
+    """Non-operator callers get 403; the snapshot is operator-tier
+    workflow awareness, not worker-readable."""
+    app, _, _ = v2_app
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://t",
+    ) as c:
+        # Scout creates a kickoff task so the root exists.
+        r = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "analyst", "title": "kickoff"},
+            headers={"X-Agent-ID": "scout"},
+        )
+        assert r.status_code == 200, r.text
+        tid = r.json()["id"]
+
+        # Worker tries to read — 403.
+        r = await c.get(
+            f"/mesh/tasks/workflow/{tid}",
+            headers={"X-Agent-ID": "analyst"},
+        )
+        assert r.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_workflow_snapshot_endpoint_returns_snapshot_for_operator(v2_app):
+    """Operator sees the chain rooted at the kickoff task."""
+    app, _, _ = v2_app
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://t",
+    ) as c:
+        # Scout creates kickoff task.
+        r = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "analyst", "title": "kickoff"},
+            headers={"X-Agent-ID": "scout"},
+        )
+        root_id = r.json()["id"]
+        # Scout creates a child of the kickoff.
+        r = await c.post(
+            "/mesh/tasks",
+            json={
+                "assignee": "analyst",
+                "title": "next stage",
+                "parent_task_id": root_id,
+            },
+            headers={"X-Agent-ID": "scout"},
+        )
+        assert r.status_code == 200, r.text
+
+        # Operator reads the snapshot.
+        r = await c.get(
+            f"/mesh/tasks/workflow/{root_id}",
+            headers={"X-Agent-ID": "operator"},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["root"] == root_id
+        ids = [s["task_id"] for s in body["stages"]]
+        assert root_id in ids
+        assert body["summary"]["total"] == 2
+
+
+@pytest.mark.asyncio
+async def test_workflow_snapshot_endpoint_returns_404_for_missing_root(v2_app):
+    """Unknown root id returns 404 so the operator can distinguish a
+    typo from an empty chain."""
+    app, _, _ = v2_app
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://t",
+    ) as c:
+        r = await c.get(
+            "/mesh/tasks/workflow/task_does_not_exist",
+            headers={"X-Agent-ID": "operator"},
+        )
+        assert r.status_code == 404

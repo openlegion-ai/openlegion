@@ -49,6 +49,7 @@ from src.shared.types import (
     BlackboardClaimRequest,
     BlackboardWatchRequest,
     MeshEvent,
+    MessageOrigin,
     NotifyRequest,
 )
 from src.shared.utils import dumps_safe, sanitize_for_prompt, setup_logging
@@ -4392,6 +4393,139 @@ def create_mesh_app(
             return True
         return project_id in _caller_projects(agent_id)
 
+    # ── Back-edge events ─────────────────────────────────────────
+    #
+    # When a task reaches a terminal status (or a lane-timeout flips it
+    # to ``failed``), the originating agent learns via a back-edge entry
+    # written to ``inbox/{origin_user}/task_event/{task_id}``. Actionable
+    # events also wake the originator so workflow recovery is event-
+    # driven instead of heartbeat-paced. Closure-local rate-limit state
+    # coalesces bursts (e.g. lane timeout + sweep retry).
+    _BACK_EDGE_KIND_FOR_STATUS = {
+        "done": "task_completed",
+        "failed": "task_failed",
+        "blocked": "task_blocked",
+        "cancelled": "task_cancelled",
+    }
+    _BACK_EDGE_WAKE_KINDS = frozenset({"task_failed", "task_blocked"})
+    _BACK_EDGE_WAKE_WINDOW_SECONDS = 60.0
+    _back_edge_wake_state: dict[str, float] = {}
+
+    def _write_task_event_back_edge(
+        task_record: dict,
+        *,
+        event_kind: str,
+        payload_extras: dict | None = None,
+    ) -> None:
+        """Write a back-edge event for a terminal-status transition.
+
+        ``task_record`` is the post-transition row dict (must include
+        ``id``, ``assignee``, ``title``, ``status``, and the nested
+        ``origin`` dict). ``event_kind`` is the back-edge kind name
+        (``task_completed`` / ``task_failed`` / ``task_blocked`` /
+        ``task_cancelled``). ``payload_extras`` carries kind-specific
+        fields (``blocker_note``, ``error``, ``summary``) — sentinel
+        schema keys can't be shadowed.
+
+        Best-effort: every failure path is logged and swallowed. The
+        underlying status transition has already committed and the
+        back-edge must never destabilize the lifecycle.
+
+        Wake-on-event: ``task_failed`` and ``task_blocked`` also enqueue
+        a followup lane message back to the originator with a 60s rate-
+        limit per task. ``task_completed`` / ``task_cancelled`` do NOT
+        wake (operator picks them up via heartbeat — no need to interrupt
+        successful chains or explicit cancels).
+        """
+        try:
+            origin_dict = task_record.get("origin") or {}
+            origin_kind = origin_dict.get("kind") if origin_dict else None
+            origin_user = origin_dict.get("user") if origin_dict else None
+            assignee = task_record.get("assignee")
+            task_id = task_record.get("id")
+
+            # Eligibility — only cross-agent agent/operator handoffs.
+            # Self-handoffs (sender == recipient) suppress so an
+            # originating agent's check_inbox stays clean.
+            if origin_kind not in {"agent", "operator"}:
+                return
+            if not origin_user or origin_user == assignee:
+                return
+            if not task_id:
+                return
+
+            payload: dict = {
+                "kind": event_kind,
+                "task_id": task_id,
+                "recipient": assignee,
+                "title": task_record.get("title"),
+                "status": task_record.get("status"),
+                "ts": int(time.time()),
+            }
+            if payload_extras:
+                # Sentinel keys above take precedence — extras can't
+                # shadow the canonical schema fields.
+                for k, v in payload_extras.items():
+                    if k not in payload:
+                        payload[k] = v
+            try:
+                blackboard.write(
+                    f"inbox/{origin_user}/task_event/{task_id}",
+                    payload, written_by="mesh", ttl=604800,  # 7 days
+                )
+            except Exception as e:
+                logger.warning(
+                    "Back-edge write failed for task %s: %s", task_id, e,
+                )
+                return
+
+            # Wake-on-event for actionable kinds with per-task rate limit.
+            if event_kind not in _BACK_EDGE_WAKE_KINDS:
+                return
+            if lane_manager is None or dispatch_loop is None:
+                return
+            if origin_user not in router.agent_registry:
+                return
+            now = time.time()
+            last = _back_edge_wake_state.get(task_id, 0.0)
+            if now - last < _BACK_EDGE_WAKE_WINDOW_SECONDS:
+                return
+            _back_edge_wake_state[task_id] = now
+            try:
+                wake_origin = MessageOrigin(
+                    kind=origin_kind,
+                    channel=str(origin_dict.get("channel") or ""),
+                    user=str(origin_user),
+                )
+                title = task_record.get("title") or "(no title)"
+                wake_msg = (
+                    f"Task {task_id} ({title}) reached {event_kind}. "
+                    "Call check_inbox to see the event payload."
+                )
+                asyncio.run_coroutine_threadsafe(
+                    lane_manager.enqueue(
+                        origin_user, wake_msg, mode="followup",
+                        origin=wake_origin, auto_notify=False,
+                        task_id=task_id,
+                    ),
+                    dispatch_loop,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Back-edge wake for %s on task %s failed: %s",
+                    origin_user, task_id, e,
+                )
+        except Exception as e:  # belt-and-suspenders
+            logger.warning(
+                "Back-edge handler crashed for task %s: %s",
+                task_record.get("id"), e,
+            )
+
+    # Expose so the lane watchdog (built in runtime.py before this app)
+    # can fire the same back-edge path on lane-timeout failures. Wired
+    # in ``runtime.py`` post-app-construction via ``set_back_edge_fn``.
+    app._write_task_event_back_edge = _write_task_event_back_edge
+
     @app.post("/mesh/tasks")
     async def create_task(request: Request) -> dict:
         """Create a durable task record.
@@ -4495,6 +4629,36 @@ def create_mesh_app(
         rows = store.list_project(team_id)
         return {"tasks": rows, "count": len(rows)}
 
+    @app.get("/mesh/tasks/workflow/{root_task_id}")
+    async def get_workflow_snapshot(
+        root_task_id: str, request: Request,
+    ) -> dict:
+        """Return a workflow chain snapshot rooted at ``root_task_id``.
+
+        Walks ``parent_task_id`` descendants from the root and reports
+        every stage's status + age. Operator-only by design — workflow
+        orchestration awareness is operator-tier, and individual workers
+        have no business inspecting a chain they don't own.
+
+        404 when the root does not exist (lets the operator distinguish
+        a typo from an empty chain).
+        """
+        caller = _extract_verified_agent_id(request)
+        if not (
+            _caller_is_operator(caller, request)
+            or _is_internal_caller(request)
+        ):
+            raise HTTPException(
+                403,
+                "workflow_snapshot is operator-only",
+            )
+        snapshot = tasks_store.workflow_snapshot(root_task_id)
+        if snapshot is None:
+            raise HTTPException(
+                404, f"Root task '{root_task_id}' not found",
+            )
+        return snapshot
+
     @app.get("/mesh/tasks/{task_id}")
     async def get_task(task_id: str, request: Request) -> dict:
         """Read a task by id.
@@ -4582,63 +4746,26 @@ def create_mesh_app(
         except TaskNotFound:
             raise HTTPException(404, f"Task '{task_id}' not found")
 
-        # Bug 3: back-edge to originating agent on terminal transitions.
-        _BACK_EDGE_STATUSES = {"done", "failed", "cancelled", "blocked"}
-        if status in _BACK_EDGE_STATUSES:
-            try:
-                fresh = store.get(task_id) or record
-                # ``Tasks._row_to_dict`` returns origin as a nested dict
-                # (``origin`` or ``None``), not flat ``origin_kind`` /
-                # ``origin_user`` columns. Read defensively.
-                origin_dict = fresh.get("origin") or {}
-                origin_kind = origin_dict.get("kind") if origin_dict else None
-                origin_user = origin_dict.get("user") if origin_dict else None
-                assignee = fresh.get("assignee")
-                if (
-                    origin_kind in {"agent", "operator"}
-                    and origin_user
-                    and origin_user != assignee
-                ):
-                    event_kind_map = {
-                        "done": "task_completed",
-                        "failed": "task_failed",
-                        "blocked": "task_blocked",
-                        "cancelled": "task_cancelled",
-                    }
-                    payload: dict = {
-                        "kind": event_kind_map[status],
-                        "task_id": task_id,
-                        "recipient": assignee,
-                        "title": fresh.get("title"),
-                        "status": status,
-                        "ts": int(time.time()),
-                    }
-                    # ``body["result"]`` is supposed to be a dict, but
-                    # nothing enforces that on the wire. A caller passing
-                    # a string ("ok") used to AttributeError here and the
-                    # back-edge silently dropped — coerce defensively.
-                    raw_result = body.get("result")
-                    result_dict = raw_result if isinstance(raw_result, dict) else {}
-                    if status == "blocked":
-                        payload["blocker_note"] = blocker_note or ""
-                    if status == "failed":
-                        payload["error"] = (
-                            body.get("error")
-                            or result_dict.get("error", "")
-                            or ""
-                        )
-                    if status == "done":
-                        payload["summary"] = result_dict.get("summary", "")
-                    blackboard.write(
-                        f"inbox/{origin_user}/task_event/{task_id}",
-                        payload,
-                        written_by="mesh",
-                        ttl=604800,  # 7 days
-                    )
-            except Exception as e:
-                logger.warning(
-                    "Back-edge write failed for task %s: %s", task_id, e,
+        # Back-edge to originating agent on terminal transitions. The
+        # helper handles eligibility, payload shaping, and the wake-on-
+        # event chain for actionable kinds.
+        event_kind = _BACK_EDGE_KIND_FOR_STATUS.get(status)
+        if event_kind is not None:
+            fresh = store.get(task_id) or record
+            raw_result = body.get("result")
+            result_dict = raw_result if isinstance(raw_result, dict) else {}
+            payload_extras: dict = {}
+            if status == "blocked":
+                payload_extras["blocker_note"] = blocker_note or ""
+            elif status == "failed":
+                payload_extras["error"] = (
+                    body.get("error") or result_dict.get("error", "") or ""
                 )
+            elif status == "done":
+                payload_extras["summary"] = result_dict.get("summary", "")
+            _write_task_event_back_edge(
+                fresh, event_kind=event_kind, payload_extras=payload_extras,
+            )
         return updated
 
     def _check_can_schedule(target_agent: str) -> tuple[bool, dict | None]:

@@ -134,10 +134,17 @@ _BLACKBOARD_TOOLS = frozenset({
 
 # Read-only tools allowed during operator heartbeat (unsupervised execution).
 # The full operator allowlist is restricted to this subset so heartbeats
-# cannot mutate fleet state without user approval.
+# cannot mutate fleet state without user approval. ``check_inbox`` is
+# read-only — needed so any agent can pick up back-edge events during
+# its heartbeat tick instead of waiting until the next /chat turn.
+# ``workflow_snapshot`` and ``await_task_event`` are operator-tier reads
+# (the skills self-reject for non-operator callers via ``_is_operator``);
+# adding them here lets operator's heartbeat surface workflow state
+# without dropping out to a full /chat turn.
 _HEARTBEAT_TOOLS = frozenset({
     "list_agents", "get_agent_profile", "get_system_status",
-    "notify_user", "save_observations",
+    "notify_user", "save_observations", "check_inbox",
+    "workflow_snapshot", "await_task_event",
 })
 
 
@@ -584,8 +591,12 @@ class AgentLoop:
         Messages grow across iterations:
           user -> assistant(tool_calls) -> tool(result) -> assistant(final)
         """
-        from src.shared.trace import current_trace_id
+        from src.shared.trace import current_task_id, current_trace_id
         current_trace_id.set(trace_id)
+        # ``execute_task`` runs as a fresh coroutine per task — contextvar
+        # scope dies with the coroutine, so no explicit reset is needed
+        # (mirrors the ``current_trace_id`` pattern on the line above).
+        current_task_id.set(assignment.task_id)
         self._loop_detector.reset()
         # State is already set to "working" by receive_task() before spawning
         # this coroutine. Setting current_task is a no-op but documents intent.
@@ -2206,9 +2217,18 @@ class AgentLoop:
                 "tokens_used": 0,
             }
 
-        from src.shared.trace import current_origin, current_trace_id
+        from src.shared.trace import (
+            current_origin,
+            current_task_id,
+            current_trace_id,
+        )
         current_trace_id.set(trace_id)
         origin_token = current_origin.set(origin)
+        # ``current_task_id`` is set only when a real durable task drove
+        # this chat turn (handoff/lane dispatch). Free chats and heartbeats
+        # leave it ``None`` so downstream tools (``hand_off``) don't
+        # falsely parent their new tasks off a non-existent ancestor.
+        task_id_token = current_task_id.set(task_id)
         try:
             async with self._chat_lock:
                 await self._maybe_restore_session()
@@ -2316,6 +2336,7 @@ class AgentLoop:
                     await self._checkpoint_chat_session()
         finally:
             current_origin.reset(origin_token)
+            current_task_id.reset(task_id_token)
 
     async def _auto_close_task(
         self, task_id: str, status: str, *,

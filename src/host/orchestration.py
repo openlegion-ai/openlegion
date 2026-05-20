@@ -93,6 +93,16 @@ _VALID_TRANSITIONS: dict[str, frozenset[str]] = {
 # fleet default only.
 DEFAULT_RETENTION_SECONDS: int = 90 * 24 * 60 * 60  # 90 days
 
+# Defense-in-depth cap on the recursive walk inside
+# ``Tasks.workflow_snapshot``. Caps the inner CTE size before the outer
+# LIMIT trims, so a pathological wide chain can't materialize a huge
+# intermediate result set. Cycles are impossible by construction
+# (parent_task_id is set at creation, never updated); this is purely a
+# memory bound on legitimate workloads. 200 is well above any plausible
+# real workflow (typical chains are 3–8 stages) but well below the
+# point at which the temporary chain table starts to matter.
+MAX_WORKFLOW_CHAIN_DEPTH: int = 200
+
 
 class InvalidStatusTransition(ValueError):
     """Raised when a status transition is not allowed by the state machine."""
@@ -506,7 +516,21 @@ class Tasks:
                 "created_at": now,
             },
         )
-        return self.get(tid)  # type: ignore[return-value]
+        # Post-write assert. Under ``isolation_level=None`` (autocommit)
+        # the INSERT above is durable before we re-read. If ``get(tid)``
+        # returns ``None`` here something genuinely surprising happened —
+        # a file-handle race, a mid-flight schema migration, a downgrade
+        # path that dropped the row. Don't return ``None`` to the caller
+        # (which then surfaces as ``null`` JSON and an ``AttributeError``
+        # inside the agent's ``hand_off``). Raise loudly so the endpoint
+        # returns 5xx and the agent's ``create_failed`` envelope fires.
+        record = self.get(tid)
+        if record is None:
+            raise RuntimeError(
+                f"task {tid!r} INSERT committed but post-read returned no "
+                "row — possible storage corruption or mid-migration race"
+            )
+        return record
 
     def get(self, task_id: str) -> dict | None:
         """Read a task by id. Returns None when not found."""
@@ -724,6 +748,94 @@ class Tasks:
                 params,
             ).fetchall()
         return [row[0] for row in rows]
+
+    def workflow_snapshot(
+        self, root_task_id: str, *, limit: int = 50,
+    ) -> dict | None:
+        """Return a snapshot of the workflow chain rooted at ``root_task_id``.
+
+        Walks the ``parent_task_id`` graph downstream from the root (the
+        operator's kickoff task) via ``WITH RECURSIVE``. Each descendant
+        task is one stage of the workflow. Returns ``None`` when the root
+        does not exist. Capped at ``limit`` rows (default 50) so a
+        runaway chain can't OOM the caller.
+
+        Output shape:
+
+        ::
+
+            {
+              "root": "task_abc",
+              "stages": [
+                {"task_id": "...", "parent_task_id": "...",
+                 "assignee": "...", "status": "...",
+                 "age_in_state_seconds": int, "title": "..."},
+                ...  # ordered by created_at ASC so the chain reads as
+                     # kickoff → downstream
+              ],
+              "summary": {"done": N, "working": N, "pending": N,
+                          "failed": N, "blocked": N, "cancelled": N,
+                          "total": N},
+            }
+
+        ``age_in_state_seconds`` is ``int(now - max(updated_at, created_at))``
+        — the wall-clock age since the last status mutation (or
+        creation, for never-transitioned rows).
+        """
+        now = time.time()
+        # Inner recursion is bounded by ``MAX_WORKFLOW_CHAIN_DEPTH`` via
+        # a depth counter so a pathological wide chain can't materialize
+        # millions of intermediate rows before the outer LIMIT trims.
+        # Cycles are impossible by construction (parent_task_id is set
+        # once at creation, never updated), but the depth guard is
+        # cheap defense-in-depth.
+        with self._conn() as conn:
+            rows = conn.execute(
+                "WITH RECURSIVE chain(id, depth) AS ("
+                "  SELECT id, 0 FROM tasks WHERE id = ?"
+                "  UNION ALL"
+                "  SELECT t.id, c.depth + 1 FROM tasks t "
+                "    JOIN chain c ON t.parent_task_id = c.id "
+                "    WHERE c.depth < ?"
+                ") "
+                "SELECT t.id, t.parent_task_id, t.assignee, t.status, "
+                "  t.title, t.blocker_note, t.created_at, t.updated_at "
+                "FROM tasks t JOIN chain c ON t.id = c.id "
+                "ORDER BY t.created_at ASC LIMIT ?",
+                (root_task_id, MAX_WORKFLOW_CHAIN_DEPTH, limit),
+            ).fetchall()
+        if not rows:
+            return None
+        stages: list[dict] = []
+        # Derive buckets from ``VALID_STATUSES`` so a future state added
+        # to the enum can't silently drift out of the summary math.
+        summary = {status: 0 for status in VALID_STATUSES}
+        summary["total"] = 0
+        for row in rows:
+            (
+                tid, parent, assignee, status, title, blocker_note,
+                created_at, updated_at,
+            ) = row
+            age_basis = updated_at or created_at or 0.0
+            age = int(now - age_basis) if age_basis > 0 else 0
+            stage: dict = {
+                "task_id": tid,
+                "parent_task_id": parent,
+                "assignee": assignee,
+                "status": status,
+                "age_in_state_seconds": age,
+                "title": title or "",
+            }
+            # Surface ``blocker_note`` only when set — saves the operator
+            # a follow-up get_task call for failed/blocked stages and
+            # keeps the snapshot quiet for nominal stages.
+            if blocker_note:
+                stage["blocker_note"] = blocker_note
+            stages.append(stage)
+            if status in summary:
+                summary[status] += 1
+            summary["total"] += 1
+        return {"root": root_task_id, "stages": stages, "summary": summary}
 
     def update_status(
         self,

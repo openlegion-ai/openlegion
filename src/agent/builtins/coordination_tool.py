@@ -250,10 +250,20 @@ async def hand_off(
                 ),
             }
 
-    # Read the origin contextvar once so both create_task and wake_agent
-    # propagate the same provenance.
-    from src.shared.trace import current_origin as _current_origin
+    # Read origin + current task id contextvars once so both create_task
+    # and wake_agent propagate the same provenance. ``current_task_id``
+    # links the new task into the parent's workflow chain so
+    # ``workflow_snapshot`` can walk the descendants from the kickoff
+    # root. Outside a task context (heartbeats, free chat) the var is
+    # ``None`` and the new task lands as a workflow root.
+    from src.shared.trace import (
+        current_origin as _current_origin,
+    )
+    from src.shared.trace import (
+        current_task_id as _current_task_id,
+    )
     origin = _current_origin.get()
+    parent_task_id = _current_task_id.get()
 
     try:
         record = await mesh_client.create_task(
@@ -262,6 +272,7 @@ async def hand_off(
             description=description,
             project=write_project,
             priority=0,
+            parent_task_id=parent_task_id,
             artifact_refs=[artifact_ref] if artifact_ref else None,
             origin=origin,
         )

@@ -1449,3 +1449,239 @@ def test_last_event_ts_for_agent_returns_most_recent(tmp_path):
     # The later row's event should win.
     assert ts >= rec_b["created_at"]
     assert ts >= rec_a["created_at"]
+
+
+# ── Defensive: Tasks.create post-write assert (Bug 1 catch) ─────────
+
+
+class TestTasksCreatePostWriteAssert:
+    """``Tasks.create`` re-reads its INSERT under autocommit and raises
+    RuntimeError on a missing row, so a corrupt/migrating store can't
+    leak ``None`` into the agent's hand_off envelope."""
+
+    def test_create_happy_path_returns_dict(self, tmp_path):
+        t = _make_store(tmp_path)
+        rec = t.create(creator="scout", assignee="analyst", title="hi")
+        assert isinstance(rec, dict)
+        assert rec["id"].startswith("task_")
+        assert rec["title"] == "hi"
+
+    def test_create_raises_when_post_read_returns_none(self, tmp_path):
+        """Force ``self.get(tid)`` to return None after the INSERT — the
+        post-write assert must surface as a loud RuntimeError so the
+        endpoint returns 5xx and ``hand_off`` fires its ``create_failed``
+        envelope instead of returning ``null`` JSON."""
+        t = _make_store(tmp_path)
+        # Patch the bound get() to None so the INSERT succeeds but the
+        # post-read returns nothing. This mirrors the storage-corruption
+        # / mid-migration race the assert exists to catch.
+        t.get = lambda task_id: None  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError) as ei:
+            t.create(creator="scout", assignee="analyst", title="oops")
+        msg = str(ei.value)
+        assert "post-read returned no" in msg or "post-read" in msg
+
+
+# ── workflow_snapshot (operator workflow awareness) ────────────────
+
+
+def _chain(t: Tasks, *, creator="operator", project=None):
+    """Build a linear 3-stage workflow chain rooted at a kickoff task.
+
+    Returns ``(root, mid, leaf)`` records.
+    """
+    root = t.create(
+        creator=creator, assignee="scout", title="kickoff",
+        project_id=project,
+    )
+    time.sleep(0.01)
+    mid = t.create(
+        creator="scout", assignee="analyst", title="middle",
+        parent_task_id=root["id"], project_id=project,
+    )
+    time.sleep(0.01)
+    leaf = t.create(
+        creator="analyst", assignee="writer", title="leaf",
+        parent_task_id=mid["id"], project_id=project,
+    )
+    return root, mid, leaf
+
+
+class TestWorkflowSnapshot:
+    def test_linear_chain_returns_stages_in_created_order(self, tmp_path):
+        t = _make_store(tmp_path)
+        root, mid, leaf = _chain(t)
+        snap = t.workflow_snapshot(root["id"])
+        assert snap is not None
+        assert snap["root"] == root["id"]
+        # Three stages, ordered by created_at ASC (kickoff → leaf).
+        stages = snap["stages"]
+        assert [s["task_id"] for s in stages] == [
+            root["id"], mid["id"], leaf["id"],
+        ]
+        # parent_task_id chain reads as None → root → mid.
+        assert stages[0]["parent_task_id"] is None
+        assert stages[1]["parent_task_id"] == root["id"]
+        assert stages[2]["parent_task_id"] == mid["id"]
+
+    def test_missing_root_returns_none(self, tmp_path):
+        t = _make_store(tmp_path)
+        assert t.workflow_snapshot("task_does_not_exist") is None
+
+    def test_limit_caps_stage_count(self, tmp_path):
+        t = _make_store(tmp_path)
+        root = t.create(
+            creator="operator", assignee="scout", title="root",
+        )
+        # Fan out four direct children. WITH RECURSIVE walks every
+        # descendant; LIMIT 2 caps at root + 1 child = 2 rows (created_at ASC).
+        for i in range(4):
+            time.sleep(0.005)
+            t.create(
+                creator="scout", assignee="writer",
+                title=f"child{i}", parent_task_id=root["id"],
+            )
+        snap = t.workflow_snapshot(root["id"], limit=2)
+        assert snap is not None
+        assert len(snap["stages"]) == 2
+
+    def test_summary_buckets_reflect_statuses(self, tmp_path):
+        t = _make_store(tmp_path)
+        root, mid, leaf = _chain(t)
+        # Add a fourth stage we can park in ``accepted`` — the 7th
+        # status that the original 6-bucket hard-coded code missed.
+        extra = t.create(
+            creator="writer", assignee="reviewer", title="review",
+            parent_task_id=leaf["id"],
+        )
+        # Move mid through working → done; leaf to blocked; extra to
+        # accepted. Root stays pending. The summary must count by
+        # terminal/active state across the full ``VALID_STATUSES`` set.
+        t.update_status(mid["id"], "working", actor="analyst")
+        t.update_status(mid["id"], "done", actor="analyst")
+        t.update_status(leaf["id"], "working", actor="writer")
+        t.update_status(
+            leaf["id"], "blocked", actor="writer",
+            blocker_note="need clarification",
+        )
+        t.update_status(extra["id"], "accepted", actor="reviewer")
+        snap = t.workflow_snapshot(root["id"])
+        assert snap is not None
+        summary = snap["summary"]
+        # Every status in VALID_STATUSES must have a bucket — the fix
+        # derives buckets from the enum rather than a hard-coded list.
+        for status in VALID_STATUSES:
+            assert status in summary, (
+                f"missing bucket for {status!r} — buckets must derive "
+                f"from VALID_STATUSES"
+            )
+        assert summary["pending"] == 1
+        assert summary["accepted"] == 1
+        assert summary["done"] == 1
+        assert summary["blocked"] == 1
+        assert summary["working"] == 0
+        assert summary["failed"] == 0
+        assert summary["cancelled"] == 0
+        assert summary["total"] == 4
+        # The critical invariant — bucket sum equals total. The pre-fix
+        # 6-bucket math missed ``accepted`` so this would have been 3 == 4.
+        bucket_sum = sum(
+            summary[s] for s in VALID_STATUSES
+        )
+        assert bucket_sum == summary["total"], (
+            f"buckets {bucket_sum} != total {summary['total']}"
+        )
+
+    def test_age_in_state_seconds_is_positive_int(self, tmp_path):
+        t = _make_store(tmp_path)
+        root = t.create(
+            creator="operator", assignee="scout", title="root",
+        )
+        # Wait so age > 0.
+        time.sleep(1.1)
+        snap = t.workflow_snapshot(root["id"])
+        assert snap is not None
+        ages = [s["age_in_state_seconds"] for s in snap["stages"]]
+        assert all(isinstance(a, int) for a in ages)
+        assert all(a >= 1 for a in ages), ages
+
+    def test_blocker_note_surfaces_only_on_blocked_stages(self, tmp_path):
+        """Per-stage ``blocker_note`` is included inline when set on a
+        blocked task and ABSENT on done / working / pending stages —
+        so the operator gets the context without a follow-up get_task
+        call but nominal stages stay quiet."""
+        t = _make_store(tmp_path)
+        root, mid, leaf = _chain(t)
+        # leaf → working → blocked with a note. mid → working → done
+        # (no note). root stays pending (no note).
+        t.update_status(mid["id"], "working", actor="analyst")
+        t.update_status(mid["id"], "done", actor="analyst")
+        t.update_status(leaf["id"], "working", actor="writer")
+        t.update_status(
+            leaf["id"], "blocked", actor="writer",
+            blocker_note="awaiting upstream API key",
+        )
+        snap = t.workflow_snapshot(root["id"])
+        assert snap is not None
+        by_id = {s["task_id"]: s for s in snap["stages"]}
+        # Blocked leaf carries the note inline.
+        leaf_stage = by_id[leaf["id"]]
+        assert leaf_stage["status"] == "blocked"
+        assert leaf_stage["blocker_note"] == "awaiting upstream API key"
+        # Done mid stage has no blocker_note key.
+        mid_stage = by_id[mid["id"]]
+        assert mid_stage["status"] == "done"
+        assert "blocker_note" not in mid_stage, (
+            "blocker_note must be absent on non-blocked stages so the "
+            "snapshot stays quiet for nominal workflow steps"
+        )
+        # Pending root has no blocker_note key either.
+        root_stage = by_id[root["id"]]
+        assert root_stage["status"] == "pending"
+        assert "blocker_note" not in root_stage
+
+    def test_max_workflow_chain_depth_caps_recursion(self, tmp_path):
+        """``MAX_WORKFLOW_CHAIN_DEPTH`` (=200) bounds the inner CTE
+        before the outer LIMIT trims. A 250-stage chain must materialise
+        no more rows than the depth cap allows AND the outer ``limit``
+        still applies — set ``limit=300`` so the depth bound is the
+        binding constraint."""
+        from src.host.orchestration import MAX_WORKFLOW_CHAIN_DEPTH
+        assert MAX_WORKFLOW_CHAIN_DEPTH == 200
+        t = _make_store(tmp_path)
+        # Build a linear 250-stage chain. Each new task points to the
+        # previous one as parent.
+        root = t.create(
+            creator="operator", assignee="scout", title="stage_0",
+        )
+        prev_id = root["id"]
+        for i in range(1, 250):
+            rec = t.create(
+                creator="scout", assignee="writer",
+                title=f"stage_{i}", parent_task_id=prev_id,
+            )
+            prev_id = rec["id"]
+        # limit=50 (default behaviour) — outer LIMIT is the binding cap.
+        snap = t.workflow_snapshot(root["id"])
+        assert snap is not None
+        assert len(snap["stages"]) == 50, (
+            f"default limit=50 must cap at 50 rows, got {len(snap['stages'])}"
+        )
+        # limit=300 — outer cap exceeds the recursion depth, so the
+        # depth bound becomes the binding constraint. The inner CTE
+        # walks ``depth < MAX_WORKFLOW_CHAIN_DEPTH`` (root at depth 0,
+        # descendants at depth 1..MAX_WORKFLOW_CHAIN_DEPTH-1), so we get
+        # root + MAX_WORKFLOW_CHAIN_DEPTH−1 children plus the row whose
+        # parent sits at depth MAX_WORKFLOW_CHAIN_DEPTH−1 = at most
+        # MAX_WORKFLOW_CHAIN_DEPTH + 1 rows in total.
+        snap_deep = t.workflow_snapshot(root["id"], limit=300)
+        assert snap_deep is not None
+        # The depth guard kicks in well before the chain length; we
+        # must NOT see all 250 stages even when ``limit`` allows it.
+        assert len(snap_deep["stages"]) < 250, (
+            "MAX_WORKFLOW_CHAIN_DEPTH must cap a 250-stage chain "
+            "below the chain length even when limit is generous"
+        )
+        # Loose upper bound — MAX_WORKFLOW_CHAIN_DEPTH+1 covers the
+        # off-by-one between depth values and row counts.
+        assert len(snap_deep["stages"]) <= MAX_WORKFLOW_CHAIN_DEPTH + 1

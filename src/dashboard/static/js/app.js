@@ -10724,6 +10724,8 @@ function dashboard() {
         inspect_agents: 'reviewing the team',
         list_available_models: 'checking available models',
         compose_work_summary: 'composing a work summary',
+        workflow_snapshot: 'mapping the workflow',
+        await_task_event: 'waiting on a task',
       };
       if (map[toolName]) return map[toolName];
       // Fallback: humanise the snake_case tool name.

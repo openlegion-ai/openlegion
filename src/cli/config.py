@@ -1592,6 +1592,10 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     "list_peer_artifacts", "read_peer_artifact",
     # Coordination + chat
     "list_templates", "apply_template", "hand_off", "check_inbox",
+    # Workflow awareness — operator-only chain inspection + single-task
+    # blocking primitive (see _HEARTBEAT_TOOLS in src/agent/loop.py for
+    # the heartbeat surface; both skills self-reject for non-operators).
+    "workflow_snapshot", "await_task_event",
     # Configuration edits — edit_agent applies every field immediately
     # and emits an undo receipt (5min for soft fields, 30min for hard).
     # undo_change lets the operator self-revert within the TTL.
@@ -1628,8 +1632,14 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     "http_request", "web_search",
 ]
 
+# Reference list documenting the tools operator uses on heartbeat. The
+# loop's actual gate is ``_HEARTBEAT_TOOLS`` in ``src/agent/loop.py`` —
+# this list is kept in sync as documentation but is not itself consulted
+# by the runtime. New tools should be added to BOTH places (and the
+# operator HEARTBEAT.md prompt) to take effect.
 _OPERATOR_HEARTBEAT_TOOLS: list[str] = [
     "inspect_agents", "get_system_status", "notify_user", "save_observations",
+    "check_inbox", "workflow_snapshot", "await_task_event",
 ]
 
 _OPERATOR_SOUL = """\
@@ -1647,6 +1657,7 @@ You build the workforce and step back. Users work with agents directly.
 """
 
 _OPERATOR_HEARTBEAT = """\
+<!-- heartbeat_v2_workflow_aware -->
 You are running an autonomous fleet health check. You have access ONLY to monitoring tools.
 Your previous observations are included above in OBSERVATIONS.md.
 
@@ -1656,7 +1667,14 @@ in the loop; 10 leaves headroom for the final assistant turn).
 1. Review your previous observations (above) to check what you flagged last cycle.
    Do not re-alert on known issues unless they have escalated in severity.
 
-2. Call get_system_status() for fleet-wide metrics:
+2. Call check_inbox() FIRST so any task_failed / task_blocked back-edge events
+   from active workflows are surfaced before you do fleet-wide work. Skim the
+   ``events[]`` array:
+   - For each task_failed / task_blocked event note the task_id and recipient.
+   - For each event whose task is part of an orchestration you started, drop a
+     ``workflow_snapshot(root_task_id)`` call (step 4) to see chain state.
+
+3. Call get_system_status() for fleet-wide metrics:
    - Total cost, cost trend vs yesterday
    - Per-agent cost (per_agent_cost_today_usd, per_agent_cost_vs_yesterday_ratio)
    - Per-agent task health: outcome_rejected_24h_count, execution_failures_24h_count,
@@ -1664,10 +1682,24 @@ in the loop; 10 leaves headroom for the final assistant turn).
    - Agent health counts and pre-computed agents_needing_attention list
    - Plan limits and current usage
 
-3. Call inspect_agents() for the roster summary.
+4. Workflow awareness — for any active orchestration you kicked off (a task you
+   created as a root that fanned out via hand_off), call
+   ``workflow_snapshot(root_task_id)`` to see all stages. Read the response:
+   - ``summary.failed`` > 0 OR ``summary.blocked`` > 0: surface to the user
+     in step 7 with the offending stage's assignee, title, and blocker_note
+     (the snapshot includes it inline — no follow-up get_task needed).
+   - Any stage with ``status == "working"`` AND ``age_in_state_seconds > 300``:
+     mention it in your notify_user message — the agent is genuinely slow.
+     DO NOT mark the work failed; the lane watchdog handles the actual cap.
+   - Skip ``workflow_snapshot`` entirely if you have no active orchestrations.
+     One call covers an entire chain — do NOT loop.
+   - Cap at 3 snapshot calls per heartbeat: if you have more than 3 active
+     workflows, snapshot the 3 most concerning (most-recent failed events
+     wins, then most-recent task_started) and defer the rest to next cycle.
 
-4. Drill into at most THREE most-concerning agents. PREFER one targeted call
-   per drill — don't fan out across the whole fleet:
+5. Call inspect_agents() for the roster summary if you haven't already this
+   cycle. Then drill into at most THREE most-concerning agents. PREFER one
+   targeted call per drill — don't fan out across the whole fleet:
    - Candidates are agents that appear in agents_needing_attention OR have
      per_agent_cost_vs_yesterday_ratio is not None AND > 2.0 OR
      outcome_rejected_24h_count[agent] > 5 OR
@@ -1681,14 +1713,19 @@ in the loop; 10 leaves headroom for the final assistant turn).
      inspect_agents(stale_threshold_hours=24) ONCE to pull the offending
      task IDs (the result annotates every roster entry — don't loop).
 
-5. Call save_observations() with:
+6. Call save_observations() with:
    - fleet_summary: one-line health (e.g. "5/6 healthy, cost stable")
    - agents_attention: list of agents needing attention with issue and severity
    - cost_trend: up/down/stable with percentage
+   - workflows: list of {root_task_id, summary, slow_stages} for any active
+     orchestrations you snapshotted in step 4
    - notes: stale task IDs, rejected outcomes, anything unusual not captured above
 
-6. If any agent is CRITICAL (failed state, budget exceeded, >5 rejected outcomes,
-   or stale work blocking a project), call notify_user() with a brief alert.
+7. Call notify_user() if ANY of the following triggered this cycle:
+   - A workflow stage reached task_failed or task_blocked (include task_id +
+     recipient + the kickoff root_task_id).
+   - An agent is CRITICAL (failed state, budget exceeded, >5 rejected outcomes).
+   - A workflow stage has been ``working`` for > 5 minutes (inform, don't kill).
    Do not re-notify on issues you already alerted on last cycle unless severity
    has increased.
 
@@ -1729,6 +1766,35 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
         return
 
     if has_operator:
+        # Refresh the operator's heartbeat field whenever the canonical
+        # template gains a new sentinel marker. Mirrors the workspace-
+        # side refresh in ``WorkspaceManager._ensure_scaffold`` — a
+        # sentinel like ``heartbeat_v2_workflow_aware`` lets us roll
+        # the operator's heartbeat forward without touching agents
+        # with user-customised heartbeats.
+        op_entry = agents_cfg["agents"].get(_OPERATOR_AGENT_ID, {}) or {}
+        existing_heartbeat = op_entry.get("heartbeat") or ""
+        from src.shared.types import HEARTBEAT_SENTINELS
+        new_has_sentinel = any(
+            f"<!-- {m} -->" in _OPERATOR_HEARTBEAT
+            for m in HEARTBEAT_SENTINELS
+        )
+        old_has_sentinel = any(
+            f"<!-- {m} -->" in existing_heartbeat
+            for m in HEARTBEAT_SENTINELS
+        )
+        if new_has_sentinel and not old_has_sentinel:
+            op_entry["heartbeat"] = _OPERATOR_HEARTBEAT
+            agents_cfg["agents"][_OPERATOR_AGENT_ID] = op_entry
+            AGENTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with open(AGENTS_FILE, "w") as f:
+                yaml.dump(
+                    agents_cfg, f, default_flow_style=False, sort_keys=False,
+                )
+            logger.info(
+                "Refreshed operator heartbeat to versioned template",
+            )
+
         # Ensure permissions are correct even for existing operator
         # (handles upgrades where operator was created before permissions were set)
         perms = _load_permissions()

@@ -1253,6 +1253,18 @@ class MeshClient:
         _raise_with_body(response)
         return response.json()
 
+    async def get_workflow_snapshot(
+        self, root_task_id: str,
+    ) -> dict | None:
+        """Operator-tier read of a workflow chain. Returns ``None`` on 404."""
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/tasks/workflow/{root_task_id}",
+        )
+        if response.status_code == 404:
+            return None
+        _raise_with_body(response)
+        return response.json()
+
     async def list_task_inbox(self, assignee: str | None = None) -> list[dict]:
         """List tasks assigned to ``assignee`` (defaults to self)."""
         target = assignee or self.agent_id

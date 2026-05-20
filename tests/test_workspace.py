@@ -1221,3 +1221,110 @@ class TestDeriveCapabilitiesFromInterface:
         (Path(self._tmpdir) / "INTERFACE.md").mkdir()
         result = _derive_capabilities_from_interface(self._tmpdir)
         assert result["capabilities"] == []
+
+
+# ── Idempotent HEARTBEAT.md refresh via versioned sentinel ─────────
+
+
+class TestHeartbeatVersionedRefresh:
+    """When the template carries the ``heartbeat_v2_workflow_aware``
+    sentinel and the live HEARTBEAT.md lacks it, the workspace
+    overwrites on next construction. Preserves user-customised
+    heartbeats (which won't have the marker) and pushes the next
+    system-managed revision forward."""
+
+    SENTINEL = "<!-- heartbeat_v2_workflow_aware -->"
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _new_initial_heartbeat(self) -> str:
+        return (
+            f"{self.SENTINEL}\nWorkflow-aware autonomous steps:\n"
+            "1. check_inbox\n2. workflow_snapshot\n"
+        )
+
+    def test_initial_heartbeat_with_sentinel_creates_file(self):
+        """File doesn't exist + initial_heartbeat with sentinel → writes."""
+        WorkspaceManager(
+            workspace_dir=self._tmpdir,
+            initial_heartbeat=self._new_initial_heartbeat(),
+        )
+        path = Path(self._tmpdir) / "HEARTBEAT.md"
+        assert path.exists()
+        content = path.read_text()
+        assert self.SENTINEL in content
+        assert "check_inbox" in content
+
+    def test_existing_file_with_sentinel_not_overwritten(self):
+        """File exists with sentinel → no overwrite (idempotent re-init)."""
+        path = Path(self._tmpdir) / "HEARTBEAT.md"
+        path.write_text(
+            f"# Heartbeat Rules\n\n{self.SENTINEL}\n"
+            "user-edited workflow rules\n",
+        )
+        before = path.read_text()
+        WorkspaceManager(
+            workspace_dir=self._tmpdir,
+            initial_heartbeat=self._new_initial_heartbeat(),
+        )
+        assert path.read_text() == before, "Sentinel-present file must not change"
+
+    def test_existing_file_without_sentinel_is_overwritten(self):
+        """File exists WITHOUT sentinel + initial_heartbeat WITH sentinel
+        → overwrite from template (system-managed version bump)."""
+        path = Path(self._tmpdir) / "HEARTBEAT.md"
+        path.write_text(
+            "# Heartbeat Rules\n\nLEGACY rules from a prior revision\n",
+        )
+        WorkspaceManager(
+            workspace_dir=self._tmpdir,
+            initial_heartbeat=self._new_initial_heartbeat(),
+        )
+        content = path.read_text()
+        assert "LEGACY" not in content
+        assert self.SENTINEL in content
+        assert "check_inbox" in content
+
+    def test_existing_file_without_sentinel_template_without_sentinel_no_change(
+        self,
+    ):
+        """No sentinel on either side → leave the file alone. Pins the
+        "user-customised heartbeat" preservation case."""
+        path = Path(self._tmpdir) / "HEARTBEAT.md"
+        path.write_text("# Heartbeat Rules\n\nuser-written rules\n")
+        WorkspaceManager(
+            workspace_dir=self._tmpdir,
+            initial_heartbeat="No marker in this template either\n",
+        )
+        # Untouched.
+        assert "user-written rules" in path.read_text()
+
+    def test_sentinel_constant_imported_from_shared_types(self):
+        """``HEARTBEAT_SENTINELS`` lives in ``src.shared.types`` so the
+        workspace and the operator-config heartbeat refresh stay in
+        sync. Verify the symbol resolves and includes the current
+        marker — a regression here would mean the constant was
+        re-defined locally and would silently drift."""
+        from src.shared.types import HEARTBEAT_SENTINELS
+        assert isinstance(HEARTBEAT_SENTINELS, tuple)
+        assert "heartbeat_v2_workflow_aware" in HEARTBEAT_SENTINELS
+        # The workspace module must consume the central constant, not
+        # define its own. Confirmed by exercising the refresh path on
+        # the canonical marker.
+        path = Path(self._tmpdir) / "HEARTBEAT.md"
+        path.write_text("# Heartbeat Rules\n\nLEGACY revision\n")
+        marker = f"<!-- {HEARTBEAT_SENTINELS[0]} -->"
+        WorkspaceManager(
+            workspace_dir=self._tmpdir,
+            initial_heartbeat=(
+                f"{marker}\nWorkflow-aware autonomous steps:\n"
+                "1. check_inbox\n"
+            ),
+        )
+        content = path.read_text()
+        assert "LEGACY" not in content
+        assert marker in content
