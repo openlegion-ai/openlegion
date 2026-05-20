@@ -150,11 +150,21 @@ class TestEnsureOperatorModelSync(_TempConfigMixin):
         assert result["agents"]["operator"]["model"] == "anthropic/claude-3-haiku"
 
     def test_no_write_when_operator_exists(self):
-        """Does not rewrite agents.yaml when operator already exists."""
-        # Pre-create operator with matching model
+        """Does not rewrite agents.yaml when operator already exists.
+
+        The post-migration ``_ensure_operator_agent`` will refresh the
+        heartbeat when its sentinel is missing — to pin the pure no-write
+        path we seed the heartbeat with the canonical template (which
+        carries the sentinel) so the refresh branch is a no-op.
+        """
+        from src.cli.config import _OPERATOR_HEARTBEAT
+
+        # Pre-create operator with matching model AND the canonical
+        # heartbeat template (sentinel present → no refresh).
         agents_cfg = {"agents": {"operator": {
             "role": "Existing operator",
             "model": "openai/gpt-4o-mini",
+            "heartbeat": _OPERATOR_HEARTBEAT,
         }}}
         with open(self._agents_path, "w") as f:
             yaml.dump(agents_cfg, f)
@@ -250,7 +260,9 @@ class TestOperatorConstants:
         # a magic number so additions like ``compose_work_summary`` from
         # the work-summaries backend don't require recounting.
         assert _OPERATOR_ALLOWED_TOOLS  # non-empty
-        assert len(_OPERATOR_HEARTBEAT_TOOLS) == 4
+        # Workflow-awareness layer added check_inbox / workflow_snapshot /
+        # await_task_event so the heartbeat can drive multi-stage chains.
+        assert len(_OPERATOR_HEARTBEAT_TOOLS) == 7
         # Heartbeat tools should be a subset of allowed tools
         assert set(_OPERATOR_HEARTBEAT_TOOLS).issubset(set(_OPERATOR_ALLOWED_TOOLS))
         # Consolidated product tools (read + lifecycle) must be present.

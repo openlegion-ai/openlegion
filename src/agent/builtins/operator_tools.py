@@ -890,6 +890,161 @@ async def get_team_outputs(
 
 
 @skill(
+    name="workflow_snapshot",
+    description=(
+        "Read a workflow chain snapshot for a multi-stage handoff. Pass "
+        "the kickoff task_id (the root task you created when launching "
+        "the workflow); returns every descendant stage with status and "
+        "age. Use this in heartbeats and after task_failed/task_blocked "
+        "wakes to see where the workflow is, which stage is stuck, and "
+        "what age each stage has been in its current status. Returns "
+        "{'error': 'not_found'} when the root id doesn't exist."
+    ),
+    parameters={
+        "root_task_id": {
+            "type": "string",
+            "description": "Kickoff task_id (the workflow root)",
+        },
+    },
+)
+async def workflow_snapshot(
+    root_task_id: str,
+    *,
+    mesh_client=None,
+    **_kw,
+) -> dict:
+    """Operator-only workflow chain snapshot via mesh endpoint."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    try:
+        result = await mesh_client.get_workflow_snapshot(root_task_id)
+    except Exception as e:
+        return {
+            "error": f"Failed to read workflow snapshot: {e}",
+            "root_task_id": root_task_id,
+        }
+    if result is None:
+        return {"error": "not_found", "root_task_id": root_task_id}
+    return result
+
+
+# Cap below the agent loop's 300s tool execution ceiling so an await
+# completes (and returns its ``timed_out`` shape) before the loop's own
+# timeout cancels the tool call. Default is well under the cap so a
+# nominal handoff completes inside one tool round.
+_AWAIT_TASK_EVENT_MAX_TIMEOUT_S = 270
+_AWAIT_TASK_EVENT_DEFAULT_TIMEOUT_S = 240
+
+
+@skill(
+    name="await_task_event",
+    description=(
+        "Block until a specific task reaches a terminal status (done / "
+        "failed / blocked / cancelled) or the timeout elapses. Polls "
+        "the operator's back-edge inbox with exponential backoff. Use "
+        "this when you need to wait for one specific child task to "
+        "finish before proceeding (e.g. confirming a setup handoff). "
+        "For multi-stage chains, prefer workflow_snapshot — this skill "
+        "is a single-task blocking primitive. Max timeout is 270s so "
+        "the call can return cleanly before the agent loop's tool "
+        "execution ceiling cancels it. Returns the terminal event or "
+        "{'timed_out': true, 'last_status_seen': '...'} on timeout."
+    ),
+    parameters={
+        "task_id": {
+            "type": "string",
+            "description": "Task id to wait on",
+        },
+        "timeout_s": {
+            "type": "integer",
+            "description": (
+                "Max seconds to wait (default 240; capped at 270 "
+                "below the 300s tool execution ceiling)"
+            ),
+            "default": _AWAIT_TASK_EVENT_DEFAULT_TIMEOUT_S,
+        },
+        "poll_interval_s": {
+            "type": "integer",
+            "description": "Initial polling interval (default 3)",
+            "default": 3,
+        },
+    },
+)
+async def await_task_event(
+    task_id: str,
+    timeout_s: int = _AWAIT_TASK_EVENT_DEFAULT_TIMEOUT_S,
+    poll_interval_s: int = 3,
+    *,
+    mesh_client=None,
+    **_kw,
+) -> dict:
+    """Poll the operator's inbox for a terminal back-edge event."""
+    import asyncio
+    import time as _time
+
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    if not task_id:
+        return {"error": "task_id is required"}
+
+    timeout = max(1, min(int(timeout_s), _AWAIT_TASK_EVENT_MAX_TIMEOUT_S))
+    interval = max(1, int(poll_interval_s))
+    terminal_kinds = {
+        "task_completed", "task_failed",
+        "task_blocked", "task_cancelled",
+    }
+    deadline = _time.monotonic() + timeout
+    last_status_seen: str | None = None
+    inbox_prefix = f"inbox/{mesh_client.agent_id}/task_event/"
+
+    while True:
+        try:
+            entries = await mesh_client.list_blackboard(
+                inbox_prefix, global_scope=True,
+            )
+        except Exception as e:
+            return {
+                "error": f"Inbox fetch failed: {e}",
+                "task_id": task_id,
+            }
+        for entry in entries:
+            value = entry.get("value") or {}
+            if value.get("task_id") != task_id:
+                continue
+            kind = value.get("kind", "")
+            if kind in terminal_kinds:
+                return {
+                    "event": {
+                        "kind": kind,
+                        "task_id": task_id,
+                        "status": value.get("status"),
+                        "title": value.get("title"),
+                        "summary": value.get("summary", ""),
+                        "error": value.get("error", ""),
+                        "blocker_note": value.get("blocker_note", ""),
+                        "ts": value.get("ts"),
+                    },
+                }
+            last_status_seen = value.get("status") or last_status_seen
+        remaining = deadline - _time.monotonic()
+        if remaining <= 0:
+            return {
+                "timed_out": True,
+                "task_id": task_id,
+                "last_status_seen": last_status_seen,
+                "waited_seconds": timeout,
+            }
+        # Exponential backoff capped at 30s and the remaining window.
+        sleep_for = min(interval, remaining, 30.0)
+        await asyncio.sleep(sleep_for)
+        interval = min(interval * 2, 30)
+
+
+@skill(
     name="inspect_agents",
     description=(
         "Read agents. Without agent_id: roster summary. With agent_id: "

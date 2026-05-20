@@ -88,9 +88,19 @@ async def test_heartbeat_restores_tools_on_skip():
 
 
 def test_heartbeat_tools_constant():
-    """Verify _HEARTBEAT_TOOLS has exactly the 5 expected tools."""
+    """Verify _HEARTBEAT_TOOLS carries the workflow-awareness allowlist.
+
+    The set previously had 5 entries (list_agents, get_agent_profile,
+    get_system_status, notify_user, save_observations). The operator
+    workflow-awareness layer added three operator-only reads
+    (``check_inbox`` for back-edge events, ``workflow_snapshot`` for
+    chain inspection, ``await_task_event`` for single-task blocking) so
+    the heartbeat can drive multi-stage chains without dropping out to
+    a full /chat turn.
+    """
     assert _HEARTBEAT_TOOLS == frozenset({
         "list_agents", "get_agent_profile", "get_system_status",
         "notify_user", "save_observations",
+        "check_inbox", "workflow_snapshot", "await_task_event",
     })
-    assert len(_HEARTBEAT_TOOLS) == 5
+    assert len(_HEARTBEAT_TOOLS) == 8

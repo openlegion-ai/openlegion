@@ -506,7 +506,21 @@ class Tasks:
                 "created_at": now,
             },
         )
-        return self.get(tid)  # type: ignore[return-value]
+        # Post-write assert. Under ``isolation_level=None`` (autocommit)
+        # the INSERT above is durable before we re-read. If ``get(tid)``
+        # returns ``None`` here something genuinely surprising happened —
+        # a file-handle race, a mid-flight schema migration, a downgrade
+        # path that dropped the row. Don't return ``None`` to the caller
+        # (which then surfaces as ``null`` JSON and an ``AttributeError``
+        # inside the agent's ``hand_off``). Raise loudly so the endpoint
+        # returns 5xx and the agent's ``create_failed`` envelope fires.
+        record = self.get(tid)
+        if record is None:
+            raise RuntimeError(
+                f"task {tid!r} INSERT committed but post-read returned no "
+                "row — possible storage corruption or mid-migration race"
+            )
+        return record
 
     def get(self, task_id: str) -> dict | None:
         """Read a task by id. Returns None when not found."""
@@ -724,6 +738,78 @@ class Tasks:
                 params,
             ).fetchall()
         return [row[0] for row in rows]
+
+    def workflow_snapshot(
+        self, root_task_id: str, *, limit: int = 50,
+    ) -> dict | None:
+        """Return a snapshot of the workflow chain rooted at ``root_task_id``.
+
+        Walks the ``parent_task_id`` graph downstream from the root (the
+        operator's kickoff task) via ``WITH RECURSIVE``. Each descendant
+        task is one stage of the workflow. Returns ``None`` when the root
+        does not exist. Capped at ``limit`` rows (default 50) so a
+        runaway chain can't OOM the caller.
+
+        Output shape:
+
+        ::
+
+            {
+              "root": "task_abc",
+              "stages": [
+                {"task_id": "...", "parent_task_id": "...",
+                 "assignee": "...", "status": "...",
+                 "age_in_state_seconds": int, "title": "..."},
+                ...  # ordered by created_at ASC so the chain reads as
+                     # kickoff → downstream
+              ],
+              "summary": {"done": N, "working": N, "pending": N,
+                          "failed": N, "blocked": N, "cancelled": N,
+                          "total": N},
+            }
+
+        ``age_in_state_seconds`` is ``int(now - max(updated_at, created_at))``
+        — the wall-clock age since the last status mutation (or
+        creation, for never-transitioned rows).
+        """
+        now = time.time()
+        with self._conn() as conn:
+            rows = conn.execute(
+                "WITH RECURSIVE chain(id) AS ("
+                "  SELECT id FROM tasks WHERE id = ?"
+                "  UNION ALL"
+                "  SELECT t.id FROM tasks t "
+                "    JOIN chain c ON t.parent_task_id = c.id"
+                ") "
+                "SELECT t.id, t.parent_task_id, t.assignee, t.status, "
+                "  t.title, t.created_at, t.updated_at "
+                "FROM tasks t JOIN chain c ON t.id = c.id "
+                "ORDER BY t.created_at ASC LIMIT ?",
+                (root_task_id, limit),
+            ).fetchall()
+        if not rows:
+            return None
+        stages: list[dict] = []
+        summary = {
+            "done": 0, "working": 0, "pending": 0,
+            "failed": 0, "blocked": 0, "cancelled": 0, "total": 0,
+        }
+        for row in rows:
+            tid, parent, assignee, status, title, created_at, updated_at = row
+            age_basis = max(updated_at or 0.0, created_at or 0.0)
+            age = int(now - age_basis) if age_basis > 0 else 0
+            stages.append({
+                "task_id": tid,
+                "parent_task_id": parent,
+                "assignee": assignee,
+                "status": status,
+                "age_in_state_seconds": age,
+                "title": title or "",
+            })
+            if status in summary:
+                summary[status] += 1
+            summary["total"] += 1
+        return {"root": root_task_id, "stages": stages, "summary": summary}
 
     def update_status(
         self,

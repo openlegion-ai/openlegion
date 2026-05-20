@@ -19,6 +19,7 @@ from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from typing import Any
 
+from src.host.orchestration import InvalidStatusTransition
 from src.shared.types import SILENT_REPLY_TOKEN, MessageOrigin
 from src.shared.utils import generate_id, setup_logging
 
@@ -85,6 +86,21 @@ class LaneManager:
         # error instead of dispatched — the agent will keep failing on a
         # broken credential otherwise.
         self._quarantine_check = quarantine_check
+        # ``_back_edge_fn``: callable wired by the mesh app after both
+        # this LaneManager and ``create_mesh_app`` have been constructed
+        # (the helper is a closure over the app's blackboard / router).
+        # Called from the lane-timeout path so the originator's back-edge
+        # inbox sees a ``task_failed`` event AND gets a wake-on-event
+        # followup — without this, lane-timeout failures land in SQLite
+        # but never surface to the originating agent's awareness loop.
+        self._back_edge_fn: (
+            Callable[..., None] | None
+        ) = None
+        # Per-agent timeout overlay. ``set_agent_timeout`` writes here;
+        # ``_timeout_for`` falls back to the module default when unset.
+        # Lets workflow-stage agents (page-writer, etc.) run on a tight
+        # 10-min cap while deep-research agents keep the 15-min default.
+        self._per_agent_timeouts: dict[str, int] = {}
         self._queues: dict[str, asyncio.Queue[QueuedTask]] = {}
         self._workers: dict[str, asyncio.Task] = {}
         self._pending: dict[str, list[QueuedTask]] = {}
@@ -106,6 +122,40 @@ class LaneManager:
         ``None`` to clear.
         """
         self._tasks_store = store
+
+    def set_back_edge_fn(
+        self, fn: Callable[..., None] | None,
+    ) -> None:
+        """Wire the mesh's back-edge writer.
+
+        ``fn(task_record, *, event_kind, payload_extras=None)`` writes a
+        back-edge event to the originator's inbox and (for actionable
+        kinds) wakes the originator with a rate-limit. Called from the
+        lane-timeout path. Wired by ``create_mesh_app`` after the helper
+        closure exists. Pass ``None`` to clear.
+        """
+        self._back_edge_fn = fn
+
+    def set_agent_timeout(self, agent: str, seconds: int | None) -> None:
+        """Set a per-agent override on the per-task wall-clock cap.
+
+        ``seconds`` < 60 is clamped to 60 (a 1-second cap would make the
+        watchdog the bottleneck instead of a safety net). Pass ``None``
+        to drop back to the module default. Per-agent overrides are
+        useful for workflow stages with predictable bounds (tight cap →
+        faster recovery from a wedged step) vs deep-research agents that
+        need the generous default.
+        """
+        if seconds is None:
+            self._per_agent_timeouts.pop(agent, None)
+            return
+        self._per_agent_timeouts[agent] = max(60, int(seconds))
+
+    def _timeout_for(self, agent: str) -> int:
+        """Resolve the per-task wall-clock cap for ``agent``."""
+        return self._per_agent_timeouts.get(
+            agent, self._task_timeout_seconds,
+        )
 
     def set_quarantine_check(
         self, check: Callable[[str], bool] | None,
@@ -301,15 +351,17 @@ class LaneManager:
                 # Bug 4: per-task wall-clock cap. A hung LLM stream or
                 # stuck tool previously blocked the lane forever — every
                 # subsequent task for this agent would queue forever.
+                # Per-agent override takes precedence over the default.
+                resolved_timeout = self._timeout_for(agent)
                 if dispatch_kwargs:
                     result = await asyncio.wait_for(
                         self._dispatch_fn(agent, task.message, **dispatch_kwargs),
-                        timeout=self._task_timeout_seconds,
+                        timeout=resolved_timeout,
                     )
                 else:
                     result = await asyncio.wait_for(
                         self._dispatch_fn(agent, task.message),
-                        timeout=self._task_timeout_seconds,
+                        timeout=resolved_timeout,
                     )
                 task.future.set_result(result)
                 # Auto-forward result to origin channel+user when requested.
@@ -354,16 +406,23 @@ class LaneManager:
                 # originating agent's back-edge inbox sees the timeout,
                 # then continue serving the queue. Do NOT raise — the
                 # worker must survive a single stuck task.
+                effective_timeout = self._timeout_for(agent)
                 timeout_msg = (
                     f"Lane task {task.id} for agent={agent} timed out after "
-                    f"{self._task_timeout_seconds}s — freeing lane"
+                    f"{effective_timeout}s — freeing lane"
                 )
                 logger.error(timeout_msg)
+                fresh_record: dict | None = None
                 if task.task_id and self._tasks_store is not None:
                     try:
-                        # ``Tasks.update_status`` is sync — push it off the
-                        # event loop so a slow SQLite write can't pile back
-                        # onto the lane worker we just freed.
+                        # ``Tasks.update_status`` is sync — push it off
+                        # the event loop so a slow SQLite write can't
+                        # pile back onto the lane worker we just freed.
+                        # ``InvalidStatusTransition`` here means the
+                        # assignee already terminated the task between
+                        # our SELECT and UPDATE (a benign race) — log
+                        # and skip the back-edge so we don't double-
+                        # notify the originator.
                         await asyncio.get_running_loop().run_in_executor(
                             None,
                             lambda: self._tasks_store.update_status(
@@ -372,14 +431,42 @@ class LaneManager:
                                 actor="lane_watchdog",
                                 extra_payload={
                                     "error": "lane_timeout",
-                                    "timeout_seconds": self._task_timeout_seconds,
+                                    "timeout_seconds": effective_timeout,
                                 },
                             ),
+                        )
+                        fresh_record = self._tasks_store.get(task.task_id)
+                    except InvalidStatusTransition as race_err:
+                        logger.info(
+                            "Lane watchdog race: task %s already terminal "
+                            "(%s) — skipping back-edge",
+                            task.task_id, race_err,
                         )
                     except Exception as close_err:
                         logger.warning(
                             "Lane watchdog failed to close task %s: %s",
                             task.task_id, close_err,
+                        )
+                # Fire the back-edge writer so the originating agent
+                # learns about the timeout via inbox event + wake (for
+                # the actionable ``task_failed`` kind). Best-effort.
+                if (
+                    fresh_record is not None
+                    and self._back_edge_fn is not None
+                ):
+                    try:
+                        self._back_edge_fn(
+                            fresh_record,
+                            event_kind="task_failed",
+                            payload_extras={
+                                "error": "lane_timeout",
+                                "timeout_seconds": effective_timeout,
+                            },
+                        )
+                    except Exception as be_err:
+                        logger.warning(
+                            "Lane watchdog back-edge fire failed for "
+                            "task %s: %s", task.task_id, be_err,
                         )
                 if not task.future.done():
                     task.future.set_exception(

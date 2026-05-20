@@ -39,6 +39,15 @@ current_origin: contextvars.ContextVar[
     "MessageOrigin | None"
 ] = contextvars.ContextVar("current_origin", default=None)
 
+# Active durable task id, set whenever the loop is executing inside a
+# task context (``execute_task`` or ``chat(task_id=...)``). Tools that
+# create new work for downstream peers read this to establish the
+# parent_task_id linkage so ``workflow_snapshot`` can walk a chain.
+# Defaults to ``None`` outside any task context (heartbeats, free chat).
+current_task_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "current_task_id", default=None,
+)
+
 
 def new_trace_id() -> str:
     """Generate a fresh trace ID: ``tr_<12-hex-chars>``."""
@@ -85,6 +94,7 @@ __all__ = [
     "ORIGIN_HEADER",
     "current_trace_id",
     "current_origin",
+    "current_task_id",
     "new_trace_id",
     "trace_headers",
     "origin_header",

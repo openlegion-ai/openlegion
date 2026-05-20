@@ -734,6 +734,14 @@ class RuntimeContext:
         _tasks_store_ref = getattr(app, "tasks_store", None)
         if _tasks_store_ref is not None and self.lane_manager is not None:
             self.lane_manager.set_tasks_store(_tasks_store_ref)
+        # Wire the mesh's back-edge writer into the lane watchdog so a
+        # lane-timeout failure produces a ``task_failed`` inbox event for
+        # the originator AND triggers the wake-on-event chain. Without
+        # this the durable status update lands but the originating agent
+        # never learns until its next heartbeat.
+        _back_edge_fn = getattr(app, "_write_task_event_back_edge", None)
+        if _back_edge_fn is not None and self.lane_manager is not None:
+            self.lane_manager.set_back_edge_fn(_back_edge_fn)
 
         self._init_channel_manager()
 

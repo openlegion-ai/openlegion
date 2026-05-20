@@ -1271,3 +1271,55 @@ class TestFailedTransitionEnvelopeHelper:
         assert result["test_failed"] is True
         # Non-sentinel extras flow through.
         assert result["task_id"] == "task_abc"
+
+
+class TestHandOffParentTaskIdPropagation:
+    """Operator workflow awareness: ``hand_off`` reads ``current_task_id``
+    so the new task chains under the parent for ``workflow_snapshot`` to
+    walk descendants from the kickoff root."""
+
+    @pytest.mark.asyncio
+    async def test_hand_off_passes_parent_task_id_when_set(self):
+        from src.agent.builtins.coordination_tool import hand_off
+        from src.shared.trace import current_task_id
+
+        mc = _make_mesh_client(agent_id="scout")
+        mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
+        mc.create_task.return_value = {"id": "task_child", "status": "pending"}
+
+        token = current_task_id.set("task_root_parent")
+        try:
+            result = await hand_off(
+                to="analyst", summary="next stage", mesh_client=mc,
+            )
+        finally:
+            current_task_id.reset(token)
+
+        assert result["handed_off"] is True
+        kwargs = mc.create_task.call_args.kwargs
+        assert kwargs.get("parent_task_id") == "task_root_parent"
+
+    @pytest.mark.asyncio
+    async def test_hand_off_passes_none_when_unset(self):
+        """Outside a task context (heartbeats, free chat) the contextvar
+        is None and create_task must receive parent_task_id=None — the
+        new task lands as a workflow root."""
+        from src.agent.builtins.coordination_tool import hand_off
+        from src.shared.trace import current_task_id
+
+        mc = _make_mesh_client(agent_id="scout")
+        mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
+        mc.create_task.return_value = {"id": "task_root", "status": "pending"}
+
+        # Reset to the default (None) explicitly so the test is robust to
+        # leaking state from prior tests in this module.
+        token = current_task_id.set(None)
+        try:
+            await hand_off(
+                to="analyst", summary="kickoff", mesh_client=mc,
+            )
+        finally:
+            current_task_id.reset(token)
+
+        kwargs = mc.create_task.call_args.kwargs
+        assert kwargs.get("parent_task_id") is None
