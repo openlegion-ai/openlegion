@@ -67,6 +67,16 @@ new tool surface (PR-L'). Validation lives in
 :func:`src.agent.builtins.operator_tools._validate_heartbeat_schedule`.
 """
 
+# Versioned markers embedded in system-managed heartbeat templates
+# (currently operator's). When a new sentinel is added here AND the
+# template, idempotent migrators in :func:`src.cli.config._ensure_operator_agent`
+# and :class:`src.agent.workspace.WorkspaceManager._ensure_scaffold`
+# detect the mismatch and roll the live agents.yaml + HEARTBEAT.md
+# forward. User-customised heartbeats (no sentinel) are left alone.
+# Add new markers to the END of the tuple to keep older sentinels as
+# evidence that a workspace was previously migrated.
+HEARTBEAT_SENTINELS: tuple[str, ...] = ("heartbeat_v2_workflow_aware",)
+
 # === Inter-Component Messages ===
 
 

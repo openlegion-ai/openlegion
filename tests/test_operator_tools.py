@@ -1446,3 +1446,84 @@ class TestAwaitTaskEventSkill:
         )
         assert result.get("timed_out") is True
         assert result["task_id"] == "task_target"
+
+    @pytest.mark.asyncio
+    async def test_per_poll_timeout_treated_as_transient(self, monkeypatch):
+        """A per-poll ``asyncio.TimeoutError`` from
+        ``list_blackboard`` must NOT terminate the wait — the watchdog
+        treats it as a transient hiccup, sleeps, and polls again. We
+        prove this by raising TimeoutError on the first call then
+        returning a matching terminal event on the second."""
+        import asyncio as _aio
+
+        from src.agent.builtins import operator_tools
+        from src.agent.builtins.operator_tools import await_task_event
+
+        # Short-circuit the inter-poll sleep so the test doesn't wait.
+        # ``await_task_event`` does ``import asyncio`` locally; the
+        # module is a process singleton, so patching ``asyncio.sleep``
+        # directly is the simplest seam.
+        async def _no_sleep(_seconds):
+            return None
+
+        monkeypatch.setattr(_aio, "sleep", _no_sleep)
+        # Touch ``operator_tools`` so the import isn't flagged unused
+        # (the module ref is still useful for future seams).
+        assert operator_tools.await_task_event is await_task_event
+
+        calls = {"n": 0}
+
+        async def flaky_list_blackboard(_prefix, *, global_scope=False):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise _aio.TimeoutError("simulated stuck poll")
+            return [
+                {"value": {
+                    "kind": "task_completed",
+                    "task_id": "task_t",
+                    "status": "done",
+                    "ts": 0,
+                }},
+            ]
+
+        mc = MagicMock()
+        mc.agent_id = "operator"
+        mc.list_blackboard = flaky_list_blackboard
+
+        result = await await_task_event(
+            "task_t", timeout_s=60, poll_interval_s=1, mesh_client=mc,
+        )
+        # We polled twice: once timed out (transient), once returned the
+        # terminal event. The error envelope path must NOT have fired.
+        assert calls["n"] == 2
+        assert "error" not in result
+        assert "event" in result
+        assert result["event"]["kind"] == "task_completed"
+
+    @pytest.mark.asyncio
+    async def test_deadline_check_skips_poll_when_too_close(self, monkeypatch):
+        """Pre-iteration deadline math: if ``deadline - now <=
+        _AWAIT_TASK_EVENT_POLL_BUDGET_S``, return ``timed_out`` without
+        starting a poll that could overrun the deadline. We monkeypatch
+        the constant to be larger than the requested timeout so the
+        pre-check fires on the very first iteration."""
+        from src.agent.builtins import operator_tools
+        from src.agent.builtins.operator_tools import await_task_event
+
+        # Force the per-poll budget higher than the user-supplied
+        # timeout so the deadline-pre-check trips on iteration 1.
+        monkeypatch.setattr(
+            operator_tools, "_AWAIT_TASK_EVENT_POLL_BUDGET_S", 30,
+        )
+
+        mc = MagicMock()
+        mc.agent_id = "operator"
+        # Should NEVER be called — the deadline check returns first.
+        mc.list_blackboard = AsyncMock(return_value=[])
+
+        result = await await_task_event(
+            "task_short", timeout_s=5, poll_interval_s=1, mesh_client=mc,
+        )
+        assert result.get("timed_out") is True
+        assert result["task_id"] == "task_short"
+        mc.list_blackboard.assert_not_called()

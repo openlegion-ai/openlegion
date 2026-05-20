@@ -1302,3 +1302,29 @@ class TestHeartbeatVersionedRefresh:
         )
         # Untouched.
         assert "user-written rules" in path.read_text()
+
+    def test_sentinel_constant_imported_from_shared_types(self):
+        """``HEARTBEAT_SENTINELS`` lives in ``src.shared.types`` so the
+        workspace and the operator-config heartbeat refresh stay in
+        sync. Verify the symbol resolves and includes the current
+        marker — a regression here would mean the constant was
+        re-defined locally and would silently drift."""
+        from src.shared.types import HEARTBEAT_SENTINELS
+        assert isinstance(HEARTBEAT_SENTINELS, tuple)
+        assert "heartbeat_v2_workflow_aware" in HEARTBEAT_SENTINELS
+        # The workspace module must consume the central constant, not
+        # define its own. Confirmed by exercising the refresh path on
+        # the canonical marker.
+        path = Path(self._tmpdir) / "HEARTBEAT.md"
+        path.write_text("# Heartbeat Rules\n\nLEGACY revision\n")
+        marker = f"<!-- {HEARTBEAT_SENTINELS[0]} -->"
+        WorkspaceManager(
+            workspace_dir=self._tmpdir,
+            initial_heartbeat=(
+                f"{marker}\nWorkflow-aware autonomous steps:\n"
+                "1. check_inbox\n"
+            ),
+        )
+        content = path.read_text()
+        assert "LEGACY" not in content
+        assert marker in content

@@ -346,13 +346,13 @@ class WorkspaceManager:
         # touching user-customised heartbeats (which won't have the
         # marker because they replaced the template). New markers added
         # in future revisions can extend this tuple.
-        _HEARTBEAT_SENTINELS = ("heartbeat_v2_workflow_aware",)
+        from src.shared.types import HEARTBEAT_SENTINELS
         if (
             heartbeat_path.exists()
             and self._initial_heartbeat
             and any(
                 f"<!-- {m} -->" in self._initial_heartbeat
-                for m in _HEARTBEAT_SENTINELS
+                for m in HEARTBEAT_SENTINELS
             )
         ):
             try:
@@ -360,7 +360,7 @@ class WorkspaceManager:
             except Exception:
                 existing = ""
             needs_refresh = not any(
-                f"<!-- {m} -->" in existing for m in _HEARTBEAT_SENTINELS
+                f"<!-- {m} -->" in existing for m in HEARTBEAT_SENTINELS
             )
             if needs_refresh:
                 heartbeat_path.write_text(

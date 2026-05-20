@@ -413,55 +413,87 @@ class LaneManager:
                 )
                 logger.error(timeout_msg)
                 fresh_record: dict | None = None
+                already_terminal = False
                 if task.task_id and self._tasks_store is not None:
+                    # Pre-flight check: read the current status so we can
+                    # tell whether the watchdog actually transitioned the
+                    # row OR the assignee already wrote a terminal status
+                    # while we were timing out. ``Tasks.update_status``
+                    # treats ``current == status`` as a no-op success
+                    # (returns the row without raising), so without this
+                    # check the watchdog would happily overwrite the
+                    # assignee's actual back-edge payload with a generic
+                    # ``error="lane_timeout"`` at the same blackboard key.
                     try:
-                        # ``Tasks.update_status`` is sync — push it off
-                        # the event loop so a slow SQLite write can't
-                        # pile back onto the lane worker we just freed.
-                        # ``InvalidStatusTransition`` here means the
-                        # assignee already terminated the task between
-                        # our SELECT and UPDATE (a benign race) — log
-                        # and skip the back-edge so we don't double-
-                        # notify the originator.
-                        await asyncio.get_running_loop().run_in_executor(
-                            None,
-                            lambda: self._tasks_store.update_status(
-                                task.task_id,
-                                "failed",
-                                actor="lane_watchdog",
-                                extra_payload={
-                                    "error": "lane_timeout",
-                                    "timeout_seconds": effective_timeout,
-                                },
-                            ),
+                        pre = self._tasks_store.get(task.task_id)
+                        if pre is not None and pre.get("status") in (
+                            "done", "failed", "cancelled"
+                        ):
+                            already_terminal = True
+                            logger.info(
+                                "Lane watchdog: task %s already terminal "
+                                "(status=%s) — skipping update + back-edge",
+                                task.task_id, pre.get("status"),
+                            )
+                    except Exception as pre_err:
+                        logger.debug(
+                            "Lane watchdog pre-check for %s failed: %s",
+                            task.task_id, pre_err,
                         )
-                        fresh_record = self._tasks_store.get(task.task_id)
-                    except InvalidStatusTransition as race_err:
-                        logger.info(
-                            "Lane watchdog race: task %s already terminal "
-                            "(%s) — skipping back-edge",
-                            task.task_id, race_err,
-                        )
-                    except Exception as close_err:
-                        logger.warning(
-                            "Lane watchdog failed to close task %s: %s",
-                            task.task_id, close_err,
-                        )
+                    if not already_terminal:
+                        try:
+                            # ``Tasks.update_status`` is sync — push it
+                            # off the event loop so a slow SQLite write
+                            # can't pile back onto the lane worker we
+                            # just freed. ``InvalidStatusTransition``
+                            # here means a benign race terminated the
+                            # task between pre-check and UPDATE.
+                            await asyncio.get_running_loop().run_in_executor(
+                                None,
+                                lambda: self._tasks_store.update_status(
+                                    task.task_id,
+                                    "failed",
+                                    actor="lane_watchdog",
+                                    extra_payload={
+                                        "error": "lane_timeout",
+                                        "timeout_seconds": effective_timeout,
+                                    },
+                                ),
+                            )
+                            fresh_record = self._tasks_store.get(task.task_id)
+                        except InvalidStatusTransition as race_err:
+                            logger.info(
+                                "Lane watchdog race: task %s went "
+                                "terminal during update (%s) — skipping "
+                                "back-edge",
+                                task.task_id, race_err,
+                            )
+                        except Exception as close_err:
+                            logger.warning(
+                                "Lane watchdog failed to close task %s: %s",
+                                task.task_id, close_err,
+                            )
                 # Fire the back-edge writer so the originating agent
                 # learns about the timeout via inbox event + wake (for
                 # the actionable ``task_failed`` kind). Best-effort.
+                # SQLite-bound work is pushed to an executor so a
+                # blackboard write under contention can't block the
+                # shared lane-worker event loop for all agents.
                 if (
                     fresh_record is not None
                     and self._back_edge_fn is not None
                 ):
                     try:
-                        self._back_edge_fn(
-                            fresh_record,
-                            event_kind="task_failed",
-                            payload_extras={
-                                "error": "lane_timeout",
-                                "timeout_seconds": effective_timeout,
-                            },
+                        await asyncio.get_running_loop().run_in_executor(
+                            None,
+                            lambda: self._back_edge_fn(
+                                fresh_record,
+                                event_kind="task_failed",
+                                payload_extras={
+                                    "error": "lane_timeout",
+                                    "timeout_seconds": effective_timeout,
+                                },
+                            ),
                         )
                     except Exception as be_err:
                         logger.warning(

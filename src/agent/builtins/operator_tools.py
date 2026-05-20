@@ -932,8 +932,12 @@ async def workflow_snapshot(
 
 # Cap below the agent loop's 300s tool execution ceiling so an await
 # completes (and returns its ``timed_out`` shape) before the loop's own
-# timeout cancels the tool call. Default is well under the cap so a
-# nominal handoff completes inside one tool round.
+# timeout cancels the tool call. Each inbox poll is wrapped in
+# ``asyncio.wait_for(..., _AWAIT_TASK_EVENT_POLL_BUDGET_S)`` so a stuck
+# HTTP retry chain (``_get_with_retry`` worst-case ≈ 90s with 3×30s
+# attempts) can't push our wall-clock past the ceiling — the per-poll
+# budget bounds each iteration to a known maximum.
+_AWAIT_TASK_EVENT_POLL_BUDGET_S = 15
 _AWAIT_TASK_EVENT_MAX_TIMEOUT_S = 270
 _AWAIT_TASK_EVENT_DEFAULT_TIMEOUT_S = 240
 
@@ -1002,10 +1006,33 @@ async def await_task_event(
     inbox_prefix = f"inbox/{mesh_client.agent_id}/task_event/"
 
     while True:
+        # Don't start another poll if there isn't time for it to finish
+        # cleanly. With ``_AWAIT_TASK_EVENT_POLL_BUDGET_S`` of slack we
+        # return ``timed_out`` rather than risk pushing wall-clock past
+        # the agent loop's 300s tool ceiling.
+        remaining_before_poll = deadline - _time.monotonic()
+        if remaining_before_poll <= _AWAIT_TASK_EVENT_POLL_BUDGET_S:
+            return {
+                "timed_out": True,
+                "task_id": task_id,
+                "last_status_seen": last_status_seen,
+                "waited_seconds": timeout,
+            }
         try:
-            entries = await mesh_client.list_blackboard(
-                inbox_prefix, global_scope=True,
+            # Each poll is bounded by ``_AWAIT_TASK_EVENT_POLL_BUDGET_S``
+            # to keep the worst-case iteration time predictable even if
+            # the mesh's ``_get_with_retry`` chain would otherwise burn
+            # ~90s on a flaky link.
+            entries = await asyncio.wait_for(
+                mesh_client.list_blackboard(
+                    inbox_prefix, global_scope=True,
+                ),
+                timeout=_AWAIT_TASK_EVENT_POLL_BUDGET_S,
             )
+        except asyncio.TimeoutError:
+            # Treat per-poll timeout as transient — the back-edge may
+            # arrive on the next poll. Fall through to the sleep + retry.
+            entries = []
         except Exception as e:
             return {
                 "error": f"Inbox fetch failed: {e}",

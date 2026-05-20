@@ -93,6 +93,16 @@ _VALID_TRANSITIONS: dict[str, frozenset[str]] = {
 # fleet default only.
 DEFAULT_RETENTION_SECONDS: int = 90 * 24 * 60 * 60  # 90 days
 
+# Defense-in-depth cap on the recursive walk inside
+# ``Tasks.workflow_snapshot``. Caps the inner CTE size before the outer
+# LIMIT trims, so a pathological wide chain can't materialize a huge
+# intermediate result set. Cycles are impossible by construction
+# (parent_task_id is set at creation, never updated); this is purely a
+# memory bound on legitimate workloads. 200 is well above any plausible
+# real workflow (typical chains are 3–8 stages) but well below the
+# point at which the temporary chain table starts to matter.
+MAX_WORKFLOW_CHAIN_DEPTH: int = 200
+
 
 class InvalidStatusTransition(ValueError):
     """Raised when a status transition is not allowed by the state machine."""
@@ -773,39 +783,55 @@ class Tasks:
         creation, for never-transitioned rows).
         """
         now = time.time()
+        # Inner recursion is bounded by ``MAX_WORKFLOW_CHAIN_DEPTH`` via
+        # a depth counter so a pathological wide chain can't materialize
+        # millions of intermediate rows before the outer LIMIT trims.
+        # Cycles are impossible by construction (parent_task_id is set
+        # once at creation, never updated), but the depth guard is
+        # cheap defense-in-depth.
         with self._conn() as conn:
             rows = conn.execute(
-                "WITH RECURSIVE chain(id) AS ("
-                "  SELECT id FROM tasks WHERE id = ?"
+                "WITH RECURSIVE chain(id, depth) AS ("
+                "  SELECT id, 0 FROM tasks WHERE id = ?"
                 "  UNION ALL"
-                "  SELECT t.id FROM tasks t "
-                "    JOIN chain c ON t.parent_task_id = c.id"
+                "  SELECT t.id, c.depth + 1 FROM tasks t "
+                "    JOIN chain c ON t.parent_task_id = c.id "
+                "    WHERE c.depth < ?"
                 ") "
                 "SELECT t.id, t.parent_task_id, t.assignee, t.status, "
-                "  t.title, t.created_at, t.updated_at "
+                "  t.title, t.blocker_note, t.created_at, t.updated_at "
                 "FROM tasks t JOIN chain c ON t.id = c.id "
                 "ORDER BY t.created_at ASC LIMIT ?",
-                (root_task_id, limit),
+                (root_task_id, MAX_WORKFLOW_CHAIN_DEPTH, limit),
             ).fetchall()
         if not rows:
             return None
         stages: list[dict] = []
-        summary = {
-            "done": 0, "working": 0, "pending": 0,
-            "failed": 0, "blocked": 0, "cancelled": 0, "total": 0,
-        }
+        # Derive buckets from ``VALID_STATUSES`` so a future state added
+        # to the enum can't silently drift out of the summary math.
+        summary = {status: 0 for status in VALID_STATUSES}
+        summary["total"] = 0
         for row in rows:
-            tid, parent, assignee, status, title, created_at, updated_at = row
-            age_basis = max(updated_at or 0.0, created_at or 0.0)
+            (
+                tid, parent, assignee, status, title, blocker_note,
+                created_at, updated_at,
+            ) = row
+            age_basis = updated_at or created_at or 0.0
             age = int(now - age_basis) if age_basis > 0 else 0
-            stages.append({
+            stage: dict = {
                 "task_id": tid,
                 "parent_task_id": parent,
                 "assignee": assignee,
                 "status": status,
                 "age_in_state_seconds": age,
                 "title": title or "",
-            })
+            }
+            # Surface ``blocker_note`` only when set — saves the operator
+            # a follow-up get_task call for failed/blocked stages and
+            # keeps the snapshot quiet for nominal stages.
+            if blocker_note:
+                stage["blocker_note"] = blocker_note
+            stages.append(stage)
             if status in summary:
                 summary[status] += 1
             summary["total"] += 1

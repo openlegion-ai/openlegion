@@ -420,6 +420,42 @@ class TestOperatorConstants:
         from src.cli.config import _OPERATOR_HEARTBEAT
         assert f"HEARTBEAT_MAX_ITERATIONS={HEARTBEAT_MAX_ITERATIONS}" in _OPERATOR_HEARTBEAT
 
+    def test_heartbeat_imports_sentinel_from_shared_types(self):
+        """HEARTBEAT_SENTINELS lives in ``src.shared.types`` and the
+        operator-config refresh path imports it from there. Verifies
+        the central constant resolves and contains the canonical
+        marker actually embedded in ``_OPERATOR_HEARTBEAT``."""
+        from src.cli.config import _OPERATOR_HEARTBEAT
+        from src.shared.types import HEARTBEAT_SENTINELS
+        assert isinstance(HEARTBEAT_SENTINELS, tuple)
+        assert "heartbeat_v2_workflow_aware" in HEARTBEAT_SENTINELS
+        # Every sentinel in the tuple must appear as an HTML comment
+        # somewhere in the canonical template — otherwise the
+        # ``new_has_sentinel`` check in ``_ensure_operator_agent``
+        # would silently fail to roll the heartbeat forward.
+        present = [
+            f"<!-- {m} -->" in _OPERATOR_HEARTBEAT
+            for m in HEARTBEAT_SENTINELS
+        ]
+        assert any(present), (
+            "no HEARTBEAT_SENTINELS marker present in _OPERATOR_HEARTBEAT — "
+            "operator heartbeat refresh would never fire"
+        )
+
+    def test_heartbeat_step4_mentions_inline_blocker_note(self):
+        """Fix 4 — step 4 must surface the new inline ``blocker_note``
+        contract and the 3-call cap so the LLM doesn't loop snapshots."""
+        from src.cli.config import _OPERATOR_HEARTBEAT
+        # Snapshot now carries blocker_note inline — no follow-up
+        # get_task call needed.
+        assert "blocker_note" in _OPERATOR_HEARTBEAT
+        assert "inline" in _OPERATOR_HEARTBEAT
+        # Cap of 3 snapshot calls per heartbeat.
+        assert (
+            "Cap at 3 snapshot calls" in _OPERATOR_HEARTBEAT
+            or "cap at 3 snapshot calls" in _OPERATOR_HEARTBEAT
+        )
+
     def test_core_has_key_sections(self):
         from src.shared.operator_playbooks import _OPERATOR_CORE
         assert "Routing Work" in _OPERATOR_CORE

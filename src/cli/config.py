@@ -1686,12 +1686,16 @@ in the loop; 10 leaves headroom for the final assistant turn).
    created as a root that fanned out via hand_off), call
    ``workflow_snapshot(root_task_id)`` to see all stages. Read the response:
    - ``summary.failed`` > 0 OR ``summary.blocked`` > 0: surface to the user
-     in step 7 with the offending stage's assignee and title.
+     in step 7 with the offending stage's assignee, title, and blocker_note
+     (the snapshot includes it inline — no follow-up get_task needed).
    - Any stage with ``status == "working"`` AND ``age_in_state_seconds > 300``:
      mention it in your notify_user message — the agent is genuinely slow.
      DO NOT mark the work failed; the lane watchdog handles the actual cap.
    - Skip ``workflow_snapshot`` entirely if you have no active orchestrations.
      One call covers an entire chain — do NOT loop.
+   - Cap at 3 snapshot calls per heartbeat: if you have more than 3 active
+     workflows, snapshot the 3 most concerning (most-recent failed events
+     wins, then most-recent task_started) and defer the rest to next cycle.
 
 5. Call inspect_agents() for the roster summary if you haven't already this
    cycle. Then drill into at most THREE most-concerning agents. PREFER one
@@ -1770,14 +1774,14 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
         # with user-customised heartbeats.
         op_entry = agents_cfg["agents"].get(_OPERATOR_AGENT_ID, {}) or {}
         existing_heartbeat = op_entry.get("heartbeat") or ""
-        _HEARTBEAT_SENTINELS = ("heartbeat_v2_workflow_aware",)
+        from src.shared.types import HEARTBEAT_SENTINELS
         new_has_sentinel = any(
             f"<!-- {m} -->" in _OPERATOR_HEARTBEAT
-            for m in _HEARTBEAT_SENTINELS
+            for m in HEARTBEAT_SENTINELS
         )
         old_has_sentinel = any(
             f"<!-- {m} -->" in existing_heartbeat
-            for m in _HEARTBEAT_SENTINELS
+            for m in HEARTBEAT_SENTINELS
         )
         if new_has_sentinel and not old_has_sentinel:
             op_entry["heartbeat"] = _OPERATOR_HEARTBEAT

@@ -743,6 +743,34 @@ class RuntimeContext:
         if _back_edge_fn is not None and self.lane_manager is not None:
             self.lane_manager.set_back_edge_fn(_back_edge_fn)
 
+        # Per-agent watchdog override. Workflow-stage agents that run a
+        # bounded fast loop can opt into a tighter cap than the 15-min
+        # default via ``settings.watchdog_ttl_seconds`` in agents.yaml.
+        # Workers without the field stay on the module default.
+        if self.lane_manager is not None:
+            try:
+                from src.cli.config import _load_config as _load_cfg_for_lanes
+                _cfg = _load_cfg_for_lanes()
+                _agents_cfg = _cfg.get("agents", {}) or {}
+                for aid, entry in _agents_cfg.items():
+                    if not isinstance(entry, dict):
+                        continue
+                    settings = entry.get("settings") or {}
+                    ttl = settings.get("watchdog_ttl_seconds")
+                    if ttl is None:
+                        continue
+                    try:
+                        self.lane_manager.set_agent_timeout(aid, int(ttl))
+                    except (TypeError, ValueError):
+                        logger.warning(
+                            "Invalid watchdog_ttl_seconds for %s: %r — "
+                            "ignored", aid, ttl,
+                        )
+            except Exception as e:
+                logger.warning(
+                    "Per-agent watchdog override wiring failed: %s", e,
+                )
+
         self._init_channel_manager()
 
         from src.dashboard.server import create_dashboard_router, create_spa_catchall_router
