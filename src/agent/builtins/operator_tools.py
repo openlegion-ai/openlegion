@@ -9,6 +9,7 @@ import time as _time
 from datetime import datetime, timezone
 
 from src.agent.skills import skill
+from src.shared.redaction import redact_text_with_urls
 from src.shared.types import (
     HARD_EDIT_FIELDS as _HARD_EDIT_FIELDS,
 )
@@ -1041,8 +1042,13 @@ async def await_task_event(
                 # may arrive on the next poll. Fall through to sleep.
                 entries = []
             except Exception as e:
+                # Redact + truncate so an HTTP-layer exception that
+                # quotes a URL with credentials in the query string
+                # can't leak into the LLM context (same precaution as
+                # coordination_tool's failure envelopes).
+                redacted = redact_text_with_urls(str(e))[:200]
                 return {
-                    "error": f"Inbox fetch failed: {e}",
+                    "error": f"Inbox fetch failed: {redacted}",
                     "task_id": task_id,
                 }
             for entry in entries:
@@ -1079,13 +1085,17 @@ async def await_task_event(
     except Exception as e:
         # Belt-and-suspenders: any exception escaping the loop body
         # (entry shape mismatch, contextvar resolution, etc.) lands here
-        # and produces a typed envelope instead of an empty body.
+        # and produces a typed envelope instead of an empty body. The
+        # message is redacted + truncated for the same reason as the
+        # inner ``except`` — exception strings can carry HTTP URLs with
+        # credentials and must never leak into the LLM context.
+        redacted = redact_text_with_urls(str(e))[:200]
         logger.warning(
             "await_task_event unexpected exception for task=%s: %s",
-            task_id, e,
+            task_id, redacted,
         )
         return {
-            "error": f"await_task_event_unexpected: {e}",
+            "error": f"await_task_event_unexpected: {redacted}",
             "task_id": task_id,
         }
 

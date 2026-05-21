@@ -637,36 +637,27 @@ async def test_workflow_snapshot_endpoint_returns_404_for_missing_root(v2_app):
 # ── Bug 1 post-write verify tests ────────────────────────────────
 
 
-def _patch_get_for_verify(tasks_store, fake_post_verify_row):
-    """Replace ``tasks_store.get`` so the post-create verify branch sees
-    a chosen row.
+def _patch_create_for_verify(tasks_store, fake_record):
+    """Replace ``tasks_store.create`` so it returns a chosen record.
 
-    The endpoint's verify reads ``store.get(record["id"])`` AFTER
-    ``store.create(...)``. ``Tasks.create`` itself calls ``self.get(tid)``
-    once internally as a sanity check before returning. We therefore let
-    the first ``get`` call hit the real underlying row (so ``create``
-    succeeds) and only swap in our fake for the SECOND call — which is
-    the endpoint's post-write verify.
+    The endpoint compares the record returned from ``store.create`` against
+    the incoming request body. Injecting a divergent record here is the
+    cleanest way to exercise the endpoint's verify branch — it lets the
+    test pretend the store had a corruption bug and stored mistyped
+    values, then asserts the verify catches it before the row reaches
+    the agent's ``hand_off`` envelope path.
     """
-    original_get = tasks_store.get
-    state = {"n": 0}
-
-    def fake_get(task_id):
-        state["n"] += 1
-        if state["n"] == 1:
-            return original_get(task_id)
-        return fake_post_verify_row
-
-    tasks_store.get = fake_get
-    return state
+    def fake_create(**_kwargs):
+        return fake_record
+    tasks_store.create = fake_create
 
 
 @pytest.mark.asyncio
-async def test_post_write_verify_500_on_missing_row(v2_app):
-    """If the row vanishes between INSERT and the post-write re-read the
-    endpoint must 500 with a structured detail mentioning 'vanished'."""
+async def test_post_write_verify_500_on_null_record(v2_app):
+    """If ``Tasks.create`` ever violates its contract and returns None the
+    endpoint must 500 rather than leak null JSON to the agent."""
     app, _, _ = v2_app
-    _patch_get_for_verify(app.tasks_store, fake_post_verify_row=None)
+    _patch_create_for_verify(app.tasks_store, fake_record=None)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         r = await c.post(
             "/mesh/tasks",
@@ -674,7 +665,7 @@ async def test_post_write_verify_500_on_missing_row(v2_app):
             headers={"X-Agent-ID": "scout"},
         )
     assert r.status_code == 500, r.text
-    assert "vanished" in r.text.lower()
+    assert "no record" in r.text.lower() or "contract" in r.text.lower()
 
 
 @pytest.mark.asyncio
@@ -685,11 +676,12 @@ async def test_post_write_verify_500_on_assignee_mismatch(v2_app):
     fake_row = {
         "id": "task_fake",
         "assignee": "wrong",
+        "creator": "scout",
         "project_id": None,
         "parent_task_id": None,
         "status": "pending",
     }
-    _patch_get_for_verify(app.tasks_store, fake_post_verify_row=fake_row)
+    _patch_create_for_verify(app.tasks_store, fake_record=fake_row)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         r = await c.post(
             "/mesh/tasks",
@@ -709,11 +701,12 @@ async def test_post_write_verify_500_on_status_mismatch(v2_app):
     fake_row = {
         "id": "task_fake",
         "assignee": "analyst",
+        "creator": "scout",
         "project_id": None,
         "parent_task_id": None,
         "status": "failed",
     }
-    _patch_get_for_verify(app.tasks_store, fake_post_verify_row=fake_row)
+    _patch_create_for_verify(app.tasks_store, fake_record=fake_row)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         r = await c.post(
             "/mesh/tasks",
@@ -722,6 +715,30 @@ async def test_post_write_verify_500_on_status_mismatch(v2_app):
         )
     assert r.status_code == 500, r.text
     assert "status" in r.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_post_write_verify_500_on_creator_mismatch(v2_app):
+    """A stored row with a divergent ``creator`` (header-forge bug) must
+    surface as a 500 with 'creator' in the detail."""
+    app, _, _ = v2_app
+    fake_row = {
+        "id": "task_fake",
+        "assignee": "analyst",
+        "creator": "impersonator",
+        "project_id": None,
+        "parent_task_id": None,
+        "status": "pending",
+    }
+    _patch_create_for_verify(app.tasks_store, fake_record=fake_row)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "analyst", "title": "creator drift"},
+            headers={"X-Agent-ID": "scout"},
+        )
+    assert r.status_code == 500, r.text
+    assert "creator" in r.text.lower()
 
 
 @pytest.mark.asyncio

@@ -1,21 +1,31 @@
-"""Integration test: ``hand_off`` → ``list_task_inbox``.
+"""Integration tests: ``hand_off`` → ``list_task_inbox``.
 
-Canary for Bug 1: agent A calls ``hand_off`` and agent B's inbox
-must contain the resulting row immediately afterwards. Exercises the
-real :class:`Tasks` store (``:memory:`` shared connection) wired up to
-a mock ``mesh_client`` whose write/read methods proxy to the store —
-the same pattern :class:`TestHandOffParentTaskIdPropagation` in
-``test_coordination.py`` uses, but driving the FULL round-trip end-to-end
-(create → store → list_inbox) so a regression in the
-``assignee``-normalization / post-write-verify chain would be caught
-here even if individual unit tests stayed green.
+Canaries for Bug 1: agent A's hand_off must produce a row that the
+recipient's inbox returns. Two layers of coverage so a regression
+at EITHER layer fails loudly:
+
+* Store-level canary (the original test below): real :class:`Tasks`
+  store wired to a mock ``mesh_client``. Drives ``hand_off`` →
+  ``store.create`` → ``store.list_inbox`` without going through HTTP,
+  catching store-side parent_task_id / assignee regressions.
+* HTTP-level canary (the ASGI test below): real mesh app behind
+  ``ASGITransport``. Drives POST ``/mesh/tasks`` → endpoint → store →
+  GET ``/mesh/tasks/inbox/{assignee}``, catching endpoint-side strip /
+  verify / permission regressions that the store-level test would miss.
 """
 
 from __future__ import annotations
 
+import importlib
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import yaml
+from httpx import ASGITransport, AsyncClient
+
+from src.host.mesh import Blackboard, MessageRouter, PubSub
+from src.host.permissions import PermissionMatrix
+from src.shared.types import AgentPermissions
 
 
 @pytest.mark.asyncio
@@ -101,3 +111,118 @@ async def test_hand_off_creates_task_visible_to_recipient_inbox(monkeypatch):
     assert row["parent_task_id"] == "task_root_parent"
     assert row["status"] == "pending"
     assert row["creator"] == "scout"
+
+
+# ── HTTP-level integration canary (codex R5) ─────────────────────
+
+
+def _reload_mesh_server(monkeypatch, *, tasks_db: str):
+    monkeypatch.setenv("OPENLEGION_ORCHESTRATION_TASKS_DB", tasks_db)
+    import src.host.server as server_module
+    importlib.reload(server_module)
+    return server_module
+
+
+@pytest.fixture
+def asgi_mesh(tmp_path, monkeypatch):
+    """Mesh app behind ASGITransport with two agents in one project."""
+    server_module = _reload_mesh_server(
+        monkeypatch, tasks_db=str(tmp_path / "tasks.db"),
+    )
+    pdir = tmp_path / "projects" / "research"
+    pdir.mkdir(parents=True)
+    (pdir / "metadata.yaml").write_text(yaml.dump({
+        "name": "research",
+        "members": ["scout", "analyst"],
+        "created_at": "2026-05-21T00:00:00+00:00",
+    }))
+    monkeypatch.setenv(
+        "OPENLEGION_CONFIG_PROJECTS_DIR", str(tmp_path / "projects"),
+    )
+    blackboard = Blackboard(str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    permissions = PermissionMatrix()
+    for aid in ("scout", "analyst"):
+        permissions.permissions[aid] = AgentPermissions(
+            agent_id=aid, can_route_tasks=True,
+            can_message=["scout", "analyst"],
+        )
+    router = MessageRouter(permissions, {
+        "scout": "http://scout:8400",
+        "analyst": "http://analyst:8400",
+    })
+    app = server_module.create_mesh_app(
+        blackboard=blackboard, pubsub=pubsub,
+        router=router, permissions=permissions,
+    )
+    yield app
+    blackboard.close()
+    monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)
+    importlib.reload(server_module)
+
+
+@pytest.mark.asyncio
+async def test_http_handoff_round_trip_lands_in_recipient_inbox(asgi_mesh):
+    """End-to-end through the HTTP layer: POST /mesh/tasks as scout for
+    analyst, then GET /mesh/tasks/inbox/analyst — the row must be there.
+
+    This is the codex R5 canary. The store-level test above can pass
+    while an endpoint-side regression (e.g. someone reverts the post-
+    write verify or breaks the assignee.strip normalization) silently
+    breaks every real handoff in production. Drive the full HTTP chain
+    so that class of regression fails loudly here.
+    """
+    transport = ASGITransport(app=asgi_mesh)
+    async with AsyncClient(transport=transport, base_url="http://t") as c:
+        # scout creates a task for analyst.
+        post = await c.post(
+            "/mesh/tasks",
+            json={
+                "assignee": "analyst",
+                "title": "Investigate Q3 funnel",
+                "parent_task_id": "task_kickoff_root",
+            },
+            headers={"X-Agent-ID": "scout"},
+        )
+        assert post.status_code == 200, post.text
+        created = post.json()
+        assert created["assignee"] == "analyst"
+        assert created["creator"] == "scout"
+        assert created["parent_task_id"] == "task_kickoff_root"
+        assert created["status"] == "pending"
+
+        # analyst's inbox must surface the row immediately.
+        inbox = await c.get(
+            "/mesh/tasks/inbox/analyst",
+            headers={"X-Agent-ID": "analyst"},
+        )
+        assert inbox.status_code == 200, inbox.text
+        payload = inbox.json()
+        assert payload["count"] == 1
+        assert payload["tasks"][0]["id"] == created["id"]
+        assert payload["tasks"][0]["assignee"] == "analyst"
+        assert payload["tasks"][0]["status"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_http_handoff_assignee_with_whitespace_normalized_and_visible(
+    asgi_mesh,
+):
+    """Whitespace-padded assignee at the wire is stripped before storage,
+    so the recipient's byte-exact SQLite ``=`` lookup matches. Bug 1
+    repros consistent with a single stray space breaking ``list_inbox``."""
+    transport = ASGITransport(app=asgi_mesh)
+    async with AsyncClient(transport=transport, base_url="http://t") as c:
+        post = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "  analyst  ", "title": "Padded"},
+            headers={"X-Agent-ID": "scout"},
+        )
+        assert post.status_code == 200, post.text
+        assert post.json()["assignee"] == "analyst"
+        inbox = await c.get(
+            "/mesh/tasks/inbox/analyst",
+            headers={"X-Agent-ID": "analyst"},
+        )
+        assert inbox.status_code == 200
+        assert inbox.json()["count"] == 1

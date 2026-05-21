@@ -4588,58 +4588,69 @@ def create_mesh_app(
         origin = _validated_origin(request, caller)
         origin_dict = origin.model_dump() if origin is not None else None
 
-        record = store.create(
-            creator=caller,
-            assignee=assignee,
-            title=title,
-            description=description or None,
-            project_id=project_id,
-            parent_task_id=parent_task_id,
-            priority=priority,
-            dependencies=dependencies if isinstance(dependencies, list) else None,
-            artifact_refs=artifact_refs if isinstance(artifact_refs, list) else None,
-            origin=origin_dict,
-        )
-        # Belt-and-suspenders verify (Bug 1 post-mortem): ``Tasks.create``
-        # already asserts the row exists, but it does NOT check that
-        # ``assignee`` / ``team_id`` / ``parent_task_id`` / ``status``
-        # stored match what the caller requested. A corrupt row with
-        # e.g. wrong-typed assignee silently breaks ``list_task_inbox``
-        # for the intended recipient (the row exists but the SELECT
-        # ``WHERE assignee = ?`` doesn't match). Re-read the row and
-        # assert the four fields agree with the request — if anything
-        # differs, 500 with a structured detail so the caller's
-        # ``hand_off`` failure envelope fires and we get diagnostic
-        # evidence on the next repro.
-        verify = store.get(record["id"])
-        if verify is None:
-            logger.error(
-                "tasks.create post-write verify: row %s vanished between "
-                "INSERT and re-read", record["id"],
+        try:
+            record = store.create(
+                creator=caller,
+                assignee=assignee,
+                title=title,
+                description=description or None,
+                project_id=project_id,
+                parent_task_id=parent_task_id,
+                priority=priority,
+                dependencies=dependencies if isinstance(dependencies, list) else None,
+                artifact_refs=artifact_refs if isinstance(artifact_refs, list) else None,
+                origin=origin_dict,
             )
+        except RuntimeError as e:
+            # ``Tasks.create``'s centralised post-write verify raises
+            # RuntimeError on integrity failure. Convert to a structured
+            # 500 so the agent's ``hand_off`` ``create_failed`` envelope
+            # surfaces the actual reason instead of FastAPI's generic
+            # "Internal Server Error" placeholder.
+            logger.error("tasks.create raised RuntimeError: %s", e)
+            raise HTTPException(500, str(e))
+        # Belt-and-suspenders verify (Bug 1 post-mortem): ``Tasks.create``
+        # already asserts the row exists via its own post-write SELECT and
+        # returns that fresh record. Use the returned record (no second
+        # SELECT round-trip — Tasks.create has already done it) and assert
+        # the canonical fields agree with what the caller requested. A
+        # corrupt row with e.g. wrong-typed ``assignee`` silently breaks
+        # ``list_task_inbox`` for the intended recipient (the row exists
+        # but the SELECT ``WHERE assignee = ?`` doesn't match). If anything
+        # differs, 500 with a structured detail so the caller's
+        # ``hand_off`` ``create_failed`` envelope fires and we get
+        # diagnostic evidence on the next repro.
+        if record is None:  # Tasks.create's contract forbids this, but
+            # keep a defensive 500 so a future regression in the store
+            # surface can't return null JSON to the agent.
             raise HTTPException(
                 500,
-                f"Task {record['id']!r} insert verify failed: row vanished",
+                "Task creation returned no record (store contract violation)",
             )
         mismatches: list[str] = []
-        if verify.get("assignee") != assignee:
+        if record.get("assignee") != assignee:
             mismatches.append(
-                f"assignee: stored={verify.get('assignee')!r} "
+                f"assignee: stored={record.get('assignee')!r} "
                 f"requested={assignee!r}"
             )
-        if verify.get("project_id") != project_id:
+        if record.get("creator") != caller:
             mismatches.append(
-                f"project_id: stored={verify.get('project_id')!r} "
+                f"creator: stored={record.get('creator')!r} "
+                f"requested={caller!r}"
+            )
+        if record.get("project_id") != project_id:
+            mismatches.append(
+                f"project_id: stored={record.get('project_id')!r} "
                 f"requested={project_id!r}"
             )
-        if verify.get("parent_task_id") != parent_task_id:
+        if record.get("parent_task_id") != parent_task_id:
             mismatches.append(
-                f"parent_task_id: stored={verify.get('parent_task_id')!r} "
+                f"parent_task_id: stored={record.get('parent_task_id')!r} "
                 f"requested={parent_task_id!r}"
             )
-        if verify.get("status") != "pending":
+        if record.get("status") != "pending":
             mismatches.append(
-                f"status: stored={verify.get('status')!r} expected='pending'"
+                f"status: stored={record.get('status')!r} expected='pending'"
             )
         if mismatches:
             logger.error(
@@ -5016,16 +5027,23 @@ def create_mesh_app(
             )
         origin = _validated_origin(request, caller)
         origin_dict = origin.model_dump() if origin is not None else None
-        clone = store.create(
-            creator=caller,
-            assignee=new_assignee,
-            title=title,
-            description=description,
-            project_id=original.get("project_id"),
-            parent_task_id=original["id"],
-            priority=original.get("priority", 0) or 0,
-            origin=origin_dict,
-        )
+        try:
+            clone = store.create(
+                creator=caller,
+                assignee=new_assignee,
+                title=title,
+                description=description,
+                project_id=original.get("project_id"),
+                parent_task_id=original["id"],
+                priority=original.get("priority", 0) or 0,
+                origin=origin_dict,
+            )
+        except RuntimeError as e:
+            # Retry shares Tasks.create's centralised post-write verify
+            # (Bug 1 R2 closed the bypass gap) — same RuntimeError-to-500
+            # conversion as the /mesh/tasks POST path above.
+            logger.error("tasks.retry store.create RuntimeError: %s", e)
+            raise HTTPException(500, str(e))
         # Wake the (possibly new) assignee on the clone so the retry
         # starts immediately rather than waiting for a heartbeat.
         _try_wake_agent(
