@@ -4530,10 +4530,15 @@ def create_mesh_app(
     async def create_task(request: Request) -> dict:
         """Create a durable task record.
 
-        Caller must have ``can_route_tasks`` (or be the operator /
-        loopback internal). Body: ``{assignee, title, description?,
-        project?, parent_task_id?, priority?, dependencies?}``.
-        Origin is sourced from the validated ``X-Origin`` header.
+        Caller must be authorised to message the assignee
+        (``can_message(caller, assignee)``); operator and mesh-internal
+        bypass. Body: ``{assignee, title, description?, project?,
+        parent_task_id?, priority?, dependencies?}``. Origin is sourced
+        from the validated ``X-Origin`` header. The legacy
+        ``can_route_tasks`` toggle was retired — task creation is
+        structured messaging and shares the ``can_message`` trust
+        boundary, which is set to ``["*"]`` by default under collab mode
+        so multi-stage workflows work out of the box.
         """
         store = tasks_store
         caller = _extract_verified_agent_id(request)

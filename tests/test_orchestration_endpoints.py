@@ -181,6 +181,57 @@ async def test_create_task_default_collab_works_out_of_box(tmp_path, monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_worker_can_create_task_for_operator(tmp_path, monkeypatch):
+    """Worker→operator task creation is the intended async escalation path.
+
+    ``/mesh/wake`` explicitly blocks worker→operator synchronous wakes
+    (workers can be steered into privileged actions by anyone able to
+    message them). The task queue is the right channel: it's async,
+    operator processes it on heartbeat. Codex review of PR #954
+    flagged this design intent — pin it with a regression test so a
+    future "mirror the wake block" patch doesn't silently break the
+    standard worker-completion path.
+    """
+    server_module = _reload_server(
+        monkeypatch, tasks_db=str(tmp_path / "tasks.db"),
+    )
+    perms_map = {
+        # Default collab-mode worker permissions.
+        "worker": {"can_message": ["*"]},
+        # Operator is permissioned the way ``_ensure_operator_agent``
+        # produces it post-PR#954 (no can_route_tasks needed).
+        "operator": {"can_message": ["*"]},
+    }
+    app, bb = _build_app(
+        tmp_path, server_module,
+        perms_map=perms_map,
+        agents={
+            "worker": "http://worker:8400",
+            "operator": "http://operator:8400",
+        },
+    )
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.post(
+                "/mesh/tasks",
+                json={
+                    "assignee": "operator",
+                    "title": "Escalating: blocker on stage 3",
+                },
+                headers={"X-Agent-ID": "worker"},
+            )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["assignee"] == "operator"
+        assert body["creator"] == "worker"
+        assert body["status"] == "pending"
+    finally:
+        bb.close()
+        monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)
+        importlib.reload(server_module)
+
+
+@pytest.mark.asyncio
 async def test_create_task_invalid_assignee(v2_app):
     app, _, _ = v2_app
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
