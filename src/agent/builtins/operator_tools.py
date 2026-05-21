@@ -1,12 +1,15 @@
 """Operator agent tools -- agent edits (with undo), observations, agent/team management."""
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re as _re
+import time as _time
 from datetime import datetime, timezone
 
 from src.agent.skills import skill
+from src.shared.redaction import redact_text_with_urls
 from src.shared.types import (
     HARD_EDIT_FIELDS as _HARD_EDIT_FIELDS,
 )
@@ -984,10 +987,14 @@ async def await_task_event(
     mesh_client=None,
     **_kw,
 ) -> dict:
-    """Poll the operator's inbox for a terminal back-edge event."""
-    import asyncio
-    import time as _time
+    """Poll the operator's inbox for a terminal back-edge event.
 
+    Top-level try/except ensures the skill ALWAYS returns a non-empty
+    envelope (event / timed_out / error). Operator's prompt and the LLM
+    upstream both depend on a dict shape — an unexpected exception that
+    escaped the inner loop would surface to the LLM as an empty body and
+    break the awareness loop (Bug 2 repro 2026-05-21).
+    """
     if not _is_operator():
         return {"error": "This tool is only available to the operator agent."}
     if mesh_client is None:
@@ -995,80 +1002,102 @@ async def await_task_event(
     if not task_id:
         return {"error": "task_id is required"}
 
-    timeout = max(1, min(int(timeout_s), _AWAIT_TASK_EVENT_MAX_TIMEOUT_S))
-    interval = max(1, int(poll_interval_s))
-    terminal_kinds = {
-        "task_completed", "task_failed",
-        "task_blocked", "task_cancelled",
-    }
-    deadline = _time.monotonic() + timeout
-    last_status_seen: str | None = None
-    inbox_prefix = f"inbox/{mesh_client.agent_id}/task_event/"
+    try:
+        timeout = max(1, min(int(timeout_s), _AWAIT_TASK_EVENT_MAX_TIMEOUT_S))
+        interval = max(1, int(poll_interval_s))
+        terminal_kinds = {
+            "task_completed", "task_failed",
+            "task_blocked", "task_cancelled",
+        }
+        deadline = _time.monotonic() + timeout
+        last_status_seen: str | None = None
+        inbox_prefix = f"inbox/{mesh_client.agent_id}/task_event/"
 
-    while True:
-        # Don't start another poll if there isn't time for it to finish
-        # cleanly. With ``_AWAIT_TASK_EVENT_POLL_BUDGET_S`` of slack we
-        # return ``timed_out`` rather than risk pushing wall-clock past
-        # the agent loop's 300s tool ceiling.
-        remaining_before_poll = deadline - _time.monotonic()
-        if remaining_before_poll <= _AWAIT_TASK_EVENT_POLL_BUDGET_S:
-            return {
-                "timed_out": True,
-                "task_id": task_id,
-                "last_status_seen": last_status_seen,
-                "waited_seconds": timeout,
-            }
-        try:
-            # Each poll is bounded by ``_AWAIT_TASK_EVENT_POLL_BUDGET_S``
-            # to keep the worst-case iteration time predictable even if
-            # the mesh's ``_get_with_retry`` chain would otherwise burn
-            # ~90s on a flaky link.
-            entries = await asyncio.wait_for(
-                mesh_client.list_blackboard(
-                    inbox_prefix, global_scope=True,
-                ),
-                timeout=_AWAIT_TASK_EVENT_POLL_BUDGET_S,
-            )
-        except asyncio.TimeoutError:
-            # Treat per-poll timeout as transient — the back-edge may
-            # arrive on the next poll. Fall through to the sleep + retry.
-            entries = []
-        except Exception as e:
-            return {
-                "error": f"Inbox fetch failed: {e}",
-                "task_id": task_id,
-            }
-        for entry in entries:
-            value = entry.get("value") or {}
-            if value.get("task_id") != task_id:
-                continue
-            kind = value.get("kind", "")
-            if kind in terminal_kinds:
+        while True:
+            # Don't start another poll if there isn't time for it to
+            # finish cleanly. With ``_AWAIT_TASK_EVENT_POLL_BUDGET_S`` of
+            # slack we return ``timed_out`` rather than risk pushing
+            # wall-clock past the agent loop's 300s tool ceiling.
+            remaining_before_poll = deadline - _time.monotonic()
+            if remaining_before_poll <= _AWAIT_TASK_EVENT_POLL_BUDGET_S:
                 return {
-                    "event": {
-                        "kind": kind,
-                        "task_id": task_id,
-                        "status": value.get("status"),
-                        "title": value.get("title"),
-                        "summary": value.get("summary", ""),
-                        "error": value.get("error", ""),
-                        "blocker_note": value.get("blocker_note", ""),
-                        "ts": value.get("ts"),
-                    },
+                    "timed_out": True,
+                    "task_id": task_id,
+                    "last_status_seen": last_status_seen,
+                    "waited_seconds": timeout,
                 }
-            last_status_seen = value.get("status") or last_status_seen
-        remaining = deadline - _time.monotonic()
-        if remaining <= 0:
-            return {
-                "timed_out": True,
-                "task_id": task_id,
-                "last_status_seen": last_status_seen,
-                "waited_seconds": timeout,
-            }
-        # Exponential backoff capped at 30s and the remaining window.
-        sleep_for = min(interval, remaining, 30.0)
-        await asyncio.sleep(sleep_for)
-        interval = min(interval * 2, 30)
+            try:
+                # Each poll is bounded by ``_AWAIT_TASK_EVENT_POLL_BUDGET_S``
+                # to keep the worst-case iteration time predictable even
+                # if the mesh's ``_get_with_retry`` chain would otherwise
+                # burn ~90s on a flaky link.
+                entries = await asyncio.wait_for(
+                    mesh_client.list_blackboard(
+                        inbox_prefix, global_scope=True,
+                    ),
+                    timeout=_AWAIT_TASK_EVENT_POLL_BUDGET_S,
+                )
+            except asyncio.TimeoutError:
+                # Treat per-poll timeout as transient — the back-edge
+                # may arrive on the next poll. Fall through to sleep.
+                entries = []
+            except Exception as e:
+                # Redact + truncate so an HTTP-layer exception that
+                # quotes a URL with credentials in the query string
+                # can't leak into the LLM context (same precaution as
+                # coordination_tool's failure envelopes).
+                redacted = redact_text_with_urls(str(e))[:200]
+                return {
+                    "error": f"Inbox fetch failed: {redacted}",
+                    "task_id": task_id,
+                }
+            for entry in entries:
+                value = entry.get("value") or {}
+                if value.get("task_id") != task_id:
+                    continue
+                kind = value.get("kind", "")
+                if kind in terminal_kinds:
+                    return {
+                        "event": {
+                            "kind": kind,
+                            "task_id": task_id,
+                            "status": value.get("status"),
+                            "title": value.get("title"),
+                            "summary": value.get("summary", ""),
+                            "error": value.get("error", ""),
+                            "blocker_note": value.get("blocker_note", ""),
+                            "ts": value.get("ts"),
+                        },
+                    }
+                last_status_seen = value.get("status") or last_status_seen
+            remaining = deadline - _time.monotonic()
+            if remaining <= 0:
+                return {
+                    "timed_out": True,
+                    "task_id": task_id,
+                    "last_status_seen": last_status_seen,
+                    "waited_seconds": timeout,
+                }
+            # Exponential backoff capped at 30s and the remaining window.
+            sleep_for = min(interval, remaining, 30.0)
+            await asyncio.sleep(sleep_for)
+            interval = min(interval * 2, 30)
+    except Exception as e:
+        # Belt-and-suspenders: any exception escaping the loop body
+        # (entry shape mismatch, contextvar resolution, etc.) lands here
+        # and produces a typed envelope instead of an empty body. The
+        # message is redacted + truncated for the same reason as the
+        # inner ``except`` — exception strings can carry HTTP URLs with
+        # credentials and must never leak into the LLM context.
+        redacted = redact_text_with_urls(str(e))[:200]
+        logger.warning(
+            "await_task_event unexpected exception for task=%s: %s",
+            task_id, redacted,
+        )
+        return {
+            "error": f"await_task_event_unexpected: {redacted}",
+            "task_id": task_id,
+        }
 
 
 @skill(

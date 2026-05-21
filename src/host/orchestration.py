@@ -410,6 +410,41 @@ class Tasks:
     def _SELECT_COLS(self) -> str:
         return self._SELECT_COLS_TEMPLATE.format(team_col=self._team_col)
 
+    def _assert_stored_matches(
+        self, record: dict, *, expected: dict, context: str,
+    ) -> None:
+        """Post-write integrity check: stored values must equal ``expected``.
+
+        Centralised so every task-creation path (``create`` /
+        ``create_rework_task`` / the retry endpoint's direct ``create``
+        call) gets the same defence against a row landing with mistyped
+        ``assignee`` / ``team_id`` / ``parent_task_id`` / ``status``.
+        Corruption at this layer is exactly what made Bug 1's silent
+        handoff drop possible — ``list_task_inbox`` does a byte-exact
+        SQLite ``=`` match, so a single divergence here breaks the
+        recipient's whole inbox flow without the caller ever knowing.
+
+        Raises ``RuntimeError`` on any divergence so the surrounding
+        endpoint converts to 500 + the caller's ``hand_off`` envelope
+        fires. ``context`` is a short label spliced into log + error
+        for cross-log correlation.
+        """
+        mismatches: list[str] = []
+        for field, expected_value in expected.items():
+            stored = record.get(field)
+            if stored != expected_value:
+                mismatches.append(
+                    f"{field}: stored={stored!r} expected={expected_value!r}"
+                )
+        if mismatches:
+            tid = record.get("id") or "<no id>"
+            msg = (
+                f"task {tid!r} post-write verify failed in {context}: "
+                + "; ".join(mismatches)
+            )
+            logger.error(msg)
+            raise RuntimeError(msg)
+
     def _emit_event(
         self, conn: sqlite3.Connection, task_id: str, event_kind: str,
         actor: str, payload: dict | None,
@@ -530,6 +565,32 @@ class Tasks:
                 f"task {tid!r} INSERT committed but post-read returned no "
                 "row — possible storage corruption or mid-migration race"
             )
+        # Centralised post-write integrity check (Bug 1 R2). All task-
+        # creation paths route through this assert so a row landing with
+        # mistyped assignee / team_id / parent_task_id / status raises
+        # loudly instead of silently breaking ``list_task_inbox``.
+        self._assert_stored_matches(
+            record,
+            expected={
+                "assignee": assignee,
+                "creator": creator,
+                "project_id": project_id,
+                "parent_task_id": parent_task_id,
+                "status": "pending",
+            },
+            context="create",
+        )
+        # Bug 1 post-mortem evidence: log the canonical stored values so
+        # the next repro of a silent handoff drop has authoritative data
+        # on what landed in the DB vs what the caller intended. Tagged
+        # with ``tid`` for cross-log correlation.
+        logger.info(
+            "tasks.create stored task=%s creator=%s assignee=%s "
+            "team_id=%s parent_task_id=%s status=%s title=%r",
+            tid, creator, assignee,
+            record.get("project_id"), parent_task_id,
+            record.get("status"), (title or "")[:80],
+        )
         return record
 
     def get(self, task_id: str) -> dict | None:
@@ -1298,7 +1359,27 @@ class Tasks:
                 "created_at": now,
             },
         )
-        return self.get(new_id)  # type: ignore[return-value]
+        record = self.get(new_id)
+        if record is None:
+            raise RuntimeError(
+                f"rework task {new_id!r} INSERT committed but post-read "
+                "returned no row — possible storage corruption"
+            )
+        # Same centralised integrity check ``create`` uses — Bug 1 R2
+        # closed the bypass gap for this path so a rework row landing
+        # with a mistyped assignee can't silently break the recipient.
+        self._assert_stored_matches(
+            record,
+            expected={
+                "assignee": previous["assignee"],
+                "creator": actor,
+                "project_id": previous.get("project_id"),
+                "parent_task_id": previous.get("parent_task_id"),
+                "status": "pending",
+            },
+            context="create_rework_task",
+        )
+        return record
 
     def list_events(self, task_id: str) -> list[dict]:
         """Return audit events for ``task_id`` ordered oldest-first."""

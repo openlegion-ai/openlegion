@@ -1527,3 +1527,51 @@ class TestAwaitTaskEventSkill:
         assert result.get("timed_out") is True
         assert result["task_id"] == "task_short"
         mc.list_blackboard.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unexpected_exception_returns_error_envelope_not_empty(
+        self, monkeypatch,
+    ):
+        """Bug 2 fallback: an exception escaping the inner loop body
+        (NOT routed through the inner ``except Exception`` that wraps
+        ``list_blackboard``) must surface via the outer try/except as a
+        non-empty ``{"error": "await_task_event_unexpected: ..."}``
+        envelope. An empty body would let the LLM treat the call as
+        silent-success and break the awareness loop."""
+        from src.agent.builtins import operator_tools
+        from src.agent.builtins.operator_tools import await_task_event
+
+        class BoomList:
+            """Return value from ``list_blackboard``: looks list-shaped
+            until iteration, at which point it raises an exception that
+            the inner ``except Exception`` block does NOT cover (it
+            wraps the ``wait_for(list_blackboard(...))`` call only, not
+            the subsequent ``for entry in entries`` iteration)."""
+
+            def __iter__(self):
+                raise ZeroDivisionError("synthetic boom in loop body")
+
+        # Shrink the per-poll budget so the deadline pre-check
+        # (``remaining <= _AWAIT_TASK_EVENT_POLL_BUDGET_S``) does NOT
+        # short-circuit to timed_out before we ever call list_blackboard.
+        # Default budget is 15s; with timeout_s=5 the pre-check would
+        # fire on iteration 1 and never exercise the iteration that
+        # raises ZeroDivisionError.
+        monkeypatch.setattr(
+            operator_tools, "_AWAIT_TASK_EVENT_POLL_BUDGET_S", 1,
+        )
+
+        mc = MagicMock()
+        mc.agent_id = "operator"
+        mc.list_blackboard = AsyncMock(return_value=BoomList())
+
+        result = await await_task_event(
+            "task_boom", timeout_s=5, poll_interval_s=1, mesh_client=mc,
+        )
+
+        assert result is not None
+        assert isinstance(result, dict)
+        assert result, "outer try/except must produce a non-empty envelope"
+        assert "error" in result
+        assert "await_task_event_unexpected" in result["error"]
+        assert result.get("task_id") == "task_boom"

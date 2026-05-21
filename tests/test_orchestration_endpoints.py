@@ -632,3 +632,148 @@ async def test_workflow_snapshot_endpoint_returns_404_for_missing_root(v2_app):
             headers={"X-Agent-ID": "operator"},
         )
         assert r.status_code == 404
+
+
+# ── Bug 1 post-write verify tests ────────────────────────────────
+
+
+def _patch_create_for_verify(tasks_store, fake_record):
+    """Replace ``tasks_store.create`` so it returns a chosen record.
+
+    The endpoint compares the record returned from ``store.create`` against
+    the incoming request body. Injecting a divergent record here is the
+    cleanest way to exercise the endpoint's verify branch — it lets the
+    test pretend the store had a corruption bug and stored mistyped
+    values, then asserts the verify catches it before the row reaches
+    the agent's ``hand_off`` envelope path.
+    """
+    def fake_create(**_kwargs):
+        return fake_record
+    tasks_store.create = fake_create
+
+
+@pytest.mark.asyncio
+async def test_post_write_verify_500_on_null_record(v2_app):
+    """If ``Tasks.create`` ever violates its contract and returns None the
+    endpoint must 500 rather than leak null JSON to the agent."""
+    app, _, _ = v2_app
+    _patch_create_for_verify(app.tasks_store, fake_record=None)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "analyst", "title": "ghost"},
+            headers={"X-Agent-ID": "scout"},
+        )
+    assert r.status_code == 500, r.text
+    assert "no record" in r.text.lower() or "contract" in r.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_post_write_verify_500_on_assignee_mismatch(v2_app):
+    """A stored row with a divergent ``assignee`` must trip the verify
+    branch and surface the field name in the 500 detail."""
+    app, _, _ = v2_app
+    fake_row = {
+        "id": "task_fake",
+        "assignee": "wrong",
+        "creator": "scout",
+        "project_id": None,
+        "parent_task_id": None,
+        "status": "pending",
+    }
+    _patch_create_for_verify(app.tasks_store, fake_record=fake_row)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "analyst", "title": "mismatch"},
+            headers={"X-Agent-ID": "scout"},
+        )
+    assert r.status_code == 500, r.text
+    assert "assignee" in r.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_post_write_verify_500_on_status_mismatch(v2_app):
+    """A stored row with a divergent ``status`` (e.g. ``failed`` instead
+    of the expected ``pending``) must surface as a 500 with the field
+    name in the detail."""
+    app, _, _ = v2_app
+    fake_row = {
+        "id": "task_fake",
+        "assignee": "analyst",
+        "creator": "scout",
+        "project_id": None,
+        "parent_task_id": None,
+        "status": "failed",
+    }
+    _patch_create_for_verify(app.tasks_store, fake_record=fake_row)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "analyst", "title": "bad status"},
+            headers={"X-Agent-ID": "scout"},
+        )
+    assert r.status_code == 500, r.text
+    assert "status" in r.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_post_write_verify_500_on_creator_mismatch(v2_app):
+    """A stored row with a divergent ``creator`` (header-forge bug) must
+    surface as a 500 with 'creator' in the detail."""
+    app, _, _ = v2_app
+    fake_row = {
+        "id": "task_fake",
+        "assignee": "analyst",
+        "creator": "impersonator",
+        "project_id": None,
+        "parent_task_id": None,
+        "status": "pending",
+    }
+    _patch_create_for_verify(app.tasks_store, fake_record=fake_row)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "analyst", "title": "creator drift"},
+            headers={"X-Agent-ID": "scout"},
+        )
+    assert r.status_code == 500, r.text
+    assert "creator" in r.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_assignee_whitespace_stripped(v2_app):
+    """An assignee with surrounding whitespace must be normalized in the
+    stored row so SQLite ``=`` lookups (``list_task_inbox``) match."""
+    app, _, _ = v2_app
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "  analyst  ", "title": "stripme"},
+            headers={"X-Agent-ID": "scout"},
+        )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["assignee"] == "analyst"
+
+
+@pytest.mark.asyncio
+async def test_assignee_whitespace_normalization_logged(v2_app, caplog):
+    """The whitespace normalization must emit a WARNING-level log so
+    operators see when stale prompts are emitting padded ids."""
+    import logging
+
+    app, _, _ = v2_app
+    caplog.set_level(logging.WARNING)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "  analyst  ", "title": "logme"},
+            headers={"X-Agent-ID": "scout"},
+        )
+    assert r.status_code == 200, r.text
+    assert any(
+        "normalized assignee" in rec.getMessage().lower()
+        for rec in caplog.records
+        if rec.levelno >= logging.WARNING
+    ), [rec.getMessage() for rec in caplog.records]

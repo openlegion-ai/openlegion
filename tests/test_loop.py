@@ -2826,3 +2826,80 @@ class TestLoopLLMErrorHandling:
             )
         assert result.get("recorded") is False
         assert "error" in result
+
+
+# === Chat empty-response fallback (Bug 3) ===
+
+
+class TestChatEmptyResponseFallback:
+    """When the LLM produces zero final text but ran tool calls, the chat
+    return value gets a synthetic notice so the dashboard renders the
+    turn (instead of a blank panel). Only fires for non-handoff chats
+    (``task_id is None``). Handoff turns route through the lazy-completion
+    guard above and the fallback must NOT also run there."""
+
+    @pytest.mark.asyncio
+    async def test_chat_empty_response_with_tools_gets_fallback(self):
+        loop = _make_loop()
+
+        async def fake_inner(_msg):
+            return {
+                "response": "",
+                "tool_outputs": [{"name": "noop"}, {"name": "noop2"}],
+                "tokens_used": 10,
+            }
+        loop._chat_inner = fake_inner
+
+        result = await loop.chat("hi")
+
+        assert result["tool_outputs"]
+        assert result["response"].strip(), \
+            "fallback must produce non-empty response"
+        assert "2 tool calls" in result["response"]
+
+    @pytest.mark.asyncio
+    async def test_chat_empty_response_no_tools_unchanged(self):
+        """A truly silent no-tool LLM turn is a different problem and
+        must NOT be papered over by the fallback."""
+        loop = _make_loop()
+
+        async def fake_inner(_msg):
+            return {"response": "", "tool_outputs": [], "tokens_used": 0}
+        loop._chat_inner = fake_inner
+
+        result = await loop.chat("hi")
+        assert result["response"] == ""
+        assert result["tool_outputs"] == []
+
+    @pytest.mark.asyncio
+    async def test_chat_with_task_id_skips_fallback(self):
+        """Handoff (task_id) path: the lazy-completion guard fires
+        instead. An empty response with tool_outputs in task_id mode
+        means a handoff that produced no structured result; auto-close
+        as ``done`` runs above, and the synthetic fallback must NOT
+        rewrite ``response``."""
+        loop = _make_loop()
+
+        async def fake_inner(_msg):
+            return {
+                "response": "",
+                "tool_outputs": [{"name": "x"}],
+                "tokens_used": 5,
+            }
+        loop._chat_inner = fake_inner
+
+        # Mock the auto-close pipeline so the test doesn't depend on
+        # mesh round-trips. We just want to assert the chat-mode
+        # synthetic-response fallback does NOT fire for task_id chats.
+        loop._auto_close_task = AsyncMock(return_value=None)
+
+        result = await loop.chat("hi", task_id="task_X")
+
+        # The chat-mode synthetic fallback (which mentions "Completed N
+        # tool calls") must NOT have fired.
+        assert "Completed" not in (result.get("response") or "")
+        assert "tool calls" not in (result.get("response") or "")
+        # The lazy-completion guard ran for the task. With non-empty
+        # tool_outputs and an empty response, the guard goes through
+        # the "did work" branch and auto-closes as ``done``.
+        loop._auto_close_task.assert_awaited()
