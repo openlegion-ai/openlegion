@@ -4552,7 +4552,19 @@ def create_mesh_app(
                     f"Agent {caller} cannot route tasks (can_route_tasks not granted)",
                 )
         body = await request.json()
-        assignee = body.get("assignee", "")
+        # ``.strip()`` on assignee defends against a trailing newline or
+        # leading space sneaking through a hand-written prompt. SQLite
+        # ``=`` is byte-exact so a single whitespace divergence between
+        # what the LLM emitted and what the recipient compares against
+        # would silently break ``list_task_inbox`` matching — the exact
+        # symptom Bug 1's repros chased.
+        assignee_raw = body.get("assignee", "")
+        assignee = assignee_raw.strip() if isinstance(assignee_raw, str) else ""
+        if assignee != assignee_raw:
+            logger.warning(
+                "tasks.create normalized assignee %r → %r (whitespace "
+                "stripped) for caller=%s", assignee_raw, assignee, caller,
+            )
         title = sanitize_for_prompt(body.get("title", "")).strip()
         description = sanitize_for_prompt(body.get("description") or "")
         project_id = body.get("project") or body.get("project_id") or None
@@ -4588,6 +4600,57 @@ def create_mesh_app(
             artifact_refs=artifact_refs if isinstance(artifact_refs, list) else None,
             origin=origin_dict,
         )
+        # Belt-and-suspenders verify (Bug 1 post-mortem): ``Tasks.create``
+        # already asserts the row exists, but it does NOT check that
+        # ``assignee`` / ``team_id`` / ``parent_task_id`` / ``status``
+        # stored match what the caller requested. A corrupt row with
+        # e.g. wrong-typed assignee silently breaks ``list_task_inbox``
+        # for the intended recipient (the row exists but the SELECT
+        # ``WHERE assignee = ?`` doesn't match). Re-read the row and
+        # assert the four fields agree with the request — if anything
+        # differs, 500 with a structured detail so the caller's
+        # ``hand_off`` failure envelope fires and we get diagnostic
+        # evidence on the next repro.
+        verify = store.get(record["id"])
+        if verify is None:
+            logger.error(
+                "tasks.create post-write verify: row %s vanished between "
+                "INSERT and re-read", record["id"],
+            )
+            raise HTTPException(
+                500,
+                f"Task {record['id']!r} insert verify failed: row vanished",
+            )
+        mismatches: list[str] = []
+        if verify.get("assignee") != assignee:
+            mismatches.append(
+                f"assignee: stored={verify.get('assignee')!r} "
+                f"requested={assignee!r}"
+            )
+        if verify.get("project_id") != project_id:
+            mismatches.append(
+                f"project_id: stored={verify.get('project_id')!r} "
+                f"requested={project_id!r}"
+            )
+        if verify.get("parent_task_id") != parent_task_id:
+            mismatches.append(
+                f"parent_task_id: stored={verify.get('parent_task_id')!r} "
+                f"requested={parent_task_id!r}"
+            )
+        if verify.get("status") != "pending":
+            mismatches.append(
+                f"status: stored={verify.get('status')!r} expected='pending'"
+            )
+        if mismatches:
+            logger.error(
+                "tasks.create post-write verify: task %s mismatch — %s",
+                record["id"], "; ".join(mismatches),
+            )
+            raise HTTPException(
+                500,
+                f"Task {record['id']!r} post-write verify failed: "
+                + "; ".join(mismatches),
+            )
         return record
 
     @app.get("/mesh/tasks/inbox/{assignee}")

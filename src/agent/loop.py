@@ -2331,6 +2331,37 @@ class AgentLoop:
                                     task_id, "done",
                                     result_payload={"summary": summary},
                                 )
+                    # Bug 3 fallback: when the LLM produced zero text but
+                    # ran tool calls, the dashboard would render an empty
+                    # chat panel even though work happened (notify_user,
+                    # workflow_snapshot, etc.). Surface a synthetic
+                    # response so the user sees that the turn DID execute.
+                    # Only fires for non-handoff chats (handoff lazy
+                    # completion was already handled above) and only when
+                    # tool_outputs is non-empty (a truly silent LLM
+                    # response in a no-tool chat is a different problem
+                    # and shouldn't be papered over).
+                    if not task_id:
+                        if (
+                            not (result.get("response") or "").strip()
+                            and result.get("tool_outputs")
+                            and not result.get("silent_reply")
+                            and not result.get("tool_limit_reached")
+                        ):
+                            n_tools = len(result.get("tool_outputs") or [])
+                            logger.warning(
+                                "chat empty-response fallback: %d tool "
+                                "call(s) executed but LLM produced no "
+                                "final text — surfacing synthetic notice",
+                                n_tools,
+                            )
+                            tool_word = "tool call" if n_tools == 1 else "tool calls"
+                            result["response"] = (
+                                f"(Completed {n_tools} {tool_word}; no "
+                                "text response was generated. Check the "
+                                "dashboard for tool outputs and any "
+                                "notifications I sent.)"
+                            )
                     return result
                 finally:
                     await self._checkpoint_chat_session()
@@ -2694,6 +2725,16 @@ class AgentLoop:
         content = llm_response.content or ""
         if content and content.strip() == SILENT_REPLY_TOKEN:
             content = ""
+            # Mark the response object so downstream chat() can
+            # distinguish a deliberately-silent reply from a model that
+            # produced no text accidentally. Surfaces via the
+            # ``llm_response`` attribute (a Pydantic model) — we attach
+            # the flag without mutating the schema by reading it back
+            # from a sentinel attribute name.
+            try:
+                llm_response.__dict__["__silent_reply__"] = True
+            except (AttributeError, TypeError):
+                pass
         # Fall back to thinking content when the model produced only
         # reasoning tokens (common with Ollama thinking models).
         if not content and llm_response.thinking_content:
@@ -2781,11 +2822,17 @@ class AgentLoop:
                             outcome="complete",
                         )
                     self.state = "idle"
-                    return {
+                    result_dict: dict = {
                         "response": content,
                         "tool_outputs": tool_outputs,
                         "tokens_used": total_tokens,
                     }
+                    if llm_response.__dict__.get("__silent_reply__"):
+                        # Mark a deliberate ``__SILENT__`` reply so the
+                        # chat() empty-response fallback doesn't
+                        # paper over it with a synthetic notice.
+                        result_dict["silent_reply"] = True
+                    return result_dict
 
                 # Pre-scan for terminate before appending assistant message
                 terminate_msg = self._check_tool_loop_terminate(llm_response.tool_calls)
@@ -2880,12 +2927,15 @@ class AgentLoop:
                     outcome="tool_limit_reached",
                 )
             self.state = "idle"
-            return {
+            tool_limit_result: dict = {
                 "response": content,
                 "tool_outputs": tool_outputs,
                 "tokens_used": total_tokens,
                 "tool_limit_reached": True,
             }
+            if llm_response.__dict__.get("__silent_reply__"):
+                tool_limit_result["silent_reply"] = True
+            return tool_limit_result
 
         except asyncio.CancelledError:
             self.state = "idle"

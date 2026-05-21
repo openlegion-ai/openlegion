@@ -530,6 +530,17 @@ class Tasks:
                 f"task {tid!r} INSERT committed but post-read returned no "
                 "row — possible storage corruption or mid-migration race"
             )
+        # Bug 1 post-mortem evidence: log the canonical stored values so
+        # the next repro of a silent handoff drop has authoritative data
+        # on what landed in the DB vs what the caller intended. Tagged
+        # with the trace_id-equivalent ``tid`` for cross-log correlation.
+        logger.info(
+            "tasks.create stored task=%s creator=%s assignee=%s "
+            "team_id=%s parent_task_id=%s status=%s title=%r",
+            tid, creator, assignee,
+            record.get("project_id"), parent_task_id,
+            record.get("status"), (title or "")[:80],
+        )
         return record
 
     def get(self, task_id: str) -> dict | None:

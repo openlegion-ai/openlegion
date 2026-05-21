@@ -632,3 +632,131 @@ async def test_workflow_snapshot_endpoint_returns_404_for_missing_root(v2_app):
             headers={"X-Agent-ID": "operator"},
         )
         assert r.status_code == 404
+
+
+# ── Bug 1 post-write verify tests ────────────────────────────────
+
+
+def _patch_get_for_verify(tasks_store, fake_post_verify_row):
+    """Replace ``tasks_store.get`` so the post-create verify branch sees
+    a chosen row.
+
+    The endpoint's verify reads ``store.get(record["id"])`` AFTER
+    ``store.create(...)``. ``Tasks.create`` itself calls ``self.get(tid)``
+    once internally as a sanity check before returning. We therefore let
+    the first ``get`` call hit the real underlying row (so ``create``
+    succeeds) and only swap in our fake for the SECOND call — which is
+    the endpoint's post-write verify.
+    """
+    original_get = tasks_store.get
+    state = {"n": 0}
+
+    def fake_get(task_id):
+        state["n"] += 1
+        if state["n"] == 1:
+            return original_get(task_id)
+        return fake_post_verify_row
+
+    tasks_store.get = fake_get
+    return state
+
+
+@pytest.mark.asyncio
+async def test_post_write_verify_500_on_missing_row(v2_app):
+    """If the row vanishes between INSERT and the post-write re-read the
+    endpoint must 500 with a structured detail mentioning 'vanished'."""
+    app, _, _ = v2_app
+    _patch_get_for_verify(app.tasks_store, fake_post_verify_row=None)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "analyst", "title": "ghost"},
+            headers={"X-Agent-ID": "scout"},
+        )
+    assert r.status_code == 500, r.text
+    assert "vanished" in r.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_post_write_verify_500_on_assignee_mismatch(v2_app):
+    """A stored row with a divergent ``assignee`` must trip the verify
+    branch and surface the field name in the 500 detail."""
+    app, _, _ = v2_app
+    fake_row = {
+        "id": "task_fake",
+        "assignee": "wrong",
+        "project_id": None,
+        "parent_task_id": None,
+        "status": "pending",
+    }
+    _patch_get_for_verify(app.tasks_store, fake_post_verify_row=fake_row)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "analyst", "title": "mismatch"},
+            headers={"X-Agent-ID": "scout"},
+        )
+    assert r.status_code == 500, r.text
+    assert "assignee" in r.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_post_write_verify_500_on_status_mismatch(v2_app):
+    """A stored row with a divergent ``status`` (e.g. ``failed`` instead
+    of the expected ``pending``) must surface as a 500 with the field
+    name in the detail."""
+    app, _, _ = v2_app
+    fake_row = {
+        "id": "task_fake",
+        "assignee": "analyst",
+        "project_id": None,
+        "parent_task_id": None,
+        "status": "failed",
+    }
+    _patch_get_for_verify(app.tasks_store, fake_post_verify_row=fake_row)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "analyst", "title": "bad status"},
+            headers={"X-Agent-ID": "scout"},
+        )
+    assert r.status_code == 500, r.text
+    assert "status" in r.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_assignee_whitespace_stripped(v2_app):
+    """An assignee with surrounding whitespace must be normalized in the
+    stored row so SQLite ``=`` lookups (``list_task_inbox``) match."""
+    app, _, _ = v2_app
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "  analyst  ", "title": "stripme"},
+            headers={"X-Agent-ID": "scout"},
+        )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["assignee"] == "analyst"
+
+
+@pytest.mark.asyncio
+async def test_assignee_whitespace_normalization_logged(v2_app, caplog):
+    """The whitespace normalization must emit a WARNING-level log so
+    operators see when stale prompts are emitting padded ids."""
+    import logging
+
+    app, _, _ = v2_app
+    caplog.set_level(logging.WARNING)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "  analyst  ", "title": "logme"},
+            headers={"X-Agent-ID": "scout"},
+        )
+    assert r.status_code == 200, r.text
+    assert any(
+        "normalized assignee" in rec.getMessage().lower()
+        for rec in caplog.records
+        if rec.levelno >= logging.WARNING
+    ), [rec.getMessage() for rec in caplog.records]
