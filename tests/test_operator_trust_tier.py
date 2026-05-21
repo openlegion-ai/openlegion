@@ -586,7 +586,11 @@ def test_operator_bypass_pattern_present_at_every_bypassed_gate(mesh_setup):
         "permissions.can_manage_cron(",
         "permissions.can_spawn(",
         "permissions.can_manage_fleet(",
-        "permissions.can_route_tasks(",
+        # ``permissions.can_route_tasks(`` removed: task create/reroute/
+        # retry gates were folded into ``can_message`` (create) and
+        # operator-only (reroute/retry). The legacy method is retained
+        # on PermissionMatrix for back-compat but is no longer called
+        # by server.py — so there's nothing to assert here.
     ]
     for gate in bypassed_gates:
         gate_lines = []

@@ -117,15 +117,118 @@ async def test_create_task_success(v2_app):
 
 
 @pytest.mark.asyncio
-async def test_create_task_requires_can_route_tasks(v2_app):
+async def test_create_task_requires_can_message_to_assignee(v2_app):
+    """``POST /mesh/tasks`` is gated on ``can_message(caller, assignee)``.
+
+    The fixture's ``tracker`` has ``can_message=[]`` (deny all), so even
+    though ``can_route_tasks`` is the legacy back-compat field that some
+    callers still grant, lacking the per-target ``can_message`` entry is
+    the actual blocker.
+    """
     app, _, _ = v2_app
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        # tracker has can_message=[] — cannot message scout (or anyone).
         r = await c.post(
             "/mesh/tasks",
             json={"assignee": "scout", "title": "no permission"},
-            headers={"X-Agent-ID": "analyst"},
+            headers={"X-Agent-ID": "tracker"},
         )
     assert r.status_code == 403
+    assert "can_message" in r.json().get("detail", "")
+
+
+@pytest.mark.asyncio
+async def test_create_task_default_collab_works_out_of_box(tmp_path, monkeypatch):
+    """Headline architectural test: a worker with default collab-mode
+    perms (``can_message=["*"]``) can create a task for a peer
+    out-of-the-box — no ``can_route_tasks`` toggle needed.
+
+    This is the test that demonstrates pipelines work without operator
+    intervention. Mirrors the defaults applied by
+    ``cli/config.py::_add_agent_permissions``.
+    """
+    server_module = _reload_server(
+        monkeypatch, tasks_db=str(tmp_path / "tasks.db"),
+    )
+    perms_map = {
+        # No can_route_tasks set anywhere; just collab-mode defaults.
+        "alpha": {"can_message": ["*"]},
+        "bravo": {"can_message": ["*"]},
+    }
+    app, bb = _build_app(
+        tmp_path, server_module,
+        perms_map=perms_map,
+        agents={
+            "alpha": "http://alpha:8400",
+            "bravo": "http://bravo:8400",
+        },
+    )
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.post(
+                "/mesh/tasks",
+                json={"assignee": "bravo", "title": "out of the box"},
+                headers={"X-Agent-ID": "alpha"},
+            )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["assignee"] == "bravo"
+        assert body["creator"] == "alpha"
+    finally:
+        bb.close()
+        monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)
+        importlib.reload(server_module)
+
+
+@pytest.mark.asyncio
+async def test_worker_can_create_task_for_operator(tmp_path, monkeypatch):
+    """Worker→operator task creation is the intended async escalation path.
+
+    ``/mesh/wake`` explicitly blocks worker→operator synchronous wakes
+    (workers can be steered into privileged actions by anyone able to
+    message them). The task queue is the right channel: it's async,
+    operator processes it on heartbeat. Codex review of PR #954
+    flagged this design intent — pin it with a regression test so a
+    future "mirror the wake block" patch doesn't silently break the
+    standard worker-completion path.
+    """
+    server_module = _reload_server(
+        monkeypatch, tasks_db=str(tmp_path / "tasks.db"),
+    )
+    perms_map = {
+        # Default collab-mode worker permissions.
+        "worker": {"can_message": ["*"]},
+        # Operator is permissioned the way ``_ensure_operator_agent``
+        # produces it post-PR#954 (no can_route_tasks needed).
+        "operator": {"can_message": ["*"]},
+    }
+    app, bb = _build_app(
+        tmp_path, server_module,
+        perms_map=perms_map,
+        agents={
+            "worker": "http://worker:8400",
+            "operator": "http://operator:8400",
+        },
+    )
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.post(
+                "/mesh/tasks",
+                json={
+                    "assignee": "operator",
+                    "title": "Escalating: blocker on stage 3",
+                },
+                headers={"X-Agent-ID": "worker"},
+            )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["assignee"] == "operator"
+        assert body["creator"] == "worker"
+        assert body["status"] == "pending"
+    finally:
+        bb.close()
+        monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)
+        importlib.reload(server_module)
 
 
 @pytest.mark.asyncio
@@ -277,7 +380,13 @@ async def test_status_update_creator_assignee_operator_outsider(v2_app):
 
 
 @pytest.mark.asyncio
-async def test_reroute_requires_can_route_tasks(v2_app):
+async def test_reroute_requires_operator_or_internal(v2_app):
+    """Reroute is now operator-only (administrative recovery action).
+
+    Workers — even with the legacy ``can_route_tasks=True`` grant — must
+    not be able to reroute tasks. Only operator or ``x-mesh-internal``
+    callers succeed.
+    """
     app, _, _ = v2_app
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         r = await c.post(
@@ -300,11 +409,58 @@ async def test_reroute_requires_can_route_tasks(v2_app):
             headers={"X-Agent-ID": "analyst"},
         )
         assert r.status_code == 403
-        # Worker WITH can_route_tasks allowed (scout has it).
+        assert "operator-only" in r.json().get("detail", "")
+        # Worker WITH legacy can_route_tasks=True ALSO denied — reroute
+        # is operator-only now (the gate no longer consults the field).
         r = await c.post(
             f"/mesh/tasks/{tid}/reroute",
             json={"new_assignee": "scout"},
             headers={"X-Agent-ID": "scout"},
+        )
+        assert r.status_code == 403
+        assert "operator-only" in r.json().get("detail", "")
+
+
+@pytest.mark.asyncio
+async def test_retry_requires_operator_or_internal(v2_app):
+    """Retry is operator-only — workers with ``can_route_tasks`` are
+    rejected. Sibling contract to reroute."""
+    app, _, _ = v2_app
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        # Seed a task, then force-fail it via internal call so retry
+        # is eligible.
+        r = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "analyst", "title": "retry target"},
+            headers={"X-Agent-ID": "scout"},
+        )
+        tid = r.json()["id"]
+        # Drive it to failed via assignee status updates.
+        r = await c.post(
+            f"/mesh/tasks/{tid}/status",
+            json={"status": "working"},
+            headers={"X-Agent-ID": "analyst"},
+        )
+        assert r.status_code == 200
+        r = await c.post(
+            f"/mesh/tasks/{tid}/status",
+            json={"status": "failed"},
+            headers={"X-Agent-ID": "analyst"},
+        )
+        assert r.status_code == 200
+        # Worker WITH legacy can_route_tasks=True (scout) is rejected.
+        r = await c.post(
+            f"/mesh/tasks/{tid}/retry",
+            json={},
+            headers={"X-Agent-ID": "scout"},
+        )
+        assert r.status_code == 403
+        assert "operator-only" in r.json().get("detail", "")
+        # Operator succeeds.
+        r = await c.post(
+            f"/mesh/tasks/{tid}/retry",
+            json={},
+            headers={"X-Agent-ID": "operator"},
         )
         assert r.status_code == 200
 

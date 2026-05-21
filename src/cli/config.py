@@ -528,7 +528,7 @@ def _add_agent_permissions(name: str, permissions: dict | None = None) -> None:
         for key in (
             "can_use_browser", "can_spawn", "can_manage_cron",
             "can_manage_fleet", "can_manage_teams", "can_edit_agent_config",
-            "can_view_fleet_metrics", "can_route_tasks",
+            "can_view_fleet_metrics",
             "can_request_user_credentials",
         ):
             if key in permissions:
@@ -1837,9 +1837,12 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
         if not op_perms.get("can_view_fleet_metrics", False):
             op_perms["can_view_fleet_metrics"] = True
             needs_update = True
-        if not op_perms.get("can_route_tasks", False):
-            op_perms["can_route_tasks"] = True
-            needs_update = True
+        # ``can_route_tasks`` retired in favour of unified ``can_message``
+        # gate on /mesh/tasks (worker→worker handoffs need exactly one
+        # permission, not two). The field stays on AgentPermissions for
+        # back-compat with existing permissions.json files but is no
+        # longer read; we stop grant-on-backfill so new operators don't
+        # accumulate dead configuration.
         if not op_perms.get("can_request_user_credentials", False):
             op_perms["can_request_user_credentials"] = True
             needs_update = True
@@ -1899,7 +1902,6 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
             "can_manage_teams": True,
             "can_edit_agent_config": True,
             "can_view_fleet_metrics": True,
-            "can_route_tasks": True,
             "can_request_user_credentials": True,
         },
     )

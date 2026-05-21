@@ -1553,11 +1553,16 @@ class AgentLoop:
             return f"config_error: {(result.get('response') or '')[:400]}"
         if result.get("exception_caught"):
             return f"exception: {(result.get('response') or '')[:400]}"
-        # System-side handoff enforcement (Round-4 structural fix).
+        # System-side handoff enforcement (Round-5 key-name fix).
+        # The ``tool_outputs`` schema is ``{"tool": tool_name, "input":
+        # ..., "output": ...}`` per ``_chat_inner``. PR #953 mistakenly
+        # scanned ``tool_out["name"]`` which never matches any real
+        # output — enforcement was dead code in production. Tests
+        # passed because they were written against the wrong key too.
         for tool_out in result.get("tool_outputs") or []:
             if not isinstance(tool_out, dict):
                 continue
-            if tool_out.get("name") != "hand_off":
+            if tool_out.get("tool") != "hand_off":
                 continue
             payload = tool_out.get("output") or tool_out.get("result") or {}
             if not isinstance(payload, dict):
