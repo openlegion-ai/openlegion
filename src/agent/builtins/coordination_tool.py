@@ -200,6 +200,16 @@ async def hand_off(
         write_project = target_project
     else:
         write_project = mesh_client.team_name
+    # Round-4 forensic trace: if the registry doesn't surface a
+    # ``project`` key for the target (e.g. post-rename drift) we fall
+    # back to sender's team_name — log both inputs so the operator can
+    # see the resolution path on the next E2E.
+    logger.info(
+        "hand_off scope resolution to=%s target_project=%r "
+        "target_is_global=%s sender_team=%r write_project=%r",
+        to, target_project, target_is_global,
+        mesh_client.team_name, write_project,
+    )
 
     if data and data.strip():
         # Optional: stash the payload under an artifact_ref the
@@ -307,6 +317,20 @@ async def hand_off(
         }
 
     task_id = record.get("id", "")
+    # Round-4 forensic trace: create_task succeeded with this id. Pairs
+    # with the ``tasks.create stored`` server log so the chain from
+    # agent → mesh → SQLite can be reconstructed from the operator's
+    # log on the next E2E. Surfacing the assignee + parent_task_id +
+    # creator surfaced from the server's POST handler exposes any
+    # value drift between request and storage at a glance.
+    logger.info(
+        "hand_off create_task returned task_id=%s to=%s "
+        "stored_assignee=%s stored_creator=%s stored_parent=%s "
+        "stored_team_id=%s",
+        task_id, to,
+        record.get("assignee"), record.get("creator"),
+        record.get("parent_task_id"), record.get("project_id"),
+    )
 
     # Wake the target so they pick up the task immediately. The task
     # is queued in SQLite either way; wake failures surface via
@@ -360,6 +384,18 @@ async def hand_off(
             "duplicate row). DO NOT mark this work as complete in your "
             "final response."
         )
+    # Round-4 forensic trace: final envelope shape the LLM sees. Pairs
+    # with the ``hand_off create_task returned`` line above so a future
+    # repro shows whether the LLM ignored a failure envelope OR the
+    # envelope was malformed in a way that hid the failure.
+    logger.info(
+        "hand_off result to=%s handed_off=%s task_id=%s flags=%s",
+        to, result.get("handed_off"), task_id,
+        [k for k in (
+            "create_failed", "wake_failed", "output_write_failed",
+            "task_queued",
+        ) if result.get(k)],
+    )
     return result
 
 

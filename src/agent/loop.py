@@ -1508,6 +1508,19 @@ class AgentLoop:
 
         return "\n\n".join(parts)
 
+    # Round-4 structural fix: hand_off failures are now enforced from
+    # tool-output evidence, not the LLM's discretion. Any of these
+    # flags in a ``hand_off`` tool result means the downstream chain
+    # did not land — the task must NOT auto-close to ``done`` even if
+    # the LLM produced text claiming success. The previous design
+    # depended on the LLM faithfully reading the failure envelope's
+    # ``MUST NOT report success`` directive, which models ignored
+    # across three repro cycles. Enforcing system-side closes that
+    # trust gap completely.
+    _HANDOFF_FAILURE_FLAGS = frozenset({
+        "create_failed", "wake_failed", "output_write_failed",
+    })
+
     @staticmethod
     def _chat_result_failure_reason(result: dict) -> str | None:
         """Return a failure-reason string if ``result`` carries a known
@@ -1522,6 +1535,13 @@ class AgentLoop:
         lazy-completion guard so a failure after ≥1 tool call doesn't
         slip past the empty-tool_outputs check and auto-close as
         ``done``.
+
+        Round-4 extension: also scans ``tool_outputs`` for ``hand_off``
+        results that indicate the downstream chain failed. If any
+        hand_off in this turn returned ``handed_off=False`` or any of
+        ``create_failed`` / ``wake_failed`` / ``output_write_failed``,
+        the task fails — the LLM no longer has the option to mark
+        ``done`` after a broken handoff just by producing text.
         """
         if not isinstance(result, dict):
             return None
@@ -1533,6 +1553,26 @@ class AgentLoop:
             return f"config_error: {(result.get('response') or '')[:400]}"
         if result.get("exception_caught"):
             return f"exception: {(result.get('response') or '')[:400]}"
+        # System-side handoff enforcement (Round-4 structural fix).
+        for tool_out in result.get("tool_outputs") or []:
+            if not isinstance(tool_out, dict):
+                continue
+            if tool_out.get("name") != "hand_off":
+                continue
+            payload = tool_out.get("output") or tool_out.get("result") or {}
+            if not isinstance(payload, dict):
+                continue
+            failing = [
+                k for k in AgentLoop._HANDOFF_FAILURE_FLAGS
+                if payload.get(k)
+            ]
+            if failing or payload.get("handed_off") is False:
+                target = payload.get("to") or "unknown"
+                detail = (payload.get("error") or "")[:300]
+                return (
+                    f"handoff_failed: hand_off to {target!r} reported "
+                    f"{failing or ['handed_off=False']} — {detail}"
+                )
         return None
 
     def _is_structured_final(self, content: str | None) -> bool:
