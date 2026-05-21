@@ -2923,7 +2923,8 @@ class TestChatHandoffFailureEnforcement:
             "response": "Done, handed off to bob",
             "tool_outputs": [
                 {
-                    "name": "hand_off",
+                    "tool": "hand_off",
+                    "input": {"to": "bob"},
                     "output": {
                         "handed_off": False,
                         "create_failed": True,
@@ -2943,7 +2944,8 @@ class TestChatHandoffFailureEnforcement:
             "response": "Handed off",
             "tool_outputs": [
                 {
-                    "name": "hand_off",
+                    "tool": "hand_off",
+                    "input": {"to": "carol"},
                     "output": {
                         "handed_off": False,
                         "wake_failed": True,
@@ -2963,7 +2965,8 @@ class TestChatHandoffFailureEnforcement:
             "response": "All good",
             "tool_outputs": [
                 {
-                    "name": "hand_off",
+                    "tool": "hand_off",
+                    "input": {"to": "dave"},
                     "output": {
                         "handed_off": False,
                         "output_write_failed": True,
@@ -2985,7 +2988,8 @@ class TestChatHandoffFailureEnforcement:
             "response": "Tried to hand off",
             "tool_outputs": [
                 {
-                    "name": "hand_off",
+                    "tool": "hand_off",
+                    "input": {"to": "eve"},
                     "output": {"handed_off": False, "to": "eve"},
                 },
             ],
@@ -2999,7 +3003,8 @@ class TestChatHandoffFailureEnforcement:
             "response": "Handed off to bob",
             "tool_outputs": [
                 {
-                    "name": "hand_off",
+                    "tool": "hand_off",
+                    "input": {"to": "bob"},
                     "output": {
                         "handed_off": True,
                         "to": "bob",
@@ -3011,13 +3016,14 @@ class TestChatHandoffFailureEnforcement:
         assert AgentLoop._chat_result_failure_reason(result) is None
 
     def test_non_handoff_tool_output_ignored(self):
-        """Scan only triggers on ``name == "hand_off"`` — same keys on
+        """Scan only triggers on ``tool == "hand_off"`` — same keys on
         a different tool's payload must NOT fail the task."""
         result = {
             "response": "Notified",
             "tool_outputs": [
                 {
-                    "name": "notify_user",
+                    "tool": "notify_user",
+                    "input": {},
                     "output": {"create_failed": True},
                 },
             ],
@@ -3031,7 +3037,8 @@ class TestChatHandoffFailureEnforcement:
             "response": "...",
             "tool_outputs": [
                 {
-                    "name": "hand_off",
+                    "tool": "hand_off",
+                    "input": {"to": "bob"},
                     "result": {"create_failed": True, "to": "bob"},
                 },
             ],
@@ -3047,8 +3054,34 @@ class TestChatHandoffFailureEnforcement:
         result = {
             "tool_limit_reached": True,
             "tool_outputs": [
-                {"name": "hand_off", "output": {"handed_off": True}},
+                {"tool": "hand_off", "input": {}, "output": {"handed_off": True}},
             ],
         }
         assert AgentLoop._chat_result_failure_reason(result) == \
             "max_iterations_reached"
+
+    def test_real_tool_output_schema_with_create_failed(self):
+        """Pin the integration with the actual ``_chat_inner`` schema
+        ``{"tool": tool_name, "input": ..., "output": ...}`` from
+        loop.py:2727. Guards against the PR #953 dead-code regression
+        where the scanner used the wrong key (``name``) and matched
+        nothing in production.
+        """
+        result = {
+            "response": "tried to hand off to bob",
+            "tool_outputs": [
+                {
+                    "tool": "hand_off",
+                    "input": {"to": "bob", "context": "follow-up"},
+                    "output": {
+                        "handed_off": False,
+                        "create_failed": True,
+                        "to": "bob",
+                    },
+                },
+            ],
+        }
+        reason = AgentLoop._chat_result_failure_reason(result)
+        assert reason is not None
+        assert reason.startswith("handoff_failed:")
+        assert "bob" in reason

@@ -4553,20 +4553,6 @@ def create_mesh_app(
                 )
             },
         )
-        # ``can_route_tasks`` is the structured permission. The mesh
-        # pseudo-id and operator are auto-permitted by the matrix; the
-        # operator trust tier also bypasses unconditionally so a
-        # misconfigured grant cannot silently break task routing.
-        if not _caller_is_operator(caller, request):
-            if not permissions.can_route_tasks(caller):
-                _record_denial(
-                    "permission", caller=caller,
-                    gate="tasks.create:can_route_tasks",
-                )
-                raise HTTPException(
-                    403,
-                    f"Agent {caller} cannot route tasks (can_route_tasks not granted)",
-                )
         body = await request.json()
         # ``.strip()`` on assignee defends against a trailing newline or
         # leading space sneaking through a hand-written prompt. SQLite
@@ -4592,6 +4578,23 @@ def create_mesh_app(
             raise HTTPException(400, "title is required")
         if not assignee or not _AGENT_ID_RE.match(assignee):
             raise HTTPException(400, f"Invalid assignee: {assignee!r}")
+        # Task creation is structured messaging — same trust boundary as
+        # ``can_message(caller, assignee)``. Using one gate (instead of
+        # the legacy double-gate with the now-defunct ``can_route_tasks``
+        # toggle) means every fleet template's collab-mode default
+        # (``can_message=["*"]``) automatically enables worker→worker
+        # handoffs out of the box. Operator + mesh-internal bypass.
+        if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
+            if not permissions.can_message(caller, assignee):
+                _record_denial(
+                    "permission", caller=caller, target=assignee,
+                    gate="tasks.create:can_message",
+                )
+                raise HTTPException(
+                    403,
+                    f"Agent {caller} cannot create task for {assignee!r} "
+                    "(can_message not granted)",
+                )
         # Cross-project scope: callers can only create tasks in projects
         # they belong to (operators / mesh are global). Standalone is
         # permitted (project_id=None).
@@ -4936,7 +4939,7 @@ def create_mesh_app(
 
     @app.post("/mesh/tasks/{task_id}/reroute")
     async def reroute_task(task_id: str, request: Request) -> dict:
-        """Reassign a task. Operator-only or callers with ``can_route_tasks``.
+        """Reassign a task. Operator-only (administrative recovery action).
 
         Cost-aware: refuses to reroute onto an agent that is already
         over its daily or monthly budget (HTTP 400, structured error).
@@ -4946,11 +4949,10 @@ def create_mesh_app(
         if not (
             _caller_is_operator(caller, request)
             or _is_internal_caller(request)
-            or permissions.can_route_tasks(caller)
         ):
             raise HTTPException(
                 403,
-                "Reroute requires can_route_tasks (operator-grade permission)",
+                "Reroute is operator-only (administrative recovery action)",
             )
         body = await request.json()
         new_assignee = body.get("new_assignee", "")
@@ -5009,11 +5011,10 @@ def create_mesh_app(
         if not (
             _caller_is_operator(caller, request)
             or _is_internal_caller(request)
-            or permissions.can_route_tasks(caller)
         ):
             raise HTTPException(
                 403,
-                "Retry requires can_route_tasks (operator-grade permission)",
+                "Retry is operator-only (administrative recovery action)",
             )
         original = store.get(task_id)
         if original is None:

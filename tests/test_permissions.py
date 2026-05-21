@@ -876,13 +876,18 @@ class TestControlPlanePermissions:
     """Task 3: ``can_spawn`` is now narrow; durable fleet operations
     require new control-plane permissions.
 
-    The six bits split off ``can_spawn``:
+    The control-plane bits split off ``can_spawn``:
       * ``can_manage_fleet``           — create/register named agents
       * ``can_manage_teams``           — create/archive teams, membership
       * ``can_edit_agent_config``      — propose/confirm config edits
       * ``can_view_fleet_metrics``     — fleet-wide metrics endpoints
-      * ``can_route_tasks``            — durable task records (Task 6)
       * ``can_request_user_credentials`` — user-facing credential requests
+
+    ``can_route_tasks`` was retired — task creation is now gated on
+    ``can_message(caller, assignee)`` and reroute/retry are operator-only
+    administrative actions. The field stays on ``AgentPermissions`` for
+    back-compat with existing permissions.json files but is no longer
+    read or seeded.
     """
 
     _CONTROL_PLANE_FIELDS = (
@@ -890,7 +895,6 @@ class TestControlPlanePermissions:
         "can_manage_teams",
         "can_edit_agent_config",
         "can_view_fleet_metrics",
-        "can_route_tasks",
         "can_request_user_credentials",
     )
 
