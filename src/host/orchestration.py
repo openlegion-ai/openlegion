@@ -631,7 +631,20 @@ class Tasks:
         )
         with self._conn() as conn:
             rows = conn.execute(sql, params).fetchall()
-        return [self._row_to_dict(r) for r in rows]
+        result = [self._row_to_dict(r) for r in rows]
+        # Round-4 forensic logging: pairs with ``tasks.create stored`` so
+        # an operator running an E2E test can see exactly what the
+        # recipient's inbox lookup compared against. ``rows=N`` over the
+        # same lookup paired with the create log gives the silent-drop
+        # bisect: if create stored ``assignee=X`` and list_inbox queries
+        # ``assignee=Y`` the mismatch falls out instantly.
+        logger.info(
+            "tasks.list_inbox assignee=%r project_id=%r "
+            "include_terminal=%s rows=%d team_col=%s",
+            assignee, project_id, include_terminal,
+            len(result), self._team_col,
+        )
+        return result
 
     def list_project(
         self,

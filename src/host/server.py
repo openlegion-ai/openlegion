@@ -4537,6 +4537,22 @@ def create_mesh_app(
         """
         store = tasks_store
         caller = _extract_verified_agent_id(request)
+        # Round-4 forensic logging (Bug 1 still reproduces post-PR#952).
+        # INFO-level entry trace so the operator's repro logs reveal
+        # whether the request even reached this handler (vs short-
+        # circuited upstream by transport/router) and what the request
+        # body looked like at the wire. Combine with ``Tasks.create``'s
+        # stored-value log to bisect the silent drop in one E2E run.
+        logger.info(
+            "/mesh/tasks POST entry caller=%s headers=%s",
+            caller,
+            {
+                k: v for k, v in request.headers.items()
+                if k.lower() in (
+                    "x-trace-id", "x-task-id", "x-origin", "x-agent-id",
+                )
+            },
+        )
         # ``can_route_tasks`` is the structured permission. The mesh
         # pseudo-id and operator are auto-permitted by the matrix; the
         # operator trust tier also bypasses unconditionally so a
@@ -4584,6 +4600,17 @@ def create_mesh_app(
                 403,
                 f"Caller {caller} is not a member of project {project_id!r}",
             )
+        # Body trace — assignee/project/parent already validated above.
+        # Round-4 forensic visibility: pairs with the entry log at the
+        # top so a missing log line here points to validation refusal
+        # while a present log here proves the request reached the
+        # store.create call site.
+        logger.info(
+            "/mesh/tasks POST body caller=%s assignee=%s project_id=%s "
+            "parent_task_id=%s title=%r",
+            caller, assignee, project_id, parent_task_id,
+            (title or "")[:80],
+        )
 
         origin = _validated_origin(request, caller)
         origin_dict = origin.model_dump() if origin is not None else None

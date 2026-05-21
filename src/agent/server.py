@@ -239,6 +239,25 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
             origin=origin,
             task_id=task_id,
         )
+        # Round-4 forensic trace (Bug 3 still reproduces post-PR#952).
+        # The operator reported turns ending with no visible chat
+        # output after tool calls. INFO-level shape log makes the next
+        # repro diagnosable from the agent's container log alone:
+        # ``response_len=0 tool_outputs=N`` would prove the fallback
+        # never fired; non-zero response_len would point to a
+        # dashboard-side rendering bug instead.
+        resp = result.get("response") or ""
+        tool_outputs = result.get("tool_outputs") or []
+        logger.info(
+            "/chat EXIT task_id=%s response_len=%d tool_outputs=%d "
+            "tokens_used=%s flags=%s",
+            task_id, len(resp), len(tool_outputs),
+            result.get("tokens_used"),
+            [k for k in (
+                "auth_failure", "config_error", "exception_caught",
+                "tool_limit_reached", "silent_reply",
+            ) if result.get(k)],
+        )
         return ChatResponse(**result)
 
     @app.post("/chat/steer")

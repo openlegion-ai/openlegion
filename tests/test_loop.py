@@ -2903,3 +2903,152 @@ class TestChatEmptyResponseFallback:
         # tool_outputs and an empty response, the guard goes through
         # the "did work" branch and auto-closes as ``done``.
         loop._auto_close_task.assert_awaited()
+
+
+# === Round-4 structural fix: system-side hand_off failure enforcement ===
+
+
+class TestChatHandoffFailureEnforcement:
+    """``AgentLoop._chat_result_failure_reason`` scans ``tool_outputs`` for
+    ``hand_off`` results and forces a failure reason when the downstream
+    chain didn't land (``handed_off=False`` or any of ``create_failed`` /
+    ``wake_failed`` / ``output_write_failed``). The previous design trusted
+    the LLM to surface those failures in its text; models ignored the
+    directive across three repro cycles, so enforcement is now system-side.
+    These tests pin the contract on the pure staticmethod — no async needed.
+    """
+
+    def test_create_failed_handoff_fails_task(self):
+        result = {
+            "response": "Done, handed off to bob",
+            "tool_outputs": [
+                {
+                    "name": "hand_off",
+                    "output": {
+                        "handed_off": False,
+                        "create_failed": True,
+                        "to": "bob",
+                        "error": "create_failed: bob does not exist",
+                    },
+                },
+            ],
+        }
+        reason = AgentLoop._chat_result_failure_reason(result)
+        assert reason is not None
+        assert reason.startswith("handoff_failed:")
+        assert "bob" in reason
+
+    def test_wake_failed_handoff_fails_task(self):
+        result = {
+            "response": "Handed off",
+            "tool_outputs": [
+                {
+                    "name": "hand_off",
+                    "output": {
+                        "handed_off": False,
+                        "wake_failed": True,
+                        "to": "carol",
+                        "error": "wake_failed: timeout",
+                    },
+                },
+            ],
+        }
+        reason = AgentLoop._chat_result_failure_reason(result)
+        assert reason is not None
+        assert reason.startswith("handoff_failed:")
+        assert "wake_failed" in reason or "handoff_failed:" in reason
+
+    def test_output_write_failed_handoff_fails_task(self):
+        result = {
+            "response": "All good",
+            "tool_outputs": [
+                {
+                    "name": "hand_off",
+                    "output": {
+                        "handed_off": False,
+                        "output_write_failed": True,
+                        "to": "dave",
+                        "error": "output_write_failed: disk full",
+                    },
+                },
+            ],
+        }
+        reason = AgentLoop._chat_result_failure_reason(result)
+        assert reason is not None
+        assert reason.startswith("handoff_failed:")
+        assert "output_write_failed" in reason or "dave" in reason
+
+    def test_handed_off_false_alone_fails_task(self):
+        """No specific failure flag, just ``handed_off=False`` — still
+        a failure (legacy/future payload shape)."""
+        result = {
+            "response": "Tried to hand off",
+            "tool_outputs": [
+                {
+                    "name": "hand_off",
+                    "output": {"handed_off": False, "to": "eve"},
+                },
+            ],
+        }
+        reason = AgentLoop._chat_result_failure_reason(result)
+        assert reason is not None
+        assert reason.startswith("handoff_failed:")
+
+    def test_successful_handoff_does_not_fail_task(self):
+        result = {
+            "response": "Handed off to bob",
+            "tool_outputs": [
+                {
+                    "name": "hand_off",
+                    "output": {
+                        "handed_off": True,
+                        "to": "bob",
+                        "task_id": "task_X",
+                    },
+                },
+            ],
+        }
+        assert AgentLoop._chat_result_failure_reason(result) is None
+
+    def test_non_handoff_tool_output_ignored(self):
+        """Scan only triggers on ``name == "hand_off"`` — same keys on
+        a different tool's payload must NOT fail the task."""
+        result = {
+            "response": "Notified",
+            "tool_outputs": [
+                {
+                    "name": "notify_user",
+                    "output": {"create_failed": True},
+                },
+            ],
+        }
+        assert AgentLoop._chat_result_failure_reason(result) is None
+
+    def test_alternate_payload_key_result(self):
+        """Some dispatchers expose the payload under ``result`` instead
+        of ``output`` — both shapes must be recognized."""
+        result = {
+            "response": "...",
+            "tool_outputs": [
+                {
+                    "name": "hand_off",
+                    "result": {"create_failed": True, "to": "bob"},
+                },
+            ],
+        }
+        reason = AgentLoop._chat_result_failure_reason(result)
+        assert reason is not None
+        assert reason.startswith("handoff_failed:")
+
+    def test_pre_existing_failures_take_precedence(self):
+        """``tool_limit_reached`` is checked before the tool_outputs
+        scan — even with a "successful" handoff in the same envelope,
+        the iteration-limit failure wins."""
+        result = {
+            "tool_limit_reached": True,
+            "tool_outputs": [
+                {"name": "hand_off", "output": {"handed_off": True}},
+            ],
+        }
+        assert AgentLoop._chat_result_failure_reason(result) == \
+            "max_iterations_reached"

@@ -995,12 +995,27 @@ async def await_task_event(
     escaped the inner loop would surface to the LLM as an empty body and
     break the awareness loop (Bug 2 repro 2026-05-21).
     """
+    # Round-4 forensic trace (Bug 2 still reproduces post-PR#952). Entry
+    # logging at INFO so the operator's E2E log shows whether the skill
+    # was even invoked with what args. Pairs with the exit-log added
+    # to every return site below — a missing exit line for a present
+    # entry line means an unhandled exception escaped both guards.
+    logger.info(
+        "await_task_event ENTRY task_id=%s timeout_s=%s poll_interval_s=%s",
+        task_id, timeout_s, poll_interval_s,
+    )
     if not _is_operator():
-        return {"error": "This tool is only available to the operator agent."}
+        out = {"error": "This tool is only available to the operator agent."}
+        logger.info("await_task_event EXIT non_operator result=%s", out)
+        return out
     if mesh_client is None:
-        return {"error": "No mesh_client available"}
+        out = {"error": "No mesh_client available"}
+        logger.info("await_task_event EXIT no_mesh_client result=%s", out)
+        return out
     if not task_id:
-        return {"error": "task_id is required"}
+        out = {"error": "task_id is required"}
+        logger.info("await_task_event EXIT empty_task_id result=%s", out)
+        return out
 
     try:
         timeout = max(1, min(int(timeout_s), _AWAIT_TASK_EVENT_MAX_TIMEOUT_S))
@@ -1020,12 +1035,17 @@ async def await_task_event(
             # wall-clock past the agent loop's 300s tool ceiling.
             remaining_before_poll = deadline - _time.monotonic()
             if remaining_before_poll <= _AWAIT_TASK_EVENT_POLL_BUDGET_S:
-                return {
+                out = {
                     "timed_out": True,
                     "task_id": task_id,
                     "last_status_seen": last_status_seen,
                     "waited_seconds": timeout,
                 }
+                logger.info(
+                    "await_task_event EXIT timeout_predeadline result=%s",
+                    out,
+                )
+                return out
             try:
                 # Each poll is bounded by ``_AWAIT_TASK_EVENT_POLL_BUDGET_S``
                 # to keep the worst-case iteration time predictable even
@@ -1047,17 +1067,22 @@ async def await_task_event(
                 # can't leak into the LLM context (same precaution as
                 # coordination_tool's failure envelopes).
                 redacted = redact_text_with_urls(str(e))[:200]
-                return {
+                out = {
                     "error": f"Inbox fetch failed: {redacted}",
                     "task_id": task_id,
                 }
+                logger.info(
+                    "await_task_event EXIT inbox_fetch_failed result=%s",
+                    out,
+                )
+                return out
             for entry in entries:
                 value = entry.get("value") or {}
                 if value.get("task_id") != task_id:
                     continue
                 kind = value.get("kind", "")
                 if kind in terminal_kinds:
-                    return {
+                    out = {
                         "event": {
                             "kind": kind,
                             "task_id": task_id,
@@ -1069,15 +1094,25 @@ async def await_task_event(
                             "ts": value.get("ts"),
                         },
                     }
+                    logger.info(
+                        "await_task_event EXIT terminal_event kind=%s "
+                        "task_id=%s", kind, task_id,
+                    )
+                    return out
                 last_status_seen = value.get("status") or last_status_seen
             remaining = deadline - _time.monotonic()
             if remaining <= 0:
-                return {
+                out = {
                     "timed_out": True,
                     "task_id": task_id,
                     "last_status_seen": last_status_seen,
                     "waited_seconds": timeout,
                 }
+                logger.info(
+                    "await_task_event EXIT timeout_postpoll result=%s",
+                    out,
+                )
+                return out
             # Exponential backoff capped at 30s and the remaining window.
             sleep_for = min(interval, remaining, 30.0)
             await asyncio.sleep(sleep_for)
@@ -1094,10 +1129,14 @@ async def await_task_event(
             "await_task_event unexpected exception for task=%s: %s",
             task_id, redacted,
         )
-        return {
+        out = {
             "error": f"await_task_event_unexpected: {redacted}",
             "task_id": task_id,
         }
+        logger.info(
+            "await_task_event EXIT outer_except result=%s", out,
+        )
+        return out
 
 
 @skill(
