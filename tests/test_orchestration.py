@@ -1770,6 +1770,29 @@ def test_failed_terminal_does_not_emit_chain_break(tmp_path):
     assert chain_break == []
 
 
+def test_done_to_done_noop_does_not_re_emit_chain_break(tmp_path):
+    """A redundant done→done transition is no-op'd by the state machine.
+    The chain-break event must fire EXACTLY ONCE — on the initial
+    working→done transition — not again on the no-op redo."""
+    t = _make_store(tmp_path)
+    rec = t.create(creator="op", assignee="writer", title="t")
+    t.update_status(rec["id"], "working", actor="writer")
+    _bus, captured = _attach_event_bus(t)
+    t.update_status(rec["id"], "done", actor="writer")
+    # Second done call — either no-op'd by state machine OR raises
+    # InvalidStatusTransition; either way, no new chain_break.
+    try:
+        t.update_status(rec["id"], "done", actor="writer")
+    except Exception:
+        pass
+    chain_break = [
+        c for c in captured if c[0] == "task_completed_without_handoff"
+    ]
+    assert len(chain_break) == 1, (
+        f"Expected exactly one chain_break event, got {len(chain_break)}"
+    )
+
+
 def test_workflow_snapshot_flags_terminal_without_children(tmp_path):
     """A 3-stage chain where stage 2 transitions to ``done`` without
     creating stage 3 must surface ``terminal_without_children=True`` on

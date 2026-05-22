@@ -588,3 +588,166 @@ class TestChatPartialPersistence:
         assert assistant_entries[0]["content"] == "Final answer"
         # Final entry has no partial flag set.
         assert assistant_entries[0].get("partial") is not True
+
+    @pytest.mark.asyncio
+    async def test_streaming_chat_persists_partial_before_tool_dispatch(self):
+        """Streaming path also writes a partial=True assistant entry before
+        tool dispatch — mirrors the _chat_inner behavior so a dashboard
+        refresh during a streamed long tool call doesn't lose the bubble."""
+        tool_response = LLMResponse(
+            content="streaming thinking…",
+            tool_calls=[
+                ToolCallInfo(name="slow_tool", arguments={"k": "v"}),
+            ],
+            tokens_used=10,
+        )
+        final_response = LLMResponse(content="Final.", tokens_used=20)
+
+        loop = _make_loop_with_workspace(
+            self._tmpdir, llm_responses=[tool_response, final_response],
+        )
+
+        # Force the streaming path to fall back to non-streaming for the
+        # LLM call (the partial-write happens AFTER the LLM call regardless
+        # of whether it streamed or not).
+        async def _no_stream(**kwargs):
+            raise RuntimeError("no streaming")
+            yield  # makes it an async generator
+
+        loop.llm.chat_stream = _no_stream
+        loop.skills.execute = AsyncMock(return_value={"results": []})
+        loop.skills.get_tool_definitions = MagicMock(
+            return_value=[
+                {"type": "function", "function": {"name": "slow_tool"}},
+            ],
+        )
+
+        # Drive the async generator to completion.
+        events = []
+        async for event in loop.chat_stream("trigger slow tool"):
+            events.append(event)
+
+        # Read raw transcript lines (no dedup) — verify a partial=True
+        # assistant entry was written to disk before the final.
+        from pathlib import Path as _P
+        path = _P(self._tmpdir) / WorkspaceManager.CHAT_TRANSCRIPT
+        raw_lines = path.read_text().strip().splitlines()
+        import json as _json
+        parsed = [_json.loads(line) for line in raw_lines if line.strip()]
+        partial_entries = [
+            e for e in parsed
+            if e.get("role") == "assistant" and e.get("partial") is True
+        ]
+        assert len(partial_entries) >= 1, (
+            "Streaming path must persist a partial assistant entry "
+            "before tool dispatch — same contract as _chat_inner."
+        )
+        assert partial_entries[0].get("turn_id"), (
+            "Partial entry must carry a turn_id for dedup against the final"
+        )
+        # After dedup, exactly one assistant entry visible (the final).
+        transcript = loop.workspace.load_chat_transcript()
+        assistant_entries = [
+            e for e in transcript if e.get("role") == "assistant"
+        ]
+        assert len(assistant_entries) == 1
+        assert assistant_entries[0]["content"] == "Final."
+
+    @pytest.mark.asyncio
+    async def test_multi_round_tool_dispatch_dedupes_to_single_assistant_entry(self):
+        """A turn with 3 rounds of tool calls + final text should produce
+        multiple partial writes (one per round) but ONLY ONE assistant
+        entry visible after load_chat_transcript dedup. The visible final
+        carries every tool name used across the turn (cumulative)."""
+        round1 = LLMResponse(
+            content="round 1 prose",
+            tool_calls=[ToolCallInfo(name="tool_a", arguments={"x": 1})],
+            tokens_used=10,
+        )
+        round2 = LLMResponse(
+            content="round 2 prose",
+            tool_calls=[ToolCallInfo(name="tool_b", arguments={"x": 2})],
+            tokens_used=10,
+        )
+        round3 = LLMResponse(
+            content="round 3 prose",
+            tool_calls=[ToolCallInfo(name="tool_c", arguments={"x": 3})],
+            tokens_used=10,
+        )
+        final_response = LLMResponse(
+            content="Final synthesized answer", tokens_used=20,
+        )
+
+        loop = _make_loop_with_workspace(
+            self._tmpdir,
+            llm_responses=[round1, round2, round3, final_response],
+        )
+        loop.skills.execute = AsyncMock(return_value={"ok": True})
+        loop.skills.get_tool_definitions = MagicMock(
+            return_value=[
+                {"type": "function", "function": {"name": "tool_a"}},
+                {"type": "function", "function": {"name": "tool_b"}},
+                {"type": "function", "function": {"name": "tool_c"}},
+            ],
+        )
+
+        await loop.chat("multi-round work")
+
+        # Raw file: 3 partial assistant entries (one per tool round) +
+        # final assistant entry = at least 3 partials present.
+        from pathlib import Path as _P
+        path = _P(self._tmpdir) / WorkspaceManager.CHAT_TRANSCRIPT
+        raw_lines = path.read_text().strip().splitlines()
+        import json as _json
+        parsed = [_json.loads(line) for line in raw_lines if line.strip()]
+        partial_entries = [
+            e for e in parsed
+            if e.get("role") == "assistant" and e.get("partial") is True
+        ]
+        assert len(partial_entries) >= 3, (
+            f"Expected at least 3 partial entries (one per tool round), "
+            f"got {len(partial_entries)}"
+        )
+
+        # After dedup, exactly ONE visible assistant entry.
+        transcript = loop.workspace.load_chat_transcript()
+        assistant_entries = [
+            e for e in transcript if e.get("role") == "assistant"
+        ]
+        assert len(assistant_entries) == 1, (
+            f"Expected 1 visible assistant entry, got {len(assistant_entries)}"
+        )
+        # The visible entry shows the FINAL content.
+        assert assistant_entries[0]["content"] == "Final synthesized answer"
+        # The visible entry's tools list (from _log_chat_turn, sourced
+        # from tool_outputs) includes all 3 tool names. ``_log_chat_turn``
+        # stores tools as a list of dicts with a ``name`` field.
+        visible_tools = assistant_entries[0].get("tools") or []
+        visible_tool_names = {
+            (t.get("name") if isinstance(t, dict) else t)
+            for t in visible_tools
+        }
+        assert visible_tool_names == {"tool_a", "tool_b", "tool_c"}, (
+            f"Final entry tools should include all 3 names, "
+            f"got {visible_tool_names}"
+        )
+
+        # PE review follow-up — the LAST partial (just before the final
+        # supersedes it) should carry the cumulative tool list across
+        # all 3 rounds + cumulative content joined with newlines.
+        # ``append_chat_message`` stores ``tool_names`` (list[str]) under
+        # the ``tools`` key when no full ``tools`` dict list is passed.
+        last_partial = partial_entries[-1]
+        last_partial_tools = last_partial.get("tools") or []
+        last_partial_tool_names = {
+            (t.get("name") if isinstance(t, dict) else t)
+            for t in last_partial_tools
+        }
+        assert last_partial_tool_names == {"tool_a", "tool_b", "tool_c"}, (
+            f"Last partial entry must carry cumulative tool names, "
+            f"got {last_partial_tool_names}"
+        )
+        # Cumulative content: all 3 rounds' prose joined by newlines.
+        assert "round 1 prose" in last_partial.get("content", "")
+        assert "round 2 prose" in last_partial.get("content", "")
+        assert "round 3 prose" in last_partial.get("content", "")

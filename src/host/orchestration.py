@@ -246,6 +246,8 @@ class Tasks:
                     ON tasks (created_at);
                 CREATE INDEX IF NOT EXISTS idx_tasks_retention
                     ON tasks (retention_until);
+                CREATE INDEX IF NOT EXISTS idx_tasks_parent_task_id
+                    ON tasks (parent_task_id);
 
                 CREATE TABLE IF NOT EXISTS task_events (
                     event_id INTEGER PRIMARY KEY AUTOINCREMENT,

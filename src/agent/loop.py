@@ -2923,6 +2923,14 @@ class AgentLoop:
         # during a long-running tool call sees the in-flight partial and
         # the eventual completion overwrites it cleanly.
         turn_id = str(uuid.uuid4())
+        # PE review follow-up — accumulate tool names and assistant text
+        # across multi-round turns so the in-flight partial bubble shows
+        # ALL tools used so far (not just the current round) and the
+        # full assistant prose emitted to date. ``llm_response.content``
+        # is per-round, not cumulative — joining with newlines yields
+        # the full turn text.
+        turn_tool_names: list[str] = []
+        turn_content_parts: list[str] = []
 
         try:
             user_message, system = await self._prepare_chat_turn(user_message)
@@ -3027,14 +3035,23 @@ class AgentLoop:
                 # ``load_chat_transcript`` dedupes by ``turn_id``, so
                 # the final entry written by ``_log_chat_turn`` at turn
                 # close supersedes this partial cleanly.
+                #
+                # PE review follow-up — accumulate tool names + content
+                # across rounds so a mid-flight refresh shows ALL tools
+                # used so far and ALL prose emitted to date, not just
+                # the current round. ``llm_response.content`` is the
+                # CURRENT round's content only; joining with newlines
+                # yields the full turn text.
+                if llm_response.content:
+                    turn_content_parts.append(llm_response.content)
+                for tc in llm_response.tool_calls:
+                    if tc.name not in turn_tool_names:
+                        turn_tool_names.append(tc.name)
                 if self.workspace:
-                    partial_tool_names = [
-                        tc.name for tc in llm_response.tool_calls
-                    ]
                     self.workspace.append_chat_message(
                         "assistant",
-                        llm_response.content or "",
-                        tool_names=partial_tool_names,
+                        "\n".join(turn_content_parts),
+                        tool_names=list(turn_tool_names),
                         turn_id=turn_id,
                         partial=True,
                     )
@@ -3548,6 +3565,10 @@ class AgentLoop:
         accumulated_text: list[str] = []  # all text_delta content across rounds
         # Fix B — see ``_chat_inner`` for the partial-persistence rationale.
         turn_id = str(uuid.uuid4())
+        # PE review follow-up — accumulate tool names across rounds so a
+        # mid-flight refresh shows every tool used so far (not just the
+        # current round's). Streaming content reuses ``accumulated_text``.
+        turn_tool_names: list[str] = []
 
         try:
             user_message, system = await self._prepare_chat_turn(user_message)
@@ -3684,14 +3705,18 @@ class AgentLoop:
                 # the in-flight bubble. ``_log_chat_turn`` writes the
                 # final at turn close with the same ``turn_id`` and
                 # supersedes this entry on the next ``load_chat_transcript``.
+                #
+                # PE review follow-up — accumulate tool names across
+                # rounds, and reuse ``accumulated_text`` for the body so
+                # all prose streamed so far is visible after a refresh.
+                for tc in llm_response.tool_calls:
+                    if tc.name not in turn_tool_names:
+                        turn_tool_names.append(tc.name)
                 if self.workspace:
-                    partial_tool_names = [
-                        tc.name for tc in llm_response.tool_calls
-                    ]
                     self.workspace.append_chat_message(
                         "assistant",
-                        llm_response.content or "",
-                        tool_names=partial_tool_names,
+                        "".join(accumulated_text),
+                        tool_names=list(turn_tool_names),
                         turn_id=turn_id,
                         partial=True,
                     )
