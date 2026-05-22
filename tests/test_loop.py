@@ -18,10 +18,15 @@ from src.agent.loop import (
     _READ_ONLY_TOOLS,
     HEARTBEAT_MAX_ITERATIONS,
     AgentLoop,
-    _has_outbound_effect,
     _heartbeat_mode,
 )
 from src.shared.types import LLMResponse, TaskAssignment, TokenBudget, ToolCallInfo
+
+# Audit-pass: ``_has_outbound_effect`` was moved from module-level to a
+# ``@staticmethod`` on ``AgentLoop`` so it sits with the other lazy-
+# completion guards. Re-expose as a module name so test bodies that
+# call it bare-name keep working without rewrites.
+_has_outbound_effect = AgentLoop._has_outbound_effect
 
 
 def _make_loop(llm_responses: list[LLMResponse] | None = None, *, real_memory: bool = False) -> AgentLoop:
@@ -160,7 +165,11 @@ async def test_lazy_completion_guard_fails_text_only_after_nudge():
     result = await loop.execute_task(assignment)
 
     assert result.status == "failed"
-    assert "no_action_taken" in (result.error or "")
+    # Round-5 audit pass: execute_task's lazy-completion error renamed
+    # from ``no_action_taken`` to ``no_outbound_effects`` to share
+    # wording with the chat-path guard. The earlier wording is still
+    # accepted for any pre-rename log scrapers.
+    assert "no_outbound_effects" in (result.error or "")
     assert loop.tasks_failed == 1
     assert loop.tasks_completed == 0
     assert loop.state == "idle"
@@ -223,7 +232,7 @@ async def test_lazy_guard_rejects_empty_dict_result():
     )
     result = await loop.execute_task(assignment)
     assert result.status == "failed"
-    assert "no_action_taken" in (result.error or "")
+    assert "no_outbound_effects" in (result.error or "")
 
 
 @pytest.mark.asyncio
@@ -247,7 +256,7 @@ async def test_lazy_guard_rejects_scalar_result_chatter():
     result = await loop.execute_task(assignment)
     # Scalar result with no tool calls = chatter — guard trips.
     assert result.status == "failed"
-    assert "no_action_taken" in (result.error or "")
+    assert "no_outbound_effects" in (result.error or "")
     assert loop.tasks_failed == 1
 
 
@@ -342,7 +351,7 @@ async def test_lazy_guard_fires_on_iter0_text_only_with_tools_available():
         f"text-only iter-0 completion must fail under the post-regression "
         f"guard; got status={result.status} error={result.error}"
     )
-    assert "no_action_taken" in (result.error or "")
+    assert "no_outbound_effects" in (result.error or "")
     assert loop.tasks_failed == 1
     assert loop.tasks_completed == 0
 
