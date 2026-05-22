@@ -3845,6 +3845,7 @@ def create_mesh_app(
         outcome_rejected_24h: dict[str, int] = {}
         execution_failures_24h: dict[str, int] = {}
         stale_tasks_24h: dict[str, int] = {}
+        chain_breaks_24h: dict[str, int] = {}
         if tasks_store is not None:
             try:
                 _day_seconds = 24 * 60 * 60
@@ -3866,6 +3867,21 @@ def create_mesh_app(
                     aid: count
                     for aid, count in tasks_store.count_stale_since(
                         threshold_seconds=_day_seconds,
+                    ).items()
+                    if aid != "operator"
+                }
+                # Chain-break observability — surfaces ``done`` tasks
+                # whose work didn't get handed off (no child row via
+                # ``parent_task_id``) and that the operator hasn't
+                # actioned yet via rate/rework. Closes the
+                # "task_completed_without_handoff signal has no
+                # consumer" gap by giving the heartbeat playbook a
+                # field to drill into via its existing
+                # ``get_system_status`` call.
+                chain_breaks_24h = {
+                    aid: count
+                    for aid, count in tasks_store.chain_breaks_24h(
+                        since=time.time() - _day_seconds,
                     ).items()
                     if aid != "operator"
                 }
@@ -3935,6 +3951,13 @@ def create_mesh_app(
             "outcome_rejected_24h_count": outcome_rejected_24h,
             "execution_failures_24h_count": execution_failures_24h,
             "stale_tasks_24h_count": stale_tasks_24h,
+            # Chain-break observability — per-agent count of ``done``
+            # tasks with no successor (no child via ``parent_task_id``)
+            # and no outcome set, within the trailing 24h window.
+            # Paired with the ``task_completed_without_handoff``
+            # DashboardEvent emitted by ``Tasks.update_status``.
+            # Observability-only, no enforcement.
+            "chain_breaks_24h_count": chain_breaks_24h,
             "failure_rate_by_agent": failure_rates,
             "agents_needing_attention": agents_attention,
             "plan_limits": {

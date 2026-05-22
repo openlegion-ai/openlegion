@@ -796,6 +796,47 @@ class Tasks:
             return None
         return float(row[0])
 
+    def chain_breaks_24h(self, since: float) -> dict[str, int]:
+        """Count chain-break tasks per assignee since the cutoff timestamp.
+
+        A "chain-break" is a ``done`` task whose work didn't get handed
+        off to a successor — operationally, a row that:
+
+        * has ``status='done'``
+        * was updated at or after ``since`` (a Unix timestamp; callers
+          typically pass ``time.time() - 86400`` for a trailing 24h window)
+        * has no row in ``tasks`` whose ``parent_task_id`` references it
+        * has ``outcome IS NULL`` — the operator hasn't actioned this
+          delivery yet via rate / rework. Outcome-set rows drop out of
+          the count because the operator already saw them.
+
+        Returns ``{assignee: count}`` for assignees with at least one
+        chain-break in the window. The ``NOT EXISTS`` subquery uses
+        ``idx_tasks_parent_task_id`` so this is O(#done-rows-in-window)
+        index lookups. Surfaced as ``chain_breaks_24h_count`` on the
+        ``/mesh/system/metrics`` payload so the operator heartbeat
+        playbook can drill into silent-handoff agents via its existing
+        ``get_system_status`` call — no need for a separate
+        ``workflow_snapshot`` poll.
+
+        Observability-only — NO enforcement. Pairs with the
+        ``task_completed_without_handoff`` DashboardEvent emitted by
+        :meth:`update_status` at the ``done`` transition.
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT assignee, COUNT(*) FROM tasks t1 "
+                "WHERE t1.status = 'done' "
+                "  AND t1.updated_at >= ? "
+                "  AND t1.outcome IS NULL "
+                "  AND NOT EXISTS ("
+                "    SELECT 1 FROM tasks t2 WHERE t2.parent_task_id = t1.id"
+                "  ) "
+                "GROUP BY assignee",
+                (since,),
+            ).fetchall()
+        return {row[0]: int(row[1] or 0) for row in rows if row[0]}
+
     def list_stale_for_assignee(
         self,
         assignee: str,
@@ -1044,12 +1085,6 @@ class Tasks:
                         chain_break_payload = {
                             "task_id": task_id,
                             "agent_id": assignee,
-                            # No ``role`` column on tasks — left as ``None``
-                            # so the payload shape stays stable for future
-                            # consumers when an agent-role lookup is wired
-                            # in. The dashboard derives role from agent_id
-                            # via its own fleet metadata.
-                            "role": None,
                             "parent_task_id": task_parent_id,
                             "project": project_id,
                             "title": task_title,

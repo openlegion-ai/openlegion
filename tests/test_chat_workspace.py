@@ -837,6 +837,45 @@ class TestChatPartialPersistence:
         assert "round 2 prose" in last_partial.get("content", "")
         assert "round 3 prose" in last_partial.get("content", "")
 
+    @pytest.mark.asyncio
+    async def test_partial_cumulative_content_then_final_keeps_final(self):
+        """During mid-flight, the partial entry carries CUMULATIVE content
+        across rounds (newline-joined). After turn close, the final entry
+        via _log_chat_turn carries only the final round's content. dedup
+        keeps the final — the cumulative partial commentary is intentional
+        mid-flight UX only, not preserved in the post-completion history.
+        """
+        tool_resp_1 = LLMResponse(
+            content="Step 1 commentary.",
+            tool_calls=[ToolCallInfo(name="tool_a", arguments={})],
+            tokens_used=10,
+        )
+        tool_resp_2 = LLMResponse(
+            content="Step 2 commentary.",
+            tool_calls=[ToolCallInfo(name="tool_b", arguments={})],
+            tokens_used=10,
+        )
+        final_resp = LLMResponse(content="Done.", tokens_used=10)
+        loop = _make_loop_with_workspace(
+            self._tmpdir,
+            llm_responses=[tool_resp_1, tool_resp_2, final_resp],
+        )
+        loop.skills.execute = AsyncMock(return_value={"ok": True})
+        loop.skills.get_tool_definitions = MagicMock(
+            return_value=[
+                {"type": "function", "function": {"name": "tool_a"}},
+                {"type": "function", "function": {"name": "tool_b"}},
+            ],
+        )
+        await loop.chat("ask")
+        transcript = loop.workspace.load_chat_transcript()
+        assistants = [e for e in transcript if e.get("role") == "assistant"]
+        assert len(assistants) == 1
+        # The final's content is just the final round's text — NOT the
+        # cumulative "Step 1 commentary.\nStep 2 commentary.\nDone."
+        # This pins the pre-existing _log_chat_turn behavior.
+        assert assistants[0]["content"] == "Done."
+
     def test_partial_survives_when_rotation_drops_first_half(self, monkeypatch):
         """When append_chat_message rotates the transcript (first half
         dropped) BETWEEN the partial-write and the final-write, the
