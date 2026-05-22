@@ -3713,9 +3713,20 @@ class AgentLoop:
                     if tc.name not in turn_tool_names:
                         turn_tool_names.append(tc.name)
                 if self.workspace:
+                    # Fall back to ``llm_response.content`` when no
+                    # text_delta events streamed — some providers return
+                    # content as a single block instead of streaming
+                    # deltas, leaving ``accumulated_text`` empty even
+                    # though the assistant produced prose. Without this
+                    # fallback the partial entry is empty, which renders
+                    # as an empty bubble on mid-flight refresh.
+                    partial_content = (
+                        "".join(accumulated_text) if accumulated_text
+                        else (llm_response.content or "")
+                    )
                     self.workspace.append_chat_message(
                         "assistant",
-                        "".join(accumulated_text),
+                        partial_content,
                         tool_names=list(turn_tool_names),
                         turn_id=turn_id,
                         partial=True,

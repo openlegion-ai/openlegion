@@ -881,20 +881,27 @@ class Tasks:
                 "ORDER BY t.created_at ASC LIMIT ?",
                 (root_task_id, MAX_WORKFLOW_CHAIN_DEPTH, limit),
             ).fetchall()
-        if not rows:
-            return None
-        # Build a child-set from the CTE result itself so we don't need a
-        # second SQL query — every descendant in the chain is already in
-        # ``rows`` (capped at ``limit`` for safety, but the chain-break
-        # signal is correct relative to the snapshot the operator sees).
-        # NOTE: a leaf inside the chain whose only children fell off the
-        # ``limit`` cap would falsely look terminal. That's the same
-        # tradeoff the existing snapshot already makes for status counts.
-        parent_ids_with_children: set[str] = set()
-        for row in rows:
-            parent = row[1]
-            if parent:
-                parent_ids_with_children.add(parent)
+            if not rows:
+                return None
+            # Independent child-existence check — derive
+            # ``terminal_without_children`` from the full tasks table, not
+            # just the snapshot rows. Otherwise a non-leaf at the ``limit``
+            # boundary whose only children fell off the cap would falsely
+            # report ``terminal_without_children=True``. Uses the
+            # ``idx_tasks_parent_task_id`` index so this is O(#done-stages)
+            # lookups inside the same connection block.
+            done_task_ids = [row[0] for row in rows if row[3] == "done"]
+            parent_ids_with_children: set[str] = set()
+            if done_task_ids:
+                placeholders = ",".join("?" * len(done_task_ids))
+                child_rows = conn.execute(
+                    f"SELECT DISTINCT parent_task_id FROM tasks "
+                    f"WHERE parent_task_id IN ({placeholders})",
+                    done_task_ids,
+                ).fetchall()
+                parent_ids_with_children = {
+                    r[0] for r in child_rows if r[0]
+                }
         stages: list[dict] = []
         # Derive buckets from ``VALID_STATUSES`` so a future state added
         # to the enum can't silently drift out of the summary math.
@@ -1098,6 +1105,17 @@ class Tasks:
         # (i.e. the agent finished work without handing off). Emitted AFTER
         # the canonical ``task_status_changed`` event so consumers that
         # filter on the status change see the canonical event first.
+        #
+        # **Race window**: between COMMIT and this emit, another transaction
+        # COULD insert a child task with parent_task_id=this task. That
+        # child would cause a false-positive chain_break event. Acceptable
+        # for an observability signal — the operator can re-query
+        # workflow_snapshot to see current state. The alternative
+        # (re-check inside another BEGIN IMMEDIATE before emit) trades a
+        # tighter race for two additional lock acquisitions on every done
+        # transition; not worth it for a signal the operator can trivially
+        # verify by re-reading.
+        #
         # Notification-only; ``_safe_emit`` swallows failures so an absent
         # bus / dashboard never blocks the underlying task transition.
         if chain_break_payload is not None:

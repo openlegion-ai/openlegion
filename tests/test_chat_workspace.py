@@ -645,6 +645,14 @@ class TestChatPartialPersistence:
         assert partial_entries[0].get("turn_id"), (
             "Partial entry must carry a turn_id for dedup against the final"
         )
+        # Fix 2 (codex P1.2) — when no text_delta events streamed
+        # (streaming raised in this test, so accumulated_text is empty),
+        # the partial must fall back to ``llm_response.content`` instead
+        # of writing an empty bubble.
+        assert partial_entries[0].get("content") == "streaming thinking…", (
+            "Partial must fall back to llm_response.content when "
+            f"accumulated_text is empty, got {partial_entries[0].get('content')!r}"
+        )
         # After dedup, exactly one assistant entry visible (the final).
         transcript = loop.workspace.load_chat_transcript()
         assistant_entries = [
@@ -652,6 +660,83 @@ class TestChatPartialPersistence:
         ]
         assert len(assistant_entries) == 1
         assert assistant_entries[0]["content"] == "Final."
+
+    @pytest.mark.asyncio
+    async def test_streaming_partial_falls_back_to_llm_response_content_when_no_deltas(self):
+        """Some LLM providers return content as a single block instead of
+        streamed text_delta events. The streaming partial-write must then
+        fall back to llm_response.content so the bubble isn't empty during
+        a mid-flight refresh.
+
+        Scenario: ``chat_stream`` emits a ``done`` event carrying the
+        full LLMResponse (no text_delta events along the way).
+        ``accumulated_text`` is empty but ``llm_response.content`` has
+        the prose. The partial-write must use the content.
+        """
+        tool_response = LLMResponse(
+            content="single-block prose body",
+            tool_calls=[
+                ToolCallInfo(name="slow_tool", arguments={"k": "v"}),
+            ],
+            tokens_used=10,
+        )
+        final_response = LLMResponse(content="Final.", tokens_used=20)
+
+        loop = _make_loop_with_workspace(
+            self._tmpdir, llm_responses=[tool_response, final_response],
+        )
+
+        # Streaming path emits only ``done`` (no text_delta events) —
+        # the LLM returned content as one block. ``accumulated_text``
+        # stays empty.
+        async def _done_only_stream(**kwargs):
+            yield {"type": "done", "response": tool_response}
+
+        async def _done_only_stream_final(**kwargs):
+            yield {"type": "done", "response": final_response}
+
+        call_count = {"n": 0}
+
+        async def _dispatch(**kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                async for evt in _done_only_stream(**kwargs):
+                    yield evt
+            else:
+                async for evt in _done_only_stream_final(**kwargs):
+                    yield evt
+
+        loop.llm.chat_stream = _dispatch
+        loop.skills.execute = AsyncMock(return_value={"results": []})
+        loop.skills.get_tool_definitions = MagicMock(
+            return_value=[
+                {"type": "function", "function": {"name": "slow_tool"}},
+            ],
+        )
+
+        events = []
+        async for event in loop.chat_stream("trigger slow tool"):
+            events.append(event)
+
+        # Read raw transcript — verify the partial entry contains the
+        # fallback content (not empty).
+        from pathlib import Path as _P
+        path = _P(self._tmpdir) / WorkspaceManager.CHAT_TRANSCRIPT
+        raw_lines = path.read_text().strip().splitlines()
+        import json as _json
+        parsed = [_json.loads(line) for line in raw_lines if line.strip()]
+        partial_entries = [
+            e for e in parsed
+            if e.get("role") == "assistant" and e.get("partial") is True
+        ]
+        assert len(partial_entries) >= 1, (
+            "Expected a partial assistant entry written before tool dispatch"
+        )
+        # The partial must carry the LLM-block content as a fallback.
+        assert partial_entries[0].get("content") == "single-block prose body", (
+            "Partial must fall back to llm_response.content when no "
+            f"text_delta events streamed, got {partial_entries[0].get('content')!r}"
+        )
 
     @pytest.mark.asyncio
     async def test_multi_round_tool_dispatch_dedupes_to_single_assistant_entry(self):
@@ -751,3 +836,39 @@ class TestChatPartialPersistence:
         assert "round 1 prose" in last_partial.get("content", "")
         assert "round 2 prose" in last_partial.get("content", "")
         assert "round 3 prose" in last_partial.get("content", "")
+
+    def test_partial_survives_when_rotation_drops_first_half(self, monkeypatch):
+        """When append_chat_message rotates the transcript (first half
+        dropped) BETWEEN the partial-write and the final-write, the
+        final-write must still cleanly land and load_chat_transcript
+        must return the final (not a stale partial)."""
+        ws = WorkspaceManager(workspace_dir=self._tmpdir)
+        # Lower the rotation threshold so we trip it easily.
+        monkeypatch.setattr(
+            WorkspaceManager, "_MAX_TRANSCRIPT_SIZE", 256, raising=False,
+        )
+        # Write a partial that will be in the FIRST half (gets dropped).
+        ws.append_chat_message(
+            "assistant", "early partial",
+            turn_id="t1", partial=True,
+        )
+        # Pad the file with enough small user messages to exceed the cap.
+        for i in range(20):
+            ws.append_chat_message("user", f"padding {i}" * 10)
+        # Write the final — file may rotate during this append.
+        ws.append_chat_message(
+            "assistant", "final answer",
+            turn_id="t1", partial=False,
+        )
+        transcript = ws.load_chat_transcript()
+        # Find the assistant entry — there should be exactly one (or zero
+        # if rotation dropped both, but that would be a separate bug).
+        assistants = [e for e in transcript if e.get("role") == "assistant"]
+        if assistants:
+            # If anything survives, it must be the final — the partial
+            # being kept solo would mean the final couldn't supersede,
+            # which is a bug.
+            assert assistants[-1]["content"] == "final answer", (
+                f"Expected final to win after rotation, got: {assistants}"
+            )
+            assert assistants[-1].get("partial") is not True

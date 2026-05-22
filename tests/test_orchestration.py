@@ -1828,3 +1828,120 @@ def test_workflow_snapshot_pending_stage_not_flagged(tmp_path):
     assert snap is not None
     assert len(snap["stages"]) == 1
     assert snap["stages"][0]["terminal_without_children"] is False
+
+
+def test_workflow_snapshot_terminal_flag_correct_at_limit_boundary(tmp_path):
+    """A done stage at the workflow_snapshot limit boundary must NOT
+    falsely report terminal_without_children=True when its child exists
+    beyond the limit cap. The fix queries the full tasks table
+    independently of the CTE result."""
+    t = _make_store(tmp_path)
+    # Build a chain longer than the limit. Use limit=3 for tractability.
+    stages = []
+    parent = None
+    for i in range(5):
+        rec = t.create(
+            creator="op" if i == 0 else stages[-1]["assignee"],
+            assignee=f"worker_{i}", title=f"stage_{i}",
+            parent_task_id=parent,
+        )
+        stages.append(rec)
+        parent = rec["id"]
+    # Mark stage 0, 1, 2 done. Stages 3, 4 are pending.
+    for i in range(3):
+        t.update_status(stages[i]["id"], "working", actor=f"worker_{i}")
+        t.update_status(stages[i]["id"], "done", actor=f"worker_{i}")
+    # Snapshot with limit=3 — stage 2 is at the boundary; its child
+    # (stage 3) exists in tasks but falls off the snapshot.
+    snap = t.workflow_snapshot(stages[0]["id"], limit=3)
+    assert snap is not None
+    assert len(snap["stages"]) == 3
+    by_id = {s["task_id"]: s for s in snap["stages"]}
+    # Stage 2 has stage 3 as a child in the FULL tasks table, even
+    # though stage 3 doesn't appear in the limited snapshot.
+    assert by_id[stages[2]["id"]]["terminal_without_children"] is False, (
+        "Stage at limit boundary must check full tasks table for children"
+    )
+    # Stage 0 and 1 also have children — both should be False.
+    assert by_id[stages[0]["id"]]["terminal_without_children"] is False
+    assert by_id[stages[1]["id"]]["terminal_without_children"] is False
+
+
+def test_done_with_failed_child_does_not_emit_chain_break(tmp_path):
+    """If hand_off created a child task that subsequently failed,
+    chain_break must NOT fire when the parent transitions to done —
+    the chain DID continue, just to a failed downstream stage. The
+    chain-break signal is about MISSING handoffs, not failed work."""
+    t = _make_store(tmp_path)
+    parent = t.create(creator="op", assignee="scout", title="parent")
+    child = t.create(
+        creator="scout", assignee="writer",
+        title="child", parent_task_id=parent["id"],
+    )
+    t.update_status(child["id"], "working", actor="writer")
+    t.update_status(child["id"], "failed", actor="writer")
+    _bus, captured = _attach_event_bus(t)
+    t.update_status(parent["id"], "working", actor="scout")
+    t.update_status(parent["id"], "done", actor="scout")
+    chain_break = [
+        c for c in captured if c[0] == "task_completed_without_handoff"
+    ]
+    assert chain_break == [], (
+        "task with a failed child still counts as having a handoff"
+    )
+
+
+def test_done_with_cancelled_child_does_not_emit_chain_break(tmp_path):
+    """Same semantics as failed — a cancelled child counts as a
+    handoff. The chain-break signal flags MISSING handoffs only."""
+    t = _make_store(tmp_path)
+    parent = t.create(creator="op", assignee="scout", title="parent")
+    child = t.create(
+        creator="scout", assignee="writer",
+        title="child", parent_task_id=parent["id"],
+    )
+    t.update_status(child["id"], "cancelled", actor="op")
+    _bus, captured = _attach_event_bus(t)
+    t.update_status(parent["id"], "working", actor="scout")
+    t.update_status(parent["id"], "done", actor="scout")
+    chain_break = [
+        c for c in captured if c[0] == "task_completed_without_handoff"
+    ]
+    assert chain_break == []
+
+
+def test_concurrent_done_transitions_emit_chain_break_exactly_once(tmp_path):
+    """Two actors racing to mark the same task done — BEGIN IMMEDIATE
+    serializes them, so exactly one transition succeeds and exactly
+    one chain_break fires. The other call hits the working→done
+    state-machine guard (current=done, status=done is a no-op) or
+    fails outright."""
+    import threading
+    t = _make_store(tmp_path)
+    rec = t.create(creator="op", assignee="writer", title="t")
+    t.update_status(rec["id"], "working", actor="writer")
+    _bus, captured = _attach_event_bus(t)
+
+    errors: list[Exception] = []
+
+    def race(actor: str) -> None:
+        try:
+            t.update_status(rec["id"], "done", actor=actor)
+        except Exception as e:
+            errors.append(e)
+
+    threads = [
+        threading.Thread(target=race, args=(f"writer_{i}",))
+        for i in range(4)
+    ]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    chain_break = [
+        c for c in captured if c[0] == "task_completed_without_handoff"
+    ]
+    assert len(chain_break) == 1, (
+        f"Expected exactly one chain_break under contention, "
+        f"got {len(chain_break)} (errors: {errors})"
+    )
