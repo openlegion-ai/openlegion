@@ -408,3 +408,183 @@ class TestChatTranscriptIntegration:
         assert transcript[0]["role"] == "user"
         assert transcript[1]["role"] == "assistant"
         assert "LLM exploded" in transcript[1]["content"]
+
+
+# ── Fix B — Partial chat persistence for in-flight tool calls ────────
+
+
+class TestChatPartialPersistence:
+    """Fix B — assistant turns that fire long-running tool calls must
+    persist a ``partial`` transcript entry BEFORE tool dispatch so a
+    dashboard refresh mid-flight doesn't lose the assistant bubble.
+    The final entry (written at turn close) supersedes the partial via
+    ``turn_id`` dedup in ``load_chat_transcript``.
+    """
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_legacy_transcript_without_turn_id_unchanged(self):
+        """Pre-Fix-B transcripts have no ``turn_id`` on any entry. Loading
+        such a transcript must pass every entry through unchanged — no
+        dedup, no reordering."""
+        ws = WorkspaceManager(workspace_dir=self._tmpdir)
+        ws.append_chat_message("user", "first")
+        ws.append_chat_message("assistant", "first reply")
+        ws.append_chat_message("user", "second")
+
+        transcript = ws.load_chat_transcript()
+        assert len(transcript) == 3
+        assert [t["role"] for t in transcript] == ["user", "assistant", "user"]
+        assert [t["content"] for t in transcript] == [
+            "first", "first reply", "second",
+        ]
+        # No entry has turn_id or partial set.
+        assert all("turn_id" not in t for t in transcript)
+        assert all("partial" not in t for t in transcript)
+
+    def test_load_transcript_dedupes_two_partials_keeps_latest(self):
+        """Two entries with the same ``turn_id``: ``load_chat_transcript``
+        keeps only the LATER one. Validates the core dedup contract."""
+        ws = WorkspaceManager(workspace_dir=self._tmpdir)
+        ws.append_chat_message(
+            "assistant", "in flight", turn_id="t1", partial=True,
+        )
+        ws.append_chat_message(
+            "assistant", "final answer", turn_id="t1", partial=False,
+        )
+
+        transcript = ws.load_chat_transcript()
+        assert len(transcript) == 1
+        assert transcript[0]["content"] == "final answer"
+        assert transcript[0]["turn_id"] == "t1"
+        # ``partial`` flag was dropped on the second write (omitted).
+        assert "partial" not in transcript[0]
+
+    def test_dedup_preserves_chronological_order_of_first_occurrence(self):
+        """When a partial gets superseded by a final, the entry must stay
+        in its ORIGINAL position in the transcript — not jump to the
+        end. Otherwise the chat panel would visually reshuffle on every
+        turn close."""
+        ws = WorkspaceManager(workspace_dir=self._tmpdir)
+        ws.append_chat_message("user", "u1")
+        ws.append_chat_message(
+            "assistant", "partial reply", turn_id="t1", partial=True,
+        )
+        ws.append_chat_message("user", "u2")
+        # Final lands after a subsequent user message — it must replace
+        # the partial in position 1, not move to position 3.
+        ws.append_chat_message(
+            "assistant", "final reply", turn_id="t1", partial=False,
+        )
+
+        transcript = ws.load_chat_transcript()
+        assert [t["content"] for t in transcript] == [
+            "u1", "final reply", "u2",
+        ]
+
+    def test_dedup_applies_limit_after(self):
+        """``limit`` trims AFTER dedup so a final entry that supersedes
+        an earlier partial doesn't get dropped just because the partial
+        consumed a slot."""
+        ws = WorkspaceManager(workspace_dir=self._tmpdir)
+        ws.append_chat_message(
+            "assistant", "partial", turn_id="t1", partial=True,
+        )
+        ws.append_chat_message("user", "u2")
+        ws.append_chat_message("user", "u3")
+        ws.append_chat_message(
+            "assistant", "final", turn_id="t1", partial=False,
+        )
+
+        # Pre-dedup, the file has 4 lines. After dedup it has 3 entries.
+        # limit=3 must return all 3 — no further trim.
+        transcript = ws.load_chat_transcript(limit=3)
+        assert len(transcript) == 3
+        assert transcript[0]["content"] == "final"
+
+    @pytest.mark.asyncio
+    async def test_partial_chat_entry_persisted_on_tool_dispatch(self):
+        """During a tool-calling round, the loop writes a ``partial=True``
+        assistant entry BEFORE the tool fires. Simulate by raising mid-
+        tool — the partial must remain in the transcript even though
+        the turn never completed."""
+        tool_response = LLMResponse(
+            content="thinking…",
+            tool_calls=[
+                ToolCallInfo(name="slow_tool", arguments={"k": "v"}),
+            ],
+            tokens_used=10,
+        )
+
+        loop = _make_loop_with_workspace(
+            self._tmpdir, llm_responses=[tool_response],
+        )
+        # Tool execution raises a base exception so the partial we wrote
+        # before dispatch is the LAST persistent transcript event for
+        # this turn — the simulated mid-tool crash.
+        loop.skills.execute = AsyncMock(
+            side_effect=RuntimeError("tool blew up"),
+        )
+        loop.skills.get_tool_definitions = MagicMock(
+            return_value=[{"type": "function", "function": {"name": "slow_tool"}}],
+        )
+
+        await loop.chat("trigger slow tool")
+
+        # Read raw file lines (no dedup) — we want to verify the partial
+        # was actually written to disk before the tool dispatched.
+        from pathlib import Path as _P
+        path = _P(self._tmpdir) / WorkspaceManager.CHAT_TRANSCRIPT
+        raw_lines = path.read_text().strip().splitlines()
+        import json as _json
+        parsed = [_json.loads(line) for line in raw_lines if line.strip()]
+        partial_entries = [
+            e for e in parsed
+            if e.get("role") == "assistant" and e.get("partial") is True
+        ]
+        assert len(partial_entries) >= 1, (
+            "Expected a partial assistant entry written before tool dispatch"
+        )
+        assert partial_entries[0].get("turn_id"), (
+            "Partial entry must carry a turn_id so the final can supersede it"
+        )
+
+    @pytest.mark.asyncio
+    async def test_partial_superseded_by_final_with_same_turn_id(self):
+        """A complete turn produces exactly ONE assistant entry visible
+        via ``load_chat_transcript`` — the partial-pre-dispatch entry
+        is hidden behind the final."""
+        tool_response = LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCallInfo(name="memory_search", arguments={"query": "x"}),
+            ],
+            tokens_used=10,
+        )
+        final_response = LLMResponse(content="Final answer", tokens_used=20)
+
+        loop = _make_loop_with_workspace(
+            self._tmpdir, llm_responses=[tool_response, final_response],
+        )
+        loop.skills.execute = AsyncMock(return_value={"results": []})
+        loop.skills.get_tool_definitions = MagicMock(
+            return_value=[{"type": "function", "function": {"name": "memory_search"}}],
+        )
+
+        await loop.chat("ask question")
+
+        transcript = loop.workspace.load_chat_transcript()
+        assistant_entries = [
+            e for e in transcript if e.get("role") == "assistant"
+        ]
+        assert len(assistant_entries) == 1, (
+            f"Expected exactly one visible assistant entry after dedup, "
+            f"got {len(assistant_entries)}: {assistant_entries}"
+        )
+        assert assistant_entries[0]["content"] == "Final answer"
+        # Final entry has no partial flag set.
+        assert assistant_entries[0].get("partial") is not True

@@ -736,11 +736,22 @@ class WorkspaceManager:
         self, role: str, content: str, *,
         tool_names: list[str] | None = None,
         tools: list[dict] | None = None,
+        turn_id: str | None = None,
+        partial: bool = False,
     ) -> None:
         """Append a message to the persistent chat transcript (JSONL).
 
         Rotates (drops oldest half) when the file exceeds _MAX_TRANSCRIPT_SIZE
         to prevent unbounded growth in long-running sessions.
+
+        ``turn_id`` + ``partial`` cooperate with :meth:`load_chat_transcript`
+        to make in-flight assistant turns survive a dashboard refresh —
+        when a turn fires a slow tool call (``await_task_event``, browser
+        action) the loop writes a ``partial=True`` entry BEFORE tool
+        dispatch, then overwrites it with a final ``partial=False`` entry
+        when the turn closes. ``load_chat_transcript`` dedupes by
+        ``turn_id`` and keeps the latest occurrence — legacy entries
+        without ``turn_id`` are passed through unchanged.
         """
         path = self.root / self.CHAT_TRANSCRIPT
         entry: dict = {"role": role, "content": content, "ts": time.time()}
@@ -748,6 +759,10 @@ class WorkspaceManager:
             entry["tools"] = tools
         elif tool_names:
             entry["tools"] = tool_names
+        if turn_id:
+            entry["turn_id"] = turn_id
+        if partial:
+            entry["partial"] = True
         try:
             with path.open("a") as f:
                 f.write(dumps_safe(entry) + "\n")
@@ -760,7 +775,17 @@ class WorkspaceManager:
             logger.debug("Failed to write chat transcript: %s", e)
 
     def load_chat_transcript(self, limit: int = 200) -> list[dict]:
-        """Load recent messages from the persistent chat transcript."""
+        """Load recent messages from the persistent chat transcript.
+
+        Dedupes by ``turn_id``: entries that share a ``turn_id`` collapse
+        to the LATEST occurrence (the file is append-only, so later lines
+        supersede earlier ones — i.e. the final assistant entry replaces
+        the in-flight ``partial`` entry written before tool dispatch).
+        Entries without a ``turn_id`` are passed through unchanged for
+        back-compat with pre-fix transcripts. ``limit`` applies AFTER
+        dedup so trimming can't drop a final entry that supersedes an
+        earlier partial.
+        """
         path = self.root / self.CHAT_TRANSCRIPT
         if not path.exists():
             return []
@@ -769,15 +794,26 @@ class WorkspaceManager:
             if not text:
                 return []
             lines = text.split("\n")
-            messages = []
-            for line in lines[-limit:]:
+            output: list[dict] = []
+            turn_id_idx: dict[str, int] = {}
+            for line in lines:
                 if not line.strip():
                     continue
                 try:
-                    messages.append(json.loads(line))
+                    entry = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-            return messages
+                tid = entry.get("turn_id")
+                if tid and tid in turn_id_idx:
+                    # Later write wins — preserves chronological order of
+                    # the FIRST occurrence so partial entries don't jump
+                    # around the transcript when their final lands.
+                    output[turn_id_idx[tid]] = entry
+                else:
+                    if tid:
+                        turn_id_idx[tid] = len(output)
+                    output.append(entry)
+            return output[-limit:]
         except Exception as e:
             logger.debug("Failed to read chat transcript: %s", e)
             return []

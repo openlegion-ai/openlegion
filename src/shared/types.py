@@ -648,6 +648,13 @@ class DashboardEvent(BaseModel):
         # operator's review queue without polling.
         "task_created",
         "task_status_changed",
+        # ``task_completed_without_handoff`` is emitted by
+        # ``host/orchestration.py:update_status`` when a task transitions
+        # to ``done`` and no child task references it via ``parent_task_id``
+        # — i.e. the agent finished the work without handing off to a
+        # successor. Observability-only signal for the dashboard "chain
+        # break" surface; NO enforcement effect.
+        "task_completed_without_handoff",
         # ``task_outcome`` is emitted by ``host/orchestration.py:set_outcome``
         # when an operator (or system) rates a delivered task. Without this
         # literal, ``DashboardEvent`` validation rejects the emit and the

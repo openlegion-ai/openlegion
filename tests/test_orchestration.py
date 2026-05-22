@@ -1685,3 +1685,123 @@ class TestWorkflowSnapshot:
         # Loose upper bound — MAX_WORKFLOW_CHAIN_DEPTH+1 covers the
         # off-by-one between depth values and row counts.
         assert len(snap_deep["stages"]) <= MAX_WORKFLOW_CHAIN_DEPTH + 1
+
+
+# ── Fix A — Chain-break observability signal ─────────────────────────
+
+
+def test_done_with_no_children_emits_chain_break_event(tmp_path):
+    """Transitioning to ``done`` with no child task referencing this id
+    fires the ``task_completed_without_handoff`` event. Observability-only
+    — the underlying status transition is unaffected."""
+    t = _make_store(tmp_path)
+    _bus, captured = _attach_event_bus(t)
+    rec = t.create(
+        creator="op", assignee="writer", title="standalone work",
+        project_id="proj-x",
+    )
+    t.update_status(rec["id"], "working", actor="writer")
+    t.update_status(rec["id"], "done", actor="writer")
+
+    chain_break = [
+        c for c in captured if c[0] == "task_completed_without_handoff"
+    ]
+    assert len(chain_break) == 1
+    payload = chain_break[0][2]
+    assert payload["task_id"] == rec["id"]
+    assert payload["agent_id"] == "writer"
+    assert payload["parent_task_id"] is None
+    assert payload["project"] == "proj-x"
+    assert payload["title"] == "standalone work"
+    assert "ts" in payload
+    # Role is None by design — no role column on tasks; the dashboard
+    # resolves role from agent_id via its own fleet metadata.
+    assert payload["role"] is None
+
+
+def test_done_with_children_does_not_emit_chain_break(tmp_path):
+    """When a task has at least one child (created via ``parent_task_id``),
+    transitioning the parent to ``done`` must NOT emit the chain-break
+    event — the workflow continued, no break."""
+    t = _make_store(tmp_path)
+    parent = t.create(creator="op", assignee="scout", title="parent")
+    t.create(
+        creator="scout", assignee="writer",
+        title="child", parent_task_id=parent["id"],
+    )
+    # Attach the event bus AFTER both tasks exist so the captured list
+    # only contains events from the transition under test.
+    _bus, captured = _attach_event_bus(t)
+    t.update_status(parent["id"], "working", actor="scout")
+    t.update_status(parent["id"], "done", actor="scout")
+
+    chain_break = [
+        c for c in captured if c[0] == "task_completed_without_handoff"
+    ]
+    assert chain_break == [], (
+        "task with at least one child must not fire chain-break"
+    )
+    # Sanity — the canonical status_changed event still fires.
+    status_changed = [c for c in captured if c[0] == "task_status_changed"]
+    assert len(status_changed) == 2  # working + done
+
+
+def test_failed_terminal_does_not_emit_chain_break(tmp_path):
+    """Only the ``done`` terminal transition emits chain-break. Failed
+    and cancelled transitions are unrelated to the signal — they
+    represent broken / aborted workflows, not silently-ended ones."""
+    t = _make_store(tmp_path)
+    _bus, captured = _attach_event_bus(t)
+    rec = t.create(creator="op", assignee="writer", title="t")
+    t.update_status(rec["id"], "failed", actor="writer")
+
+    chain_break = [
+        c for c in captured if c[0] == "task_completed_without_handoff"
+    ]
+    assert chain_break == []
+
+    # Same for cancelled.
+    rec2 = t.create(creator="op", assignee="writer", title="t2")
+    captured.clear()
+    t.update_status(rec2["id"], "cancelled", actor="op")
+    chain_break = [
+        c for c in captured if c[0] == "task_completed_without_handoff"
+    ]
+    assert chain_break == []
+
+
+def test_workflow_snapshot_flags_terminal_without_children(tmp_path):
+    """A 3-stage chain where stage 2 transitions to ``done`` without
+    creating stage 3 must surface ``terminal_without_children=True`` on
+    stage 2 and ``False`` on stage 1 (which has stage 2 as a child)."""
+    t = _make_store(tmp_path)
+    stage1 = t.create(
+        creator="operator", assignee="scout", title="stage_1",
+    )
+    stage2 = t.create(
+        creator="scout", assignee="writer", title="stage_2",
+        parent_task_id=stage1["id"],
+    )
+    # No stage 3 — stage 2 is the leaf. Walk it to ``done``.
+    t.update_status(stage2["id"], "working", actor="writer")
+    t.update_status(stage2["id"], "done", actor="writer")
+
+    snap = t.workflow_snapshot(stage1["id"])
+    assert snap is not None
+    by_id = {s["task_id"]: s for s in snap["stages"]}
+    assert by_id[stage1["id"]]["terminal_without_children"] is False
+    assert by_id[stage2["id"]]["terminal_without_children"] is True
+
+
+def test_workflow_snapshot_pending_stage_not_flagged(tmp_path):
+    """``terminal_without_children`` only fires for the ``done`` status.
+    A pending or working stage with no children is just an in-flight
+    stage, not a chain break."""
+    t = _make_store(tmp_path)
+    stage1 = t.create(
+        creator="op", assignee="scout", title="stage_1",
+    )
+    snap = t.workflow_snapshot(stage1["id"])
+    assert snap is not None
+    assert len(snap["stages"]) == 1
+    assert snap["stages"][0]["terminal_without_children"] is False

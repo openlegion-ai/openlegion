@@ -11,6 +11,7 @@ import json
 import os
 import re
 import time
+import uuid
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
@@ -2914,6 +2915,14 @@ class AgentLoop:
         self.state = "working"
         total_tokens = 0
         tool_outputs: list[dict] = []
+        # Fix B — turn_id is generated once per user turn so the partial
+        # assistant entry (written before tool dispatch on a tool-calling
+        # round) and the final assistant entry (written by _log_chat_turn
+        # at turn close) share an identity. ``load_chat_transcript``
+        # dedupes by turn_id, keeping the latest, so a dashboard refresh
+        # during a long-running tool call sees the in-flight partial and
+        # the eventual completion overwrites it cleanly.
+        turn_id = str(uuid.uuid4())
 
         try:
             user_message, system = await self._prepare_chat_turn(user_message)
@@ -2972,7 +2981,7 @@ class AgentLoop:
                         await self._compact_chat_context(system)
                         continue
                     self._chat_messages.append({"role": "assistant", "content": content})
-                    self._log_chat_turn(user_message, content, tool_outputs)
+                    self._log_chat_turn(user_message, content, tool_outputs, turn_id=turn_id)
                     if tool_outputs and self.workspace:
                         tool_names = list({t.get("tool") or t.get("name", "?") for t in tool_outputs})
                         self.workspace.append_activity(
@@ -3009,6 +3018,26 @@ class AgentLoop:
                     }
 
                 entries = self._build_tool_call_entries(llm_response)
+                # Fix B — persist a ``partial`` assistant entry BEFORE
+                # tool dispatch. When a tool call runs long (e.g.
+                # ``await_task_event`` with a 240s timeout) and the user
+                # refreshes the dashboard mid-flight, the legacy
+                # transcript only carried the user message — the
+                # assistant bubble vanished until the turn closed.
+                # ``load_chat_transcript`` dedupes by ``turn_id``, so
+                # the final entry written by ``_log_chat_turn`` at turn
+                # close supersedes this partial cleanly.
+                if self.workspace:
+                    partial_tool_names = [
+                        tc.name for tc in llm_response.tool_calls
+                    ]
+                    self.workspace.append_chat_message(
+                        "assistant",
+                        llm_response.content or "",
+                        tool_names=partial_tool_names,
+                        turn_id=turn_id,
+                        partial=True,
+                    )
                 try:
                     await self._execute_chat_tools_parallel(
                         llm_response.tool_calls, entries, tool_outputs,
@@ -3077,7 +3106,7 @@ class AgentLoop:
             total_tokens += llm_response.tokens_used
             content = self._resolve_content(llm_response)
             self._chat_messages.append({"role": "assistant", "content": content})
-            self._log_chat_turn(user_message, content, tool_outputs)
+            self._log_chat_turn(user_message, content, tool_outputs, turn_id=turn_id)
             if tool_outputs and self.workspace:
                 tool_names = list({t.get("tool") or t.get("name", "?") for t in tool_outputs})
                 self.workspace.append_activity(
@@ -3171,8 +3200,16 @@ class AgentLoop:
     def _log_chat_turn(
         self, user_msg: str, assistant_msg: str,
         tool_outputs: list[dict] | None = None,
+        *,
+        turn_id: str | None = None,
     ) -> None:
-        """Append a rich summary of the chat turn to the daily log."""
+        """Append a rich summary of the chat turn to the daily log.
+
+        ``turn_id`` (Fix B) — when set, propagates to the persistent
+        transcript ``append_chat_message`` call so this FINAL assistant
+        entry supersedes any earlier ``partial`` entry written before
+        tool dispatch. Legacy callers without a turn_id are unchanged.
+        """
         if not self.workspace:
             return
         # Empty final text + tool calls → substitute the synthetic
@@ -3237,11 +3274,16 @@ class AgentLoop:
                     ) if out else "",
                 })
 
-        # Persist assistant response to transcript
+        # Persist assistant response to transcript. ``turn_id`` (when
+        # threaded through from chat()/chat_stream()) lets this FINAL
+        # entry supersede a ``partial`` entry written before tool
+        # dispatch — see ``WorkspaceManager.load_chat_transcript`` for
+        # the dedup semantics.
         self.workspace.append_chat_message(
             "assistant", assistant_msg,
             tools=tools,
             tool_names=tool_names or None,
+            turn_id=turn_id,
         )
 
     def get_chat_messages(self) -> list[dict]:
@@ -3504,6 +3546,8 @@ class AgentLoop:
         total_tokens = 0
         tool_outputs: list[dict] = []
         accumulated_text: list[str] = []  # all text_delta content across rounds
+        # Fix B — see ``_chat_inner`` for the partial-persistence rationale.
+        turn_id = str(uuid.uuid4())
 
         try:
             user_message, system = await self._prepare_chat_turn(user_message)
@@ -3599,7 +3643,10 @@ class AgentLoop:
                         full_content = self._synthesize_empty_chat_fallback(tool_outputs)
                         if full_content:
                             yield {"type": "text_delta", "content": full_content}
-                    self._log_chat_turn(user_message, full_content, tool_outputs)
+                    self._log_chat_turn(
+                        user_message, full_content, tool_outputs,
+                        turn_id=turn_id,
+                    )
                     if tool_outputs and self.workspace:
                         tool_names = list({t.get("tool") or t.get("name", "?") for t in tool_outputs})
                         self.workspace.append_activity(
@@ -3632,6 +3679,22 @@ class AgentLoop:
                     return
 
                 entries = self._build_tool_call_entries(llm_response)
+                # Fix B — persist a ``partial`` assistant entry BEFORE
+                # tool dispatch so a dashboard refresh mid-flight sees
+                # the in-flight bubble. ``_log_chat_turn`` writes the
+                # final at turn close with the same ``turn_id`` and
+                # supersedes this entry on the next ``load_chat_transcript``.
+                if self.workspace:
+                    partial_tool_names = [
+                        tc.name for tc in llm_response.tool_calls
+                    ]
+                    self.workspace.append_chat_message(
+                        "assistant",
+                        llm_response.content or "",
+                        tool_names=partial_tool_names,
+                        turn_id=turn_id,
+                        partial=True,
+                    )
                 # Emit tool_start events for all tools upfront
                 for tool_call in llm_response.tool_calls:
                     yield {"type": "tool_start", "name": tool_call.name, "input": tool_call.arguments}
@@ -3720,7 +3783,9 @@ class AgentLoop:
                 full_content = self._synthesize_empty_chat_fallback(tool_outputs)
                 if full_content:
                     yield {"type": "text_delta", "content": full_content}
-            self._log_chat_turn(user_message, full_content, tool_outputs)
+            self._log_chat_turn(
+                user_message, full_content, tool_outputs, turn_id=turn_id,
+            )
             if tool_outputs and self.workspace:
                 tool_names = list({t.get("tool") or t.get("name", "?") for t in tool_outputs})
                 self.workspace.append_activity(
