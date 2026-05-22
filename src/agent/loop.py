@@ -2393,19 +2393,20 @@ class AgentLoop:
                             and not result.get("silent_reply")
                             and not result.get("tool_limit_reached")
                         ):
-                            n_tools = len(result.get("tool_outputs") or [])
+                            tool_outputs = result.get("tool_outputs") or []
                             logger.warning(
                                 "chat empty-response fallback: %d tool "
                                 "call(s) executed but LLM produced no "
                                 "final text — surfacing synthetic notice",
-                                n_tools,
+                                len(tool_outputs),
                             )
-                            tool_word = "tool call" if n_tools == 1 else "tool calls"
+                            # Single source of truth for the wording —
+                            # ``_log_chat_turn`` writes the same string
+                            # to the transcript so the dashboard chat
+                            # view and ``/chat/history`` agree after a
+                            # page refresh.
                             result["response"] = (
-                                f"(Completed {n_tools} {tool_word}; no "
-                                "text response was generated. Check the "
-                                "dashboard for tool outputs and any "
-                                "notifications I sent.)"
+                                self._synthesize_empty_chat_fallback(tool_outputs)
                             )
                     return result
                 finally:
@@ -3028,6 +3029,30 @@ class AgentLoop:
                 "tokens_used": total_tokens, "exception_caught": True,
             }
 
+    @staticmethod
+    def _synthesize_empty_chat_fallback(
+        tool_outputs: list[dict] | None,
+    ) -> str:
+        """Build the synthetic notice for an LLM turn that ran tools but
+        emitted no final text. Single source of truth so the dashboard
+        chat panel (live `done` event) and the persisted transcript
+        (`/chat/history` after refresh) carry identical text — without
+        this helper the two diverged and the operator's reply appeared
+        to vanish on page refresh.
+
+        Returns ``""`` when there are no tools (truly silent LLM —
+        different problem, not papered over here).
+        """
+        if not tool_outputs:
+            return ""
+        n = len(tool_outputs)
+        word = "tool call" if n == 1 else "tool calls"
+        return (
+            f"(Completed {n} {word}; no text response was generated. "
+            "Check the dashboard for tool outputs and any notifications "
+            "I sent.)"
+        )
+
     def _log_chat_turn(
         self, user_msg: str, assistant_msg: str,
         tool_outputs: list[dict] | None = None,
@@ -3035,7 +3060,14 @@ class AgentLoop:
         """Append a rich summary of the chat turn to the daily log."""
         if not self.workspace:
             return
-        # Skip logging for suppressed responses (__SILENT__ → empty string)
+        # Empty final text + tool calls → substitute the synthetic
+        # fallback so the transcript reflects what the dashboard saw
+        # for this turn. Without this the assistant entry was skipped
+        # entirely and a page refresh lost the turn's persistence.
+        if not assistant_msg.strip():
+            assistant_msg = self._synthesize_empty_chat_fallback(tool_outputs)
+        # Skip logging only for genuinely silent responses (SILENT
+        # token, no tools called — there is nothing to persist).
         if not assistant_msg.strip():
             return
         # Strip auto-loaded memory context from user message before summarizing
@@ -3444,6 +3476,14 @@ class AgentLoop:
                     # Use accumulated text from all rounds for the transcript
                     # so intermediate messages are preserved after refresh.
                     full_content = "".join(accumulated_text) if accumulated_text else content
+                    # Empty final text + tools ran: synthesize the same
+                    # fallback the transcript will store so the live
+                    # ``done`` event and the post-refresh history agree
+                    # on what the user sees for this turn.
+                    if not full_content.strip() and tool_outputs:
+                        full_content = self._synthesize_empty_chat_fallback(tool_outputs)
+                        if full_content:
+                            yield {"type": "text_delta", "content": full_content}
                     self._log_chat_turn(user_message, full_content, tool_outputs)
                     if tool_outputs and self.workspace:
                         tool_names = list({t.get("tool") or t.get("name", "?") for t in tool_outputs})
@@ -3456,7 +3496,7 @@ class AgentLoop:
                         )
                     yield {
                         "type": "done",
-                        "response": content,
+                        "response": full_content,
                         "tool_outputs": tool_outputs,
                         "tokens_used": total_tokens,
                     }
@@ -3558,6 +3598,13 @@ class AgentLoop:
                 yield {"type": "text_delta", "content": content}
             self._chat_messages.append({"role": "assistant", "content": content})
             full_content = "".join(accumulated_text) if accumulated_text else content
+            # Same empty-final-text-with-tools fallback as the no-tool-
+            # calls path above — keep the transcript and the streaming
+            # ``done`` event in sync after a max-rounds force-final.
+            if not full_content.strip() and tool_outputs:
+                full_content = self._synthesize_empty_chat_fallback(tool_outputs)
+                if full_content:
+                    yield {"type": "text_delta", "content": full_content}
             self._log_chat_turn(user_message, full_content, tool_outputs)
             if tool_outputs and self.workspace:
                 tool_names = list({t.get("tool") or t.get("name", "?") for t in tool_outputs})
@@ -3570,7 +3617,7 @@ class AgentLoop:
                 )
             yield {
                 "type": "done",
-                "response": content,
+                "response": full_content,
                 "tool_outputs": tool_outputs,
                 "tokens_used": total_tokens,
                 "tool_limit_reached": True,
