@@ -201,7 +201,11 @@ async def test_chat_handoff_text_only_no_tools_auto_closes_as_failed():
     assert calls[0].args == ("task_lazy", "working")
     assert calls[1].args == ("task_lazy", "failed")
     error_msg = calls[1].kwargs.get("error") or ""
-    assert "no_action_taken" in error_msg
+    # Round-5: error envelope renamed from ``no_action_taken`` to
+    # ``no_outbound_effects`` when the guard was strengthened to count
+    # read-only tool calls (``check_inbox`` etc.) as still-lazy. Same
+    # semantic — the LLM produced no downstream effect for the handoff.
+    assert "no_outbound_effects" in error_msg
     # The chat call itself still returns the original response — the
     # auto-close failure annotates the task row, doesn't crash the
     # request.

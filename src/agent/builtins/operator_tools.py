@@ -1117,12 +1117,30 @@ async def await_task_event(
             sleep_for = min(interval, remaining, 30.0)
             await asyncio.sleep(sleep_for)
             interval = min(interval * 2, 30)
+    except asyncio.CancelledError:
+        # The agent loop's 300s tool-execution ceiling cancels the
+        # task while we were mid-sleep. ``CancelledError`` is
+        # ``BaseException`` so the broad ``except Exception`` below
+        # would have missed it and the function would have returned
+        # an empty body to the LLM — operator's Round-5 repro of
+        # "await_task_event returned nothing". Convert the cancel to
+        # a typed envelope before propagating so the LLM context
+        # always sees a shape.
+        out = {
+            "cancelled": True,
+            "task_id": task_id,
+            "last_status_seen": last_status_seen,
+            "reason": "await_task_event cancelled (likely tool timeout)",
+        }
+        logger.info(
+            "await_task_event EXIT cancelled result=%s", out,
+        )
+        raise  # re-raise after logging — let the loop handle the cancel
     except Exception as e:
-        # Belt-and-suspenders: any exception escaping the loop body
-        # (entry shape mismatch, contextvar resolution, etc.) lands here
-        # and produces a typed envelope instead of an empty body. The
-        # message is redacted + truncated for the same reason as the
-        # inner ``except`` — exception strings can carry HTTP URLs with
+        # Belt-and-suspenders: any non-cancellation exception escaping
+        # the loop body lands here and produces a typed envelope
+        # instead of an empty body. The message is redacted +
+        # truncated — exception strings can carry HTTP URLs with
         # credentials and must never leak into the LLM context.
         redacted = redact_text_with_urls(str(e))[:200]
         logger.warning(
@@ -1137,6 +1155,17 @@ async def await_task_event(
             "await_task_event EXIT outer_except result=%s", out,
         )
         return out
+    # Defensive final return — every loop branch above already returns,
+    # so this is unreachable under normal control flow. Kept as a hard
+    # guarantee that the function NEVER falls through to ``None`` (the
+    # empty body operator chased across multiple sessions).
+    return {  # pragma: no cover
+        "timed_out": True,
+        "task_id": task_id,
+        "last_status_seen": last_status_seen,
+        "waited_seconds": timeout,
+        "fallthrough": True,
+    }
 
 
 @skill(
