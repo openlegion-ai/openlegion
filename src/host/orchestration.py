@@ -803,8 +803,16 @@ class Tasks:
         off to a successor — operationally, a row that:
 
         * has ``status='done'``
-        * was updated at or after ``since`` (a Unix timestamp; callers
-          typically pass ``time.time() - 86400`` for a trailing 24h window)
+        * has ``completed_at >= since`` (a Unix timestamp; callers
+          typically pass ``time.time() - 86400`` for a trailing 24h
+          window). ``completed_at`` is stamped once at the terminal
+          transition (``done``/``failed``/``cancelled``) and is NOT
+          touched by later metadata writes — outcome updates, blocker
+          notes, artifact appends all bump ``updated_at`` but never
+          ``completed_at``. Filtering on ``completed_at`` keeps a task
+          completed >24h ago out of the window even if an unrelated
+          metadata write happens later. Mirrors the
+          :meth:`count_failed_status_since` pattern.
         * has no row in ``tasks`` whose ``parent_task_id`` references it
         * has ``outcome IS NULL`` — the operator hasn't actioned this
           delivery yet via rate / rework. Outcome-set rows drop out of
@@ -827,7 +835,8 @@ class Tasks:
             rows = conn.execute(
                 "SELECT assignee, COUNT(*) FROM tasks t1 "
                 "WHERE t1.status = 'done' "
-                "  AND t1.updated_at >= ? "
+                "  AND t1.completed_at IS NOT NULL "
+                "  AND t1.completed_at >= ? "
                 "  AND t1.outcome IS NULL "
                 "  AND NOT EXISTS ("
                 "    SELECT 1 FROM tasks t2 WHERE t2.parent_task_id = t1.id"

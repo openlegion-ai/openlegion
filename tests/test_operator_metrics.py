@@ -223,6 +223,21 @@ class TestSystemMetricsPRJ:
         cost_tracker = metrics_app["cost_tracker"]
         cost_tracker.track("operator", "claude-3-5-sonnet-20241022", 500, 200)
 
+        # Seed an operator-owned chain-break — without the exclusion
+        # filter in server.py, this would surface in
+        # chain_breaks_24h_count["operator"]. The store method
+        # ``Tasks.chain_breaks_24h`` returns the unfiltered per-assignee
+        # count; the operator exclusion happens at the
+        # ``/mesh/system/metrics`` layer. This makes the exclusion
+        # branch actually exercised.
+        store = metrics_app["tasks_store"]
+        assert store is not None, "tasks_store should be wired in PR-J' fixture"
+        op_task = store.create(
+            creator="operator", assignee="operator", title="operator-self",
+        )
+        store.update_status(op_task["id"], "working", actor="operator")
+        store.update_status(op_task["id"], "done", actor="operator")
+
         client = metrics_app["client"]
         resp = client.get("/mesh/system/metrics")
         data = resp.json()

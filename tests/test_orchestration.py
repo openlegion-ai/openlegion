@@ -2009,6 +2009,41 @@ def test_chain_breaks_24h_respects_time_window(tmp_path):
     assert breaks == {}
 
 
+def test_chain_breaks_24h_uses_completed_at_not_updated_at(tmp_path):
+    """The 24h window must be measured against completed_at, not
+    updated_at. A task completed >24h ago that has any later metadata
+    write (e.g., blocker_note set, or artifact added) must NOT
+    re-enter the 24h window."""
+    import time as _time
+    t = _make_store(tmp_path)
+    rec = t.create(creator="op", assignee="writer", title="t")
+    t.update_status(rec["id"], "working", actor="writer")
+    t.update_status(rec["id"], "done", actor="writer")
+    # Force completed_at backwards by 48 hours via direct DB write —
+    # simulates an old chain-break.
+    with t._conn() as conn:
+        conn.execute(
+            "UPDATE tasks SET completed_at = ?, updated_at = ? "
+            "WHERE id = ?",
+            (_time.time() - 48 * 3600, _time.time() - 48 * 3600, rec["id"]),
+        )
+    # Pre-condition: outside window.
+    breaks = t.chain_breaks_24h(since=_time.time() - 86400)
+    assert "writer" not in breaks
+    # Touch updated_at (simulate a metadata write) — must NOT bring
+    # the task back into the window.
+    with t._conn() as conn:
+        conn.execute(
+            "UPDATE tasks SET updated_at = ? WHERE id = ?",
+            (_time.time(), rec["id"]),
+        )
+    breaks_after = t.chain_breaks_24h(since=_time.time() - 86400)
+    assert "writer" not in breaks_after, (
+        "completed_at is the canonical window field — a later "
+        "updated_at write must not retroactively include the task"
+    )
+
+
 def test_previous_task_id_chain_does_not_suppress_chain_break(tmp_path):
     """``previous_task_id`` represents a retry/rework chain, not a
     handoff chain. A task that has a retry follower (linked via
