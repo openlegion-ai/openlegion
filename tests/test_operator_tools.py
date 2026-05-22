@@ -1575,3 +1575,42 @@ class TestAwaitTaskEventSkill:
         assert "error" in result
         assert "await_task_event_unexpected" in result["error"]
         assert result.get("task_id") == "task_boom"
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_logs_and_re_raises(self):
+        """Round-5 strengthening: ``asyncio.CancelledError`` is
+        ``BaseException``-derived in 3.8+ and slipped past the broad
+        ``except Exception`` arm — the loop's 300s tool-execution
+        ceiling could cancel ``await_task_event`` mid-poll and the
+        function would return ``None`` (empty body to the LLM).
+
+        Pin the contract: a cancellation during the inner sleep is
+        re-raised (the cancelling loop must see the cancel) rather than
+        swallowed into an envelope. ``asyncio.wait_for`` will convert
+        the propagated ``CancelledError`` into ``TimeoutError`` at the
+        outer boundary."""
+        import asyncio
+
+        from src.agent.builtins.operator_tools import await_task_event
+
+        async def slow_list_blackboard(_prefix, *, global_scope=False):
+            # Sleep long enough that wait_for's timeout fires while we
+            # are awaiting list_blackboard — propagates a
+            # CancelledError into await_task_event.
+            await asyncio.sleep(10)
+            return []
+
+        mc = MagicMock()
+        mc.agent_id = "operator"
+        mc.list_blackboard = slow_list_blackboard
+
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                await_task_event(
+                    "task_cancel",
+                    timeout_s=60,
+                    poll_interval_s=1,
+                    mesh_client=mc,
+                ),
+                timeout=0.1,
+            )

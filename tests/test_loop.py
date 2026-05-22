@@ -15,8 +15,10 @@ import pytest
 
 from src.agent.loop import (
     _BLACKBOARD_TOOLS,
+    _READ_ONLY_TOOLS,
     HEARTBEAT_MAX_ITERATIONS,
     AgentLoop,
+    _has_outbound_effect,
     _heartbeat_mode,
 )
 from src.shared.types import LLMResponse, TaskAssignment, TokenBudget, ToolCallInfo
@@ -3187,3 +3189,170 @@ class TestChatHandoffFailureEnforcement:
         assert reason is not None
         assert reason.startswith("handoff_failed:")
         assert "bob" in reason
+
+
+# === Outbound-effect lazy guard ===
+
+
+class TestOutboundEffectLazyGuard:
+    """``_has_outbound_effect`` flags any tool_outputs list that contains
+    at least one tool name NOT in ``_READ_ONLY_TOOLS``. Used by the chat
+    handoff lazy-completion guard so ghost-completions that only run
+    diagnostic reads (``check_inbox`` + ``read_blackboard`` + …) get
+    auto-closed as failed instead of slipping past as ``done``.
+
+    All tests pure-function on the module-level helper — no fixtures.
+    """
+
+    def test_empty_tool_outputs_returns_false(self):
+        assert _has_outbound_effect(None) is False
+        assert _has_outbound_effect([]) is False
+
+    def test_only_read_only_tools_returns_false(self):
+        outputs = [
+            {"tool": "check_inbox"},
+            {"tool": "read_blackboard"},
+        ]
+        assert _has_outbound_effect(outputs) is False
+
+    def test_any_outbound_tool_returns_true(self):
+        outputs = [
+            {"tool": "check_inbox"},
+            {"tool": "hand_off"},
+        ]
+        assert _has_outbound_effect(outputs) is True
+
+    def test_unknown_tool_treated_as_outbound(self):
+        """Default-outbound policy: a brand-new tool the guard hasn't
+        seen yet is conservatively counted as an outbound effect (lenient
+        false negatives are preferred over false positives that would
+        block real work)."""
+        outputs = [{"tool": "some_brand_new_tool_we_havent_seen"}]
+        assert _has_outbound_effect(outputs) is True
+
+    def test_legacy_name_key_fallback(self):
+        """Some older tool-output schemas use ``name`` instead of
+        ``tool``; the helper falls back to ``name`` when ``tool`` is
+        absent so both shapes are recognized."""
+        outputs = [{"name": "hand_off"}]
+        assert _has_outbound_effect(outputs) is True
+
+    def test_hand_off_alone_is_outbound(self):
+        assert _has_outbound_effect([{"tool": "hand_off"}]) is True
+
+    def test_write_blackboard_is_outbound(self):
+        assert _has_outbound_effect([{"tool": "write_blackboard"}]) is True
+
+    def test_notify_user_is_outbound(self):
+        assert _has_outbound_effect([{"tool": "notify_user"}]) is True
+
+    def test_memory_search_is_read_only(self):
+        assert _has_outbound_effect([{"tool": "memory_search"}]) is False
+
+    def test_read_only_constant_includes_documented_tools(self):
+        """Pin the documented read-only set so adding/removing entries
+        is a deliberate change reviewed alongside the guard."""
+        expected_subset = {
+            "check_inbox",
+            "read_blackboard",
+            "list_blackboard",
+            "list_agents",
+            "get_agent_profile",
+            "get_system_status",
+            "workflow_snapshot",
+            "await_task_event",
+            "inspect_agents",
+            "inspect_teams",
+            "list_agent_queue",
+            "memory_search",
+        }
+        assert expected_subset.issubset(_READ_ONLY_TOOLS)
+
+    @pytest.mark.asyncio
+    async def test_chat_handoff_with_only_read_tools_auto_closes_failed(self):
+        """Integration: a chat() handoff turn whose tool_outputs are ALL
+        read-only (no outbound effect) and whose response is empty
+        auto-closes the task as ``failed`` with a ``no_outbound_effects``
+        error envelope. Mirrors the production repro that motivated the
+        guard strengthening."""
+        loop = _make_loop()
+
+        async def fake_inner(_msg):
+            return {
+                "response": "",
+                "tool_outputs": [
+                    {
+                        "tool": "check_inbox",
+                        "input": {},
+                        "output": {"events": []},
+                    },
+                ],
+                "tokens_used": 5,
+            }
+        loop._chat_inner = fake_inner
+        loop._auto_close_task = AsyncMock(return_value=None)
+
+        await loop.chat("hi", task_id="task_lazy")
+
+        # Find the terminal close call (status="failed"). The first
+        # auto_close_task call opens the task as ``working``; the second
+        # is the terminal transition.
+        terminal_calls = [
+            c for c in loop._auto_close_task.await_args_list
+            if len(c.args) >= 2 and c.args[1] == "failed"
+        ]
+        assert terminal_calls, (
+            "expected an auto_close_task(..., 'failed') terminal call "
+            f"but saw: {loop._auto_close_task.await_args_list}"
+        )
+        last_failed = terminal_calls[-1]
+        assert last_failed.args[0] == "task_lazy"
+        error_msg = last_failed.kwargs.get("error") or ""
+        assert "no_outbound_effects" in error_msg, (
+            f"expected error envelope to contain 'no_outbound_effects', "
+            f"got: {error_msg!r}"
+        )
+        assert "check_inbox" in error_msg, (
+            "error envelope should surface the read-only tools that were "
+            f"called, got: {error_msg!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_chat_handoff_with_outbound_tool_auto_closes_done(self):
+        """Counterpart to the read-only case: a handoff turn whose
+        tool_outputs include at least one outbound effect (here:
+        ``hand_off``) and whose response is empty auto-closes as
+        ``done`` (the outbound work proves the turn wasn't lazy)."""
+        loop = _make_loop()
+
+        async def fake_inner(_msg):
+            return {
+                "response": "",
+                "tool_outputs": [
+                    {
+                        "tool": "hand_off",
+                        "input": {"to": "bob"},
+                        "output": {
+                            "handed_off": True,
+                            "to": "bob",
+                            "task_id": "task_child",
+                        },
+                    },
+                ],
+                "tokens_used": 5,
+            }
+        loop._chat_inner = fake_inner
+        loop._auto_close_task = AsyncMock(return_value=None)
+
+        await loop.chat("hi", task_id="task_outbound")
+
+        terminal_calls = [
+            c for c in loop._auto_close_task.await_args_list
+            if len(c.args) >= 2 and c.args[1] in ("done", "failed")
+        ]
+        assert terminal_calls
+        last_terminal = terminal_calls[-1]
+        assert last_terminal.args[1] == "done", (
+            "outbound-effect turn must close as 'done', not 'failed'; "
+            f"calls: {loop._auto_close_task.await_args_list}"
+        )

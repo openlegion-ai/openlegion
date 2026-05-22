@@ -147,6 +147,64 @@ _HEARTBEAT_TOOLS = frozenset({
     "workflow_snapshot", "await_task_event",
 })
 
+# Tool calls whose ONLY purpose is to read state — they don't produce
+# downstream work, no peer is woken, no artifact is written. The lazy-
+# completion guards in chat() / execute_task use this set to detect
+# ghost-completion ("checked my inbox, said 'Done!', didn't actually
+# hand off or write anything"). A turn whose ONLY tool calls are in
+# this set is treated as zero-tool for guard purposes — the LLM must
+# either return a structured ``{"result": {...}}`` final or call at
+# least one non-read-only tool to satisfy the contract.
+#
+# New tools are treated as OUTBOUND by default — soft-failing open is
+# better than soft-passing closed. A future read-only tool that's not
+# yet enumerated here is lenient (the guard might let some lazy
+# completions through), not harsh (real work blocked). Enrol new
+# read-only tools here as they're added.
+_READ_ONLY_TOOLS = frozenset({
+    # Coordination reads
+    "check_inbox", "list_task_inbox",
+    # Blackboard reads (writes go through write_blackboard, NOT here)
+    "read_blackboard", "list_blackboard", "watch_blackboard",
+    "subscribe_event",
+    # Fleet / agent introspection
+    "list_agents", "get_agent_profile", "get_system_status",
+    "inspect_agents", "inspect_teams", "list_agent_queue",
+    "list_templates", "list_available_models", "read_agent_config",
+    # Operator workflow diagnostics
+    "workflow_snapshot", "await_task_event",
+    "summarize_team_progress",
+    # Pending-action / artifact reads (writes go through manage_task etc.)
+    "list_pending", "list_peer_artifacts", "read_peer_artifact",
+    "get_team_outputs",
+    # Memory / file reads (writes go through memory_save / write_file)
+    "memory_search", "read_file",
+    # Credential discovery — names only, no values
+    "vault_list",
+    # External reads (no side effect beyond the network read itself)
+    "web_search",
+    # Self-introspection
+    "introspect",
+})
+
+
+def _has_outbound_effect(tool_outputs: list[dict] | None) -> bool:
+    """True if ``tool_outputs`` carries at least one non-read-only call.
+
+    Workers that only invoke diagnostic reads (``check_inbox`` +
+    ``read_blackboard`` + …) and then claim done are committing
+    ghost-completion — they produced no outbound effect for downstream
+    consumers. The lazy-completion guards treat such turns as if no
+    tools were called at all.
+    """
+    if not tool_outputs:
+        return False
+    for t in tool_outputs:
+        name = t.get("tool") or t.get("name") or ""
+        if name and name not in _READ_ONLY_TOOLS:
+            return True
+    return False
+
 
 async def _llm_call_with_retry(llm_chat_fn, *, system, messages, tools, **kwargs):
     """Call the LLM with exponential backoff on transient errors.
@@ -2339,33 +2397,51 @@ class AgentLoop:
                         else:
                             response_text = result.get("response") or ""
                             tool_outputs = result.get("tool_outputs") or []
+                            # Round-5 strengthening: ghost-completion
+                            # was slipping past the previous guard
+                            # whenever the LLM called ANY tool — even
+                            # diagnostic reads (``check_inbox``,
+                            # ``read_blackboard``) that produced no
+                            # downstream work. Tighten to require at
+                            # least one OUTBOUND-effect tool call OR a
+                            # structured final payload.
+                            outbound_used = _has_outbound_effect(tool_outputs)
                             handoff_is_lazy = (
-                                not tool_outputs
+                                not outbound_used
                                 and not self._is_structured_final(response_text)
                             )
                             if handoff_is_lazy:
+                                tool_names = [
+                                    (t.get("tool") or t.get("name") or "?")
+                                    for t in tool_outputs
+                                ]
                                 logger.error(
                                     "chat lazy-completion guard tripped for "
-                                    "handoff task=%s: tool_outputs=0 "
-                                    "structured_final=False — auto-closing "
-                                    "as failed (LLM produced a text-only "
-                                    "response without calling any tools and "
-                                    "without returning a structured "
-                                    "{\"result\": {...}} payload)",
-                                    task_id,
+                                    "handoff task=%s: outbound_effect=False "
+                                    "structured_final=False tools_called=%s "
+                                    "— auto-closing as failed (LLM either "
+                                    "made no tool calls or called only "
+                                    "read-only / diagnostic tools)",
+                                    task_id, tool_names,
+                                )
+                                read_only_summary = (
+                                    f" (read-only tools called: {tool_names})"
+                                    if tool_names else ""
                                 )
                                 await self._auto_close_task(
                                     task_id, "failed",
                                     error=(
-                                        "no_action_taken: the recipient "
-                                        "produced a text-only response "
-                                        "without calling any tools and "
-                                        "without returning a structured "
-                                        "{\"result\": {...}} payload. "
-                                        "Handoff tasks are expected to "
-                                        "either perform work via tools OR "
-                                        "return a structured result "
-                                        "envelope (e.g. {\"result\": "
+                                        "no_outbound_effects: the recipient "
+                                        "completed the turn without producing "
+                                        "any outbound effect (no hand_off, "
+                                        "write_blackboard, notify_user, "
+                                        "publish_event, etc.) and without "
+                                        "returning a structured "
+                                        "{\"result\": {...}} payload."
+                                        f"{read_only_summary} Handoff tasks "
+                                        "must either perform real work via an "
+                                        "outbound tool OR return a structured "
+                                        "result envelope (e.g. {\"result\": "
                                         "{\"status\": \"noop\", \"reason\": "
                                         "\"...\"}})."
                                     ),
