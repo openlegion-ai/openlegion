@@ -2904,6 +2904,108 @@ class TestChatEmptyResponseFallback:
         # the "did work" branch and auto-closes as ``done``.
         loop._auto_close_task.assert_awaited()
 
+    # --- Transcript-persistence regression tests (chat refresh bug) ---
+    #
+    # Before the fix, when the LLM ran tools and ended with empty final
+    # text, ``_log_chat_turn`` skipped persisting the assistant entry to
+    # ``chat_transcript.jsonl``. The dashboard's live ``done`` event
+    # showed the synthetic notice fine, but the transcript loaded on
+    # page refresh had no assistant row — "the message disappeared".
+    # These tests pin the contract that the synthetic fallback now lands
+    # in the transcript (and on the daily log) when there were tools,
+    # and that truly silent turns (no text, no tools) still skip.
+
+    def test_log_chat_turn_persists_fallback_when_empty_with_tools(
+        self, tmp_path,
+    ):
+        from src.agent.workspace import WorkspaceManager
+
+        loop = _make_loop()
+        loop.workspace = WorkspaceManager(workspace_dir=str(tmp_path))
+
+        loop._log_chat_turn(
+            "user q",
+            "",
+            tool_outputs=[
+                {"tool": "notify_user", "input": {}, "output": "ok"},
+            ],
+        )
+
+        transcript = loop.workspace.load_chat_transcript()
+        assistant_entries = [
+            m for m in transcript if m.get("role") == "assistant"
+        ]
+        assert len(assistant_entries) == 1, \
+            "fallback must persist exactly one assistant entry"
+        content = assistant_entries[0]["content"]
+        assert "Completed 1 tool call" in content
+        assert content == AgentLoop._synthesize_empty_chat_fallback(
+            [{"tool": "notify_user", "input": {}, "output": "ok"}],
+        )
+
+    def test_log_chat_turn_skips_when_empty_and_no_tools(self, tmp_path):
+        """Truly silent turn (no text, no tools) — nothing to persist.
+        The fallback helper returns ``""``, the guard skips, no
+        assistant row lands in the transcript."""
+        from src.agent.workspace import WorkspaceManager
+
+        loop = _make_loop()
+        loop.workspace = WorkspaceManager(workspace_dir=str(tmp_path))
+
+        loop._log_chat_turn("user q", "", tool_outputs=None)
+
+        transcript = loop.workspace.load_chat_transcript()
+        assistant_entries = [
+            m for m in transcript if m.get("role") == "assistant"
+        ]
+        assert assistant_entries == []
+
+    def test_synthesize_helper_pluralization(self):
+        """Pure-function contract on the helper. Empty/None → ``""``.
+        1 tool → singular "tool call". 2+ tools → plural "tool calls"."""
+        assert AgentLoop._synthesize_empty_chat_fallback(None) == ""
+        assert AgentLoop._synthesize_empty_chat_fallback([]) == ""
+
+        one = AgentLoop._synthesize_empty_chat_fallback([{"tool": "x"}])
+        assert "1 tool call" in one
+        assert "1 tool calls" not in one  # no plural mis-fire
+
+        two = AgentLoop._synthesize_empty_chat_fallback(
+            [{"tool": "x"}, {"tool": "y"}],
+        )
+        assert "2 tool calls" in two
+
+        five = AgentLoop._synthesize_empty_chat_fallback(
+            [{"tool": "x"}] * 5,
+        )
+        assert "5 tool calls" in five
+
+    def test_chat_fallback_wording_matches_log_chat_turn(self, tmp_path):
+        """Anti-drift guard: the string written to the transcript by
+        ``_log_chat_turn`` must equal the helper's return value for the
+        same ``tool_outputs``. If someone re-inlines the wording in one
+        path but not the other, this test catches the divergence."""
+        from src.agent.workspace import WorkspaceManager
+
+        loop = _make_loop()
+        loop.workspace = WorkspaceManager(workspace_dir=str(tmp_path))
+
+        tool_outputs = [
+            {"tool": "web_search", "input": {"q": "x"}, "output": "r"},
+            {"tool": "notify_user", "input": {}, "output": "ok"},
+        ]
+        expected = AgentLoop._synthesize_empty_chat_fallback(tool_outputs)
+        assert expected, "helper must return non-empty when tools ran"
+
+        loop._log_chat_turn("user q", "", tool_outputs=tool_outputs)
+
+        transcript = loop.workspace.load_chat_transcript()
+        assistant_entries = [
+            m for m in transcript if m.get("role") == "assistant"
+        ]
+        assert len(assistant_entries) == 1
+        assert assistant_entries[0]["content"] == expected
+
 
 # === Round-4 structural fix: system-side hand_off failure enforcement ===
 
