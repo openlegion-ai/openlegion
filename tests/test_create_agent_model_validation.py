@@ -752,6 +752,144 @@ async def test_auth_failure_endpoint_internal_caller_bypasses_rate_limit(
         bb.close()
 
 
+def test_apply_template_endpoint_rejects_override_outside_oauth_allowlist(
+    tmp_path, _mesh_env, container_mgr, monkeypatch,
+):
+    """Bug 3 follow-up: POST /mesh/templates/apply must validate every
+    effective model with ``is_model_compatible`` UPFRONT — before any
+    agent is created. An OAuth-only deployment + a non-OAuth-allowed
+    override should reject with 400 and zero containers started."""
+    _clear_system_env(monkeypatch)
+    monkeypatch.setenv(
+        "OPENLEGION_SYSTEM_OPENAI_OAUTH",
+        '{"access_token":"tok","refresh_token":"ref"}',
+    )
+    vault = CredentialVault()
+
+    # Stub the template loader so we don't depend on the on-disk YAMLs.
+    fake_template = {
+        "minteam": {
+            "description": "stub",
+            "agents": {
+                "worker": {
+                    "role": "worker",
+                    "model": "openai/gpt-5",  # in OAuth allowlist
+                    "instructions": "do work",
+                },
+            },
+        },
+    }
+    monkeypatch.setattr("src.cli.config._load_templates", lambda: fake_template)
+
+    client, bb = _build_mesh_app(tmp_path, container_mgr, vault)
+    try:
+        resp = client.post(
+            "/mesh/fleet/apply",
+            json={
+                "spawned_by": "operator",
+                "template": "minteam",
+                "agent_overrides": {
+                    "worker": {"model": "openai/gpt-4.1-mini"},  # NOT in OAuth allowlist
+                },
+            },
+        )
+        assert resp.status_code == 400, resp.text
+        detail = resp.json()["detail"]
+        assert "OAuth-allowed models" in detail
+        # Slot name is named for actionable error.
+        assert "worker" in detail
+        # No agent was created.
+        container_mgr.start_agent.assert_not_called()
+    finally:
+        bb.close()
+
+
+def test_apply_template_endpoint_rejects_template_default_when_incompatible(
+    tmp_path, _mesh_env, container_mgr, monkeypatch,
+):
+    """Even WITHOUT overrides, the template-default model is validated
+    upfront. OAuth-only deployment + template defaulting to
+    openai/gpt-4o-mini (not in OAuth allowlist) → 400."""
+    _clear_system_env(monkeypatch)
+    monkeypatch.setenv(
+        "OPENLEGION_SYSTEM_OPENAI_OAUTH",
+        '{"access_token":"tok","refresh_token":"ref"}',
+    )
+    vault = CredentialVault()
+
+    fake_template = {
+        "badtmpl": {
+            "description": "stub",
+            "agents": {
+                "worker": {
+                    "role": "worker",
+                    "model": "openai/gpt-4o-mini",  # NOT in OAuth allowlist
+                    "instructions": "do work",
+                },
+            },
+        },
+    }
+    monkeypatch.setattr("src.cli.config._load_templates", lambda: fake_template)
+
+    client, bb = _build_mesh_app(tmp_path, container_mgr, vault)
+    try:
+        resp = client.post(
+            "/mesh/fleet/apply",
+            json={"spawned_by": "operator", "template": "badtmpl"},
+        )
+        assert resp.status_code == 400, resp.text
+        detail = resp.json()["detail"]
+        assert "OAuth-allowed models" in detail
+        container_mgr.start_agent.assert_not_called()
+    finally:
+        bb.close()
+
+
+def test_apply_template_endpoint_top_level_model_override_validated(
+    tmp_path, _mesh_env, container_mgr, monkeypatch,
+):
+    """Top-level ``model`` (the legacy override that applies to every slot)
+    is validated upfront too. OAuth-only deployment + top-level
+    incompatible model → 400."""
+    _clear_system_env(monkeypatch)
+    monkeypatch.setenv(
+        "OPENLEGION_SYSTEM_OPENAI_OAUTH",
+        '{"access_token":"tok","refresh_token":"ref"}',
+    )
+    vault = CredentialVault()
+
+    fake_template = {
+        "okt": {
+            "description": "stub",
+            "agents": {
+                "worker": {
+                    "role": "worker",
+                    "model": "openai/gpt-5",  # template default IS OK
+                    "instructions": "do work",
+                },
+            },
+        },
+    }
+    monkeypatch.setattr("src.cli.config._load_templates", lambda: fake_template)
+
+    client, bb = _build_mesh_app(tmp_path, container_mgr, vault)
+    try:
+        resp = client.post(
+            "/mesh/fleet/apply",
+            json={
+                "spawned_by": "operator",
+                "template": "okt",
+                "model": "openai/gpt-4o-mini",  # forces all slots → BAD
+            },
+        )
+        assert resp.status_code == 400, resp.text
+        detail = resp.json()["detail"]
+        assert "OAuth-allowed models" in detail
+        container_mgr.start_agent.assert_not_called()
+    finally:
+        bb.close()
+
+
 def test_profile_endpoint_surfaces_quarantine_fields(
     tmp_path, _mesh_env, monkeypatch,
 ):

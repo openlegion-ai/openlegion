@@ -1066,7 +1066,14 @@ class Tasks:
                     "blocker_note=? WHERE id=?",
                     (
                         status, now, completed_at, retention_until,
-                        blocker_note if status == "blocked" else None,
+                        # ``blocker_note`` is the canonical non-success
+                        # status-reason column. ``blocked`` (recoverable —
+                        # the original semantic) and ``failed`` (terminal —
+                        # Bug 3 "silent model rejection") both populate it.
+                        # ``cancelled`` deliberately stays None: a manual
+                        # cancellation isn't an error, the user has the
+                        # context. ``done`` clears whatever was there.
+                        blocker_note if status in ("blocked", "failed") else None,
                         task_id,
                     ),
                 )

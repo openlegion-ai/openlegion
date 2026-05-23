@@ -302,12 +302,20 @@ class LaneManager:
                 logger.warning(err_msg)
                 if task.task_id and self._tasks_store is not None:
                     try:
+                        # Bug 3: surface failure reason via blocker_note so
+                        # the dashboard/workflow_snapshot show *why* the
+                        # task failed, not a bare "failed" pill.
+                        _quarantine_note = (
+                            f"agent_quarantined: '{agent}' quarantined "
+                            f"on credential failure (fix via edit_agent)"
+                        )[:500]
                         await asyncio.get_running_loop().run_in_executor(
                             None,
                             lambda: self._tasks_store.update_status(
                                 task.task_id,
                                 "failed",
                                 actor="lane_quarantine",
+                                blocker_note=_quarantine_note,
                                 extra_payload={
                                     "error": "agent_quarantined",
                                     "agent": agent,
@@ -448,12 +456,17 @@ class LaneManager:
                             # just freed. ``InvalidStatusTransition``
                             # here means a benign race terminated the
                             # task between pre-check and UPDATE.
+                            _timeout_note = (
+                                f"lane_timeout: task exceeded "
+                                f"{effective_timeout}s wall-clock cap"
+                            )[:500]
                             await asyncio.get_running_loop().run_in_executor(
                                 None,
                                 lambda: self._tasks_store.update_status(
                                     task.task_id,
                                     "failed",
                                     actor="lane_watchdog",
+                                    blocker_note=_timeout_note,
                                     extra_payload={
                                         "error": "lane_timeout",
                                         "timeout_seconds": effective_timeout,

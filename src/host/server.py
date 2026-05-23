@@ -3030,6 +3030,43 @@ def create_mesh_app(
                             f"exceeds cap ({len(val)} > {_cap} chars)",
                         )
 
+        # Credential-compatibility check on every model the apply will
+        # actually use — runs UPFRONT so a bad model rejects the whole
+        # call before any agent is created. Mirrors the gate on
+        # ``create_custom_agent`` / ``edit-soft`` (Bug 3, "silent model
+        # rejection"): without this the slot starts and dies on its
+        # first LLM call with no surfaced reason.
+        if credential_vault is not None:
+            _cfg_for_resolve = _load_config()
+            _default_model_for_resolve = _cfg_for_resolve.get(
+                "llm", {},
+            ).get("default_model", "openai/gpt-4o-mini")
+            _seen_models: set[str] = set()
+            for slot_name, slot_def in tpl_agents.items():
+                # Per-slot effective model = override > top-level
+                # model_override > template-default > config default.
+                _override = (agent_overrides or {}).get(slot_name) or {}
+                if "model" in _override:
+                    _slot_model = _override["model"]
+                elif model_override:
+                    _slot_model = model_override
+                else:
+                    _slot_model = slot_def.get(
+                        "model", _default_model_for_resolve,
+                    ).replace("{default_model}", _default_model_for_resolve)
+                if not _slot_model or _slot_model in _seen_models:
+                    continue
+                _seen_models.add(_slot_model)
+                _compatible, _reason = credential_vault.is_model_compatible(
+                    _slot_model,
+                )
+                if not _compatible:
+                    raise HTTPException(
+                        400,
+                        f"Slot '{slot_name}' model '{_slot_model}': "
+                        + (_reason or "not compatible with current credentials."),
+                    )
+
         # Apply template to create config entries
         created_names = _apply_template(
             template_name, tpl, agent_overrides=agent_overrides or None,
@@ -4852,6 +4889,17 @@ def create_mesh_app(
         body = await request.json()
         status = body.get("status", "")
         blocker_note = body.get("blocker_note")
+        # Bug 3 (silent model rejection): when a failed transition arrives
+        # with no ``blocker_note`` but carries an ``error`` string (the
+        # canonical shape ``mesh_client.set_task_status`` sends for
+        # auto-close paths), promote ``error`` to ``blocker_note`` so the
+        # store persists the reason. Truncate to 500 chars to match the
+        # column's expected size and avoid runaway bloat from huge LLM
+        # tracebacks. Existing explicit ``blocker_note`` callers win.
+        if status == "failed" and not blocker_note:
+            _err = body.get("error")
+            if isinstance(_err, str) and _err.strip():
+                blocker_note = _err.strip()[:500]
         if status not in VALID_STATUSES:
             raise HTTPException(
                 400,

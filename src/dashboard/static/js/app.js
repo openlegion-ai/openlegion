@@ -4725,7 +4725,12 @@ function dashboard() {
         const note = data.blocker_note || '';
         summary = `${actor} marked task '${title}' as blocked${note ? ': ' + note : ''}`;
       } else if (status === 'failed') {
-        summary = `${actor} failed task '${title}'`;
+        // Bug 3 fix: surface blocker_note on failed transitions so an
+        // operator can see *why* a task died without digging into
+        // workflow_snapshot or the back-edge inbox. Mirrors the blocked
+        // branch's rendering — same column, broader semantic.
+        const note = data.blocker_note || '';
+        summary = `${actor} failed task '${title}'${note ? ': ' + note : ''}`;
       } else if (status === 'cancelled') {
         const reason = data.reason ? ` (${data.reason})` : '';
         summary = `${actor} cancelled task '${title}'${reason}`;

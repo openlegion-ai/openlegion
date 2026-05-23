@@ -493,6 +493,105 @@ async def test_cancel_creator_or_assignee_or_operator(v2_app):
 
 
 @pytest.mark.asyncio
+async def test_failed_status_promotes_error_to_blocker_note(v2_app):
+    """Bug 3 fix: ``POST /mesh/tasks/{id}/status`` with status=failed +
+    ``error`` body field (the shape ``mesh_client.set_task_status``
+    sends from auto-close paths) must promote ``error`` to the
+    persisted ``blocker_note`` column when no explicit blocker_note was
+    given. Without this, agent-loop failures left ``blocker_note=NULL``
+    and the dashboard rendered a bare "failed task" pill with no
+    reason."""
+    app, server_module, _ = v2_app
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "analyst", "title": "promotion check"},
+            headers={"X-Agent-ID": "scout"},
+        )
+        tid = r.json()["id"]
+        r = await c.post(
+            f"/mesh/tasks/{tid}/status",
+            json={"status": "working"},
+            headers={"X-Agent-ID": "analyst"},
+        )
+        assert r.status_code == 200
+        # Auto-close shape — error field, no blocker_note.
+        r = await c.post(
+            f"/mesh/tasks/{tid}/status",
+            json={
+                "status": "failed",
+                "error": "config_error: model 'openai/gpt-4o-mini' not in OAuth allowlist",
+            },
+            headers={"X-Agent-ID": "analyst"},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "failed"
+        assert body["blocker_note"] is not None
+        assert "config_error" in body["blocker_note"]
+        assert "OAuth allowlist" in body["blocker_note"]
+
+
+@pytest.mark.asyncio
+async def test_failed_status_explicit_blocker_note_wins_over_error(v2_app):
+    """Explicit ``blocker_note`` in the body wins over ``error`` — the
+    promotion only fires when blocker_note is missing/empty."""
+    app, _, _ = v2_app
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "analyst", "title": "precedence"},
+            headers={"X-Agent-ID": "scout"},
+        )
+        tid = r.json()["id"]
+        await c.post(
+            f"/mesh/tasks/{tid}/status",
+            json={"status": "working"},
+            headers={"X-Agent-ID": "analyst"},
+        )
+        r = await c.post(
+            f"/mesh/tasks/{tid}/status",
+            json={
+                "status": "failed",
+                "error": "should NOT override",
+                "blocker_note": "explicit note wins",
+            },
+            headers={"X-Agent-ID": "analyst"},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["blocker_note"] == "explicit note wins"
+
+
+@pytest.mark.asyncio
+async def test_failed_status_error_truncated_to_500_chars(v2_app):
+    """Huge ``error`` strings (e.g. LLM tracebacks) are truncated to 500
+    chars in the promoted ``blocker_note`` to avoid runaway bloat."""
+    app, _, _ = v2_app
+    huge = "x" * 5000
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "analyst", "title": "huge"},
+            headers={"X-Agent-ID": "scout"},
+        )
+        tid = r.json()["id"]
+        await c.post(
+            f"/mesh/tasks/{tid}/status",
+            json={"status": "working"},
+            headers={"X-Agent-ID": "analyst"},
+        )
+        r = await c.post(
+            f"/mesh/tasks/{tid}/status",
+            json={"status": "failed", "error": huge},
+            headers={"X-Agent-ID": "analyst"},
+        )
+        assert r.status_code == 200
+        note = r.json()["blocker_note"]
+        assert note is not None
+        assert len(note) == 500
+
+
+@pytest.mark.asyncio
 async def test_events_endpoint_returns_audit_history(v2_app):
     app, _, _ = v2_app
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
