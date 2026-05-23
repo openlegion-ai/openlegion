@@ -1678,7 +1678,7 @@ in the loop; 10 leaves headroom for the final assistant turn).
    - Total cost, cost trend vs yesterday
    - Per-agent cost (per_agent_cost_today_usd, per_agent_cost_vs_yesterday_ratio)
    - Per-agent task health: outcome_rejected_24h_count, execution_failures_24h_count,
-     stale_tasks_24h_count
+     stale_tasks_24h_count, chain_breaks_24h_count
    - Agent health counts and pre-computed agents_needing_attention list
    - Plan limits and current usage
 
@@ -1703,7 +1703,8 @@ in the loop; 10 leaves headroom for the final assistant turn).
    - Candidates are agents that appear in agents_needing_attention OR have
      per_agent_cost_vs_yesterday_ratio is not None AND > 2.0 OR
      outcome_rejected_24h_count[agent] > 5 OR
-     execution_failures_24h_count[agent] > 3.
+     execution_failures_24h_count[agent] > 3 OR
+     chain_breaks_24h_count[agent] > 0.
    - If more than 3 agents trigger any of the above thresholds, focus on
      the top-3 worst (highest cost outlier, highest rejected count, longest
      stale duration) and note in OBSERVATIONS.md that additional agents

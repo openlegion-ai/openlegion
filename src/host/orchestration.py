@@ -31,6 +31,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -245,6 +246,8 @@ class Tasks:
                     ON tasks (created_at);
                 CREATE INDEX IF NOT EXISTS idx_tasks_retention
                     ON tasks (retention_until);
+                CREATE INDEX IF NOT EXISTS idx_tasks_parent_task_id
+                    ON tasks (parent_task_id);
 
                 CREATE TABLE IF NOT EXISTS task_events (
                     event_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -793,6 +796,56 @@ class Tasks:
             return None
         return float(row[0])
 
+    def chain_breaks_24h(self, since: float) -> dict[str, int]:
+        """Count chain-break tasks per assignee since the cutoff timestamp.
+
+        A "chain-break" is a ``done`` task whose work didn't get handed
+        off to a successor — operationally, a row that:
+
+        * has ``status='done'``
+        * has ``completed_at >= since`` (a Unix timestamp; callers
+          typically pass ``time.time() - 86400`` for a trailing 24h
+          window). ``completed_at`` is stamped once at the terminal
+          transition (``done``/``failed``/``cancelled``) and is NOT
+          touched by later metadata writes — outcome updates, blocker
+          notes, artifact appends all bump ``updated_at`` but never
+          ``completed_at``. Filtering on ``completed_at`` keeps a task
+          completed >24h ago out of the window even if an unrelated
+          metadata write happens later. Mirrors the
+          :meth:`count_failed_status_since` pattern.
+        * has no row in ``tasks`` whose ``parent_task_id`` references it
+        * has ``outcome IS NULL`` — the operator hasn't actioned this
+          delivery yet via rate / rework. Outcome-set rows drop out of
+          the count because the operator already saw them.
+
+        Returns ``{assignee: count}`` for assignees with at least one
+        chain-break in the window. The ``NOT EXISTS`` subquery uses
+        ``idx_tasks_parent_task_id`` so this is O(#done-rows-in-window)
+        index lookups. Surfaced as ``chain_breaks_24h_count`` on the
+        ``/mesh/system/metrics`` payload so the operator heartbeat
+        playbook can drill into silent-handoff agents via its existing
+        ``get_system_status`` call — no need for a separate
+        ``workflow_snapshot`` poll.
+
+        Observability-only — NO enforcement. Pairs with the
+        ``task_completed_without_handoff`` DashboardEvent emitted by
+        :meth:`update_status` at the ``done`` transition.
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT assignee, COUNT(*) FROM tasks t1 "
+                "WHERE t1.status = 'done' "
+                "  AND t1.completed_at IS NOT NULL "
+                "  AND t1.completed_at >= ? "
+                "  AND t1.outcome IS NULL "
+                "  AND NOT EXISTS ("
+                "    SELECT 1 FROM tasks t2 WHERE t2.parent_task_id = t1.id"
+                "  ) "
+                "GROUP BY assignee",
+                (since,),
+            ).fetchall()
+        return {row[0]: int(row[1] or 0) for row in rows if row[0]}
+
     def list_stale_for_assignee(
         self,
         assignee: str,
@@ -878,8 +931,27 @@ class Tasks:
                 "ORDER BY t.created_at ASC LIMIT ?",
                 (root_task_id, MAX_WORKFLOW_CHAIN_DEPTH, limit),
             ).fetchall()
-        if not rows:
-            return None
+            if not rows:
+                return None
+            # Independent child-existence check — derive
+            # ``terminal_without_children`` from the full tasks table, not
+            # just the snapshot rows. Otherwise a non-leaf at the ``limit``
+            # boundary whose only children fell off the cap would falsely
+            # report ``terminal_without_children=True``. Uses the
+            # ``idx_tasks_parent_task_id`` index so this is O(#done-stages)
+            # lookups inside the same connection block.
+            done_task_ids = [row[0] for row in rows if row[3] == "done"]
+            parent_ids_with_children: set[str] = set()
+            if done_task_ids:
+                placeholders = ",".join("?" * len(done_task_ids))
+                child_rows = conn.execute(
+                    f"SELECT DISTINCT parent_task_id FROM tasks "
+                    f"WHERE parent_task_id IN ({placeholders})",
+                    done_task_ids,
+                ).fetchall()
+                parent_ids_with_children = {
+                    r[0] for r in child_rows if r[0]
+                }
         stages: list[dict] = []
         # Derive buckets from ``VALID_STATUSES`` so a future state added
         # to the enum can't silently drift out of the summary math.
@@ -905,6 +977,13 @@ class Tasks:
             # keeps the snapshot quiet for nominal stages.
             if blocker_note:
                 stage["blocker_note"] = blocker_note
+            # Chain-break observability flag — True when this stage is
+            # terminal (``done``) AND nothing in the snapshot references
+            # it as its parent. Drives the dashboard chain-break marker
+            # without a follow-up query. Observability-only.
+            stage["terminal_without_children"] = (
+                status == "done" and tid not in parent_ids_with_children
+            )
             stages.append(stage)
             if status in summary:
                 summary[status] += 1
@@ -936,19 +1015,28 @@ class Tasks:
         # Captured outside the txn so the event-emit (which goes through
         # the bus / asyncio loop) doesn't run while we hold BEGIN IMMEDIATE.
         emitted_change: tuple[str, str, str | None, str | None] | None = None
+        # Chain-break signal — populated inside the txn (under the same
+        # BEGIN IMMEDIATE that flipped status to ``done``) so the child-
+        # count query reads consistent state. Emitted after commit so the
+        # bus / asyncio loop never runs while the write lock is held.
+        chain_break_payload: dict | None = None
         with self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 row = conn.execute(
-                    f"SELECT status, {self._team_col}, assignee, title, outcome "
+                    f"SELECT status, {self._team_col}, assignee, title, "
+                    f"outcome, parent_task_id "
                     f"FROM tasks WHERE id=?",
                     (task_id,),
                 ).fetchone()
                 if not row:
                     conn.execute("ROLLBACK")
                     raise TaskNotFound(task_id)
-                current, project_id, assignee, task_title, task_outcome = (
-                    row[0], row[1], row[2], row[3], row[4],
+                (
+                    current, project_id, assignee, task_title, task_outcome,
+                    task_parent_id,
+                ) = (
+                    row[0], row[1], row[2], row[3], row[4], row[5],
                 )
                 if current == status:
                     # No-op transition. Record the event so the audit
@@ -990,6 +1078,27 @@ class Tasks:
                         "blocker_note": blocker_note,
                     },
                 )
+                # Chain-break detection — only on the ``done`` transition.
+                # Counts child tasks (where ``parent_task_id`` = this id)
+                # under the same connection so the read sees the same
+                # snapshot as the UPDATE we just committed. The actual
+                # event emit fires AFTER ``COMMIT`` to avoid running the
+                # bus inside the write txn.
+                if status == "done":
+                    child_count_row = conn.execute(
+                        "SELECT COUNT(*) FROM tasks WHERE parent_task_id=?",
+                        (task_id,),
+                    ).fetchone()
+                    child_count = child_count_row[0] if child_count_row else 0
+                    if child_count == 0:
+                        chain_break_payload = {
+                            "task_id": task_id,
+                            "agent_id": assignee,
+                            "parent_task_id": task_parent_id,
+                            "project": project_id,
+                            "title": task_title,
+                            "ts": datetime.now(timezone.utc).isoformat(),
+                        }
                 conn.execute("COMMIT")
                 emitted_change = (
                     current, status, project_id, assignee,
@@ -1034,6 +1143,30 @@ class Tasks:
                 "task_status_changed",
                 agent=actor,
                 data=payload,
+            )
+        # Chain-break observability signal — fires when a task transitioned
+        # to ``done`` and no child tasks reference it via ``parent_task_id``
+        # (i.e. the agent finished work without handing off). Emitted AFTER
+        # the canonical ``task_status_changed`` event so consumers that
+        # filter on the status change see the canonical event first.
+        #
+        # **Race window**: between COMMIT and this emit, another transaction
+        # COULD insert a child task with parent_task_id=this task. That
+        # child would cause a false-positive chain_break event. Acceptable
+        # for an observability signal — the operator can re-query
+        # workflow_snapshot to see current state. The alternative
+        # (re-check inside another BEGIN IMMEDIATE before emit) trades a
+        # tighter race for two additional lock acquisitions on every done
+        # transition; not worth it for a signal the operator can trivially
+        # verify by re-reading.
+        #
+        # Notification-only; ``_safe_emit`` swallows failures so an absent
+        # bus / dashboard never blocks the underlying task transition.
+        if chain_break_payload is not None:
+            self._safe_emit(
+                "task_completed_without_handoff",
+                agent=actor,
+                data=chain_break_payload,
             )
         return self.get(task_id)  # type: ignore[return-value]
 

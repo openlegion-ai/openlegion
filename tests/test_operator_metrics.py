@@ -186,13 +186,16 @@ class TestSystemMetricsPRJ:
         client = metrics_app["client"]
         resp = client.get("/mesh/system/metrics")
         data = resp.json()
-        # All five new fields exist and are dicts.
+        # All per-agent operator-heartbeat fields exist and are dicts.
+        # ``chain_breaks_24h_count`` is the PR-957 follow-up that closes
+        # the "chain-break signal has no consumer" gap.
         for field in (
             "per_agent_cost_today_usd",
             "per_agent_cost_vs_yesterday_ratio",
             "outcome_rejected_24h_count",
             "execution_failures_24h_count",
             "stale_tasks_24h_count",
+            "chain_breaks_24h_count",
         ):
             assert field in data, f"missing field {field!r}"
             assert isinstance(data[field], dict), f"{field} should be a dict"
@@ -220,6 +223,21 @@ class TestSystemMetricsPRJ:
         cost_tracker = metrics_app["cost_tracker"]
         cost_tracker.track("operator", "claude-3-5-sonnet-20241022", 500, 200)
 
+        # Seed an operator-owned chain-break — without the exclusion
+        # filter in server.py, this would surface in
+        # chain_breaks_24h_count["operator"]. The store method
+        # ``Tasks.chain_breaks_24h`` returns the unfiltered per-assignee
+        # count; the operator exclusion happens at the
+        # ``/mesh/system/metrics`` layer. This makes the exclusion
+        # branch actually exercised.
+        store = metrics_app["tasks_store"]
+        assert store is not None, "tasks_store should be wired in PR-J' fixture"
+        op_task = store.create(
+            creator="operator", assignee="operator", title="operator-self",
+        )
+        store.update_status(op_task["id"], "working", actor="operator")
+        store.update_status(op_task["id"], "done", actor="operator")
+
         client = metrics_app["client"]
         resp = client.get("/mesh/system/metrics")
         data = resp.json()
@@ -230,6 +248,7 @@ class TestSystemMetricsPRJ:
         assert "operator" not in data["outcome_rejected_24h_count"]
         assert "operator" not in data["execution_failures_24h_count"]
         assert "operator" not in data["stale_tasks_24h_count"]
+        assert "operator" not in data["chain_breaks_24h_count"]
 
     def test_outcome_rejected_attribution(self, metrics_app):
         store = metrics_app["tasks_store"]

@@ -1685,3 +1685,395 @@ class TestWorkflowSnapshot:
         # Loose upper bound — MAX_WORKFLOW_CHAIN_DEPTH+1 covers the
         # off-by-one between depth values and row counts.
         assert len(snap_deep["stages"]) <= MAX_WORKFLOW_CHAIN_DEPTH + 1
+
+
+# ── Fix A — Chain-break observability signal ─────────────────────────
+
+
+def test_done_with_no_children_emits_chain_break_event(tmp_path):
+    """Transitioning to ``done`` with no child task referencing this id
+    fires the ``task_completed_without_handoff`` event. Observability-only
+    — the underlying status transition is unaffected."""
+    t = _make_store(tmp_path)
+    _bus, captured = _attach_event_bus(t)
+    rec = t.create(
+        creator="op", assignee="writer", title="standalone work",
+        project_id="proj-x",
+    )
+    t.update_status(rec["id"], "working", actor="writer")
+    t.update_status(rec["id"], "done", actor="writer")
+
+    chain_break = [
+        c for c in captured if c[0] == "task_completed_without_handoff"
+    ]
+    assert len(chain_break) == 1
+    payload = chain_break[0][2]
+    assert payload["task_id"] == rec["id"]
+    assert payload["agent_id"] == "writer"
+    assert payload["parent_task_id"] is None
+    assert payload["project"] == "proj-x"
+    assert payload["title"] == "standalone work"
+    assert "ts" in payload
+    # ``role`` is no longer carried on the payload — the dashboard
+    # resolves role from agent_id via its own fleet metadata, so the
+    # speculative field was dropped (YAGNI).
+    assert "role" not in payload
+
+
+def test_done_with_children_does_not_emit_chain_break(tmp_path):
+    """When a task has at least one child (created via ``parent_task_id``),
+    transitioning the parent to ``done`` must NOT emit the chain-break
+    event — the workflow continued, no break."""
+    t = _make_store(tmp_path)
+    parent = t.create(creator="op", assignee="scout", title="parent")
+    t.create(
+        creator="scout", assignee="writer",
+        title="child", parent_task_id=parent["id"],
+    )
+    # Attach the event bus AFTER both tasks exist so the captured list
+    # only contains events from the transition under test.
+    _bus, captured = _attach_event_bus(t)
+    t.update_status(parent["id"], "working", actor="scout")
+    t.update_status(parent["id"], "done", actor="scout")
+
+    chain_break = [
+        c for c in captured if c[0] == "task_completed_without_handoff"
+    ]
+    assert chain_break == [], (
+        "task with at least one child must not fire chain-break"
+    )
+    # Sanity — the canonical status_changed event still fires.
+    status_changed = [c for c in captured if c[0] == "task_status_changed"]
+    assert len(status_changed) == 2  # working + done
+
+
+def test_failed_terminal_does_not_emit_chain_break(tmp_path):
+    """Only the ``done`` terminal transition emits chain-break. Failed
+    and cancelled transitions are unrelated to the signal — they
+    represent broken / aborted workflows, not silently-ended ones."""
+    t = _make_store(tmp_path)
+    _bus, captured = _attach_event_bus(t)
+    rec = t.create(creator="op", assignee="writer", title="t")
+    t.update_status(rec["id"], "failed", actor="writer")
+
+    chain_break = [
+        c for c in captured if c[0] == "task_completed_without_handoff"
+    ]
+    assert chain_break == []
+
+    # Same for cancelled.
+    rec2 = t.create(creator="op", assignee="writer", title="t2")
+    captured.clear()
+    t.update_status(rec2["id"], "cancelled", actor="op")
+    chain_break = [
+        c for c in captured if c[0] == "task_completed_without_handoff"
+    ]
+    assert chain_break == []
+
+
+def test_done_to_done_noop_does_not_re_emit_chain_break(tmp_path):
+    """A redundant done→done transition is no-op'd by the state machine.
+    The chain-break event must fire EXACTLY ONCE — on the initial
+    working→done transition — not again on the no-op redo."""
+    t = _make_store(tmp_path)
+    rec = t.create(creator="op", assignee="writer", title="t")
+    t.update_status(rec["id"], "working", actor="writer")
+    _bus, captured = _attach_event_bus(t)
+    t.update_status(rec["id"], "done", actor="writer")
+    # Second done call — either no-op'd by state machine OR raises
+    # InvalidStatusTransition; either way, no new chain_break.
+    try:
+        t.update_status(rec["id"], "done", actor="writer")
+    except Exception:
+        pass
+    chain_break = [
+        c for c in captured if c[0] == "task_completed_without_handoff"
+    ]
+    assert len(chain_break) == 1, (
+        f"Expected exactly one chain_break event, got {len(chain_break)}"
+    )
+
+
+def test_workflow_snapshot_flags_terminal_without_children(tmp_path):
+    """A 3-stage chain where stage 2 transitions to ``done`` without
+    creating stage 3 must surface ``terminal_without_children=True`` on
+    stage 2 and ``False`` on stage 1 (which has stage 2 as a child)."""
+    t = _make_store(tmp_path)
+    stage1 = t.create(
+        creator="operator", assignee="scout", title="stage_1",
+    )
+    stage2 = t.create(
+        creator="scout", assignee="writer", title="stage_2",
+        parent_task_id=stage1["id"],
+    )
+    # No stage 3 — stage 2 is the leaf. Walk it to ``done``.
+    t.update_status(stage2["id"], "working", actor="writer")
+    t.update_status(stage2["id"], "done", actor="writer")
+
+    snap = t.workflow_snapshot(stage1["id"])
+    assert snap is not None
+    by_id = {s["task_id"]: s for s in snap["stages"]}
+    assert by_id[stage1["id"]]["terminal_without_children"] is False
+    assert by_id[stage2["id"]]["terminal_without_children"] is True
+
+
+def test_workflow_snapshot_pending_stage_not_flagged(tmp_path):
+    """``terminal_without_children`` only fires for the ``done`` status.
+    A pending or working stage with no children is just an in-flight
+    stage, not a chain break."""
+    t = _make_store(tmp_path)
+    stage1 = t.create(
+        creator="op", assignee="scout", title="stage_1",
+    )
+    snap = t.workflow_snapshot(stage1["id"])
+    assert snap is not None
+    assert len(snap["stages"]) == 1
+    assert snap["stages"][0]["terminal_without_children"] is False
+
+
+def test_workflow_snapshot_terminal_flag_correct_at_limit_boundary(tmp_path):
+    """A done stage at the workflow_snapshot limit boundary must NOT
+    falsely report terminal_without_children=True when its child exists
+    beyond the limit cap. The fix queries the full tasks table
+    independently of the CTE result."""
+    t = _make_store(tmp_path)
+    # Build a chain longer than the limit. Use limit=3 for tractability.
+    stages = []
+    parent = None
+    for i in range(5):
+        rec = t.create(
+            creator="op" if i == 0 else stages[-1]["assignee"],
+            assignee=f"worker_{i}", title=f"stage_{i}",
+            parent_task_id=parent,
+        )
+        stages.append(rec)
+        parent = rec["id"]
+    # Mark stage 0, 1, 2 done. Stages 3, 4 are pending.
+    for i in range(3):
+        t.update_status(stages[i]["id"], "working", actor=f"worker_{i}")
+        t.update_status(stages[i]["id"], "done", actor=f"worker_{i}")
+    # Snapshot with limit=3 — stage 2 is at the boundary; its child
+    # (stage 3) exists in tasks but falls off the snapshot.
+    snap = t.workflow_snapshot(stages[0]["id"], limit=3)
+    assert snap is not None
+    assert len(snap["stages"]) == 3
+    by_id = {s["task_id"]: s for s in snap["stages"]}
+    # Stage 2 has stage 3 as a child in the FULL tasks table, even
+    # though stage 3 doesn't appear in the limited snapshot.
+    assert by_id[stages[2]["id"]]["terminal_without_children"] is False, (
+        "Stage at limit boundary must check full tasks table for children"
+    )
+    # Stage 0 and 1 also have children — both should be False.
+    assert by_id[stages[0]["id"]]["terminal_without_children"] is False
+    assert by_id[stages[1]["id"]]["terminal_without_children"] is False
+
+
+def test_done_with_failed_child_does_not_emit_chain_break(tmp_path):
+    """If hand_off created a child task that subsequently failed,
+    chain_break must NOT fire when the parent transitions to done —
+    the chain DID continue, just to a failed downstream stage. The
+    chain-break signal is about MISSING handoffs, not failed work."""
+    t = _make_store(tmp_path)
+    parent = t.create(creator="op", assignee="scout", title="parent")
+    child = t.create(
+        creator="scout", assignee="writer",
+        title="child", parent_task_id=parent["id"],
+    )
+    t.update_status(child["id"], "working", actor="writer")
+    t.update_status(child["id"], "failed", actor="writer")
+    _bus, captured = _attach_event_bus(t)
+    t.update_status(parent["id"], "working", actor="scout")
+    t.update_status(parent["id"], "done", actor="scout")
+    chain_break = [
+        c for c in captured if c[0] == "task_completed_without_handoff"
+    ]
+    assert chain_break == [], (
+        "task with a failed child still counts as having a handoff"
+    )
+
+
+def test_done_with_cancelled_child_does_not_emit_chain_break(tmp_path):
+    """Same semantics as failed — a cancelled child counts as a
+    handoff. The chain-break signal flags MISSING handoffs only."""
+    t = _make_store(tmp_path)
+    parent = t.create(creator="op", assignee="scout", title="parent")
+    child = t.create(
+        creator="scout", assignee="writer",
+        title="child", parent_task_id=parent["id"],
+    )
+    t.update_status(child["id"], "cancelled", actor="op")
+    _bus, captured = _attach_event_bus(t)
+    t.update_status(parent["id"], "working", actor="scout")
+    t.update_status(parent["id"], "done", actor="scout")
+    chain_break = [
+        c for c in captured if c[0] == "task_completed_without_handoff"
+    ]
+    assert chain_break == []
+
+
+def test_concurrent_done_transitions_emit_chain_break_exactly_once(tmp_path):
+    """Two actors racing to mark the same task done — BEGIN IMMEDIATE
+    serializes them, so exactly one transition succeeds and exactly
+    one chain_break fires. The other call hits the working→done
+    state-machine guard (current=done, status=done is a no-op) or
+    fails outright."""
+    import threading
+    t = _make_store(tmp_path)
+    rec = t.create(creator="op", assignee="writer", title="t")
+    t.update_status(rec["id"], "working", actor="writer")
+    _bus, captured = _attach_event_bus(t)
+
+    errors: list[Exception] = []
+
+    def race(actor: str) -> None:
+        try:
+            t.update_status(rec["id"], "done", actor=actor)
+        except Exception as e:
+            errors.append(e)
+
+    threads = [
+        threading.Thread(target=race, args=(f"writer_{i}",))
+        for i in range(4)
+    ]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    chain_break = [
+        c for c in captured if c[0] == "task_completed_without_handoff"
+    ]
+    assert len(chain_break) == 1, (
+        f"Expected exactly one chain_break under contention, "
+        f"got {len(chain_break)} (errors: {errors})"
+    )
+
+
+# ── Fix A2 — chain_breaks_24h aggregate for /mesh/system/metrics ──────
+
+
+def test_chain_breaks_24h_returns_per_assignee(tmp_path):
+    """chain_breaks_24h returns a dict of {assignee: count} for done
+    tasks without children, within the time window, without outcome."""
+    t = _make_store(tmp_path)
+    # Two chain-breaks on the same agent.
+    for _ in range(2):
+        rec = t.create(creator="op", assignee="writer", title="t")
+        t.update_status(rec["id"], "working", actor="writer")
+        t.update_status(rec["id"], "done", actor="writer")
+    # One chain-break on a different agent.
+    rec = t.create(creator="op", assignee="validator", title="t")
+    t.update_status(rec["id"], "working", actor="validator")
+    t.update_status(rec["id"], "done", actor="validator")
+    breaks = t.chain_breaks_24h(since=time.time() - 86400)
+    assert breaks == {"writer": 2, "validator": 1}
+
+
+def test_chain_breaks_24h_excludes_tasks_with_children(tmp_path):
+    """A done task with at least one child is NOT a chain-break."""
+    t = _make_store(tmp_path)
+    parent = t.create(creator="op", assignee="scout", title="p")
+    t.create(
+        creator="scout", assignee="writer",
+        title="c", parent_task_id=parent["id"],
+    )
+    t.update_status(parent["id"], "working", actor="scout")
+    t.update_status(parent["id"], "done", actor="scout")
+    breaks = t.chain_breaks_24h(since=time.time() - 86400)
+    assert "scout" not in breaks
+
+
+def test_chain_breaks_24h_excludes_outcome_set_tasks(tmp_path):
+    """A done task whose outcome was set by the operator is no longer
+    a chain-break — the operator already actioned it."""
+    t = _make_store(tmp_path)
+    rec = t.create(creator="op", assignee="writer", title="t")
+    t.update_status(rec["id"], "working", actor="writer")
+    t.update_status(rec["id"], "done", actor="writer")
+    # Pre-outcome: counted.
+    breaks_pre = t.chain_breaks_24h(since=time.time() - 86400)
+    assert breaks_pre.get("writer") == 1
+    # Set outcome — should be removed from the count.
+    t.set_outcome(rec["id"], "acknowledged", actor="op")
+    breaks_post = t.chain_breaks_24h(since=time.time() - 86400)
+    assert "writer" not in breaks_post
+
+
+def test_chain_breaks_24h_respects_time_window(tmp_path):
+    """Tasks updated before the cutoff are excluded."""
+    t = _make_store(tmp_path)
+    rec = t.create(creator="op", assignee="writer", title="old")
+    t.update_status(rec["id"], "working", actor="writer")
+    t.update_status(rec["id"], "done", actor="writer")
+    # Cutoff in the future — nothing inside window.
+    breaks = t.chain_breaks_24h(since=time.time() + 3600)
+    assert breaks == {}
+
+
+def test_chain_breaks_24h_uses_completed_at_not_updated_at(tmp_path):
+    """The 24h window must be measured against completed_at, not
+    updated_at. A task completed >24h ago that has any later metadata
+    write (e.g., blocker_note set, or artifact added) must NOT
+    re-enter the 24h window."""
+    import time as _time
+    t = _make_store(tmp_path)
+    rec = t.create(creator="op", assignee="writer", title="t")
+    t.update_status(rec["id"], "working", actor="writer")
+    t.update_status(rec["id"], "done", actor="writer")
+    # Force completed_at backwards by 48 hours via direct DB write —
+    # simulates an old chain-break.
+    with t._conn() as conn:
+        conn.execute(
+            "UPDATE tasks SET completed_at = ?, updated_at = ? "
+            "WHERE id = ?",
+            (_time.time() - 48 * 3600, _time.time() - 48 * 3600, rec["id"]),
+        )
+    # Pre-condition: outside window.
+    breaks = t.chain_breaks_24h(since=_time.time() - 86400)
+    assert "writer" not in breaks
+    # Touch updated_at (simulate a metadata write) — must NOT bring
+    # the task back into the window.
+    with t._conn() as conn:
+        conn.execute(
+            "UPDATE tasks SET updated_at = ? WHERE id = ?",
+            (_time.time(), rec["id"]),
+        )
+    breaks_after = t.chain_breaks_24h(since=_time.time() - 86400)
+    assert "writer" not in breaks_after, (
+        "completed_at is the canonical window field — a later "
+        "updated_at write must not retroactively include the task"
+    )
+
+
+def test_previous_task_id_chain_does_not_suppress_chain_break(tmp_path):
+    """``previous_task_id`` represents a retry/rework chain, not a
+    handoff chain. A task that has a retry follower (linked via
+    previous_task_id) but no child (linked via parent_task_id) still
+    fires chain_break — the workflow chain remains broken.
+    """
+    t = _make_store(tmp_path)
+    _bus, captured = _attach_event_bus(t)
+    original = t.create(creator="op", assignee="writer", title="t")
+    t.update_status(original["id"], "working", actor="writer")
+    t.update_status(original["id"], "done", actor="writer")
+    # Rate it ``rework`` so the helper can spawn a follow-up linked via
+    # previous_task_id (NOT parent_task_id). previous_task_id ≠ child
+    # relationship; the chain_break that fired on the original must NOT
+    # be retracted by the retry being created.
+    t.set_outcome(original["id"], "rework", "needs another pass", actor="op")
+    rework = t.create_rework_task(
+        original["id"], "needs another pass", actor="op",
+    )
+    # Sanity — the rework row is linked via previous_task_id (rework
+    # chain), not parent_task_id (workflow handoff chain).
+    assert rework["previous_task_id"] == original["id"]
+    chain_break = [
+        c for c in captured if c[0] == "task_completed_without_handoff"
+    ]
+    assert len(chain_break) == 1, (
+        "chain_break must fire on done-without-children regardless "
+        "of previous_task_id chains"
+    )
+    # Aggregate metric reflects the same shape: the chain-break is gone
+    # from the live count only because the rework outcome was set on
+    # the original (outcome IS NULL filter), NOT because the rework
+    # row exists. The event fired and remains in the captured stream.
