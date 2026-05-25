@@ -3036,24 +3036,27 @@ def create_mesh_app(
         # ``create_custom_agent`` / ``edit-soft`` (Bug 3, "silent model
         # rejection"): without this the slot starts and dies on its
         # first LLM call with no surfaced reason.
+        #
+        # Validation and the creation site below BOTH route through
+        # ``resolve_slot_model`` so the model we validate is exactly the
+        # model we end up handing to the container. P1.1 — see helper
+        # docstring for the precedence rules and the None-coercion
+        # contract.
+        from src.shared.models import resolve_slot_model
+        _cfg_for_resolve = _load_config()
+        _default_model_for_resolve = _cfg_for_resolve.get(
+            "llm", {},
+        ).get("default_model", "openai/gpt-4o-mini")
         if credential_vault is not None:
-            _cfg_for_resolve = _load_config()
-            _default_model_for_resolve = _cfg_for_resolve.get(
-                "llm", {},
-            ).get("default_model", "openai/gpt-4o-mini")
             _seen_models: set[str] = set()
             for slot_name, slot_def in tpl_agents.items():
-                # Per-slot effective model = override > top-level
-                # model_override > template-default > config default.
-                _override = (agent_overrides or {}).get(slot_name) or {}
-                if "model" in _override:
-                    _slot_model = _override["model"]
-                elif model_override:
-                    _slot_model = model_override
-                else:
-                    _slot_model = slot_def.get(
-                        "model", _default_model_for_resolve,
-                    ).replace("{default_model}", _default_model_for_resolve)
+                _slot_model = resolve_slot_model(
+                    slot_name,
+                    slot_def,
+                    agent_overrides,
+                    model_override,
+                    _default_model_for_resolve,
+                )
                 if not _slot_model or _slot_model in _seen_models:
                     continue
                 _seen_models.add(_slot_model)
@@ -3105,7 +3108,22 @@ def create_mesh_app(
 
         for agent_name in created_names:
             acfg = agents_cfg.get(agent_name, {})
-            agent_model = model_override or acfg.get("model", default_model)
+            # P1.1 — resolve via the same helper used at validation so
+            # there's no precedence drift. ``_apply_template`` already
+            # wrote the slot-override-or-template-default model to acfg
+            # (no awareness of the top-level model_override), so reading
+            # ``slot_def`` straight from ``tpl_agents`` gives us the
+            # untouched template view that ``resolve_slot_model`` needs
+            # to apply the canonical precedence
+            # (slot override > top-level > template default > config default).
+            slot_def = tpl_agents.get(agent_name, {})
+            agent_model = resolve_slot_model(
+                agent_name,
+                slot_def,
+                agent_overrides,
+                model_override,
+                default_model,
+            )
             skills_dir = str(
                 (container_manager.project_root / "skills" / agent_name).resolve()
             ) if container_manager.project_root else ""

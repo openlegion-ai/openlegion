@@ -1201,15 +1201,24 @@ def _apply_template(
             existing_cfg = yaml.safe_load(f) or {}
         existing_agents = set(existing_cfg.get("agents", {}).keys())
 
+    # Lazy import — keeps the CLI-only path from pulling in shared/models
+    # at module-import time (template loader runs from setup wizard too).
+    from src.shared.models import resolve_slot_model
     for agent_name, agent_def in tpl_agents.items():
         agent_name = _validate_agent_name(agent_name)
         if agent_name in existing_agents:
             click.echo(f"  Skipping '{agent_name}' — agent already exists")
             continue
         per_agent_override = overrides.get(agent_name) or {}
-        model = agent_def.get("model", default_model).replace("{default_model}", default_model)
-        if "model" in per_agent_override:
-            model = per_agent_override["model"]
+        # P1.2 — route through the shared helper so a slot with
+        # ``model: null`` (explicit None) coerces to the config default
+        # instead of crashing on ``.replace()``. ``_apply_template`` has
+        # no top-level model_override channel (the mesh route does), so
+        # pass an empty string for that argument; precedence is
+        # slot override > template default > config default.
+        model = resolve_slot_model(
+            agent_name, agent_def, overrides, "", default_model,
+        )
         instructions = agent_def.get("instructions", "") or agent_def.get("system_prompt", "")
         if "instructions" in per_agent_override:
             instructions = per_agent_override["instructions"]
@@ -1301,7 +1310,11 @@ def _create_agent_from_template(
     name = _validate_agent_name(name)
     cfg = _load_config()
     default_model = cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
-    resolved_model = model or agent_def.get("model", default_model)
+    # P1.2 — coerce explicit ``model: null`` (None) to the config
+    # default before ``.replace()``. ``dict.get(key, default)`` returns
+    # the key's actual value when it exists EVEN IF that value is None;
+    # the default only applies when the key is ABSENT.
+    resolved_model = model or agent_def.get("model") or default_model
     resolved_model = resolved_model.replace("{default_model}", default_model)
 
     # BYOK-safety: reject up front if the resolved model's provider

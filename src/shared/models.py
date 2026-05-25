@@ -562,3 +562,49 @@ def get_available_providers() -> set[str]:
         elif tail == "ANTHROPIC_OAUTH":
             providers.add("anthropic")
     return providers
+
+
+def resolve_slot_model(
+    slot_name: str,
+    slot_def: dict,
+    agent_overrides: dict[str, dict] | None,
+    model_override: str,
+    default_model: str,
+) -> str:
+    """Resolve the effective model for a single template slot.
+
+    Precedence (highest to lowest):
+
+    1. Per-slot override from ``agent_overrides[slot_name]["model"]``.
+    2. Top-level ``model_override`` (legacy template-wide override).
+    3. Template's per-slot ``slot_def["model"]``.
+    4. ``default_model`` (config-level fallback).
+
+    Both the mesh route ``apply_template`` (validation site) and
+    ``_apply_template`` (creation site) MUST resolve a slot's model the
+    same way — otherwise an operator could bypass validation by setting
+    a slot override (validated) while a top-level ``model_override``
+    (used at creation) produces a different result.
+
+    Defensive None handling: ``dict.get("model", default)`` returns
+    ``None`` when the key exists with a ``None`` value (e.g. a template
+    slot with ``model: null``). The default is only used when the key is
+    ABSENT. This helper coerces ``None`` / empty string to
+    ``default_model`` so the downstream ``.replace("{default_model}",
+    default_model)`` substitution never crashes with
+    ``AttributeError: 'NoneType' object has no attribute 'replace'``.
+
+    The ``{default_model}`` sentinel is substituted last so a template
+    string like ``"{default_model}"`` resolves to whatever the config
+    default is.
+    """
+    override = (agent_overrides or {}).get(slot_name) or {}
+    raw = override.get("model")
+    if isinstance(raw, str) and raw.strip():
+        return raw
+    if model_override:
+        return model_override
+    tmpl_model = slot_def.get("model")
+    if not isinstance(tmpl_model, str) or not tmpl_model.strip():
+        tmpl_model = default_model
+    return tmpl_model.replace("{default_model}", default_model)

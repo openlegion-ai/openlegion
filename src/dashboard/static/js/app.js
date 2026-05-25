@@ -3237,9 +3237,19 @@ function dashboard() {
       // folds into Pending so it stays visible on the board. Without
       // this fold, ``accepted`` rows render in zero columns and the
       // operator can't see (or cancel) them.
+      //
+      // Codex P1.5 (Option A): ``failed`` tasks fold into Done so they
+      // remain visible to the operator. Without this fold they render
+      // in zero columns and disappear from at-a-glance state. The card
+      // visual distinguishes done vs failed via a red border + status
+      // badge so the operator sees the failure (and the blocker_note)
+      // without having to drill in.
       const tasks = this.workplaceTasks || [];
       if (status === 'pending') {
         return tasks.filter(t => t.status === 'pending' || t.status === 'accepted');
+      }
+      if (status === 'done') {
+        return tasks.filter(t => t.status === 'done' || t.status === 'failed');
       }
       return tasks.filter(t => t.status === status);
     },

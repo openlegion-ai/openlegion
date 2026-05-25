@@ -3449,9 +3449,20 @@ class TestChatAutoCloseErrorPropagation:
             "set_task_status MUST receive ``error=`` for chain to "
             "propagate the rejection reason to blocker_note"
         )
-        assert "config_error" in err_kwarg or "OAuth-allowed models" in err_kwarg, (
-            "Expected the LLMConfigError message to flow into the error "
-            f"kwarg, got: {err_kwarg!r}"
+        # The PR contract is that BOTH pieces flow through: the
+        # ``config_error`` prefix (so downstream UI can branch on it) AND
+        # the actual LLMConfigError message content (so the operator
+        # learns WHY their model was rejected). A bare ``config_error``
+        # label with no body is exactly the regression this test guards
+        # against — assert both pieces, not "either".
+        assert "config_error" in err_kwarg, (
+            f"expected ``config_error`` prefix, got: {err_kwarg!r}"
+        )
+        assert "OAuth-allowed models" in err_kwarg, (
+            "expected the LLMConfigError message content to flow through — "
+            "a generic 'config_error' label with no body means the actual "
+            "rejection reason isn't reaching the operator; "
+            f"got: {err_kwarg!r}"
         )
         # Bug 3 truncation contract: failure-reason text is sliced to 400
         # chars in _chat_result_failure_reason; the chain-tail _auto_close
