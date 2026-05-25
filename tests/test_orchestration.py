@@ -336,7 +336,13 @@ def test_terminal_transition_sets_completed_and_retention(tmp_path):
     )
 
 
-def test_blocker_note_attaches_only_on_blocked(tmp_path):
+def test_blocker_note_clears_on_non_persisting_transition(tmp_path):
+    """Transitions OUT of (blocked|failed) — i.e. to working/done/cancelled
+    — clear the column. Both ``blocked`` (recoverable) and ``failed``
+    (terminal, post Bug 3 broadening) persist the note; everything
+    else clears it. See ``test_update_status_failed_persists_blocker_note``
+    and ``test_update_status_cancelled_does_not_carry_blocker_note`` for
+    the persistence contracts."""
     t = _make_store(tmp_path)
     rec = t.create(creator="c", assignee="a", title="t")
     t.update_status(rec["id"], "working", actor="a")

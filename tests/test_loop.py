@@ -3365,3 +3365,95 @@ class TestOutboundEffectLazyGuard:
             "outbound-effect turn must close as 'done', not 'failed'; "
             f"calls: {loop._auto_close_task.await_args_list}"
         )
+
+
+# === Bug 3 chain pin: chat() error → blocker_note wiring ===
+
+
+class TestChatAutoCloseErrorPropagation:
+    """Bug 3 chain pin. When an LLM error fires during a ``chat()`` turn
+    that rode an ``x-task-id`` wake chain, the auto-close MUST pass the
+    rejection reason through ``mesh_client.set_task_status(error=...)``.
+
+    The 6-step propagation chain is:
+        LLMConfigError raised inside ``_chat_inner``'s ``llm.chat`` call
+            → ``_chat_inner`` catches and returns ``{config_error: True, ...}``
+            → ``chat()`` post-call calls ``_chat_result_failure_reason``
+            → ``chat()`` calls ``_auto_close_task(task_id, "failed", error=reason)``
+            → ``_auto_close_task`` calls ``mesh_client.set_task_status(error=reason)``
+            → ``POST /tasks/{id}/status`` → ``update_status`` promotes to ``blocker_note``.
+
+    Each end has unit tests (see ``test_execute_task_catches_llm_config_error``
+    on the loop side, ``test_update_status_failed_persists_blocker_note``
+    on the orchestration side). This class pins the CONNECTING wiring
+    inside ``chat()`` itself so a refactor cannot break it silently.
+    """
+
+    @pytest.mark.asyncio
+    async def test_chat_with_task_id_propagates_llm_config_error_to_auto_close(
+        self,
+    ):
+        """When chat() runs a task_id-bearing turn and the LLM raises
+        LLMConfigError, mesh_client.set_task_status must be called with
+        status='failed' AND error= containing the config_error reason.
+        The mesh-side endpoint promotes that to blocker_note. Without
+        this wiring the operator sees a bare 'failed' with no reason."""
+        from src.shared.errors import LLMConfigError
+
+        loop = _make_loop()
+        # Force the LLM call inside _chat_inner to raise LLMConfigError.
+        # _chat_inner catches it and returns a dict tagged config_error=True;
+        # chat() then routes that through _chat_result_failure_reason →
+        # _auto_close_task('failed', error=...) → set_task_status.
+        loop.llm.chat = AsyncMock(
+            side_effect=LLMConfigError(
+                "OAuth-allowed models: ['openai/gpt-5']; got 'openai/gpt-4o-mini'",
+                provider="openai",
+                model="openai/gpt-4o-mini",
+                allowed_models={"openai/gpt-5", "openai/gpt-5-mini"},
+            ),
+        )
+        loop.skills.get_tool_definitions = MagicMock(return_value=[])
+
+        # Spy on mesh_client.set_task_status — the terminal sink of the
+        # propagation chain. The mesh-side handler reads the ``error``
+        # kwarg and promotes it to blocker_note.
+        loop.mesh_client.set_task_status = AsyncMock(
+            return_value={"status": "failed"},
+        )
+
+        # Drive chat() with a task_id riding the wake chain. LLMConfigError
+        # does NOT propagate out (caught inside _chat_inner) — chat returns
+        # a config_error-tagged dict instead.
+        result = await loop.chat("do the thing", task_id="task_abc")
+        assert result.get("config_error") is True, (
+            "_chat_inner must tag the result with config_error=True so "
+            "chat()'s post-call failure-reason scan can detect it"
+        )
+
+        # Verify the wiring: set_task_status was called with status=failed
+        # AND error= containing the config_error string. The error is what
+        # downstream is promoted to blocker_note.
+        calls = loop.mesh_client.set_task_status.await_args_list
+        failed_calls = [
+            c for c in calls
+            if (len(c.args) >= 2 and c.args[1] == "failed")
+            or c.kwargs.get("status") == "failed"
+        ]
+        assert len(failed_calls) >= 1, (
+            f"Expected at least one set_task_status(failed) call, "
+            f"got: {calls}"
+        )
+        err_kwarg = failed_calls[-1].kwargs.get("error")
+        assert err_kwarg is not None, (
+            "set_task_status MUST receive ``error=`` for chain to "
+            "propagate the rejection reason to blocker_note"
+        )
+        assert "config_error" in err_kwarg or "OAuth-allowed models" in err_kwarg, (
+            "Expected the LLMConfigError message to flow into the error "
+            f"kwarg, got: {err_kwarg!r}"
+        )
+        # Bug 3 truncation contract: failure-reason text is sliced to 400
+        # chars in _chat_result_failure_reason; the chain-tail _auto_close
+        # truncation cap is 500 chars. Either way the kwarg stays bounded.
+        assert len(err_kwarg) <= 500
