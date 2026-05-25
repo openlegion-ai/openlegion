@@ -752,6 +752,144 @@ async def test_auth_failure_endpoint_internal_caller_bypasses_rate_limit(
         bb.close()
 
 
+def test_apply_template_endpoint_rejects_override_outside_oauth_allowlist(
+    tmp_path, _mesh_env, container_mgr, monkeypatch,
+):
+    """Bug 3 follow-up: POST /mesh/templates/apply must validate every
+    effective model with ``is_model_compatible`` UPFRONT — before any
+    agent is created. An OAuth-only deployment + a non-OAuth-allowed
+    override should reject with 400 and zero containers started."""
+    _clear_system_env(monkeypatch)
+    monkeypatch.setenv(
+        "OPENLEGION_SYSTEM_OPENAI_OAUTH",
+        '{"access_token":"tok","refresh_token":"ref"}',
+    )
+    vault = CredentialVault()
+
+    # Stub the template loader so we don't depend on the on-disk YAMLs.
+    fake_template = {
+        "minteam": {
+            "description": "stub",
+            "agents": {
+                "worker": {
+                    "role": "worker",
+                    "model": "openai/gpt-5",  # in OAuth allowlist
+                    "instructions": "do work",
+                },
+            },
+        },
+    }
+    monkeypatch.setattr("src.cli.config._load_templates", lambda: fake_template)
+
+    client, bb = _build_mesh_app(tmp_path, container_mgr, vault)
+    try:
+        resp = client.post(
+            "/mesh/fleet/apply",
+            json={
+                "spawned_by": "operator",
+                "template": "minteam",
+                "agent_overrides": {
+                    "worker": {"model": "openai/gpt-4.1-mini"},  # NOT in OAuth allowlist
+                },
+            },
+        )
+        assert resp.status_code == 400, resp.text
+        detail = resp.json()["detail"]
+        assert "OAuth-allowed models" in detail
+        # Slot name is named for actionable error.
+        assert "worker" in detail
+        # No agent was created.
+        container_mgr.start_agent.assert_not_called()
+    finally:
+        bb.close()
+
+
+def test_apply_template_endpoint_rejects_template_default_when_incompatible(
+    tmp_path, _mesh_env, container_mgr, monkeypatch,
+):
+    """Even WITHOUT overrides, the template-default model is validated
+    upfront. OAuth-only deployment + template defaulting to
+    openai/gpt-4o-mini (not in OAuth allowlist) → 400."""
+    _clear_system_env(monkeypatch)
+    monkeypatch.setenv(
+        "OPENLEGION_SYSTEM_OPENAI_OAUTH",
+        '{"access_token":"tok","refresh_token":"ref"}',
+    )
+    vault = CredentialVault()
+
+    fake_template = {
+        "badtmpl": {
+            "description": "stub",
+            "agents": {
+                "worker": {
+                    "role": "worker",
+                    "model": "openai/gpt-4o-mini",  # NOT in OAuth allowlist
+                    "instructions": "do work",
+                },
+            },
+        },
+    }
+    monkeypatch.setattr("src.cli.config._load_templates", lambda: fake_template)
+
+    client, bb = _build_mesh_app(tmp_path, container_mgr, vault)
+    try:
+        resp = client.post(
+            "/mesh/fleet/apply",
+            json={"spawned_by": "operator", "template": "badtmpl"},
+        )
+        assert resp.status_code == 400, resp.text
+        detail = resp.json()["detail"]
+        assert "OAuth-allowed models" in detail
+        container_mgr.start_agent.assert_not_called()
+    finally:
+        bb.close()
+
+
+def test_apply_template_endpoint_top_level_model_override_validated(
+    tmp_path, _mesh_env, container_mgr, monkeypatch,
+):
+    """Top-level ``model`` (the legacy override that applies to every slot)
+    is validated upfront too. OAuth-only deployment + top-level
+    incompatible model → 400."""
+    _clear_system_env(monkeypatch)
+    monkeypatch.setenv(
+        "OPENLEGION_SYSTEM_OPENAI_OAUTH",
+        '{"access_token":"tok","refresh_token":"ref"}',
+    )
+    vault = CredentialVault()
+
+    fake_template = {
+        "okt": {
+            "description": "stub",
+            "agents": {
+                "worker": {
+                    "role": "worker",
+                    "model": "openai/gpt-5",  # template default IS OK
+                    "instructions": "do work",
+                },
+            },
+        },
+    }
+    monkeypatch.setattr("src.cli.config._load_templates", lambda: fake_template)
+
+    client, bb = _build_mesh_app(tmp_path, container_mgr, vault)
+    try:
+        resp = client.post(
+            "/mesh/fleet/apply",
+            json={
+                "spawned_by": "operator",
+                "template": "okt",
+                "model": "openai/gpt-4o-mini",  # forces all slots → BAD
+            },
+        )
+        assert resp.status_code == 400, resp.text
+        detail = resp.json()["detail"]
+        assert "OAuth-allowed models" in detail
+        container_mgr.start_agent.assert_not_called()
+    finally:
+        bb.close()
+
+
 def test_profile_endpoint_surfaces_quarantine_fields(
     tmp_path, _mesh_env, monkeypatch,
 ):
@@ -801,5 +939,256 @@ def test_profile_endpoint_surfaces_quarantine_fields(
         assert body["quarantined"] is True
         assert body["quarantine_reason"] is not None
         assert body["consecutive_auth_failures"] == 3
+    finally:
+        bb.close()
+
+
+# ── Codex P1.1 / P1.2: slot model resolution helper ────────
+
+
+def test_resolve_slot_model_slot_override_wins_over_top_level():
+    """Slot override beats top-level model_override (precedence rule 1)."""
+    from src.shared.models import resolve_slot_model
+    slot_def = {"model": "openai/gpt-4o-mini"}
+    out = resolve_slot_model(
+        slot_name="worker",
+        slot_def=slot_def,
+        agent_overrides={"worker": {"model": "anthropic/claude-sonnet-4-5-20250929"}},
+        model_override="openai/gpt-5",  # would otherwise win
+        default_model="openai/gpt-4o-mini",
+    )
+    assert out == "anthropic/claude-sonnet-4-5-20250929"
+
+
+def test_resolve_slot_model_top_level_beats_template_default():
+    """Top-level model_override beats template default (precedence rule 2)."""
+    from src.shared.models import resolve_slot_model
+    slot_def = {"model": "openai/gpt-4o-mini"}
+    out = resolve_slot_model(
+        slot_name="worker",
+        slot_def=slot_def,
+        agent_overrides=None,
+        model_override="openai/gpt-5",
+        default_model="openai/gpt-4o-mini",
+    )
+    assert out == "openai/gpt-5"
+
+
+def test_resolve_slot_model_template_default_used_when_no_override():
+    """Template default applies when neither override is set."""
+    from src.shared.models import resolve_slot_model
+    slot_def = {"model": "openai/gpt-4o-mini"}
+    out = resolve_slot_model(
+        slot_name="worker",
+        slot_def=slot_def,
+        agent_overrides=None,
+        model_override="",
+        default_model="anthropic/claude-sonnet-4-5-20250929",
+    )
+    assert out == "openai/gpt-4o-mini"
+
+
+def test_resolve_slot_model_config_default_when_template_absent():
+    """Falls through to config default when slot_def has no model key."""
+    from src.shared.models import resolve_slot_model
+    out = resolve_slot_model(
+        slot_name="worker",
+        slot_def={},
+        agent_overrides=None,
+        model_override="",
+        default_model="anthropic/claude-sonnet-4-5-20250929",
+    )
+    assert out == "anthropic/claude-sonnet-4-5-20250929"
+
+
+def test_resolve_slot_model_handles_null_model_in_slot_def():
+    """P1.2 — a template slot with ``model: null`` (Python None) must
+    coerce to the config default. Without this, ``dict.get('model',
+    default)`` returns None (because the KEY is present), and the
+    downstream ``.replace()`` raises ``AttributeError``."""
+    from src.shared.models import resolve_slot_model
+    out = resolve_slot_model(
+        slot_name="worker",
+        slot_def={"model": None},  # explicit Python None
+        agent_overrides=None,
+        model_override="",
+        default_model="openai/gpt-4o-mini",
+    )
+    assert out == "openai/gpt-4o-mini"
+
+
+def test_resolve_slot_model_substitutes_default_model_sentinel():
+    """A template string ``"{default_model}"`` is replaced with the
+    config default after precedence resolution."""
+    from src.shared.models import resolve_slot_model
+    out = resolve_slot_model(
+        slot_name="worker",
+        slot_def={"model": "{default_model}"},
+        agent_overrides=None,
+        model_override="",
+        default_model="anthropic/claude-sonnet-4-5-20250929",
+    )
+    assert out == "anthropic/claude-sonnet-4-5-20250929"
+
+
+def test_resolve_slot_model_empty_slot_override_falls_through():
+    """A slot override with empty/whitespace ``model`` falls through to
+    the next precedence layer rather than emitting an empty string.
+    Prevents accidental ``{"worker": {"model": ""}}`` from breaking
+    container start."""
+    from src.shared.models import resolve_slot_model
+    out = resolve_slot_model(
+        slot_name="worker",
+        slot_def={"model": "openai/gpt-5"},
+        agent_overrides={"worker": {"model": ""}},
+        model_override="",
+        default_model="openai/gpt-4o-mini",
+    )
+    assert out == "openai/gpt-5"
+
+
+def test_apply_template_validation_matches_creation_resolution(
+    tmp_path, _mesh_env, container_mgr, monkeypatch,
+):
+    """P1.1 — validation and agent creation MUST resolve the per-slot
+    model the same way. Otherwise an operator could set a slot override
+    (validated) while a top-level model_override (used at creation)
+    produces a different result, and an incompatible model bypasses
+    the up-front credential check.
+
+    Setup: OAuth-only OpenAI deployment. Template slot defaults to
+    ``openai/gpt-5`` (in OAuth allowlist). Operator supplies a slot
+    override of ``openai/gpt-5-mini`` (also allowed) AND a top-level
+    model_override of ``openai/gpt-4.1-mini`` (NOT in OAuth allowlist).
+
+    The canonical precedence is slot override > top-level. If both
+    sites obey it, validation passes (slot model is allowed), creation
+    starts the container with the slot model (allowed), end-to-end ok.
+
+    If validation and creation drift (e.g. validation honors slot
+    override but creation falls back to top-level), creation would
+    silently hand the container an incompatible model and the slot
+    would die on first LLM call with no surfaced reason.
+    """
+    _clear_system_env(monkeypatch)
+    monkeypatch.setenv(
+        "OPENLEGION_SYSTEM_OPENAI_OAUTH",
+        '{"access_token":"tok","refresh_token":"ref"}',
+    )
+    vault = CredentialVault()
+
+    fake_template = {
+        "tmpl": {
+            "description": "stub",
+            "agents": {
+                "worker": {
+                    "role": "worker",
+                    "model": "openai/gpt-5",  # template default — allowed
+                    "instructions": "do work",
+                },
+            },
+        },
+    }
+    monkeypatch.setattr("src.cli.config._load_templates", lambda: fake_template)
+
+    client, bb = _build_mesh_app(tmp_path, container_mgr, vault)
+    try:
+        resp = client.post(
+            "/mesh/fleet/apply",
+            json={
+                "spawned_by": "operator",
+                "template": "tmpl",
+                # Slot override is OAuth-allowed — should win.
+                "agent_overrides": {
+                    "worker": {"model": "openai/gpt-5-mini"},
+                },
+                # Top-level is NOT OAuth-allowed. If creation lets
+                # this win over the slot override, the slot starts
+                # dead. If precedence holds, the slot override wins
+                # at BOTH validation and creation and we're fine.
+                "model": "openai/gpt-4.1-mini",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        # The container manager call records the model that was
+        # actually used at creation — assert it matches what
+        # validation accepted (the slot override).
+        container_mgr.start_agent.assert_called_once()
+        call_kwargs = container_mgr.start_agent.call_args.kwargs
+        assert call_kwargs.get("model") == "openai/gpt-5-mini", (
+            "Validation accepted the slot override but creation used a "
+            "different model — validation/creation precedence drifted. "
+            f"start_agent called with model={call_kwargs.get('model')!r}"
+        )
+    finally:
+        bb.close()
+
+
+def test_apply_template_slot_with_null_model_uses_default(
+    tmp_path, _mesh_env, container_mgr, monkeypatch,
+):
+    """P1.2 — a template slot with ``model: null`` (explicit Python
+    None) must coerce to the config default. Without this,
+    ``slot_def.get('model', default)`` returns None and ``.replace()``
+    crashes with ``AttributeError``.
+
+    Use the OAuth-only happy path so credential validation accepts the
+    default ``openai/gpt-5`` and the create flow can run.
+    """
+    _clear_system_env(monkeypatch)
+    monkeypatch.setenv(
+        "OPENLEGION_SYSTEM_OPENAI_OAUTH",
+        '{"access_token":"tok","refresh_token":"ref"}',
+    )
+    vault = CredentialVault()
+
+    fake_template = {
+        "tmpl_null": {
+            "description": "stub",
+            "agents": {
+                "worker": {
+                    "role": "worker",
+                    "model": None,  # the bug-trigger
+                    "instructions": "do work",
+                },
+            },
+        },
+    }
+    monkeypatch.setattr("src.cli.config._load_templates", lambda: fake_template)
+
+    # Force the config default to a model the OAuth-only deployment
+    # accepts, so once None coerces correctly, validation passes.
+    import src.cli.config as cli_config_mod
+    monkeypatch.setattr(
+        cli_config_mod,
+        "_load_config",
+        lambda: {"llm": {"default_model": "openai/gpt-5"}},
+    )
+    # The mesh route also calls ``_load_config`` directly — patch the
+    # host server's import the same way.
+    import src.host.server as host_server_mod  # noqa: F401
+    monkeypatch.setattr(
+        "src.cli.config._load_config",
+        lambda: {"llm": {"default_model": "openai/gpt-5"}},
+    )
+
+    client, bb = _build_mesh_app(tmp_path, container_mgr, vault)
+    try:
+        resp = client.post(
+            "/mesh/fleet/apply",
+            json={
+                "spawned_by": "operator",
+                "template": "tmpl_null",
+            },
+        )
+        # Pre-fix, validation site would crash with AttributeError on
+        # the .replace() call before any HTTP 4xx/5xx envelope. With
+        # the helper in place, the None coerces to the config default
+        # and the request succeeds.
+        assert resp.status_code == 200, resp.text
+        container_mgr.start_agent.assert_called_once()
+        call_kwargs = container_mgr.start_agent.call_args.kwargs
+        # Creation must end up with the config default, not None.
+        assert call_kwargs.get("model") == "openai/gpt-5"
     finally:
         bb.close()

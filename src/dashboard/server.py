@@ -231,7 +231,15 @@ def _summarize_task_event(
             tail = f": {note}" if note else ""
             return f"{actor} marked task {quoted} as blocked{tail}"
         if new_status == "failed":
-            return f"{actor} failed task {quoted}{where}"
+            # Bug 3 fix: surface blocker_note on failed transitions too —
+            # mirrors the blocked branch's "{actor} marked task '{title}'
+            # as blocked: {note}" shape. The store now populates
+            # blocker_note for failed transitions (orchestration.py
+            # update_status), so an operator can read *why* a task died
+            # straight off the feed without drilling in.
+            note = blocker_note or (payload or {}).get("blocker_note") or ""
+            tail = f": {note}" if note else ""
+            return f"{actor} failed task {quoted}{where}{tail}"
         if new_status == "cancelled":
             return f"{actor} cancelled task {quoted}{where}"
         if new_status == "working":

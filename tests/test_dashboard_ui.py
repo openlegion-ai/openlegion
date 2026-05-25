@@ -1131,14 +1131,20 @@ class TestBoardKanbanAuditFixes:
         # transient status emitted by ``update_status`` between pending
         # and working. The filter folds it into the Pending column so
         # those tasks remain visible (and cancellable) on the board.
+        # Codex P1.5 Option A extended the helper to also fold ``failed``
+        # into Done — slice widened to 2000 chars so the comment block
+        # and the new branch fit.
         idx = app_js.find("workplaceTasksByStatus(status)")
         assert idx > 0
-        body = app_js[idx:idx + 1000]
+        body = app_js[idx:idx + 2000]
         # Both pending and accepted are matched in the pending branch.
         assert "t.status === 'pending'" in body
         assert "t.status === 'accepted'" in body
         # Other statuses still match by exact equality.
         assert "t.status === status" in body
+        # Codex P1.5: ``failed`` folds into ``done`` so it stays visible.
+        assert "t.status === 'failed'" in body
+        assert "t.status === 'done'" in body
 
     # ── Critical #2: restart confirmation modal ───────────────────
 

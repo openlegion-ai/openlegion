@@ -3237,9 +3237,19 @@ function dashboard() {
       // folds into Pending so it stays visible on the board. Without
       // this fold, ``accepted`` rows render in zero columns and the
       // operator can't see (or cancel) them.
+      //
+      // Codex P1.5 (Option A): ``failed`` tasks fold into Done so they
+      // remain visible to the operator. Without this fold they render
+      // in zero columns and disappear from at-a-glance state. The card
+      // visual distinguishes done vs failed via a red border + status
+      // badge so the operator sees the failure (and the blocker_note)
+      // without having to drill in.
       const tasks = this.workplaceTasks || [];
       if (status === 'pending') {
         return tasks.filter(t => t.status === 'pending' || t.status === 'accepted');
+      }
+      if (status === 'done') {
+        return tasks.filter(t => t.status === 'done' || t.status === 'failed');
       }
       return tasks.filter(t => t.status === status);
     },
@@ -4725,7 +4735,12 @@ function dashboard() {
         const note = data.blocker_note || '';
         summary = `${actor} marked task '${title}' as blocked${note ? ': ' + note : ''}`;
       } else if (status === 'failed') {
-        summary = `${actor} failed task '${title}'`;
+        // Bug 3 fix: surface blocker_note on failed transitions so an
+        // operator can see *why* a task died without digging into
+        // workflow_snapshot or the back-edge inbox. Mirrors the blocked
+        // branch's rendering — same column, broader semantic.
+        const note = data.blocker_note || '';
+        summary = `${actor} failed task '${title}'${note ? ': ' + note : ''}`;
       } else if (status === 'cancelled') {
         const reason = data.reason ? ` (${data.reason})` : '';
         summary = `${actor} cancelled task '${title}'${reason}`;

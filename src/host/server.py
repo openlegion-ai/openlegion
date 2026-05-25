@@ -3030,6 +3030,46 @@ def create_mesh_app(
                             f"exceeds cap ({len(val)} > {_cap} chars)",
                         )
 
+        # Credential-compatibility check on every model the apply will
+        # actually use — runs UPFRONT so a bad model rejects the whole
+        # call before any agent is created. Mirrors the gate on
+        # ``create_custom_agent`` / ``edit-soft`` (Bug 3, "silent model
+        # rejection"): without this the slot starts and dies on its
+        # first LLM call with no surfaced reason.
+        #
+        # Validation and the creation site below BOTH route through
+        # ``resolve_slot_model`` so the model we validate is exactly the
+        # model we end up handing to the container. P1.1 — see helper
+        # docstring for the precedence rules and the None-coercion
+        # contract.
+        from src.shared.models import resolve_slot_model
+        _cfg_for_resolve = _load_config()
+        _default_model_for_resolve = _cfg_for_resolve.get(
+            "llm", {},
+        ).get("default_model", "openai/gpt-4o-mini")
+        if credential_vault is not None:
+            _seen_models: set[str] = set()
+            for slot_name, slot_def in tpl_agents.items():
+                _slot_model = resolve_slot_model(
+                    slot_name,
+                    slot_def,
+                    agent_overrides,
+                    model_override,
+                    _default_model_for_resolve,
+                )
+                if not _slot_model or _slot_model in _seen_models:
+                    continue
+                _seen_models.add(_slot_model)
+                _compatible, _reason = credential_vault.is_model_compatible(
+                    _slot_model,
+                )
+                if not _compatible:
+                    raise HTTPException(
+                        400,
+                        f"Slot '{slot_name}' model '{_slot_model}': "
+                        + (_reason or "not compatible with current credentials."),
+                    )
+
         # Apply template to create config entries
         created_names = _apply_template(
             template_name, tpl, agent_overrides=agent_overrides or None,
@@ -3068,7 +3108,22 @@ def create_mesh_app(
 
         for agent_name in created_names:
             acfg = agents_cfg.get(agent_name, {})
-            agent_model = model_override or acfg.get("model", default_model)
+            # P1.1 — resolve via the same helper used at validation so
+            # there's no precedence drift. ``_apply_template`` already
+            # wrote the slot-override-or-template-default model to acfg
+            # (no awareness of the top-level model_override), so reading
+            # ``slot_def`` straight from ``tpl_agents`` gives us the
+            # untouched template view that ``resolve_slot_model`` needs
+            # to apply the canonical precedence
+            # (slot override > top-level > template default > config default).
+            slot_def = tpl_agents.get(agent_name, {})
+            agent_model = resolve_slot_model(
+                agent_name,
+                slot_def,
+                agent_overrides,
+                model_override,
+                default_model,
+            )
             skills_dir = str(
                 (container_manager.project_root / "skills" / agent_name).resolve()
             ) if container_manager.project_root else ""
@@ -4852,6 +4907,17 @@ def create_mesh_app(
         body = await request.json()
         status = body.get("status", "")
         blocker_note = body.get("blocker_note")
+        # Bug 3 (silent model rejection): when a failed transition arrives
+        # with no ``blocker_note`` but carries an ``error`` string (the
+        # canonical shape ``mesh_client.set_task_status`` sends for
+        # auto-close paths), promote ``error`` to ``blocker_note`` so the
+        # store persists the reason. Truncate to 500 chars to match the
+        # column's expected size and avoid runaway bloat from huge LLM
+        # tracebacks. Existing explicit ``blocker_note`` callers win.
+        if status == "failed" and not blocker_note:
+            _err = body.get("error")
+            if isinstance(_err, str) and _err.strip():
+                blocker_note = _err.strip()[:500]
         if status not in VALID_STATUSES:
             raise HTTPException(
                 400,

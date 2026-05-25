@@ -336,7 +336,13 @@ def test_terminal_transition_sets_completed_and_retention(tmp_path):
     )
 
 
-def test_blocker_note_attaches_only_on_blocked(tmp_path):
+def test_blocker_note_clears_on_non_persisting_transition(tmp_path):
+    """Transitions OUT of (blocked|failed) — i.e. to working/done/cancelled
+    — clear the column. Both ``blocked`` (recoverable) and ``failed``
+    (terminal, post Bug 3 broadening) persist the note; everything
+    else clears it. See ``test_update_status_failed_persists_blocker_note``
+    and ``test_update_status_cancelled_does_not_carry_blocker_note`` for
+    the persistence contracts."""
     t = _make_store(tmp_path)
     rec = t.create(creator="c", assignee="a", title="t")
     t.update_status(rec["id"], "working", actor="a")
@@ -346,6 +352,50 @@ def test_blocker_note_attaches_only_on_blocked(tmp_path):
     assert result["blocker_note"] == "waiting on auth"
     # Subsequent transitions clear the blocker note.
     result = t.update_status(rec["id"], "working", actor="a")
+    assert result["blocker_note"] is None
+
+
+def test_update_status_failed_persists_blocker_note(tmp_path):
+    """Bug 3 (silent model rejection): the ``failed`` transition is now
+    blocker_note-bearing too. Without this, operators saw bare ``status:
+    failed`` with no actionable reason."""
+    t = _make_store(tmp_path)
+    rec = t.create(creator="c", assignee="a", title="t")
+    t.update_status(rec["id"], "working", actor="a")
+    result = t.update_status(
+        rec["id"], "failed", actor="a",
+        blocker_note="config_error: model 'openai/gpt-4o-mini' not in OAuth allowlist",
+    )
+    assert (
+        result["blocker_note"]
+        == "config_error: model 'openai/gpt-4o-mini' not in OAuth allowlist"
+    )
+
+
+def test_update_status_done_clears_blocker_note(tmp_path):
+    """Promotion to ``done`` clears any prior blocker_note — pre-existing
+    behavior, pinned to prevent regression as the failed branch was
+    broadened."""
+    t = _make_store(tmp_path)
+    rec = t.create(creator="c", assignee="a", title="t")
+    t.update_status(rec["id"], "working", actor="a")
+    t.update_status(rec["id"], "blocked", actor="a", blocker_note="hold")
+    # blocked → working → done; blocker_note clears at the first non-(blocked|failed) hop.
+    result = t.update_status(rec["id"], "working", actor="a")
+    assert result["blocker_note"] is None
+    result = t.update_status(rec["id"], "done", actor="a")
+    assert result["blocker_note"] is None
+
+
+def test_update_status_cancelled_does_not_carry_blocker_note(tmp_path):
+    """``cancelled`` is intentionally NOT in the blocker_note gate — a
+    manual cancellation isn't an error to surface."""
+    t = _make_store(tmp_path)
+    rec = t.create(creator="c", assignee="a", title="t")
+    result = t.update_status(
+        rec["id"], "cancelled", actor="a",
+        blocker_note="should not stick",
+    )
     assert result["blocker_note"] is None
 
 

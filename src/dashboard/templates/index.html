@@ -4467,16 +4467,20 @@
                   </div>
                   <div class="space-y-1.5">
                     <template x-for="t in workplaceTasksByStatusFiltered(status)" :key="t.id">
-                      <div class="group bg-gray-900/60 border border-gray-700/40 rounded-md px-2 py-1.5 text-[11px] hover:bg-gray-900/90 hover:border-gray-600 transition-colors relative"
+                      <div class="group rounded-md px-2 py-1.5 text-[11px] hover:bg-gray-900/90 transition-colors relative border"
+                        :class="t.status === 'failed'
+                          ? 'bg-red-950/30 border-red-800/40 hover:border-red-700/60'
+                          : 'bg-gray-900/60 border-gray-700/40 hover:border-gray-600'"
                         data-testid="board-kanban-card">
                         <!-- Phase 4 cancel button: top-right × on every
                              card; opens the confirmation modal. Hidden
                              on the Done column (you can't cancel a
                              completed task) and on rated cards. The
                              ``@click.stop`` keeps the row click (drill-in)
-                             from firing. -->
+                             from firing. Codex P1.5 Option A: also hidden
+                             on failed tasks (they're terminal). -->
                         <button type="button"
-                          x-show="status !== 'done' && !t.outcome"
+                          x-show="status !== 'done' && t.status !== 'failed' && !t.outcome"
                           @click.stop="confirmCancelTask(t)"
                           aria-label="Cancel task"
                           class="absolute top-1 right-1 w-5 h-5 flex items-center justify-center rounded text-gray-500 hover:text-red-300 hover:bg-red-900/30 transition-colors opacity-0 group-hover:opacity-100 focus:opacity-100"
@@ -4485,11 +4489,18 @@
                         </button>
                         <button type="button" class="block w-full text-left pr-5"
                           @click="openTaskDrillIn(t.id)">
-                          <div class="font-medium text-gray-200 leading-snug"
+                          <div class="font-medium leading-snug"
+                            :class="t.status === 'failed' ? 'text-red-200' : 'text-gray-200'"
                             :title="t.title"
                             x-text="truncateTitle(t.title, 80)"></div>
                           <div class="text-[10px] text-gray-400 mt-1 flex items-center gap-1.5">
                             <span class="truncate" x-text="t.assignee || ''"></span>
+                            <!-- Codex P1.5 Option A: failed tasks get a
+                                 red "failed" badge that visually
+                                 distinguishes them from done tasks in the
+                                 same column. Outcome badge (if rated)
+                                 takes precedence so a re-rated failure
+                                 still shows operator intent. -->
                             <template x-if="t.outcome">
                               <span class="ml-auto px-1.5 py-0.5 rounded text-[9px] font-medium"
                                 :class="{
@@ -4499,7 +4510,22 @@
                                 }"
                                 x-text="t.outcome"></span>
                             </template>
+                            <template x-if="!t.outcome && t.status === 'failed'">
+                              <span class="ml-auto px-1.5 py-0.5 rounded text-[9px] font-medium bg-red-900/30 text-red-300">failed</span>
+                            </template>
                           </div>
+                          <!-- Codex P1.5 Option A: surface the
+                               blocker_note inline for failed cards so
+                               the operator sees WHY without drilling in.
+                               Humanized via _humanizeBlocker (matches
+                               the Needs-you panel rendering); falls back
+                               to the raw note if the classifier
+                               can't tag it. -->
+                          <template x-if="t.status === 'failed' && t.blocker_note">
+                            <div class="mt-1 text-[10px] text-red-300/90 leading-snug"
+                              :title="t.blocker_note"
+                              x-text="(_humanizeBlocker(t.blocker_note).label || t.blocker_note).slice(0, 100)"></div>
+                          </template>
                         </button>
                       </div>
                     </template>
@@ -4678,6 +4704,21 @@
                       <span x-show="drillInData.task.created_at"><span class="text-gray-500">created:</span> <span class="text-gray-200" x-text="drillInFormatTimestamp(drillInData.task.created_at)"></span></span>
                       <span x-show="drillInData.task.completed_at"><span class="text-gray-500">completed:</span> <span class="text-gray-200" x-text="drillInFormatTimestamp(drillInData.task.completed_at)"></span></span>
                       <span x-show="drillInTimeToComplete()"><span class="text-gray-500">duration:</span> <span class="text-gray-200" x-text="drillInTimeToComplete()"></span></span>
+                    </div>
+                  </template>
+                  <!-- Codex P1.4 — surface blocker_note for blocked /
+                       failed tasks. The detail API at
+                       /api/workplace/tasks/{id} already returns the
+                       column; the modal used to ignore it, leaving the
+                       operator with a bare 'failed' status and no
+                       actionable signal when drilling in to investigate.
+                       Colour matches the kanban-card status palette
+                       (amber for blocked, red for failed). -->
+                  <template x-if="!drillInLoading && drillInData?.task && drillInData.task.blocker_note && ['blocked','failed'].includes(drillInData.task.status)">
+                    <div class="mt-2 text-xs">
+                      <span x-show="drillInData.task.status === 'blocked'" class="text-amber-400 font-medium">Blocked:</span>
+                      <span x-show="drillInData.task.status === 'failed'" class="text-red-400 font-medium">Failed:</span>
+                      <span class="text-gray-200 whitespace-pre-wrap" x-text="drillInData.task.blocker_note"></span>
                     </div>
                   </template>
                 </div>
