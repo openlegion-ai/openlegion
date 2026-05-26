@@ -1347,8 +1347,36 @@ function dashboard() {
           // On reconnect, refresh chat histories to catch messages from other sessions.
           // Skip on initial connect — init() already fetches them.
           if (isReconnect) {
+            // Disconnect invalidates ephemeral chat-stream state — a
+            // ``text_delta`` flips ``chatStreamingAgents[id]=true`` and only
+            // ``chat_done`` clears it. If the WS dropped between those two,
+            // the flag is stuck and ``_loadChatHistory`` early-returns,
+            // silently swallowing the refetch.
+            //
+            // BUT: ``_chatAborts[id]`` is an AbortController for a LOCAL
+            // SSE ``/chat/stream`` fetch — wiping it kills our handle on
+            // an active local stream and the next text_delta could land
+            // in a stale render target. Skip agents with an active local
+            // stream (their state is correct as-is) and reset state for
+            // everyone else so a stuck flag elsewhere doesn't block a
+            // later reopen.
+            const agentsToReset = Object.keys({
+              ...this.chatStreamingAgents,
+              ...this._chatStreamEndAt,
+              ...this._chatFetchedAt,
+            });
+            for (const id of agentsToReset) {
+              if (this._chatAborts && this._chatAborts[id]) continue;
+              delete this.chatStreamingAgents[id];
+              delete this._chatStreamEndAt[id];
+              delete this._chatFetchedAt[id];
+            }
             for (const agentId of this.openChats) {
-              delete this._chatFetchedAt[agentId];
+              // Skip the refetch for agents with an active local SSE
+              // stream — the persistent transcript won't include the
+              // in-flight bubble yet, and replacing chatHistories[agent]
+              // mid-stream invalidates the streaming render target.
+              if (this._chatAborts && this._chatAborts[agentId]) continue;
               this._loadChatHistory(agentId);
             }
           }

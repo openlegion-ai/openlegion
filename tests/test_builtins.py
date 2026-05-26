@@ -1348,10 +1348,9 @@ class TestCredentialRedaction:
         assert _redact_credentials("Price: $42.00") == "Price: $42.00"
         assert _redact_credentials("") == ""
 
-    def test_browser_command_redacts_response(self):
+    @pytest.mark.asyncio
+    async def test_browser_command_redacts_response(self):
         """_browser_command applies _deep_redact to the response."""
-        import asyncio
-
         from src.agent.builtins.browser_tool import _browser_command
 
         mc = AsyncMock()
@@ -1359,17 +1358,19 @@ class TestCredentialRedaction:
             "content": "key is sk-abcdefghijklmnopqrstuvwxyz"
         })
 
-        result = asyncio.get_event_loop().run_until_complete(
-            _browser_command(mc, "navigate", {"url": "https://x.com"})
-        )
+        # Native ``await`` inside an asyncio-marked test runs on the
+        # pytest-asyncio managed loop — under Python 3.11+ the legacy
+        # ``asyncio.get_event_loop().run_until_complete(...)`` pattern
+        # raises ``RuntimeError: no current event loop`` once the
+        # surrounding async test has closed its loop.
+        result = await _browser_command(mc, "navigate", {"url": "https://x.com"})
 
         assert "sk-abcdefghijklmnopqrstuvwxyz" not in str(result)
         assert "[REDACTED]" in result["content"]
 
-    def test_browser_command_redacts_error(self):
+    @pytest.mark.asyncio
+    async def test_browser_command_redacts_error(self):
         """_browser_command redacts errors too."""
-        import asyncio
-
         from src.agent.builtins.browser_tool import _browser_command
 
         mc = AsyncMock()
@@ -1377,9 +1378,7 @@ class TestCredentialRedaction:
             side_effect=Exception("fail: sk-abcdefghijklmnopqrstuvwxyz exposed")
         )
 
-        result = asyncio.get_event_loop().run_until_complete(
-            _browser_command(mc, "navigate", {})
-        )
+        result = await _browser_command(mc, "navigate", {})
 
         assert "sk-abcdefghijklmnopqrstuvwxyz" not in str(result)
         assert "[REDACTED]" in result["error"]

@@ -813,7 +813,12 @@ class Tasks:
           completed >24h ago out of the window even if an unrelated
           metadata write happens later. Mirrors the
           :meth:`count_failed_status_since` pattern.
-        * has no row in ``tasks`` whose ``parent_task_id`` references it
+        * has no row in ``tasks`` whose ``parent_task_id`` references it.
+          ``previous_task_id`` (rework) descendants are DELIBERATELY
+          NOT considered here — a rework is a retry of the same work,
+          not the downstream handoff the chain was waiting for. See
+          ``test_previous_task_id_chain_does_not_suppress_chain_break``
+          for the pinning test on this semantic.
         * has ``outcome IS NULL`` — the operator hasn't actioned this
           delivery yet via rate / rework. Outcome-set rows drop out of
           the count because the operator already saw them.
@@ -881,11 +886,25 @@ class Tasks:
     ) -> dict | None:
         """Return a snapshot of the workflow chain rooted at ``root_task_id``.
 
-        Walks the ``parent_task_id`` graph downstream from the root (the
-        operator's kickoff task) via ``WITH RECURSIVE``. Each descendant
-        task is one stage of the workflow. Returns ``None`` when the root
-        does not exist. Capped at ``limit`` rows (default 50) so a
-        runaway chain can't OOM the caller.
+        Walks BOTH the ``parent_task_id`` graph (normal handoff chain)
+        AND the ``previous_task_id`` graph (rework lineage from
+        :meth:`create_rework_task`) downstream from the root via
+        ``WITH RECURSIVE``. Each descendant task is one stage of the
+        workflow. Returns ``None`` when the root does not exist. Capped
+        at ``limit`` rows (default 50) so a runaway chain can't OOM the
+        caller.
+
+        Walking both edges matters because rework tasks inherit the
+        failed task's ``parent_task_id`` (so the kanban renders them as
+        siblings of the failed validator) but their lineage to the
+        failed task is captured only via ``previous_task_id``. Without
+        traversing that edge:
+
+        * a snapshot rooted at a failed task would miss its rework
+          descendants (the parent inheritance points them sideways
+          rather than down)
+        * an orphan rework (parent outside the chain) would be
+          invisible even from the chain root
 
         Output shape:
 
@@ -895,6 +914,7 @@ class Tasks:
               "root": "task_abc",
               "stages": [
                 {"task_id": "...", "parent_task_id": "...",
+                 "previous_task_id": "...",  # rework stages only
                  "assignee": "...", "status": "...",
                  "age_in_state_seconds": int, "title": "..."},
                 ...  # ordered by created_at ASC so the chain reads as
@@ -913,21 +933,29 @@ class Tasks:
         # Inner recursion is bounded by ``MAX_WORKFLOW_CHAIN_DEPTH`` via
         # a depth counter so a pathological wide chain can't materialize
         # millions of intermediate rows before the outer LIMIT trims.
-        # Cycles are impossible by construction (parent_task_id is set
-        # once at creation, never updated), but the depth guard is
-        # cheap defense-in-depth.
+        # Cycles are impossible by construction (both ``parent_task_id``
+        # and ``previous_task_id`` are set once at creation, never
+        # updated, and reference tasks that already exist) but the
+        # depth guard is cheap defense-in-depth. A task reachable via
+        # both edges (e.g. a rework spawned from the chain root) lands
+        # in ``chain`` twice at potentially different depths — the
+        # outer ``IN (SELECT DISTINCT id FROM chain)`` dedupes so the
+        # task surfaces once in the snapshot.
         with self._conn() as conn:
             rows = conn.execute(
                 "WITH RECURSIVE chain(id, depth) AS ("
                 "  SELECT id, 0 FROM tasks WHERE id = ?"
                 "  UNION ALL"
                 "  SELECT t.id, c.depth + 1 FROM tasks t "
-                "    JOIN chain c ON t.parent_task_id = c.id "
+                "    JOIN chain c ON (t.parent_task_id = c.id "
+                "                  OR t.previous_task_id = c.id) "
                 "    WHERE c.depth < ?"
                 ") "
-                "SELECT t.id, t.parent_task_id, t.assignee, t.status, "
-                "  t.title, t.blocker_note, t.created_at, t.updated_at "
-                "FROM tasks t JOIN chain c ON t.id = c.id "
+                "SELECT t.id, t.parent_task_id, t.previous_task_id, "
+                "  t.assignee, t.status, t.title, t.blocker_note, "
+                "  t.created_at, t.updated_at "
+                "FROM tasks t "
+                "WHERE t.id IN (SELECT DISTINCT id FROM chain) "
                 "ORDER BY t.created_at ASC LIMIT ?",
                 (root_task_id, MAX_WORKFLOW_CHAIN_DEPTH, limit),
             ).fetchall()
@@ -940,7 +968,17 @@ class Tasks:
             # report ``terminal_without_children=True``. Uses the
             # ``idx_tasks_parent_task_id`` index so this is O(#done-stages)
             # lookups inside the same connection block.
-            done_task_ids = [row[0] for row in rows if row[3] == "done"]
+            #
+            # ``previous_task_id`` descendants (rework) are DELIBERATELY
+            # NOT considered here — a rework is a retry of the same
+            # stage, not a downstream handoff. A done task whose only
+            # follow-up is a rework is still a chain break (workflow
+            # stalled). The rework appears as its own stage in the
+            # snapshot via the CTE's ``previous_task_id`` edge walk, but
+            # it doesn't suppress its predecessor's chain-break flag.
+            # Mirrors :meth:`chain_breaks_24h` and is pinned by
+            # ``test_previous_task_id_chain_does_not_suppress_chain_break``.
+            done_task_ids = [row[0] for row in rows if row[4] == "done"]
             parent_ids_with_children: set[str] = set()
             if done_task_ids:
                 placeholders = ",".join("?" * len(done_task_ids))
@@ -959,8 +997,8 @@ class Tasks:
         summary["total"] = 0
         for row in rows:
             (
-                tid, parent, assignee, status, title, blocker_note,
-                created_at, updated_at,
+                tid, parent, previous, assignee, status, title,
+                blocker_note, created_at, updated_at,
             ) = row
             age_basis = updated_at or created_at or 0.0
             age = int(now - age_basis) if age_basis > 0 else 0
@@ -972,6 +1010,12 @@ class Tasks:
                 "age_in_state_seconds": age,
                 "title": title or "",
             }
+            # ``previous_task_id`` surfaced only when set so the operator
+            # can spot rework stages (and which task triggered them)
+            # without an extra ``get_task`` call. Nominal handoff stages
+            # have ``previous_task_id IS NULL`` and stay quiet.
+            if previous:
+                stage["previous_task_id"] = previous
             # Surface ``blocker_note`` only when set — saves the operator
             # a follow-up get_task call for failed/blocked stages and
             # keeps the snapshot quiet for nominal stages.

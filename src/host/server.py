@@ -4822,10 +4822,15 @@ def create_mesh_app(
     ) -> dict:
         """Return a workflow chain snapshot rooted at ``root_task_id``.
 
-        Walks ``parent_task_id`` descendants from the root and reports
-        every stage's status + age. Operator-only by design — workflow
-        orchestration awareness is operator-tier, and individual workers
-        have no business inspecting a chain they don't own.
+        Walks BOTH ``parent_task_id`` (normal handoff) and
+        ``previous_task_id`` (rework lineage from
+        :meth:`Tasks.create_rework_task`) descendants from the root and
+        reports every stage's status + age. Rework stages carry
+        ``previous_task_id`` in their stage dict so the operator can
+        identify lineage without an extra ``get_task`` call. Operator-
+        only by design — workflow orchestration awareness is operator-
+        tier, and individual workers have no business inspecting a
+        chain they don't own.
 
         404 when the root does not exist (lets the operator distinguish
         a typo from an empty chain).

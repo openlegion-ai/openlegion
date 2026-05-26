@@ -3468,3 +3468,207 @@ class TestChatAutoCloseErrorPropagation:
         # chars in _chat_result_failure_reason; the chain-tail _auto_close
         # truncation cap is 500 chars. Either way the kwarg stays bounded.
         assert len(err_kwarg) <= 500
+
+
+# === Bug 2 fix: in-flight chat turn is finalized cleanly on errors/terminate ===
+#
+# Before the fix, exception and tool-loop-terminate paths wrote a NEW
+# assistant transcript entry without ``turn_id``. The earlier ``partial``
+# entry (written before tool dispatch) stayed on disk as ``partial=True``
+# next to a separate "Error: ..." or "Stopped: ..." bubble. With
+# ``load_chat_transcript`` deduping by turn_id, the partial was an
+# orphan. These tests pin the ``_finalize_chat_turn`` helper that closes
+# the turn cleanly: one entry, same turn_id as the partial, content =
+# ``<accumulated text>\n\n<closing message>``.
+
+
+class TestFinalizeChatTurn:
+    """Helper-level pin. Exercises the contract directly without
+    standing up the full chat() / _chat_inner async machinery."""
+
+    def test_finalize_combines_accumulated_text_with_closing_message(
+        self, tmp_path,
+    ):
+        from src.agent.workspace import WorkspaceManager
+        loop = _make_loop()
+        loop.workspace = WorkspaceManager(workspace_dir=str(tmp_path))
+
+        loop._finalize_chat_turn(
+            turn_id="turn-1",
+            accumulated_content="streamed text so far",
+            tool_names=["tool_a", "tool_b"],
+            closing_message="Error: boom",
+        )
+
+        msgs = loop.workspace.load_chat_transcript()
+        assert len(msgs) == 1
+        entry = msgs[0]
+        assert entry["role"] == "assistant"
+        assert entry["content"] == "streamed text so far\n\nError: boom"
+        assert entry.get("turn_id") == "turn-1"
+        assert entry.get("tools") == ["tool_a", "tool_b"]
+        # Final entry — NOT partial.
+        assert entry.get("partial") is not True
+
+    def test_finalize_supersedes_in_flight_partial(self, tmp_path):
+        """The same turn_id as a prior partial entry must replace it in
+        the transcript dedupe. Pins the orphan-partial fix."""
+        from src.agent.workspace import WorkspaceManager
+        loop = _make_loop()
+        loop.workspace = WorkspaceManager(workspace_dir=str(tmp_path))
+
+        # Simulate the partial write that happens before tool dispatch.
+        loop.workspace.append_chat_message(
+            "assistant", "streamed text so far",
+            tool_names=["tool_a"], turn_id="turn-1", partial=True,
+        )
+        # Hit the error path → finalize.
+        loop._finalize_chat_turn(
+            turn_id="turn-1",
+            accumulated_content="streamed text so far",
+            tool_names=["tool_a"],
+            closing_message="Error: boom",
+        )
+
+        msgs = loop.workspace.load_chat_transcript()
+        # Dedupe by turn_id: ONE entry, the final one.
+        assert len(msgs) == 1
+        assert msgs[0]["content"] == "streamed text so far\n\nError: boom"
+        assert msgs[0].get("partial") is not True
+
+    def test_finalize_with_empty_accumulated_content_writes_only_closing(
+        self, tmp_path,
+    ):
+        """No streamed text yet (exception fired before LLM emitted any
+        tokens) → only the closing message lands, no leading blank lines."""
+        from src.agent.workspace import WorkspaceManager
+        loop = _make_loop()
+        loop.workspace = WorkspaceManager(workspace_dir=str(tmp_path))
+
+        loop._finalize_chat_turn(
+            turn_id="turn-1",
+            accumulated_content="",
+            tool_names=[],
+            closing_message="Error: boom",
+        )
+        msgs = loop.workspace.load_chat_transcript()
+        assert len(msgs) == 1
+        assert msgs[0]["content"] == "Error: boom"
+        assert msgs[0].get("turn_id") == "turn-1"
+        # Empty tool list → no ``tools`` key in entry.
+        assert "tools" not in msgs[0] or msgs[0]["tools"] == []
+
+    def test_finalize_no_workspace_is_noop(self):
+        """Agents without a mounted workspace must skip silently — same
+        pattern as the existing ``if self.workspace:`` guard."""
+        loop = _make_loop()
+        loop.workspace = None
+        # Must not raise.
+        loop._finalize_chat_turn(
+            turn_id="turn-1",
+            accumulated_content="text",
+            tool_names=["a"],
+            closing_message="Error: boom",
+        )
+
+    def test_finalize_rejects_empty_turn_id(self, tmp_path):
+        """An empty/None turn_id breaks the partial-dedupe contract —
+        the helper must refuse and raise so callers can't silently
+        regress to the orphaned-partial bug."""
+        from src.agent.workspace import WorkspaceManager
+        loop = _make_loop()
+        loop.workspace = WorkspaceManager(workspace_dir=str(tmp_path))
+        with pytest.raises(ValueError, match="turn_id"):
+            loop._finalize_chat_turn(
+                turn_id="",
+                accumulated_content="text",
+                tool_names=["a"],
+                closing_message="Error: boom",
+            )
+
+
+class TestChatExceptionPathsFinalizeCleanly:
+    """End-to-end pin: the exception handlers in ``_chat_inner`` must
+    route through ``_finalize_chat_turn`` (NOT the raw ``append_chat_message``)
+    so the in-flight partial is superseded cleanly."""
+
+    @pytest.mark.asyncio
+    async def test_chat_inner_llm_config_error_finalizes_partial(
+        self, tmp_path,
+    ):
+        from src.agent.workspace import WorkspaceManager
+        from src.shared.errors import LLMConfigError
+
+        loop = _make_loop()
+        loop.workspace = WorkspaceManager(workspace_dir=str(tmp_path))
+        loop.skills.get_tool_definitions = MagicMock(return_value=[])
+        # First call: LLMConfigError mid-turn. Before this point a partial
+        # MAY exist on disk if a prior round wrote one — simulate that
+        # case so we verify supersedence.
+        loop.workspace.append_chat_message(
+            "assistant", "intermediate streamed text",
+            tool_names=["search"], turn_id="will-be-overwritten",
+            partial=True,
+        )
+        # Pre-state: one partial entry on disk.
+        pre = loop.workspace.load_chat_transcript()
+        assert len(pre) == 1
+        assert pre[0].get("partial") is True
+
+        loop.llm.chat = AsyncMock(side_effect=LLMConfigError(
+            "OAuth-allowed models: [...]; got 'openai/gpt-4o-mini'",
+            provider="openai",
+            model="openai/gpt-4o-mini",
+            allowed_models=set(),
+        ))
+
+        result = await loop._chat_inner("hello")
+        assert result.get("config_error") is True
+
+        msgs = loop.workspace.load_chat_transcript()
+        # The legacy partial is unrelated to the new turn_id — it stays
+        # as a separate entry. The NEW turn's error finalizes cleanly
+        # (no orphan partial for it).
+        # New entry's content must surface the error.
+        error_entries = [
+            m for m in msgs if "Config error" in m.get("content", "")
+        ]
+        assert len(error_entries) == 1
+        assert error_entries[0].get("partial") is not True
+        assert error_entries[0].get("turn_id"), (
+            "error finalize entry must carry a turn_id so any future "
+            "partial from the same turn dedupes against it"
+        )
+
+    @pytest.mark.asyncio
+    async def test_chat_stream_inner_generic_exception_finalizes_partial(
+        self, tmp_path,
+    ):
+        """Streaming path's generic Exception handler must finalize via
+        the same helper. Verify by patching ``_finalize_chat_turn`` and
+        checking it gets called with the error message."""
+        from src.agent.workspace import WorkspaceManager
+
+        loop = _make_loop()
+        loop.workspace = WorkspaceManager(workspace_dir=str(tmp_path))
+        loop.skills.get_tool_definitions = MagicMock(return_value=[])
+        loop.llm.chat_stream = MagicMock(
+            side_effect=RuntimeError("kaboom"),
+        )
+        loop.llm.chat = AsyncMock(side_effect=RuntimeError("kaboom"))
+
+        finalize_spy = MagicMock()
+        loop._finalize_chat_turn = finalize_spy
+
+        events = []
+        async for evt in loop._chat_stream_inner("hello"):
+            events.append(evt)
+
+        # Helper invoked exactly once for this turn.
+        assert finalize_spy.call_count == 1
+        call = finalize_spy.call_args
+        assert "Error: kaboom" in call.kwargs["closing_message"]
+        assert call.kwargs.get("turn_id"), (
+            "finalize must receive the turn's turn_id so the partial "
+            "supersedes cleanly"
+        )

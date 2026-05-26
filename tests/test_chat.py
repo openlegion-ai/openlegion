@@ -207,16 +207,18 @@ class TestChatEndpoints:
         assert "injected" in data
         assert "agent_state" in data
 
-    def test_chat_steer_does_not_block(self):
+    @pytest.mark.asyncio
+    async def test_chat_steer_does_not_block(self):
         """Steer endpoint returns immediately without acquiring _chat_lock."""
-        import asyncio
-
         loop = _make_loop()
         app = create_agent_app(loop)
         client = TestClient(app)
 
-        # Manually acquire the chat lock to simulate a busy agent
-        acquired = asyncio.get_event_loop().run_until_complete(loop._chat_lock.acquire())
+        # Manually acquire the chat lock to simulate a busy agent.
+        # Native ``await`` inside an asyncio-marked test runs on the
+        # pytest-asyncio managed loop — no ``get_event_loop()`` foot-gun
+        # under Python 3.11+ where the legacy synchronous path raises.
+        acquired = await loop._chat_lock.acquire()
         assert acquired
 
         try:
