@@ -109,6 +109,48 @@ def estimate_tokens(messages: list[dict], model: str = "") -> int:
     return chars // 4
 
 
+def group_messages_by_tool_call(messages: list[dict]) -> list[list[dict]]:
+    """Group consecutive tool-call related messages into atomic units.
+
+    Each group is either:
+
+    * a standalone non-tool message (``[user_msg]``, ``[assistant_text]``,
+      ``[system]``)
+    * an assistant+tools group: ``[assistant(tool_calls), tool_1, tool_2,
+      ...]`` collecting an assistant message that emitted ``tool_calls``
+      together with every subsequent ``role=tool`` reply that answers
+      them.
+
+    The grouping is the invariant the LLM API expects: a ``tool`` message
+    must immediately follow its parent ``assistant`` with the matching
+    ``tool_call_id``, and every ``tool_call`` from the assistant must be
+    answered by a ``tool`` message before the next assistant turn. Any
+    slice/trim operation that respects group boundaries cannot orphan a
+    tool result from its parent or vice-versa.
+
+    Three call sites use this — :meth:`ContextManager._summarize_compact`,
+    :meth:`ContextManager._hard_prune`, and ``AgentLoop._trim_context``
+    in ``loop.py``. They had three identical inline copies of this loop;
+    consolidating them here eliminates the drift risk and makes the
+    invariant explicit.
+    """
+    groups: list[list[dict]] = []
+    i = 0
+    while i < len(messages):
+        msg = messages[i]
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            group = [msg]
+            i += 1
+            while i < len(messages) and messages[i].get("role") == "tool":
+                group.append(messages[i])
+                i += 1
+            groups.append(group)
+        else:
+            groups.append([msg])
+            i += 1
+    return groups
+
+
 class ContextManager:
     """Monitors and manages the LLM context window.
 
@@ -358,8 +400,35 @@ class ContextManager:
     async def _summarize_compact(
         self, system_prompt: str, messages: list[dict],
     ) -> list[dict]:
-        """Summarize the conversation and replace history with summary + recent."""
-        conversation_text = self._messages_to_text(messages[:-4] if len(messages) > 4 else messages)
+        """Summarize the conversation and replace history with summary + recent.
+
+        Group-aware: the recent tail is sliced by tool-call group, never
+        by message index, so a multi-tool turn at the boundary stays
+        atomic. Slicing by index (the legacy ``messages[-4:]`` shape)
+        could land on ``[tool_a, tool_b, tool_c, tool_d]`` and orphan
+        the parent ``assistant(tool_calls)`` at index ``-5``; the next
+        LLM call would then reject the messages and the post-tool
+        continuation would silently fail.
+        """
+        groups = group_messages_by_tool_call(messages)
+
+        # Need at least 2 groups to compact meaningfully — one to
+        # summarize, one to keep as recent. Otherwise return as-is
+        # (the caller's threshold check decided we should try, but
+        # there is nothing safe to summarize without orphaning).
+        if len(groups) <= 1:
+            return messages
+
+        # Keep last N groups intact; reserve at least one group for the
+        # summary. Caps at 4 to roughly match the legacy 4-message tail
+        # for normal alternation, but a multi-tool group preserves the
+        # whole group instead of slicing inside it.
+        keep_n = min(4, len(groups) - 1)
+        older_groups = groups[:-keep_n]
+        recent_groups = groups[-keep_n:]
+
+        older_messages = [m for g in older_groups for m in g]
+        conversation_text = self._messages_to_text(older_messages)
 
         summary_prompt = (
             "Summarize this conversation concisely, preserving key context "
@@ -369,6 +438,7 @@ class ContextManager:
         )
 
         last_err = None
+        summary = None
         for attempt in range(self._SUMMARIZE_RETRIES + 1):
             try:
                 response = await self.llm.chat(
@@ -401,18 +471,32 @@ class ContextManager:
             "content": f"## Conversation Summary (auto-compacted)\n\n{summary}",
         }
 
-        # Check if the message right after the summary would be "user" role,
-        # which would create two consecutive user messages (breaking LLM APIs).
-        # If so, insert a bridge assistant message and keep 3 recent to stay compact.
-        tail_start = -4 if len(messages) > 4 else 0
-        needs_bridge = messages[tail_start:] and messages[tail_start].get("role") == "user"
-        if needs_bridge:
-            recent = messages[-3:] if len(messages) > 3 else messages
+        # The summary is ``role=user``. If the first recent group also
+        # leads with a user message, two ``user`` messages would land
+        # back-to-back, which the LLM APIs reject. Resolve atomically:
+        #
+        #   * If 2+ recent groups: DROP the leading user group. The next
+        #     group's first message is well-formed alternation
+        #     (``assistant`` or ``assistant(tool_calls)``), so summary
+        #     (user) → next (assistant) is valid and no bridge is needed.
+        #     This avoids the consecutive-assistant bug in the legacy
+        #     path (which inserted a bridge assistant AND dropped a
+        #     message, producing ``user → assistant → assistant``).
+        #
+        #   * If only 1 recent group AND it leads with user: we cannot
+        #     drop it without losing the only kept turn. Insert a
+        #     bridging assistant between summary and the user message.
+        recent_messages = [m for g in recent_groups for m in g]
+        needs_bridge = bool(recent_messages) and recent_messages[0].get("role") == "user"
+        if needs_bridge and len(recent_groups) > 1:
+            recent_groups = recent_groups[1:]
+            recent_messages = [m for g in recent_groups for m in g]
+            result = [summary_msg] + recent_messages
+        elif needs_bridge:
             bridge = {"role": "assistant", "content": "Understood, continuing from the summary above."}
-            result = [summary_msg, bridge] + recent
+            result = [summary_msg, bridge] + recent_messages
         else:
-            recent = messages[-4:] if len(messages) > 4 else messages
-            result = [summary_msg] + recent
+            result = [summary_msg] + recent_messages
         logger.info(
             f"Compacted {len(messages)} messages -> {len(result)} "
             f"(usage: {int(self.usage(result) * 100)}%)"
@@ -422,27 +506,14 @@ class ContextManager:
     def _hard_prune(self, messages: list[dict]) -> list[dict]:
         """Emergency: keep first message and last N messages (group-aware).
 
-        Groups tool_calls with their tool results so we never orphan a
-        tool_call without its matching tool responses.
+        Groups tool_calls with their tool results via the shared
+        :func:`group_messages_by_tool_call` helper so we never orphan
+        a tool_call from its matching tool responses.
         """
         if len(messages) <= 8:
             return messages
 
-        # Build groups: assistant(tool_calls) + following tool messages stay together
-        groups: list[list[dict]] = []
-        i = 0
-        while i < len(messages):
-            msg = messages[i]
-            if msg.get("role") == "assistant" and msg.get("tool_calls"):
-                group = [msg]
-                i += 1
-                while i < len(messages) and messages[i].get("role") == "tool":
-                    group.append(messages[i])
-                    i += 1
-                groups.append(group)
-            else:
-                groups.append([msg])
-                i += 1
+        groups = group_messages_by_tool_call(messages)
 
         if len(groups) <= 5:
             return messages
