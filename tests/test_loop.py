@@ -3571,6 +3571,21 @@ class TestFinalizeChatTurn:
             closing_message="Error: boom",
         )
 
+    def test_finalize_rejects_empty_turn_id(self, tmp_path):
+        """An empty/None turn_id breaks the partial-dedupe contract —
+        the helper must refuse and raise so callers can't silently
+        regress to the orphaned-partial bug."""
+        from src.agent.workspace import WorkspaceManager
+        loop = _make_loop()
+        loop.workspace = WorkspaceManager(workspace_dir=str(tmp_path))
+        with pytest.raises(ValueError, match="turn_id"):
+            loop._finalize_chat_turn(
+                turn_id="",
+                accumulated_content="text",
+                tool_names=["a"],
+                closing_message="Error: boom",
+            )
+
 
 class TestChatExceptionPathsFinalizeCleanly:
     """End-to-end pin: the exception handlers in ``_chat_inner`` must

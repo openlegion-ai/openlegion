@@ -3233,7 +3233,7 @@ class AgentLoop:
     def _finalize_chat_turn(
         self,
         *,
-        turn_id: str | None,
+        turn_id: str,
         accumulated_content: str,
         tool_names: list[str],
         closing_message: str,
@@ -3251,7 +3251,21 @@ class AgentLoop:
         Empty ``accumulated_content`` is fine — the closing_message
         stands alone (no leading blank lines). No-op when the agent has
         no workspace mounted.
+
+        ``turn_id`` is required and must be non-empty — without it the
+        transcript dedupe cannot match the partial and the helper
+        degrades to writing an orphaned final entry, defeating its
+        purpose. ``_chat_inner`` / ``_chat_stream_inner`` both generate
+        ``turn_id = str(uuid.uuid4())`` at the top of the function
+        before any work that can raise, so the contract is structurally
+        safe.
         """
+        if not turn_id:
+            raise ValueError(
+                "_finalize_chat_turn requires a non-empty turn_id — "
+                "callers must mint one before the try block so the "
+                "partial dedupe is well-defined"
+            )
         if not self.workspace:
             return
         prefix = (accumulated_content or "").strip()
