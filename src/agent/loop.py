@@ -3017,8 +3017,12 @@ class AgentLoop:
                 if terminate_msg:
                     self.state = "idle"
                     msg = f"Stopped: {terminate_msg}"
-                    if self.workspace:
-                        self.workspace.append_chat_message("assistant", msg)
+                    self._finalize_chat_turn(
+                        turn_id=turn_id,
+                        accumulated_content="\n".join(turn_content_parts),
+                        tool_names=turn_tool_names,
+                        closing_message=msg,
+                    )
                     return {
                         "response": msg,
                         "tool_outputs": tool_outputs,
@@ -3155,8 +3159,12 @@ class AgentLoop:
             self.state = "idle"
             logger.warning(f"Chat auth failure: {e}")
             msg = f"Auth failure: {e}"
-            if self.workspace:
-                self.workspace.append_chat_message("assistant", msg)
+            self._finalize_chat_turn(
+                turn_id=turn_id,
+                accumulated_content="\n".join(turn_content_parts),
+                tool_names=turn_tool_names,
+                closing_message=msg,
+            )
             return {
                 "response": msg, "tool_outputs": tool_outputs,
                 "tokens_used": total_tokens, "auth_failure": True,
@@ -3165,8 +3173,12 @@ class AgentLoop:
             self.state = "idle"
             logger.warning(f"Chat config error: {e}")
             msg = f"Config error: {e}"
-            if self.workspace:
-                self.workspace.append_chat_message("assistant", msg)
+            self._finalize_chat_turn(
+                turn_id=turn_id,
+                accumulated_content="\n".join(turn_content_parts),
+                tool_names=turn_tool_names,
+                closing_message=msg,
+            )
             return {
                 "response": msg, "tool_outputs": tool_outputs,
                 "tokens_used": total_tokens, "config_error": True,
@@ -3175,8 +3187,12 @@ class AgentLoop:
             self.state = "idle"
             logger.error(f"Chat failed: {e}", exc_info=True)
             msg = f"Error: {e}"
-            if self.workspace:
-                self.workspace.append_chat_message("assistant", msg)
+            self._finalize_chat_turn(
+                turn_id=turn_id,
+                accumulated_content="\n".join(turn_content_parts),
+                tool_names=turn_tool_names,
+                closing_message=msg,
+            )
             # Codex r10: tag the bare-exception return with
             # ``exception_caught`` so the chat() auto-close site can
             # detect failures-after-tool-calls and route them to
@@ -3212,6 +3228,41 @@ class AgentLoop:
             f"(Completed {n} {word}; no text response was generated. "
             "Check the dashboard for tool outputs and any notifications "
             "I sent.)"
+        )
+
+    def _finalize_chat_turn(
+        self,
+        *,
+        turn_id: str | None,
+        accumulated_content: str,
+        tool_names: list[str],
+        closing_message: str,
+    ) -> None:
+        """Write a final assistant transcript entry for an abnormal turn close.
+
+        Used by exception handlers and tool-loop terminate paths. Sharing
+        the in-flight partial's ``turn_id`` ensures
+        :meth:`WorkspaceManager.load_chat_transcript`'s dedupe replaces
+        the partial cleanly — the user sees ONE bubble carrying every
+        token streamed so far + the closing message (e.g. ``Error: ...``
+        or ``Stopped: ...``), instead of an orphaned ``partial=True``
+        entry next to a separate error bubble.
+
+        Empty ``accumulated_content`` is fine — the closing_message
+        stands alone (no leading blank lines). No-op when the agent has
+        no workspace mounted.
+        """
+        if not self.workspace:
+            return
+        prefix = (accumulated_content or "").strip()
+        final_content = (
+            f"{prefix}\n\n{closing_message}" if prefix else closing_message
+        )
+        self.workspace.append_chat_message(
+            "assistant",
+            final_content,
+            tool_names=list(tool_names) if tool_names else None,
+            turn_id=turn_id,
         )
 
     def _log_chat_turn(
@@ -3689,8 +3740,12 @@ class AgentLoop:
                 terminate_msg = self._check_tool_loop_terminate(llm_response.tool_calls)
                 if terminate_msg:
                     msg = f"Stopped: {terminate_msg}"
-                    if self.workspace:
-                        self.workspace.append_chat_message("assistant", msg)
+                    self._finalize_chat_turn(
+                        turn_id=turn_id,
+                        accumulated_content="".join(accumulated_text),
+                        tool_names=turn_tool_names,
+                        closing_message=msg,
+                    )
                     yield {
                         "type": "done",
                         "response": msg,
@@ -3847,8 +3902,12 @@ class AgentLoop:
             # to avoid double-counting against the quarantine threshold.
             logger.warning("Streaming chat auth failure: %s", e)
             msg = f"Auth failure: {e}"
-            if self.workspace:
-                self.workspace.append_chat_message("assistant", msg)
+            self._finalize_chat_turn(
+                turn_id=turn_id,
+                accumulated_content="".join(accumulated_text),
+                tool_names=turn_tool_names,
+                closing_message=msg,
+            )
             yield {
                 "type": "done",
                 "response": msg,
@@ -3859,8 +3918,12 @@ class AgentLoop:
         except LLMConfigError as e:
             logger.warning("Streaming chat config error: %s", e)
             msg = f"Config error: {e}"
-            if self.workspace:
-                self.workspace.append_chat_message("assistant", msg)
+            self._finalize_chat_turn(
+                turn_id=turn_id,
+                accumulated_content="".join(accumulated_text),
+                tool_names=turn_tool_names,
+                closing_message=msg,
+            )
             yield {
                 "type": "done",
                 "response": msg,
@@ -3871,8 +3934,12 @@ class AgentLoop:
         except Exception as e:
             logger.error("Streaming chat failed: %s", e, exc_info=True)
             msg = f"Error: {e}"
-            if self.workspace:
-                self.workspace.append_chat_message("assistant", msg)
+            self._finalize_chat_turn(
+                turn_id=turn_id,
+                accumulated_content="".join(accumulated_text),
+                tool_names=turn_tool_names,
+                closing_message=msg,
+            )
             yield {
                 "type": "done",
                 "response": msg,

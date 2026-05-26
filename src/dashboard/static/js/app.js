@@ -1347,8 +1347,19 @@ function dashboard() {
           // On reconnect, refresh chat histories to catch messages from other sessions.
           // Skip on initial connect — init() already fetches them.
           if (isReconnect) {
+            // Disconnect invalidates ALL ephemeral chat-stream state — a
+            // ``text_delta`` flips ``chatStreamingAgents[id]=true`` and only
+            // ``chat_done`` clears it. If the WS dropped between those two,
+            // the flag is stuck and ``_loadChatHistory`` early-returns,
+            // silently swallowing the refetch. Reset the per-agent state
+            // across the board (not just ``openChats``) so a chat closed
+            // during the disconnect window doesn't hit a stuck flag when
+            // the user reopens it later.
+            this.chatStreamingAgents = {};
+            this._chatStreamEndAt = {};
+            this._chatAborts = {};
+            this._chatFetchedAt = {};
             for (const agentId of this.openChats) {
-              delete this._chatFetchedAt[agentId];
               this._loadChatHistory(agentId);
             }
           }

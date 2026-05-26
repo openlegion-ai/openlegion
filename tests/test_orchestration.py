@@ -2127,3 +2127,200 @@ def test_previous_task_id_chain_does_not_suppress_chain_break(tmp_path):
     # from the live count only because the rework outcome was set on
     # the original (outcome IS NULL filter), NOT because the rework
     # row exists. The event fired and remains in the captured stream.
+
+
+# ── Bug 5 fix: workflow_snapshot traverses previous_task_id (rework) edges ──
+#
+# Operator hit a case where a validator failed mid-chain and a rework
+# was spawned. ``workflow_snapshot`` is what the operator's heartbeat
+# polls to see the full state of an in-flight workflow. Before the fix
+# the CTE walked ``parent_task_id`` only, so a rework — which inherits
+# the failed task's parent but carries the failed task in
+# ``previous_task_id`` — was invisible from a snapshot rooted at the
+# failed task itself, and orphan reworks (parent outside the chain)
+# were invisible from any root. These tests pin the fix.
+
+
+def test_workflow_snapshot_includes_rework_via_previous_task_id(tmp_path):
+    """A rework spawned from a failed leaf must appear in the snapshot
+    when rooted at the failed task — even though the rework's
+    ``parent_task_id`` inherits the failed task's parent (not the
+    failed task itself), the ``previous_task_id`` edge carries the
+    lineage and the CTE walks it."""
+    t = _make_store(tmp_path)
+    kickoff = t.create(creator="op", assignee="scout", title="kickoff")
+    stage = t.create(
+        creator="scout", assignee="validator", title="validate",
+        parent_task_id=kickoff["id"],
+    )
+    t.update_status(stage["id"], "working", actor="validator")
+    t.update_status(stage["id"], "done", actor="validator")
+    rework = t.create_rework_task(
+        stage["id"], "needs another pass", actor="op",
+    )
+    # Rework inherits the failed task's parent — NOT the failed task —
+    # so the parent_task_id-only CTE would miss it when rooted at stage.
+    assert rework["parent_task_id"] == kickoff["id"]
+    assert rework["previous_task_id"] == stage["id"]
+
+    # Rooted at the failed task: rework must surface via previous_task_id.
+    snap = t.workflow_snapshot(stage["id"])
+    assert snap is not None
+    ids = {s["task_id"] for s in snap["stages"]}
+    assert rework["id"] in ids, (
+        "rework descendant must appear in snapshot via previous_task_id "
+        "edge, not just parent_task_id"
+    )
+
+
+def test_workflow_snapshot_from_root_includes_rework_descendants(tmp_path):
+    """A snapshot rooted at the kickoff must also surface rework
+    descendants — they're part of the operator's full workflow view
+    regardless of which root the operator picks."""
+    t = _make_store(tmp_path)
+    kickoff = t.create(creator="op", assignee="scout", title="kickoff")
+    stage = t.create(
+        creator="scout", assignee="validator", title="validate",
+        parent_task_id=kickoff["id"],
+    )
+    t.update_status(stage["id"], "working", actor="validator")
+    t.update_status(stage["id"], "done", actor="validator")
+    rework = t.create_rework_task(
+        stage["id"], "redo this", actor="op",
+    )
+
+    snap = t.workflow_snapshot(kickoff["id"])
+    assert snap is not None
+    ids = {s["task_id"] for s in snap["stages"]}
+    assert {kickoff["id"], stage["id"], rework["id"]}.issubset(ids)
+
+
+def test_workflow_snapshot_surfaces_previous_task_id_on_rework_stages(tmp_path):
+    """Rework stages must carry ``previous_task_id`` in their stage
+    dict so the operator can identify which task triggered the
+    rework without an extra ``get_task`` round-trip. Nominal stages
+    omit the field."""
+    t = _make_store(tmp_path)
+    kickoff = t.create(creator="op", assignee="scout", title="kickoff")
+    stage = t.create(
+        creator="scout", assignee="writer", title="write",
+        parent_task_id=kickoff["id"],
+    )
+    t.update_status(stage["id"], "working", actor="writer")
+    t.update_status(stage["id"], "done", actor="writer")
+    rework = t.create_rework_task(stage["id"], "redo", actor="op")
+
+    snap = t.workflow_snapshot(kickoff["id"])
+    assert snap is not None
+    by_id = {s["task_id"]: s for s in snap["stages"]}
+    # Nominal stages: no previous_task_id key.
+    assert "previous_task_id" not in by_id[kickoff["id"]]
+    assert "previous_task_id" not in by_id[stage["id"]]
+    # Rework: previous_task_id points to the failed predecessor.
+    assert by_id[rework["id"]]["previous_task_id"] == stage["id"]
+
+
+def test_workflow_snapshot_multi_step_rework_chain(tmp_path):
+    """A rework-of-rework chain (V → V' → V'') rooted at the original
+    failed task must surface all generations. Each generation links
+    back to the previous via ``previous_task_id``."""
+    t = _make_store(tmp_path)
+    v = t.create(creator="op", assignee="validator", title="v")
+    t.update_status(v["id"], "working", actor="validator")
+    t.update_status(v["id"], "done", actor="validator")
+    v_prime = t.create_rework_task(v["id"], "retry once", actor="op")
+    t.update_status(v_prime["id"], "working", actor="validator")
+    t.update_status(v_prime["id"], "done", actor="validator")
+    v_pp = t.create_rework_task(v_prime["id"], "retry twice", actor="op")
+
+    snap = t.workflow_snapshot(v["id"])
+    assert snap is not None
+    ids = {s["task_id"] for s in snap["stages"]}
+    assert {v["id"], v_prime["id"], v_pp["id"]}.issubset(ids), (
+        "multi-step rework chain must surface every generation"
+    )
+
+
+def test_workflow_snapshot_rework_not_duplicated_when_reachable_by_both_edges(
+    tmp_path,
+):
+    """A rework whose ``parent_task_id`` AND ``previous_task_id`` both
+    fall inside the chain (e.g. rework of the root task) must appear
+    exactly once. The ``IN (SELECT DISTINCT id FROM chain)`` outer
+    dedup is what enforces this."""
+    t = _make_store(tmp_path)
+    # Root task with no parent. Rework of root: previous_task_id=root,
+    # parent_task_id=NULL (root has no parent). Reachable via
+    # previous_task_id edge but NOT parent_task_id — exercise the
+    # one-edge path. Then add a second rework that DOES have its
+    # parent in the chain to exercise the two-edge dedup path.
+    root = t.create(creator="op", assignee="writer", title="root")
+    t.update_status(root["id"], "working", actor="writer")
+    t.update_status(root["id"], "done", actor="writer")
+    rework = t.create_rework_task(root["id"], "redo", actor="op")
+    # Force the rework's parent_task_id to point at root via a direct
+    # write — simulates a future code path that explicitly threads
+    # the failed task as parent. This is the dual-edge dedup case.
+    with t._conn() as conn:
+        conn.execute(
+            "UPDATE tasks SET parent_task_id = ? WHERE id = ?",
+            (root["id"], rework["id"]),
+        )
+
+    snap = t.workflow_snapshot(root["id"])
+    assert snap is not None
+    ids = [s["task_id"] for s in snap["stages"]]
+    assert ids.count(rework["id"]) == 1, (
+        f"rework reachable via both edges must appear exactly once, "
+        f"got {ids.count(rework['id'])}"
+    )
+
+
+def test_workflow_snapshot_orphan_rework_surfaces_from_failed_root(tmp_path):
+    """A rework whose ``parent_task_id`` is outside any chain (orphan
+    parent or NULL) must still surface when the snapshot is rooted at
+    its predecessor via ``previous_task_id``. Exercises the case where
+    the predecessor IS the kickoff (its parent is NULL)."""
+    t = _make_store(tmp_path)
+    kickoff = t.create(creator="op", assignee="writer", title="kickoff")
+    t.update_status(kickoff["id"], "working", actor="writer")
+    t.update_status(kickoff["id"], "done", actor="writer")
+    # Rework of kickoff — inherits kickoff's parent (NULL) so parent
+    # chain dead-ends. Only the previous_task_id edge connects it.
+    rework = t.create_rework_task(kickoff["id"], "redo", actor="op")
+    assert rework["parent_task_id"] is None
+
+    snap = t.workflow_snapshot(kickoff["id"])
+    assert snap is not None
+    ids = {s["task_id"] for s in snap["stages"]}
+    assert rework["id"] in ids
+
+
+def test_workflow_snapshot_terminal_flag_unaffected_by_rework_descendant(
+    tmp_path,
+):
+    """``terminal_without_children`` is the *workflow*-chain marker.
+    A rework spawned via ``previous_task_id`` is NOT a downstream
+    handoff — it's a retry — so the predecessor's
+    ``terminal_without_children`` flag must stay True. Mirrors the
+    chain_breaks_24h semantic pinned by
+    ``test_previous_task_id_chain_does_not_suppress_chain_break``.
+    """
+    t = _make_store(tmp_path)
+    stage = t.create(creator="op", assignee="writer", title="leaf")
+    t.update_status(stage["id"], "working", actor="writer")
+    t.update_status(stage["id"], "done", actor="writer")
+    rework = t.create_rework_task(stage["id"], "redo", actor="op")
+
+    snap = t.workflow_snapshot(stage["id"])
+    assert snap is not None
+    by_id = {s["task_id"]: s for s in snap["stages"]}
+    # The predecessor is a done leaf — no parent_task_id descendant.
+    # Even though the rework references it via previous_task_id,
+    # terminal_without_children stays True.
+    assert by_id[stage["id"]]["terminal_without_children"] is True, (
+        "rework via previous_task_id must NOT suppress the predecessor's "
+        "chain-break flag — that flag is about workflow handoffs"
+    )
+    # The rework itself is pending — flag is False (not 'done').
+    assert by_id[rework["id"]]["terminal_without_children"] is False
