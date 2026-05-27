@@ -1387,9 +1387,10 @@ class AgentLoop:
         """Trim old tool exchanges to manage context window.
 
         Groups messages into tool-call groups (assistant+tool responses)
-        so we never split a tool-call from its results.
+        via the shared :func:`group_messages_by_tool_call` helper so we
+        never split a tool-call from its results.
         """
-        from src.agent.context import _content_chars
+        from src.agent.context import _content_chars, group_messages_by_tool_call
         estimated_tokens = sum(
             _content_chars(m.get("content", "")) // 4 + len(json.dumps({
                 k: v for k, v in m.items() if k != "content"
@@ -1399,22 +1400,7 @@ class AgentLoop:
         if estimated_tokens <= max_tokens:
             return messages
 
-        # Build groups: each group is either a standalone message or
-        # an assistant(tool_calls) + its following tool messages
-        groups: list[list[dict]] = []
-        i = 0
-        while i < len(messages):
-            msg = messages[i]
-            if msg.get("role") == "assistant" and msg.get("tool_calls"):
-                group = [msg]
-                i += 1
-                while i < len(messages) and messages[i].get("role") == "tool":
-                    group.append(messages[i])
-                    i += 1
-                groups.append(group)
-            else:
-                groups.append([msg])
-                i += 1
+        groups = group_messages_by_tool_call(messages)
 
         if len(groups) <= 3:
             return messages
