@@ -845,6 +845,104 @@ class TestSummarizeCompactGroupAware:
         assert result == msgs
 
     @pytest.mark.asyncio
+    async def test_first_input_is_orphan_tool_grouped_as_standalone(self):
+        """Codex P1 follow-up: ``group_messages_by_tool_call`` treats a
+        bare leading ``tool`` message as its own standalone group (no
+        assistant to absorb into). Pins that the helper does not
+        consume orphans into a non-existent assistant group."""
+        msgs = [
+            {"role": "tool", "tool_call_id": "orphan_1", "content": "r"},
+            {"role": "user", "content": "hi"},
+        ]
+        groups = group_messages_by_tool_call(msgs)
+        assert len(groups) == 2
+        assert groups[0][0]["role"] == "tool"
+        assert groups[1][0]["role"] == "user"
+
+    @pytest.mark.asyncio
+    async def test_summarize_empty_messages_no_compact(self):
+        """Codex P1 follow-up: zero-message input returns as-is without
+        invoking the LLM. The threshold gate above this layer should
+        prevent the call, but defense-in-depth."""
+        cm = ContextManager(max_tokens=100, llm=MagicMock(), workspace=None)
+        result = await cm._summarize_compact("system", [])
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_summarize_first_retained_role_never_tool(self):
+        """Codex P1.1 follow-up: pathological input where the recent
+        tail leads with an orphan ``tool`` group must NOT produce
+        ``[summary(user), tool, ...]``. Either drop the orphans
+        atomically (when 2+ groups available) OR fall back to
+        ``_hard_prune`` (the orphan-leads-alone case)."""
+        llm = MagicMock()
+        llm.chat = AsyncMock(return_value=LLMResponse(
+            content="Summary.", tokens_used=10,
+        ))
+        cm = ContextManager(max_tokens=100, llm=llm, workspace=None)
+
+        # 4 standalone-tool groups + 1 assistant group at the tail.
+        # group_messages_by_tool_call yields 5 groups; with keep_n=4
+        # the recent tail leads with the second orphan-tool group.
+        # The fix drops those leading tools and lands on the assistant.
+        msgs = [
+            {"role": "user", "content": "kickoff"},
+            {"role": "tool", "tool_call_id": "x1", "content": "orph1"},
+            {"role": "tool", "tool_call_id": "x2", "content": "orph2"},
+            {"role": "tool", "tool_call_id": "x3", "content": "orph3"},
+            {"role": "tool", "tool_call_id": "x4", "content": "orph4"},
+            {"role": "assistant", "content": "final"},
+        ]
+        result = await cm._summarize_compact("system", msgs)
+        # First retained message must not be a tool — would orphan in
+        # the API. The summary is at index 0; index 1 is the first
+        # retained from recent.
+        if len(result) > 1:
+            assert result[1].get("role") != "tool", (
+                f"orphan tool leaked into recent tail: {result}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_summarize_two_leading_user_groups_no_consecutive_users(self):
+        """Codex P1.2 follow-up: when recent has multiple consecutive
+        user groups (pathological: queued chat inputs / reconnect race
+        producing two user messages back-to-back), dropping just the
+        first would leave a second user group at the head — still
+        consecutive with summary(user). The fix loops the drop so all
+        leading user groups are stripped."""
+        llm = MagicMock()
+        llm.chat = AsyncMock(return_value=LLMResponse(
+            content="Summary.", tokens_used=10,
+        ))
+        cm = ContextManager(max_tokens=100, llm=llm, workspace=None)
+
+        # 5 groups: 1 older + 4 recent. Recent leads with 2 user
+        # groups, then assistant turns. Need keep_n=4 to fire the
+        # multi-drop path.
+        msgs = _make_multimsg(
+            ("assistant", "a0"),  # older
+            ("user", "u1"),       # recent[0]
+            ("user", "u2"),       # recent[1] — also user! consecutive
+            ("assistant", "a1"),  # recent[2]
+            ("user", "u3"),       # recent[3]
+        )
+        # group_messages_by_tool_call: 5 standalone groups.
+        groups = group_messages_by_tool_call(msgs)
+        assert len(groups) == 5, f"setup error: got {len(groups)} groups"
+
+        result = await cm._summarize_compact("system", msgs)
+
+        # No two consecutive user/assistant pairs in the output.
+        for i in range(len(result) - 1):
+            r_a = result[i].get("role")
+            r_b = result[i + 1].get("role")
+            if r_a in ("user", "assistant") and r_b in ("user", "assistant"):
+                assert r_a != r_b, (
+                    f"consecutive {r_a} messages at index {i},{i+1} — "
+                    f"breaks LLM API alternation. result: {result}"
+                )
+
+    @pytest.mark.asyncio
     async def test_large_multi_tool_group_stays_atomic(self):
         """A single assistant turn with 10 tool calls forms one
         12-message group (1 + 1 + 10). The group must NOT be split by

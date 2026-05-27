@@ -471,30 +471,62 @@ class ContextManager:
             "content": f"## Conversation Summary (auto-compacted)\n\n{summary}",
         }
 
-        # The summary is ``role=user``. If the first recent group also
-        # leads with a user message, two ``user`` messages would land
-        # back-to-back, which the LLM APIs reject. Resolve atomically:
+        # The summary is ``role=user``. The recent tail's leading group
+        # must compose cleanly with that:
         #
-        #   * If 2+ recent groups: DROP the leading user group. The next
-        #     group's first message is well-formed alternation
-        #     (``assistant`` or ``assistant(tool_calls)``), so summary
-        #     (user) → next (assistant) is valid and no bridge is needed.
-        #     This avoids the consecutive-assistant bug in the legacy
-        #     path (which inserted a bridge assistant AND dropped a
-        #     message, producing ``user → assistant → assistant``).
+        #   * ``assistant`` (with or without tool_calls) — valid; the
+        #     summary (user) → assistant alternation is well-formed.
+        #     If the assistant carries tool_calls, the tool messages
+        #     that follow are part of the same atomic group so no
+        #     orphan can arise.
+        #   * ``system`` — accepted (uncommon mid-conversation but
+        #     valid alternation).
+        #   * ``user`` — back-to-back ``user`` messages break the API
+        #     contract. Drop the group if we have another to fall back
+        #     on, else insert a bridge assistant.
+        #   * ``tool`` — orphan: no preceding assistant carries the
+        #     matching tool_call_id. Drop the group; if every fallback
+        #     is also a tool orphan, fall back to ``_hard_prune`` which
+        #     handles malformed inputs defensively. (P1 follow-up from
+        #     codex review — original Bug 8 fix only handled the
+        #     ``user`` case and could still emit ``[summary, tool, ...]``
+        #     for malformed inputs.)
         #
-        #   * If only 1 recent group AND it leads with user: we cannot
-        #     drop it without losing the only kept turn. Insert a
-        #     bridging assistant between summary and the user message.
-        recent_messages = [m for g in recent_groups for m in g]
-        needs_bridge = bool(recent_messages) and recent_messages[0].get("role") == "user"
-        if needs_bridge and len(recent_groups) > 1:
+        # Drop leading invalid groups in a loop so consecutive bad
+        # groups (e.g. two queued user turns followed by an assistant)
+        # are all stripped, not just the first one.
+        while (
+            len(recent_groups) > 1
+            and recent_groups[0]
+            and recent_groups[0][0].get("role") in ("user", "tool")
+        ):
             recent_groups = recent_groups[1:]
-            recent_messages = [m for g in recent_groups for m in g]
-            result = [summary_msg] + recent_messages
-        elif needs_bridge:
-            bridge = {"role": "assistant", "content": "Understood, continuing from the summary above."}
+        recent_messages = [m for g in recent_groups for m in g]
+
+        first_role = recent_messages[0].get("role") if recent_messages else None
+        if first_role == "user":
+            # Only one group left and it leads with ``user`` — insert a
+            # bridging assistant so summary(user) → bridge(asst) → user
+            # is valid alternation.
+            bridge = {
+                "role": "assistant",
+                "content": "Understood, continuing from the summary above.",
+            }
             result = [summary_msg, bridge] + recent_messages
+        elif first_role == "tool":
+            # Only one group left and it's an orphan tool — defensive
+            # fallback to ``_hard_prune`` which returns the input
+            # unchanged when it can't safely shrink. This path is
+            # unreachable in normal flow (compaction is post-tool, so
+            # every tool message has its parent assistant in the same
+            # group); guards against malformed checkpoints / future
+            # refactors.
+            logger.warning(
+                "Recent tail leads with orphan tool after group-aware "
+                "dedup; falling back to _hard_prune. messages=%d groups=%d",
+                len(messages), len(recent_groups),
+            )
+            return self._hard_prune(messages)
         else:
             result = [summary_msg] + recent_messages
         logger.info(
