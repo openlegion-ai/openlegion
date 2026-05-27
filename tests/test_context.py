@@ -943,6 +943,61 @@ class TestSummarizeCompactGroupAware:
                 )
 
     @pytest.mark.asyncio
+    async def test_summarize_all_orphan_tools_returns_summary_only(self):
+        """Codex r2 P1: when every retained group is an orphan ``tool``
+        (pathological input — every message is a stray tool with no
+        parent assistant), the dedup loop strips all but the last
+        group. That last group still leads with ``tool``, which can't
+        be bridged (a tool needs a matching parent assistant, not just
+        any assistant). Drop the tail entirely; the summary already
+        captured everything older. Returning ``[summary]`` is strictly
+        better than ``[summary, tool, ...]`` (API-invalid)."""
+        llm = MagicMock()
+        llm.chat = AsyncMock(return_value=LLMResponse(
+            content="Summary.", tokens_used=10,
+        ))
+        cm = ContextManager(max_tokens=100, llm=llm, workspace=None)
+
+        # 5 standalone orphan-tool groups + nothing else.
+        msgs = [
+            {"role": "tool", "tool_call_id": f"orph_{i}", "content": f"r{i}"}
+            for i in range(5)
+        ]
+        result = await cm._summarize_compact("system", msgs)
+        # Result is just the summary; no orphan tools leaked out.
+        assert len(result) == 1
+        assert result[0].get("role") == "user"
+        assert "Summary" in result[0]["content"]
+
+    @pytest.mark.asyncio
+    async def test_summarize_unknown_role_drops_tail(self):
+        """Codex r2 P2: unknown roles (``developer``, future provider-
+        native roles, malformed payloads) must NOT pass through to
+        the LLM API. The original code's ``else`` branch accepted
+        them implicitly; the explicit allowlist (``assistant`` /
+        ``system``) drops them and returns summary-only."""
+        llm = MagicMock()
+        llm.chat = AsyncMock(return_value=LLMResponse(
+            content="Summary.", tokens_used=10,
+        ))
+        cm = ContextManager(max_tokens=100, llm=llm, workspace=None)
+
+        # 2 groups: [user_only], [developer_message]. After dedup,
+        # recent[0].role is "developer" — drops to summary-only.
+        msgs = [
+            {"role": "user", "content": "kickoff"},
+            {"role": "developer", "content": "weird leaked role"},
+        ]
+        result = await cm._summarize_compact("system", msgs)
+        # Tail dropped, only summary returned.
+        assert len(result) == 1
+        assert result[0].get("role") == "user"
+        # The unknown-role message must NOT have leaked into the result.
+        assert not any(
+            m.get("role") == "developer" for m in result
+        )
+
+    @pytest.mark.asyncio
     async def test_large_multi_tool_group_stays_atomic(self):
         """A single assistant turn with 10 tool calls forms one
         12-message group (1 + 1 + 10). The group must NOT be split by

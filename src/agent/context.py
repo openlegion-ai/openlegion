@@ -485,19 +485,20 @@ class ContextManager:
         #     contract. Drop the group if we have another to fall back
         #     on, else insert a bridge assistant.
         #   * ``tool`` — orphan: no preceding assistant carries the
-        #     matching tool_call_id. Drop the group; if every fallback
-        #     is also a tool orphan, fall back to ``_hard_prune`` which
-        #     handles malformed inputs defensively. (P1 follow-up from
-        #     codex review — original Bug 8 fix only handled the
-        #     ``user`` case and could still emit ``[summary, tool, ...]``
-        #     for malformed inputs.)
+        #     matching tool_call_id. Drop the group; if the orphan is
+        #     the last group, drop the whole tail and return summary
+        #     alone (losing a stray tool message is strictly better
+        #     than emitting an API-invalid sequence).
+        #   * anything else (``developer``, malformed/future roles) —
+        #     same treatment as orphan tool: drop the tail. Better to
+        #     return a summary-only result than ship unknown roles
+        #     downstream and surface as cryptic API rejections.
         #
         # Drop leading invalid groups in a loop so consecutive bad
         # groups (e.g. two queued user turns followed by an assistant)
         # are all stripped, not just the first one.
         while (
             len(recent_groups) > 1
-            and recent_groups[0]
             and recent_groups[0][0].get("role") in ("user", "tool")
         ):
             recent_groups = recent_groups[1:]
@@ -513,22 +514,28 @@ class ContextManager:
                 "content": "Understood, continuing from the summary above.",
             }
             result = [summary_msg, bridge] + recent_messages
-        elif first_role == "tool":
-            # Only one group left and it's an orphan tool — defensive
-            # fallback to ``_hard_prune`` which returns the input
-            # unchanged when it can't safely shrink. This path is
-            # unreachable in normal flow (compaction is post-tool, so
-            # every tool message has its parent assistant in the same
-            # group); guards against malformed checkpoints / future
-            # refactors.
-            logger.warning(
-                "Recent tail leads with orphan tool after group-aware "
-                "dedup; falling back to _hard_prune. messages=%d groups=%d",
-                len(messages), len(recent_groups),
-            )
-            return self._hard_prune(messages)
-        else:
+        elif first_role in ("assistant", "system"):
+            # Valid alternation after summary(user). The tool messages
+            # inside an ``assistant(tool_calls)`` group are paired with
+            # their parent in the same group (helper invariant) so no
+            # orphan can surface from this branch.
             result = [summary_msg] + recent_messages
+        else:
+            # ``tool`` (orphan after the loop's dedup pass) or any
+            # unknown role. Pathological input that shouldn't occur in
+            # normal flow — compaction runs post-tool so every tool
+            # message has its parent assistant in the same group, and
+            # the codebase only emits ``user``/``assistant``/``tool``/
+            # ``system`` roles into ``_chat_messages``. Drop the tail
+            # rather than emit an API-invalid sequence; the summary
+            # already captured the older context.
+            logger.warning(
+                "Recent tail leads with unexpected role %r after "
+                "group-aware dedup; returning summary-only. "
+                "messages=%d groups=%d",
+                first_role, len(messages), len(recent_groups),
+            )
+            result = [summary_msg]
         logger.info(
             f"Compacted {len(messages)} messages -> {len(result)} "
             f"(usage: {int(self.usage(result) * 100)}%)"
