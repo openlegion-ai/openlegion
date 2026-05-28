@@ -91,13 +91,13 @@ The operator is a system agent that builds and manages your workforce. It is ren
 
 The Work tab is the user's primary surface for steering the team without managing it. The route id is `workplace` (label "Work"); endpoints, JS state vars, and URL paths all keep the legacy name `workplace`. Single page at `/home`; legacy sub-paths (`/home/summaries`, `/home/kanban`, `/home/activity`, `/home/tasks`) normalize silently to `/home` so older bookmarks survive.
 
-The page composes four surfaces, top to bottom:
+The page composes five surfaces. In actual render order, top to bottom (`index.html` line refs):
 
-1. **Goals strip** — operator-managed business outcomes from `GOALS.json` (PR 1). Status-colored chips, hides entirely when empty. Read endpoint: `GET /api/workplace/goals`. Source-of-truth tool: `manage_goals` (operator-only, capped at 10 entries).
-2. **Sticky "Needs You" panel** — pending actions, credential requests, browser-login handoffs, CAPTCHA handoffs, and blocked tasks. Pinned at top. Aggregated client-side from `/api/workplace/pending` + `/api/workplace/blockers` + operator chat asks.
-3. **Stuck Tasks panel** — tasks pending or working for >24h with no status change (silent stale-work detection, distinct from Blockers which are explicit `status='blocked'` raises). Each row carries Cancel + Restart-agent buttons. Computed client-side from `/api/workplace/tasks`.
-4. **Summary cards** — operator-composed daily narratives from `WorkSummariesStore` (one row per team or solo agent per period). Rated 👍 / ➖ / 👎 with inline rework feedback that flows back into the next composition. Loaded via `GET /api/workplace/summaries`.
-5. **"Tell Operator" textarea** — freeform steering channel below the summaries. POSTs to the existing operator chat-stream endpoint via `sendChatTo('operator', …)`. Inline "Sent" / "Send failed" confirmation that auto-clears.
+1. **Sticky "Needs You" panel** (line ~3689) — pending actions, credential requests, browser-login handoffs, CAPTCHA handoffs, and blocked tasks. Pinned with `sticky top-0`. Aggregated client-side from `/api/workplace/pending` + `/api/workplace/blockers` + operator chat asks.
+2. **Goals strip** (line ~3770) — operator-managed business outcomes from `GOALS.json` (PR 1). Status-colored chips, hides entirely when empty. Read endpoint: `GET /api/workplace/goals`. Source-of-truth tool: `manage_goals` (operator-only, capped at 10 entries).
+3. **Summary cards** (line ~3804) — operator-composed daily narratives from `WorkSummariesStore` (one row per team or solo agent per period). Rated 👍 / ➖ / 👎 with inline rework feedback that flows back into the next composition. Loaded via `GET /api/workplace/summaries`.
+4. **"Tell Operator" textarea** (line ~3975) — freeform steering channel below the summaries. POSTs to the existing operator chat-stream endpoint via `sendChatTo('operator', …)`. Inline "Sent" / "Send failed" confirmation that auto-clears.
+5. **Stuck Tasks panel** (line ~4010) — tasks pending or working for >24h with no status change. Silent stale-work detection, distinct from Blockers (which are explicit `status='blocked'` raises). Each row carries Cancel + Restart-agent buttons. Computed client-side from `/api/workplace/tasks`. Hidden entirely when no tasks are stuck; appears at the bottom only when needed.
 
 The task **drill-in modal** stays reachable from Needs You blocker actions and notification-bell payload clicks. It serves the small fraction of users who want raw task detail; the per-summary rating UI handles the common QA loop for everyone else.
 
@@ -595,7 +595,7 @@ These endpoints power the Work tab. They cover the summary cards, Needs-You pane
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/dashboard/api/workplace/projects` | Teams with rollup status (response payload includes both `team_id` and `project_id` keys per item) |
+| `GET` | `/dashboard/api/workplace/teams` | Teams with rollup status (response payload includes both `team_id` and `project_id` keys per item for back-compat) |
 | `GET` | `/dashboard/api/workplace/tasks` | All tasks — Stuck Tasks panel + drill-in modal |
 | `GET` | `/dashboard/api/workplace/tasks/{task_id}` | Single task detail with artifacts (drill-in modal "Read full" toggle) |
 | `GET` | `/dashboard/api/workplace/tasks/{task_id}/events` | Per-task event timeline (drill-in modal) |

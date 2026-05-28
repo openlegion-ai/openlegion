@@ -4241,16 +4241,6 @@
           </section>
         </template>
 
-        <!-- PR-2 cutover note: the legacy activity sub-page (Just
-             delivered + Happening now + In progress) was removed.
-             Per-task rating moved from human UI into the operator's
-             programmatic ``rate_delivery`` tool. Stuck Tasks below
-             keeps the silent stale-work detector visible. -->
-        <template x-if="false">
-          <div class="hidden">
-          </div>
-        </template>
-
         <!-- Stuck tasks panel — silent stale-work detector kept across
              the PR 2 cutover. Renders when ``stuckTasks`` is non-empty
              (tasks pending or working >24h). Each row carries [Cancel]
