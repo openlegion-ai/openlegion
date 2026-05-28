@@ -6108,6 +6108,11 @@ function dashboard() {
         const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/capabilities`);
         if (resp.ok) {
           const data = await resp.json();
+          // Guard against an in-flight fetch landing after the user
+          // switched to a different agent — without this, agent A's
+          // response would overwrite the now-visible agent B's
+          // tools/status. Drop late responses.
+          if (this.selectedAgent && this.selectedAgent !== agentId) return;
           // Agent returns tool_definitions (OpenAI format: {type, function: {name, description}})
           const defs = data.tool_definitions || [];
           const sources = data.tool_sources || {};
@@ -6922,15 +6927,22 @@ function dashboard() {
     mcpStartEdit(idx) {
       const s = this.editForm.mcp_servers[idx];
       if (!s) return;
+      // If this entry was added/edited earlier in this session, the
+      // mcpCommitDraft path attached ``_replaceEnv`` and ``_envRows``;
+      // restore them so a second-pass edit doesn't silently drop the
+      // env the user already typed. For entries loaded fresh from
+      // agentConfigs (no prior draft), _envRows is [] and
+      // _replaceEnv defaults to off so existing env is preserved
+      // unless the user explicitly toggles. env_keys is all we know
+      // for these — the masked GET doesn't return values.
       this.editForm._mcpDraft = {
         name: s.name,
         command: s.command,
         _argRows: (s.args || []).map(v => ({ value: v })),
-        // env_keys is all we know on edit — we can't pre-populate values
-        // because the masked GET doesn't return them. _replaceEnv defaults
-        // off so existing env is preserved unless the user explicitly toggles.
-        _envRows: [],
-        _replaceEnv: false,
+        _envRows: Array.isArray(s._envRows)
+          ? s._envRows.map(r => ({ key: r.key, type: r.type, value: r.value }))
+          : [],
+        _replaceEnv: !!s._replaceEnv,
       };
       this.editForm._mcpEditIndex = idx;
       this.editForm._showMcpAddForm = false;
@@ -6945,6 +6957,34 @@ function dashboard() {
     mcpCommitDraft() {
       const d = this.editForm._mcpDraft;
       if (!d) return;
+      const name = (d.name || '').trim();
+      const command = (d.command || '').trim();
+      const editIdx = this.editForm._mcpEditIndex;
+      // Client-side duplicate-name rejection (case-insensitive,
+      // mirrors the backend AgentConfig field-validator). Avoids
+      // confusing top-level Pydantic 400 surfaces — also keeps
+      // ``mcpServersChanged``'s by-name Map lookup honest.
+      const lowered = name.toLowerCase();
+      const collidesAt = this.editForm.mcp_servers.findIndex(
+        (s, i) => i !== editIdx && (s.name || '').toLowerCase() === lowered,
+      );
+      if (collidesAt >= 0) {
+        this.showToast(`Another MCP server already uses name "${name}" (case-insensitive).`);
+        return;
+      }
+      // Reject cred rows with a key but no selected credential —
+      // otherwise mcpDraftToWirePayload silently drops them while
+      // env_keys would still record the key, lying to the user.
+      if (d._replaceEnv) {
+        for (const row of (d._envRows || [])) {
+          const k = (row.key || '').trim();
+          if (!k) continue;
+          if (row.type === 'cred' && !(row.value || '').trim()) {
+            this.showToast(`Env "${k}" is set to Credential mode but no credential is selected.`);
+            return;
+          }
+        }
+      }
       // env_keys is a display-only field for the inline edit UI:
       //   * In replace mode it's derived from the new rows the user supplied.
       //   * In preserve mode (not replacing) we KEEP the original entry's
@@ -6955,23 +6995,23 @@ function dashboard() {
       //     by-name semantic).
       let envKeys;
       if (d._replaceEnv) {
-        envKeys = d._envRows.map(r => (r.key || '').trim()).filter(Boolean);
-      } else if (this.editForm._mcpEditIndex >= 0) {
-        const original = this.editForm.mcp_servers[this.editForm._mcpEditIndex];
+        envKeys = (d._envRows || []).map(r => (r.key || '').trim()).filter(Boolean);
+      } else if (editIdx >= 0) {
+        const original = this.editForm.mcp_servers[editIdx];
         envKeys = (original && Array.isArray(original.env_keys)) ? [...original.env_keys] : [];
       } else {
         envKeys = [];
       }
       const entry = {
-        name: (d.name || '').trim(),
-        command: (d.command || '').trim(),
+        name,
+        command,
         args: d._argRows.map(r => r.value).filter(v => v !== ''),
         env_keys: envKeys,
         _replaceEnv: !!d._replaceEnv,
         _envRows: d._envRows,
       };
-      if (this.editForm._mcpEditIndex >= 0) {
-        this.editForm.mcp_servers.splice(this.editForm._mcpEditIndex, 1, entry);
+      if (editIdx >= 0) {
+        this.editForm.mcp_servers.splice(editIdx, 1, entry);
       } else {
         this.editForm.mcp_servers.push(entry);
       }
@@ -7132,6 +7172,19 @@ function dashboard() {
       if (this.editForm && this.editForm._mcpRestartPending) {
         this.showToast('MCP restart in progress — try again in a moment.');
         return;
+      }
+      // If the user has an open MCP draft (add or edit form) and clicks
+      // the outer Save, auto-commit the draft so the typed entries
+      // aren't silently dropped. Reject the save if the draft is
+      // incomplete (no name/command) — surface a clear toast so the
+      // user knows why their save didn't go through.
+      if (this.editForm && this.editForm._mcpDraft) {
+        const d = this.editForm._mcpDraft;
+        if (!(d.name || '').trim() || !(d.command || '').trim()) {
+          this.showToast('MCP server draft is incomplete — Apply or Cancel it before saving.');
+          return;
+        }
+        this.mcpCommitDraft();
       }
       this.configSaving = true;
       try {
