@@ -544,3 +544,54 @@ async def test_record_seed_ask_updates_timestamp_on_replay(tmp_path):
         workspace_manager=ws,
     )
     assert second["seed_ask"]["last_ts"] > first["seed_ask"]["last_ts"]
+
+
+@pytest.mark.asyncio
+async def test_record_seed_ask_refuses_on_corrupt_goals_json(tmp_path):
+    """Codex r3 catch — when GOALS.json is corrupt (e.g. a partial
+    write from a prior crash), ``record_seed_ask`` must NOT silently
+    write back ``{"goals": [], "seed_ask": {...}}`` and thereby wipe
+    any goals the file would have decoded to. It must abort and
+    surface an error so the operator can repair the file."""
+    from src.agent.builtins.operator_tools import manage_goals
+
+    ws = _FakeWorkspace(tmp_path)
+    # First, seed some goals via the happy path so we have a valid
+    # baseline to "lose" — proves the corrupt-input refusal is what
+    # protects the data, not just an empty-file check.
+    await manage_goals(
+        "set",
+        goals=[{"name": "Launch landing page", "status": "in_progress"}],
+        workspace_manager=ws,
+    )
+    # Now simulate a corrupt write — truncated JSON.
+    (tmp_path / "GOALS.json").write_text('{"goals": [{"name":')
+    result = await manage_goals(
+        "record_seed_ask",
+        team_names=["growth"],
+        workspace_manager=ws,
+    )
+    assert "error" in result
+    assert "corrupt" in result["error"].lower()
+    # File is left untouched — operator can inspect and repair.
+    assert (tmp_path / "GOALS.json").read_text() == '{"goals": [{"name":'
+
+
+@pytest.mark.asyncio
+async def test_record_seed_ask_seeds_into_empty_workspace(tmp_path):
+    """No GOALS.json yet → record_seed_ask creates one with empty
+    goals + the new seed_ask block. The corrupt-file guard at
+    ``_safe_read_goals_for_merge`` distinguishes "missing" (legitimate
+    empty) from "exists but corrupt" (raise)."""
+    from src.agent.builtins.operator_tools import manage_goals
+
+    ws = _FakeWorkspace(tmp_path)
+    result = await manage_goals(
+        "record_seed_ask",
+        team_names=["alpha"],
+        workspace_manager=ws,
+    )
+    assert result["ok"] is True
+    payload = json.loads((tmp_path / "GOALS.json").read_text())
+    assert payload["goals"] == []
+    assert payload["seed_ask"]["team_names"] == ["alpha"]

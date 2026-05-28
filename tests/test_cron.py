@@ -494,6 +494,15 @@ class TestEnrichedHeartbeat:
         call_msg = dispatch.call_args[0][1]
         assert "Heartbeat for test" in call_msg
         assert "Heartbeat Operating Rules" in call_msg
+        # PR 972 Codex r3 — the trigger line carries a current ISO
+        # timestamp so the LLM has a concrete "now" for date math
+        # (e.g. the 7-day re-ask throttle on goal seeding).
+        import re
+        # ISO 8601 with timezone offset, e.g. 2026-05-29T01:23:45.678901+00:00
+        assert re.search(
+            r"Heartbeat for test at \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}",
+            call_msg,
+        ), f"missing ISO timestamp in heartbeat trigger: {call_msg[:120]}"
 
     @pytest.mark.asyncio
     async def test_heartbeat_dispatches_custom_rules(self):

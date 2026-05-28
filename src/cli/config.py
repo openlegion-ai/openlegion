@@ -1936,7 +1936,16 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
         old_has_any_sentinel = any(
             f"<!-- {s} -->" in existing_heartbeat for s in HEARTBEAT_SENTINELS
         )
-        if new_has_latest and not old_has_latest and old_has_any_sentinel:
+        # An EMPTY heartbeat is the operator's documented opt-in path
+        # for re-bootstrap (the WARN below for no-sentinel files
+        # instructs operators to clear the field; the refresh has to
+        # actually fire when they do). Treated as "fresh install" and
+        # rewritten from the canonical template.
+        existing_is_empty = not existing_heartbeat.strip()
+        if new_has_latest and (
+            (not old_has_latest and old_has_any_sentinel)
+            or existing_is_empty
+        ):
             op_entry["heartbeat"] = _OPERATOR_HEARTBEAT
             agents_cfg["agents"][_OPERATOR_AGENT_ID] = op_entry
             AGENTS_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -1945,19 +1954,22 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
                     agents_cfg, f, default_flow_style=False, sort_keys=False,
                 )
             logger.info(
-                "Refreshed operator heartbeat to versioned template",
+                "Refreshed operator heartbeat to versioned template%s",
+                " (was empty — bootstrapped)" if existing_is_empty else "",
             )
         elif (
             new_has_latest
             and not old_has_latest
             and not old_has_any_sentinel
-            and existing_heartbeat.strip()
+            and not existing_is_empty
         ):
             logger.warning(
                 "operator heartbeat carries no known sentinel — "
                 "treating as user-customised and skipping refresh. "
-                "Clear the `heartbeat:` field in agents.yaml to opt "
-                "in to the fresh template on next startup."
+                "To opt in to the fresh template: clear the `heartbeat:` "
+                "field in agents.yaml (set to empty/null) AND delete "
+                "the operator's HEARTBEAT.md — startup will then write "
+                "both layers fresh from the canonical template."
             )
 
         # Ensure permissions are correct even for existing operator
