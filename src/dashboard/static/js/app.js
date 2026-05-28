@@ -396,8 +396,9 @@ function dashboard() {
     workplaceTasks: [],
     workplaceBlockers: [],
     // Workplace-wide business goals (PR 2). Operator manages via
-    // ``manage_goals``; dashboard renders a read-only chip strip above
-    // the Needs You panel. Hidden entirely when empty.
+    // ``manage_goals``; dashboard renders a read-only chip strip
+    // between Needs You (top sticky) and the Summary cards. Hidden
+    // entirely when empty.
     workplaceGoals: [],
     // Work summaries surface (PR-B). One row per team per period. The
     // user rates 👍/➖/👎 with optional feedback; rating + feedback

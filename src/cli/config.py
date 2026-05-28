@@ -1690,8 +1690,16 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
 # by the runtime. New tools should be added to BOTH places (and the
 # operator HEARTBEAT.md prompt) to take effect.
 _OPERATOR_HEARTBEAT_TOOLS: list[str] = [
-    "inspect_agents", "get_system_status", "notify_user", "save_observations",
+    # v1 baseline (read-only)
+    "list_agents", "get_agent_profile", "get_system_status",
+    "notify_user", "save_observations",
+    # v2 workflow-awareness — back-edge events + chain inspection +
+    # single-task blocking so the heartbeat can drive multi-stage
+    # chains without dropping out to a full /chat turn.
     "check_inbox", "workflow_snapshot", "await_task_event",
+    # v3 Work-tab rewrite — heartbeat grades up to 10 oldest unrated
+    # done tasks per cycle and stewards goal staleness.
+    "rate_delivery", "manage_goals",
 ]
 
 _OPERATOR_SOUL = """\
