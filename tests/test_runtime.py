@@ -1450,3 +1450,161 @@ class TestEntrypointHelpers:
         )
         assert result.returncode == 0
         assert "skipping firewall setup" in result.stderr
+
+
+# ── _build_mcp_servers_env: $CRED{name} resolution at agent start ──
+
+
+class TestBuildMcpServersEnv:
+    """The mesh resolves $CRED handles in mcp_servers env values and args
+    just before serializing MCP_SERVERS for the agent container. The
+    command field is left literal (handles there are rejected at config
+    validation time). When the vault is not wired, configs with handles
+    must fail loudly so a misconfigured deploy doesn't ship literal
+    ``$CRED{...}`` to subprocesses.
+    """
+
+    def _backend(self, vault=None, permissions=None):
+        b = _make_docker_backend()
+        if vault is not None:
+            b._vault = vault
+        if permissions is not None:
+            b._permissions = permissions
+        return b
+
+    def _vault_with(self, monkeypatch, **creds):
+        from src.host.credentials import CredentialVault
+        for name, value in creds.items():
+            monkeypatch.setenv(f"OPENLEGION_CRED_{name.upper()}", value)
+        return CredentialVault()
+
+    def _perms_allow_all(self):
+        p = MagicMock()
+        p.can_access_credential.return_value = True
+        return p
+
+    def _perms_deny_all(self):
+        p = MagicMock()
+        p.can_access_credential.return_value = False
+        return p
+
+    def test_empty_servers_returns_empty_json_array(self):
+        b = self._backend()
+        assert b._build_mcp_servers_env(None, agent_id="a1") == "[]"
+        assert b._build_mcp_servers_env([], agent_id="a1") == "[]"
+
+    def test_plain_config_no_handles_passes_through(self):
+        b = self._backend()
+        servers = [{
+            "name": "fs", "command": "mcp-server-fs", "args": ["/data"],
+            "env": {"DEBUG": "1"},
+        }]
+        result = json.loads(b._build_mcp_servers_env(servers, agent_id="a1"))
+        assert result == servers
+
+    def test_handle_in_env_resolves_when_vault_wired(self, monkeypatch):
+        b = self._backend(
+            vault=self._vault_with(monkeypatch, linear_token="LINEAR-SECRET"),
+            permissions=self._perms_allow_all(),
+        )
+        servers = [{
+            "name": "linear", "command": "mcp-server-linear",
+            "env": {"API_KEY": "$CRED{linear_token}"},
+        }]
+        result = json.loads(b._build_mcp_servers_env(servers, agent_id="a1"))
+        assert result[0]["env"]["API_KEY"] == "LINEAR-SECRET"
+
+    def test_handle_in_args_resolves_when_vault_wired(self, monkeypatch):
+        b = self._backend(
+            vault=self._vault_with(monkeypatch, linear_token="LINEAR-SECRET"),
+            permissions=self._perms_allow_all(),
+        )
+        servers = [{
+            "name": "linear", "command": "mcp-server-linear",
+            "args": ["--token", "$CRED{linear_token}"],
+        }]
+        result = json.loads(b._build_mcp_servers_env(servers, agent_id="a1"))
+        assert result[0]["args"] == ["--token", "LINEAR-SECRET"]
+
+    def test_handle_in_env_without_vault_raises_clearly(self):
+        # vault and permissions still None (class defaults).
+        b = self._backend()
+        servers = [{
+            "name": "x", "command": "y",
+            "env": {"KEY": "$CRED{anything}"},
+        }]
+        with pytest.raises(ValueError) as excinfo:
+            b._build_mcp_servers_env(servers, agent_id="a1")
+        msg = str(excinfo.value)
+        assert "$CRED" in msg
+        assert "a1" in msg
+        assert "set_credential_resolver" in msg
+
+    def test_handle_in_args_without_vault_raises_clearly(self):
+        b = self._backend()
+        servers = [{
+            "name": "x", "command": "y",
+            "args": ["--token", "$CRED{anything}"],
+        }]
+        with pytest.raises(ValueError):
+            b._build_mcp_servers_env(servers, agent_id="a1")
+
+    def test_clean_config_without_vault_does_not_raise(self):
+        # No $CRED references → vault wiring not required.
+        b = self._backend()
+        servers = [{"name": "x", "command": "y", "args": ["a"], "env": {"K": "v"}}]
+        # Should not raise.
+        result = json.loads(b._build_mcp_servers_env(servers, agent_id="a1"))
+        assert result == servers
+
+    def test_missing_credential_propagates_value_error(self, monkeypatch):
+        # Vault has linear_token; config asks for github_token.
+        b = self._backend(
+            vault=self._vault_with(monkeypatch, linear_token="x"),
+            permissions=self._perms_allow_all(),
+        )
+        servers = [{
+            "name": "x", "command": "y",
+            "env": {"K": "$CRED{github_token}"},
+        }]
+        with pytest.raises(ValueError) as excinfo:
+            b._build_mcp_servers_env(servers, agent_id="a1")
+        assert "github_token" in str(excinfo.value)
+
+    def test_permission_denied_propagates_value_error(self, monkeypatch):
+        b = self._backend(
+            vault=self._vault_with(monkeypatch, linear_token="x"),
+            permissions=self._perms_deny_all(),
+        )
+        servers = [{
+            "name": "x", "command": "y",
+            "env": {"K": "$CRED{linear_token}"},
+        }]
+        with pytest.raises(ValueError) as excinfo:
+            b._build_mcp_servers_env(servers, agent_id="a1")
+        assert "permission" in str(excinfo.value).lower()
+
+    def test_setter_wires_vault_and_permissions(self, monkeypatch):
+        b = self._backend()
+        v = self._vault_with(monkeypatch, linear_token="ABC")
+        p = self._perms_allow_all()
+        b.set_credential_resolver(vault=v, permissions=p)
+        servers = [{
+            "name": "x", "command": "y",
+            "env": {"K": "$CRED{linear_token}"},
+        }]
+        result = json.loads(b._build_mcp_servers_env(servers, agent_id="a1"))
+        assert result[0]["env"]["K"] == "ABC"
+
+    def test_setter_with_none_resets_to_unwired(self):
+        # Wiring None re-creates the "no resolver" state — refs would re-raise.
+        b = self._backend()
+        b._vault = MagicMock()  # pretend wired
+        b._permissions = MagicMock()
+        b.set_credential_resolver(vault=None, permissions=None)
+        servers = [{
+            "name": "x", "command": "y",
+            "env": {"K": "$CRED{anything}"},
+        }]
+        with pytest.raises(ValueError):
+            b._build_mcp_servers_env(servers, agent_id="a1")

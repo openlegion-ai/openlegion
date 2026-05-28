@@ -6,11 +6,12 @@ Agent containers and the host process share only these types.
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 def _generate_id(prefix: str, length: int = 12) -> str:
@@ -33,6 +34,24 @@ its profile silently stomped the next time an operator ran the canary.
 
 AGENT_ID_RE_PATTERN = r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
 """Canonical agent ID regex — 1-64 chars, alphanumeric start, then alphanumeric/hyphen/underscore."""
+
+MCP_SERVER_NAME_RE_PATTERN = r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
+"""MCP server name regex — matches :data:`AGENT_ID_RE_PATTERN` convention.
+
+Used as a prefix when an MCP tool conflicts with a built-in skill or
+another server's tool (``mcp_<server>_<tool>`` — see
+:mod:`src.agent.mcp_client`).
+"""
+
+CRED_HANDLE_RE = re.compile(r"\$CRED\{([^}]+)\}")
+"""Credential handle regex — ``$CRED{name}`` references resolved by the
+mesh against :class:`src.host.credentials.CredentialVault` at the point
+of use.
+
+This is the canonical location. ``src.agent.builtins.CRED_HANDLE_RE``
+is a mirrored constant kept for back-compat; prefer importing from
+here.
+"""
 
 HARD_EDIT_FIELDS = frozenset({"model", "permissions", "budget", "thinking"})
 """Agent-config fields that earn the longer 30-min Undo window (the
@@ -376,6 +395,72 @@ class AgentPermissions(BaseModel):
 # === Agent Configuration ===
 
 
+class MCPServerConfig(BaseModel):
+    """Configuration for a single MCP (Model Context Protocol) server.
+
+    Each agent may declare zero or more servers via
+    :attr:`AgentConfig.mcp_servers`. The mesh launches each as a stdio
+    subprocess inside the agent container (see :mod:`src.agent.mcp_client`).
+
+    Credential handles (``$CRED{name}``) may appear in ``env`` values
+    and in ``args`` strings; the mesh resolves them against the
+    credential vault at agent start. They are **not** permitted in
+    ``command`` — rejected here so users get a clear validation error
+    instead of a confusing "executable not found" failure later.
+
+    The outer :class:`AgentConfig` keeps ``extra="allow"`` for forward
+    compatibility, but this nested model enforces ``extra="forbid"``
+    so typos like ``commnad`` fail loudly.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    name: str = Field(
+        min_length=1, max_length=64, pattern=MCP_SERVER_NAME_RE_PATTERN,
+    )
+    command: str = Field(min_length=1, max_length=256)
+    args: list[str] = Field(default_factory=list, max_length=32)
+    env: dict[str, str] | None = None
+
+    @field_validator("command")
+    @classmethod
+    def _command_no_cred_handle(cls, v: str) -> str:
+        if CRED_HANDLE_RE.search(v):
+            raise ValueError(
+                "Credential handles ($CRED{...}) are not allowed in `command` "
+                "— use `env` or `args` instead.",
+            )
+        return v
+
+    @field_validator("args")
+    @classmethod
+    def _args_per_item_length(cls, v: list[str]) -> list[str]:
+        for i, a in enumerate(v):
+            if len(a) > 512:
+                raise ValueError(f"args[{i}] too long (max 512 chars)")
+        return v
+
+    @field_validator("env")
+    @classmethod
+    def _env_shape(
+        cls, v: dict[str, str] | None,
+    ) -> dict[str, str] | None:
+        if v is None:
+            return v
+        if len(v) > 32:
+            raise ValueError("env may have at most 32 entries")
+        for k, val in v.items():
+            if not k or len(k) > 128:
+                raise ValueError(
+                    f"invalid env key: {k!r} (must be 1-128 chars)",
+                )
+            if len(val) > 4096:
+                raise ValueError(
+                    f"env value for {k!r} too long (max 4096 chars)",
+                )
+        return v
+
+
 class AgentConfig(BaseModel):
     """Structured fields for an agent entry in ``config/agents.yaml``.
 
@@ -418,7 +503,33 @@ class AgentConfig(BaseModel):
     escalation_to: str | None = None
     forbidden: list[str] = Field(default_factory=list)
 
+    # MCP server configurations. Validated strictly via MCPServerConfig
+    # despite the outer ``extra="allow"`` policy (Pydantic enforces the
+    # nested model's ``extra="forbid"`` independently of the parent).
+    # Credential handles in env/args resolved by the mesh at agent start.
+    mcp_servers: list[MCPServerConfig] | None = None
+
     model_config = {"extra": "allow"}
+
+    @field_validator("mcp_servers")
+    @classmethod
+    def _no_duplicate_mcp_names(
+        cls, v: list[MCPServerConfig] | None,
+    ) -> list[MCPServerConfig] | None:
+        if not v:
+            return v
+        seen: set[str] = set()
+        dups: list[str] = []
+        for s in v:
+            lower = s.name.lower()
+            if lower in seen and lower not in dups:
+                dups.append(lower)
+            seen.add(lower)
+        if dups:
+            raise ValueError(
+                f"Duplicate MCP server names (case-insensitive): {dups}",
+            )
+        return v
 
 
 # === Teams ===

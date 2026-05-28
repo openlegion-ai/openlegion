@@ -22,6 +22,7 @@ import re
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import httpx
 
@@ -29,8 +30,11 @@ from src.agent.attachments import convert_openai_image_blocks
 from src.host.transcript import sanitize_for_provider
 from src.shared.errors import LLMAuthError, LLMConfigError
 from src.shared.models import KEYLESS_PROVIDERS, get_known_provider_names
-from src.shared.types import APIProxyRequest, APIProxyResponse
+from src.shared.types import CRED_HANDLE_RE, APIProxyRequest, APIProxyResponse
 from src.shared.utils import friendly_streaming_error, setup_logging
+
+if TYPE_CHECKING:
+    from src.host.permissions import PermissionMatrix
 
 logger = setup_logging("host.credentials")
 
@@ -3335,3 +3339,65 @@ class CredentialVault:
                 "fixed_cost_usd": cost,
             },
         )
+
+
+def resolve_cred_handles(
+    text: str,
+    *,
+    vault: CredentialVault,
+    permissions: PermissionMatrix,
+    agent_id: str,
+) -> tuple[str, list[str]]:
+    """Resolve ``$CRED{name}`` handles in *text* against the mesh vault.
+
+    Mesh-side, synchronous counterpart to
+    :func:`src.agent.builtins.http_tool._resolve_creds`. Both use the
+    shared :data:`src.shared.types.CRED_HANDLE_RE` regex; both perform
+    a single-pass replacement so a resolved value that happens to
+    contain ``$CRED{...}`` is never re-resolved.
+
+    Args:
+        text: Input string possibly containing one or more
+            ``$CRED{name}`` handles. Strings without any handle are
+            returned unchanged.
+        vault: The mesh credential vault.
+        permissions: Permission matrix used to gate each handle.
+        agent_id: The agent whose ``allowed_credentials`` patterns
+            apply to this resolution.
+
+    Returns:
+        A tuple of ``(resolved_text, resolved_secret_values)``. The
+        secret list lets callers redact resolved values from any
+        downstream log statement (mirroring the agent-side helper).
+
+    Raises:
+        ValueError: If a referenced credential does not exist in the
+            vault, or if the agent does not have permission to access
+            it. The message names the credential so the caller can
+            surface a clear error to the operator.
+    """
+    matches = CRED_HANDLE_RE.findall(text)
+    if not matches:
+        return text, []
+
+    resolved: dict[str, str] = {}
+    secrets: list[str] = []
+    for cred_name in set(matches):
+        if not permissions.can_access_credential(agent_id, cred_name):
+            raise ValueError(
+                f"Agent {agent_id!r} does not have permission to access "
+                f"credential {cred_name!r}.",
+            )
+        value = vault.resolve_credential(cred_name)
+        if value is None:
+            raise ValueError(
+                f"Credential {cred_name!r} referenced by agent "
+                f"{agent_id!r} does not exist in the vault.",
+            )
+        resolved[cred_name] = value
+        secrets.append(value)
+
+    resolved_text = CRED_HANDLE_RE.sub(
+        lambda m: resolved.get(m.group(1), m.group(0)), text,
+    )
+    return resolved_text, secrets

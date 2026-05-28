@@ -22,9 +22,14 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from src.shared.types import CRED_HANDLE_RE
 from src.shared.utils import setup_logging
+
+if TYPE_CHECKING:
+    from src.host.credentials import CredentialVault
+    from src.host.permissions import PermissionMatrix
 
 logger = setup_logging("host.runtime")
 
@@ -37,8 +42,33 @@ def _docker_safe_name(agent_id: str) -> str:
     return _DOCKER_NAME_RE.sub("_", agent_id)
 
 
+def _mcp_servers_contain_cred_handles(mcp_servers: list[dict]) -> bool:
+    """Return True if any server's env value or args string contains a
+    ``$CRED{name}`` reference. Used for the pre-flight error when the
+    vault/permissions resolver has not been wired into the backend.
+    """
+    for s in mcp_servers:
+        for a in s.get("args") or []:
+            if isinstance(a, str) and CRED_HANDLE_RE.search(a):
+                return True
+        for v in (s.get("env") or {}).values():
+            if isinstance(v, str) and CRED_HANDLE_RE.search(v):
+                return True
+    return False
+
+
 class RuntimeBackend(abc.ABC):
     """Abstract backend for starting, stopping, and monitoring agents."""
+
+    # Class-level defaults for the mesh credential resolver. Wired by
+    # ``RuntimeContext`` via :meth:`set_credential_resolver` once the
+    # vault and permission matrix exist. Class-level placement means
+    # tests that bypass ``__init__`` via ``.__new__()`` still get safe
+    # ``None`` defaults — MCP configs with ``$CRED{...}`` handles will
+    # fail loudly at ``start_agent`` rather than silently shipping
+    # literal handles to subprocesses.
+    _vault: CredentialVault | None = None
+    _permissions: PermissionMatrix | None = None
 
     def __init__(self, mesh_host_port: int = 8420, project_root: str | None = None):
         self.mesh_host_port = mesh_host_port
@@ -49,6 +79,93 @@ class RuntimeBackend(abc.ABC):
         self.agents: dict[str, dict] = {}
         self.auth_tokens: dict[str, str] = {}
         self.extra_env: dict[str, str] = {}
+
+    def set_credential_resolver(
+        self,
+        *,
+        vault: CredentialVault | None,
+        permissions: PermissionMatrix | None,
+    ) -> None:
+        """Plumb the mesh credential vault and permission matrix into the
+        backend so it can resolve ``$CRED{name}`` handles inside
+        ``mcp_servers`` configs when starting an agent.
+
+        Idempotent — safe to call multiple times. Until called (or if
+        called with ``vault=None``), any MCP config containing a
+        credential handle will be rejected at ``start_agent`` so a
+        misconfigured deploy fails loudly rather than shipping literal
+        ``$CRED{...}`` strings to subprocesses.
+        """
+        self._vault = vault
+        self._permissions = permissions
+
+    def _build_mcp_servers_env(
+        self,
+        mcp_servers: list[dict] | None,
+        *,
+        agent_id: str,
+    ) -> str:
+        """Serialize ``mcp_servers`` for the ``MCP_SERVERS`` container
+        env var, resolving any ``$CRED{name}`` handles in env values
+        and args strings against the mesh credential vault.
+
+        ``command`` is passed through literally — handles there are
+        rejected at config validation time by
+        :class:`src.shared.types.MCPServerConfig`.
+
+        Raises ``ValueError`` if the config references credential
+        handles but the resolver has not been wired
+        (vault/permissions are ``None``), or if any referenced
+        credential is missing from the vault or denied by the agent's
+        ``allowed_credentials`` policy. Callers (``start_agent``)
+        propagate this so the failure surfaces through the existing
+        agent-restart error path.
+        """
+        if not mcp_servers:
+            return json.dumps(mcp_servers or [])
+
+        has_refs = _mcp_servers_contain_cred_handles(mcp_servers)
+        if not has_refs:
+            return json.dumps(mcp_servers)
+
+        if self._vault is None or self._permissions is None:
+            raise ValueError(
+                "MCP server config for agent "
+                f"{agent_id!r} contains $CRED{{...}} references but the "
+                "mesh credential vault is not wired into RuntimeBackend. "
+                "Call set_credential_resolver(vault=..., permissions=...) "
+                "before starting agents, or remove credential handles "
+                "from mcp_servers.",
+            )
+
+        from src.host.credentials import resolve_cred_handles
+
+        resolved_servers: list[dict] = []
+        for s in mcp_servers:
+            s_copy = dict(s)
+            args = s.get("args") or []
+            if args:
+                s_copy["args"] = [
+                    resolve_cred_handles(
+                        a, vault=self._vault, permissions=self._permissions,
+                        agent_id=agent_id,
+                    )[0]
+                    if isinstance(a, str) else a
+                    for a in args
+                ]
+            env = s.get("env") or {}
+            if env:
+                s_copy["env"] = {
+                    k: resolve_cred_handles(
+                        v, vault=self._vault, permissions=self._permissions,
+                        agent_id=agent_id,
+                    )[0]
+                    if isinstance(v, str) else v
+                    for k, v in env.items()
+                }
+            resolved_servers.append(s_copy)
+
+        return json.dumps(resolved_servers)
 
     @abc.abstractmethod
     def start_agent(
@@ -254,7 +371,9 @@ class DockerBackend(RuntimeBackend):
         if model:
             environment["LLM_MODEL"] = model
         if mcp_servers:
-            environment["MCP_SERVERS"] = json.dumps(mcp_servers)
+            environment["MCP_SERVERS"] = self._build_mcp_servers_env(
+                mcp_servers, agent_id=agent_id,
+            )
         if thinking:
             environment["THINKING"] = thinking
         environment.update(self.extra_env)
@@ -882,7 +1001,9 @@ class SandboxBackend(RuntimeBackend):
         if model:
             env_cfg["LLM_MODEL"] = model
         if mcp_servers:
-            env_cfg["MCP_SERVERS"] = json.dumps(mcp_servers)
+            env_cfg["MCP_SERVERS"] = self._build_mcp_servers_env(
+                mcp_servers, agent_id=agent_id,
+            )
         if thinking:
             env_cfg["THINKING"] = thinking
         env_cfg.update(self.extra_env)

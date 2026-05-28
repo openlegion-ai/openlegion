@@ -42,11 +42,13 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from jinja2 import Environment, FileSystemLoader
+from pydantic import ValidationError
 
 from src.cli.proxy import build_proxy_env_vars, resolve_agent_proxy
 from src.dashboard.auth import verify_session_cookie
 from src.shared.paths import resolve_under_root
 from src.shared.sqlite_helpers import open_db
+from src.shared.types import CRED_HANDLE_RE, MCPServerConfig
 from src.shared.utils import dumps_safe, friendly_streaming_error, sanitize_for_prompt, setup_logging
 
 if TYPE_CHECKING:
@@ -152,6 +154,99 @@ def _get_builtin_tool_names() -> frozenset[str]:
 
 
 _get_builtin_tool_names._cache = None  # type: ignore[attr-defined]
+
+
+def _mask_mcp_servers_for_get(servers: list[dict] | None) -> list[dict]:
+    """Return ``mcp_servers`` with env values stripped, suitable for GET
+    responses. Env values may be plaintext secrets or ``$CRED{name}``
+    handles pointing at one; neither is safe to ship over the API.
+
+    Each server entry retains ``name``, ``command``, and ``args``;
+    ``env`` is omitted entirely (NOT returned as ``null``) and replaced
+    with ``env_keys`` — a sorted list of the env variable names. The
+    omission is deliberate: a naive ``GET → edit → PUT`` round-trip
+    would otherwise lose env when the PUT handler interprets a present
+    ``env=null`` as "replace with no env." The PUT contract is "env
+    absent = preserve, env present (dict or {}) = replace wholesale"
+    (see T5 in :func:`_api_put_agent_config`).
+    """
+    if not servers:
+        return []
+    result: list[dict] = []
+    for s in servers:
+        masked = {k: v for k, v in s.items() if k != "env"}
+        env = s.get("env") or {}
+        masked["env_keys"] = sorted(env.keys()) if env else []
+        result.append(masked)
+    return result
+
+
+def _canonicalize_mcp_servers(servers: list | None) -> list[dict]:
+    """Return a stable canonical form of ``mcp_servers`` for diff
+    comparison. Used by the PUT handler to set ``mcp_touched`` only
+    when an effective change occurred — a GET → no-op PUT round-trip
+    must not trigger a container restart.
+
+    Canonicalization:
+
+    * Parse each entry through :class:`MCPServerConfig` to normalize
+      missing-optional fields (e.g. ``args`` → ``[]``, ``env`` →
+      ``None``) and shape coercion (Pydantic v2 returns dicts on
+      ``model_dump``).
+    * Sort the list by ``name.lower()`` so the comparison is
+      independent of input order.
+    * Normalize ``env == {}`` to ``env is None`` so an empty dict and
+      a missing field compare equal.
+
+    If any entry fails Pydantic validation, returns the raw list
+    unchanged — better to over-report a diff (false positive
+    ``mcp_touched``) than to silently mask a malformed legacy entry.
+    The CLI load path (T7) drops malformed entries before they reach
+    this function in normal flow.
+    """
+    if not servers:
+        return []
+    parsed: list[MCPServerConfig] = []
+    for s in servers:
+        try:
+            parsed.append(MCPServerConfig.model_validate(s))
+        except Exception:
+            return list(servers)
+    parsed.sort(key=lambda s: s.name.lower())
+    result: list[dict] = []
+    for s in parsed:
+        d = s.model_dump(exclude_none=False)
+        if d.get("env") == {}:
+            d["env"] = None
+        result.append(d)
+    return result
+
+
+def _redact_mcp_env_for_audit(value: object) -> object:
+    """Strip env VALUES from an ``mcp_servers`` payload for audit-log
+    logging. Keys are preserved so an operator reviewing the audit
+    trail can see which env vars changed; the values are not
+    persisted to the audit table (which would be a covert plaintext
+    secret leak otherwise — values may be ``$CRED{name}`` handles or
+    raw secrets, and both are sensitive).
+
+    Returns the original value unchanged if it isn't shaped like an
+    ``mcp_servers`` list-of-dicts payload — the audit caller handles
+    both old-and-new sides identically and may pass an empty string
+    on first-write.
+    """
+    if not isinstance(value, list):
+        return value
+    redacted: list[dict] = []
+    for s in value:
+        if not isinstance(s, dict):
+            return value  # not the shape we redact
+        copy = {k: v for k, v in s.items() if k != "env"}
+        env = s.get("env") or {}
+        if env:
+            copy["env_keys"] = sorted(env.keys())
+        redacted.append(copy)
+    return redacted
 
 
 def _compute_asset_version() -> str:
@@ -2450,7 +2545,16 @@ def create_dashboard_router(
             "color": agent_cfg.get("color"),
             "budget": agent_cfg.get("budget", {}),
             "thinking": agent_cfg.get("thinking", "off") or "off",
-            "mcp_servers": agent_cfg.get("mcp_servers") or [],
+            # MCP server entries are masked: env values (which may be
+            # plaintext secrets or ``$CRED{name}`` handles pointing at
+            # one) are NEVER returned. The UI binds to ``env_keys`` to
+            # render the list of variable names. The ``env`` field is
+            # omitted from each entry so a naive GET→PUT round-trip
+            # cannot accidentally clear env (PUT semantics in T5:
+            # ``env`` absent = preserve; present = replace wholesale).
+            "mcp_servers": _mask_mcp_servers_for_get(
+                agent_cfg.get("mcp_servers"),
+            ),
             "allowed_credentials": allowed_creds,
             "available_credentials": sorted(agent_cred_names),
             "system_credentials": system_cred_names,
@@ -2625,21 +2729,148 @@ def create_dashboard_router(
             mcp_val = body["mcp_servers"]
             if not isinstance(mcp_val, list):
                 raise HTTPException(status_code=400, detail="mcp_servers must be a list")
-            for srv in mcp_val:
-                if not isinstance(srv, dict) or "name" not in srv or "command" not in srv:
+
+            # ── env preserve-or-replace, per-server ───────────────────
+            # If a server dict OMITS the ``env`` key in the request body,
+            # the persisted env from the current server-of-same-name is
+            # preserved. If ``env`` is present (as a dict, ``{}``, or
+            # ``None``), it replaces wholesale. This matches the GET
+            # contract (env is masked / omitted from responses) so a
+            # naive GET → PUT round-trip preserves env rather than
+            # accidentally clearing it.
+            current_servers = agent_cfg.get("mcp_servers") or []
+            current_env_by_name: dict[str, object] = {}
+            for cs in current_servers:
+                if isinstance(cs, dict) and isinstance(cs.get("name"), str):
+                    current_env_by_name[cs["name"]] = cs.get("env")
+
+            effective_raw: list[dict] = []
+            for raw in mcp_val:
+                if not isinstance(raw, dict):
                     raise HTTPException(
                         status_code=400,
-                        detail="Each MCP server must have 'name' and 'command' keys",
+                        detail="Each MCP server must be a JSON object",
                     )
-            pending_writes.append(("mcp_servers", mcp_val if mcp_val else None))
-            mcp_touched = True
+                s = dict(raw)
+                # Strip ``env_keys`` if the client replayed a GET response
+                # verbatim — GET adds it as the masked stand-in for ``env``
+                # (see ``_mask_mcp_servers_for_get``). MCPServerConfig has
+                # ``extra="forbid"`` so leaving it in would reject the PUT.
+                # The field is purely a display-side artifact; the source
+                # of truth for env keys is the persisted ``env`` dict.
+                s.pop("env_keys", None)
+                if "env" not in raw:
+                    # Preserve from current persisted entry of same name.
+                    s["env"] = current_env_by_name.get(raw.get("name"))
+                effective_raw.append(s)
+
+            # ── Pydantic validation (replaces hand-rolled checks) ─────
+            try:
+                validated = [
+                    MCPServerConfig.model_validate(s) for s in effective_raw
+                ]
+            except ValidationError as ve:
+                # Surface the structured Pydantic error so the dashboard
+                # can map it back to the offending field for inline UI.
+                # Strip ``ctx`` and ``input`` — they can contain raw
+                # exception objects that FastAPI's JSON encoder rejects.
+                safe_errors = [
+                    {
+                        "loc": [str(p) for p in e.get("loc", ())],
+                        "msg": e.get("msg", ""),
+                        "type": e.get("type", ""),
+                    }
+                    for e in ve.errors(include_url=False)
+                ]
+                raise HTTPException(
+                    status_code=400,
+                    detail={"field": "mcp_servers", "errors": safe_errors},
+                )
+            # Case-insensitive duplicate-name rejection (mirrors the
+            # AgentConfig field validator added in T2).
+            names_lower = [v.name.lower() for v in validated]
+            if len(set(names_lower)) != len(names_lower):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Duplicate MCP server names (case-insensitive) are not allowed",
+                )
+
+            # ── PUT-time $CRED check: permission + existence ──────────
+            # Reject the PUT with a clear error if any $CRED reference
+            # in env values or args strings (a) the agent isn't allowed
+            # to use, or (b) doesn't exist in the vault. Mirrors the
+            # runtime-time check in :func:`src.host.credentials.resolve_cred_handles`
+            # but surfaces failures synchronously rather than at agent
+            # start — better UX, lets the operator fix the credentials
+            # surface before saving the config.
+            def _check_cred_refs(text: str, where: str) -> None:
+                for cred_name in set(CRED_HANDLE_RE.findall(text or "")):
+                    if permissions is not None and not permissions.can_access_credential(
+                        agent_id, cred_name,
+                    ):
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                f"Agent {agent_id!r} does not have permission "
+                                f"to access credential {cred_name!r} "
+                                f"(referenced in {where})."
+                            ),
+                        )
+                    if (
+                        credential_vault is not None
+                        and credential_vault.resolve_credential(cred_name) is None
+                    ):
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                f"Credential {cred_name!r} referenced in "
+                                f"{where} does not exist in the vault. "
+                                f"Store it via the credentials surface first."
+                            ),
+                        )
+
+            for srv_idx, srv in enumerate(validated):
+                for arg_idx, arg in enumerate(srv.args):
+                    _check_cred_refs(arg, f"mcp_servers[{srv_idx}].args[{arg_idx}]")
+                for env_key, env_val in (srv.env or {}).items():
+                    _check_cred_refs(
+                        env_val, f"mcp_servers[{srv_idx}].env[{env_key!r}]",
+                    )
+
+            # ── mcp_touched only on real diff ────────────────────────
+            # Convert validated MCPServerConfig objects back to dicts
+            # for storage. Compare canonicalized new vs canonicalized
+            # current — a GET → unchanged PUT must NOT trigger a
+            # container restart (previously the flag fired any time
+            # ``mcp_servers`` appeared in the body, regardless of value).
+            effective_dicts = [
+                v.model_dump(exclude_none=False) for v in validated
+            ]
+            if (
+                _canonicalize_mcp_servers(effective_dicts)
+                != _canonicalize_mcp_servers(current_servers)
+            ):
+                pending_writes.append((
+                    "mcp_servers", effective_dicts if effective_dicts else None,
+                ))
+                mcp_touched = True
 
         # Phase 2: apply writes now that every field validated.
         updated: list[str] = []
         def _audit(field: str, old_value: object, new_value: object) -> None:
             """Log a dashboard-initiated edit. Never raises — a broken audit
             sink must not block the caller's config change, but silent
-            failure is worth a warning so it doesn't rot unnoticed."""
+            failure is worth a warning so it doesn't rot unnoticed.
+
+            ``mcp_servers`` env VALUES are redacted before logging — they
+            may be plaintext secrets or ``$CRED{name}`` handles, and the
+            audit table is not a safe place for either. Env KEYS are
+            preserved as ``env_keys`` so a reviewer can still see which
+            env vars changed.
+            """
+            if field == "mcp_servers":
+                old_value = _redact_mcp_env_for_audit(old_value)
+                new_value = _redact_mcp_env_for_audit(new_value)
             try:
                 blackboard.log_audit(
                     action="edit_agent",
@@ -3094,17 +3325,34 @@ def create_dashboard_router(
             data = await transport.request(agent_id, "GET", "/capabilities", timeout=10)
         except Exception as e:
             raise HTTPException(status_code=502, detail=str(e))
+        # Defensive: if the agent transport returned a non-dict shape
+        # (malformed-but-valid JSON like a list or a string), surface
+        # 502 rather than crashing the backfill block with AttributeError.
+        if not isinstance(data, dict):
+            raise HTTPException(
+                status_code=502,
+                detail="Agent /capabilities returned a non-object response",
+            )
         # Backfill tool_sources for agents running pre-badge code (no container
         # restart required).  The host process has access to the builtins package
         # and can classify tools without executing agent-side code.
         if "tool_sources" not in data:
             builtins = _get_builtin_tool_names()
             sources: dict[str, str] = {}
+            # If the agent surfaced an mcp_tool_to_server side-channel
+            # (post-T6 agents), every name listed there is an MCP tool.
+            # Older agents lack this field, in which case we fall back
+            # to builtin/custom classification only — there's no
+            # legitimate way to identify MCP tools from the OpenAI
+            # tool-definition format alone (the prior heuristic
+            # ``tool.get("function") == "mcp"`` was always False because
+            # the OpenAI format puts a dict at ``function``).
+            mcp_names: set[str] = set(data.get("mcp_tool_to_server") or {})
             for tool in data.get("tool_definitions", []):
                 name = (tool.get("function") or {}).get("name") or tool.get("name")
                 if not name:
                     continue
-                if tool.get("function") == "mcp":
+                if name in mcp_names:
                     sources[name] = "mcp"
                 elif name in builtins:
                     sources[name] = "builtin"
