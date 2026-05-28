@@ -6109,10 +6109,12 @@ function dashboard() {
         if (resp.ok) {
           const data = await resp.json();
           // Guard against an in-flight fetch landing after the user
-          // switched to a different agent — without this, agent A's
-          // response would overwrite the now-visible agent B's
-          // tools/status. Drop late responses.
-          if (this.selectedAgent && this.selectedAgent !== agentId) return;
+          // switched to a different agent (or closed the detail panel
+          // entirely). Without this, agent A's response would overwrite
+          // the now-visible agent B's tools/status — or worse, write
+          // stale data into agentMcpStatus while no agent is selected,
+          // which then bleeds into the next agent the user opens.
+          if (this.selectedAgent !== agentId) return;
           // Agent returns tool_definitions (OpenAI format: {type, function: {name, description}})
           const defs = data.tool_definitions || [];
           const sources = data.tool_sources || {};
@@ -6960,6 +6962,17 @@ function dashboard() {
       const name = (d.name || '').trim();
       const command = (d.command || '').trim();
       const editIdx = this.editForm._mcpEditIndex;
+      // Reject whitespace-only name/command BEFORE committing — the
+      // Apply button's :disabled check is raw truthiness and lets a
+      // whitespace-only string through. Without this guard, the bad
+      // entry gets committed locally, _mcpDraft is nulled, and the
+      // outer Save's auto-commit guard sees nothing to abort on (it
+      // only checks that _mcpDraft is still set). User would only
+      // discover the issue when the backend 400s on the field-regex.
+      if (!name || !command) {
+        this.showToast('Name and command are required.');
+        return;
+      }
       // Client-side duplicate-name rejection (case-insensitive,
       // mirrors the backend AgentConfig field-validator). Avoids
       // confusing top-level Pydantic 400 surfaces — also keeps
@@ -6995,7 +7008,17 @@ function dashboard() {
       //     by-name semantic).
       let envKeys;
       if (d._replaceEnv) {
-        envKeys = (d._envRows || []).map(r => (r.key || '').trim()).filter(Boolean);
+        // Dedupe to match the wire payload's dict semantics — a later
+        // duplicate key would overwrite the earlier on the backend, so
+        // ``env_keys`` should reflect a single occurrence per key.
+        const seen = new Set();
+        envKeys = [];
+        for (const r of (d._envRows || [])) {
+          const k = (r.key || '').trim();
+          if (!k || seen.has(k)) continue;
+          seen.add(k);
+          envKeys.push(k);
+        }
       } else if (editIdx >= 0) {
         const original = this.editForm.mcp_servers[editIdx];
         envKeys = (original && Array.isArray(original.env_keys)) ? [...original.env_keys] : [];
@@ -7064,12 +7087,11 @@ function dashboard() {
     mcpToggleReplaceEnv() {
       if (!this.editForm._mcpDraft) return;
       this.editForm._mcpDraft._replaceEnv = !this.editForm._mcpDraft._replaceEnv;
-      // Toggling OFF drops any draft rows so the save flow omits env
-      // entirely (preserve-by-name semantics). Toggling ON leaves the
-      // editor empty — the user explicitly supplies every var via +Add.
-      if (!this.editForm._mcpDraft._replaceEnv) {
-        this.editForm._mcpDraft._envRows = [];
-      }
+      // Don't clear _envRows on toggle-off: the save flow already
+      // omits env entirely whenever ``_replaceEnv`` is false (see
+      // mcpDraftToWirePayload), so the rows are inert until the user
+      // toggles back ON. Preserving them across an off→on cycle stops
+      // the silent drop where a curious toggle would discard typed env.
     },
 
     mcpDetectJsRuntime(command) {
