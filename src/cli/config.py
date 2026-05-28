@@ -1863,22 +1863,24 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
     if has_operator:
         # Refresh the operator's heartbeat field whenever the canonical
         # template gains a new sentinel marker. Mirrors the workspace-
-        # side refresh in ``WorkspaceManager._ensure_scaffold`` — a
-        # sentinel like ``heartbeat_v2_workflow_aware`` lets us roll
-        # the operator's heartbeat forward without touching agents
-        # with user-customised heartbeats.
+        # side refresh in ``WorkspaceManager._ensure_scaffold`` — the
+        # latest sentinel in ``HEARTBEAT_SENTINELS`` is the current
+        # expectation; an operator carrying only earlier markers (e.g.
+        # ``heartbeat_v2_workflow_aware`` after we add v3) needs a
+        # refresh to receive the new instructions.
         op_entry = agents_cfg["agents"].get(_OPERATOR_AGENT_ID, {}) or {}
         existing_heartbeat = op_entry.get("heartbeat") or ""
         from src.shared.types import HEARTBEAT_SENTINELS
-        new_has_sentinel = any(
-            f"<!-- {m} -->" in _OPERATOR_HEARTBEAT
-            for m in HEARTBEAT_SENTINELS
+        latest_sentinel = HEARTBEAT_SENTINELS[-1] if HEARTBEAT_SENTINELS else None
+        new_has_latest = (
+            latest_sentinel is not None
+            and f"<!-- {latest_sentinel} -->" in _OPERATOR_HEARTBEAT
         )
-        old_has_sentinel = any(
-            f"<!-- {m} -->" in existing_heartbeat
-            for m in HEARTBEAT_SENTINELS
+        old_has_latest = (
+            latest_sentinel is not None
+            and f"<!-- {latest_sentinel} -->" in existing_heartbeat
         )
-        if new_has_sentinel and not old_has_sentinel:
+        if new_has_latest and not old_has_latest:
             op_entry["heartbeat"] = _OPERATOR_HEARTBEAT
             agents_cfg["agents"][_OPERATOR_AGENT_ID] = op_entry
             AGENTS_FILE.parent.mkdir(parents=True, exist_ok=True)

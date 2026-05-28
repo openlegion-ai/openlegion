@@ -3000,6 +3000,15 @@ function dashboard() {
     // per-task 👍/➖/👎 buttons. POSTs to the operator chat via the
     // existing ``sendChatTo`` helper; shows a transient "Sent" banner
     // and clears the textarea on success.
+    //
+    // ``sendChatTo`` absorbs HTTP failures into the chat history
+    // (sets the assistant placeholder's ``role`` to ``error`` or
+    // ``credit_exhausted``) and returns silently rather than
+    // throwing — so a try/catch around the call wouldn't catch a
+    // 4xx/5xx POST. Detect failure by inspecting the assistant
+    // placeholder's role after the call returns. The user message
+    // is pushed at length-2 and the assistant placeholder at
+    // length-1; we check the tail.
     async submitTellOperator() {
       const text = (this.tellOperatorText || '').trim();
       if (!text || this.tellOperatorInflight) return;
@@ -3007,9 +3016,23 @@ function dashboard() {
       this.tellOperatorConfirmation = '';
       try {
         await this.sendChatTo('operator', text);
-        this.tellOperatorText = '';
-        this.tellOperatorConfirmation = "Sent — open Chat tab to see operator's response.";
-        setTimeout(() => { this.tellOperatorConfirmation = ''; }, 5000);
+        const history = this.chatHistories['operator'] || [];
+        const tail = history[history.length - 1];
+        const failed = tail && (
+          tail.role === 'error' || tail.role === 'credit_exhausted'
+        );
+        if (failed) {
+          this.tellOperatorConfirmation = (
+            tail.role === 'credit_exhausted'
+              ? 'Send failed — operator out of credit.'
+              : 'Send failed — try again.'
+          );
+          setTimeout(() => { this.tellOperatorConfirmation = ''; }, 5000);
+        } else {
+          this.tellOperatorText = '';
+          this.tellOperatorConfirmation = "Sent — open Chat tab to see operator's response.";
+          setTimeout(() => { this.tellOperatorConfirmation = ''; }, 5000);
+        }
       } catch (e) {
         this.tellOperatorConfirmation = 'Send failed — try again.';
       } finally {
