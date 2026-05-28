@@ -2305,6 +2305,7 @@ _VERB_FOR_TOOL_FALLBACK_OK = frozenset({
     "archive_audit_before",
     "undo_change",
     "manage_agent",
+    "manage_goals",
     "manage_project",
     "manage_team",
     "manage_task",
