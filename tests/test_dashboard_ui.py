@@ -2105,11 +2105,11 @@ _VERB_FOR_TOOL_FALLBACK_OK = frozenset({
     "run_command",
     "wallet_execute",
     "wallet_read_contract",
-    # Operator-only programmatic surfaces (PR 1 + PR 2 of Work tab
-    # rewrite). User-visible activity feed doesn't render them with
-    # a custom verb — the fallback "using manage goals" / "using
-    # rate delivery" reads fine.
-    "manage_goals",
+    # Operator-only programmatic surface added in PR 2 of the Work
+    # tab rewrite. User-visible activity feed doesn't render it
+    # with a custom verb — the fallback "using rate delivery"
+    # reads fine. (``manage_goals`` is allowlisted by PR 1 in the
+    # ``manage_*`` cluster above.)
     "rate_delivery",
 })
 
