@@ -21,7 +21,7 @@ The dashboard has **four** top-level tabs. Tab IDs are frozen for URL stability 
 | `fleet` | **Team** | Agent grid with operator card prepended in standalone view, drill-down agent detail (config, identity, capabilities, files). See [Team Tab](#team-tab) |
 | `system` | **Settings** | 11 sub-tabs: Activity / Costs / Automation / Integrations / API Keys / Wallet / Network / Storage / Operator / Browser / Settings. See [System Tab](#system-tab) |
 
-The defaults — `tabs` array and `activeTab: 'chat'` — live in `src/dashboard/static/js/app.js` (top of the `dashboard()` factory). Routes parse the URL hash into `{ tab, systemTab, agentId, identityTab, homeTab, activityView }`.
+The defaults — `tabs` array and `activeTab: 'chat'` — live in `src/dashboard/static/js/app.js` (top of the `dashboard()` factory). Routes parse the URL hash into `{ tab, systemTab, agentId, identityTab, activityView }` (the Work tab has no sub-routes — `/home/*` variants all normalize to `/home`).
 
 A command palette (**Cmd+K** / **Ctrl+K**) provides quick access to agents, actions, and navigation. The search button in the nav bar also opens it.
 
@@ -89,35 +89,26 @@ The operator is a system agent that builds and manages your workforce. It is ren
 
 ## Work Tab
 
-The Work tab is the Board surface — Phase 2 Board UX overhaul. The route id is `workplace` (label "Work"); endpoints, JS state vars, and URL paths all keep the legacy name `workplace`.
+The Work tab is the user's primary surface for steering the team without managing it. The route id is `workplace` (label "Work"); endpoints, JS state vars, and URL paths all keep the legacy name `workplace`. Single page at `/home`; legacy sub-paths (`/home/summaries`, `/home/kanban`, `/home/activity`, `/home/tasks`) normalize silently to `/home` so older bookmarks survive.
 
-### Sub-Routes (`homeTab`)
+The page composes five surfaces. In actual render order, top to bottom (`index.html` line refs):
 
-Two sub-routes, switched by the `homeTab` Alpine var (default `kanban`):
+1. **Sticky "Needs You" panel** (line ~3689) — pending actions, credential requests, browser-login handoffs, CAPTCHA handoffs, and blocked tasks. Pinned with `sticky top-0`. Aggregated client-side from `/api/workplace/pending` + `/api/workplace/blockers` + operator chat asks.
+2. **Goals strip** (line ~3770) — operator-managed business outcomes from `GOALS.json` (PR 1). Status-colored chips, hides entirely when empty. Read endpoint: `GET /api/workplace/goals`. Source-of-truth tool: `manage_goals` (operator-only, capped at 10 entries).
+3. **Summary cards** (line ~3804) — operator-composed daily narratives from `WorkSummariesStore` (one row per team or solo agent per period). Rated 👍 / ➖ / 👎 with inline rework feedback that flows back into the next composition. Loaded via `GET /api/workplace/summaries`.
+4. **"Tell Operator" textarea** (line ~3975) — freeform steering channel below the summaries. POSTs to the existing operator chat-stream endpoint via `sendChatTo('operator', …)`. Inline "Sent" / "Send failed" confirmation that auto-clears.
+5. **Stuck Tasks panel** (line ~4010) — tasks pending or working for >24h with no status change. Silent stale-work detection, distinct from Blockers (which are explicit `status='blocked'` raises). Each row carries Cancel + Restart-agent buttons. Computed client-side from `/api/workplace/tasks`. Hidden entirely when no tasks are stuck; appears at the bottom only when needed.
 
-| `homeTab` | Surface |
-|-----------|---------|
-| `kanban` (default) | Kanban board — Needs You + Stuck tasks + 4-column kanban (Pending / Working / Blocked / Done) with × cancel on every card. Empty sections hide. URL: `/home` |
-| `activity` | Single-scroll activity feed — Just delivered + Happening now + In progress, with pinned blockers and "Recently delivered" inline artifact preview. URL: `/home/activity` |
-
-Legacy `homeTab` values `main` and `tasks` (Phase 3) both resolve to `kanban` for back-compat. A separate `workplaceTab` (`feed` / `project-status` / `task-board` / `team-outputs`) survives for deep-link compat but the new structure routes through `homeTab`.
-
-### Surfaces
-
-- **Sticky "Needs You" panel** — aggregates pending actions, credential requests, browser-login handoffs, CAPTCHA handoffs, and blockers across the fleet. Pinned to the top of the kanban view.
-- **Activity feed** — pinned blockers + "Recently delivered" with inline artifact preview, "Read full" toggle, and "Copy" button. The `recentlyDeliveredItems` array is memoised in `loadWorkplaceOutputs` so Alpine doesn't recompute on every reactive read.
-- **Per-task artifact preview cache** — keyed by `task_id`, full `/api/workplace/tasks/{id}` response cached so "Read full" doesn't re-fetch.
-- **Onboarding intent chips** — prepend (not overwrite) drafts so users don't lose typed text when they click a suggestion.
-- **Activity translation toggle** (`showTechDetail`) — when false (default), implementation events (`blackboard_write`, `llm_call`, `message_received`) are hidden and engineer event types are run through `formatActivityForUser` for plain-English summaries. Persisted to localStorage.
+The task **drill-in modal** stays reachable from Needs You blocker actions and notification-bell payload clicks. It serves the small fraction of users who want raw task detail; the per-summary rating UI handles the common QA loop for everyone else.
 
 ### Per-Section Skeleton Loaders + Retry Banners
 
-Each Board section (`projects`, `tasks`, `blockers`, `outputs`, `pending`, `feed`) has its own loading + error bucket:
+Each Work section (`teams`, `tasks`, `blockers`, `pending`, `summaries`, `goals`) has its own loading + error bucket:
 
 - `workplaceSectionLoading.<section>: bool` — drives skeleton placeholders during in-flight fetch.
 - `workplaceErrors.<section>: string` — drives the "Couldn't load — Retry" banner. Click clears the error and re-runs the load.
 
-Previously, failures were swallowed (`console.error`) and left the user staring at an empty panel. The retry pattern keeps recovery one click away.
+Failures used to be swallowed (`console.error`) and left the user staring at an empty panel; the retry pattern keeps recovery one click away.
 
 ## System Tab
 
@@ -600,20 +591,20 @@ The tables below are not exhaustive — they cover the user-facing surface area 
 
 **Work (Board) Surface — `/api/workplace/*`**
 
-12 endpoints power the Work tab. Together they cover the Kanban, Needs-You, Activity feed, and pending-action review surfaces. State-changing routes require the CSRF header.
+These endpoints power the Work tab. They cover the summary cards, Needs-You panel, Stuck Tasks panel, task drill-in modal, and pending-action review surfaces. State-changing routes require the CSRF header. (PR 3 of the Work-tab rewrite retired `GET /workplace/outputs` and `GET /workplace/feed` along with the legacy team-outputs + activity sub-tabs.)
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/dashboard/api/workplace/projects` | Teams with rollup status for the Team Status panel (response payload includes both `team_id` and `project_id` keys per item) |
-| `GET` | `/dashboard/api/workplace/tasks` | All tasks (kanban columns: Pending / Working / Blocked / Done) |
-| `GET` | `/dashboard/api/workplace/tasks/{task_id}` | Single task detail with artifacts (powers "Read full" toggle) |
-| `GET` | `/dashboard/api/workplace/tasks/{task_id}/events` | Per-task event timeline |
-| `POST` | `/dashboard/api/workplace/tasks/{task_id}/cancel` | Cancel a task (× button on cards) |
+| `GET` | `/dashboard/api/workplace/teams` | Teams with rollup status (response payload includes both `team_id` and `project_id` keys per item for back-compat) |
+| `GET` | `/dashboard/api/workplace/tasks` | All tasks — Stuck Tasks panel + drill-in modal |
+| `GET` | `/dashboard/api/workplace/tasks/{task_id}` | Single task detail with artifacts (drill-in modal "Read full" toggle) |
+| `GET` | `/dashboard/api/workplace/tasks/{task_id}/events` | Per-task event timeline (drill-in modal) |
+| `POST` | `/dashboard/api/workplace/tasks/{task_id}/cancel` | Cancel a task (Stuck Tasks panel) |
 | `POST` | `/dashboard/api/workplace/tasks/{task_id}/outcome` | Set the outcome rating on a delivered task |
-| `GET` | `/dashboard/api/workplace/blockers` | Active blockers across the fleet |
-| `GET` | `/dashboard/api/workplace/outputs` | "Recently delivered" outputs with artifact previews |
-| `GET` | `/dashboard/api/workplace/feed` | Combined activity feed (capped at `workplaceFeedCap=200`) |
+| `GET` | `/dashboard/api/workplace/blockers` | Active blockers across the fleet (Needs You panel) |
+| `GET` | `/dashboard/api/workplace/goals` | Workplace-wide business goals (Goals chip strip) |
 | `GET` | `/dashboard/api/workplace/pending` | Pending operator review queue |
+| `POST` | `/dashboard/api/workplace/pending/{nonce}/confirm` | Confirm a pending action |
 | `POST` | `/dashboard/api/workplace/pending/{nonce}/cancel` | Cancel a pending action |
 | `POST` | `/dashboard/api/changes/undo/{undo_token}` | Undo a soft-edit change inside its TTL window |
 

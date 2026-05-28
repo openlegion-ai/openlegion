@@ -342,12 +342,13 @@ class TestNotificationsProducerWiring:
         _teardown(self.components)
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
-    def test_task_status_changed_to_done_creates_delivered_notification(self):
-        """Worker finishes a task (status->done, outcome=NULL): bell
-        pings with kind=delivered so the user knows there's new work
-        to review. This replaces the legacy outcome=='delivered' path
-        which never fired because 'delivered' was never a valid
-        outcome value.
+    def test_task_status_changed_to_done_no_longer_creates_notification(self):
+        """PR 3 of Work tab rewrite — the bell no longer dings per task
+        completion. Per-task delivery pings spammed the user with one
+        notification per worker completion; operator now authors
+        notifications explicitly via ``notify_user`` when something is
+        genuinely user-facing. Regression guard: no listener creates a
+        ``kind="delivered"`` row on ``task_status_changed`` → ``done``.
         """
         self.bus.emit("task_status_changed", agent="writer", data={
             "task_id": "t-1",
@@ -358,41 +359,11 @@ class TestNotificationsProducerWiring:
             "title": "Q3 launch brief draft",
             "outcome": None,
         })
-        rows = self.store.list_recent()
-        assert len(rows) == 1
-        row = rows[0]
-        assert row["kind"] == "delivered"
-        assert "writer" in row["title"]
-        assert "Q3 launch brief" in row["title"]
-        assert row["payload"]["task_id"] == "t-1"
-        assert row["payload"]["assignee"] == "writer"
-
-    def test_task_status_changed_skips_operator_self_delivery(self):
-        """Operator-self transitions don't ping — the operator IS the
-        user's surface; it doesn't deliver TO the user."""
-        self.bus.emit("task_status_changed", agent="operator", data={
-            "task_id": "t-op",
-            "assignee": "operator",
-            "old_status": "working",
-            "new_status": "done",
-            "title": "operator-self maintenance",
-        })
         assert self.store.list_recent() == []
 
-    def test_task_status_changed_skips_already_rated(self):
-        """An auto-graded or pre-rated transition doesn't fire a fresh
-        notification — the rating already represents review."""
-        self.bus.emit("task_status_changed", agent="writer", data={
-            "task_id": "t-auto",
-            "assignee": "writer",
-            "old_status": "working",
-            "new_status": "done",
-            "title": "auto-rated delivery",
-            "outcome": "accepted",
-        })
-        assert self.store.list_recent() == []
-
-    def test_task_status_changed_non_done_transition_no_notification(self):
+    def test_task_status_changed_blocked_transition_no_notification(self):
+        """Non-done transitions never fired and still don't — kept as a
+        regression guard for the broader producer."""
         self.bus.emit("task_status_changed", agent="writer", data={
             "task_id": "t-block",
             "assignee": "writer",
@@ -540,7 +511,9 @@ class TestNotificationsProducerEmitsLiveEvent:
     def _added_events(self) -> list[dict]:
         return [e for e in self.captured if e["type"] == "notification_added"]
 
-    def test_task_status_changed_to_done_emits_notification_added(self):
+    def test_task_status_changed_to_done_no_longer_emits_notification_added(self):
+        """PR 3 — the delivered producer is gone, so no
+        ``notification_added`` WS event rides on a task completion."""
         self.bus.emit("task_status_changed", agent="writer", data={
             "task_id": "t-1",
             "assignee": "writer",
@@ -548,13 +521,7 @@ class TestNotificationsProducerEmitsLiveEvent:
             "new_status": "done",
             "title": "Great brief",
         })
-        added = self._added_events()
-        assert len(added) == 1
-        assert added[0]["data"]["kind"] == "delivered"
-        assert "writer" in added[0]["data"]["title"]
-        # The ``id`` from ``notification_store.add`` rides along so the
-        # SPA can dedupe against the 60s poll.
-        assert added[0]["data"]["id"] > 0
+        assert self._added_events() == []
 
     def test_pending_action_created_emits_notification_added(self):
         self.bus.emit("pending_action_created", agent="operator", data={
@@ -623,22 +590,6 @@ class TestNotificationsProducerEmitsLiveEvent:
     # replaces it with the persisted version that does carry it. Each
     # producer branch should pass the SAME payload it persisted to the
     # store through into ``_emit_notification_added``.
-
-    def test_task_status_changed_done_emit_carries_payload(self):
-        self.bus.emit("task_status_changed", agent="writer", data={
-            "task_id": "t-1",
-            "project_id": "proj-a",
-            "assignee": "writer",
-            "old_status": "working",
-            "new_status": "done",
-            "title": "Q3 brief",
-        })
-        added = self._added_events()
-        assert len(added) == 1
-        payload = added[0]["data"].get("payload") or {}
-        assert payload.get("task_id") == "t-1"
-        assert payload.get("project_id") == "proj-a"
-        assert payload.get("assignee") == "writer"
 
     def test_pending_action_created_emit_carries_payload(self):
         self.bus.emit("pending_action_created", agent="operator", data={

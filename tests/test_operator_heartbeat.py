@@ -88,19 +88,24 @@ async def test_heartbeat_restores_tools_on_skip():
 
 
 def test_heartbeat_tools_constant():
-    """Verify _HEARTBEAT_TOOLS carries the workflow-awareness allowlist.
+    """Verify _HEARTBEAT_TOOLS carries the heartbeat-reachable allowlist.
 
-    The set previously had 5 entries (list_agents, get_agent_profile,
-    get_system_status, notify_user, save_observations). The operator
-    workflow-awareness layer added three operator-only reads
-    (``check_inbox`` for back-edge events, ``workflow_snapshot`` for
-    chain inspection, ``await_task_event`` for single-task blocking) so
-    the heartbeat can drive multi-stage chains without dropping out to
-    a full /chat turn.
+    Layer history:
+    * v1 (initial): 5 read-only tools — ``list_agents``,
+      ``get_agent_profile``, ``get_system_status``, ``notify_user``,
+      ``save_observations``.
+    * v2 (workflow awareness): + ``check_inbox``, ``workflow_snapshot``,
+      ``await_task_event`` so the heartbeat can drive multi-stage
+      chains without dropping out to a full /chat turn.
+    * v3 (Work-tab rewrite PR 2): + ``rate_delivery``, ``manage_goals``
+      so the heartbeat instructions that grade up to 10 oldest unrated
+      done tasks and steward goal staleness are actually reachable —
+      without these the loop denies the calls the instructions request.
     """
     assert _HEARTBEAT_TOOLS == frozenset({
         "list_agents", "get_agent_profile", "get_system_status",
         "notify_user", "save_observations",
         "check_inbox", "workflow_snapshot", "await_task_event",
+        "rate_delivery", "manage_goals",
     })
-    assert len(_HEARTBEAT_TOOLS) == 8
+    assert len(_HEARTBEAT_TOOLS) == 10

@@ -5380,19 +5380,6 @@ class TestWorkplaceTabRoutes:
         rows = resp.json()["blockers"]
         assert any(r["id"] == rec["id"] for r in rows)
 
-    def test_workplace_outputs_returns_done_tasks(self):
-        client = self._client_with_v2(True)
-        rec = self.tasks_store.create(
-            creator="op", assignee="alpha", title="done one",
-            project_id="research",
-        )
-        self.tasks_store.update_status(rec["id"], "working", actor="alpha")
-        self.tasks_store.update_status(rec["id"], "done", actor="alpha")
-        resp = client.get("/dashboard/api/workplace/outputs?project_id=research")
-        assert resp.status_code == 200
-        rows = resp.json()["outputs"]
-        assert any(r["id"] == rec["id"] for r in rows)
-
     def test_workplace_pending_lists_open_nonces(self):
         # No need for v2 — pending list is independent of orchestration.
         client = self._client_with_v2(False)

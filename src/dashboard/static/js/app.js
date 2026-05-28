@@ -381,36 +381,24 @@ function dashboard() {
     cmdPaletteResults: [],
     cmdPaletteIdx: 0,
 
-    // Task 9 — Workplace tab (peer of Chat / Agents / System).
-    // Sub-tabs: project status, kanban task board, blockers, team outputs.
-    // ``workplaceEnabled`` reflects whether the tasks store responded
-    // — kept for graceful empty-state rendering on transient errors.
-    // PR 5: feed becomes the default workplace landing — kanban demoted
-    // to a non-default sub-tab; standalone blockers tab removed
-    // (pinned at the top of the feed instead).
-    // PR G: kanban sub-tab is labelled "Tasks" so it doesn't collide
-    // with the parent tab "Board" (Board > Board was confusing).
-    // The route id ``task-board`` stays internal so URL hashes /
-    // server state don't change.
-    workplaceTab: 'feed',
-    workplaceTabs: [
-      { id: 'feed', label: 'Activity' },
-      { id: 'project-status', label: 'Teams' },
-      { id: 'task-board', label: 'Tasks' },
-      { id: 'team-outputs', label: 'Outputs' },
-    ],
-    // PR 2 of Work tab rewrite — removed sub-nav (Summaries / Kanban /
-    // Activity) along with the kanban + activity surfaces. The Work tab
-    // now lands directly on summary cards. Stuck Tasks panel + Cancel
-    // modal + Task drill-in (reachable from Needs you + notification
-    // bell) are retained.
+    // Workplace tab (peer of Chat / Agents / System). PR 2 of the Work
+    // tab rewrite removed the sub-nav (Summaries / Kanban / Activity)
+    // along with the kanban + activity surfaces; PR 3 dropped the legacy
+    // ``workplaceTab`` / ``workplaceTabs`` Alpine state with the dead
+    // ``team-status`` + ``team-outputs`` templates. The Work tab now
+    // lands directly on summary cards. Stuck Tasks panel + Cancel modal
+    // + Task drill-in (reachable from Needs you + notification bell)
+    // are retained. ``workplaceEnabled`` reflects whether the tasks
+    // store responded — kept for graceful empty-state rendering on
+    // transient errors.
     workplaceEnabled: true,
     workplaceTeams: [],
     workplaceTasks: [],
     workplaceBlockers: [],
     // Workplace-wide business goals (PR 2). Operator manages via
-    // ``manage_goals``; dashboard renders a read-only chip strip above
-    // the Needs You panel. Hidden entirely when empty.
+    // ``manage_goals``; dashboard renders a read-only chip strip
+    // between Needs You (top sticky) and the Summary cards. Hidden
+    // entirely when empty.
     workplaceGoals: [],
     // Work summaries surface (PR-B). One row per team per period. The
     // user rates 👍/➖/👎 with optional feedback; rating + feedback
@@ -11051,7 +11039,7 @@ function dashboard() {
     },
 
     // Icon glyph for the notification kind. Plain text glyphs keep
-    // the markup emoji-free (matches workplaceFeedIcon convention).
+    // the markup emoji-free.
     notificationKindIcon(kind) {
       switch (kind) {
         case 'delivered': return '★';

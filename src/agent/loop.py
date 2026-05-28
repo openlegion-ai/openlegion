@@ -146,6 +146,12 @@ _HEARTBEAT_TOOLS = frozenset({
     "list_agents", "get_agent_profile", "get_system_status",
     "notify_user", "save_observations", "check_inbox",
     "workflow_snapshot", "await_task_event",
+    # PR 2 of Work tab rewrite. Heartbeat instructions tell operator
+    # to rate up to 10 oldest unrated done tasks via ``rate_delivery``
+    # and update tracked goals via ``manage_goals`` based on user
+    # chat direction; both surfaces would be unreachable from heartbeat
+    # ticks if the loop restricts them to the legacy read-only set.
+    "rate_delivery", "manage_goals",
 })
 
 # Tool calls whose ONLY purpose is to read state — they don't produce
