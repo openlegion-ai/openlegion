@@ -260,11 +260,31 @@ class TestOperatorConstants:
         # a magic number so additions like ``compose_work_summary`` from
         # the work-summaries backend don't require recounting.
         assert _OPERATOR_ALLOWED_TOOLS  # non-empty
-        # Workflow-awareness layer added check_inbox / workflow_snapshot /
-        # await_task_event so the heartbeat can drive multi-stage chains.
-        assert len(_OPERATOR_HEARTBEAT_TOOLS) == 7
-        # Heartbeat tools should be a subset of allowed tools
-        assert set(_OPERATOR_HEARTBEAT_TOOLS).issubset(set(_OPERATOR_ALLOWED_TOOLS))
+        # Heartbeat tool count history (bump this assertion + the
+        # ``_HEARTBEAT_TOOLS`` frozenset in ``src/agent/loop.py`` + the
+        # ``_OPERATOR_HEARTBEAT_TOOLS`` doc list in ``src/cli/config.py``
+        # together when adding a new heartbeat-reachable tool):
+        #  * v1 (initial): 5 read-only tools (list_agents, get_agent_profile,
+        #    get_system_status, notify_user, save_observations).
+        #  * v2 (workflow awareness): +check_inbox, workflow_snapshot,
+        #    await_task_event for multi-stage chain driving.
+        #  * v3 (Work-tab rewrite PR 2/3): +rate_delivery, manage_goals so the
+        #    heartbeat instructions that grade up to 10 oldest unrated done
+        #    tasks per cycle and steward goal staleness are reachable.
+        assert len(_OPERATOR_HEARTBEAT_TOOLS) == 10
+        # The operator-tier heartbeat tools must also be on the main
+        # operator allowlist — they're the tools operator can use from
+        # both /chat and heartbeat. Two heartbeat entries are
+        # deliberately mesh-internal primitives that operator does NOT
+        # expose in /chat (``inspect_agents`` is the operator-flavored
+        # cousin used in /chat instead): ``list_agents`` and
+        # ``get_agent_profile``. The rest must overlap.
+        _HEARTBEAT_ONLY = {"list_agents", "get_agent_profile"}
+        operator_visible = set(_OPERATOR_HEARTBEAT_TOOLS) - _HEARTBEAT_ONLY
+        assert operator_visible.issubset(set(_OPERATOR_ALLOWED_TOOLS)), (
+            f"heartbeat tools missing from operator allowlist: "
+            f"{operator_visible - set(_OPERATOR_ALLOWED_TOOLS)}"
+        )
         # Consolidated product tools (read + lifecycle) must be present.
         for tool in (
             "inspect_teams", "inspect_agents",
