@@ -188,11 +188,24 @@ class LLMClient:
                     allowed_models=set(error_meta.get("allowed_models", [])),
                     http_status=error_meta.get("http_status"),
                 )
-            # Rate limits and transient errors should be retried.
-            # "empty response" is the Claude subscription throttle signal
-            # (Anthropic OAuth + OpenAI Codex paths emit it when the stream
-            # closes with zero content/tool_calls/thinking). Treat as transient.
-            _retryable = ("rate limit", "ratelimit", "429", "too many requests", "overloaded", "503", "empty response")
+            if error_type == "transient":
+                # Mesh-tagged transient (Claude subscription throttle,
+                # stream interruption, empty-choices response). The mesh
+                # already classified it at the source — surface as
+                # retryable so ``_llm_call_with_retry`` backs off.
+                raise LLMRetryableError(f"LLM call failed: {error_msg}")
+            # Backstop for un-tagged transient signals — third-party SDKs,
+            # future wrapper sites not yet routed through the typed channel,
+            # or paths the mesh outer handler didn't catch. Each substring
+            # corresponds to a known transient pattern; ``retrying may
+            # help`` is the deliberate suffix appended by
+            # ``friendly_streaming_error`` (src/shared/utils.py:78), so
+            # matching on it recognizes the helper's contract rather than
+            # whack-a-mole'ing message text.
+            _retryable = (
+                "rate limit", "ratelimit", "429", "too many requests",
+                "overloaded", "503", "empty response", "retrying may help",
+            )
             if any(kw in error_msg.lower() for kw in _retryable):
                 raise LLMRetryableError(f"LLM call failed: {error_msg}")
             raise RuntimeError(f"LLM call failed: {error_msg}")

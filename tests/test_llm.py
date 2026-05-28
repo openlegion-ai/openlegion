@@ -20,10 +20,20 @@ import pytest
 from src.agent.llm import LLMClient, LLMRetryableError
 
 
-def _make_mesh_response(error_msg: str) -> MagicMock:
+def _make_mesh_response(
+    error_msg: str,
+    *,
+    error_type: str | None = None,
+    error_meta: dict | None = None,
+) -> MagicMock:
     resp = MagicMock()
     resp.raise_for_status = MagicMock()
-    resp.json = MagicMock(return_value={"success": False, "error": error_msg})
+    body: dict = {"success": False, "error": error_msg}
+    if error_type is not None:
+        body["error_type"] = error_type
+    if error_meta is not None:
+        body["error_meta"] = error_meta
+    resp.json = MagicMock(return_value=body)
     return resp
 
 
@@ -78,6 +88,54 @@ async def test_rate_limit_still_retryable():
     mock_http = await client._get_client()
     mock_http.post = AsyncMock(
         return_value=_make_mesh_response("openai rate limit exceeded"),
+    )
+    with pytest.raises(LLMRetryableError):
+        await client.chat(system="s", messages=[{"role": "user", "content": "x"}])
+
+
+@pytest.mark.asyncio
+async def test_transient_error_type_classified_as_retryable():
+    """Mesh-tagged ``error_type="transient"`` (the typed channel emitted by
+    ``execute_api_call`` when ``LLMTransientError`` propagates from the
+    OAuth wrap at credentials.py:~1727 or the LiteLLM empty-choices path
+    at credentials.py:~2685) must surface as ``LLMRetryableError`` so
+    ``_llm_call_with_retry`` backs off. Mirrors the existing
+    ``auth_failure`` / ``config_error`` typed branches."""
+    client = _make_llm_client()
+    mock_http = await client._get_client()
+    mock_http.post = AsyncMock(
+        return_value=_make_mesh_response(
+            "Anthropic OAuth error: Connection to the AI provider was "
+            "interrupted. Retrying may help.",
+            error_type="transient",
+            error_meta={
+                "provider": "anthropic",
+                "model": "anthropic/claude-sonnet-4-6",
+                "retry_after": None,
+            },
+        ),
+    )
+    with pytest.raises(LLMRetryableError):
+        await client.chat(system="s", messages=[{"role": "user", "content": "x"}])
+
+
+@pytest.mark.asyncio
+async def test_retrying_may_help_substring_retryable_backstop():
+    """Backstop path — when the mesh did NOT tag ``error_type="transient"``
+    (un-tagged third-party wrapper or a path the outer handler didn't
+    catch), the substring tuple must still classify ``"Retrying may help"``
+    as retryable. The phrase is the deliberate suffix from
+    ``friendly_streaming_error`` (src/shared/utils.py:78); matching it
+    keeps the helper's contract usable as a fallback signal even without
+    the typed channel."""
+    client = _make_llm_client()
+    mock_http = await client._get_client()
+    mock_http.post = AsyncMock(
+        return_value=_make_mesh_response(
+            "Anthropic OAuth error: Connection to the AI provider was "
+            "interrupted. Retrying may help.",
+            # No error_type tag — exercises the substring path.
+        ),
     )
     with pytest.raises(LLMRetryableError):
         await client.chat(system="s", messages=[{"role": "user", "content": "x"}])

@@ -28,7 +28,7 @@ import httpx
 
 from src.agent.attachments import convert_openai_image_blocks
 from src.host.transcript import sanitize_for_provider
-from src.shared.errors import LLMAuthError, LLMConfigError
+from src.shared.errors import LLMAuthError, LLMConfigError, LLMTransientError
 from src.shared.models import KEYLESS_PROVIDERS, get_known_provider_names
 from src.shared.types import CRED_HANDLE_RE, APIProxyRequest, APIProxyResponse
 from src.shared.utils import friendly_streaming_error, setup_logging
@@ -695,6 +695,29 @@ class CredentialVault:
                         "model": e.model,
                         "http_status": e.http_status,
                         "allowed_models": sorted(e.allowed_models),
+                    },
+                )
+            except LLMTransientError as e:
+                # Typed transient — Claude subscription throttle empty-
+                # responses, RemoteProtocolError stream interruptions, etc.
+                # Reach this branch only after ``_call_llm_with_failover``
+                # exhausted the chain (failover propagates non-permanent
+                # exceptions like this one through generic ``except
+                # Exception`` first). Tagging ``error_type="transient"``
+                # routes the agent classifier to ``LLMRetryableError`` so
+                # ``_llm_call_with_retry`` backs off and retries instead
+                # of failing the task on the first hit.
+                logger.info(
+                    "LLM transient failure for agent='%s' provider=%s model=%s: %s",
+                    agent_id, e.provider, e.model, e,
+                )
+                return APIProxyResponse(
+                    success=False, error=str(e),
+                    error_type="transient",
+                    error_meta={
+                        "provider": e.provider,
+                        "model": e.model,
+                        "retry_after": e.retry_after,
                     },
                 )
             except Exception as e:
@@ -1724,6 +1747,22 @@ class CredentialVault:
                 result = data
 
         if last_error:
+            # Inspect the collected stream error for transient signals
+            # the inner stream already classified. ``friendly_streaming_error``
+            # (src/shared/utils.py) deliberately appends ``"Retrying may
+            # help."`` to ``httpx.RemoteProtocolError`` / incomplete-chunked-
+            # read failures; the empty-stream emit at line 1848 yields
+            # ``"...returned empty response"`` for subscription throttles.
+            # Raise typed so the mesh outer handler tags
+            # ``error_type="transient"`` and the agent's classifier routes
+            # via ``LLMRetryableError`` instead of failing the task.
+            le_lower = last_error.lower()
+            if "retrying may help" in le_lower or "empty response" in le_lower:
+                raise LLMTransientError(
+                    f"Anthropic OAuth error: {last_error}",
+                    provider="anthropic",
+                    model=model,
+                )
             raise RuntimeError(f"Anthropic OAuth error: {last_error}")
 
         if not result:
@@ -2682,9 +2721,15 @@ class CredentialVault:
                     raise  # _raise_typed_llm_error re-raises on no match
                 # Empty choices = failed generation — raise so failover can
                 # try the next model instead of marking this one healthy.
+                # Typed transient: the mesh outer handler tags
+                # ``error_type="transient"`` so the agent's classifier
+                # routes via ``LLMRetryableError`` (matches the OAuth
+                # empty-stream signal at ``_oauth_chat`` line ~1727).
                 if not getattr(result, "choices", None):
-                    raise RuntimeError(
-                        f"LLM returned empty response (no choices) for model {model}"
+                    raise LLMTransientError(
+                        f"LLM returned empty response (no choices) for model {model}",
+                        provider=model.split("/", 1)[0] if "/" in model else "unknown",
+                        model=model,
                     )
                 return result
 
