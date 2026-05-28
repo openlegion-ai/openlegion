@@ -11,6 +11,7 @@ from src.host.credentials import (
     CredentialVault,
     _extract_content,
     is_system_credential,
+    resolve_cred_handles,
 )
 from src.shared.types import APIProxyRequest, APIProxyResponse
 
@@ -4794,3 +4795,108 @@ class TestOAuthStreamDoesNotYieldUntypedFrame:
             "OAuth stream must not yield an untyped error frame before "
             f"raising LLMConfigError — got {yielded!r}"
         )
+
+
+# === resolve_cred_handles (mesh-side $CRED{name} resolver) ===
+
+
+@pytest.fixture
+def vault_with_creds(monkeypatch):
+    """A vault holding two agent-tier credentials."""
+    monkeypatch.setenv("OPENLEGION_CRED_LINEAR_TOKEN", "linear-secret-value")
+    monkeypatch.setenv("OPENLEGION_CRED_GITHUB_TOKEN", "ghp-secret-value")
+    return CredentialVault()
+
+
+@pytest.fixture
+def perms_allow_all():
+    """Permission matrix that allows any agent → any credential."""
+    p = MagicMock()
+    p.can_access_credential.return_value = True
+    return p
+
+
+@pytest.fixture
+def perms_deny_all():
+    """Permission matrix that denies any credential access."""
+    p = MagicMock()
+    p.can_access_credential.return_value = False
+    return p
+
+
+def test_resolve_no_handles_passthrough(vault_with_creds, perms_allow_all):
+    resolved, secrets = resolve_cred_handles(
+        "plain text with no handles",
+        vault=vault_with_creds, permissions=perms_allow_all, agent_id="a1",
+    )
+    assert resolved == "plain text with no handles"
+    assert secrets == []
+
+
+def test_resolve_single_handle(vault_with_creds, perms_allow_all):
+    resolved, secrets = resolve_cred_handles(
+        "Bearer $CRED{linear_token}",
+        vault=vault_with_creds, permissions=perms_allow_all, agent_id="a1",
+    )
+    assert resolved == "Bearer linear-secret-value"
+    assert secrets == ["linear-secret-value"]
+
+
+def test_resolve_multiple_distinct_handles(vault_with_creds, perms_allow_all):
+    resolved, secrets = resolve_cred_handles(
+        "a=$CRED{linear_token} b=$CRED{github_token}",
+        vault=vault_with_creds, permissions=perms_allow_all, agent_id="a1",
+    )
+    assert "linear-secret-value" in resolved
+    assert "ghp-secret-value" in resolved
+    assert set(secrets) == {"linear-secret-value", "ghp-secret-value"}
+
+
+def test_resolve_repeated_handle_resolves_once_replaces_all(
+    vault_with_creds, perms_allow_all,
+):
+    resolved, secrets = resolve_cred_handles(
+        "$CRED{linear_token} and $CRED{linear_token} again",
+        vault=vault_with_creds, permissions=perms_allow_all, agent_id="a1",
+    )
+    assert resolved == "linear-secret-value and linear-secret-value again"
+    # Deduped — the secret appears once in the redaction list.
+    assert secrets == ["linear-secret-value"]
+
+
+def test_resolve_missing_credential_raises(vault_with_creds, perms_allow_all):
+    with pytest.raises(ValueError) as excinfo:
+        resolve_cred_handles(
+            "$CRED{does_not_exist}",
+            vault=vault_with_creds, permissions=perms_allow_all, agent_id="a1",
+        )
+    msg = str(excinfo.value)
+    assert "does_not_exist" in msg
+    assert "a1" in msg  # error names the agent so operator can diagnose
+
+
+def test_resolve_permission_denied_raises(vault_with_creds, perms_deny_all):
+    with pytest.raises(ValueError) as excinfo:
+        resolve_cred_handles(
+            "$CRED{linear_token}",
+            vault=vault_with_creds, permissions=perms_deny_all, agent_id="a1",
+        )
+    assert "permission" in str(excinfo.value).lower()
+    assert "linear_token" in str(excinfo.value)
+
+
+def test_resolve_single_pass_no_recursion(monkeypatch, perms_allow_all):
+    """If a resolved value itself contains $CRED{...}, do NOT re-resolve it.
+    Matches the http_tool single-pass policy that prevents double-resolution.
+    """
+    monkeypatch.setenv("OPENLEGION_CRED_OUTER", "before $CRED{inner} after")
+    monkeypatch.setenv("OPENLEGION_CRED_INNER", "INNER-VALUE")
+    v = CredentialVault()
+    resolved, secrets = resolve_cred_handles(
+        "$CRED{outer}",
+        vault=v, permissions=perms_allow_all, agent_id="a1",
+    )
+    # The literal '$CRED{inner}' from the outer's value is preserved as-is.
+    assert resolved == "before $CRED{inner} after"
+    # Only the outer value is in the redaction list — inner was never read.
+    assert secrets == ["before $CRED{inner} after"]

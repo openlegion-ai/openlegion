@@ -1600,3 +1600,94 @@ class TestWorkplaceCLICommands:
         # And X-Origin so the human-confirmation gate accepts it
         assert "kind=human" in headers.get("X-Origin", "")
         assert "channel=cli" in headers.get("X-Origin", "")
+
+
+class TestLoadConfigMcpServersValidation:
+    """T7 — ``_load_config`` validates each agent's ``mcp_servers``
+    entries through :class:`MCPServerConfig`. Malformed entries are
+    logged and dropped at the load boundary so a single bad row
+    doesn't crash agent startup. The dashboard PUT path enforces the
+    same model on the write side; this is the safety net for legacy
+    rows written before the formal model existed.
+    """
+
+    def _write_agents_yaml(self, tmp_path, agents: dict) -> "Path":
+        agents_file = tmp_path / "agents.yaml"
+        agents_file.write_text(yaml.safe_dump({"agents": agents}))
+        return agents_file
+
+    def _load(self, tmp_path, agents_file):
+        from src.cli.config import _load_config
+        with (
+            patch("src.cli.config.AGENTS_FILE", agents_file),
+            patch("src.cli.config.CONFIG_FILE", tmp_path / "mesh.yaml"),
+            patch("src.cli.config.PROJECTS_DIR", tmp_path / "projects"),
+            patch("src.cli.config.NETWORK_FILE", tmp_path / "network.yaml"),
+        ):
+            return _load_config()
+
+    def test_well_formed_servers_load_cleanly(self, tmp_path):
+        agents_file = self._write_agents_yaml(tmp_path, {
+            "alpha": {
+                "role": "x",
+                "mcp_servers": [{
+                    "name": "linear", "command": "mcp-server-linear",
+                    "args": ["--workspace", "ol"],
+                    "env": {"K": "v"},
+                }],
+            },
+        })
+        cfg = self._load(tmp_path, agents_file)
+        servers = cfg["agents"]["alpha"]["mcp_servers"]
+        assert len(servers) == 1
+        assert servers[0]["name"] == "linear"
+        # Env survives the round-trip (Pydantic + model_dump).
+        assert servers[0]["env"] == {"K": "v"}
+
+    def test_malformed_entry_dropped_keeps_well_formed(self, tmp_path, caplog):
+        agents_file = self._write_agents_yaml(tmp_path, {
+            "alpha": {
+                "role": "x",
+                "mcp_servers": [
+                    # First entry is fine
+                    {"name": "good", "command": "x"},
+                    # Bad name regex (spaces) → drop with warning
+                    {"name": "bad name", "command": "y"},
+                    # Bad command ($CRED handle) → drop with warning
+                    {"name": "with_cred", "command": "$CRED{secret}"},
+                ],
+            },
+        })
+        with caplog.at_level("WARNING", logger="cli"):
+            cfg = self._load(tmp_path, agents_file)
+        servers = cfg["agents"]["alpha"]["mcp_servers"]
+        assert [s["name"] for s in servers] == ["good"]
+        # Two warnings — one per malformed row
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert sum(
+            "Dropping malformed mcp_servers entry" in r.getMessage()
+            for r in warnings
+        ) == 2
+
+    def test_all_malformed_yields_none(self, tmp_path):
+        agents_file = self._write_agents_yaml(tmp_path, {
+            "alpha": {
+                "role": "x",
+                "mcp_servers": [
+                    {"name": "bad name", "command": "x"},
+                    {"command": "no_name_field"},  # missing name
+                ],
+            },
+        })
+        cfg = self._load(tmp_path, agents_file)
+        # Empty after drop is collapsed to None (matches the persisted
+        # convention used elsewhere — see _update_agent_field).
+        assert cfg["agents"]["alpha"]["mcp_servers"] is None
+
+    def test_no_mcp_servers_no_op(self, tmp_path):
+        # Agents without mcp_servers field are untouched.
+        agents_file = self._write_agents_yaml(tmp_path, {
+            "alpha": {"role": "x"},
+        })
+        cfg = self._load(tmp_path, agents_file)
+        assert "mcp_servers" not in cfg["agents"]["alpha"]

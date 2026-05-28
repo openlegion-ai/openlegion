@@ -1444,6 +1444,404 @@ class TestDashboardAgentConfig:
         assert data["thinking"] == "off"
         assert data["mcp_servers"] == []
 
+    @patch("src.cli.config._load_config")
+    def test_get_config_masks_mcp_env_values(self, mock_load):
+        """``GET /config`` must never return env values. Each server's
+        env dict is stripped; ``env_keys`` carries the variable names so
+        the dashboard can render the env list without ever holding the
+        plaintext secrets or ``$CRED{name}`` handles."""
+        mock_load.return_value = {
+            "llm": {"default_model": "openai/gpt-4.1-mini"},
+            "agents": {
+                "alpha": {
+                    "model": "openai/gpt-4.1",
+                    "mcp_servers": [{
+                        "name": "linear",
+                        "command": "mcp-server-linear",
+                        "args": ["--workspace", "ol"],
+                        "env": {
+                            "LINEAR_API_KEY": "lin_pat_super_secret_123",
+                            "DEBUG": "1",
+                        },
+                    }],
+                },
+            },
+        }
+        resp = self.client.get("/dashboard/api/agents/alpha/config")
+        data = resp.json()
+        s = data["mcp_servers"][0]
+        # The env field is OMITTED entirely (not returned as null).
+        # Round-tripping the GET back through PUT must not accidentally
+        # clear env — PR's PUT contract treats "env absent" as preserve.
+        assert "env" not in s
+        # env_keys carries the variable names, sorted, with no values.
+        assert s["env_keys"] == ["DEBUG", "LINEAR_API_KEY"]
+        # Other fields pass through untouched.
+        assert s["name"] == "linear"
+        assert s["command"] == "mcp-server-linear"
+        assert s["args"] == ["--workspace", "ol"]
+        # No env values leak anywhere in the response payload.
+        assert "lin_pat_super_secret_123" not in resp.text
+
+    @patch("src.cli.config._load_config")
+    def test_get_config_no_env_returns_empty_env_keys(self, mock_load):
+        mock_load.return_value = {
+            "llm": {"default_model": "openai/gpt-4.1-mini"},
+            "agents": {
+                "alpha": {
+                    "model": "openai/gpt-4.1",
+                    "mcp_servers": [{
+                        "name": "fs", "command": "mcp-server-fs",
+                    }],
+                },
+            },
+        }
+        resp = self.client.get("/dashboard/api/agents/alpha/config")
+        data = resp.json()
+        s = data["mcp_servers"][0]
+        assert "env" not in s
+        assert s["env_keys"] == []
+
+    @patch("src.cli.config._update_agent_field")
+    @patch("src.cli.config._load_config")
+    def test_audit_log_redacts_mcp_env_values(self, mock_load, _mock_update):
+        """When ``mcp_servers`` is edited, the audit_log row stores env
+        KEYS only — never values. Values may be ``$CRED{name}`` handles
+        or raw secrets; either way they don't belong in audit storage.
+        """
+        mock_load.return_value = {
+            "llm": {"default_model": "openai/gpt-4.1-mini"},
+            "agents": {
+                "alpha": {
+                    "model": "openai/gpt-4.1",
+                    "mcp_servers": [{
+                        "name": "linear", "command": "x",
+                        "env": {"OLD_KEY": "old-secret-value"},
+                    }],
+                },
+            },
+        }
+        # PUT a new mcp_servers payload — old has OLD_KEY value, new has
+        # NEW_KEY value. Both env VALUES must be absent from the audit row.
+        resp = self.client.put(
+            "/dashboard/api/agents/alpha/config",
+            json={"mcp_servers": [{
+                "name": "linear", "command": "x",
+                "env": {"NEW_KEY": "new-secret-value"},
+            }]},
+        )
+        assert resp.status_code == 200
+
+        # Inspect what landed in the audit_log via the operator-audit
+        # endpoint (the dashboard surface that exposes blackboard.audit_log).
+        audit_resp = self.client.get("/dashboard/api/operator-audit")
+        assert audit_resp.status_code == 200
+        entries = audit_resp.json().get("entries", [])
+        mcp_rows = [r for r in entries if r.get("field") == "mcp_servers"]
+        assert mcp_rows, f"no mcp_servers audit row found in {entries!r}"
+        row = mcp_rows[0]
+        before = row.get("before_value") or ""
+        after = row.get("after_value") or ""
+        # CRITICAL: env values must NOT appear in either before or after.
+        assert "old-secret-value" not in before, (
+            f"old env value leaked into audit_log.before_value: {before!r}"
+        )
+        assert "new-secret-value" not in after, (
+            f"new env value leaked into audit_log.after_value: {after!r}"
+        )
+        # Env keys ARE preserved so reviewers can see what changed.
+        assert "OLD_KEY" in before
+        assert "NEW_KEY" in after
+
+    # ── T5: PUT env preserve/replace + permission + diff ──────────────
+
+    @patch("src.cli.config._update_agent_field")
+    @patch("src.cli.config._load_config")
+    def test_get_then_put_roundtrip_safe(self, mock_load, mock_update):
+        """The exact GET response replayed through PUT must succeed —
+        otherwise the dashboard UI breaks for any "load config, edit
+        one field, save back" flow. GET adds ``env_keys`` as the masked
+        stand-in for env; PUT must strip that before Pydantic validation
+        (``MCPServerConfig`` has ``extra="forbid"`` and would otherwise
+        reject the round-trip)."""
+        mock_load.return_value = {
+            "llm": {"default_model": "openai/gpt-4.1-mini"},
+            "agents": {
+                "alpha": {
+                    "model": "openai/gpt-4.1",
+                    "mcp_servers": [{
+                        "name": "linear", "command": "x",
+                        "args": ["--workspace", "ol"],
+                        "env": {"LINEAR_API_KEY": "kept-secret"},
+                    }],
+                },
+            },
+        }
+        # GET first.
+        get_resp = self.client.get("/dashboard/api/agents/alpha/config")
+        assert get_resp.status_code == 200
+        round_trip = get_resp.json()["mcp_servers"]
+        assert "env_keys" in round_trip[0]  # GET adds it
+        assert "env" not in round_trip[0]   # GET omits it
+
+        # PUT the exact GET response back.
+        put_resp = self.client.put(
+            "/dashboard/api/agents/alpha/config",
+            json={"mcp_servers": round_trip},
+        )
+        assert put_resp.status_code == 200, put_resp.json()
+        # No restart triggered — env preserved → canonical diff is empty.
+        assert put_resp.json()["restart_required"] is False
+
+    @patch("src.cli.config._update_agent_field")
+    @patch("src.cli.config._load_config")
+    def test_put_config_env_omitted_preserves_existing(
+        self, mock_load, mock_update,
+    ):
+        """When the PUT body lists a server with no ``env`` key, the
+        persisted env (matched by server name) is preserved. This keeps
+        a GET → edit → PUT round-trip from accidentally clearing secrets
+        the dashboard never showed."""
+        mock_load.return_value = {
+            "llm": {"default_model": "openai/gpt-4.1-mini"},
+            "agents": {
+                "alpha": {
+                    "model": "openai/gpt-4.1",
+                    "mcp_servers": [{
+                        "name": "linear", "command": "x",
+                        "env": {"LINEAR_API_KEY": "kept-secret"},
+                    }],
+                },
+            },
+        }
+        # PUT same server, no env field → should preserve.
+        resp = self.client.put(
+            "/dashboard/api/agents/alpha/config",
+            json={"mcp_servers": [{
+                "name": "linear", "command": "x",
+                "args": ["--debug"],  # changing args, not env
+            }]},
+        )
+        assert resp.status_code == 200
+        # Find the persisted payload from the mocked _update_agent_field call.
+        calls = [c for c in mock_update.call_args_list if c.args[1] == "mcp_servers"]
+        assert calls, "expected mcp_servers to be written"
+        written = calls[-1].args[2]
+        # Env preserved verbatim.
+        assert written[0]["env"] == {"LINEAR_API_KEY": "kept-secret"}
+        # Args changed as requested.
+        assert written[0]["args"] == ["--debug"]
+
+    @patch("src.cli.config._update_agent_field")
+    @patch("src.cli.config._load_config")
+    def test_put_config_env_present_replaces_wholesale(
+        self, mock_load, mock_update,
+    ):
+        mock_load.return_value = {
+            "llm": {"default_model": "openai/gpt-4.1-mini"},
+            "agents": {
+                "alpha": {
+                    "model": "openai/gpt-4.1",
+                    "mcp_servers": [{
+                        "name": "linear", "command": "x",
+                        "env": {"OLD": "v1"},
+                    }],
+                },
+            },
+        }
+        resp = self.client.put(
+            "/dashboard/api/agents/alpha/config",
+            json={"mcp_servers": [{
+                "name": "linear", "command": "x",
+                "env": {"NEW": "v2"},  # explicit env → replace
+            }]},
+        )
+        assert resp.status_code == 200
+        calls = [c for c in mock_update.call_args_list if c.args[1] == "mcp_servers"]
+        written = calls[-1].args[2]
+        assert written[0]["env"] == {"NEW": "v2"}
+        # OLD must be gone.
+        assert "OLD" not in (written[0].get("env") or {})
+
+    @patch("src.cli.config._update_agent_field")
+    @patch("src.cli.config._load_config")
+    def test_put_config_env_empty_dict_clears(self, mock_load, mock_update):
+        mock_load.return_value = {
+            "llm": {"default_model": "openai/gpt-4.1-mini"},
+            "agents": {
+                "alpha": {
+                    "model": "openai/gpt-4.1",
+                    "mcp_servers": [{
+                        "name": "linear", "command": "x", "env": {"X": "y"},
+                    }],
+                },
+            },
+        }
+        resp = self.client.put(
+            "/dashboard/api/agents/alpha/config",
+            json={"mcp_servers": [{
+                "name": "linear", "command": "x", "env": {},
+            }]},
+        )
+        assert resp.status_code == 200
+        calls = [c for c in mock_update.call_args_list if c.args[1] == "mcp_servers"]
+        written = calls[-1].args[2]
+        # env_after must NOT have any keys (empty dict or None — both
+        # canonicalize to None in storage; we accept either).
+        assert not (written[0].get("env") or {})
+
+    @patch("src.cli.config._update_agent_field")
+    @patch("src.cli.config._load_config")
+    def test_put_config_noop_does_not_trigger_restart(
+        self, mock_load, mock_update,
+    ):
+        """A GET → unchanged PUT round-trip must not flip
+        ``mcp_touched`` — that was the prior bug where any PUT
+        containing ``mcp_servers`` (even unchanged) triggered a restart."""
+        existing = [{
+            "name": "linear", "command": "mcp-server-linear",
+            "args": ["--workspace", "ol"],
+            "env": {"K": "v"},
+        }]
+        mock_load.return_value = {
+            "llm": {"default_model": "openai/gpt-4.1-mini"},
+            "agents": {
+                "alpha": {
+                    "model": "openai/gpt-4.1",
+                    "mcp_servers": existing,
+                },
+            },
+        }
+        # Replay the exact persisted payload — no real change.
+        resp = self.client.put(
+            "/dashboard/api/agents/alpha/config",
+            json={"mcp_servers": existing},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        # restart_required must be False — no diff, no restart.
+        assert data["restart_required"] is False
+        # mcp_servers must NOT appear in updated (no write happened).
+        assert "mcp_servers" not in data.get("updated", [])
+
+    @patch("src.cli.config._update_agent_field")
+    @patch("src.cli.config._load_config")
+    def test_put_config_invalid_name_returns_structured_400(
+        self, mock_load, mock_update,
+    ):
+        """Pydantic validation surfaces structured errors (field path +
+        message) so the dashboard can map back to the offending input."""
+        mock_load.return_value = {
+            "llm": {"default_model": "openai/gpt-4.1-mini"},
+            "agents": {"alpha": {"model": "openai/gpt-4.1"}},
+        }
+        resp = self.client.put(
+            "/dashboard/api/agents/alpha/config",
+            json={"mcp_servers": [{
+                "name": "bad name with spaces", "command": "x",
+            }]},
+        )
+        assert resp.status_code == 400
+        detail = resp.json().get("detail")
+        # Structured: {"field": "mcp_servers", "errors": [Pydantic-error-dicts]}
+        assert isinstance(detail, dict)
+        assert detail["field"] == "mcp_servers"
+        assert any("name" in str(e.get("loc", "")) for e in detail["errors"])
+
+    @patch("src.cli.config._update_agent_field")
+    @patch("src.cli.config._load_config")
+    def test_put_config_rejects_cred_in_command(self, mock_load, mock_update):
+        mock_load.return_value = {
+            "llm": {"default_model": "openai/gpt-4.1-mini"},
+            "agents": {"alpha": {"model": "openai/gpt-4.1"}},
+        }
+        resp = self.client.put(
+            "/dashboard/api/agents/alpha/config",
+            json={"mcp_servers": [{
+                "name": "x", "command": "$CRED{secret}",
+            }]},
+        )
+        assert resp.status_code == 400
+
+    @patch("src.cli.config._update_agent_field")
+    @patch("src.cli.config._load_config")
+    def test_put_config_rejects_cred_permission_denied(
+        self, mock_load, mock_update,
+    ):
+        """Agent's ``allowed_credentials`` gates env $CRED references."""
+        mock_load.return_value = {
+            "llm": {"default_model": "openai/gpt-4.1-mini"},
+            "agents": {"alpha": {"model": "openai/gpt-4.1"}},
+        }
+        # Pre-load a credential into the vault (so existence check passes),
+        # but deny the agent permission to use it.
+        vault = self.components["credential_vault"]
+        vault.credentials["forbidden_cred"] = "any-value"
+        perms = self.components["permissions"]
+        perms.can_access_credential = MagicMock(return_value=False)
+
+        resp = self.client.put(
+            "/dashboard/api/agents/alpha/config",
+            json={"mcp_servers": [{
+                "name": "x", "command": "y",
+                "env": {"KEY": "$CRED{forbidden_cred}"},
+            }]},
+        )
+        assert resp.status_code == 400
+        assert "permission" in resp.json()["detail"].lower()
+
+    @patch("src.cli.config._update_agent_field")
+    @patch("src.cli.config._load_config")
+    def test_put_config_rejects_missing_cred(self, mock_load, mock_update):
+        """A $CRED reference to a credential not in the vault is
+        rejected at PUT time with a clear actionable error."""
+        mock_load.return_value = {
+            "llm": {"default_model": "openai/gpt-4.1-mini"},
+            "agents": {"alpha": {"model": "openai/gpt-4.1"}},
+        }
+        # Permissions allow anything; vault returns None (cred missing).
+        perms = self.components["permissions"]
+        perms.can_access_credential = MagicMock(return_value=True)
+        vault = self.components["credential_vault"]
+        vault.resolve_credential = MagicMock(return_value=None)
+
+        resp = self.client.put(
+            "/dashboard/api/agents/alpha/config",
+            json={"mcp_servers": [{
+                "name": "x", "command": "y",
+                "env": {"KEY": "$CRED{does_not_exist}"},
+            }]},
+        )
+        assert resp.status_code == 400
+        assert "does not exist" in resp.json()["detail"].lower()
+
+    @patch("src.cli.config._update_agent_field")
+    @patch("src.cli.config._load_config")
+    def test_put_config_cred_in_args_also_validated(
+        self, mock_load, mock_update,
+    ):
+        """$CRED handles in ``args`` strings go through the same
+        permission + existence check as env values."""
+        mock_load.return_value = {
+            "llm": {"default_model": "openai/gpt-4.1-mini"},
+            "agents": {"alpha": {"model": "openai/gpt-4.1"}},
+        }
+        perms = self.components["permissions"]
+        perms.can_access_credential = MagicMock(return_value=True)
+        vault = self.components["credential_vault"]
+        vault.resolve_credential = MagicMock(return_value=None)
+
+        resp = self.client.put(
+            "/dashboard/api/agents/alpha/config",
+            json={"mcp_servers": [{
+                "name": "x", "command": "y",
+                "args": ["--token", "$CRED{missing_in_args}"],
+            }]},
+        )
+        assert resp.status_code == 400
+        # Error message should point at the args path
+        assert "args" in resp.json()["detail"].lower()
+
     @patch("src.cli.config._update_agent_field")
     @patch("src.cli.config._load_config")
     def test_put_config_thinking(self, mock_load, mock_update):
@@ -1518,9 +1916,17 @@ class TestDashboardAgentConfig:
     @patch("src.cli.config._update_agent_field")
     @patch("src.cli.config._load_config")
     def test_put_config_mcp_servers_empty_clears(self, mock_load, mock_update):
+        """PUT with empty list MUST clear when persisted is non-empty
+        (real diff). When persisted is already empty, it's a no-op — see
+        ``test_put_config_noop_does_not_trigger_restart``."""
         mock_load.return_value = {
             "llm": {"default_model": "openai/gpt-4.1-mini"},
-            "agents": {"alpha": {"model": "openai/gpt-4.1-mini"}},
+            "agents": {
+                "alpha": {
+                    "model": "openai/gpt-4.1-mini",
+                    "mcp_servers": [{"name": "linear", "command": "x"}],
+                },
+            },
         }
         resp = self.client.put(
             "/dashboard/api/agents/alpha/config",
@@ -5624,3 +6030,115 @@ class TestDashboardEventBusCoverage:
         assert resp.status_code == 400
         deletes = [e for e in self.captured if e["type"] == "blackboard_delete"]
         assert deletes == []
+
+
+class TestCapabilitiesMcpForwarding:
+    """``GET /dashboard/api/agents/{id}/capabilities`` proxies the agent's
+    ``/capabilities`` and (a) forwards the new ``mcp_servers`` status
+    registry and ``mcp_tool_to_server`` mapping unchanged, and (b)
+    correctly classifies MCP tools in ``tool_sources`` using
+    ``mcp_tool_to_server`` — fixing the prior broken check
+    (``tool.get("function") == "mcp"`` was always False because the
+    OpenAI tool format puts a dict at ``function``).
+    """
+
+    def setup_method(self):
+        self.tmp_dir = tempfile.mkdtemp(prefix="ol_caps_")
+        self.components = _make_components(self.tmp_dir, include_v2=True)
+        self.transport_mock = self.components["transport"]
+        self.client = _make_client(self.components)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_forwards_mcp_servers_status_registry(self):
+        """The agent's per-server status registry passes through
+        unchanged so the dashboard can render status dots."""
+        self.transport_mock.request = AsyncMock(return_value={
+            "agent_id": "alpha", "role": "r", "skills": {},
+            "tool_definitions": [], "tool_sources": {},
+            "mcp_servers": [
+                {"name": "linear", "state": "running", "tools_count": 8, "error": None},
+                {"name": "github", "state": "failed", "tools_count": 0,
+                 "error": "command not found: gh-mcp"},
+            ],
+        })
+        resp = self.client.get("/dashboard/api/agents/alpha/capabilities")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["mcp_servers"][0]["name"] == "linear"
+        assert body["mcp_servers"][0]["state"] == "running"
+        assert body["mcp_servers"][1]["error"] == "command not found: gh-mcp"
+
+    def test_forwards_mcp_tool_to_server_mapping(self):
+        self.transport_mock.request = AsyncMock(return_value={
+            "agent_id": "alpha", "role": "r", "skills": {},
+            "tool_definitions": [], "tool_sources": {},
+            "mcp_tool_to_server": {
+                "linear_create_issue": "linear",
+                "gh_list_repos": "github",
+            },
+        })
+        resp = self.client.get("/dashboard/api/agents/alpha/capabilities")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["mcp_tool_to_server"] == {
+            "linear_create_issue": "linear",
+            "gh_list_repos": "github",
+        }
+
+    def test_backfill_classifies_mcp_tools_via_mapping(self):
+        """When the agent supplies ``mcp_tool_to_server`` and does NOT
+        supply ``tool_sources``, the dashboard backfill must mark
+        those names as ``source=mcp``. Pre-fix this branch was dead
+        because the prior ``tool.get('function') == 'mcp'`` check
+        was always False against the OpenAI tool format.
+        """
+        self.transport_mock.request = AsyncMock(return_value={
+            "agent_id": "alpha", "role": "r", "skills": {},
+            "tool_definitions": [
+                {"type": "function", "function": {"name": "linear_create_issue"}},
+                {"type": "function", "function": {"name": "gh_list_repos"}},
+            ],
+            "mcp_tool_to_server": {
+                "linear_create_issue": "linear",
+                "gh_list_repos": "github",
+            },
+            # tool_sources intentionally absent → forces backfill
+        })
+        resp = self.client.get("/dashboard/api/agents/alpha/capabilities")
+        body = resp.json()
+        assert body["tool_sources"]["linear_create_issue"] == "mcp"
+        assert body["tool_sources"]["gh_list_repos"] == "mcp"
+
+    def test_backfill_legacy_agent_without_mapping(self):
+        """An older agent (no ``mcp_tool_to_server``) cannot have its
+        MCP tools identified — we just classify by builtin/custom.
+        This is the documented limitation when the side-channel is
+        absent; the new backfill must not crash.
+        """
+        self.transport_mock.request = AsyncMock(return_value={
+            "agent_id": "alpha", "role": "r", "skills": {},
+            "tool_definitions": [
+                {"type": "function", "function": {"name": "some_unknown_tool"}},
+            ],
+            # No tool_sources, no mcp_tool_to_server
+        })
+        resp = self.client.get("/dashboard/api/agents/alpha/capabilities")
+        body = resp.json()
+        # Falls into "custom" (not "mcp", not "builtin")
+        assert body["tool_sources"]["some_unknown_tool"] == "custom"
+
+    def test_omits_mcp_fields_when_agent_does_not_provide(self):
+        """An older agent (no MCP client wired, or pre-T6 code) won't
+        emit the new fields; the dashboard response simply omits them.
+        """
+        self.transport_mock.request = AsyncMock(return_value={
+            "agent_id": "alpha", "role": "r", "skills": {},
+            "tool_definitions": [], "tool_sources": {},
+        })
+        resp = self.client.get("/dashboard/api/agents/alpha/capabilities")
+        body = resp.json()
+        assert "mcp_servers" not in body
+        assert "mcp_tool_to_server" not in body

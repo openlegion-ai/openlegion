@@ -35,6 +35,14 @@ class MCPClient:
         self._sessions: dict[str, Any] = {}  # server_name → ClientSession
         self._tool_to_server: dict[str, str] = {}  # tool_name → server_name
         self._tool_schemas: dict[str, dict] = {}  # tool_name → schema dict
+        # Startup/discovery status registry. Updated in ``start()`` per
+        # server: success path sets ``state="running"`` with ``tools_count``
+        # and ``error=None``; failure path sets ``state="failed"`` with
+        # the captured exception message. This reflects the last startup
+        # attempt only — NOT live health (no in-flight probes). The
+        # dashboard reads this via ``/capabilities`` to render per-server
+        # status dots and click-to-see-error.
+        self._server_status: dict[str, dict] = {}
 
     async def start(self, servers: list[dict], builtin_names: set[str] | None = None) -> None:
         """Start MCP server subprocesses and discover their tools.
@@ -49,6 +57,19 @@ class MCPClient:
         """
         if StdioServerParameters is None:
             logger.error("MCP SDK not installed — cannot start MCP servers")
+            # Mark every configured server as failed so the dashboard's
+            # per-server status registry surfaces the cause instead of
+            # silently showing zero servers. Operator sees red dots +
+            # actionable error rather than wondering why nothing
+            # discovered.
+            for server_cfg in servers:
+                name = server_cfg.get("name") if isinstance(server_cfg, dict) else None
+                if isinstance(name, str):
+                    self._server_status[name] = {
+                        "state": "failed",
+                        "tools_count": 0,
+                        "error": "MCP SDK not installed in agent container",
+                    }
             return
 
         builtin_names = builtin_names or set()
@@ -97,8 +118,21 @@ class MCPClient:
                     f"MCP server '{name}' started: "
                     f"{len(tools_result.tools)} tools discovered"
                 )
+                self._server_status[name] = {
+                    "state": "running",
+                    "tools_count": len(tools_result.tools),
+                    "error": None,
+                }
             except Exception as e:
                 logger.error(f"Failed to start MCP server '{name}': {e}")
+                # Capture the error string (truncated) so the dashboard
+                # can surface it on click — operator should not need to
+                # tail container logs to diagnose a failed MCP start.
+                self._server_status[name] = {
+                    "state": "failed",
+                    "tools_count": 0,
+                    "error": str(e)[:500],
+                }
 
     async def stop(self) -> None:
         """Shut down all MCP server connections."""
@@ -109,10 +143,39 @@ class MCPClient:
         self._sessions.clear()
         self._tool_to_server.clear()
         self._tool_schemas.clear()
+        self._server_status.clear()
 
     def list_tools(self) -> list[dict]:
         """Return all discovered MCP tools as schema dicts."""
         return list(self._tool_schemas.values())
+
+    def list_server_statuses(self) -> list[dict]:
+        """Return per-server startup/discovery status as a list of dicts.
+
+        Each entry: ``{name, state, tools_count, error}`` where
+        ``state`` is ``"running"`` or ``"failed"``. Reflects the last
+        startup attempt only — NOT live health. The dashboard renders
+        per-server status dots from this list and exposes the error
+        string when a server failed to start.
+
+        Servers that were never attempted (no call to :meth:`start`)
+        are not present in the list.
+        """
+        return [
+            {"name": name, **status}
+            for name, status in self._server_status.items()
+        ]
+
+    def get_tool_to_server(self) -> dict[str, str]:
+        """Return a snapshot of the ``tool_name → server_name`` mapping.
+
+        Surfaced through ``/capabilities`` so the dashboard can filter
+        the existing tool list by MCP server when the user clicks a
+        server's tool-count badge — the OpenAI tool definition format
+        has no field for per-tool source metadata, so this side-channel
+        is the contract.
+        """
+        return dict(self._tool_to_server)
 
     async def call_tool(self, name: str, arguments: dict) -> dict:
         """Route a tool call to the correct MCP server.

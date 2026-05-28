@@ -15,7 +15,7 @@ import click
 import yaml
 
 from src.shared.operator_playbooks import _OPERATOR_CORE
-from src.shared.types import RESERVED_AGENT_IDS
+from src.shared.types import RESERVED_AGENT_IDS, MCPServerConfig
 from src.shared.utils import truncate
 
 logger = logging.getLogger("cli")
@@ -207,6 +207,33 @@ def _load_config(mesh_path: Path | None = None) -> dict:
         with open(AGENTS_FILE) as f:
             agents_data = yaml.safe_load(f) or {}
             cfg.setdefault("agents", {}).update(agents_data.get("agents", {}))
+
+    # T7: validate ``mcp_servers`` entries via MCPServerConfig at the
+    # load boundary. Malformed entries (bad name regex, oversized
+    # strings, $CRED handles in command, unknown extra fields) are
+    # logged and dropped — DO NOT crash the whole agent load over one
+    # bad row. The dashboard PUT path enforces the same model for
+    # newly-saved configs; this is the safety net for legacy entries
+    # written before T2 landed.
+    for _agent_id, _agent_cfg in cfg.get("agents", {}).items():
+        if not isinstance(_agent_cfg, dict):
+            continue
+        _raw_servers = _agent_cfg.get("mcp_servers")
+        if not _raw_servers:
+            continue
+        _kept: list[dict] = []
+        for _entry in _raw_servers:
+            try:
+                _parsed = MCPServerConfig.model_validate(_entry)
+                _kept.append(_parsed.model_dump(exclude_none=False))
+            except Exception as _e:
+                _name = _entry.get("name") if isinstance(_entry, dict) else "<?>"
+                logger.warning(
+                    "Dropping malformed mcp_servers entry %r for agent %r: %s",
+                    _name, _agent_id, _e,
+                )
+        # Replace the raw list with the validated subset (may be empty).
+        _agent_cfg["mcp_servers"] = _kept if _kept else None
 
     # Load projects and build reverse map (agent → project)
     projects = _load_projects()

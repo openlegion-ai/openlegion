@@ -6,11 +6,15 @@ import re
 from pathlib import Path
 from typing import get_args
 
+import pytest
+from pydantic import ValidationError
+
 from src.shared.types import (
     AgentConfig,
     AgentMessage,
     AgentStatus,
     DashboardEvent,
+    MCPServerConfig,
     TaskAssignment,
     TaskResult,
     TokenBudget,
@@ -203,5 +207,199 @@ def test_every_emit_string_in_src_matches_a_dashboard_event_literal():
         f"strip the emit call. Silent ValidationError swallowing means "
         f"these events never reach the dashboard."
     )
+
+
+# === MCPServerConfig ===
+
+
+def test_mcp_server_minimal_parses_cleanly():
+    s = MCPServerConfig(name="linear", command="mcp-server-linear")
+    assert s.name == "linear"
+    assert s.command == "mcp-server-linear"
+    assert s.args == []
+    assert s.env is None
+
+
+def test_mcp_server_full_parses_cleanly():
+    s = MCPServerConfig(
+        name="fs_main",
+        command="mcp-server-filesystem",
+        args=["--root", "/data"],
+        env={"DEBUG": "1"},
+    )
+    assert s.args == ["--root", "/data"]
+    assert s.env == {"DEBUG": "1"}
+
+
+@pytest.mark.parametrize(
+    "bad_name",
+    [
+        "-leading-hyphen",
+        "_leading-underscore",
+        "name with spaces",
+        "weird/slash",
+        "dot.notation",
+        "",
+        "x" * 65,
+    ],
+)
+def test_mcp_server_name_regex_rejects_invalid(bad_name):
+    with pytest.raises(ValidationError):
+        MCPServerConfig(name=bad_name, command="x")
+
+
+def test_mcp_server_command_empty_rejected():
+    with pytest.raises(ValidationError):
+        MCPServerConfig(name="x", command="")
+
+
+def test_mcp_server_command_too_long_rejected():
+    with pytest.raises(ValidationError):
+        MCPServerConfig(name="x", command="y" * 257)
+
+
+def test_mcp_server_command_rejects_cred_handle():
+    with pytest.raises(ValidationError) as excinfo:
+        MCPServerConfig(name="x", command="$CRED{my_token}")
+    # Clear actionable error pointing the user to env/args
+    assert "command" in str(excinfo.value)
+    assert "env" in str(excinfo.value) or "args" in str(excinfo.value)
+
+
+def test_mcp_server_command_rejects_cred_handle_substring():
+    # Even if the handle is embedded, reject
+    with pytest.raises(ValidationError):
+        MCPServerConfig(
+            name="x", command="wrapper --token=$CRED{tok} run",
+        )
+
+
+def test_mcp_server_args_allows_cred_handle():
+    s = MCPServerConfig(
+        name="x", command="y", args=["--token", "$CRED{my_token}"],
+    )
+    assert s.args == ["--token", "$CRED{my_token}"]
+
+
+def test_mcp_server_env_allows_cred_handle():
+    s = MCPServerConfig(
+        name="x", command="y", env={"API_KEY": "$CRED{my_token}"},
+    )
+    assert s.env == {"API_KEY": "$CRED{my_token}"}
+
+
+def test_mcp_server_args_max_length():
+    with pytest.raises(ValidationError):
+        MCPServerConfig(name="x", command="y", args=["a"] * 33)
+
+
+def test_mcp_server_args_per_item_length():
+    with pytest.raises(ValidationError):
+        MCPServerConfig(name="x", command="y", args=["a" * 513])
+
+
+def test_mcp_server_env_max_entries():
+    too_many = {f"K{i}": "v" for i in range(33)}
+    with pytest.raises(ValidationError):
+        MCPServerConfig(name="x", command="y", env=too_many)
+
+
+def test_mcp_server_env_value_too_long():
+    with pytest.raises(ValidationError):
+        MCPServerConfig(name="x", command="y", env={"K": "v" * 4097})
+
+
+def test_mcp_server_env_empty_key_rejected():
+    with pytest.raises(ValidationError):
+        MCPServerConfig(name="x", command="y", env={"": "v"})
+
+
+def test_mcp_server_env_long_key_rejected():
+    with pytest.raises(ValidationError):
+        MCPServerConfig(name="x", command="y", env={"K" * 129: "v"})
+
+
+def test_mcp_server_rejects_extra_fields():
+    with pytest.raises(ValidationError):
+        MCPServerConfig(
+            name="x", command="y", commnad="typo", env=None,  # type: ignore[call-arg]
+        )
+
+
+# === AgentConfig.mcp_servers integration ===
+
+
+def test_agent_config_mcp_servers_default_none():
+    c = AgentConfig()
+    assert c.mcp_servers is None
+
+
+def test_agent_config_mcp_servers_empty_list_ok():
+    c = AgentConfig(mcp_servers=[])
+    assert c.mcp_servers == []
+
+
+def test_agent_config_mcp_servers_parses_nested():
+    c = AgentConfig(
+        mcp_servers=[
+            {"name": "linear", "command": "mcp-server-linear"},
+            {"name": "fs", "command": "mcp-server-filesystem", "args": ["/data"]},
+        ],
+    )
+    assert len(c.mcp_servers) == 2
+    assert isinstance(c.mcp_servers[0], MCPServerConfig)
+    assert c.mcp_servers[1].args == ["/data"]
+
+
+def test_agent_config_mcp_servers_rejects_case_insensitive_duplicates():
+    with pytest.raises(ValidationError) as excinfo:
+        AgentConfig(
+            mcp_servers=[
+                {"name": "Linear", "command": "x"},
+                {"name": "linear", "command": "y"},
+            ],
+        )
+    assert "duplicate" in str(excinfo.value).lower()
+
+
+def test_agent_config_mcp_servers_allows_distinct_names():
+    c = AgentConfig(
+        mcp_servers=[
+            {"name": "linear", "command": "x"},
+            {"name": "github", "command": "y"},
+        ],
+    )
+    assert {s.name for s in c.mcp_servers} == {"linear", "github"}
+
+
+def test_agent_config_keeps_extra_allow_for_outer_unknown_fields():
+    # Outer extra=allow is preserved — unknown top-level fields don't break load.
+    c = AgentConfig(role="researcher", some_legacy_field=42)  # type: ignore[call-arg]
+    dumped = c.model_dump()
+    assert dumped.get("some_legacy_field") == 42
+
+
+def test_agent_config_nested_mcp_server_extras_still_forbidden():
+    # extra=allow on the outer model does NOT leak into nested MCPServerConfig.
+    with pytest.raises(ValidationError) as excinfo:
+        AgentConfig(
+            mcp_servers=[
+                {"name": "linear", "command": "x", "bogus_nested_field": 1},
+            ],
+        )
+    # Error points to the right path
+    assert "mcp_servers" in str(excinfo.value)
+
+
+def test_agent_config_mcp_servers_round_trip_via_model_dump():
+    # Downstream consumers read mcp_servers via .get() expecting dicts.
+    c = AgentConfig(
+        mcp_servers=[
+            {"name": "linear", "command": "mcp-server-linear", "env": {"K": "v"}},
+        ],
+    )
+    dumped = c.model_dump()
+    assert isinstance(dumped["mcp_servers"][0], dict)
+    assert dumped["mcp_servers"][0]["env"] == {"K": "v"}
 
 

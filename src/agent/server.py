@@ -30,7 +30,7 @@ import mimetypes
 import os
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -143,16 +143,33 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
 
         Respects the same exclude filter used when calling the LLM, so the
         dashboard accurately reflects what the agent can actually use.
+
+        Includes two MCP side-channels for the dashboard:
+
+        * ``mcp_servers`` — per-server startup/discovery status registry
+          (state, tools_count, error). Drives the per-server status dot
+          and the click-to-see-error UX.
+        * ``mcp_tool_to_server`` — ``{tool_name: server_name}`` mapping
+          for filtering the tool list by server. Sidesteps the OpenAI
+          tool definition format which has no place for per-tool source
+          metadata.
+
+        Both are omitted when no MCP client is wired to the loop.
         """
         exc = loop._excluded_tools
         alw = loop._allowed_tools if isinstance(loop._allowed_tools, frozenset) else None
-        return {
+        result: dict[str, Any] = {
             "agent_id": loop.agent_id,
             "role": loop.role,
             "skills": loop.skills.list_skills(exclude=exc, allowed=alw),
             "tool_definitions": loop.skills.get_tool_definitions(exclude=exc, allowed=alw),
             "tool_sources": loop.skills.get_tool_sources(exclude=exc, allowed=alw),
         }
+        mcp_client = getattr(loop.skills, "_mcp_client", None)
+        if mcp_client is not None:
+            result["mcp_servers"] = mcp_client.list_server_statuses()
+            result["mcp_tool_to_server"] = mcp_client.get_tool_to_server()
+        return result
 
     @app.post("/invoke")
     async def invoke_tool(request: Request) -> dict:

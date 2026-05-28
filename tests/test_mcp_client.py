@@ -277,6 +277,7 @@ class TestMCPClientLifecycle:
         client._sessions = {"test": MagicMock()}
         client._tool_to_server = {"tool": "test"}
         client._tool_schemas = {"tool": {"name": "tool"}}
+        client._server_status = {"test": {"state": "running"}}
 
         client._exit_stack = AsyncMock()
         client._exit_stack.aclose = AsyncMock()
@@ -287,6 +288,7 @@ class TestMCPClientLifecycle:
         assert len(client._sessions) == 0
         assert len(client._tool_to_server) == 0
         assert len(client._tool_schemas) == 0
+        assert len(client._server_status) == 0
 
     def test_has_tool(self):
         """has_tool returns True only for registered MCP tools."""
@@ -294,4 +296,180 @@ class TestMCPClientLifecycle:
         client._tool_to_server = {"mcp_tool": "server"}
 
         assert client.has_tool("mcp_tool")
+
+
+# === Per-server status registry + tool-to-server mapping (T6) ===
+
+
+class TestMCPServerStatusRegistry:
+    """The MCPClient tracks per-server startup/discovery status so the
+    dashboard can render status dots and surface the error string on a
+    failed-start row click. NOT live health — registry reflects the
+    last ``start()`` attempt only.
+    """
+
+    @pytest.mark.asyncio
+    async def test_running_status_recorded_on_successful_start(self):
+        client = MCPClient()
+
+        session = AsyncMock()
+        tools_result = MagicMock()
+        tools_result.tools = [
+            _make_mock_tool("read_file"),
+            _make_mock_tool("write_file"),
+        ]
+        session.initialize = AsyncMock()
+        session.list_tools = AsyncMock(return_value=tools_result)
+
+        p1 = patch("src.agent.mcp_client.StdioServerParameters", MagicMock())
+        p2 = patch("src.agent.mcp_client.stdio_client")
+        p3 = patch("src.agent.mcp_client.ClientSession")
+
+        with p1, p2 as mock_stdio, p3 as mock_cs_cls:
+            _setup_mock_server(mock_stdio, mock_cs_cls, session)
+            await client.start([{"name": "fs", "command": "x"}])
+
+        statuses = client.list_server_statuses()
+        assert len(statuses) == 1
+        assert statuses[0] == {
+            "name": "fs", "state": "running", "tools_count": 2, "error": None,
+        }
+
+    @pytest.mark.asyncio
+    async def test_failed_status_captures_error_message(self):
+        client = MCPClient()
+
+        def boom(params):
+            cm = AsyncMock()
+            cm.__aenter__ = AsyncMock(
+                side_effect=RuntimeError("command not found: linear-server"),
+            )
+            return cm
+
+        p1 = patch("src.agent.mcp_client.StdioServerParameters", MagicMock())
+        p2 = patch("src.agent.mcp_client.stdio_client", side_effect=boom)
+        p3 = patch("src.agent.mcp_client.ClientSession")
+
+        with p1, p2, p3:
+            await client.start([{"name": "linear", "command": "linear-server"}])
+
+        statuses = client.list_server_statuses()
+        assert len(statuses) == 1
+        s = statuses[0]
+        assert s["name"] == "linear"
+        assert s["state"] == "failed"
+        assert s["tools_count"] == 0
+        assert "command not found" in s["error"]
+
+    @pytest.mark.asyncio
+    async def test_mixed_success_failure_recorded_independently(self):
+        """A failing server doesn't tank the registry entry for a
+        successful sibling — both must appear with their respective
+        states. Mirrors the existing graceful-failure behavior.
+        """
+        client = MCPClient()
+
+        good_session = AsyncMock()
+        good_tools = MagicMock()
+        good_tools.tools = [_make_mock_tool("ok_tool")]
+        good_session.initialize = AsyncMock()
+        good_session.list_tools = AsyncMock(return_value=good_tools)
+
+        call_count = 0
+
+        def side_effect(params):
+            nonlocal call_count
+            call_count += 1
+            cm = AsyncMock()
+            if call_count == 1:
+                cm.__aenter__ = AsyncMock(side_effect=RuntimeError("bad"))
+            else:
+                cm.__aenter__ = AsyncMock(return_value=(MagicMock(), MagicMock()))
+            return cm
+
+        p1 = patch("src.agent.mcp_client.StdioServerParameters", MagicMock())
+        p2 = patch("src.agent.mcp_client.stdio_client", side_effect=side_effect)
+        p3 = patch("src.agent.mcp_client.ClientSession")
+
+        with p1, p2, p3 as mock_cs_cls:
+            scm = AsyncMock()
+            scm.__aenter__ = AsyncMock(return_value=good_session)
+            mock_cs_cls.return_value = scm
+            await client.start([
+                {"name": "bad", "command": "x"},
+                {"name": "good", "command": "y"},
+            ])
+
+        by_name = {s["name"]: s for s in client.list_server_statuses()}
+        assert by_name["bad"]["state"] == "failed"
+        assert by_name["bad"]["tools_count"] == 0
+        assert by_name["good"]["state"] == "running"
+        assert by_name["good"]["tools_count"] == 1
+
+
+class TestMCPToolToServerMapping:
+    """The ``get_tool_to_server`` side-channel lets the dashboard filter
+    the existing tool list by MCP server when the user clicks a
+    server's tool-count badge. Captures both non-conflicting tool
+    names AND the conflict-rename case (``mcp_<server>_<tool>``).
+    """
+
+    @pytest.mark.asyncio
+    async def test_non_conflict_tool_maps_to_server_under_original_name(self):
+        client = MCPClient()
+
+        session = AsyncMock()
+        tools_result = MagicMock()
+        tools_result.tools = [_make_mock_tool("read_file")]
+        session.initialize = AsyncMock()
+        session.list_tools = AsyncMock(return_value=tools_result)
+
+        p1 = patch("src.agent.mcp_client.StdioServerParameters", MagicMock())
+        p2 = patch("src.agent.mcp_client.stdio_client")
+        p3 = patch("src.agent.mcp_client.ClientSession")
+        with p1, p2 as mock_stdio, p3 as mock_cs_cls:
+            _setup_mock_server(mock_stdio, mock_cs_cls, session)
+            await client.start([{"name": "fs", "command": "x"}])
+
+        mapping = client.get_tool_to_server()
+        assert mapping == {"read_file": "fs"}
+
+    @pytest.mark.asyncio
+    async def test_conflict_renamed_tool_maps_under_prefixed_name(self):
+        # A tool name that collides with a built-in gets renamed to
+        # ``mcp_<server>_<tool>``; the mapping must use that key (the
+        # one the LLM and dashboard see) so filtering works.
+        client = MCPClient()
+
+        session = AsyncMock()
+        tools_result = MagicMock()
+        tools_result.tools = [_make_mock_tool("exec_command")]
+        session.initialize = AsyncMock()
+        session.list_tools = AsyncMock(return_value=tools_result)
+
+        p1 = patch("src.agent.mcp_client.StdioServerParameters", MagicMock())
+        p2 = patch("src.agent.mcp_client.stdio_client")
+        p3 = patch("src.agent.mcp_client.ClientSession")
+        with p1, p2 as mock_stdio, p3 as mock_cs_cls:
+            _setup_mock_server(mock_stdio, mock_cs_cls, session)
+            # ``exec_command`` collides with a built-in name → renamed
+            await client.start(
+                [{"name": "shell", "command": "x"}],
+                builtin_names={"exec_command"},
+            )
+
+        mapping = client.get_tool_to_server()
+        # Renamed key, not the original ``exec_command``
+        assert "mcp_shell_exec_command" in mapping
+        assert mapping["mcp_shell_exec_command"] == "shell"
+        # Original name is NOT in the mapping (it's the built-in's name)
+        assert "exec_command" not in mapping
+
+    def test_get_tool_to_server_returns_snapshot_not_alias(self):
+        """Mutating the returned dict must not bleed into MCPClient state."""
+        client = MCPClient()
+        client._tool_to_server = {"a": "s1"}
+        snap = client.get_tool_to_server()
+        snap["b"] = "s2"
+        assert "b" not in client._tool_to_server
         assert not client.has_tool("other_tool")

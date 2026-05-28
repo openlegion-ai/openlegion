@@ -278,6 +278,15 @@ class RuntimeContext:
             failover_config=failover_config or None,
             default_model=default_model,
         )
+        # Plumb the credential resolver into the already-constructed runtime
+        # backend so $CRED{name} handles in MCP server configs (env values
+        # and args) resolve at agent start. Idempotent; safe if the runtime
+        # is later replaced (the sandbox→docker fallback path in
+        # _start_agents also calls set_credential_resolver explicitly).
+        self.runtime.set_credential_resolver(
+            vault=self.credential_vault,
+            permissions=self.permissions,
+        )
         self.router = MessageRouter(
             self.permissions, self.agent_urls,
             trace_store=self.trace_store,
@@ -496,6 +505,11 @@ class RuntimeContext:
                         project_root=str(PROJECT_ROOT),
                     )
                     self.runtime.extra_env = saved_extra_env
+                    # Re-plumb the credential resolver into the fresh backend.
+                    self.runtime.set_credential_resolver(
+                        vault=self.credential_vault,
+                        permissions=self.permissions,
+                    )
                     self.transport = HttpTransport()
                     _ensure_docker_image()
                     url = self.runtime.start_agent(

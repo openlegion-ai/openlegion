@@ -40,16 +40,69 @@ There is no top-level `config/agents.yaml` file shipped with the repo — agents
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `name` | string | Yes | Unique identifier for the server |
-| `command` | string | Yes | Command to launch the server |
-| `args` | list[string] | No | Command-line arguments (defaults to `[]`) |
-| `env` | dict[string, string] | No | Environment variables for the server process (defaults to `None`, meaning the subprocess inherits the agent container's environment) |
+| `name` | string | Yes | Unique identifier (1-64 chars, `^[a-zA-Z0-9][a-zA-Z0-9_-]*$`). Used as a prefix when a tool name collides with a built-in or another server's tool (`mcp_<server>_<tool>`). Case-insensitive duplicate names are rejected. |
+| `command` | string | Yes | Command to launch the server (max 256 chars). **Cannot contain `$CRED{name}` handles** — use `env` or `args` if a credential needs to reach the subprocess. |
+| `args` | list[string] | No | Command-line arguments (defaults to `[]`, max 32 entries × 512 chars). May contain `$CRED{name}` handles — the mesh resolves them at agent start. |
+| `env` | dict[string, string] | No | Environment variables for the server process (defaults to `None`, max 32 entries × 4096-char values). Values may contain `$CRED{name}` handles. |
+
+Entries are validated by `src.shared.types.MCPServerConfig` at load time (`src/cli/config.py:_load_config`), at PUT time (`/api/agents/{id}/config`), and persisted as plain dicts so existing tooling that diffs `config/agents.yaml` keeps working.
+
+### Credential handles in `env` and `args`
+
+`$CRED{name}` references the agent-tier credential vault. The mesh resolves them just before serializing the `MCP_SERVERS` env var for the agent container — the resolved plaintext goes into the subprocess environment, never to disk and never through the API surface.
+
+```yaml
+mcp_servers:
+  - name: linear
+    command: mcp-server-linear
+    args: ["--workspace", "ol"]
+    env:
+      LINEAR_API_KEY: "$CRED{linear_token}"
+```
+
+**Permission gate.** Each handle is checked against the agent's `allowed_credentials` glob list (via `permissions.can_access_credential`) at **both** PUT time (so the dashboard rejects an unsavable config synchronously) and runtime (so a permission revoked after save is enforced on next restart).
+
+**What handles protect (and what they don't):**
+
+| Surface | Protected? |
+|---|---|
+| `config/agents.yaml` on disk | ✅ stored as `$CRED{name}` reference |
+| `audit_log` table | ✅ env values redacted; only keys preserved |
+| `GET /api/agents/{id}/config` | ✅ `env` field omitted; `env_keys` returned instead |
+| Container `MCP_SERVERS` env var | ❌ plaintext after mesh resolves |
+| MCP subprocess `env` | ❌ plaintext (the subprocess needs the value to authenticate — this is a protocol fact, not a routing problem) |
+| Container process memory | ❌ plaintext |
+
+The runtime exposure is bounded by the existing container hardening (UID 1000, `cap_drop=ALL`, `read_only` filesystem, 384 MB memory cap). Persistent storage and observability surfaces are the threat-model windows that credential handles close.
+
+**Failure modes:**
+
+- **Vault not wired.** `RuntimeBackend` raises a clear startup error if the config contains `$CRED{...}` handles but the mesh credential vault was not plumbed in via `set_credential_resolver`. Silent literal-passthrough was rejected as a footgun: a misconfigured deploy would otherwise ship literal `$CRED{...}` strings to subprocesses.
+- **Credential missing.** Agent start raises `ValueError`; the dashboard surfaces this through the existing restart-failed UX with the credential name in the error message. Fix by storing the credential and retrying restart.
+- **Permission denied.** Same as missing — agent start raises with the credential name. Fix by extending the agent's `allowed_credentials` glob.
+
+### Dashboard `GET /config` env masking
+
+`env` values are never returned by the dashboard config API. Each MCP server entry in the response omits the `env` key entirely and returns `env_keys: ["KEY1", "KEY2"]` instead — the dashboard renders the list of env-var names without ever holding the values.
+
+The `env` field is **omitted**, not returned as `null`. This is deliberate: a naive `GET → edit → PUT` round-trip would otherwise lose env because the PUT handler treats "`env` present in body" as "replace wholesale." Omission lets the PUT handler tell "client preserved env" from "client wants to clear env":
+
+- **Field absent from request body** → preserve persisted env for this server (matched by name).
+- **Field present (as `{}` or `{K: v}`)** → replace wholesale.
+
+### `mcp_touched` only fires on real diffs
+
+Saving a config that doesn't actually change the persisted `mcp_servers` does NOT restart the agent. The PUT handler canonicalizes both sides (Pydantic model load + `model_dump(exclude_none=False)`, sorted by `name.lower()`, with `env={}` normalized to `env=None`) and only triggers the restart if the diff is non-empty.
+
+### Concurrent edits
+
+Last-write-wins semantics for the whole `mcp_servers` field. The dashboard does not currently use an `If-Match` / etag concurrency token, so two operators editing the same agent's MCP config simultaneously will have one overwrite the other. This is consistent with how every other dashboard config edit behaves today.
 
 ## How It Works
 
 ### Startup Sequence
 
-1. The runtime layer (`DockerBackend` in `src/host/runtime.py`) reads `mcp_servers` from the agent's record and serializes it as JSON into the `MCP_SERVERS` environment variable passed to the agent container (`environment["MCP_SERVERS"] = json.dumps(mcp_servers)`)
+1. The runtime layer (`DockerBackend` / `SandboxBackend` in `src/host/runtime.py`) reads `mcp_servers` from the agent's record and serializes it as JSON into the `MCP_SERVERS` environment variable passed to the agent container (`environment["MCP_SERVERS"] = self._build_mcp_servers_env(...)`). Any `$CRED{name}` handles in `env` values or `args` strings are resolved here against the mesh credential vault — the agent container receives plaintext values; the persisted config retains the handle.
 2. Agent container starts; `src/agent/__main__.py` reads `MCP_SERVERS`
 3. `MCPClient` is created and passed to `SkillRegistry`
 4. During lifespan startup, `MCPClient.start()` launches each server:
@@ -194,3 +247,13 @@ Common causes:
 ### Name conflicts
 
 If your MCP tool has the same name as a built-in (e.g., `exec_command`), it will be prefixed. Check logs for "conflicts with existing tool, renamed to" warnings.
+
+### Dashboard shows a red status dot
+
+The agent's `/capabilities` endpoint exposes a per-server startup registry — each entry has `{state, tools_count, error}`. Failed startups capture the exception message (truncated to 500 chars); clicking the row in the dashboard surfaces the error verbatim, so you don't need to tail container logs for the common cases (`command not found`, missing env var, permission denied on a credential handle).
+
+Note: the registry reflects the **last startup attempt** only — it is not a live health probe. A server that started successfully but crashed mid-session is not marked failed until the next agent restart re-runs discovery.
+
+## Future: operator-requested setup
+
+A planned follow-up will let the operator agent request MCP setup through the existing credential-request / browser-login pattern: the operator surfaces a dashboard card describing the tool it needs, the human reviews + saves, the agent picks up the new server on restart. The operator never edits MCP config directly — this preserves the operator-first positioning while sidestepping the prompt-injection risk of giving operator chat the power to install arbitrary subprocesses.
