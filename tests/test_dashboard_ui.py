@@ -376,11 +376,6 @@ class TestVocabularySweepStrings:
 
 
 class TestEmptyStateCTAs:
-    def test_workplace_empty_outputs_has_cta(self):
-        # The Outputs sub-tab empty state now contains a verb-driven CTA
-        # pointing users at the operator chat.
-        assert "Tell the Operator what you want delivered" in _INDEX_HTML
-
     def test_team_empty_state_has_cta(self):
         # The fleet/team page first-run state.
         assert "Build your first team" in _INDEX_HTML

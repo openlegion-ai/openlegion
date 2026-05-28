@@ -600,20 +600,20 @@ The tables below are not exhaustive — they cover the user-facing surface area 
 
 **Work (Board) Surface — `/api/workplace/*`**
 
-12 endpoints power the Work tab. Together they cover the Kanban, Needs-You, Activity feed, and pending-action review surfaces. State-changing routes require the CSRF header.
+These endpoints power the Work tab. They cover the summary cards, Needs-You panel, Stuck Tasks panel, task drill-in modal, and pending-action review surfaces. State-changing routes require the CSRF header. (PR 3 of the Work-tab rewrite retired `GET /workplace/outputs` and `GET /workplace/feed` along with the legacy team-outputs + activity sub-tabs.)
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/dashboard/api/workplace/projects` | Teams with rollup status for the Team Status panel (response payload includes both `team_id` and `project_id` keys per item) |
-| `GET` | `/dashboard/api/workplace/tasks` | All tasks (kanban columns: Pending / Working / Blocked / Done) |
-| `GET` | `/dashboard/api/workplace/tasks/{task_id}` | Single task detail with artifacts (powers "Read full" toggle) |
-| `GET` | `/dashboard/api/workplace/tasks/{task_id}/events` | Per-task event timeline |
-| `POST` | `/dashboard/api/workplace/tasks/{task_id}/cancel` | Cancel a task (× button on cards) |
+| `GET` | `/dashboard/api/workplace/projects` | Teams with rollup status (response payload includes both `team_id` and `project_id` keys per item) |
+| `GET` | `/dashboard/api/workplace/tasks` | All tasks — Stuck Tasks panel + drill-in modal |
+| `GET` | `/dashboard/api/workplace/tasks/{task_id}` | Single task detail with artifacts (drill-in modal "Read full" toggle) |
+| `GET` | `/dashboard/api/workplace/tasks/{task_id}/events` | Per-task event timeline (drill-in modal) |
+| `POST` | `/dashboard/api/workplace/tasks/{task_id}/cancel` | Cancel a task (Stuck Tasks panel) |
 | `POST` | `/dashboard/api/workplace/tasks/{task_id}/outcome` | Set the outcome rating on a delivered task |
-| `GET` | `/dashboard/api/workplace/blockers` | Active blockers across the fleet |
-| `GET` | `/dashboard/api/workplace/outputs` | "Recently delivered" outputs with artifact previews |
-| `GET` | `/dashboard/api/workplace/feed` | Combined activity feed (capped at `workplaceFeedCap=200`) |
+| `GET` | `/dashboard/api/workplace/blockers` | Active blockers across the fleet (Needs You panel) |
+| `GET` | `/dashboard/api/workplace/goals` | Workplace-wide business goals (Goals chip strip) |
 | `GET` | `/dashboard/api/workplace/pending` | Pending operator review queue |
+| `POST` | `/dashboard/api/workplace/pending/{nonce}/confirm` | Confirm a pending action |
 | `POST` | `/dashboard/api/workplace/pending/{nonce}/cancel` | Cancel a pending action |
 | `POST` | `/dashboard/api/changes/undo/{undo_token}` | Undo a soft-edit change inside its TTL window |
 
