@@ -2527,7 +2527,51 @@ async def manage_goals(
         }
 
     workspace_root = workspace_manager.root
-    current = _read_goals_sidecar(workspace_root)
+
+    # Action-specific read policy (Codex r4 catch — without this,
+    # incremental writes silently clobbered a corrupt GOALS.json):
+    #
+    # * ``list`` / ``set``: lenient — ``list`` is a read-only display
+    #   and ``set`` is an intentional full replacement (the user is
+    #   re-asserting truth, so accepting current=[] on corrupt is OK,
+    #   but we still log so the corruption isn't silent).
+    # * ``add`` / ``update`` / ``remove`` / ``record_seed_ask``:
+    #   strict — these are merge-writes that ASSUME a known prior
+    #   state. Silently treating a corrupt file as empty would either
+    #   wipe goals (``add``: append to []) or produce confusing
+    #   "not found" errors on goals the user can plainly see in the
+    #   raw JSON.
+    _MERGE_WRITE_ACTIONS = {"add", "update", "remove"}
+    if action in _MERGE_WRITE_ACTIONS:
+        try:
+            current = _safe_read_goals_for_merge(workspace_root)
+        except _GoalsCorruptError as e:
+            return {
+                "error": (
+                    f"GOALS.json is corrupt — refusing to "
+                    f"{action} because doing so would silently lose "
+                    f"the pre-existing goals on disk. Inspect the "
+                    f"file in the operator workspace and repair or "
+                    f"rotate it before retrying. ({e})"
+                ),
+            }
+    elif action == "set":
+        # ``set`` replaces the full list, so a corrupt file's prior
+        # goals are intentionally going away. Surface the corruption
+        # in logs so the operator notices, but proceed.
+        try:
+            current = _safe_read_goals_for_merge(workspace_root)
+        except _GoalsCorruptError as e:
+            logger.warning(
+                "GOALS.json was corrupt during 'set' replacement; "
+                "treating as empty and overwriting. (%s)", e,
+            )
+            current = []
+    else:
+        # ``list`` / ``record_seed_ask`` — current goals aren't used
+        # by these branches except indirectly (record_seed_ask reads
+        # via _write_seed_ask, which has its own strict guard).
+        current = _read_goals_sidecar(workspace_root)
 
     if action == "list":
         # List surfaces the seed_ask block too so the heartbeat can

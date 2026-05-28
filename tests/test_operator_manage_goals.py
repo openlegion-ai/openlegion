@@ -595,3 +595,116 @@ async def test_record_seed_ask_seeds_into_empty_workspace(tmp_path):
     payload = json.loads((tmp_path / "GOALS.json").read_text())
     assert payload["goals"] == []
     assert payload["seed_ask"]["team_names"] == ["alpha"]
+
+
+# ── Corrupt-GOALS-file protection across all merge-write actions ──
+#
+# Codex r4 caught: the r3 fix wired ``_safe_read_goals_for_merge``
+# only into ``_write_seed_ask``. ``add`` / ``update`` / ``remove``
+# still used the lenient reader and could silently overwrite a
+# corrupt file. These tests pin each action's behaviour on a
+# corrupted GOALS.json (truncated mid-write).
+
+
+_CORRUPT_JSON = '{"goals": [{"name":'
+
+
+@pytest.mark.asyncio
+async def test_add_refuses_on_corrupt_goals_json(tmp_path):
+    """``add`` must abort and surface an error rather than overwrite
+    a corrupt file with ``[new_goal]``."""
+    from src.agent.builtins.operator_tools import manage_goals
+
+    ws = _FakeWorkspace(tmp_path)
+    (tmp_path / "GOALS.json").write_text(_CORRUPT_JSON)
+    result = await manage_goals(
+        "add",
+        goal={"name": "Launch landing page", "status": "in_progress"},
+        workspace_manager=ws,
+    )
+    assert "error" in result
+    assert "corrupt" in result["error"].lower()
+    # File untouched — operator can repair.
+    assert (tmp_path / "GOALS.json").read_text() == _CORRUPT_JSON
+
+
+@pytest.mark.asyncio
+async def test_update_refuses_on_corrupt_goals_json(tmp_path):
+    """``update`` must abort with a 'corrupt' error, NOT a misleading
+    'goal not found' error — the latter would imply the goal didn't
+    exist when in fact the file just couldn't be read."""
+    from src.agent.builtins.operator_tools import manage_goals
+
+    ws = _FakeWorkspace(tmp_path)
+    (tmp_path / "GOALS.json").write_text(_CORRUPT_JSON)
+    result = await manage_goals(
+        "update",
+        goal={"name": "Launch landing page", "status": "on_track"},
+        workspace_manager=ws,
+    )
+    assert "error" in result
+    assert "corrupt" in result["error"].lower()
+    assert (tmp_path / "GOALS.json").read_text() == _CORRUPT_JSON
+
+
+@pytest.mark.asyncio
+async def test_remove_refuses_on_corrupt_goals_json(tmp_path):
+    """``remove`` must abort with a 'corrupt' error rather than the
+    confusing 'goal not found' that the lenient path produced."""
+    from src.agent.builtins.operator_tools import manage_goals
+
+    ws = _FakeWorkspace(tmp_path)
+    (tmp_path / "GOALS.json").write_text(_CORRUPT_JSON)
+    result = await manage_goals(
+        "remove",
+        name="Launch landing page",
+        workspace_manager=ws,
+    )
+    assert "error" in result
+    assert "corrupt" in result["error"].lower()
+    assert (tmp_path / "GOALS.json").read_text() == _CORRUPT_JSON
+
+
+@pytest.mark.asyncio
+async def test_set_overwrites_corrupt_but_logs_warning(tmp_path, caplog):
+    """``set`` is an intentional full replacement — the user is
+    re-asserting truth, so accepting current=[] on corrupt and
+    proceeding is acceptable. But the corruption MUST be surfaced
+    via a WARNING log so the situation isn't silent."""
+    import logging
+
+    from src.agent.builtins.operator_tools import manage_goals
+
+    ws = _FakeWorkspace(tmp_path)
+    (tmp_path / "GOALS.json").write_text(_CORRUPT_JSON)
+    caplog.set_level(logging.WARNING, logger="agent.builtins.operator_tools")
+    result = await manage_goals(
+        "set",
+        goals=[{"name": "Fresh start", "status": "in_progress"}],
+        workspace_manager=ws,
+    )
+    assert result.get("ok") is True
+    assert len(result["goals"]) == 1
+    payload = json.loads((tmp_path / "GOALS.json").read_text())
+    assert payload["goals"][0]["name"] == "Fresh start"
+    # WARNING was logged — operator notices the corruption recovery.
+    assert any(
+        "corrupt" in r.message.lower() and r.levelno >= logging.WARNING
+        for r in caplog.records
+    ), f"missing corrupt-file warning in logs: {[r.message for r in caplog.records]}"
+
+
+@pytest.mark.asyncio
+async def test_list_tolerates_corrupt_goals_json(tmp_path):
+    """``list`` is a read-only display surface — returning ``[]`` on
+    a corrupt file is acceptable (the dashboard already handles empty
+    cleanly). The strict guard is only for WRITE paths."""
+    from src.agent.builtins.operator_tools import manage_goals
+
+    ws = _FakeWorkspace(tmp_path)
+    (tmp_path / "GOALS.json").write_text(_CORRUPT_JSON)
+    result = await manage_goals("list", workspace_manager=ws)
+    assert result.get("ok") is True
+    assert result["goals"] == []
+    # File untouched (list is read-only).
+    assert (tmp_path / "GOALS.json").read_text() == _CORRUPT_JSON
