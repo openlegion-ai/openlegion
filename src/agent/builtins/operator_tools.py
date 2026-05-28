@@ -2199,6 +2199,16 @@ _VALID_GOAL_STATUSES = frozenset({
 _VALID_GOAL_ACTIONS = frozenset({
     "set", "add", "update", "remove", "list", "record_seed_ask",
 })
+# Actions whose semantics assume a known prior on-disk state — they
+# MUST refuse on a corrupt GOALS.json instead of silently treating the
+# file as empty and overwriting valid data. ``set`` is the recovery
+# path (intentional full replacement, accepts current=[] on corrupt
+# with a WARN), ``list`` is a read-only display (lenient acceptable),
+# and ``record_seed_ask`` has its own strict guard inside
+# ``_write_seed_ask``. New actions added to ``_VALID_GOAL_ACTIONS``
+# must be classified here too — silently merging them into the lenient
+# path would re-open the data-loss hole Codex r4 caught.
+_MERGE_WRITE_ACTIONS = frozenset({"add", "update", "remove"})
 # Cap on team names captured in a seed_ask record — defensive bound
 # so a misbehaving caller can't blow up the JSON sidecar.
 _MAX_SEED_ASK_TEAMS = 20
@@ -2356,18 +2366,33 @@ def _write_goals(workspace_root, goals: list[dict]) -> None:
 
     Preserves an existing ``seed_ask`` block across goal mutations so
     the heartbeat throttle can't be silently cleared by an unrelated
-    goal edit. ``_read_seed_ask`` returns ``None`` on parse failure —
-    in that case the seed_ask block is dropped (not the goals: the
-    caller passed those explicitly). A bigger threat — corrupt JSON
-    silently wiping goals during ``_write_seed_ask`` — is guarded
-    separately by ``_safe_read_goals_for_merge``.
+    goal edit. If the underlying JSON parse fails, the seed_ask block
+    is dropped but a WARN is logged so the loss is visible (Codex r5
+    catch — the previous silent drop on a corrupt-file ``set`` recovery
+    would have meant one stray re-ask in the user's chat with no log
+    explaining why).
     """
     json_path = workspace_root / _GOALS_JSON_FILENAME
     md_path = workspace_root / _GOALS_MD_FILENAME
     payload: dict = {"goals": goals}
-    existing_seed_ask = _read_seed_ask(workspace_root)
-    if existing_seed_ask is not None:
-        payload["seed_ask"] = existing_seed_ask
+    # Distinguish "file missing / no seed_ask present" (silent) from
+    # "file exists but unparseable" (log warning so the drop is visible).
+    if json_path.exists() and json_path.read_text(errors="replace").strip():
+        try:
+            existing_seed_ask = _read_seed_ask(workspace_root)
+        except Exception:
+            existing_seed_ask = None
+        if existing_seed_ask is None:
+            try:
+                json.loads(json_path.read_text(errors="replace"))
+            except (OSError, ValueError) as e:
+                logger.warning(
+                    "preserving seed_ask: GOALS.json at %s could not be "
+                    "parsed; throttle block dropped from this write. (%s)",
+                    json_path, e,
+                )
+        if existing_seed_ask is not None:
+            payload["seed_ask"] = existing_seed_ask
     json_path.write_text(json.dumps(payload, indent=2) + "\n")
     md_path.write_text(_render_goals_md(goals))
 
@@ -2529,19 +2554,11 @@ async def manage_goals(
     workspace_root = workspace_manager.root
 
     # Action-specific read policy (Codex r4 catch — without this,
-    # incremental writes silently clobbered a corrupt GOALS.json):
-    #
-    # * ``list`` / ``set``: lenient — ``list`` is a read-only display
-    #   and ``set`` is an intentional full replacement (the user is
-    #   re-asserting truth, so accepting current=[] on corrupt is OK,
-    #   but we still log so the corruption isn't silent).
-    # * ``add`` / ``update`` / ``remove`` / ``record_seed_ask``:
-    #   strict — these are merge-writes that ASSUME a known prior
-    #   state. Silently treating a corrupt file as empty would either
-    #   wipe goals (``add``: append to []) or produce confusing
-    #   "not found" errors on goals the user can plainly see in the
-    #   raw JSON.
-    _MERGE_WRITE_ACTIONS = {"add", "update", "remove"}
+    # incremental writes silently clobbered a corrupt GOALS.json).
+    # ``_MERGE_WRITE_ACTIONS`` is the module-scope source of truth;
+    # see the comment beside its definition for the classification
+    # rules and the "must add new actions here" note for future
+    # contributors.
     if action in _MERGE_WRITE_ACTIONS:
         try:
             current = _safe_read_goals_for_merge(workspace_root)
@@ -2563,8 +2580,9 @@ async def manage_goals(
             current = _safe_read_goals_for_merge(workspace_root)
         except _GoalsCorruptError as e:
             logger.warning(
-                "GOALS.json was corrupt during 'set' replacement; "
-                "treating as empty and overwriting. (%s)", e,
+                "GOALS.json at %s was corrupt during 'set' replacement; "
+                "treating as empty and overwriting. (%s)",
+                workspace_root / _GOALS_JSON_FILENAME, e,
             )
             current = []
     else:

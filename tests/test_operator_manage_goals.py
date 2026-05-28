@@ -708,3 +708,33 @@ async def test_list_tolerates_corrupt_goals_json(tmp_path):
     assert result["goals"] == []
     # File untouched (list is read-only).
     assert (tmp_path / "GOALS.json").read_text() == _CORRUPT_JSON
+
+
+@pytest.mark.asyncio
+async def test_set_on_corrupt_logs_seed_ask_drop(tmp_path, caplog):
+    """Codex r5 catch — when ``set`` recovers from a corrupt GOALS.json
+    by overwriting it, ``_write_goals`` cannot preserve the seed_ask
+    block (the existing JSON can't be parsed). The block is dropped,
+    but the drop MUST be visible in logs so the operator can decide
+    whether to re-pester users for goals. Without this WARN, the only
+    user-facing signal is one extra heartbeat ping with no explanation."""
+    import logging
+
+    from src.agent.builtins.operator_tools import manage_goals
+
+    ws = _FakeWorkspace(tmp_path)
+    (tmp_path / "GOALS.json").write_text(_CORRUPT_JSON)
+    caplog.set_level(logging.WARNING, logger="agent.builtins.operator_tools")
+    result = await manage_goals(
+        "set",
+        goals=[{"name": "Fresh start", "status": "in_progress"}],
+        workspace_manager=ws,
+    )
+    assert result.get("ok") is True
+    # Two distinct WARNINGs fire: the outer 'set' recovery + the
+    # inner _write_goals seed_ask preservation failure.
+    messages = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("corrupt" in m.lower() for m in messages)
+    assert any(
+        "seed_ask" in m.lower() and "drop" in m.lower() for m in messages
+    ), f"missing seed_ask drop warning: {messages}"
