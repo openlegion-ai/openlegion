@@ -60,7 +60,7 @@
     };
   </script>
 
-  <div x-data="dashboard()" x-init="init()" class="flex flex-col h-screen">
+  <div x-data="dashboard()" x-init="init()" class="flex flex-col md:flex-row h-screen">
 
     <!-- Toast notifications -->
     <div class="fixed top-16 left-1/2 -translate-x-1/2 z-[100] flex flex-col gap-2 items-center pointer-events-none max-w-sm w-full" role="status" aria-live="polite">
@@ -167,14 +167,72 @@
       </div>
     </div>
 
-    <!-- Navigation bar -->
+    <!-- Desktop sidebar (md+) — labeled vertical tab nav.
+         Mobile (<md) keeps the icon-only tab strip inside the top bar
+         below for thumb reach without sidebar friction. Tab IDs stay
+         frozen per CLAUDE.md constraint — only the labels and chrome
+         change. -->
+    <aside class="side-nav hidden md:flex md:flex-col w-[220px] shrink-0">
+      <div class="px-4 py-4 flex items-center gap-2.5 shrink-0">
+        <img src="/dashboard/static/logo.png" alt="OpenLegion" width="24" height="24" class="rounded-full">
+        <span class="text-base font-bold text-white tracking-tight">OpenLegion</span>
+      </div>
+      <nav class="flex-1 px-2 py-2 flex flex-col gap-1 overflow-y-auto" role="tablist" aria-label="Primary">
+        <template x-for="tab in tabs" :key="tab.id">
+          <button
+            @click="switchTab(tab.id)"
+            :class="activeTab === tab.id
+              ? 'side-nav-tab side-nav-tab-active'
+              : 'side-nav-tab side-nav-tab-inactive'"
+            role="tab"
+            :aria-selected="activeTab === tab.id"
+          >
+            <template x-if="tab.id === 'chat'">
+              <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            </template>
+            <template x-if="tab.id === 'fleet'">
+              <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+            </template>
+            <template x-if="tab.id === 'workplace'">
+              <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="4" y="4" width="4" height="16" rx="1"/>
+                <rect x="10" y="4" width="4" height="10" rx="1"/>
+                <rect x="16" y="4" width="4" height="13" rx="1"/>
+              </svg>
+            </template>
+            <template x-if="tab.id === 'system'">
+              <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
+            </template>
+            <span class="flex-1 truncate" x-text="tab.id === 'fleet'
+                ? 'Teams (' + teams.length + ')'
+                : tabLabelFor(tab)"></span>
+          </button>
+        </template>
+      </nav>
+      <!-- Sidebar footer: connection status pill. Mirrored in mobile
+           top bar via the existing pill below. -->
+      <div class="px-4 py-3 border-t border-gray-800/40 flex items-center gap-1.5 text-xs shrink-0">
+        <span class="relative flex h-2 w-2">
+          <span :class="connected ? 'bg-green-400' : 'bg-red-400'" class="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75" x-show="connected"></span>
+          <span :class="connected ? 'bg-green-400' : 'bg-red-400'" class="relative inline-flex rounded-full h-2 w-2"></span>
+        </span>
+        <span x-show="connected" class="text-green-400">Live</span>
+        <span x-show="!connected" class="text-red-400" x-text="wsReconnectIn > 0 ? 'Reconnecting in ' + wsReconnectIn + 's...' : 'Disconnected'"></span>
+      </div>
+    </aside>
+
+    <!-- Main column (top bar + page content) -->
+    <div class="flex-1 flex flex-col min-w-0">
+
+    <!-- Top bar — slim on desktop (search + status pills only); on
+         mobile (<md) it also carries the logo + icon-only tab strip
+         since the sidebar is hidden. -->
     <nav class="nav-bar px-3 sm:px-5 py-2.5 flex items-center shrink-0 gap-3">
-      <div class="flex items-center gap-2 sm:gap-4 min-w-0 shrink-0">
-        <div class="flex items-center gap-2.5">
-          <img src="/dashboard/static/logo.png" alt="OpenLegion" width="24" height="24" class="rounded-full">
-          <span class="text-base font-bold text-white tracking-tight hidden sm:inline">OpenLegion</span>
-        </div>
-        <div class="flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5" role="tablist">
+      <!-- Mobile: logo + icon tabs (md:hidden). The sidebar covers
+           desktop so we don't duplicate the strip there. -->
+      <div class="flex md:hidden items-center gap-2 min-w-0 shrink-0">
+        <img src="/dashboard/static/logo.png" alt="OpenLegion" width="24" height="24" class="rounded-full shrink-0">
+        <div class="flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5" role="tablist" aria-label="Primary">
           <template x-for="tab in tabs" :key="tab.id">
             <button
               @click="switchTab(tab.id)"
@@ -184,6 +242,8 @@
               class="relative"
               role="tab"
               :aria-selected="activeTab === tab.id"
+              :title="tab.id === 'fleet' ? 'Teams (' + teams.length + ')' : tabLabelFor(tab)"
+              :aria-label="tab.id === 'fleet' ? 'Teams (' + teams.length + ')' : tabLabelFor(tab)"
             >
               <template x-if="tab.id === 'chat'">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
@@ -201,13 +261,6 @@
               <template x-if="tab.id === 'system'">
                 <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
               </template>
-              <!-- Tab IDs stay frozen so URLs / routes don't break;
-                   user-facing labels are: fleet→Teams (with team count
-                   in parens), workplace→Work, system→Settings. -->
-              <span x-text="tab.id === 'fleet'
-                  ? 'Teams (' + teams.length + ')'
-                  : tabLabelFor(tab)"></span>
-              <!-- unread event badge removed -->
             </button>
           </template>
         </div>
@@ -275,25 +328,6 @@
           <span
             x-show="!messengerSidePanelOpen && Object.values(chatUnread || {}).some(n => n > 0)"
             class="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-amber-400"></span>
-        </button>
-        <!-- Fleet pulse attention badge — surfaces operator's flagged agents -->
-        <button
-          x-show="fleetDigest?.agents_attention?.length > 0"
-          x-cloak
-          @click="switchTab('system'); systemTab = 'activity'; scrollToFleetPulse()"
-          class="flex items-center gap-1.5 px-2 sm:px-2.5 py-1 rounded-md text-xs font-medium bg-amber-900/30 text-amber-300 border border-amber-700/40 hover:bg-amber-900/50 hover:border-amber-600/60 transition-colors cursor-pointer"
-          aria-live="polite"
-          :aria-label="(fleetDigest?.agents_attention?.length || 0) + ' agents need attention. Click to view fleet pulse.'"
-          :title="'View fleet pulse — ' + (fleetDigest?.agents_attention?.length || 0) + ' need attention'"
-        >
-          <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-          <!-- Mobile: number-only -->
-          <span class="sm:hidden font-mono" x-text="fleetDigest?.agents_attention?.length || 0"></span>
-          <!-- Tablet+: full text -->
-          <span class="hidden sm:inline">
-            <span class="font-mono" x-text="fleetDigest?.agents_attention?.length || 0"></span>
-            <span x-text="(fleetDigest?.agents_attention?.length === 1 ? ' agent needs' : ' agents need') + ' attention'"></span>
-          </span>
         </button>
         <div class="text-xs text-gray-500 hidden sm:block cursor-pointer hover:text-gray-300 transition-colors" x-show="fleetTotalCost > 0" @click="systemTab = 'costs'; switchTab('system')">
           Today: <span class="text-gray-300 font-medium" x-text="formatCost(fleetTotalCost)"></span>
@@ -366,7 +400,10 @@
             </div>
           </div>
         </div>
-        <div class="flex items-center gap-1.5 text-xs">
+        <!-- Connection status pill — desktop hides this (duplicated
+             in the sidebar footer); mobile keeps it since the sidebar
+             isn't rendered there. -->
+        <div class="md:hidden flex items-center gap-1.5 text-xs">
           <span class="relative flex h-2 w-2">
             <span :class="connected ? 'bg-green-400' : 'bg-red-400'" class="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75" x-show="connected"></span>
             <span :class="connected ? 'bg-green-400' : 'bg-red-400'" class="relative inline-flex rounded-full h-2 w-2"></span>
@@ -1506,13 +1543,16 @@
 
       <!-- Fleet Overview (merged: Fleet + Agents + Queues) -->
       <div x-show="activeTab === 'fleet' && !detailAgent" x-cloak>
-        <!-- Team switcher + Add Agent row -->
-        <div x-show="agents.length > 0" class="flex items-center gap-2 mb-3 min-w-0" x-cloak>
-          <div class="flex items-center gap-2 flex-1 min-w-0">
-            <!-- Scrollable team tabs -->
-            <div x-show="teams.length > 0" class="project-tabs-scroll">
+        <!-- Team filter chips (left, wrap to additional rows when many)
+             + prominent "+ New Team" button (right, where + Add Agent
+             used to sit). The Add-Agent control now lives as a card
+             at the end of the agent grid below. -->
+        <div x-show="agents.length > 0" class="flex items-start gap-3 mb-3 min-w-0" x-cloak>
+          <div class="flex-1 min-w-0 flex flex-col gap-1">
+            <div class="flex flex-wrap items-center gap-1 transition-[max-height] duration-200"
+                 :class="!teamFilterExpanded && teams.length > 6 ? 'team-chips-collapsed' : ''">
               <button @click="switchTeam(null)"
-                class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
+                class="px-2.5 py-1 rounded-md text-xs font-medium transition-all shrink-0"
                 :class="!activeTeam
                   ? 'bg-gray-700 text-white shadow-sm'
                   : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'">
@@ -1521,7 +1561,7 @@
               </button>
               <template x-for="proj in teams" :key="proj.name">
                 <button @click="switchTeam(proj.name)"
-                  class="px-2.5 py-1 rounded-md text-xs font-medium transition-all inline-flex items-center gap-1"
+                  class="px-2.5 py-1 rounded-md text-xs font-medium transition-all inline-flex items-center gap-1 shrink-0"
                   :class="[
                     activeTeam === proj.name
                       ? 'bg-gray-700 text-white shadow-sm'
@@ -1535,39 +1575,37 @@
                 </button>
               </template>
             </div>
-            <div class="relative group/proj flex-shrink-0">
-              <button @click="openTeamModal()"
-                :disabled="atTeamLimit"
-                :class="atTeamLimit ? 'opacity-50 cursor-not-allowed' : ''"
-                class="px-2.5 py-1 rounded-md text-xs text-gray-500 hover:text-white hover:bg-gray-700 transition-colors flex items-center gap-1 whitespace-nowrap"
-                :title="atTeamLimit ? '' : 'Create team'">
-                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-                New Team
-              </button>
-              <div x-show="atTeamLimit" x-cloak
-                class="hidden group-hover/proj:block absolute top-full mt-1.5 left-0 z-50 w-52 max-w-[calc(100vw-2rem)] px-3 py-2 rounded-lg bg-gray-900 border border-gray-700 shadow-xl text-xs text-gray-300 whitespace-normal pointer-events-none">
-                <span x-text="!teamsEnabled ? 'Teams aren\'t available on your current plan.' : 'Team limit reached.'"></span>
-                <span class="text-indigo-400 ml-0.5">Upgrade to add more.</span>
-                <div class="absolute -top-1 left-4 w-2 h-2 bg-gray-900 border-l border-t border-gray-700 rotate-45"></div>
-              </div>
-            </div>
+            <!-- Show all / Show less toggle — only appears once team count
+                 is high enough that chips would wrap past 2 rows on a
+                 typical viewport. Threshold tuned to the lg breakpoint
+                 (~6 chips per row); error on the side of showing it. -->
+            <button x-show="teams.length > 6"
+              x-cloak
+              @click="teamFilterExpanded = !teamFilterExpanded"
+              class="self-start text-[11px] text-gray-500 hover:text-gray-200 px-1.5 py-0.5 inline-flex items-center gap-1 transition-colors"
+              :aria-expanded="teamFilterExpanded ? 'true' : 'false'"
+            >
+              <span x-show="!teamFilterExpanded">Show all teams</span>
+              <span x-show="teamFilterExpanded" x-cloak>Show fewer</span>
+              <svg class="w-3 h-3 transition-transform" :class="teamFilterExpanded && 'rotate-180'" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+            </button>
           </div>
-          <div class="relative group/agent flex-shrink-0">
-            <button @click="openAddAgentModal()"
+          <div class="relative group/team flex-shrink-0">
+            <button @click="openTeamModal()"
               class="text-xs px-3 py-1.5 rounded-md transition-colors inline-flex items-center gap-1.5 whitespace-nowrap"
-              :class="atAgentLimit
+              :class="atTeamLimit
                 ? 'bg-gray-800 text-gray-400 opacity-50 cursor-not-allowed'
-                : addAgentMode ? 'bg-indigo-600 text-white' : 'bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white'"
-              :disabled="atAgentLimit"
-              :title="atAgentLimit ? '' : 'Add a new agent'"
+                : 'bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white'"
+              :disabled="atTeamLimit"
+              :title="atTeamLimit ? '' : 'Create a new team'"
             >
               <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-              Add Agent
+              New Team
             </button>
-            <div x-show="atAgentLimit" x-cloak
-              class="hidden group-hover/agent:block absolute top-full mt-1.5 right-0 z-50 w-56 max-w-[calc(100vw-2rem)] px-3 py-2 rounded-lg bg-gray-900 border border-gray-700 shadow-xl text-xs text-gray-300 whitespace-normal pointer-events-none">
-              Agent limit reached.
-              <span class="text-indigo-400 ml-0.5">Upgrade your plan to add more.</span>
+            <div x-show="atTeamLimit" x-cloak
+              class="hidden group-hover/team:block absolute top-full mt-1.5 right-0 z-50 w-56 max-w-[calc(100vw-2rem)] px-3 py-2 rounded-lg bg-gray-900 border border-gray-700 shadow-xl text-xs text-gray-300 whitespace-normal pointer-events-none">
+              <span x-text="!teamsEnabled ? 'Teams aren\'t available on your current plan.' : 'Team limit reached.'"></span>
+              <span class="text-indigo-400 ml-0.5">Upgrade to add more.</span>
               <div class="absolute -top-1 right-4 w-2 h-2 bg-gray-900 border-l border-t border-gray-700 rotate-45"></div>
             </div>
           </div>
@@ -2321,6 +2359,34 @@
               </template>
             </div>
           </template>
+          <!-- Add-Agent card — sits as the final cell in the agent
+               grid with the same footprint as a real agent card.
+               Pre-fills the active team in the modal via
+               openAddAgentModal(). -->
+          <div x-show="!loading" x-cloak class="relative group/addagent">
+            <button
+              @click="openAddAgentModal()"
+              :disabled="atAgentLimit"
+              :class="atAgentLimit
+                ? 'opacity-40 cursor-not-allowed'
+                : 'hover:border-indigo-500/50 hover:text-indigo-300 cursor-pointer'"
+              class="agent-card-add p-4 w-full h-full min-h-[180px] flex flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-gray-700/60 text-gray-500 transition-colors"
+              :aria-label="atAgentLimit ? 'Agent limit reached' : 'Add a new agent'"
+              :title="atAgentLimit ? '' : 'Add a new agent'"
+            >
+              <div class="w-10 h-10 rounded-full bg-gray-800/60 flex items-center justify-center">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              </div>
+              <div class="text-sm font-medium">Add Agent</div>
+              <div class="text-[11px] text-gray-600" x-text="activeTeam ? 'to ' + activeTeam : 'as solo'"></div>
+            </button>
+            <!-- Limit-reached tooltip. -->
+            <div x-show="atAgentLimit" x-cloak
+              class="hidden group-hover/addagent:block absolute top-full mt-1.5 left-1/2 -translate-x-1/2 z-40 w-56 max-w-[calc(100vw-2rem)] px-3 py-2 rounded-lg bg-gray-900 border border-gray-700 shadow-xl text-xs text-gray-300 whitespace-normal pointer-events-none">
+              Agent limit reached.
+              <span class="text-indigo-400 ml-0.5">Upgrade your plan to add more.</span>
+            </div>
+          </div>
         </div>
         <!-- Empty state for team filter with no matching agents -->
         <div x-show="activeTeam && filteredAgents.length === 0 && agents.length > 0 && !loading" class="text-center py-12" x-cloak>
@@ -4559,100 +4625,6 @@
 
       <!-- System (Activity + Costs + Automation + Integrations + API Keys + Wallet + Storage + Audit + Settings) -->
       <div x-show="activeTab === 'system'" x-cloak>
-        <!-- Fleet pulse card — operator's autonomous fleet-health observations.
-             Sits above the sub-tab bar so it's always visible regardless of sub-tab. -->
-        <div
-          id="fleet-pulse-card"
-          role="region"
-          aria-label="Fleet pulse"
-          class="bg-gray-800/40 border border-gray-700/50 rounded-xl p-4 mb-4"
-        >
-          <div class="flex items-center justify-between gap-2 mb-2">
-            <div class="flex items-center gap-2 min-w-0">
-              <h2 class="text-sm font-semibold text-white">Fleet pulse</h2>
-              <span
-                x-show="fleetDigest?.timestamp"
-                class="text-[11px] text-gray-500 truncate"
-                x-text="(() => { const t = Date.parse(fleetDigest.timestamp); if (!t) return ''; const rel = formatRelativeTime(t); return rel ? 'as of ' + rel : 'just now'; })()"
-              ></span>
-              <!-- Staleness badge — only operator-stopped signal users get -->
-              <span
-                x-show="isFleetDigestStale()"
-                class="text-[10px] font-semibold uppercase tracking-wide text-red-400 px-1.5 py-0.5 rounded bg-red-900/20 border border-red-800/40 shrink-0"
-                title="Operator hasn't run a check in 24h+"
-                aria-label="Fleet pulse is stale — operator hasn't run a check in 24h or more"
-              >stale</span>
-            </div>
-            <button
-              @click="refreshFleetDigest()"
-              :disabled="fleetDigestRefreshing"
-              :aria-label="fleetDigestRefreshing ? 'Refreshing fleet pulse' : 'Refresh fleet pulse'"
-              class="text-gray-500 hover:text-gray-200 disabled:opacity-50 disabled:cursor-not-allowed transition-colors p-1 rounded hover:bg-gray-800/60"
-              title="Refresh"
-            >
-              <svg class="w-3.5 h-3.5" :class="fleetDigestRefreshing ? 'animate-spin' : ''" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-            </button>
-          </div>
-
-          <!-- State A: never run -->
-          <template x-if="!fleetDigest">
-            <div class="text-sm text-gray-400">
-              Operator hasn't run a fleet check yet.
-            </div>
-          </template>
-
-          <!-- State B: ran, all quiet -->
-          <template x-if="fleetDigest && !(fleetDigest.agents_attention?.length)">
-            <div>
-              <div class="text-sm text-gray-200" x-text="fleetDigest.fleet_summary || 'All quiet across the fleet.'"></div>
-              <div x-show="!fleetDigest.fleet_summary" class="text-sm text-gray-300">All quiet across the fleet. &check;</div>
-            </div>
-          </template>
-
-          <!-- State C: ran, has attention items -->
-          <template x-if="fleetDigest && fleetDigest.agents_attention?.length">
-            <div>
-              <div x-show="fleetDigest.fleet_summary" class="text-sm text-gray-200 mb-3" x-text="fleetDigest.fleet_summary"></div>
-              <ul class="space-y-1.5" role="list">
-                <template x-for="entry in fleetDigest.agents_attention" :key="(entry.agent_id || '') + '|' + (entry.issue || '')">
-                  <li class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1 sm:gap-3 px-2.5 py-1.5 rounded-md bg-gray-900/40 border border-gray-800/60">
-                    <div class="flex items-start sm:items-center gap-2 min-w-0">
-                      <span
-                        class="text-sm shrink-0 leading-5"
-                        :title="entry.severity || 'unknown'"
-                        :aria-label="(entry.severity === 'high' || entry.severity === 'critical' || entry.severity === 'medium' || entry.severity === 'low' || entry.severity === 'info') ? ('severity ' + entry.severity) : 'severity unknown'"
-                        x-text="(entry.severity === 'high' || entry.severity === 'critical') ? '🔴' : entry.severity === 'medium' ? '🟡' : entry.severity === 'low' ? '🔵' : entry.severity === 'info' ? '🔵' : '⚠️'"
-                      ></span>
-                      <span class="text-sm text-gray-200 min-w-0">
-                        <span class="font-mono text-gray-100" x-text="entry.agent_id || 'unknown'"></span>
-                        <template x-if="entry.issue">
-                          <span class="text-gray-400"> &mdash; <span x-text="entry.issue"></span></span>
-                        </template>
-                      </span>
-                    </div>
-                    <button
-                      @click="drillIntoAttentionEntry(entry)"
-                      x-show="entry.agent_id"
-                      class="text-xs text-amber-300 hover:text-amber-200 self-start sm:self-auto shrink-0 px-2 py-0.5 rounded hover:bg-amber-900/20 transition-colors"
-                      :aria-label="'Drill in to ' + (entry.agent_id || 'agent')"
-                    >Drill in &rarr;</button>
-                  </li>
-                </template>
-              </ul>
-              <template x-if="fleetDigest.cost_trend">
-                <div class="text-[11px] text-gray-500 mt-3">
-                  Cost trend: <span class="text-gray-400" x-text="fleetDigest.cost_trend"></span>
-                </div>
-              </template>
-            </div>
-          </template>
-
-          <!-- Footer: last-check timestamp + author -->
-          <div x-show="fleetDigest?.timestamp" class="text-[11px] text-gray-500 mt-3 pt-2 border-t border-gray-800/60">
-            Last check: <span x-text="(() => { const t = Date.parse(fleetDigest.timestamp); if (!t) return '—'; return formatRelativeTime(t) || 'just now'; })()"></span> &middot; by Operator
-          </div>
-        </div>
-
         <!-- System sub-tab bar -->
         <div class="flex flex-wrap gap-0.5 bg-gray-800/50 rounded-lg p-0.5 mb-4">
           <template x-for="st in systemTabs" :key="st.id">
@@ -7779,6 +7751,8 @@
       </div>
 
     </main>
+    </div>
+    <!-- end main column -->
 
     <!-- Messenger-style chat panel (outside main so fullscreen toggle works; hidden on Chat tab).
          Phase 1: also opens via ``messengerSidePanelOpen`` — the

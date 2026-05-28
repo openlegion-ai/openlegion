@@ -454,27 +454,27 @@ class TestPlanLimitEnforcement:
 class TestOperatorLoopCreation:
     """Verify AgentLoop can be created with operator-style configuration."""
 
-    def test_create_operator_loop_with_19_tools(self):
-        """An operator-style loop should accept a 19-tool allowlist."""
+    def test_create_operator_loop_with_18_tools(self):
+        """An operator-style loop should accept an 18-tool allowlist."""
         operator_tools = frozenset({
             "list_agents", "get_agent_profile", "get_system_status",
-            "notify_user", "save_observations", "hand_off",
+            "notify_user", "hand_off",
             "confirm_edit", "check_inbox", "update_status",
             "blackboard_read", "blackboard_write", "publish",
             "memory_search", "memory_save", "update_workspace",
             "read_file", "exec_command", "http_request", "web_search",
         })
-        assert len(operator_tools) == 19
+        assert len(operator_tools) == 18
 
         loop = _make_loop(allowed_tools=operator_tools)
         assert loop._allowed_tools == operator_tools
-        assert len(loop._allowed_tools) == 19
+        assert len(loop._allowed_tools) == 18
 
     def test_operator_heartbeat_subset(self):
         """Heartbeat tools should be a proper subset of the full allowed list."""
         full_tools = frozenset({
             "list_agents", "get_agent_profile", "get_system_status",
-            "notify_user", "save_observations", "hand_off",
+            "notify_user", "hand_off",
             "confirm_edit", "check_inbox", "update_status",
             "blackboard_read", "blackboard_write", "publish",
             "memory_search", "memory_save", "update_workspace",
@@ -482,17 +482,17 @@ class TestOperatorLoopCreation:
         })
         heartbeat_tools = frozenset({
             "list_agents", "get_agent_profile", "get_system_status",
-            "notify_user", "save_observations",
+            "notify_user",
         })
 
-        assert len(heartbeat_tools) == 5
+        assert len(heartbeat_tools) == 4
         assert heartbeat_tools.issubset(full_tools)
 
     def test_operator_loop_excludes_dangerous_tools(self):
         """Operator should not have spawn or cron tools."""
         operator_tools = frozenset({
             "list_agents", "get_agent_profile", "get_system_status",
-            "notify_user", "save_observations", "hand_off",
+            "notify_user", "hand_off",
             "confirm_edit", "check_inbox", "update_status",
             "blackboard_read", "blackboard_write", "publish",
             "memory_search", "memory_save", "update_workspace",

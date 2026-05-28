@@ -102,7 +102,7 @@ An OS-level device profile is selected by `BROWSER_DEVICE_PROFILE` (`desktop-win
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `update_workspace` | `filename`, `content` | Update a writable workspace file (`SOUL.md`, `INSTRUCTIONS.md`, `USER.md`, `HEARTBEAT.md`, `INTERFACE.md`, `OBSERVATIONS.md`, `GOALS.md`, or `GOALS.json`) to persist learnings across sessions |
+| `update_workspace` | `filename`, `content` | Update a writable workspace file (`SOUL.md`, `INSTRUCTIONS.md`, `USER.md`, `HEARTBEAT.md`, `INTERFACE.md`, `GOALS.md`, or `GOALS.json`) to persist learnings across sessions |
 
 ### Scheduling & Automation
 
@@ -227,7 +227,6 @@ stale LLM prompt fails fast and retries on the canonical name.
 | `edit_agent` | `agent_id`, `field` (enum: `instructions` / `soul` / `role` / `heartbeat` / `heartbeat_schedule` / `interface` / `model` / `thinking` / `budget` / `permissions`), `value`, `reason` (default `"user_asked"`; values: `user_asked` / `operator_proactive`) | Single entry point for agent config changes. ALL fields apply immediately and emit an undo receipt — soft fields (`instructions`, `soul`, `role`, `heartbeat`, `heartbeat_schedule`, `interface`) carry a 5-minute Undo window; hard fields (`model`, `thinking`, `budget`, `permissions`) carry a 30-minute Undo window. No pre-execution confirm step. `heartbeat_schedule` also retargets the live cron job in lockstep with the YAML write. |
 | `undo_change` | `undo_token` | Reverse an edit applied via `edit_agent`. Token is returned with the edit and remains valid for 5 minutes (soft fields) or 30 minutes (hard fields); 404 if expired or already undone. |
 | `confirm_edit` | `change_id` | Deprecated no-op stub. The `/edit-soft` immediate-apply refactor retired the propose-then-confirm flow; `confirm_edit` returns a friendly hint and is retained only so in-flight LLM conversations that still emit it don't error. New conversations should call `edit_agent` directly. |
-| `save_observations` | `fleet_summary`, `agents_attention` (default `[]`, items: `{agent_id, issue, severity}`), `cost_trend`, `notes` (default "") | Persist fleet health observations to `OBSERVATIONS.md` for the Fleet Digest display. Char cap 1500; history retains last 50 entries. |
 | `create_agent` | `name` (lowercase, alphanumeric + hyphens, 1–32 chars), `role`, `model` (default ""), `instructions`, `soul` (default "") | Create a new custom agent. Requires user confirmation. |
 | `create_team` | `name`, `description`, `agent_ids` (default []) | Create a new team and optionally assign agents. Requires user confirmation. |
 | `add_agents_to_team` | `team_name`, `agent_ids` | Add one or more agents to a team. Requires user confirmation. |

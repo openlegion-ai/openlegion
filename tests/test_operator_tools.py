@@ -1,6 +1,4 @@
-"""Tests for operator tools: observations, history, create, projects."""
-import json
-from pathlib import Path
+"""Tests for operator tools: inspect, create, manage."""
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -52,108 +50,6 @@ def test_last_message_is_user_origin_no_user_messages():
 
     msgs = [{"role": "assistant", "content": "hi"}]
     assert _last_message_is_user_origin(msgs) is False
-
-
-# ── save_observations tests ─────────────────────────────────
-
-
-class _FakeWorkspace:
-    """Minimal workspace manager stub with a real tmp directory."""
-
-    def __init__(self, tmp_path: Path):
-        self.root = tmp_path
-
-
-@pytest.mark.asyncio
-async def test_save_observations_no_workspace():
-    from src.agent.builtins.operator_tools import save_observations
-
-    result = await save_observations("all good", "stable")
-    assert "error" in result
-    assert "workspace_manager" in result["error"]
-
-
-@pytest.mark.asyncio
-async def test_save_observations_writes_files(tmp_path):
-    from src.agent.builtins.operator_tools import save_observations
-
-    ws = _FakeWorkspace(tmp_path)
-    result = await save_observations(
-        "5/6 healthy", "stable",
-        agents_attention=[{"agent_id": "writer", "issue": "slow", "severity": "low"}],
-        notes="all fine",
-        workspace_manager=ws,
-    )
-    assert result["saved"] is True
-    assert "timestamp" in result
-    assert result["chars"] > 0
-
-    # Check OBSERVATIONS.md was created
-    obs_path = tmp_path / "OBSERVATIONS.md"
-    assert obs_path.exists()
-    content = obs_path.read_text()
-    assert "Fleet Observations" in content
-    assert "5/6 healthy" in content
-
-    # Parse the JSON inside the markdown
-    json_start = content.index("```json\n") + len("```json\n")
-    json_end = content.index("\n```", json_start)
-    obs_data = json.loads(content[json_start:json_end])
-    assert obs_data["fleet_summary"] == "5/6 healthy"
-    assert obs_data["cost_trend"] == "stable"
-    assert len(obs_data["agents_attention"]) == 1
-
-    # Check OBSERVATIONS_HISTORY.md was created
-    history_path = tmp_path / "OBSERVATIONS_HISTORY.md"
-    assert history_path.exists()
-    history = history_path.read_text()
-    assert "5/6 healthy" in history
-
-
-@pytest.mark.asyncio
-async def test_save_observations_appends_history(tmp_path):
-    from src.agent.builtins.operator_tools import save_observations
-
-    ws = _FakeWorkspace(tmp_path)
-    await save_observations("check 1", "stable", workspace_manager=ws)
-    await save_observations("check 2", "up_10pct", workspace_manager=ws)
-
-    history_path = tmp_path / "OBSERVATIONS_HISTORY.md"
-    history = history_path.read_text()
-    entries = [e for e in history.strip().split("\n---\n") if e.strip()]
-    assert len(entries) == 2
-    assert "check 1" in entries[0]
-    assert "check 2" in entries[1]
-
-
-@pytest.mark.asyncio
-async def test_save_observations_truncates_long_notes(tmp_path):
-    from src.agent.builtins.operator_tools import save_observations
-
-    ws = _FakeWorkspace(tmp_path)
-    long_notes = "x" * 5000
-    result = await save_observations(
-        "ok", "stable", notes=long_notes, workspace_manager=ws,
-    )
-    assert result["saved"] is True
-    assert result["chars"] <= 1500
-
-
-@pytest.mark.asyncio
-async def test_save_observations_history_cap(tmp_path):
-    from src.agent.builtins.operator_tools import save_observations
-
-    ws = _FakeWorkspace(tmp_path)
-    # Write 55 entries, history should cap at 50
-    for i in range(55):
-        await save_observations(f"check {i}", "stable", workspace_manager=ws)
-
-    history_path = tmp_path / "OBSERVATIONS_HISTORY.md"
-    entries = [e for e in history_path.read_text().strip().split("\n---\n") if e.strip()]
-    assert len(entries) == 50
-    # Should have the last 50 entries (5-54)
-    last_entry = json.loads(entries[-1])
-    assert last_entry["fleet_summary"] == "check 54"
 
 
 # ── inspect_agents tests ────────────────────────────────────
