@@ -3524,6 +3524,10 @@
                             <button x-show="!editForm._showMcpAddForm && editForm._mcpEditIndex === -1"
                                     type="button" @click="mcpStartAdd()"
                                     class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors">+ Add MCP server</button>
+                            <!-- Top-level validation banner (errors that don't map to a single row, e.g. duplicate names) -->
+                            <div x-show="editForm._mcpGlobalError" x-cloak
+                                 class="mt-2 p-2 rounded bg-red-900/20 border border-red-800/50 text-[11px] text-red-300"
+                                 x-text="editForm._mcpGlobalError"></div>
                             <!-- Restart failure banner (post save+restart attempt) -->
                             <div x-show="editForm._mcpRestartError" x-cloak
                                  class="mt-3 p-2 rounded bg-red-900/20 border border-red-800/50 text-[11px] text-red-300 flex items-center gap-2">
@@ -3531,7 +3535,7 @@
                                 Config saved, but agent restart failed:
                                 <span class="font-mono text-red-400" x-text="editForm._mcpRestartError"></span>
                               </span>
-                              <button type="button" @click="retryMcpRestart(selectedAgent)"
+                              <button type="button" @click="retryMcpRestart(editForm._editingAgentId || selectedAgent)"
                                       class="text-[10px] px-2 py-1 rounded bg-red-900/40 hover:bg-red-900/60 text-red-200 transition-colors">Retry restart</button>
                             </div>
                           </div>
