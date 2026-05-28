@@ -287,96 +287,6 @@ def _parse_positive_float(value: Any, field: str, fallback: float) -> float:
     return result
 
 
-def _summarize_task_event(
-    *,
-    event_kind: str,
-    actor: str,
-    title: str,
-    project_id: str,
-    assignee: str,
-    blocker_note: str,
-    payload: dict | None,
-) -> str:
-    """Build a one-line human-readable summary of a task_events row.
-
-    Examples (keep these snappy — the feed renders one per line):
-        "writer-1 completed task 'Draft Q4 plan' in project work"
-        "reviewer-1 marked task 'Edit copy' as blocked: needs SEO data"
-        "ops created task 'Fetch metrics' for analyst-1"
-    """
-    actor = actor or "unknown"
-    where = f" in project {project_id}" if project_id else ""
-    quoted = f"'{title}'"
-
-    if event_kind == "created":
-        for_who = f" for {assignee}" if assignee else ""
-        return f"{actor} created task {quoted}{for_who}{where}"
-
-    if event_kind == "status_changed":
-        # ``orchestration.py`` writes ``from``/``to``; tolerate
-        # ``old_status``/``new_status`` too in case future emitters
-        # standardize on the WS payload's naming.
-        p = payload or {}
-        new_status = p.get("to") or p.get("new_status") or ""
-        old_status = p.get("from") or p.get("old_status") or ""
-        if new_status == "done":
-            return f"{actor} completed task {quoted}{where}"
-        if new_status == "blocked":
-            note = blocker_note or (payload or {}).get("blocker_note") or ""
-            tail = f": {note}" if note else ""
-            return f"{actor} marked task {quoted} as blocked{tail}"
-        if new_status == "failed":
-            # Bug 3 fix: surface blocker_note on failed transitions too —
-            # mirrors the blocked branch's "{actor} marked task '{title}'
-            # as blocked: {note}" shape. The store now populates
-            # blocker_note for failed transitions (orchestration.py
-            # update_status), so an operator can read *why* a task died
-            # straight off the feed without drilling in.
-            note = blocker_note or (payload or {}).get("blocker_note") or ""
-            tail = f": {note}" if note else ""
-            return f"{actor} failed task {quoted}{where}{tail}"
-        if new_status == "cancelled":
-            return f"{actor} cancelled task {quoted}{where}"
-        if new_status == "working":
-            return f"{actor} started task {quoted}{where}"
-        if new_status == "accepted":
-            return f"{actor} accepted task {quoted}{where}"
-        from_part = f" from {old_status}" if old_status else ""
-        return f"{actor} moved task {quoted} to {new_status}{from_part}{where}"
-
-    if event_kind == "rerouted":
-        # ``orchestration.py`` writes ``to`` (the new assignee).
-        p = payload or {}
-        new_assignee = p.get("to") or p.get("new_assignee") or ""
-        if new_assignee:
-            return f"{actor} rerouted task {quoted} to {new_assignee}{where}"
-        return f"{actor} rerouted task {quoted}{where}"
-
-    if event_kind == "cancelled":
-        reason = (payload or {}).get("reason") or ""
-        tail = f": {reason}" if reason else ""
-        return f"{actor} cancelled task {quoted}{tail}"
-
-    if event_kind == "artifact_added":
-        ref = (payload or {}).get("ref") or ""
-        ref_part = f" ({ref})" if ref else ""
-        return f"{actor} added an artifact to task {quoted}{ref_part}"
-
-    if event_kind == "task_outcome":
-        # Emitted by orchestration when the operator grades a finished
-        # task (PR 4). Render the rating cleanly so the feed reads as
-        # "<actor> rated task '<title>' accepted" instead of falling
-        # through to the generic "<actor> task_outcome on task ..." line.
-        p = payload or {}
-        outcome = p.get("outcome") or "rated"
-        previous = p.get("previous_outcome") or ""
-        verb = "re-rated" if previous and previous != outcome else "rated"
-        return f"{actor} {verb} task {quoted} {outcome}{where}"
-
-    # Fall-through: still useful, just less polished.
-    return f"{actor} {event_kind} on task {quoted}{where}"
-
-
 def _log_cron_task_exception(task: object) -> None:
     """Log unhandled exceptions from fire-and-forget cron tasks."""
     import asyncio
@@ -994,47 +904,16 @@ def create_dashboard_router(
         agent_id = evt.get("agent") or None
         data = evt.get("data") or {}
         try:
-            if event_type == "task_status_changed":
-                # A non-operator worker finishing a task is the
-                # "you have new work to review" signal. Operator-self
-                # status changes are excluded because the operator
-                # doesn't deliver to the user — the user IS the
-                # operator's surface. Also skip already-rated
-                # transitions (e.g. a rework task moving to done was
-                # auto-graded) so we don't double-ping the bell.
-                if (data.get("new_status") or "").lower() != "done":
-                    return
-                assignee = data.get("assignee") or agent_id
-                if not assignee or assignee == "operator":
-                    return
-                if data.get("outcome"):
-                    # Already rated (auto-graded or pre-rated).
-                    return
-                task_id = data.get("task_id")
-                if not task_id:
-                    return
-                title = data.get("title") or "delivered work"
-                short_title = (title[:80] + "…") if len(title) > 80 else title
-                heading = f"{assignee} delivered: {short_title}"[:200]
-                preview = (data.get("preview_text") or "").strip()[:200] or None
-                payload = {
-                    "task_id": task_id,
-                    "project_id": data.get("project_id"),
-                    "assignee": assignee,
-                    "title": title,
-                }
-                nid = notification_store.add(
-                    kind="delivered",
-                    title=heading,
-                    body=preview,
-                    agent_id=assignee,
-                    payload=payload,
-                )
-                _emit_notification_added(
-                    nid, "delivered", heading, preview, assignee, payload,
-                )
-                return
-
+            # PR 3 of Work tab rewrite — the bell no longer dings on
+            # ``task_status_changed`` → ``done``. Per-task delivery
+            # pings spammed the user with one notification per worker
+            # completion; the operator now authors notifications
+            # explicitly via ``notify_user`` (and the heartbeat-driven
+            # ``rate_delivery`` loop) when something is genuinely
+            # user-facing. ``kind="delivered"`` itself stays in
+            # ``notification_store._KNOWN_KINDS`` so historical rows
+            # render correctly, but no producer in this dashboard
+            # creates new ones.
             if event_type == "task_outcome":
                 # Outcome updates (user rated a delivery) do NOT create
                 # new bell notifications — the delivery already pinged
@@ -6922,113 +6801,6 @@ def create_dashboard_router(
             logger.warning("workplace blockers listing failed: %s", e)
             rows = []
         return {"enabled": True, "blockers": rows}
-
-    @api_router.get("/api/workplace/outputs")
-    async def api_workplace_outputs(
-        project_id: str | None = None,
-        limit: int = 100,
-    ) -> dict:
-        """Completed task artifacts for the Workplace > team-outputs tab."""
-        limit = max(1, min(int(limit or 100), 500))
-        try:
-            with tasks_store._conn() as conn:
-                if project_id:
-                    sql = (
-                        f"SELECT {tasks_store._SELECT_COLS} FROM tasks "
-                        f"WHERE status='done' AND {tasks_store._team_col}=? "
-                        f"ORDER BY completed_at DESC LIMIT ?"
-                    )
-                    raw = conn.execute(sql, (project_id, limit)).fetchall()
-                else:
-                    sql = (
-                        f"SELECT {tasks_store._SELECT_COLS} FROM tasks "
-                        "WHERE status='done' ORDER BY completed_at DESC LIMIT ?"
-                    )
-                    raw = conn.execute(sql, (limit,)).fetchall()
-            rows = [tasks_store._row_to_dict(r) for r in raw]
-        except Exception as e:
-            logger.warning("workplace outputs listing failed: %s", e)
-            rows = []
-        return {"enabled": True, "outputs": rows}
-
-    @api_router.get("/api/workplace/feed")
-    async def api_workplace_feed(
-        project_id: str | None = None,
-        limit: int = 100,
-    ) -> dict:
-        """Activity feed for the Workplace > feed tab.
-
-        Returns the most recent ``task_events`` rows joined back to their
-        parent task so each entry can render a humanized one-line summary
-        ("writer-1 completed task 'Draft Q4 plan' in project work").
-        Sorted descending by event timestamp; ``limit`` is clamped to
-        ``[1, 500]``.
-        """
-        limit = max(1, min(int(limit or 100), 500))
-        try:
-            team_col = tasks_store._team_col
-            with tasks_store._conn() as conn:
-                if project_id:
-                    sql = (
-                        f"SELECT e.event_id, e.task_id, e.event_kind, "
-                        f"e.actor, e.payload_json, e.created_at, "
-                        f"t.title, t.{team_col}, t.assignee, t.status, "
-                        f"t.blocker_note "
-                        f"FROM task_events e "
-                        f"JOIN tasks t ON t.id = e.task_id "
-                        f"WHERE t.{team_col} = ? "
-                        f"ORDER BY e.created_at DESC, e.event_id DESC "
-                        f"LIMIT ?"
-                    )
-                    raw = conn.execute(sql, (project_id, limit)).fetchall()
-                else:
-                    sql = (
-                        f"SELECT e.event_id, e.task_id, e.event_kind, "
-                        f"e.actor, e.payload_json, e.created_at, "
-                        f"t.title, t.{team_col}, t.assignee, t.status, "
-                        f"t.blocker_note "
-                        f"FROM task_events e "
-                        f"JOIN tasks t ON t.id = e.task_id "
-                        f"ORDER BY e.created_at DESC, e.event_id DESC "
-                        f"LIMIT ?"
-                    )
-                    raw = conn.execute(sql, (limit,)).fetchall()
-        except Exception as e:
-            logger.warning("workplace feed listing failed: %s", e)
-            return {"enabled": True, "feed": [], "error": str(e)}
-
-        feed: list[dict] = []
-        for row in raw:
-            payload = json.loads(row[4]) if row[4] else None
-            event_kind = row[2]
-            actor = row[3]
-            title = row[6] or "(untitled)"
-            proj = row[7] or ""
-            assignee = row[8] or ""
-            blocker_note = row[10] or ""
-            summary = _summarize_task_event(
-                event_kind=event_kind,
-                actor=actor,
-                title=title,
-                project_id=proj,
-                assignee=assignee,
-                blocker_note=blocker_note,
-                payload=payload,
-            )
-            feed.append({
-                "event_id": row[0],
-                "event_type": event_kind,
-                "task_id": row[1],
-                "task_title": title,
-                "project_id": proj,
-                "assignee": assignee,
-                "actor": actor,
-                "task_status": row[9],
-                "blocker_note": blocker_note,
-                "timestamp": row[5],
-                "summary": summary,
-            })
-        return {"enabled": True, "feed": feed}
 
     @api_router.get("/api/workplace/pending")
     async def api_workplace_pending() -> dict:

@@ -1032,3 +1032,144 @@ async def test_assignee_whitespace_normalization_logged(v2_app, caplog):
         for rec in caplog.records
         if rec.levelno >= logging.WARNING
     ), [rec.getMessage() for rec in caplog.records]
+
+
+# ── PR 2 (Work tab cutover) — mesh outcome endpoint ─────────────────
+
+
+async def _create_and_complete(client, *, assignee: str = "analyst") -> str:
+    """Helper — create a task, mark it done. Returns the task id."""
+    r = await client.post(
+        "/mesh/tasks",
+        json={"assignee": assignee, "title": "completed work"},
+        headers={"X-Agent-ID": "scout"},
+    )
+    assert r.status_code == 200, r.text
+    tid = r.json()["id"]
+    # Mark working, then done (transition rules require working → done).
+    r = await client.post(
+        f"/mesh/tasks/{tid}/status",
+        json={"status": "working"},
+        headers={"X-Agent-ID": assignee},
+    )
+    assert r.status_code == 200, r.text
+    r = await client.post(
+        f"/mesh/tasks/{tid}/status",
+        json={"status": "done"},
+        headers={"X-Agent-ID": assignee},
+    )
+    assert r.status_code == 200, r.text
+    return tid
+
+
+@pytest.mark.asyncio
+async def test_outcome_endpoint_operator_accepts(v2_app):
+    """Operator can rate a completed task with ``accepted`` (empty feedback OK)."""
+    app, _, _ = v2_app
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://t",
+    ) as c:
+        tid = await _create_and_complete(c)
+        r = await c.post(
+            f"/mesh/tasks/{tid}/outcome",
+            json={"outcome": "accepted"},
+            headers={"X-Agent-ID": "operator"},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["ok"] is True
+        assert body["task"]["outcome"] == "accepted"
+
+
+@pytest.mark.asyncio
+async def test_outcome_endpoint_rework_spawns_followup(v2_app):
+    """``rework`` outcome auto-spawns a follow-up task and surfaces its id."""
+    app, _, _ = v2_app
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://t",
+    ) as c:
+        tid = await _create_and_complete(c)
+        r = await c.post(
+            f"/mesh/tasks/{tid}/outcome",
+            json={
+                "outcome": "rework",
+                "feedback": "tighten the intro paragraph",
+            },
+            headers={"X-Agent-ID": "operator"},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["ok"] is True
+        assert body["task"]["outcome"] == "rework"
+        assert "rework_task_id" in body
+        assert body["rework_assignee"] == "analyst"
+
+
+@pytest.mark.asyncio
+async def test_outcome_endpoint_rejects_unknown_outcome(v2_app):
+    """Unknown outcomes get 400, not 200."""
+    app, _, _ = v2_app
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://t",
+    ) as c:
+        tid = await _create_and_complete(c)
+        r = await c.post(
+            f"/mesh/tasks/{tid}/outcome",
+            json={"outcome": "loved_it"},
+            headers={"X-Agent-ID": "operator"},
+        )
+        assert r.status_code == 400
+        assert "outcome must be one of" in r.text
+
+
+@pytest.mark.asyncio
+async def test_outcome_endpoint_requires_feedback_for_rework(v2_app):
+    """rework / rejected require non-empty feedback (HTTP 400)."""
+    app, _, _ = v2_app
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://t",
+    ) as c:
+        tid = await _create_and_complete(c)
+        r = await c.post(
+            f"/mesh/tasks/{tid}/outcome",
+            json={"outcome": "rework", "feedback": ""},
+            headers={"X-Agent-ID": "operator"},
+        )
+        assert r.status_code == 400
+        assert "feedback is required" in r.text
+
+
+@pytest.mark.asyncio
+async def test_outcome_endpoint_returns_404_for_missing_task(v2_app):
+    app, _, _ = v2_app
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://t",
+    ) as c:
+        r = await c.post(
+            "/mesh/tasks/task_does_not_exist/outcome",
+            json={"outcome": "accepted"},
+            headers={"X-Agent-ID": "operator"},
+        )
+        assert r.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_outcome_endpoint_non_terminal_returns_409(v2_app):
+    """Tasks must be terminal before they can be rated."""
+    app, _, _ = v2_app
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://t",
+    ) as c:
+        r = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "analyst", "title": "still working"},
+            headers={"X-Agent-ID": "scout"},
+        )
+        tid = r.json()["id"]
+        # Task is pending — not terminal. Try to rate it.
+        r = await c.post(
+            f"/mesh/tasks/{tid}/outcome",
+            json={"outcome": "accepted"},
+            headers={"X-Agent-ID": "operator"},
+        )
+        assert r.status_code == 409

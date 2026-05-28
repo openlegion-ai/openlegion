@@ -339,29 +339,33 @@ class WorkspaceManager:
 
         # Idempotent heartbeat refresh: mirrors the INSTRUCTIONS.md
         # playbook_v2 sentinel pattern above. When the template carries a
-        # versioned marker (currently ``heartbeat_v2_workflow_aware`` —
-        # the operator workflow-awareness rewrite) and the live file
-        # lacks it, overwrite from the template. Versioned markers let
-        # us roll system-managed heartbeat updates forward without
-        # touching user-customised heartbeats (which won't have the
-        # marker because they replaced the template). New markers added
-        # in future revisions can extend this tuple.
+        # versioned marker (latest: ``heartbeat_v3_rate_delivery``) and
+        # the live file lacks the LATEST one, overwrite from the
+        # template. Versioned markers let us roll system-managed
+        # heartbeat updates forward without touching user-customised
+        # heartbeats (which won't have any marker because they replaced
+        # the template). New markers added in future revisions extend
+        # ``HEARTBEAT_SENTINELS`` at the end — the last entry is the
+        # current expectation; earlier entries stay as evidence of
+        # prior migrations.
         from src.shared.types import HEARTBEAT_SENTINELS
+        latest_sentinel = HEARTBEAT_SENTINELS[-1] if HEARTBEAT_SENTINELS else None
         if (
             heartbeat_path.exists()
             and self._initial_heartbeat
-            and any(
-                f"<!-- {m} -->" in self._initial_heartbeat
-                for m in HEARTBEAT_SENTINELS
-            )
+            and latest_sentinel
+            and f"<!-- {latest_sentinel} -->" in self._initial_heartbeat
         ):
             try:
                 existing = heartbeat_path.read_text(errors="replace")
             except Exception:
                 existing = ""
-            needs_refresh = not any(
-                f"<!-- {m} -->" in existing for m in HEARTBEAT_SENTINELS
-            )
+            # Refresh if the EXISTING file lacks the latest sentinel —
+            # i.e., it's still on a prior heartbeat version (or
+            # custom). Using ``any()`` over the whole tuple would
+            # silently skip v2→v3 upgrades because v2's marker is
+            # already present in old files.
+            needs_refresh = f"<!-- {latest_sentinel} -->" not in existing
             if needs_refresh:
                 heartbeat_path.write_text(
                     "# Heartbeat Rules\n\n"

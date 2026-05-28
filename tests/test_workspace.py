@@ -6,6 +6,8 @@ import shutil
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from src.agent.workspace import (
     _MAX_SYSTEM,
     WorkspaceManager,
@@ -1227,13 +1229,25 @@ class TestDeriveCapabilitiesFromInterface:
 
 
 class TestHeartbeatVersionedRefresh:
-    """When the template carries the ``heartbeat_v2_workflow_aware``
-    sentinel and the live HEARTBEAT.md lacks it, the workspace
-    overwrites on next construction. Preserves user-customised
-    heartbeats (which won't have the marker) and pushes the next
-    system-managed revision forward."""
+    """When the template carries the LATEST sentinel from
+    ``HEARTBEAT_SENTINELS`` and the live HEARTBEAT.md lacks it, the
+    workspace overwrites on next construction. Preserves user-
+    customised heartbeats (which won't have any marker) and pushes
+    the next system-managed revision forward — including upgrading
+    workspaces that carry only an older sentinel.
 
-    SENTINEL = "<!-- heartbeat_v2_workflow_aware -->"
+    The class pins to ``HEARTBEAT_SENTINELS[-1]`` so future template
+    bumps don't require touching every test — only the migration
+    semantics matter.
+    """
+
+    @classmethod
+    def setup_class(cls):
+        from src.shared.types import HEARTBEAT_SENTINELS
+        # Refresh fires when the template's LATEST sentinel isn't in
+        # the live file. Earlier sentinels are evidence of past
+        # migrations and don't block upgrades.
+        cls.SENTINEL = f"<!-- {HEARTBEAT_SENTINELS[-1]} -->"
 
     def setup_method(self):
         self._tmpdir = tempfile.mkdtemp()
@@ -1306,25 +1320,61 @@ class TestHeartbeatVersionedRefresh:
     def test_sentinel_constant_imported_from_shared_types(self):
         """``HEARTBEAT_SENTINELS`` lives in ``src.shared.types`` so the
         workspace and the operator-config heartbeat refresh stay in
-        sync. Verify the symbol resolves and includes the current
-        marker — a regression here would mean the constant was
-        re-defined locally and would silently drift."""
+        sync. Verify the symbol resolves, includes the historical
+        v2 marker, and that the LATEST sentinel drives the refresh
+        path — a regression here would mean the constant was
+        re-defined locally and would silently drift, or that the
+        check reverted to ``any()`` semantics that skip v2→v3
+        upgrades."""
         from src.shared.types import HEARTBEAT_SENTINELS
         assert isinstance(HEARTBEAT_SENTINELS, tuple)
+        # v2 stays as evidence of past migrations even after later
+        # sentinels are added.
         assert "heartbeat_v2_workflow_aware" in HEARTBEAT_SENTINELS
-        # The workspace module must consume the central constant, not
-        # define its own. Confirmed by exercising the refresh path on
-        # the canonical marker.
         path = Path(self._tmpdir) / "HEARTBEAT.md"
         path.write_text("# Heartbeat Rules\n\nLEGACY revision\n")
-        marker = f"<!-- {HEARTBEAT_SENTINELS[0]} -->"
+        latest_marker = f"<!-- {HEARTBEAT_SENTINELS[-1]} -->"
         WorkspaceManager(
             workspace_dir=self._tmpdir,
             initial_heartbeat=(
-                f"{marker}\nWorkflow-aware autonomous steps:\n"
+                f"{latest_marker}\nWorkflow-aware autonomous steps:\n"
                 "1. check_inbox\n"
             ),
         )
         content = path.read_text()
         assert "LEGACY" not in content
-        assert marker in content
+        assert latest_marker in content
+
+    def test_existing_file_with_only_old_sentinel_is_refreshed(self):
+        """Regression: file carrying ONLY an older sentinel + template
+        carrying the LATEST sentinel must refresh. The previous logic
+        used ``any()`` over all known sentinels and treated a v2-only
+        workspace as "already migrated", silently skipping v3 updates
+        for every deployed operator.
+
+        Skips when there's only one sentinel in the tuple (i.e. no
+        upgrade path to verify).
+        """
+        from src.shared.types import HEARTBEAT_SENTINELS
+        if len(HEARTBEAT_SENTINELS) < 2:
+            pytest.skip("Need ≥2 sentinels to verify upgrade path")
+        older_marker = f"<!-- {HEARTBEAT_SENTINELS[0]} -->"
+        latest_marker = f"<!-- {HEARTBEAT_SENTINELS[-1]} -->"
+        path = Path(self._tmpdir) / "HEARTBEAT.md"
+        path.write_text(
+            f"# Heartbeat Rules\n\n{older_marker}\nOlder revision text\n"
+        )
+        template = (
+            f"{older_marker}\n{latest_marker}\nNew revision\n"
+            "1. check_inbox\n"
+        )
+        WorkspaceManager(
+            workspace_dir=self._tmpdir, initial_heartbeat=template,
+        )
+        content = path.read_text()
+        assert latest_marker in content, (
+            "Latest sentinel missing — refresh didn't fire for "
+            "old-sentinel-only workspace"
+        )
+        assert "New revision" in content
+        assert "Older revision text" not in content

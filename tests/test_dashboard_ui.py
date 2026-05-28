@@ -12,10 +12,11 @@ This file aggregates three layers of UI-contract tests:
    in the SPA template and JS-source-level checks for the activity
    translation helper.
 
-3. Phase 3 Home single-scroll layout + Operator action chips — verifies
-   ACTION-line parsing strips the trailing chip block, default Quick
-   actions render, the Home single-scroll section testids are wired,
-   and the kanban sub-page is gated on ``homeTab === 'tasks'``.
+3. Operator action chips + post-PR-2 Work-tab cutover surface —
+   verifies ACTION-line parsing strips the trailing chip block, default
+   Quick actions render, and the new Goals strip + Tell Operator
+   surface is wired (with the legacy sub-nav / kanban / activity
+   templates excised).
 
 We can't run a real headless browser in CI, so all assertions are
 string-level over the rendered template + static JS — enough to catch
@@ -375,19 +376,16 @@ class TestVocabularySweepStrings:
 
 
 class TestEmptyStateCTAs:
-    def test_workplace_empty_outputs_has_cta(self):
-        # The Outputs sub-tab empty state now contains a verb-driven CTA
-        # pointing users at the operator chat.
-        assert "Tell the Operator what you want delivered" in _INDEX_HTML
-
     def test_team_empty_state_has_cta(self):
         # The fleet/team page first-run state.
         assert "Build your first team" in _INDEX_HTML
 
-    def test_workplace_feed_empty_state_user_speak(self):
-        # The activity feed empty-state text avoids "agents" — uses
-        # "team" instead.
-        assert "Once your team starts working" in _INDEX_HTML
+    def test_workplace_summary_empty_state_user_speak(self):
+        # PR 2 of Work tab rewrite — the activity feed empty-state
+        # "Once your team starts working…" was deleted along with the
+        # activity sub-page. The summary view's empty state is now the
+        # user-facing "no work yet" surface.
+        assert "No summaries yet" in _INDEX_HTML
 
 
 # ── Notifications bell ────────────────────────────────────────────────
@@ -568,20 +566,6 @@ class TestEventBusAuditFollowUpHandlers:
         )
         assert "loadWorkplaceTasks" in body, (
             "Handler must nudge the workplace tasks list (debounced)"
-        )
-
-    def test_cancel_reason_appears_in_workplace_feed_summary(self):
-        # ``_pushWorkplaceFeedFromEvent`` builds the cancelled summary.
-        # Reason must be appended in parens when present.
-        m = re.search(
-            r"} else if \(status === 'cancelled'\)\s*\{(.*?)\}",
-            _APP_JS_TEXT,
-            re.DOTALL,
-        )
-        assert m, "cancelled branch in workplace feed missing"
-        body = m.group(1)
-        assert "data.reason" in body, (
-            "Cancel summary must read data.reason from the event payload"
         )
 
     def test_cancel_reason_appears_in_format_activity_for_user(self):
@@ -813,423 +797,167 @@ class TestOperatorActionChipsMarkup:
         assert "sendOperatorChip" in nearby
 
 
-class TestHomeSingleScrollLayout:
-    """Phase 4 — Board tab restructured around the kanban as default.
-
-    The legacy single-scroll layout (Phase 3) is retained as the
-    ``activity`` sub-page; the kanban is the new default. These tests
-    verify both the new gating and the back-compat for deep links.
+class TestWorkTabPr2Cutover:
+    """PR 2 of Work tab rewrite — sub-nav (Summaries / Kanban / Activity)
+    deleted, summary cards are the unconditional landing surface, Goals
+    chip strip + Tell Operator added, /home/* URLs normalize to /home.
     """
 
-    def test_activity_layout_gated_on_home_tab(self, index_html: str):
-        # The single-scroll activity layout renders only when
-        # ``homeTab === 'activity'`` (Phase 3's ``main`` value).
-        assert "workplaceEnabled && homeTab === 'activity'" in index_html
+    def test_subnav_tab_strip_removed(self, index_html: str):
+        # The persistent Summaries / Kanban / Activity tab bar is gone.
+        assert 'data-testid="workplace-subnav"' not in index_html
+        assert 'data-testid="workplace-subnav-summaries"' not in index_html
+        assert 'data-testid="workplace-subnav-kanban"' not in index_html
+        assert 'data-testid="workplace-subnav-activity"' not in index_html
 
-    def test_kanban_layout_gated_on_home_tab_kanban(self, index_html: str):
-        # The kanban is the new default — gated on ``homeTab === 'kanban'``.
-        assert "workplaceEnabled && homeTab === 'kanban'" in index_html
+    def test_kanban_surface_removed(self, index_html: str):
+        # No more 4-column kanban grid on the Work tab.
+        assert 'data-testid="board-kanban"' not in index_html
+        assert 'data-testid="board-kanban-card"' not in index_html
+        assert 'data-testid="board-kanban-card-cancel"' not in index_html
 
-    def test_section_testids_present(self, index_html: str):
-        # Every section in the new layout has a testid so a future
-        # refactor can't accidentally hide one without tripping a test.
-        # The legacy activity-feed testids stay (still rendered on the
-        # ``activity`` sub-page); the new kanban + stuck-tasks +
-        # cancel-modal testids capture the Phase 4 surface.
+    def test_activity_subpage_removed(self, index_html: str):
+        # Activity sub-page (Just delivered + Happening now + In progress)
+        # is gone. Only the testid that's actually rendered counts —
+        # ``home-just-delivered`` etc. previously sat inside a live block.
+        # After PR 2 the block sits in an ``x-if="false"`` stub that
+        # doesn't render, but we also want the testids removed entirely
+        # so a search for the old IDs returns nothing user-visible.
+        # The dead-stub HTML in this PR carries no testids.
         for testid in (
-            "home-activity",
             "home-just-delivered",
             "home-happening-now",
             "home-in-progress",
             "home-see-task-board",
-            "board-kanban",
-            "board-kanban-card",
-            "board-kanban-card-cancel",
-            "board-stuck-tasks",
-            # Footer-link affordance ``board-view-activity`` was replaced
-            # by the persistent ``workplace-subnav-activity`` tab bar
-            # button. Same target, more prominent.
-            "workplace-subnav-summaries",
-            "workplace-subnav-kanban",
-            "workplace-subnav-activity",
-            "cancel-task-modal",
-            "cancel-task-confirm",
+            "home-activity",
+            "home-idle-empty",
+            "rate-buttons",
+            "inline-rework",
         ):
-            assert f'data-testid="{testid}"' in index_html, \
-                f"Missing testid: {testid}"
+            assert f'data-testid="{testid}"' not in index_html, \
+                f"PR 2 should have removed testid: {testid}"
 
-    def test_subtab_bar_replaces_legacy_workplace_tab(self, index_html: str):
-        # The persistent sub-nav tab bar replaces the legacy
-        # ``workplaceTab = wt.id`` click handler. All three Work
-        # sub-views (Summaries / Kanban / Activity) are reachable in
-        # one click; no view is buried behind a footer link.
-        assert "workplaceTab = wt.id; loadWorkplace()" not in index_html
-        assert 'data-testid="workplace-subnav"' in index_html
-        assert "switchHomeTab('summaries')" in index_html
-        assert "switchHomeTab('kanban')" in index_html
-        assert "switchHomeTab('activity')" in index_html
-
-    def test_activity_subpage_reachable_via_subnav(self, index_html: str):
-        # The activity sub-page is reached via the persistent tab bar,
-        # not a "Back to Work" button. Asserts the new tab affordance.
-        assert 'data-testid="workplace-subnav-activity"' in index_html
-        assert "switchHomeTab('activity')" in index_html
-
-    def test_legacy_subtabs_hidden_with_back_compat_gate(self, index_html: str):
-        # The old team-status / team-outputs renders are kept in
-        # markup behind a ``false &&`` short-circuit so nothing visible
-        # depends on ``workplaceTab`` while deep-link callers still
-        # don't NPE on the missing template.
-        assert "false && workplaceEnabled && workplaceTab === 'team-status'" in index_html
-        assert "false && workplaceEnabled && workplaceTab === 'team-outputs'" in index_html
-
-
-class TestHomeRouting:
-    """Phase 4 — ``/home`` (kanban) and ``/home/activity`` URL routes.
-
-    Legacy ``/home/tasks`` resolves to the kanban (back-compat — the
-    kanban IS the default now, so old bookmarks survive).
-    """
-
-    def test_build_path_emits_home_route(self, app_js: str):
-        # ``_buildPath`` emits four workplace sub-routes based on
-        # ``homeTab``: ``/home`` (no-opinion landing), ``/home/activity``,
-        # ``/home/summaries``, and ``/home/kanban`` (explicit kanban —
-        # added so the user's tab choice survives page reload). The
-        # kanban arm is GATED on ``this.homeTabUserChosen`` so a bare
-        # ``/home`` placeholder doesn't canonicalize to ``/home/kanban``
-        # before the always-summaries default settles.
-        assert "if (this.homeTab === 'activity') return '/home/activity'" in app_js
-        assert "if (this.homeTab === 'summaries') return '/home/summaries'" in app_js
-        assert "this.homeTab === 'kanban' && this.homeTabUserChosen" in app_js
-        assert "return '/home/kanban'" in app_js
-        assert "return '/home'" in app_js
-
-    def test_bare_home_parses_to_summaries_no_flicker(self, app_js: str):
-        # Bare ``/home`` is parsed directly to ``homeTab='summaries'``
-        # so the initial render lands on summaries without flickering
-        # through the kanban placeholder. The post-load
-        # ``_applyDefaultHomeTab`` ratifies the same value as a
-        # belt-and-suspenders no-op.
-        idx = app_js.find("if (clean === 'home') {")
-        assert idx > 0
-        # Window large enough to capture the full block + the
-        # ``return route`` line. The comment header in the block
-        # is multi-line so the actual assignment is past line 500.
-        block = app_js[idx:idx + 1200]
-        assert "route.homeTab = 'summaries'" in block
-        # And must NOT set userChosen for the bare-/home case — the
-        # user didn't choose; we defaulted on their behalf.
-        # Scope the check to JUST the bare-/home branch (find the
-        # next ``return route;`` to bound it).
-        return_idx = block.find("return route;")
-        assert return_idx > 0
-        bare_branch = block[:return_idx]
-        assert "route.homeTabUserChosen" not in bare_branch
-
-    def test_switch_home_tab_canonicalizes_url_on_same_target(self, app_js: str):
-        # When ``switchHomeTab`` is called with the same tab as the
-        # current ``homeTab``, it MUST still push the URL if
-        # ``homeTabUserChosen`` was false (bare ``/home`` landing).
-        # Without this canonicalization the URL stays bare ``/home``
-        # after the user explicitly clicks Summaries on a fresh load.
-        idx = app_js.find("switchHomeTab(tabId) {")
-        assert idx > 0
-        body = app_js[idx:idx + 1200]
-        # Push fires on target change OR user-chosen flip.
-        assert "targetChanged" in body
-        assert "userChosenFlipped" in body
-
-    def test_parse_path_recognizes_home_routes(self, app_js: str):
-        # ``_parsePath`` accepts every Work sub-route + legacy
-        # ``/home/tasks`` for back-compat with Phase 3 bookmarks.
-        assert "clean === 'home'" in app_js
-        assert "clean === 'home/activity'" in app_js or "home/activity" in app_js
-        assert "clean === 'home/summaries'" in app_js or "home/summaries" in app_js
-        assert "clean === 'home/kanban'" in app_js or "home/kanban" in app_js
-        assert "clean === 'home/tasks'" in app_js or "home/tasks" in app_js
-
-    def test_kanban_deep_link_sets_user_chosen(self, app_js: str):
-        # Explicit ``/home/kanban`` must mark ``homeTabUserChosen``
-        # so the post-load auto-default doesn't revert to summaries
-        # (regression: without this, clicking the Kanban tab
-        # produced ``/home`` which on reload lost the choice).
-        idx = app_js.find("clean === 'home/kanban'")
-        assert idx > 0
-        block = app_js[idx:idx + 800]
-        assert "route.homeTab = 'kanban'" in block
-        assert "route.homeTabUserChosen = true" in block
-
-    def test_always_summaries_default_no_conditional(self, app_js: str):
-        # ``_applyDefaultHomeTab`` must NOT condition on team /
-        # summary count any more — summaries is the unconditional
-        # default landing regardless of fleet size. Find the
-        # METHOD DEFINITION (``_applyDefaultHomeTab() {``), not
-        # a callsite — the inner body is what carries the policy.
-        idx = app_js.find("_applyDefaultHomeTab() {")
-        assert idx > 0
-        body = app_js[idx:idx + 800]
-        # No team/summary counter checks; the only guard is the
-        # user-chosen flag.
-        assert "workplaceTeams" not in body
-        assert "workplaceSummaries" not in body
-        # And it does write summaries.
-        assert "this.homeTab = 'summaries'" in body
-
-    def test_switch_home_tab_helper_present(self, app_js: str):
-        assert "switchHomeTab(tabId)" in app_js
-
-    def test_default_home_tab_is_kanban(self, app_js: str):
-        # The Alpine state default is now ``kanban`` (Phase 3 default
-        # was ``main``). This is the load-bearing change for the
-        # CPO call to make the kanban the default Board view.
-        assert "homeTab: 'kanban'" in app_js
-
-# ── New-user onboarding tutorial ─────────────────────────────────
-
-# ── Phase 4 (Board kanban-default): cancel + stuck-tasks + density ──
-
-
-class TestBoardKanbanDefaultUI:
-    """Phase 4 — Board kanban as default + task cancel + Stuck tasks
-    + activity-feed noise filter.
-
-    All assertions are string-level over the rendered template + static
-    JS — same idiom as the rest of this file. Headless-browser checks
-    are tracked separately."""
-
-    def test_work_tab_defaults_to_kanban(self, app_js: str):
-        # Default homeTab is ``kanban`` — the kanban surface IS the
-        # Board home page now.
-        assert "homeTab: 'kanban'" in app_js
-        # _parsePath default route also lands on kanban.
-        assert "homeTab: 'kanban'" in app_js
-
-    def test_kanban_card_renders_cancel_button(self, index_html: str):
-        # The × cancel button is present on every kanban card.
-        assert 'data-testid="board-kanban-card-cancel"' in index_html
-        # And it's wired to the confirm-cancel handler.
-        assert 'confirmCancelTask(t)' in index_html
-
-    def test_cancel_task_shows_confirmation_modal(self, index_html: str):
-        # Modal is present + gated on cancelTaskCandidate.
-        assert 'data-testid="cancel-task-modal"' in index_html
-        assert 'x-if="cancelTaskCandidate"' in index_html
-        # Confirm button calls cancelTaskNow().
-        assert 'data-testid="cancel-task-confirm"' in index_html
-        assert 'cancelTaskNow()' in index_html
-
-    def test_cancel_task_calls_dashboard_proxy(self, app_js: str):
-        # The cancel handler POSTs to the new dashboard cancel route
-        # (which proxies to the mesh).
-        assert "/workplace/tasks/" in app_js
-        assert "/cancel" in app_js
-        assert "cancelTaskNow" in app_js
-
-    def test_truncate_title_helper_present(self, app_js: str):
-        # truncateTitle is the helper backing the 80-char card title cap.
-        assert "truncateTitle(title, max)" in app_js
-
-    def test_kanban_card_uses_truncate_title(self, index_html: str):
-        # Cards render via truncateTitle so long agent-instruction-as-
-        # title strings (~250 chars seen in production) don't blow up
-        # the kanban grid.
-        idx = index_html.find('data-testid="board-kanban-card"')
-        assert idx > 0
-        nearby = index_html[idx:idx + 2500]
-        assert "truncateTitle(t.title, 80)" in nearby
-
-    def test_stuck_tasks_section_present(self, index_html: str):
-        # The Stuck tasks panel sits between Needs you and the kanban.
+    def test_stuck_tasks_panel_retained(self, index_html: str):
+        # Stuck Tasks panel + per-row Cancel / Restart-agent affordances
+        # survive the cutover.
         assert 'data-testid="board-stuck-tasks"' in index_html
-        # Each row has cancel + restart buttons.
         assert 'data-testid="board-stuck-task-cancel"' in index_html
         assert 'data-testid="board-stuck-task-restart"' in index_html
 
-    def test_stuck_tasks_section_hidden_when_empty(self, index_html: str):
-        # The section only renders when stuckTasks is non-empty —
-        # gated on ``stuckTasks.length`` in the x-if expression.
-        idx = index_html.find('data-testid="board-stuck-tasks"')
+    def test_cancel_task_modal_retained(self, index_html: str):
+        assert 'data-testid="cancel-task-modal"' in index_html
+        assert 'data-testid="cancel-task-confirm"' in index_html
+
+    def test_summary_cards_unconditional_landing(self, index_html: str):
+        # Summary view renders whenever the Work tab is on (no homeTab
+        # gate any more). The conditional reads ``workplaceEnabled``
+        # only.
+        assert 'data-testid="workplace-summaries-view"' in index_html
+        idx = index_html.find('data-testid="workplace-summaries-view"')
+        # Walk back to find the enclosing template tag.
+        slice_ = index_html[max(0, idx - 400):idx]
+        assert 'homeTab' not in slice_, \
+            "summary view should no longer gate on homeTab"
+
+    def test_goals_strip_present_with_chip_template(self, index_html: str):
+        # New Goals chip strip — read-only render of operator's goals.
+        assert 'data-testid="workplace-goals-strip"' in index_html
+        assert 'data-testid="workplace-goal-chip"' in index_html
+        # Hidden when no goals tracked.
+        idx = index_html.find('data-testid="workplace-goals-strip"')
+        slice_ = index_html[max(0, idx - 200):idx + 200]
+        assert "workplaceGoals.length > 0" in slice_
+
+    def test_tell_operator_section_present(self, index_html: str):
+        # Steering textarea + Send button + confirmation slot.
+        assert 'data-testid="workplace-tell-operator"' in index_html
+        assert 'data-testid="tell-operator-submit"' in index_html
+        assert 'data-testid="tell-operator-confirmation"' in index_html
+        assert "submitTellOperator()" in index_html
+
+    def test_build_path_emits_only_bare_home(self, app_js: str):
+        # PR 2 — single Work-tab URL. _buildPath returns '/home' for
+        # the Work tab; no /home/kanban, /home/activity, /home/summaries
+        # branches survive.
+        idx = app_js.find("if (this.activeTab === 'workplace')")
         assert idx > 0
-        # Walk back to find the enclosing template open tag.
-        slice_ = index_html[max(0, idx - 600):idx]
-        assert "stuckTasks.length" in slice_
+        block = app_js[idx:idx + 400]
+        assert "return '/home'" in block
+        assert "/home/activity" not in block
+        assert "/home/summaries" not in block
+        assert "/home/kanban" not in block
 
-    def test_stuck_tasks_getter_filters_pending_over_24h(self, app_js: str):
-        # The getter checks status pending/working AND age > 24h.
-        idx = app_js.find("get stuckTasks()")
+    def test_parse_path_normalizes_legacy_home_urls(self, app_js: str):
+        # Any /home/{anything} URL silently normalizes to /home so old
+        # bookmarks (kanban, activity, summaries, tasks) survive without
+        # a 404 or visible redirect.
+        idx = app_js.find("if (clean === 'home' || clean.startsWith('home/'))")
+        assert idx > 0, "legacy /home/* normalization missing"
+        block = app_js[idx:idx + 300]
+        assert "route.tab = 'workplace'" in block
+        # Verify no separate branch for /home/kanban etc. lingers.
+        assert "clean === 'home/kanban'" not in app_js
+        assert "clean === 'home/activity'" not in app_js
+        assert "clean === 'home/summaries'" not in app_js
+        assert "clean === 'home/tasks'" not in app_js
+
+    def test_home_tab_state_and_methods_removed(self, app_js: str):
+        # Compaction check — homeTab + switchHomeTab + helper methods
+        # were all removed from app.js. Their absence is what makes the
+        # template state machine collapse to a single workplace view.
+        # Comment lines that reference these names as history are fine;
+        # we only check for the JS identifiers in active use.
+        assert "homeTab: 'kanban'" not in app_js
+        assert "switchHomeTab(tabId)" not in app_js
+        assert "_applyDefaultHomeTab()" not in app_js
+        assert "drillIntoTeamKanban(" not in app_js
+
+    def test_recently_delivered_helpers_removed(self, app_js: str):
+        # PR 2 also drops the "Recently delivered" cluster.
+        assert "_recomputeRecentlyDelivered(" not in app_js
+        assert "_ensureRecentlyDeliveredArtifact(" not in app_js
+        assert "recentlyDeliveredPreview(" not in app_js
+        assert "recentlyDeliveredFull(" not in app_js
+        assert "recentlyDeliveredHasMore(" not in app_js
+        assert "copyRecentlyDeliveredText(" not in app_js
+
+    def test_inline_rework_and_rate_delivery_removed(self, app_js: str):
+        # The per-task rating handler + inline rework state are gone.
+        assert "async rateDelivery(" not in app_js
+        assert "submitInlineRework(" not in app_js
+        assert "openInlineRework(" not in app_js
+        assert "closeInlineRework(" not in app_js
+        assert "inlineReworkIsOpen(" not in app_js
+
+    def test_global_task_ws_handlers_preserved(self, app_js: str):
+        # Global task_created / task_status_changed / task_outcome
+        # handlers feed System Activity + notification bell + the
+        # drill-in modal — they MUST survive the Work-tab cutover.
+        assert "case 'task_status_changed':" in app_js
+        assert "case 'task_outcome':" in app_js
+        assert "case 'task_created':" in app_js
+
+    def test_load_workplace_drops_outputs_and_feed_loaders(self, app_js: str):
+        # The master Promise.all should NOT call the deleted loaders.
+        idx = app_js.find("async loadWorkplace()")
         assert idx > 0
-        body = app_js[idx:idx + 2000]
-        assert "'pending'" in body and "'working'" in body
-        assert "24 * 3600" in body  # the cutoff constant
+        body = app_js[idx:idx + 1200]
+        assert "loadWorkplaceTeams" in body
+        assert "loadWorkplaceTasks" in body
+        assert "loadWorkplaceBlockers" in body
+        assert "loadWorkplacePending" in body
+        assert "loadWorkplaceSummaries" in body
+        assert "loadWorkplaceGoals" in body
+        assert "loadWorkplaceOutputs" not in body
+        assert "loadWorkplaceFeed" not in body
 
-    def test_status_unchanged_filtered_from_activity_feed(self, app_js: str):
-        # formatActivityForUser returns null for status_unchanged so
-        # heartbeat noise stays out of the user-facing feed.
-        idx = app_js.find("formatActivityForUser(event)")
-        assert idx > 0
-        body = app_js[idx:idx + 4000]
-        assert "case 'status_unchanged':" in body
-        # The feed itself uses the noise-filtered view via the getter.
-        assert "get workplaceFeedVisible()" in app_js
-        assert "event_type !== 'status_unchanged'" in app_js
+    def test_workplace_goals_loader_present(self, app_js: str):
+        assert "async loadWorkplaceGoals()" in app_js
+        assert "/workplace/goals" in app_js
 
-    def test_activity_sub_page_accessible_via_subnav(self, index_html: str):
-        # Activity is reachable in one click via the persistent
-        # Summaries/Kanban/Activity tab bar at the top of the Work
-        # tab. The legacy footer-link ``board-view-activity`` was
-        # removed when the tab bar landed — same target, less
-        # buried.
-        assert 'data-testid="workplace-subnav-activity"' in index_html
-        idx = index_html.find('data-testid="workplace-subnav-activity"')
-        nearby = index_html[max(0, idx - 200):idx + 200]
-        assert "switchHomeTab('activity')" in nearby
-
-    def test_legacy_home_tasks_url_resolves_to_kanban(self, app_js: str):
-        # ``/home/tasks`` (Phase 3 kanban URL) maps to the kanban
-        # default — old bookmarks survive without a redirect.
-        assert "clean === 'home/tasks'" in app_js
-        # The branch sets homeTab = 'kanban' (not 'tasks') so the
-        # default UI lights up.
-        idx = app_js.find("clean === 'home/tasks'")
-        assert idx > 0
-        body = app_js[idx:idx + 200]
-        assert "homeTab = 'kanban'" in body
-
-
-# ── Phase 4 audit fixes: kanban accepted-fold + restart confirm + ──
-# ── vocab + stale code cleanup. ──────────────────────────────────
-
-
-class TestBoardKanbanAuditFixes:
-    """Audit-driven follow-ups on the Phase 4 kanban-default surface.
-
-    Each test maps to one finding from the post-merge audit on
-    ``feat/work-tab-kanban-default-cancel-density``. They cover:
-
-    - Critical #1: ``accepted`` tasks fold into the Pending column so
-      they stay visible on the board.
-    - Critical #2: ``restartAgentForStuck`` routes through ``showConfirm``
-      before issuing the destructive POST.
-    - High #1: Activity sub-page back-link reads "Back to Work" (not the
-      stale "Back to Board" copy that conflicts with the renamed top-nav
-      tab from PR-G).
-    - High #2: Cancel-task modal copy doesn't claim the task is
-      "re-assignable" — ``cancelled`` is a terminal state in the
-      orchestration ledger.
-    - Medium #1: Dead ``task_status_unchanged`` switch arm dropped (the
-      engine emits the single name ``status_unchanged``).
-    - Medium #2: Dead ``workplaceTaskColumns`` Alpine state removed.
-    - Medium #3: Stale ``home-main`` testid renamed to ``home-activity``.
-    - Medium #4: ``stuckTasks`` getter filters out the operator agent.
-    """
-
-    # ── Critical #1: kanban accepted-fold ─────────────────────────
-
-    def test_kanban_pending_column_includes_accepted_tasks(self, app_js: str):
-        # The kanban template hard-codes 4 columns; ``accepted`` is a
-        # transient status emitted by ``update_status`` between pending
-        # and working. The filter folds it into the Pending column so
-        # those tasks remain visible (and cancellable) on the board.
-        # Codex P1.5 Option A extended the helper to also fold ``failed``
-        # into Done — slice widened to 2000 chars so the comment block
-        # and the new branch fit.
-        idx = app_js.find("workplaceTasksByStatus(status)")
-        assert idx > 0
-        body = app_js[idx:idx + 2000]
-        # Both pending and accepted are matched in the pending branch.
-        assert "t.status === 'pending'" in body
-        assert "t.status === 'accepted'" in body
-        # Other statuses still match by exact equality.
-        assert "t.status === status" in body
-        # Codex P1.5: ``failed`` folds into ``done`` so it stays visible.
-        assert "t.status === 'failed'" in body
-        assert "t.status === 'done'" in body
-
-    # ── Critical #2: restart confirmation modal ───────────────────
-
-    def test_restart_agent_for_stuck_routes_through_show_confirm(self, app_js: str):
-        # The Stuck-tasks panel's [Restart agent] button is destructive;
-        # it now goes through ``showConfirm`` so a stray click can't
-        # interrupt active work without an explicit confirmation.
-        idx = app_js.find("async restartAgentForStuck(agentId)")
-        assert idx > 0
-        body = app_js[idx:idx + 2500]
-        assert "this.showConfirm(" in body, \
-            "restartAgentForStuck must route through showConfirm"
-        # Confirm callback wraps the destructive fetch so the modal's
-        # spinner ties to the actual restart.
-        assert "/restart" in body
-        # The confirmation copy mentions the active-work interruption.
-        assert "interrupt any active work" in body
-
-    # ── High #1: "Back to Work" copy ──────────────────────────────
-
-    def test_back_to_board_renamed_to_back_to_work(self, index_html: str):
-        # PR-G renamed the top-nav tab from Home to Work. The two
-        # back-links on the Activity sub-page must match the new label.
-        assert "Back to Work" in index_html
-        # No stale "Back to Board" copy survives.
-        assert "Back to Board" not in index_html
-
-    # ── High #2: cancel-modal copy doesn't claim re-assignability ──
-
-    def test_cancel_modal_copy_does_not_claim_reassignability(self, index_html: str):
-        # ``cancelled`` is terminal in orchestration.py — there is no
-        # transition out, so the modal must not claim the task is
-        # re-assignable. New copy points at creating a new task instead.
-        idx = index_html.find('data-testid="cancel-task-modal"')
-        assert idx > 0
-        # Window the modal block (~1.5KB is enough to cover the body
-        # text + buttons).
-        block = index_html[idx:idx + 1500]
-        assert "re-assigned" not in block, \
-            "cancel-modal must not claim cancelled tasks are re-assignable"
-        assert "create a new task" in block
-
-    # ── Medium #1: drop dead task_status_unchanged switch arm ─────
-
-    def test_task_status_unchanged_switch_arm_dropped(self, app_js: str):
-        # The engine emits ``status_unchanged`` (single name) — the
-        # ``task_status_unchanged`` arm was dead.
-        idx = app_js.find("formatActivityForUser(event)")
-        assert idx > 0
-        body = app_js[idx:idx + 4000]
-        assert "case 'status_unchanged':" in body
-        assert "case 'task_status_unchanged':" not in body, \
-            "dead task_status_unchanged switch arm must be removed"
-
-    # ── Medium #2: workplaceTaskColumns state removed ─────────────
-
-    def test_workplace_task_columns_state_removed(self, app_js: str, index_html: str):
-        # Dead Alpine state — the kanban inlines the column array; the
-        # only remaining template usage was for project count pills,
-        # which now also inlines its own array.
-        assert "workplaceTaskColumns:" not in app_js, \
-            "dead workplaceTaskColumns Alpine state must be removed"
-        assert "workplaceTaskColumns" not in index_html, \
-            "no template should reference the removed workplaceTaskColumns"
-
-    # ── Medium #3: home-main testid renamed to home-activity ──────
-
-    def test_home_main_testid_renamed_to_home_activity(self, index_html: str):
-        # The activity sub-page's container testid lines up with the
-        # surrounding ``home-just-delivered`` / ``home-happening-now``
-        # naming.
-        assert 'data-testid="home-activity"' in index_html
-        assert 'data-testid="home-main"' not in index_html
-
-    # ── Medium #4: stuckTasks filters operator ────────────────────
-
-    def test_stuck_tasks_filters_operator_assignee(self, app_js: str):
-        # Defensive filter: operator is the orchestrator, not a worker.
-        # Even if a future code path accidentally assigns work to it,
-        # the Stuck panel must not surface those rows.
-        idx = app_js.find("get stuckTasks()")
-        assert idx > 0
-        body = app_js[idx:idx + 2000]
-        assert "t.assignee === 'operator'" in body, \
-            "stuckTasks must filter out operator-assigned rows"
+    def test_tell_operator_method_present(self, app_js: str):
+        assert "async submitTellOperator()" in app_js
+        assert "sendChatTo('operator'" in app_js
 
 
 # ── Phase 4: \"What's new\" tour for existing-fleet users ──────────
@@ -2372,6 +2100,12 @@ _VERB_FOR_TOOL_FALLBACK_OK = frozenset({
     "run_command",
     "wallet_execute",
     "wallet_read_contract",
+    # Operator-only programmatic surface added in PR 2 of the Work
+    # tab rewrite. User-visible activity feed doesn't render it
+    # with a custom verb — the fallback "using rate delivery"
+    # reads fine. (``manage_goals`` is allowlisted by PR 1 in the
+    # ``manage_*`` cluster above.)
+    "rate_delivery",
 })
 
 

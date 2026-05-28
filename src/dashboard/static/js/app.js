@@ -59,11 +59,6 @@ function dashboard() {
     // across navigation via Alpine root scope; localStorage carries it
     // through reloads so users keep their messenger open as they wander.
     messengerSidePanelOpen: false,
-    // Last time the user viewed the Work tab. Drives the Chat tab
-    // delivery banner ("Writer delivered draft 12m ago — see on Work →")
-    // — banner shows when ``recentlyDeliveredItems`` has entries newer
-    // than this timestamp. Persisted to localStorage.
-    _lastViewedHomeTs: 0,
     // Per-agent visible message count for "Load older →" pagination
     // (Phase 1 Decision 12). Default 50; click appends 50 more.
     _chatVisibleLimit: {},
@@ -386,46 +381,25 @@ function dashboard() {
     cmdPaletteResults: [],
     cmdPaletteIdx: 0,
 
-    // Task 9 — Workplace tab (peer of Chat / Agents / System).
-    // Sub-tabs: project status, kanban task board, blockers, team outputs.
-    // ``workplaceEnabled`` reflects whether the tasks store responded
-    // — kept for graceful empty-state rendering on transient errors.
-    // PR 5: feed becomes the default workplace landing — kanban demoted
-    // to a non-default sub-tab; standalone blockers tab removed
-    // (pinned at the top of the feed instead).
-    // PR G: kanban sub-tab is labelled "Tasks" so it doesn't collide
-    // with the parent tab "Board" (Board > Board was confusing).
-    // The route id ``task-board`` stays internal so URL hashes /
-    // server state don't change.
-    workplaceTab: 'feed',
-    workplaceTabs: [
-      { id: 'feed', label: 'Activity' },
-      { id: 'project-status', label: 'Teams' },
-      { id: 'task-board', label: 'Tasks' },
-      { id: 'team-outputs', label: 'Outputs' },
-    ],
-    // Phase 4 — Board (workplace) restructured around the kanban as
-    // the default surface. ``homeTab`` is the sub-route within the
-    // Board tab.
-    //   ``kanban`` (default) → kanban board: Needs You + Stuck tasks
-    //     + 4-column kanban (Pending / Working / Blocked / Done) with
-    //     a × cancel button on every card. Empty sections hide.
-    //   ``activity`` → single-scroll activity feed: Just delivered +
-    //     Happening now + In progress. Lifted from the legacy
-    //     ``main`` layout; reachable via the "View activity feed →"
-    //     link below the kanban or the URL ``/home/activity``.
-    // Backward compat: the legacy ``main`` value (Phase 3 default)
-    // and ``tasks`` value (Phase 3 kanban sub-page) both resolve to
-    // the new ``kanban`` default — old bookmarks land on the kanban
-    // because the kanban IS the new default. The legacy
-    // ``workplaceTab`` state stays for back-compat with deep links
-    // that still toggle it.
-    homeTab: 'kanban',
+    // Workplace tab (peer of Chat / Agents / System). PR 2 of the Work
+    // tab rewrite removed the sub-nav (Summaries / Kanban / Activity)
+    // along with the kanban + activity surfaces; PR 3 dropped the legacy
+    // ``workplaceTab`` / ``workplaceTabs`` Alpine state with the dead
+    // ``team-status`` + ``team-outputs`` templates. The Work tab now
+    // lands directly on summary cards. Stuck Tasks panel + Cancel modal
+    // + Task drill-in (reachable from Needs you + notification bell)
+    // are retained. ``workplaceEnabled`` reflects whether the tasks
+    // store responded — kept for graceful empty-state rendering on
+    // transient errors.
     workplaceEnabled: true,
     workplaceTeams: [],
     workplaceTasks: [],
     workplaceBlockers: [],
-    workplaceOutputs: [],
+    // Workplace-wide business goals (PR 2). Operator manages via
+    // ``manage_goals``; dashboard renders a read-only chip strip
+    // between Needs You (top sticky) and the Summary cards. Hidden
+    // entirely when empty.
+    workplaceGoals: [],
     // Work summaries surface (PR-B). One row per team per period. The
     // user rates 👍/➖/👎 with optional feedback; rating + feedback
     // flow back into operator's next composition. List is ordered
@@ -446,18 +420,6 @@ function dashboard() {
     // The template uses this to disable the rating buttons + show a
     // subtle loading affordance, preventing double-fires.
     _summaryRateInFlight: {},
-    // ``true`` once the user has explicitly chosen a homeTab (via the
-    // sub-nav toggle). Until then, the default lands on 'summaries'
-    // when at least one team exists. Small fleets (no teams) skip
-    // straight to the kanban because the team layer would be empty.
-    homeTabUserChosen: false,
-    // Memoised slice for the Activity feed's "Recently delivered"
-    // header — recomputed in ``loadWorkplaceOutputs`` so the template
-    // doesn't re-run the filter on every Alpine reactive read. See
-    // ``_recomputeRecentlyDelivered`` for the coercion rules.
-    recentlyDeliveredItems: [],
-    workplaceFeed: [],
-    workplaceFeedCap: 200,
     workplacePending: [],
     workplaceLoading: false,
     // Per-section loading + error state. Failures used to be swallowed
@@ -471,48 +433,26 @@ function dashboard() {
       teams: false,
       tasks: false,
       blockers: false,
-      outputs: false,
       pending: false,
-      feed: false,
       summaries: false,
+      goals: false,
     },
     workplaceErrors: {
       teams: '',
       tasks: '',
       blockers: '',
-      outputs: '',
       pending: '',
-      feed: '',
       summaries: '',
+      goals: '',
     },
-    // Per-task artifact preview cache for the "Recently delivered"
-    // section. Keyed by task_id so each row's preview is fetched once
-    // and reused; the value is the full /api/workplace/tasks/{id}
-    // response so the "Read full" toggle can show the inlined content
-    // without a second round-trip. ``recentlyDeliveredExpanded`` tracks
-    // which rows the user has expanded.
-    recentlyDeliveredArtifacts: {},
-    recentlyDeliveredExpanded: {},
-    _recentlyDeliveredFetching: {},
-    // Inline rework state for the "Recently delivered" cards — keyed by
-    // task_id. Opens an inline textarea on the card instead of bouncing
-    // through the drillIn modal so the user stays in flow. Cleared by
-    // ``rateDelivery`` after a successful submit. Initialized here in
-    // the data section so Alpine treats them as first-class reactive
-    // state (template helpers ``inlineReworkIsOpen`` / ``inlineReworkText``
-    // read them indirectly, but a future direct-template read should
-    // still react).
-    _inlineReworkOpen: {},
-    _inlineReworkText: {},
-    // Per-task in-flight guard for inline rating clicks — prevents a
-    // user from double-firing rateDelivery while the POST is still
-    // round-tripping. Cleared in the finally block of ``rateDelivery``.
-    _rateDeliveryInflight: {},
-    workplaceTeamFilter: '',
-    // Per-column flag: when true, the kanban column ignores the 14-day
-    // archive cutoff and shows old pending/blocked rows. Keyed by status
-    // so toggling one column doesn't expand the others.
-    boardShowArchived: {},
+    // PR 2 Tell Operator (steering affordance, replaces the deleted
+    // per-task rating UI). ``tellOperatorText`` is the textarea
+    // binding; ``tellOperatorInflight`` disables the Send button
+    // while a request is in flight; ``tellOperatorConfirmation``
+    // shows a transient "Sent" banner that auto-clears after 5s.
+    tellOperatorText: '',
+    tellOperatorInflight: false,
+    tellOperatorConfirmation: '',
     // In-flight audit-log undo so we can disable the button per-row.
     auditReverting: {},
 
@@ -805,31 +745,12 @@ function dashboard() {
         return '/system/' + (this.systemTab || 'activity');
       }
       if (this.activeTab === 'fleet') return '/agents';
-      // Phase 4 — Board (workplace) sub-routing. Default lands on
-      // the kanban (``/home``); the activity feed sub-page is at
-      // ``/home/activity``. Legacy ``/home/tasks`` still maps to
-      // the same default in ``_parsePath`` (kanban IS the default,
-      // so old bookmarks survive without a redirect).
+      // PR 2 of Work tab rewrite — single Work surface. The sub-nav
+      // (Summaries / Kanban / Activity) was removed; ``/home`` is the
+      // only Work-tab URL. Legacy ``/home/kanban``, ``/home/activity``,
+      // ``/home/summaries``, and ``/home/tasks`` all normalize to
+      // ``/home`` in ``_parsePath``.
       if (this.activeTab === 'workplace') {
-        // Every EXPLICIT Work sub-view gets its own URL so reloads
-        // preserve the user's tab choice. Bare ``/home`` means
-        // "no opinion" — ``_applyDefaultHomeTab`` decides
-        // (summaries by current policy). The kanban arm is gated
-        // on ``homeTabUserChosen`` to avoid canonicalizing bare
-        // ``/home`` into ``/home/kanban`` while the default policy
-        // is still about to fire — without that gate, ``_parsePath``
-        // seeds ``homeTab='kanban'`` as a placeholder on bare
-        // ``/home`` loads, the initial ``_pushUrl`` would emit
-        // ``/home/kanban``, and the URL bar would flicker before
-        // settling on ``/home/summaries`` once the default ran.
-        // The activity/summaries arms don't need the same guard —
-        // their only way of being set is via an explicit deep link
-        // or user click, both of which set ``homeTabUserChosen``.
-        if (this.homeTab === 'activity') return '/home/activity';
-        if (this.homeTab === 'summaries') return '/home/summaries';
-        if (this.homeTab === 'kanban' && this.homeTabUserChosen) {
-          return '/home/kanban';
-        }
         return '/home';
       }
       return '/';
@@ -851,66 +772,24 @@ function dashboard() {
         return (st ? st.label : 'System') + ' \u2014 OpenLegion';
       }
       if (this.activeTab === 'workplace') {
-        return this.homeTab === 'activity' ? 'Activity \u2014 OpenLegion' : 'Work \u2014 OpenLegion';
+        return 'Work \u2014 OpenLegion';
       }
       return 'Team \u2014 OpenLegion';
     },
 
     _parsePath(path) {
       const clean = path.replace(/^\/+/, '').replace(/\/+$/, '');
-      const route = { tab: 'chat', activityView: 'traces', systemTab: 'activity', agentId: null, identityTab: 'config', homeTab: 'kanban' };
+      const route = { tab: 'chat', activityView: 'traces', systemTab: 'activity', agentId: null, identityTab: 'config' };
       if (!clean) return route;
 
       if (clean === 'chat') { route.tab = 'chat'; return route; }
       if (clean === 'agents' || clean.startsWith('agents/')) { route.tab = 'fleet'; }
-      // Phase 4 — Board sub-routing. ``/home`` → kanban (default);
-      // ``/home/activity`` → single-scroll activity feed. Legacy
-      // ``/home/tasks`` (Phase 3 kanban sub-page URL) still resolves
-      // to the kanban — the kanban IS the default now, so old
-      // bookmarks survive without a redirect.
-      // Explicit Work sub-routes all set ``homeTabUserChosen`` so the
-      // post-load ``_applyDefaultHomeTab`` doesn't override a user's
-      // deep link. Bare ``/home`` is the only path that lets the
-      // auto-default decide (currently summaries, unconditional).
-      if (clean === 'home') {
-        // Default landing. Seed ``homeTab='summaries'`` directly
-        // here (matching the always-summaries policy that
-        // ``_applyDefaultHomeTab`` would set after load anyway) so
-        // the initial render lands on summaries without a visual
-        // flicker through the kanban placeholder. Do NOT set
-        // ``homeTabUserChosen`` — the user didn't choose; we
-        // defaulted on their behalf. That distinction matters for
-        // ``_buildPath``'s canonicalization gate.
-        route.tab = 'workplace'; route.homeTab = 'summaries';
-        return route;
-      }
-      // Segment-boundary-safe prefix match: ``startsWith('home/X/')``
-      // (with trailing slash) avoids false matches like
-      // ``home/kanbanabc`` which would otherwise canonicalize to a
-      // different tab.
-      if (clean === 'home/activity' || clean.startsWith('home/activity/')) {
-        route.tab = 'workplace'; route.homeTab = 'activity';
-        route.homeTabUserChosen = true;
-        return route;
-      }
-      if (clean === 'home/summaries' || clean.startsWith('home/summaries/')) {
-        route.tab = 'workplace'; route.homeTab = 'summaries';
-        route.homeTabUserChosen = true;
-        return route;
-      }
-      if (clean === 'home/kanban' || clean.startsWith('home/kanban/')) {
-        // Explicit kanban deep-link, symmetric with the other Work
-        // sub-routes. Without it, clicking the Kanban tab produced
-        // ``/home`` and the user's choice was lost on reload (the
-        // post-load ``_applyDefaultHomeTab`` reverted to summaries).
-        route.tab = 'workplace'; route.homeTab = 'kanban';
-        route.homeTabUserChosen = true;
-        return route;
-      }
-      if (clean === 'home/tasks' || clean.startsWith('home/tasks/')) {
-        // Legacy Phase-3 bookmark — explicit kanban request.
-        route.tab = 'workplace'; route.homeTab = 'kanban';
-        route.homeTabUserChosen = true;
+      // PR 2 of Work tab rewrite — single Work-tab URL. Any /home or
+      // legacy /home/{kanban,activity,summaries,tasks} sub-route
+      // normalizes silently to ``/home`` so old bookmarks survive
+      // without a 404 or visible redirect.
+      if (clean === 'home' || clean.startsWith('home/')) {
+        route.tab = 'workplace';
         return route;
       }
 
@@ -978,18 +857,7 @@ function dashboard() {
               this.systemTab = route.systemTab;
               if (route.systemTab === 'activity') this.activityView = route.activityView;
             }
-            if (route.tab === 'workplace') {
-              this.homeTab = route.homeTab || 'kanban';
-              if (route.homeTabUserChosen) this.homeTabUserChosen = true;
-            }
             this.switchTab(route.tab);
-          } else if (route.tab === 'workplace') {
-            // Phase 4 — already on Board; just sync sub-page state
-            // without re-running loadWorkplace (no new fetch needed).
-            if (this.homeTab !== (route.homeTab || 'kanban')) {
-              this.homeTab = route.homeTab || 'kanban';
-            }
-            if (route.homeTabUserChosen) this.homeTabUserChosen = true;
           } else if (route.tab === 'system') {
             if (this.systemTab !== route.systemTab) {
               if (this.systemTab === 'activity') this._stopActivityRefresh();
@@ -1290,13 +1158,9 @@ function dashboard() {
       this._initTs = Date.now();  // track page load time to skip replayed events
       const cfg = window.__config || {};
 
-      // Restore Phase 1 state from localStorage (side panel + last-Home
-      // visit timestamp). These are cosmetic — losing them is harmless,
-      // so we wrap each in its own try/catch and never block init.
-      try {
-        const v = localStorage.getItem('ol_last_viewed_home');
-        if (v) this._lastViewedHomeTs = parseInt(v, 10) || 0;
-      } catch (e) { /* ignore */ }
+      // Restore Phase 1 state from localStorage (side panel).
+      // Cosmetic — losing it is harmless, so wrap in try/catch and
+      // never block init.
       try {
         const v = localStorage.getItem('ol_messenger_side_panel_open');
         if (v === '1') this.messengerSidePanelOpen = true;
@@ -1908,55 +1772,6 @@ function dashboard() {
     systemTabLabelFor(tab) {
       if (tab.id === 'settings') return 'General';
       return tab.label;
-    },
-
-    /** True when there's a delivered item the user hasn't seen on Home. */
-    get deliveryBannerVisible() {
-      if (this.activeTab !== 'chat') return false;
-      const items = this.recentlyDeliveredItems || [];
-      if (items.length === 0) return false;
-      // ``recentlyDeliveredItems`` rows carry an ``updated_at`` ISO string
-      // (set by ``_recomputeRecentlyDelivered``). Anything newer than the
-      // last Home visit means the user hasn't acknowledged it yet.
-      for (const it of items) {
-        const ts = Date.parse(it.updated_at || it.completed_at || it.created_at || '');
-        if (ts && ts > this._lastViewedHomeTs) return true;
-      }
-      return false;
-    },
-
-    /** Plain-English summary for the delivery banner — newest delivery first. */
-    deliveryBannerSummary() {
-      const items = this.recentlyDeliveredItems || [];
-      if (items.length === 0) return '';
-      // Pick the newest unseen item.
-      let pick = null;
-      let pickTs = 0;
-      for (const it of items) {
-        const ts = Date.parse(it.updated_at || it.completed_at || it.created_at || '');
-        if (ts > this._lastViewedHomeTs && ts > pickTs) {
-          pickTs = ts;
-          pick = it;
-        }
-      }
-      if (!pick) return '';
-      const who = pick.assignee || pick.owner || 'A teammate';
-      const title = (pick.title || 'a task').toString().slice(0, 60);
-      const ageMin = Math.max(1, Math.round((Date.now() - pickTs) / 60000));
-      const ageStr = ageMin < 60 ? `${ageMin}m ago` : `${Math.round(ageMin / 60)}h ago`;
-      return `${who} delivered ${title} ${ageStr} — see on Work →`;
-    },
-
-    /** Mark Home as viewed (clears the delivery banner). */
-    markHomeViewed() {
-      this._lastViewedHomeTs = Date.now();
-      try { localStorage.setItem('ol_last_viewed_home', String(this._lastViewedHomeTs)); } catch (e) { /* ignore */ }
-    },
-
-    /** Banner click handler — switch to Home and ack. */
-    openHomeFromBanner() {
-      this.markHomeViewed();
-      this.switchTab('workplace');
     },
 
     /** Toggle the side-panel messenger (visible on non-Chat tabs). */
@@ -2720,12 +2535,6 @@ function dashboard() {
         this.track('tab_view', { tab_id: tab, from_tab_id: fromTab || '' });
         this._trackFirstAction('tab_view');
       }
-      // Phase 1 — clearing the delivery banner. The Chat banner only
-      // shows when there are deliveries newer than ``_lastViewedHomeTs``;
-      // navigating to Home is the natural "I saw it" signal.
-      if (tab === 'workplace') {
-        this.markHomeViewed();
-      }
       if (tab === 'chat') {
         if (!this.openChats.includes('operator')) {
           this.openChats.push('operator');
@@ -2780,38 +2589,6 @@ function dashboard() {
         }
       }
       if (!this._skipPush) this._pushUrl(false);
-    },
-
-    // Phase 4 — Board sub-page switcher. ``kanban`` is the default
-    // (kanban board with cancel buttons); ``activity`` opens the
-    // single-scroll activity feed. Legacy values (``main``,
-    // ``tasks``) are coerced to the kanban default so old call
-    // sites keep working. Pushes a new history entry so the back
-    // button returns to the previous sub-page (or out of Board
-    // entirely if the user navigated in).
-    switchHomeTab(tabId) {
-      // Accept the three valid sub-nav values; coerce anything else
-      // to the kanban default so legacy call sites keep working.
-      let target = 'kanban';
-      if (tabId === 'activity') target = 'activity';
-      else if (tabId === 'summaries') target = 'summaries';
-      // Push URL whenever EITHER the target changes OR the
-      // user-chosen flag flips false→true. The second case handles
-      // the bare ``/home`` landing: ``_parsePath`` seeded
-      // ``homeTab='summaries'`` without setting userChosen, so the
-      // URL is still bare ``/home``. Clicking the Summaries tab
-      // (or any tab matching the current state) must canonicalize
-      // the URL to ``/home/summaries`` — without this, the early
-      // ``return`` on same-target dropped the canonicalization and
-      // the URL stayed bare ``/home`` despite an explicit user
-      // gesture.
-      const targetChanged = this.homeTab !== target;
-      const userChosenFlipped = !this.homeTabUserChosen;
-      this.homeTab = target;
-      this.homeTabUserChosen = true;
-      if (targetChanged || userChosenFlipped) {
-        this._pushUrl(false);
-      }
     },
 
     switchSystemTab(tabId) {
@@ -2918,15 +2695,10 @@ function dashboard() {
           this.loadWorkplaceTeams(),
           this.loadWorkplaceTasks(),
           this.loadWorkplaceBlockers(),
-          this.loadWorkplaceOutputs(),
-          this.loadWorkplaceFeed(),
           this.loadWorkplacePending(),
           this.loadWorkplaceSummaries(),
+          this.loadWorkplaceGoals(),
         ]);
-        // After all loads settle, pick the default homeTab if the user
-        // hasn't yet chosen one. Teams present → summary cards as the
-        // landing surface (PR-B). Solo / single-team fleets → kanban.
-        this._applyDefaultHomeTab();
       } finally {
         this.workplaceLoading = false;
       }
@@ -2934,19 +2706,16 @@ function dashboard() {
 
     // Per-section retry helper. Banners call ``retryWorkplaceSection``
     // with the section key — we clear the error first so the banner
-    // hides immediately, then re-run the section's loader. Keeping the
-    // dispatch in one place means the banner handlers in the template
-    // stay short ("@click=\"retryWorkplaceSection('feed')\"").
+    // hides immediately, then re-run the section's loader.
     retryWorkplaceSection(section) {
       this.workplaceErrors[section] = '';
       const fn = {
         teams: this.loadWorkplaceTeams,
         tasks: this.loadWorkplaceTasks,
         blockers: this.loadWorkplaceBlockers,
-        outputs: this.loadWorkplaceOutputs,
         pending: this.loadWorkplacePending,
-        feed: this.loadWorkplaceFeed,
         summaries: this.loadWorkplaceSummaries,
+        goals: this.loadWorkplaceGoals,
       }[section];
       if (fn) fn.call(this);
     },
@@ -3001,25 +2770,6 @@ function dashboard() {
         if (serial === this._summariesFetchSerial) {
           this.workplaceSectionLoading.summaries = false;
         }
-      }
-    },
-
-    // Pick the default homeTab on first Work-tab visit. Summaries
-    // is the unconditional default — operator-led strategy view is
-    // the primary mental model at every fleet size, not just at
-    // 30-agent scale. Empty state ("No summaries yet — ask
-    // operator") is the consistent landing for fresh installs. The
-    // sub-nav tab bar makes Kanban + Activity one-click reachable
-    // so the kanban-first power user is never more than a click
-    // away from their view.
-    //
-    // ``homeTabUserChosen`` is respected: an explicit user toggle
-    // or deep-link sub-route (every Work URL except bare ``/home``
-    // sets the flag) overrides the default.
-    _applyDefaultHomeTab() {
-      if (this.homeTabUserChosen) return;
-      if (this.homeTab !== 'summaries') {
-        this.homeTab = 'summaries';
       }
     },
 
@@ -3117,21 +2867,6 @@ function dashboard() {
       delete this.summaryFeedbackDrafts[summaryId];
     },
 
-    // Drill from a summary card into the scoped kanban for that team.
-    // Clears ``workplaceTasks`` BEFORE the sub-nav flip so a stale
-    // unfiltered render can't briefly leak cross-team tasks while
-    // the filtered fetch resolves (codex r1 P2). The skeleton
-    // loader fills the gap.
-    drillIntoTeamKanban(teamName) {
-      this.workplaceTeamFilter = teamName || '';
-      this.workplaceTasks = [];
-      this.workplaceSectionLoading.tasks = true;
-      this.homeTab = 'kanban';
-      this.homeTabUserChosen = true;
-      this.loadWorkplaceTasks();
-      this._pushUrl(false);
-    },
-
     async loadWorkplaceTeams() {
       this.workplaceSectionLoading.teams = true;
       this.workplaceErrors.teams = '';
@@ -3152,11 +2887,13 @@ function dashboard() {
     },
 
     async loadWorkplaceTasks() {
+      // PR 2 — feeds the Stuck Tasks panel and the drill-in modal's
+      // sibling-row updates. The team-filter query param was dropped
+      // along with the kanban surface; pull the unfiltered ledger.
       this.workplaceSectionLoading.tasks = true;
       this.workplaceErrors.tasks = '';
       try {
-        const params = this.workplaceTeamFilter ? `?project_id=${encodeURIComponent(this.workplaceTeamFilter)}` : '';
-        const resp = await fetch(`${window.__config.apiBase}/workplace/tasks${params}`);
+        const resp = await fetch(`${window.__config.apiBase}/workplace/tasks`);
         if (!resp.ok) {
           this.workplaceErrors.tasks = `Couldn't load tasks (HTTP ${resp.status})`;
           return;
@@ -3187,27 +2924,6 @@ function dashboard() {
         this.workplaceErrors.blockers = (e && e.message) ? `Couldn't load blockers: ${e.message}` : "Couldn't load blockers";
       } finally {
         this.workplaceSectionLoading.blockers = false;
-      }
-    },
-
-    async loadWorkplaceOutputs() {
-      this.workplaceSectionLoading.outputs = true;
-      this.workplaceErrors.outputs = '';
-      try {
-        const params = this.workplaceTeamFilter ? `?project_id=${encodeURIComponent(this.workplaceTeamFilter)}` : '';
-        const resp = await fetch(`${window.__config.apiBase}/workplace/outputs${params}`);
-        if (!resp.ok) {
-          this.workplaceErrors.outputs = `Couldn't load outputs (HTTP ${resp.status})`;
-          return;
-        }
-        const data = await resp.json();
-        this.workplaceEnabled = data.enabled !== false;
-        this.workplaceOutputs = data.outputs || [];
-        this._recomputeRecentlyDelivered();
-      } catch (e) {
-        this.workplaceErrors.outputs = (e && e.message) ? `Couldn't load outputs: ${e.message}` : "Couldn't load outputs";
-      } finally {
-        this.workplaceSectionLoading.outputs = false;
       }
     },
 
@@ -3245,67 +2961,71 @@ function dashboard() {
       }
     },
 
-    async loadWorkplaceFeed() {
-      this.workplaceSectionLoading.feed = true;
-      this.workplaceErrors.feed = '';
+    async loadWorkplaceGoals() {
+      // PR 2 — workplace-wide business goals managed by the operator
+      // via ``manage_goals`` (PR 1). Render is a horizontal chip strip
+      // above the Needs You panel; hidden entirely when empty.
+      this.workplaceSectionLoading.goals = true;
+      this.workplaceErrors.goals = '';
       try {
-        const params = this.workplaceTeamFilter ? `?project_id=${encodeURIComponent(this.workplaceTeamFilter)}` : '';
-        const resp = await fetch(`${window.__config.apiBase}/workplace/feed${params}`);
+        const resp = await fetch(`${window.__config.apiBase}/workplace/goals`);
         if (!resp.ok) {
-          this.workplaceErrors.feed = `Couldn't load activity (HTTP ${resp.status})`;
+          this.workplaceErrors.goals = `Couldn't load goals (HTTP ${resp.status})`;
           return;
         }
         const data = await resp.json();
-        this.workplaceEnabled = data.enabled !== false;
-        this.workplaceFeed = data.feed || [];
+        this.workplaceGoals = data.goals || [];
       } catch (e) {
-        this.workplaceErrors.feed = (e && e.message) ? `Couldn't load activity: ${e.message}` : "Couldn't load activity";
+        this.workplaceErrors.goals = (e && e.message)
+          ? `Couldn't load goals: ${e.message}`
+          : "Couldn't load goals";
       } finally {
-        this.workplaceSectionLoading.feed = false;
+        this.workplaceSectionLoading.goals = false;
       }
     },
 
-    workplaceTasksByStatus(status) {
-      // The kanban only has 4 columns (pending/working/blocked/done);
-      // the transient ``accepted`` status — emitted by ``update_status``
-      // when an agent acknowledges a task before they start working —
-      // folds into Pending so it stays visible on the board. Without
-      // this fold, ``accepted`` rows render in zero columns and the
-      // operator can't see (or cancel) them.
-      //
-      // Codex P1.5 (Option A): ``failed`` tasks fold into Done so they
-      // remain visible to the operator. Without this fold they render
-      // in zero columns and disappear from at-a-glance state. The card
-      // visual distinguishes done vs failed via a red border + status
-      // badge so the operator sees the failure (and the blocker_note)
-      // without having to drill in.
-      const tasks = this.workplaceTasks || [];
-      if (status === 'pending') {
-        return tasks.filter(t => t.status === 'pending' || t.status === 'accepted');
+    // PR 2 — Tell Operator. Steering affordance that replaced the
+    // per-task 👍/➖/👎 buttons. POSTs to the operator chat via the
+    // existing ``sendChatTo`` helper; shows a transient "Sent" banner
+    // and clears the textarea on success.
+    //
+    // ``sendChatTo`` absorbs HTTP failures into the chat history
+    // (sets the assistant placeholder's ``role`` to ``error`` or
+    // ``credit_exhausted``) and returns silently rather than
+    // throwing — so a try/catch around the call wouldn't catch a
+    // 4xx/5xx POST. Detect failure by inspecting the assistant
+    // placeholder's role after the call returns. The user message
+    // is pushed at length-2 and the assistant placeholder at
+    // length-1; we check the tail.
+    async submitTellOperator() {
+      const text = (this.tellOperatorText || '').trim();
+      if (!text || this.tellOperatorInflight) return;
+      this.tellOperatorInflight = true;
+      this.tellOperatorConfirmation = '';
+      try {
+        await this.sendChatTo('operator', text);
+        const history = this.chatHistories['operator'] || [];
+        const tail = history[history.length - 1];
+        const failed = tail && (
+          tail.role === 'error' || tail.role === 'credit_exhausted'
+        );
+        if (failed) {
+          this.tellOperatorConfirmation = (
+            tail.role === 'credit_exhausted'
+              ? 'Send failed — operator out of credit.'
+              : 'Send failed — try again.'
+          );
+          setTimeout(() => { this.tellOperatorConfirmation = ''; }, 5000);
+        } else {
+          this.tellOperatorText = '';
+          this.tellOperatorConfirmation = "Sent — open Chat tab to see operator's response.";
+          setTimeout(() => { this.tellOperatorConfirmation = ''; }, 5000);
+        }
+      } catch (e) {
+        this.tellOperatorConfirmation = 'Send failed — try again.';
+      } finally {
+        this.tellOperatorInflight = false;
       }
-      if (status === 'done') {
-        return tasks.filter(t => t.status === 'done' || t.status === 'failed');
-      }
-      return tasks.filter(t => t.status === status);
-    },
-
-    // Icon for an activity feed entry. Plain text glyphs keep the
-    // template emoji-free; tweak here without touching the markup.
-    workplaceFeedIcon(eventType, taskStatus) {
-      if (eventType === 'created') return '+';
-      if (eventType === 'rerouted') return '→';
-      if (eventType === 'cancelled') return '✕';
-      if (eventType === 'artifact_added') return '▻';
-      if (eventType === 'task_outcome') return '★';
-      if (eventType === 'status_changed') {
-        if (taskStatus === 'done') return '✓';
-        if (taskStatus === 'blocked') return '⚠';
-        if (taskStatus === 'failed') return '✕';
-        if (taskStatus === 'cancelled') return '✕';
-        if (taskStatus === 'working') return '▶';
-        return '●';
-      }
-      return '●';
     },
 
     // ── Task drill-in modal (PR 4) ────────────────────────
@@ -3422,16 +3142,14 @@ function dashboard() {
           this.drillInError = data.detail || `Submit failed (HTTP ${resp.status})`;
           return;
         }
-        // Optimistically reflect outcome in the local lists so the
-        // kanban / outputs tab shows the rating without waiting for
-        // the next reload.
+        // Optimistically reflect outcome in workplaceTasks so the
+        // Stuck Tasks panel reflects the rating without waiting for
+        // the next reload. (PR 2 dropped ``workplaceOutputs``.)
         const updated = data.task || {};
-        for (const list of [this.workplaceTasks, this.workplaceOutputs]) {
-          const row = (list || []).find(r => r.id === this.drillInTaskId);
-          if (row) {
-            row.outcome = updated.outcome || outcome;
-            row.feedback_text = updated.feedback_text ?? (this.drillInComment || null);
-          }
+        const row = (this.workplaceTasks || []).find(r => r.id === this.drillInTaskId);
+        if (row) {
+          row.outcome = updated.outcome || outcome;
+          row.feedback_text = updated.feedback_text ?? (this.drillInComment || null);
         }
         if (outcome === 'rework' && data.rework_task_id) {
           this.showToast(`Rework task created${data.rework_assignee ? ' for ' + data.rework_assignee : ''}.`);
@@ -3652,41 +3370,10 @@ function dashboard() {
         });
       }
 
-      // Unrated deliveries — synthetic singleton entry. The user's
-      // primary feedback signal is the rating on completed work, so we
-      // surface a "N deliveries need rating" nudge once any of the
-      // Recently Delivered cards are unrated. Click jumps to the
-      // Activity sub-tab where the cards (with inline rating buttons)
-      // live.
-      const unrated = (this.recentlyDeliveredItems || []).filter(t => !t.outcome).length;
-      if (unrated > 0) {
-        items.push({
-          id: 'unrated-deliveries',
-          kind: 'unrated',
-          icon: '?',
-          title: unrated === 1
-            ? '1 delivery needs your rating'
-            : `${unrated} deliveries need your rating`,
-          subtitle: this._needsYouSubtitle({ text: 'Thumbs up, neutral, or rework' }),
-          actions: [
-            {
-              label: 'Review',
-              style: 'indigo',
-              handler: () => {
-                this.activeTab = 'workplace';
-                this.homeTab = 'activity';
-                // Scroll the first unrated card into view next tick so
-                // the user lands directly on the rating buttons.
-                requestAnimationFrame(() => {
-                  const el = document.querySelector('[data-testid="home-just-delivered"]');
-                  if (el && el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                });
-              },
-            },
-          ],
-        });
-      }
-
+      // PR 2 of Work tab rewrite — the legacy "N deliveries need
+      // your rating" synthetic Needs You item was removed along with
+      // the per-task rating UI. The operator now rates programmatically
+      // via ``rate_delivery`` on each heartbeat.
       return items;
     },
 
@@ -3841,261 +3528,7 @@ function dashboard() {
       return n;
     },
 
-    // Inline rate handler for the "Recently delivered" cards. Reuses
-    // the dashboard ``/workplace/tasks/{id}/outcome`` endpoint that the
-    // drillIn modal hits. Optimistically updates the local row so the
-    // buttons collapse to a rating chip without waiting for the
-    // ``task_outcome`` event round-trip.
-    //
-    // ``outcome``: 'accepted' | 'acknowledged' | 'rework'
-    //   - 'accepted' / 'acknowledged' send no feedback (silent rating).
-    //   - 'rework' opens the inline textarea; this method is called
-    //     with the comment populated.
-    async rateDelivery(taskId, outcome, feedback = '') {
-      if (!taskId) return;
-      if (this._rateDeliveryInflight[taskId]) return;
-      this._rateDeliveryInflight[taskId] = true;
-      try {
-        const resp = await fetch(
-          `${window.__config.apiBase}/workplace/tasks/${encodeURIComponent(taskId)}/outcome`,
-          {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'X-Requested-With': 'XMLHttpRequest',
-            },
-            body: JSON.stringify({ outcome, feedback: feedback || '' }),
-          }
-        );
-        const data = await resp.json().catch(() => ({}));
-        if (!resp.ok) {
-          this.showToast(data.detail || `Rate failed (HTTP ${resp.status})`);
-          return;
-        }
-        // Optimistic write-back so the card flips to "Rated" without
-        // waiting on the next ``task_outcome`` WebSocket event.
-        const updated = data.task || {};
-        for (const list of [this.workplaceTasks, this.workplaceOutputs, this.recentlyDeliveredItems]) {
-          const row = (list || []).find(r => r.id === taskId);
-          if (row) {
-            row.outcome = updated.outcome || outcome;
-            row.feedback_text = updated.feedback_text ?? (feedback || null);
-          }
-        }
-        // Clear the per-card inline rework state if it was open.
-        delete this._inlineReworkOpen[taskId];
-        delete this._inlineReworkText[taskId];
-        if (outcome === 'rework' && data.rework_task_id) {
-          this.showToast(`Rework task created${data.rework_assignee ? ' for ' + data.rework_assignee : ''}.`);
-        } else if (outcome === 'rework' && data.rework_error) {
-          this.showToast(`Rework noted but follow-up task could not be spawned: ${data.rework_error}`);
-        } else {
-          this.showToast(`Rated: ${this.drillInOutcomeLabel(outcome) || outcome}.`);
-        }
-      } catch (e) {
-        this.showToast(`Rate failed: ${e.message || e}`);
-      } finally {
-        delete this._rateDeliveryInflight[taskId];
-      }
-    },
-
-    // ``_inlineReworkOpen`` / ``_inlineReworkText`` / ``_rateDeliveryInflight``
-    // declared in the data section above so Alpine treats them as
-    // reactive state. Method below just read/write them.
-    inlineReworkIsOpen(taskId) {
-      return !!(this._inlineReworkOpen && this._inlineReworkOpen[taskId]);
-    },
-
-    openInlineRework(taskId) {
-      this._inlineReworkOpen[taskId] = true;
-    },
-
-    closeInlineRework(taskId) {
-      delete this._inlineReworkOpen[taskId];
-      delete this._inlineReworkText[taskId];
-    },
-
-    inlineReworkText(taskId) {
-      return (this._inlineReworkText && this._inlineReworkText[taskId]) || '';
-    },
-
-    setInlineReworkText(taskId, value) {
-      this._inlineReworkText[taskId] = value;
-    },
-
-    submitInlineRework(taskId) {
-      const text = (this.inlineReworkText(taskId) || '').trim();
-      if (!text) {
-        this.showToast('Add a brief — what should change in the rework?');
-        return;
-      }
-      this.rateDelivery(taskId, 'rework', text);
-    },
-
-    // Recompute the memoised "Recently delivered" slice. Called whenever
-    // ``workplaceOutputs`` is refreshed. Coerces ``completed_at`` so the
-    // filter survives string timestamps and clock-skew-induced future
-    // values, then caps at 5 and sorts most-recent-first.
-    _recomputeRecentlyDelivered(limit = 5, days = 7) {
-      const cutoff = (Date.now() / 1000) - days * 86400;
-      const rows = [];
-      for (const t of (this.workplaceOutputs || [])) {
-        const sec = this._coerceCompletedAtSeconds(t.completed_at);
-        if (sec >= cutoff) {
-          // Spread + override so the original row isn't mutated and the
-          // template can still rely on ``completed_at`` being numeric
-          // seconds (its formatRelativeTime call multiplies by 1000).
-          rows.push({ ...t, completed_at: sec });
-        }
-      }
-      rows.sort((a, b) => (b.completed_at || 0) - (a.completed_at || 0));
-      this.recentlyDeliveredItems = rows.slice(0, limit);
-    },
-
-    // Back-compat shim — older callers and any future expressions should
-    // read ``recentlyDeliveredItems`` directly. Kept thin so the data
-    // field remains the single source of truth for the template.
-    recentlyDelivered() {
-      return this.recentlyDeliveredItems;
-    },
-
-    // Lazy-fetch the artifact bundle for a "Recently delivered" row so
-    // the user can read the actual output without opening the modal.
-    // The /api/workplace/tasks/{id} endpoint already returns each
-    // artifact_ref resolved to ``{kind, content, content_truncated}``
-    // (see _resolve_artifact in dashboard/server.py); we cache the
-    // first text artifact per task_id. Errors are stored on the same
-    // cache entry so a failed fetch surfaces inline rather than the
-    // row going blank.
-    async _ensureRecentlyDeliveredArtifact(taskId) {
-      if (!taskId) return;
-      if (this.recentlyDeliveredArtifacts[taskId] !== undefined) return;
-      if (this._recentlyDeliveredFetching[taskId]) return;
-      this._recentlyDeliveredFetching[taskId] = true;
-      try {
-        const resp = await fetch(`${window.__config.apiBase}/workplace/tasks/${encodeURIComponent(taskId)}`);
-        if (!resp.ok) {
-          this.recentlyDeliveredArtifacts[taskId] = { error: `HTTP ${resp.status}` };
-          return;
-        }
-        const data = await resp.json();
-        const arts = (data && data.artifacts) || [];
-        // Pick the first text artifact for the inline preview; non-text
-        // (image / pdf / missing / error) keeps the prior link-out
-        // behavior because we can't render bytes inline here.
-        const text = arts.find(a => a && a.kind === 'text' && typeof a.content === 'string');
-        if (text) {
-          this.recentlyDeliveredArtifacts[taskId] = {
-            ref: text.ref,
-            content: text.content,
-            content_truncated: !!text.content_truncated,
-            kind: 'text',
-          };
-        } else if (arts.length) {
-          // Surface the first non-text artifact's kind so the row can
-          // hint at what's there (image/pdf/missing) without crashing.
-          this.recentlyDeliveredArtifacts[taskId] = {
-            ref: arts[0].ref,
-            kind: arts[0].kind || 'unknown',
-            error: arts[0].error || null,
-          };
-        } else {
-          this.recentlyDeliveredArtifacts[taskId] = { kind: 'none' };
-        }
-      } catch (e) {
-        this.recentlyDeliveredArtifacts[taskId] = { error: (e && e.message) || 'fetch failed' };
-      } finally {
-        delete this._recentlyDeliveredFetching[taskId];
-      }
-    },
-
-    // Template helper: short preview (~300 chars) shown by default.
-    // Returns '' when the artifact isn't text or hasn't loaded yet so
-    // the template can hide the preview block until content arrives.
-    recentlyDeliveredPreview(taskId) {
-      const a = this.recentlyDeliveredArtifacts[taskId];
-      if (!a || a.kind !== 'text' || !a.content) return '';
-      const PREVIEW_CAP = 300;
-      if (a.content.length <= PREVIEW_CAP) return a.content;
-      return a.content.slice(0, PREVIEW_CAP) + '…';
-    },
-
-    // Template helper: full content for the expanded view. Falls back
-    // to '' when the artifact isn't text so the toggle can hide
-    // gracefully on non-text artifacts.
-    recentlyDeliveredFull(taskId) {
-      const a = this.recentlyDeliveredArtifacts[taskId];
-      if (!a || a.kind !== 'text') return '';
-      return a.content || '';
-    },
-
-    // True when the artifact has more than the preview cap so the
-    // "Read full" toggle should be shown. Hidden when the content fits
-    // entirely in the preview, when the artifact isn't text, or while
-    // it's still loading.
-    recentlyDeliveredHasMore(taskId) {
-      const a = this.recentlyDeliveredArtifacts[taskId];
-      if (!a || a.kind !== 'text' || !a.content) return false;
-      return a.content.length > 300;
-    },
-
-    toggleRecentlyDeliveredExpanded(taskId) {
-      this.recentlyDeliveredExpanded[taskId] = !this.recentlyDeliveredExpanded[taskId];
-    },
-
-    // Copy the artifact's full text to the clipboard. Uses the modern
-    // clipboard API when available (HTTPS / localhost) and falls back
-    // to a hidden textarea + execCommand for older browsers and the
-    // insecure-context case (file://). The toast feedback comes from
-    // the existing showToast helper so the user sees confirmation
-    // without us inventing a new banner.
-    async copyRecentlyDeliveredText(taskId) {
-      const text = this.recentlyDeliveredFull(taskId);
-      if (!text) return;
-      try {
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          await navigator.clipboard.writeText(text);
-        } else {
-          const ta = document.createElement('textarea');
-          ta.value = text;
-          ta.setAttribute('readonly', '');
-          ta.style.position = 'absolute';
-          ta.style.left = '-9999px';
-          document.body.appendChild(ta);
-          ta.select();
-          document.execCommand('copy');
-          document.body.removeChild(ta);
-        }
-        if (typeof this.showToast === 'function') this.showToast('Copied to clipboard', 2000);
-      } catch (e) {
-        if (typeof this.showToast === 'function') this.showToast('Copy failed', 3000);
-      }
-    },
-
-    // Kanban filter — drop pending/blocked rows older than 14 days
-    // unless the operator opted in for this column. Other statuses
-    // (working/done/accepted) aren't archived: completed work belongs
-    // in the Outputs tab and active work shouldn't disappear.
-    workplaceTasksByStatusFiltered(status) {
-      const all = this.workplaceTasksByStatus(status);
-      if (status !== 'pending' && status !== 'blocked') return all;
-      if (this.boardShowArchived[status]) return all;
-      const cutoff = (Date.now() / 1000) - 14 * 86400;
-      return all.filter(t => {
-        const created = typeof t.created_at === 'number'
-          ? t.created_at
-          : (t.created_at ? new Date(t.created_at).getTime() / 1000 : 0);
-        return !created || created >= cutoff;
-      });
-    },
-
-    workplaceArchivedCount(status) {
-      const total = this.workplaceTasksByStatus(status).length;
-      const visible = this.workplaceTasksByStatusFiltered(status).length;
-      return Math.max(0, total - visible);
-    },
-
-    // Phase 4 — title truncation for kanban cards + Stuck tasks
+    // PR 2 — title truncation for the Stuck tasks panel and drill-in
     // panel. Long titles (some agents accidentally hand off with
     // their full instruction text — ~250 chars seen in production)
     // wreck the kanban grid; truncate to 80 chars + ellipsis on
@@ -4156,20 +3589,6 @@ function dashboard() {
       // Oldest first so the most painful entries surface at the top.
       out.sort((a, b) => b.stuck_seconds - a.stuck_seconds);
       return out;
-    },
-
-    // Phase 4 — kanban activity feed noise filter. The legacy
-    // /workplace/feed payload includes ``status_unchanged`` rows
-    // (emitted when the same status is reported twice — typically
-    // from a heartbeat probe re-affirming "still working"). Those
-    // rows are pure implementation noise from the user's POV; we
-    // hide them by default and surface them only when
-    // ``showTechDetail`` is on. Preserves the original ``workplaceFeed``
-    // array so the WS plumbing keeps appending to one source of truth.
-    get workplaceFeedVisible() {
-      const feed = this.workplaceFeed || [];
-      if (this.showTechDetail) return feed;
-      return feed.filter(ev => ev && ev.event_type !== 'status_unchanged');
     },
 
     // Phase 4 — task cancel modal state. ``cancelTaskCandidate`` is
@@ -4566,8 +3985,8 @@ function dashboard() {
       if (!evt || !evt.type) return;
       const data = evt.data || {};
       if (evt.type === 'task_created') {
-        // Add stub row so the kanban shows the task immediately;
-        // background reload will fill in the rest.
+        // Add stub row so the Stuck Tasks panel + drill-in see it
+        // immediately; background reload fills in the rest.
         const stub = {
           id: data.task_id,
           project_id: data.project_id,
@@ -4580,7 +3999,6 @@ function dashboard() {
         if (!this.workplaceTasks.find(t => t.id === stub.id)) {
           this.workplaceTasks.unshift(stub);
         }
-        this._pushWorkplaceFeedFromEvent('created', data, stub);
       } else if (evt.type === 'task_status_changed') {
         const t = this.workplaceTasks.find(x => x.id === data.task_id);
         const prevStatus = t ? t.status : (data.from_status || data.old_status || '');
@@ -4589,13 +4007,8 @@ function dashboard() {
           if (data.assignee) t.assignee = data.assignee;
           if (data.blocker_note !== undefined) t.blocker_note = data.blocker_note;
         }
-        // Surface in feed too. Background reload is source of truth on
-        // reconnect; the client-built summary is best-effort.
-        this._pushWorkplaceFeedFromEvent('status_changed', data, t);
         // Pinned blockers list lives on a separate endpoint; refresh it
-        // whenever a task transitions in to or out of ``blocked`` (or
-        // when its blocker note may have changed) so the strip at the
-        // top of the feed doesn't go stale.
+        // whenever a task transitions in to or out of ``blocked``.
         const newStatus = data.new_status || '';
         if (
           prevStatus === 'blocked'
@@ -4604,16 +4017,14 @@ function dashboard() {
           this.loadWorkplaceBlockers();
         }
       } else if (evt.type === 'task_outcome') {
-        // Reflect the rating across every list that may show this
-        // task. Background reload remains the source of truth.
-        for (const list of [this.workplaceTasks, this.workplaceOutputs]) {
-          const row = (list || []).find(r => r.id === data.task_id);
-          if (row) {
-            row.outcome = data.outcome;
-            row.feedback_text = data.feedback || row.feedback_text || null;
-          }
+        // Reflect the rating in ``workplaceTasks`` (Stuck panel) and
+        // the open drill-in modal. Background reload is source of
+        // truth on reconnect.
+        const row = (this.workplaceTasks || []).find(r => r.id === data.task_id);
+        if (row) {
+          row.outcome = data.outcome;
+          row.feedback_text = data.feedback || row.feedback_text || null;
         }
-        // If this task is open in the drill-in modal, sync it too.
         if (this.drillInData?.task && this.drillInData.task.id === data.task_id) {
           this.drillInData.task.outcome = data.outcome;
           this.drillInData.task.feedback_text = data.feedback || null;
@@ -4745,63 +4156,6 @@ function dashboard() {
       } else if (evt.type === 'pending_action_expired') {
         this.workplacePending = this.workplacePending.filter(p => p.nonce !== data.nonce);
         this._resolvePendingActionCard(data.nonce, 'expired');
-      }
-    },
-
-    // Build a feed entry from a live WS event and prepend it. Caps the
-    // in-memory feed so long-lived sessions don't grow unbounded; the
-    // periodic full reload is the source of truth.
-    _pushWorkplaceFeedFromEvent(eventType, data, taskHint) {
-      if (!data || !data.task_id) return;
-      const t = taskHint || this.workplaceTasks.find(x => x.id === data.task_id) || {};
-      const title = data.title || t.title || '(untitled)';
-      const projectId = data.project_id || t.project_id || '';
-      const assignee = data.assignee || t.assignee || '';
-      const actor = data.actor || data.creator || data.assignee || 'unknown';
-      const status = data.new_status || t.status || '';
-      let summary;
-      if (eventType === 'created') {
-        const forWho = assignee ? ` for ${assignee}` : '';
-        const where = projectId ? ` in project ${projectId}` : '';
-        summary = `${actor} created task '${title}'${forWho}${where}`;
-      } else if (status === 'done') {
-        summary = `${actor} completed task '${title}'`;
-      } else if (status === 'blocked') {
-        const note = data.blocker_note || '';
-        summary = `${actor} marked task '${title}' as blocked${note ? ': ' + note : ''}`;
-      } else if (status === 'failed') {
-        // Bug 3 fix: surface blocker_note on failed transitions so an
-        // operator can see *why* a task died without digging into
-        // workflow_snapshot or the back-edge inbox. Mirrors the blocked
-        // branch's rendering — same column, broader semantic.
-        const note = data.blocker_note || '';
-        summary = `${actor} failed task '${title}'${note ? ': ' + note : ''}`;
-      } else if (status === 'cancelled') {
-        const reason = data.reason ? ` (${data.reason})` : '';
-        summary = `${actor} cancelled task '${title}'${reason}`;
-      } else if (status === 'working') {
-        summary = `${actor} started task '${title}'`;
-      } else if (status === 'accepted') {
-        summary = `${actor} accepted task '${title}'`;
-      } else {
-        summary = `${actor} ${eventType} on task '${title}'`;
-      }
-      const entry = {
-        event_id: `live-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        event_type: eventType,
-        task_id: data.task_id,
-        task_title: title,
-        project_id: projectId,
-        assignee: assignee,
-        actor: actor,
-        task_status: status,
-        blocker_note: data.blocker_note || '',
-        timestamp: Date.now() / 1000,
-        summary,
-      };
-      this.workplaceFeed.unshift(entry);
-      if (this.workplaceFeed.length > this.workplaceFeedCap) {
-        this.workplaceFeed.length = this.workplaceFeedCap;
       }
     },
 
@@ -11685,7 +11039,7 @@ function dashboard() {
     },
 
     // Icon glyph for the notification kind. Plain text glyphs keep
-    // the markup emoji-free (matches workplaceFeedIcon convention).
+    // the markup emoji-free.
     notificationKindIcon(kind) {
       switch (kind) {
         case 'delivered': return '★';

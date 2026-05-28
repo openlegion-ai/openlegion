@@ -439,27 +439,6 @@
                 </div>
               </div>
 
-              <!-- Phase 1 — delivery banner. Slim slip above the message
-                   list when there's a delivery on Home the user hasn't
-                   seen. ``deliveryBannerVisible`` gates on
-                   ``activeTab === 'chat'``, so we stay invisible when
-                   the user is already on Home. Click → switch to Home
-                   and ack. -->
-              <div x-show="deliveryBannerVisible" x-cloak data-delivery-banner
-                @click="openHomeFromBanner()"
-                role="button" tabindex="0"
-                @keydown.enter.prevent="openHomeFromBanner()"
-                @keydown.space.prevent="openHomeFromBanner()"
-                class="mx-4 mt-2 mb-1 px-3 py-2 rounded-lg bg-indigo-900/30 border border-indigo-700/50 hover:bg-indigo-900/50 hover:border-indigo-600/70 cursor-pointer flex items-center gap-2 transition-colors">
-                <svg class="w-4 h-4 text-indigo-300 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <path d="M3 8l7.89 5.26a2 2 0 0 0 2.22 0L21 8M5 19h14a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2z"/>
-                </svg>
-                <span class="text-xs text-indigo-200 flex-1 truncate" x-text="deliveryBannerSummary()"></span>
-                <svg class="w-3 h-3 text-indigo-300 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <path d="M9 5l7 7-7 7"/>
-                </svg>
-              </div>
-
               <!-- Pending operator-proposed actions render inline as
                    ``pending_action_card`` chat messages (see template
                    below) — matching the credential / browser-login /
@@ -4021,69 +4000,36 @@
             x-text="'Show ' + (needsYouItems.length - needsYouCollapsedCap) + ' more'"></button>
         </section>
 
-        <!-- Work-tab sub-nav. Summaries is the unconditional default
-             landing surface (operator-led strategy view, scale-
-             independent). Kanban + Activity are equal-billing tabs
-             reachable in one click. The legacy "View ... →" footer
-             links + the "Back to Work" activity-back button were
-             removed when this bar landed — the tab bar replaces
-             both as a single, always-visible nav affordance. The
-             "Back to team summaries" + filter-chip block below
-             stays because it represents FILTER state, not view
-             state — clicking the Kanban tab alone doesn't clear
-             ``workplaceTeamFilter``. -->
-        <nav class="mb-3 flex items-center gap-1 border-b border-gray-700/40"
-             role="tablist" data-testid="workplace-subnav">
-          <button type="button" role="tab"
-            :aria-selected="homeTab === 'summaries'"
-            @click="switchHomeTab('summaries')"
-            data-testid="workplace-subnav-summaries"
-            class="px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors"
-            :class="homeTab === 'summaries'
-              ? 'border-indigo-400 text-indigo-200'
-              : 'border-transparent text-gray-400 hover:text-gray-200'">
-            Summaries
-          </button>
-          <button type="button" role="tab"
-            :aria-selected="homeTab === 'kanban'"
-            @click="switchHomeTab('kanban')"
-            data-testid="workplace-subnav-kanban"
-            class="px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors"
-            :class="homeTab === 'kanban'
-              ? 'border-indigo-400 text-indigo-200'
-              : 'border-transparent text-gray-400 hover:text-gray-200'">
-            Kanban
-          </button>
-          <button type="button" role="tab"
-            :aria-selected="homeTab === 'activity'"
-            @click="switchHomeTab('activity')"
-            data-testid="workplace-subnav-activity"
-            class="px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors"
-            :class="homeTab === 'activity'
-              ? 'border-indigo-400 text-indigo-200'
-              : 'border-transparent text-gray-400 hover:text-gray-200'">
-            Activity
-          </button>
-        </nav>
-
-        <!-- PR-B: Back link when viewing the kanban under a team filter
-             (reached via "Expand task list" from a summary card). The
-             user came from summaries — let them get back without
-             touching the URL bar. -->
-        <div x-show="homeTab === 'kanban' && workplaceTeamFilter"
-             x-cloak class="mb-3 flex items-center justify-between gap-2">
-          <button type="button"
-            @click="workplaceTeamFilter = ''; switchHomeTab('summaries'); loadWorkplaceTasks();"
-            class="text-[12px] text-gray-400 hover:text-gray-200 inline-flex items-center gap-1 transition-colors"
-            data-testid="home-back-to-summaries">
-            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
-            Back to team summaries
-          </button>
-          <span class="text-[11px] text-gray-500"
-                data-testid="kanban-team-filter-label">
-            Filtered: <span class="text-gray-300" x-text="workplaceTeamFilter"></span>
-          </span>
-        </div>
+        <!-- Goals strip (PR 2 of Work tab rewrite). Operator-managed
+             workplace-wide business goals, read-only from this surface
+             (the user steers via the Tell Operator box below; the
+             operator runs the actual ``manage_goals`` writes). Hidden
+             entirely when no goals are tracked — discoverable via
+             Tell Operator, no empty-state CTA. -->
+        <section x-show="workplaceGoals.length > 0" x-cloak
+          data-testid="workplace-goals-strip"
+          role="list" aria-label="Tracked business goals"
+          class="mb-3 flex flex-wrap items-center gap-2">
+          <span class="text-xs uppercase tracking-wide text-gray-400 mr-1">Goals</span>
+          <template x-for="g in workplaceGoals" :key="g.name">
+            <span role="listitem"
+              :aria-label="g.name + ' — ' + g.status"
+              :title="g.status + (g.progress_note ? ': ' + g.progress_note : '')"
+              class="inline-flex items-center gap-1.5 text-[11px] px-2 py-0.5 rounded-full bg-gray-800/60 border border-gray-700/50"
+              :class="g.status === 'done' ? 'text-gray-400 line-through' : 'text-gray-200'"
+              data-testid="workplace-goal-chip">
+              <span class="w-1.5 h-1.5 rounded-full shrink-0"
+                :class="{
+                  'bg-gray-400': g.status === 'not_started' || g.status === 'done',
+                  'bg-blue-400': g.status === 'in_progress',
+                  'bg-green-400': g.status === 'on_track',
+                  'bg-amber-400': g.status === 'at_risk',
+                  'bg-red-400': g.status === 'blocked',
+                }"></span>
+              <span x-text="g.name"></span>
+            </span>
+          </template>
+        </section>
 
         <!-- Empty state when orchestration v2 is disabled -->
         <template x-if="!workplaceEnabled">
@@ -4095,16 +4041,16 @@
           </div>
         </template>
 
-        <!-- PR-B — Summary cards (homeTab === 'summaries'). Default
-             landing when ≥1 team exists. One card per team renders
-             the operator-composed daily summary: narrative (rendered
-             markdown), metrics row, recommendations bullet list, and
-             👍 / ➖ / 👎 rating buttons. 👎 opens an inline feedback
-             box; submission feeds the next summary's prompt. The
-             "Expand task list →" disclosure drills into the kanban
-             pre-filtered to that team — same kanban code, just scoped.
+        <!-- Summary cards — primary content of the Work tab. One card
+             per team renders the operator-composed daily summary:
+             narrative (rendered markdown), recommendations bullet list,
+             and 👍 / ➖ / 👎 rating buttons. 👎 opens an inline feedback
+             box; submission feeds the next summary's prompt. PR 2 of
+             the Work tab rewrite removed the sub-nav, kanban, and
+             activity surfaces — the summary view is now the
+             unconditional landing surface when the Work tab is open.
         -->
-        <template x-if="workplaceEnabled && homeTab === 'summaries'">
+        <template x-if="workplaceEnabled">
           <div class="space-y-3" data-testid="workplace-summaries-view">
             <!-- Error banner (retry path matches the other sections) -->
             <template x-if="workplaceErrors.summaries">
@@ -4184,19 +4130,7 @@
                 </template>
 
                 <!-- Footer: rating buttons (unrated) or outcome chip (rated). -->
-                <div class="flex items-center justify-between gap-2 pt-2 border-t border-gray-700/30">
-                  <!-- Drill-in to scoped kanban -->
-                  <button type="button"
-                    x-show="s.scope_kind === 'team'"
-                    @click="drillIntoTeamKanban(s.scope_id)"
-                    class="text-[11px] text-indigo-300 hover:text-indigo-100 inline-flex items-center gap-1 transition-colors"
-                    data-testid="summary-expand-tasks">
-                    Expand task list &rarr;
-                  </button>
-                  <div x-show="s.scope_kind !== 'team'" class="text-[11px] text-gray-500">
-                    Solo agent — no scoped kanban
-                  </div>
-
+                <div class="flex items-center justify-end gap-2 pt-2 border-t border-gray-700/30">
                   <!-- Rating buttons (only when unrated) -->
                   <template x-if="!s.rating">
                     <div class="flex items-center gap-1"
@@ -4271,350 +4205,47 @@
           </div>
         </template>
 
-        <!-- Phase 4 — Activity sub-page (homeTab === 'activity'). The
-             legacy Phase 3 single-scroll layout: Just delivered
-             (recentlyDeliveredItems), Happening now (workplaceFeed,
-             capped at 5 with disclosure), and In progress (a 4-card
-             slice of workplaceTasks). The kanban is now the default
-             board; this page is reached via the "View activity feed →"
-             link below the kanban. Empty sections hide entirely so an
-             idle activity feed has no extra chrome. -->
-        <template x-if="workplaceEnabled && homeTab === 'activity'">
-          <div class="space-y-4" data-testid="home-activity">
-            <!-- Just delivered — last 7 days of completed outputs.
-                 Replaces the legacy ``team-outputs`` sub-tab; kept inline
-                 with a drill-in for the full artifact preview. -->
-            <template x-if="recentlyDeliveredItems.length">
-              <div data-testid="home-just-delivered">
-                <div class="flex items-center justify-between mb-1.5">
-                  <div class="text-[11px] uppercase tracking-wide text-gray-500 font-medium">Just delivered</div>
-                </div>
-                <div class="space-y-1.5">
-                  <template x-for="t in recentlyDeliveredItems" :key="'rd-' + t.id">
-                    <!-- x-init lazy-fetches the artifact bundle on first
-                         render so the inline preview shows up without
-                         the user having to open the drill-in modal.
-                         The fetch is cached per task_id so flipping
-                         sub-tabs back and forth doesn't refetch. -->
-                    <div class="bg-gray-800/40 border border-gray-700/50 rounded-md px-2.5 py-1.5"
-                         x-init="t.artifact_refs && t.artifact_refs.length && _ensureRecentlyDeliveredArtifact(t.id)">
-                      <div class="flex items-center gap-2">
-                        <span class="text-emerald-400 text-xs shrink-0">&check;</span>
-                        <div class="min-w-0 flex-1 text-xs text-gray-200 truncate" x-text="t.title || '(untitled)'"></div>
-                        <div class="text-[11px] text-gray-500 hidden sm:block shrink-0" x-text="(t.assignee || '') + (t.completed_at ? ' · ' + (formatRelativeTime((t.completed_at || 0) * 1000) || 'just now') : '')"></div>
-                        <!-- Inline rating buttons. Hidden once the task
-                             carries an ``outcome`` — the rating chip
-                             shows instead. ``rateDelivery`` posts to
-                             the existing /workplace/tasks/{id}/outcome
-                             endpoint; the optimistic update flips this
-                             group to the chip without waiting on a
-                             round-trip. -->
-                        <template x-if="!t.outcome">
-                          <div class="flex items-center gap-1 shrink-0" data-testid="rate-buttons">
-                            <button type="button"
-                              @click.stop="rateDelivery(t.id, 'accepted')"
-                              title="Accept — looks good"
-                              aria-label="Accept this delivery"
-                              class="text-sm px-1.5 py-0.5 rounded hover:bg-emerald-500/20 text-emerald-300">&#x1F44D;</button>
-                            <button type="button"
-                              @click.stop="rateDelivery(t.id, 'acknowledged')"
-                              title="Acknowledge — reviewed without judgement"
-                              aria-label="Acknowledge this delivery without judgement"
-                              class="text-sm px-1.5 py-0.5 rounded hover:bg-gray-500/20 text-gray-400">&#x2796;</button>
-                            <button type="button"
-                              @click.stop="openInlineRework(t.id)"
-                              title="Needs rework — add a brief"
-                              aria-label="Mark this delivery for rework"
-                              class="text-sm px-1.5 py-0.5 rounded hover:bg-amber-500/20 text-amber-300">&#x1F44E;</button>
-                          </div>
-                        </template>
-                        <template x-if="t.outcome">
-                          <span class="text-[10px] px-1.5 py-0.5 rounded shrink-0"
-                                :class="t.outcome === 'accepted' ? 'bg-emerald-900/40 text-emerald-300 border border-emerald-700/40' : (t.outcome === 'rework' ? 'bg-amber-900/40 text-amber-300 border border-amber-700/40' : (t.outcome === 'rejected' ? 'bg-rose-900/40 text-rose-300 border border-rose-700/40' : 'bg-gray-700/40 text-gray-300 border border-gray-600/40'))"
-                                x-text="drillInOutcomeLabel(t.outcome) || t.outcome"></span>
-                        </template>
-                        <button type="button"
-                          @click.stop="openTaskDrillIn(t.id)"
-                          class="text-[11px] px-2 py-0.5 rounded bg-gray-700 hover:bg-gray-600 text-gray-200 shrink-0">Open</button>
-                      </div>
-                      <!-- Inline rework brief. Expands when the user
-                           clicks &#x1F44E; on the card. Submit calls the
-                           same rateDelivery handler with outcome='rework'
-                           which auto-spawns the follow-up task. Cancel
-                           clears the textarea without writing. -->
-                      <template x-if="inlineReworkIsOpen(t.id)">
-                        <div class="mt-1.5 pl-5" data-testid="inline-rework">
-                          <textarea
-                            :value="inlineReworkText(t.id)"
-                            @input="setInlineReworkText(t.id, $event.target.value)"
-                            rows="2"
-                            maxlength="2000"
-                            placeholder="What needs to change? This becomes the rework brief."
-                            class="w-full text-[11px] text-gray-200 bg-gray-900/60 border border-gray-700/50 rounded px-2 py-1.5 focus:outline-none focus:border-amber-500/60"></textarea>
-                          <div class="flex items-center gap-2 mt-1">
-                            <button type="button"
-                              @click.stop="submitInlineRework(t.id)"
-                              class="text-[11px] px-2 py-0.5 rounded bg-amber-600 hover:bg-amber-500 text-white">Submit rework</button>
-                            <button type="button"
-                              @click.stop="closeInlineRework(t.id)"
-                              class="text-[11px] px-2 py-0.5 rounded bg-gray-700 hover:bg-gray-600 text-gray-200">Cancel</button>
-                          </div>
-                        </div>
-                      </template>
-                      <!-- Inline artifact preview. Hidden until the
-                           lazy fetch completes; collapses again if the
-                           artifact turns out to be non-text or absent. -->
-                      <template x-if="t.artifact_refs && t.artifact_refs.length && recentlyDeliveredPreview(t.id)">
-                        <div class="mt-1.5 pl-5">
-                          <pre class="text-[11px] text-gray-300 whitespace-pre-wrap break-words bg-gray-900/40 rounded px-2 py-1.5 max-h-64 overflow-y-auto custom-scrollbar"
-                               x-text="recentlyDeliveredExpanded[t.id] ? recentlyDeliveredFull(t.id) : recentlyDeliveredPreview(t.id)"></pre>
-                          <div class="flex items-center gap-2 mt-1">
-                            <button type="button"
-                              x-show="recentlyDeliveredHasMore(t.id)"
-                              @click.stop="toggleRecentlyDeliveredExpanded(t.id)"
-                              class="text-[11px] text-indigo-300 hover:text-indigo-200"
-                              x-text="recentlyDeliveredExpanded[t.id] ? 'Show less' : 'Read full'"></button>
-                            <button type="button"
-                              @click.stop="copyRecentlyDeliveredText(t.id)"
-                              class="text-[11px] text-gray-400 hover:text-gray-200">Copy</button>
-                          </div>
-                        </div>
-                      </template>
-                    </div>
-                  </template>
-                </div>
-              </div>
-            </template>
-
-            <!-- Happening now — capped at 5 events on the main scroll;
-                 "See all" disclosure expands inline. Empty section hides
-                 entirely (no header, no chrome). Phase 4: source switched
-                 to ``workplaceFeedVisible`` which strips
-                 ``status_unchanged`` heartbeat noise unless the user
-                 has the "Show technical detail" toggle on. -->
-            <div x-data="{ feedExpanded: false }"
-                 x-show="workplaceFeedVisible.length || workplaceSectionLoading.feed || workplaceErrors.feed"
-                 data-testid="home-happening-now">
-              <div class="flex items-center justify-between mb-1.5">
-                <div class="text-[11px] uppercase tracking-wide text-gray-500 font-medium">Happening now</div>
-                <button type="button"
-                  x-show="!feedExpanded && workplaceFeedVisible.length > 5"
-                  @click="feedExpanded = true"
-                  class="text-[11px] text-gray-400 hover:text-gray-200">See all &rarr;</button>
-                <button type="button"
-                  x-show="feedExpanded && workplaceFeedVisible.length > 5"
-                  @click="feedExpanded = false"
-                  class="text-[11px] text-gray-400 hover:text-gray-200">Show less</button>
-              </div>
-
-              <!-- Skeleton loader for the activity feed itself while the
-                   first /workplace/feed fetch is in flight. Three pulsing
-                   rows match the visual rhythm of the real cards so the
-                   layout doesn't jump when content arrives. Hidden once
-                   the load resolves (success or error — the error banner
-                   below takes over in the failure case). -->
-              <template x-if="workplaceSectionLoading.feed && !workplaceFeedVisible.length && !workplaceErrors.feed">
-                <div class="space-y-2" data-testid="workplace-feed-skeleton">
-                  <div class="bg-gray-800/40 border border-gray-700/50 rounded-lg p-3">
-                    <div class="h-3 w-2/3 bg-gray-800 rounded animate-pulse"></div>
-                    <div class="h-2.5 w-1/3 bg-gray-800 rounded animate-pulse mt-2"></div>
-                  </div>
-                  <div class="bg-gray-800/40 border border-gray-700/50 rounded-lg p-3">
-                    <div class="h-3 w-3/4 bg-gray-800 rounded animate-pulse"></div>
-                    <div class="h-2.5 w-1/4 bg-gray-800 rounded animate-pulse mt-2"></div>
-                  </div>
-                  <div class="bg-gray-800/40 border border-gray-700/50 rounded-lg p-3">
-                    <div class="h-3 w-1/2 bg-gray-800 rounded animate-pulse"></div>
-                    <div class="h-2.5 w-1/3 bg-gray-800 rounded animate-pulse mt-2"></div>
-                  </div>
-                </div>
-              </template>
-
-              <!-- Error banner for the activity feed. Rendered when the
-                   /workplace/feed fetch fails. -->
-              <template x-if="workplaceErrors.feed">
-                <div class="bg-red-900/20 border border-red-800/40 rounded-lg p-3 flex flex-wrap items-center gap-2"
-                     role="alert" data-testid="workplace-feed-error">
-                  <span class="text-xs text-red-200 flex-1" x-text="workplaceErrors.feed"></span>
-                  <button type="button" @click="retryWorkplaceSection('feed')"
-                    class="text-[11px] font-medium px-2.5 py-1 rounded bg-red-800/40 hover:bg-red-700/50 text-red-100 transition-colls">Retry</button>
-                </div>
-              </template>
-
-              <!-- Chronological activity list, capped at 5 unless
-                   ``feedExpanded`` is true. Source is the noise-filtered
-                   ``workplaceFeedVisible`` (see getter for filtering
-                   rules). -->
-              <div class="space-y-2">
-                <template x-for="ev in (feedExpanded ? workplaceFeedVisible : workplaceFeedVisible.slice(0, 5))" :key="ev.event_id">
-                  <button type="button"
-                    class="w-full text-left bg-gray-800/40 border border-gray-700/50 rounded-lg p-3 hover:bg-gray-800/70 transition-colors"
-                    @click="openTaskDrillIn(ev.task_id)">
-                    <div class="flex items-start gap-2">
-                      <span class="text-base leading-none mt-0.5" x-text="workplaceFeedIcon(ev.event_type, ev.task_status)"></span>
-                      <div class="min-w-0 flex-1">
-                        <div class="text-sm text-gray-100" x-text="ev.summary"></div>
-                        <div class="text-[11px] text-gray-500 mt-0.5">
-                          <span x-text="formatRelativeTime((ev.timestamp || 0) * 1000) || 'just now'"></span>
-                          <span x-show="ev.project_id" class="ml-2" x-text="'· ' + ev.project_id"></span>
-                        </div>
-                      </div>
-                    </div>
-                  </button>
-                </template>
-              </div>
+        <!-- Tell Operator — primary steering affordance. PR 2 of the
+             Work tab rewrite. The user types freeform feedback; submit
+             posts to the operator chat (via ``sendChatTo('operator', …)``)
+             and surfaces a "Sent — open Chat tab" confirmation. The
+             operator handles per-task rating + team coordination from
+             the chat reply. -->
+        <template x-if="workplaceEnabled">
+          <section data-testid="workplace-tell-operator"
+            class="mt-6 rounded-lg border border-gray-700/40 bg-gray-800/30 p-4">
+            <h3 class="text-sm font-medium text-gray-200">Tell operator</h3>
+            <p class="text-xs text-gray-400 mt-1">Steer the team in plain language. Operator handles the rest.</p>
+            <textarea
+              x-model="tellOperatorText"
+              :disabled="tellOperatorInflight"
+              rows="3"
+              maxlength="2000"
+              aria-label="Message to operator"
+              placeholder="e.g. The landing page tone feels too corporate — make it warmer."
+              class="mt-2 w-full rounded bg-gray-900/50 border border-gray-700 px-3 py-2 text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:border-indigo-500"
+            ></textarea>
+            <div class="mt-2 flex items-center justify-between">
+              <span x-show="tellOperatorConfirmation" x-text="tellOperatorConfirmation"
+                class="text-xs text-green-400"
+                data-testid="tell-operator-confirmation"></span>
+              <span x-show="!tellOperatorConfirmation" class="text-xs text-gray-500">Response shows up in Chat tab.</span>
+              <button type="button"
+                @click="submitTellOperator()"
+                :disabled="tellOperatorInflight || !tellOperatorText.trim()"
+                class="ml-auto rounded bg-indigo-500 hover:bg-indigo-400 disabled:opacity-50 disabled:cursor-not-allowed px-3 py-1 text-xs text-white"
+                data-testid="tell-operator-submit">
+                <span x-text="tellOperatorInflight ? 'Sending…' : 'Send'"></span>
+              </button>
             </div>
-
-            <!-- In progress — 4-card slice of workplaceTasks filtered to
-                 working / pending / accepted statuses (most-recent
-                 first). Phase 4: "Back to Work" links to the kanban
-                 (the new default). Empty section hides entirely. -->
-            <template x-if="(workplaceTasks || []).filter(t => ['working','pending','accepted'].includes(t.status)).length">
-              <div data-testid="home-in-progress">
-                <div class="flex items-center justify-between mb-1.5">
-                  <div class="text-[11px] uppercase tracking-wide text-gray-500 font-medium">In progress</div>
-                  <button type="button" @click="switchHomeTab('kanban')"
-                    class="text-[11px] text-indigo-300 hover:text-indigo-200"
-                    data-testid="home-see-task-board">Back to Work &rarr;</button>
-                </div>
-                <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  <template x-for="t in (workplaceTasks || []).filter(t => ['working','pending','accepted'].includes(t.status)).slice(0, 4)" :key="'ip-' + t.id">
-                    <div class="bg-gray-800/40 border border-gray-700/50 rounded-md px-3 py-2 cursor-pointer hover:bg-gray-800/70 hover:border-gray-600/60 transition-colors"
-                      @click="openTaskDrillIn(t.id)">
-                      <div class="text-xs font-medium text-gray-200 truncate" x-text="t.title || '(untitled)'"></div>
-                      <div class="text-[11px] text-gray-500 mt-0.5 flex items-center gap-1.5">
-                        <span class="px-1.5 py-0.5 rounded bg-gray-900/60 text-gray-400 text-[10px]" x-text="t.status"></span>
-                        <span class="truncate" x-text="t.assignee || ''"></span>
-                        <span x-show="t.project_id" class="text-gray-600 truncate" x-text="'· ' + (t.project_id || '')"></span>
-                      </div>
-                    </div>
-                  </template>
-                </div>
-              </div>
-            </template>
-
-            <!-- Idle empty state — shown only when EVERY section above
-                 is empty AND there's nothing pending. Calm prompt,
-                 verb-driven CTA. -->
-            <template x-if="!workplaceSectionLoading.feed && !workplaceErrors.feed && !workplaceFeedVisible.length && !recentlyDeliveredItems.length && !needsYouItems.length && !(workplaceTasks || []).filter(t => ['working','pending','accepted'].includes(t.status)).length">
-              <div class="text-sm text-gray-300 py-6 text-center" data-testid="home-idle-empty">
-                Your team is idle.
-                <button type="button" @click="activeTab = 'chat'"
-                  class="underline decoration-dotted text-indigo-300 hover:text-indigo-200 transition-colors">Chat with your operator</button>
-                to start something.
-              </div>
-            </template>
-            <!-- Phase 2 vocab: explicit "team starts working" empty
-                 state is preserved here for the workplaceTeams-but-no-
-                 feed case. Phase 3's idle empty state above only fires
-                 when every section is empty; this one stays so users with
-                 active teams but no fresh activity still see the
-                 reassurance copy that Phase 2 promised. -->
-            <template x-if="!workplaceSectionLoading.feed && !workplaceErrors.feed && !workplaceFeedVisible.length && workplaceTeams.length">
-              <div class="text-sm text-gray-500 py-4">Once your team starts working, you'll see updates here.</div>
-            </template>
-          </div>
+          </section>
         </template>
 
-        <!-- Team status — hidden in the Phase 3 layout. The legacy
-             render is kept in markup for back-compat with deep-links
-             that set ``workplaceTab === 'team-status'`` directly via
-             URL hash, but the new Home single-scroll surface routes
-             team detail through the task drill-in modal instead. -->
-        <template x-if="false && workplaceEnabled && workplaceTab === 'team-status'">
-          <div class="space-y-3">
-            <!-- Skeleton while /workplace/teams is in flight -->
-            <template x-if="workplaceSectionLoading.teams && !workplaceTeams.length && !workplaceErrors.teams">
-              <div class="space-y-3" data-testid="workplace-teams-skeleton">
-                <div class="bg-gray-800/40 border border-gray-700/50 rounded-lg p-4">
-                  <div class="h-4 w-1/3 bg-gray-800 rounded animate-pulse"></div>
-                  <div class="h-3 w-2/3 bg-gray-800 rounded animate-pulse mt-2"></div>
-                  <div class="h-3 w-1/2 bg-gray-800 rounded animate-pulse mt-2"></div>
-                </div>
-                <div class="bg-gray-800/40 border border-gray-700/50 rounded-lg p-4">
-                  <div class="h-4 w-1/4 bg-gray-800 rounded animate-pulse"></div>
-                  <div class="h-3 w-3/4 bg-gray-800 rounded animate-pulse mt-2"></div>
-                </div>
-              </div>
-            </template>
-            <!-- Error banner for /workplace/teams -->
-            <template x-if="workplaceErrors.teams">
-              <div class="bg-red-900/20 border border-red-800/40 rounded-lg p-3 flex flex-wrap items-center gap-2"
-                   role="alert" data-testid="workplace-teams-error">
-                <span class="text-xs text-red-200 flex-1" x-text="workplaceErrors.teams"></span>
-                <button type="button" @click="retryWorkplaceSection('teams')"
-                  class="text-[11px] font-medium px-2.5 py-1 rounded bg-red-800/40 hover:bg-red-700/50 text-red-100 transition-colors">Retry</button>
-              </div>
-            </template>
-            <template x-if="!workplaceSectionLoading.teams && !workplaceErrors.teams && !workplaceTeams.length">
-              <div class="text-sm text-gray-500 py-4">No active teams.</div>
-            </template>
-            <template x-for="p in workplaceTeams" :key="p.name">
-              <div class="bg-gray-800/40 border border-gray-700/50 rounded-lg p-4">
-                <div class="flex items-center justify-between mb-2">
-                  <div>
-                    <div class="text-sm font-medium text-white" x-text="p.name"></div>
-                    <div class="text-xs text-gray-400" x-text="p.description || ''"></div>
-                  </div>
-                  <div class="text-xs text-gray-400">
-                    <span x-text="p.total + ' task' + (p.total === 1 ? '' : 's')"></span>
-                    <span class="ml-2 px-1.5 py-0.5 rounded bg-gray-900/60 text-gray-300" x-text="p.status"></span>
-                  </div>
-                </div>
-                <!-- North star + success criteria — the team's goal as a first-class artifact. -->
-                <div class="mb-3 pb-2 border-b border-gray-700/40">
-                  <template x-if="p.north_star">
-                    <div>
-                      <div class="text-[10px] uppercase tracking-wide text-gray-500 mb-1">North star</div>
-                      <div class="text-xs italic text-gray-200" x-text="'“' + p.north_star + '”'"></div>
-                      <template x-if="p.success_criteria && p.success_criteria.length">
-                        <ul class="mt-2 space-y-0.5">
-                          <template x-for="sc in p.success_criteria" :key="sc">
-                            <li class="text-[11px] text-gray-300 pl-3 relative before:content-['\\2022'] before:absolute before:left-0 before:text-gray-500" x-text="sc"></li>
-                          </template>
-                        </ul>
-                      </template>
-                    </div>
-                  </template>
-                  <template x-if="!p.north_star">
-                    <div class="text-[11px] text-gray-500 italic">No goal set yet. Ask the operator to set one.</div>
-                  </template>
-                </div>
-                <div class="flex flex-wrap gap-1.5 text-[11px]">
-                  <template x-for="status in ['pending','accepted','working','blocked','done']" :key="status">
-                    <span class="px-2 py-0.5 rounded bg-gray-900/60 text-gray-300"
-                      x-show="(p.counts && p.counts[status]) || 0">
-                      <span x-text="status"></span>:
-                      <span class="font-mono" x-text="(p.counts && p.counts[status]) || 0"></span>
-                    </span>
-                  </template>
-                </div>
-                <template x-if="p.blockers && p.blockers.length">
-                  <div class="mt-3 pt-2 border-t border-gray-700/40">
-                    <div class="text-[11px] text-yellow-300 mb-1">Blockers:</div>
-                    <template x-for="b in p.blockers" :key="b.task_id">
-                      <div class="text-xs text-gray-300 pl-2 cursor-pointer hover:text-white"
-                        @click="openTaskDrillIn(b.task_id)">
-                        <span x-text="b.title"></span>
-                        <span class="text-gray-500" x-text="'· ' + (b.assignee || '')"></span>
-                        <div class="text-[11px] text-gray-400" x-text="_humanizeBlocker(b.blocker_note).label || b.blocker_note"></div>
-                      </div>
-                    </template>
-                  </div>
-                </template>
-              </div>
-            </template>
-          </div>
-        </template>
-
-        <!-- Phase 4 — Stuck tasks panel. Sits between "Needs you" and
-             the kanban grid so it inherits the sticky-feel of the
-             attention bar above it without claiming a sticky position
-             of its own. Only renders when ``stuckTasks`` is non-empty.
-             Shows tasks that have been pending or working >24h. Each
-             row carries [Cancel] + [Restart agent] for the operator's
-             two-fastest unblockers. -->
-        <template x-if="workplaceEnabled && homeTab === 'kanban' && stuckTasks.length">
+        <!-- Stuck tasks panel — silent stale-work detector kept across
+             the PR 2 cutover. Renders when ``stuckTasks`` is non-empty
+             (tasks pending or working >24h). Each row carries [Cancel]
+             + [Restart agent] for the operator's two-fastest unblockers. -->
+        <template x-if="workplaceEnabled && stuckTasks.length">
           <section class="bg-amber-950/30 border border-amber-800/50 rounded-xl p-3 mb-3"
             data-testid="board-stuck-tasks"
             aria-label="Stuck tasks">
@@ -4657,143 +4288,6 @@
           </section>
         </template>
 
-        <!-- Phase 4 — Kanban board (default Board view).
-             Responsive grid: 1 col on phones (<sm), 2 cols at 640px+,
-             4 cols on desktop (lg+). On the smallest phones the grid
-             still hits 1 column, which is fine for stacked reading;
-             the outer ``overflow-x-auto`` + inner ``min-w-[640px]``
-             give phone users a horizontal-scroll fallback so each
-             column keeps a usable width when they prefer the kanban
-             layout. Status columns: Pending / Working / Blocked /
-             Done — ``accepted`` (transient) folds into Pending via
-             the existing ``workplaceTasksByStatus`` filter. -->
-        <template x-if="workplaceEnabled && homeTab === 'kanban'">
-          <div data-testid="board-kanban">
-            <!-- Error banner for /workplace/tasks. Tasks lives outside
-                 the kanban grid because errored loads should still let
-                 the user retry without seeing four empty columns. -->
-            <template x-if="workplaceErrors.tasks">
-              <div class="bg-red-900/20 border border-red-800/40 rounded-lg p-3 mb-3 flex flex-wrap items-center gap-2"
-                   role="alert" data-testid="workplace-tasks-error">
-                <span class="text-xs text-red-200 flex-1" x-text="workplaceErrors.tasks"></span>
-                <button type="button" @click="retryWorkplaceSection('tasks')"
-                  class="text-[11px] font-medium px-2.5 py-1 rounded bg-red-800/40 hover:bg-red-700/50 text-red-100 transition-colors">Retry</button>
-              </div>
-            </template>
-            <!-- Skeleton kanban while /workplace/tasks is in flight -->
-            <template x-if="workplaceSectionLoading.tasks && !workplaceTasks.length && !workplaceErrors.tasks">
-              <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 mb-3" data-testid="workplace-tasks-skeleton">
-                <template x-for="i in 4" :key="'sk-task-' + i">
-                  <div class="bg-gray-800/40 border border-gray-700/50 rounded-lg p-3">
-                    <div class="h-3 w-1/2 bg-gray-800 rounded animate-pulse mb-2"></div>
-                    <div class="h-8 bg-gray-800 rounded animate-pulse mt-2"></div>
-                    <div class="h-8 bg-gray-800 rounded animate-pulse mt-2"></div>
-                  </div>
-                </template>
-              </div>
-            </template>
-          <div class="overflow-x-auto custom-scrollbar -mx-3 px-3 sm:mx-0 sm:px-0">
-            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 min-w-[640px] sm:min-w-0">
-              <template x-for="status in ['pending','working','blocked','done']" :key="status">
-                <div class="bg-gray-800/40 border border-gray-700/50 rounded-lg p-2.5">
-                  <!-- Sticky column header so cards keep their context
-                       when the column scrolls. ``z-10`` keeps it above
-                       the cards but below the global Needs-you panel
-                       (which sits at z-10 on a different stacking
-                       context — they don't overlap visually). -->
-                  <div class="text-[11px] font-medium text-gray-300 uppercase tracking-wide mb-2 flex items-center justify-between sticky top-0 z-10 bg-gray-800/80 backdrop-blur-sm -mx-2.5 px-2.5 py-1.5 border-b border-gray-700/40">
-                    <span x-text="status"></span>
-                    <span class="text-gray-500 font-mono" x-text="workplaceTasksByStatus(status).length"></span>
-                  </div>
-                  <div class="space-y-1.5">
-                    <template x-for="t in workplaceTasksByStatusFiltered(status)" :key="t.id">
-                      <div class="group rounded-md px-2 py-1.5 text-[11px] hover:bg-gray-900/90 transition-colors relative border"
-                        :class="t.status === 'failed'
-                          ? 'bg-red-950/30 border-red-800/40 hover:border-red-700/60'
-                          : 'bg-gray-900/60 border-gray-700/40 hover:border-gray-600'"
-                        data-testid="board-kanban-card">
-                        <!-- Phase 4 cancel button: top-right × on every
-                             card; opens the confirmation modal. Hidden
-                             on the Done column (you can't cancel a
-                             completed task) and on rated cards. The
-                             ``@click.stop`` keeps the row click (drill-in)
-                             from firing. Codex P1.5 Option A: also hidden
-                             on failed tasks (they're terminal). -->
-                        <button type="button"
-                          x-show="status !== 'done' && t.status !== 'failed' && !t.outcome"
-                          @click.stop="confirmCancelTask(t)"
-                          aria-label="Cancel task"
-                          class="absolute top-1 right-1 w-5 h-5 flex items-center justify-center rounded text-gray-500 hover:text-red-300 hover:bg-red-900/30 transition-colors opacity-0 group-hover:opacity-100 focus:opacity-100"
-                          data-testid="board-kanban-card-cancel">
-                          <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
-                        </button>
-                        <button type="button" class="block w-full text-left pr-5"
-                          @click="openTaskDrillIn(t.id)">
-                          <div class="font-medium leading-snug"
-                            :class="t.status === 'failed' ? 'text-red-200' : 'text-gray-200'"
-                            :title="t.title"
-                            x-text="truncateTitle(t.title, 80)"></div>
-                          <div class="text-[10px] text-gray-400 mt-1 flex items-center gap-1.5">
-                            <span class="truncate" x-text="t.assignee || ''"></span>
-                            <!-- Codex P1.5 Option A: failed tasks get a
-                                 red "failed" badge that visually
-                                 distinguishes them from done tasks in the
-                                 same column. Outcome badge (if rated)
-                                 takes precedence so a re-rated failure
-                                 still shows operator intent. -->
-                            <template x-if="t.outcome">
-                              <span class="ml-auto px-1.5 py-0.5 rounded text-[9px] font-medium"
-                                :class="{
-                                  'bg-emerald-900/30 text-emerald-300': t.outcome === 'accepted',
-                                  'bg-amber-900/30 text-amber-300': t.outcome === 'rework',
-                                  'bg-red-900/30 text-red-300': t.outcome === 'rejected',
-                                }"
-                                x-text="t.outcome"></span>
-                            </template>
-                            <template x-if="!t.outcome && t.status === 'failed'">
-                              <span class="ml-auto px-1.5 py-0.5 rounded text-[9px] font-medium bg-red-900/30 text-red-300">failed</span>
-                            </template>
-                          </div>
-                          <!-- Codex P1.5 Option A: surface the
-                               blocker_note inline for failed cards so
-                               the operator sees WHY without drilling in.
-                               Humanized via _humanizeBlocker (matches
-                               the Needs-you panel rendering); falls back
-                               to the raw note if the classifier
-                               can't tag it. -->
-                          <template x-if="t.status === 'failed' && t.blocker_note">
-                            <div class="mt-1 text-[10px] text-red-300/90 leading-snug"
-                              :title="t.blocker_note"
-                              x-text="(_humanizeBlocker(t.blocker_note).label || t.blocker_note).slice(0, 100)"></div>
-                          </template>
-                        </button>
-                      </div>
-                    </template>
-                    <!-- Archived disclosure: only the pending and blocked
-                         columns hide rows older than 14 days, since they
-                         can grow unbounded when a project stalls. Other
-                         statuses keep showing every row. -->
-                    <template x-if="workplaceArchivedCount(status) > 0">
-                      <button type="button"
-                        @click="boardShowArchived = { ...boardShowArchived, [status]: !boardShowArchived[status] }"
-                        class="w-full text-[10px] text-gray-400 hover:text-gray-200 px-2 py-1 rounded border border-dashed border-gray-700/60 hover:border-gray-600 transition-colors text-left">
-                        <span x-show="!boardShowArchived[status]"
-                          x-text="'Show ' + workplaceArchivedCount(status) + ' archived ▸'"></span>
-                        <span x-show="boardShowArchived[status]" x-cloak>Hide archived &#9662;</span>
-                      </button>
-                    </template>
-                  </div>
-                </div>
-              </template>
-            </div>
-          </div>
-          <!-- Phase 4 — Activity feed link. The single-scroll layout
-               (Just delivered + Happening now + In progress) lives at
-               /home/activity; users land here only if they click in
-               (back-compat with the Phase 3 default that opened the
-               feed first). -->
-          </div>
-        </template>
 
         <!-- Phase 4 — task cancel confirmation modal. Opens via
              ``confirmCancelTask`` (kanban × button or stuck-tasks
@@ -4835,81 +4329,6 @@
                 </button>
               </div>
             </div>
-          </div>
-        </template>
-
-        <!-- (Blockers no longer have their own sub-tab — pinned at the top
-             of the activity feed instead.) -->
-
-        <!-- Team outputs — hidden in the Phase 3 layout. "Just delivered"
-             on the Home main scroll handles the common case (last 7 days
-             with inline artifact preview); deeper history is reachable
-             via the task drill-in modal. The legacy render below is
-             retained for back-compat with deep-links that still set
-             ``workplaceTab === 'team-outputs'``. -->
-        <template x-if="false && workplaceEnabled && workplaceTab === 'team-outputs'">
-          <div class="space-y-2">
-            <!-- Skeleton while /workplace/outputs is in flight -->
-            <template x-if="workplaceSectionLoading.outputs && !workplaceOutputs.length && !workplaceErrors.outputs">
-              <div class="space-y-2" data-testid="workplace-outputs-skeleton">
-                <div class="bg-gray-800/40 border border-gray-700/50 rounded-lg p-3">
-                  <div class="h-3 w-2/3 bg-gray-800 rounded animate-pulse"></div>
-                  <div class="h-2.5 w-1/3 bg-gray-800 rounded animate-pulse mt-2"></div>
-                </div>
-                <div class="bg-gray-800/40 border border-gray-700/50 rounded-lg p-3">
-                  <div class="h-3 w-3/4 bg-gray-800 rounded animate-pulse"></div>
-                  <div class="h-2.5 w-1/4 bg-gray-800 rounded animate-pulse mt-2"></div>
-                </div>
-              </div>
-            </template>
-            <!-- Error banner for /workplace/outputs -->
-            <template x-if="workplaceErrors.outputs">
-              <div class="bg-red-900/20 border border-red-800/40 rounded-lg p-3 flex flex-wrap items-center gap-2"
-                   role="alert" data-testid="workplace-outputs-error">
-                <span class="text-xs text-red-200 flex-1" x-text="workplaceErrors.outputs"></span>
-                <button type="button" @click="retryWorkplaceSection('outputs')"
-                  class="text-[11px] font-medium px-2.5 py-1 rounded bg-red-800/40 hover:bg-red-700/50 text-red-100 transition-colors">Retry</button>
-              </div>
-            </template>
-            <template x-if="!workplaceSectionLoading.outputs && !workplaceErrors.outputs && !workplaceOutputs.length">
-              <div class="text-sm text-gray-300 py-6 text-center">
-                Nothing delivered yet.
-                <button type="button" @click="activeTab = 'chat'"
-                  class="underline decoration-dotted text-indigo-300 hover:text-indigo-200 transition-colors">Tell the Operator what you want delivered</button>.
-              </div>
-            </template>
-            <template x-for="t in workplaceOutputs" :key="t.id">
-              <div class="bg-gray-800/40 border border-gray-700/50 rounded-lg p-3 cursor-pointer hover:bg-gray-800/70 hover:border-gray-600/60 transition-colors"
-                @click="openTaskDrillIn(t.id)">
-                <div class="flex items-start justify-between gap-2">
-                  <div class="text-sm font-medium text-gray-100 flex-1" x-text="t.title"></div>
-                  <template x-if="t.outcome">
-                    <span class="px-1.5 py-0.5 rounded text-[10px] font-medium shrink-0"
-                      :class="{
-                        'bg-emerald-900/30 text-emerald-300': t.outcome === 'accepted',
-                        'bg-amber-900/30 text-amber-300': t.outcome === 'rework',
-                        'bg-red-900/30 text-red-300': t.outcome === 'rejected',
-                      }"
-                      x-text="t.outcome"></span>
-                  </template>
-                </div>
-                <div class="text-[11px] text-gray-400 mt-1">
-                  <span x-text="t.assignee || ''"></span>
-                  <span x-show="t.project_id" class="text-gray-500"
-                    x-text="' · ' + (t.project_id || '')"></span>
-                  <span x-show="t.completed_at" class="text-gray-500"
-                    x-text="' · completed ' + new Date((t.completed_at || 0) * 1000).toLocaleString()"></span>
-                </div>
-                <template x-if="t.artifact_refs && t.artifact_refs.length">
-                  <div class="mt-2 text-xs text-gray-300">
-                    <span class="text-gray-500">Artifacts:</span>
-                    <template x-for="ref in t.artifact_refs" :key="ref">
-                      <code class="ml-1 px-1.5 py-0.5 rounded bg-gray-900/60 text-gray-200" x-text="ref"></code>
-                    </template>
-                  </div>
-                </template>
-              </div>
-            </template>
           </div>
         </template>
 

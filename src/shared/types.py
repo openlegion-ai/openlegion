@@ -94,7 +94,10 @@ new tool surface (PR-L'). Validation lives in
 # forward. User-customised heartbeats (no sentinel) are left alone.
 # Add new markers to the END of the tuple to keep older sentinels as
 # evidence that a workspace was previously migrated.
-HEARTBEAT_SENTINELS: tuple[str, ...] = ("heartbeat_v2_workflow_aware",)
+HEARTBEAT_SENTINELS: tuple[str, ...] = (
+    "heartbeat_v2_workflow_aware",
+    "heartbeat_v3_rate_delivery",
+)
 
 # === Inter-Component Messages ===
 
