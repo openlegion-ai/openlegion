@@ -6391,6 +6391,8 @@ def create_dashboard_router(
     _WORKSPACE_ALLOWLIST = frozenset({
         "SOUL.md", "HEARTBEAT.md", "USER.md", "INSTRUCTIONS.md", "AGENTS.md", "MEMORY.md",
         "INTERFACE.md", "OBSERVATIONS.md",
+        # Operator-tracked goals (mirrors agent-side allowlist).
+        "GOALS.md", "GOALS.json",
     })
 
     @api_router.get("/api/agents/{agent_id}/workspace")
@@ -6841,6 +6843,55 @@ def create_dashboard_router(
             raise HTTPException(409, str(e))
         except ValueError as e:
             raise HTTPException(400, str(e))
+
+    @api_router.get("/api/workplace/goals")
+    async def api_workplace_goals() -> dict:
+        """Return the operator's tracked goals for the Work-tab strip.
+
+        Reads ``GOALS.json`` from the operator container's workspace via
+        the transport proxy. Returns ``{enabled: False, goals: []}`` when
+        the dashboard can't reach the operator (legacy / standalone test
+        configs); the frontend renders that as "no goals tracked yet"
+        without erroring.
+        """
+        empty = {"enabled": False, "goals": []}
+        if transport is None:
+            return empty
+        if "operator" not in agent_registry:
+            return empty
+        try:
+            payload = await transport.request(
+                "operator", "GET", "/workspace/GOALS.json", timeout=10,
+            )
+        except Exception as e:
+            logger.warning("operator goals fetch failed: %s", e)
+            return {"enabled": True, "goals": [], "error": str(e)}
+        raw = ""
+        if isinstance(payload, dict):
+            raw = str(payload.get("content") or "")
+        if not raw.strip():
+            return {"enabled": True, "goals": []}
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, TypeError) as e:
+            logger.warning("operator GOALS.json parse failed: %s", e)
+            return {"enabled": True, "goals": []}
+        if not isinstance(parsed, dict):
+            return {"enabled": True, "goals": []}
+        entries = parsed.get("goals", [])
+        if not isinstance(entries, list):
+            return {"enabled": True, "goals": []}
+        cleaned: list[dict] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            cleaned.append({
+                "name": str(entry.get("name", "")),
+                "status": str(entry.get("status", "")),
+                "progress_note": str(entry.get("progress_note", "")),
+                "updated_at": str(entry.get("updated_at", "")),
+            })
+        return {"enabled": True, "goals": cleaned}
 
     @api_router.get("/api/workplace/blockers")
     async def api_workplace_blockers() -> dict:

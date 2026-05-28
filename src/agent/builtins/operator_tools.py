@@ -16,7 +16,7 @@ from src.shared.types import (
 from src.shared.types import (
     SOFT_EDIT_FIELDS as _SOFT_EDIT_FIELDS,
 )
-from src.shared.utils import setup_logging
+from src.shared.utils import sanitize_for_prompt, setup_logging
 
 logger = setup_logging("agent.builtins.operator_tools")
 
@@ -2175,3 +2175,284 @@ async def manage_team(
     return {
         "error": f"Unknown action {action!r}; use archive|unarchive|propose_delete"
     }
+
+
+# ── Goals tracking (PR 1 of Work tab rewrite) ───────────────────────
+#
+# Operator-tracked business goals, surfaced on the Work tab as a
+# horizontal strip. Source of truth is GOALS.json (structured, parsed
+# by the dashboard); GOALS.md is a rendered human-readable mirror
+# regenerated from JSON on every mutation. Per-goal ``updated_at`` is
+# stamped only on touched entries so untouched goals keep their
+# original timestamp (the test contract).
+
+_GOALS_MD_FILENAME = "GOALS.md"
+_GOALS_JSON_FILENAME = "GOALS.json"
+
+_MAX_GOALS_ENTRIES = 20
+_MAX_GOAL_NAME_CHARS = 120
+_MAX_GOAL_NOTE_CHARS = 500
+
+_VALID_GOAL_STATUSES = frozenset({
+    "not_started", "in_progress", "on_track", "at_risk", "blocked", "done",
+})
+_VALID_GOAL_ACTIONS = frozenset({"set", "add", "update", "remove", "list"})
+
+
+def _read_goals_sidecar(workspace_root) -> list[dict]:
+    """Read GOALS.json. Returns ``[]`` on missing/corrupt files."""
+    path = workspace_root / _GOALS_JSON_FILENAME
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(errors="replace"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    raw = data.get("goals")
+    if not isinstance(raw, list):
+        return []
+    cleaned: list[dict] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        status = entry.get("status")
+        if not isinstance(name, str) or not isinstance(status, str):
+            continue
+        cleaned.append({
+            "name": name,
+            "status": status,
+            "progress_note": entry.get("progress_note", "") or "",
+            "updated_at": entry.get("updated_at", "") or "",
+        })
+    return cleaned
+
+
+def _render_goals_md(goals: list[dict]) -> str:
+    """Render the JSON sidecar back to a human-readable GOALS.md."""
+    lines: list[str] = ["# Goals", ""]
+    if not goals:
+        lines.append("_No goals tracked._")
+    else:
+        for goal in goals:
+            lines.append(f"## {goal['name']}")
+            lines.append(f"- **Status:** {goal['status']}")
+            lines.append(f"- **Updated:** {goal['updated_at']}")
+            note = goal.get("progress_note") or ""
+            if note:
+                lines.append(f"- {note}")
+            lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _write_goals(workspace_root, goals: list[dict]) -> None:
+    """Persist both sidecar JSON and rendered markdown atomically-ish."""
+    json_path = workspace_root / _GOALS_JSON_FILENAME
+    md_path = workspace_root / _GOALS_MD_FILENAME
+    json_path.write_text(json.dumps({"goals": goals}, indent=2) + "\n")
+    md_path.write_text(_render_goals_md(goals))
+
+
+def _validate_goal_input(goal, *, require_status: bool = True) -> tuple[dict | None, str | None]:
+    """Sanitize and validate a single goal dict input.
+
+    Returns ``(cleaned, error)``. ``cleaned`` carries only the fields
+    we persist (no ``updated_at`` — caller stamps that). ``require_status``
+    is False on update where the caller may want to change only the
+    progress note.
+    """
+    if not isinstance(goal, dict):
+        return None, "goal must be an object"
+    name = goal.get("name", "")
+    status = goal.get("status", "")
+    note = goal.get("progress_note", "") or ""
+    if not isinstance(name, str) or not isinstance(status, str) or not isinstance(note, str):
+        return None, "goal name/status/progress_note must be strings"
+    name_clean = sanitize_for_prompt(name).strip()
+    note_clean = sanitize_for_prompt(note).strip()
+    if not name_clean:
+        return None, "goal name is required"
+    if len(name_clean) > _MAX_GOAL_NAME_CHARS:
+        name_clean = name_clean[: _MAX_GOAL_NAME_CHARS - 1] + "…"
+    if len(note_clean) > _MAX_GOAL_NOTE_CHARS:
+        note_clean = note_clean[: _MAX_GOAL_NOTE_CHARS - 1] + "…"
+    if require_status or status:
+        if status not in _VALID_GOAL_STATUSES:
+            return None, (
+                f"status must be one of {sorted(_VALID_GOAL_STATUSES)}"
+            )
+    return {
+        "name": name_clean,
+        "status": status,
+        "progress_note": note_clean,
+    }, None
+
+
+@skill(
+    name="manage_goals",
+    description=(
+        "Manage tracked business goals shown on the user's Work tab. "
+        "Source of truth is GOALS.json (rendered to GOALS.md for humans). "
+        "Use 'set' to replace the full list, 'add'/'update'/'remove' for "
+        "incremental changes, 'list' to read the current state. "
+        "Operator-only."
+    ),
+    parameters={
+        "action": {
+            "type": "string",
+            "enum": ["set", "add", "update", "remove", "list"],
+            "description": "Which operation to perform.",
+        },
+        "goals": {
+            "type": "array",
+            "description": (
+                "Full goal list for action='set'. Each entry: "
+                "{name: str, status: enum, progress_note?: str}. Max 20."
+            ),
+            "items": {"type": "object"},
+            "default": [],
+        },
+        "goal": {
+            "type": "object",
+            "description": (
+                "Single goal for action='add' or 'update'. Same shape as "
+                "'goals' entries."
+            ),
+            "default": {},
+        },
+        "name": {
+            "type": "string",
+            "description": "Goal name for action='remove'.",
+            "default": "",
+        },
+    },
+)
+async def manage_goals(
+    action: str,
+    *,
+    goals: list | None = None,
+    goal: dict | None = None,
+    name: str = "",
+    workspace_manager=None,
+    **_kw,
+) -> dict:
+    """Goals CRUD over GOALS.json + GOALS.md."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if workspace_manager is None:
+        return {"error": "No workspace_manager available"}
+    if action not in _VALID_GOAL_ACTIONS:
+        return {
+            "error": (
+                f"Unknown action {action!r}; "
+                f"use one of {sorted(_VALID_GOAL_ACTIONS)}"
+            ),
+        }
+
+    workspace_root = workspace_manager.root
+    current = _read_goals_sidecar(workspace_root)
+
+    if action == "list":
+        return {"ok": True, "goals": current}
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    if action == "set":
+        if goals is None:
+            goals = []
+        if not isinstance(goals, list):
+            return {"error": "goals must be an array of objects"}
+        if len(goals) > _MAX_GOALS_ENTRIES:
+            return {
+                "error": (
+                    f"goals exceeds max length {_MAX_GOALS_ENTRIES}"
+                ),
+            }
+        cleaned: list[dict] = []
+        seen_names: set[str] = set()
+        for entry in goals:
+            obj, err = _validate_goal_input(entry, require_status=True)
+            if err:
+                return {"error": err}
+            if obj["name"] in seen_names:
+                return {
+                    "error": (
+                        f"duplicate goal name {obj['name']!r} in input"
+                    ),
+                }
+            seen_names.add(obj["name"])
+            obj["updated_at"] = now
+            cleaned.append(obj)
+        _write_goals(workspace_root, cleaned)
+        return {"ok": True, "goals": cleaned}
+
+    if action == "add":
+        if goal is None:
+            goal = {}
+        obj, err = _validate_goal_input(goal, require_status=True)
+        if err:
+            return {"error": err}
+        if any(g["name"] == obj["name"] for g in current):
+            return {
+                "error": (
+                    f"goal {obj['name']!r} already exists; use action='update'"
+                ),
+            }
+        if len(current) >= _MAX_GOALS_ENTRIES:
+            return {
+                "error": (
+                    f"cannot add: already at max of {_MAX_GOALS_ENTRIES} goals"
+                ),
+            }
+        obj["updated_at"] = now
+        new_list = [*current, obj]
+        _write_goals(workspace_root, new_list)
+        return {"ok": True, "goals": new_list}
+
+    if action == "update":
+        if goal is None:
+            goal = {}
+        # Status is optional on update — caller may want to change only
+        # the progress note. We still validate the enum if provided.
+        obj, err = _validate_goal_input(goal, require_status=False)
+        if err:
+            return {"error": err}
+        target_name = obj["name"]
+        idx = next(
+            (i for i, g in enumerate(current) if g["name"] == target_name), None,
+        )
+        if idx is None:
+            return {"error": f"goal {target_name!r} not found"}
+        existing = current[idx]
+        merged = {
+            "name": existing["name"],
+            "status": obj["status"] or existing["status"],
+            "progress_note": (
+                obj["progress_note"]
+                if obj["progress_note"] is not None
+                else existing.get("progress_note", "")
+            ),
+            "updated_at": now,
+        }
+        new_list = list(current)
+        new_list[idx] = merged
+        _write_goals(workspace_root, new_list)
+        return {"ok": True, "goals": new_list}
+
+    if action == "remove":
+        target = sanitize_for_prompt(name or "").strip()
+        if not target:
+            return {"error": "name is required for action='remove'"}
+        idx = next(
+            (i for i, g in enumerate(current) if g["name"] == target), None,
+        )
+        if idx is None:
+            return {"error": f"goal {target!r} not found"}
+        new_list = [g for i, g in enumerate(current) if i != idx]
+        _write_goals(workspace_root, new_list)
+        return {"ok": True, "goals": new_list}
+
+    # Unreachable — action set is validated above.
+    return {"error": f"Unknown action {action!r}"}

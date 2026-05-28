@@ -373,6 +373,10 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
     _WORKSPACE_ALLOWLIST = frozenset({
         "SOUL.md", "HEARTBEAT.md", "USER.md", "INSTRUCTIONS.md", "AGENTS.md", "MEMORY.md",
         "INTERFACE.md", "OBSERVATIONS.md",
+        # Operator-tracked goals. GOALS.json is the structured sidecar
+        # the dashboard reads; GOALS.md is the rendered markdown view.
+        # Only the operator agent writes them in practice.
+        "GOALS.md", "GOALS.json",
     })
     _DEFAULT_HEARTBEAT_HEADING = "# Heartbeat Rules"
 
@@ -384,6 +388,7 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         "MEMORY.md": 16000,
         "HEARTBEAT.md": None,
         "INTERFACE.md": 4000,
+        "GOALS.md": 8000,
     }
     _DEFAULT_HEADINGS = {
         "SOUL.md": "# Identity",
@@ -393,6 +398,7 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         "MEMORY.md": "# Long-Term Memory",
         "HEARTBEAT.md": "# Heartbeat Rules",
         "INTERFACE.md": "# Interface",
+        "GOALS.md": "# Goals",
     }
 
     @app.get("/workspace")
