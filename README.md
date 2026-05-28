@@ -868,7 +868,18 @@ exposed to the LLM alongside built-in skills.
 
 ### Configuration
 
-Add `mcp_servers` to any agent in `config/agents.yaml`:
+There are two ways to attach MCP servers to an agent:
+
+**1. Dashboard (recommended for most users).** Open the agent's settings → Config
+tab → **MCP Servers** section. Click **+ Add MCP server**, fill in name +
+command + args + env, hit Save. Env values that hold secrets go through a
+credential picker (saved as `$CRED{name}` handles, resolved by the mesh at
+agent start — no plaintext on disk or in the API). Per-server status dots
+(green / red with the captured error / gray pending) tell you whether each
+server actually came up. See [`docs/mcp.md`](docs/mcp.md) for the full UX.
+
+**2. Fleet template (for repeatable deployments).** Add `mcp_servers` to an
+agent in `src/templates/<template>.yaml`:
 
 ```yaml
 agents:
@@ -882,10 +893,15 @@ agents:
       - name: database
         command: mcp-server-sqlite
         args: ["--db", "/data/research.db"]
+        env:
+          DB_PASSWORD: "$CRED{research_db_password}"
 ```
 
-Each server is launched as a subprocess inside the agent container using stdio
-transport. Tools are discovered automatically via the MCP protocol and appear
+The same `MCPServerConfig` model validates both paths: `name` matches
+`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`, `command` cannot contain `$CRED{...}`
+handles (use `env` or `args` instead), case-insensitive duplicate names are
+rejected. Each server is launched as a subprocess inside the agent container
+using stdio transport; tools are discovered via the MCP protocol and appear
 in the LLM's tool list alongside built-in skills.
 
 ### How It Works
