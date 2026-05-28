@@ -12,11 +12,11 @@ This file aggregates three layers of UI-contract tests:
    in the SPA template and JS-source-level checks for the activity
    translation helper.
 
-3. Operator action chips + post-PR-2 Work-tab cutover surface —
-   verifies ACTION-line parsing strips the trailing chip block, default
-   Quick actions render, and the new Goals strip + Tell Operator
-   surface is wired (with the legacy sub-nav / kanban / activity
-   templates excised).
+3. Operator action chips + Work-tab post-rewrite surface — verifies
+   ACTION-line parsing strips the trailing chip block, default Quick
+   actions render, the Goals chip strip is wired, summary card rating
+   uses SVG icons (not emoji), and the legacy sub-nav / kanban /
+   activity / standalone Tell Operator templates are excised.
 
 We can't run a real headless browser in CI, so all assertions are
 string-level over the rendered template + static JS — enough to catch
@@ -792,9 +792,12 @@ class TestOperatorActionChipsMarkup:
 
 
 class TestWorkTabPr2Cutover:
-    """PR 2 of Work tab rewrite — sub-nav (Summaries / Kanban / Activity)
-    deleted, summary cards are the unconditional landing surface, Goals
-    chip strip + Tell Operator added, /home/* URLs normalize to /home.
+    """Work-tab cutover — sub-nav (Summaries / Kanban / Activity)
+    deleted, summary cards are the unconditional landing surface,
+    Goals chip strip is wired, rating buttons use SVG icons (not
+    emoji), the standalone Tell Operator section is removed (steering
+    lives in inline rework feedback + the Chat tab), and /home/* URLs
+    normalize to /home.
     """
 
     def test_subnav_tab_strip_removed(self, index_html: str):
@@ -862,12 +865,41 @@ class TestWorkTabPr2Cutover:
         slice_ = index_html[max(0, idx - 200):idx + 200]
         assert "workplaceGoals.length > 0" in slice_
 
-    def test_tell_operator_section_present(self, index_html: str):
-        # Steering textarea + Send button + confirmation slot.
-        assert 'data-testid="workplace-tell-operator"' in index_html
-        assert 'data-testid="tell-operator-submit"' in index_html
-        assert 'data-testid="tell-operator-confirmation"' in index_html
-        assert "submitTellOperator()" in index_html
+    def test_tell_operator_section_removed(self, index_html: str):
+        # Standalone Tell Operator textarea was removed — redundant
+        # with the Chat tab. Steering happens via the inline rework
+        # feedback box on summary cards instead.
+        assert 'data-testid="workplace-tell-operator"' not in index_html
+        assert 'data-testid="tell-operator-submit"' not in index_html
+        assert 'data-testid="tell-operator-confirmation"' not in index_html
+        assert "submitTellOperator()" not in index_html
+
+    def test_summary_rating_uses_svg_icons_not_emoji(self, index_html: str):
+        # Three rating buttons (accept / acknowledge / rework) carry
+        # data-testid attributes and EACH one contains its own inline
+        # SVG body (not the emoji codepoints 👍 ➖ 👎). We scope the
+        # SVG-presence check per-button so a future addition of an
+        # unrelated SVG nearby can't accidentally satisfy the count.
+        for testid in (
+            "summary-rate-accept",
+            "summary-rate-acknowledge",
+            "summary-rate-rework",
+        ):
+            marker = f'data-testid="{testid}"'
+            idx = index_html.find(marker)
+            assert idx > 0, f"{testid} button missing"
+            # 800 chars covers <button …><svg …>…</svg></button> with
+            # comfortable headroom — actual size is ~600 chars.
+            btn = index_html[idx:idx + 800]
+            assert "<svg" in btn, f"{testid} button has no inline SVG"
+            assert "</button>" in btn, f"{testid} button not closed in window"
+            # No emoji codepoints (HTML entities OR raw).
+            assert "&#x1F44D;" not in btn
+            assert "&#x1F44E;" not in btn
+            assert "&#x2796;" not in btn
+            assert "\U0001f44d" not in btn
+            assert "\U0001f44e" not in btn
+            assert "➖" not in btn
 
     def test_build_path_emits_only_bare_home(self, app_js: str):
         # PR 2 — single Work-tab URL. _buildPath returns '/home' for
@@ -949,9 +981,13 @@ class TestWorkTabPr2Cutover:
         assert "async loadWorkplaceGoals()" in app_js
         assert "/workplace/goals" in app_js
 
-    def test_tell_operator_method_present(self, app_js: str):
-        assert "async submitTellOperator()" in app_js
-        assert "sendChatTo('operator'" in app_js
+    def test_tell_operator_method_removed(self, app_js: str):
+        # submitTellOperator + tellOperator* Alpine state removed
+        # with the standalone section.
+        assert "async submitTellOperator()" not in app_js
+        assert "tellOperatorText" not in app_js
+        assert "tellOperatorInflight" not in app_js
+        assert "tellOperatorConfirmation" not in app_js
 
 
 # ── Phase 4: \"What's new\" tour for existing-fleet users ──────────

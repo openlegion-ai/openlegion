@@ -2100,7 +2100,22 @@ _MAX_GOAL_NOTE_CHARS = 500
 _VALID_GOAL_STATUSES = frozenset({
     "not_started", "in_progress", "on_track", "at_risk", "blocked", "done",
 })
-_VALID_GOAL_ACTIONS = frozenset({"set", "add", "update", "remove", "list"})
+_VALID_GOAL_ACTIONS = frozenset({
+    "set", "add", "update", "remove", "list", "record_seed_ask",
+})
+# Actions whose semantics assume a known prior on-disk state — they
+# MUST refuse on a corrupt GOALS.json instead of silently treating the
+# file as empty and overwriting valid data. ``set`` is the recovery
+# path (intentional full replacement, accepts current=[] on corrupt
+# with a WARN), ``list`` is a read-only display (lenient acceptable),
+# and ``record_seed_ask`` has its own strict guard inside
+# ``_write_seed_ask``. New actions added to ``_VALID_GOAL_ACTIONS``
+# must be classified here too — silently merging them into the lenient
+# path would re-open the data-loss hole Codex r4 caught.
+_MERGE_WRITE_ACTIONS = frozenset({"add", "update", "remove"})
+# Cap on team names captured in a seed_ask record — defensive bound
+# so a misbehaving caller can't blow up the JSON sidecar.
+_MAX_SEED_ASK_TEAMS = 20
 
 
 def _read_goals_sidecar(workspace_root) -> list[dict]:
@@ -2125,6 +2140,91 @@ def _read_goals_sidecar(workspace_root) -> list[dict]:
         return []
     cleaned: list[dict] = []
     for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        status = entry.get("status")
+        if not isinstance(name, str) or not isinstance(status, str):
+            continue
+        cleaned.append({
+            "name": name,
+            "status": status,
+            "progress_note": entry.get("progress_note", "") or "",
+            "updated_at": entry.get("updated_at", "") or "",
+        })
+    return cleaned
+
+
+def _read_seed_ask(workspace_root) -> dict | None:
+    """Read the seed_ask block from GOALS.json. Returns None if absent
+    or malformed.
+
+    The seed_ask block records when operator last asked the user to
+    name business outcomes (cold-start goal seeding). Heartbeat uses
+    ``last_ts`` to throttle re-asks; without a structured timestamp
+    the throttle would degrade to LLM judgment over freeform notes.
+    """
+    path = workspace_root / _GOALS_JSON_FILENAME
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(errors="replace"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    seed_ask = data.get("seed_ask")
+    if not isinstance(seed_ask, dict):
+        return None
+    last_ts = seed_ask.get("last_ts")
+    team_names = seed_ask.get("team_names")
+    if not isinstance(last_ts, str) or not isinstance(team_names, list):
+        return None
+    cleaned_names = [
+        n for n in team_names if isinstance(n, str) and n.strip()
+    ]
+    return {"last_ts": last_ts, "team_names": cleaned_names}
+
+
+class _GoalsCorruptError(Exception):
+    """Raised by safe-read helpers when GOALS.json exists but is
+    unparseable or has an unexpected top-level shape. Callers on the
+    merge-write path (``_write_seed_ask``, ``_write_goals``) re-raise
+    rather than silently clobber valid on-disk data with an empty list.
+    """
+
+
+def _safe_read_goals_for_merge(workspace_root) -> list[dict]:
+    """Strict variant of ``_read_goals_sidecar`` for merge-write paths.
+
+    Returns the cleaned goals list when GOALS.json is missing,
+    empty, or well-formed. **Raises ``_GoalsCorruptError`` when the
+    file exists with content that can't be parsed as a JSON object**
+    — a silent ``[]`` here would let ``_write_seed_ask`` write back
+    an empty goals list and permanently wipe valid on-disk goals.
+    Codex r3 (PR 972) flagged this exact data-loss path.
+    """
+    path = workspace_root / _GOALS_JSON_FILENAME
+    if not path.exists():
+        return []
+    raw = path.read_text(errors="replace")
+    if not raw.strip():
+        return []
+    try:
+        data = json.loads(raw)
+    except (OSError, ValueError) as e:
+        raise _GoalsCorruptError(f"GOALS.json parse failed: {e}") from e
+    if not isinstance(data, dict):
+        raise _GoalsCorruptError(
+            "GOALS.json top-level is not a JSON object"
+        )
+    raw_goals = data.get("goals", [])
+    if not isinstance(raw_goals, list):
+        raise _GoalsCorruptError(
+            "GOALS.json 'goals' field is not a list"
+        )
+    cleaned: list[dict] = []
+    for entry in raw_goals:
         if not isinstance(entry, dict):
             continue
         name = entry.get("name")
@@ -2166,11 +2266,81 @@ def _write_goals(workspace_root, goals: list[dict]) -> None:
     if the MD write fails after the JSON write succeeds, the two files
     diverge. Risk is small for a stable workspace volume; if it ever
     bites, switch to temp-file + rename.
+
+    Preserves an existing ``seed_ask`` block across goal mutations so
+    the heartbeat throttle can't be silently cleared by an unrelated
+    goal edit. If the underlying JSON parse fails, the seed_ask block
+    is dropped but a WARN is logged so the loss is visible (Codex r5
+    catch — the previous silent drop on a corrupt-file ``set`` recovery
+    would have meant one stray re-ask in the user's chat with no log
+    explaining why).
     """
     json_path = workspace_root / _GOALS_JSON_FILENAME
     md_path = workspace_root / _GOALS_MD_FILENAME
-    json_path.write_text(json.dumps({"goals": goals}, indent=2) + "\n")
+    payload: dict = {"goals": goals}
+    # Distinguish "file missing / no seed_ask present" (silent) from
+    # "file exists but unparseable" (log warning so the drop is visible).
+    # Single read of the raw text — feeds both the parse attempt for
+    # seed_ask extraction and the WARN-trigger check if the parse fails.
+    if json_path.exists():
+        raw_text = json_path.read_text(errors="replace")
+        if raw_text.strip():
+            try:
+                data = json.loads(raw_text)
+                existing_seed_ask = data.get("seed_ask") if isinstance(data, dict) else None
+                if isinstance(existing_seed_ask, dict):
+                    last_ts = existing_seed_ask.get("last_ts")
+                    team_names = existing_seed_ask.get("team_names")
+                    if isinstance(last_ts, str) and isinstance(team_names, list):
+                        cleaned_names = [
+                            n for n in team_names
+                            if isinstance(n, str) and n.strip()
+                        ]
+                        payload["seed_ask"] = {
+                            "last_ts": last_ts,
+                            "team_names": cleaned_names,
+                        }
+            except (OSError, ValueError) as e:
+                logger.warning(
+                    "preserving seed_ask: GOALS.json at %s could not be "
+                    "parsed; throttle block dropped from this write. (%s)",
+                    json_path, e,
+                )
+    json_path.write_text(json.dumps(payload, indent=2) + "\n")
     md_path.write_text(_render_goals_md(goals))
+
+
+def _write_seed_ask(workspace_root, team_names: list[str]) -> dict:
+    """Record a goal-seeding ask. Updates only the ``seed_ask`` block;
+    the ``goals`` array is preserved verbatim. Returns the new
+    ``seed_ask`` dict so the caller can echo it back to the LLM.
+
+    Raises ``_GoalsCorruptError`` if GOALS.json is unparseable — without
+    that guard, ``_read_goals_sidecar`` would silently return ``[]`` and
+    the resulting write would clobber valid goals (Codex r3 catch).
+
+    GOALS.md is not re-rendered — the seed_ask record is operator
+    bookkeeping, not user-visible content (the actual ask reaches
+    the user via ``notify_user``).
+
+    Concurrency note: the read-modify-write here isn't atomic, but
+    ``execute_heartbeat`` in ``src/agent/loop.py`` skips when the
+    agent's ``state != "idle"`` or ``_chat_lock`` is held — a single
+    operator can't have two heartbeats running concurrently. The race
+    would only matter across two independent operator processes
+    sharing one workspace, which isn't a supported deployment. Worst
+    case under any race: latest timestamp wins, prior team_names
+    list is lost; the throttle still functions.
+    """
+    json_path = workspace_root / _GOALS_JSON_FILENAME
+    goals = _safe_read_goals_for_merge(workspace_root)
+    seed_ask = {
+        "last_ts": datetime.now(timezone.utc).isoformat(),
+        "team_names": list(team_names),
+    }
+    payload = {"goals": goals, "seed_ask": seed_ask}
+    json_path.write_text(json.dumps(payload, indent=2) + "\n")
+    return seed_ask
 
 
 def _validate_goal_input(goal, *, require_status: bool = True) -> tuple[dict | None, str | None]:
@@ -2225,13 +2395,16 @@ def _validate_goal_input(goal, *, require_status: bool = True) -> tuple[dict | N
         "Manage tracked business goals shown on the user's Work tab. "
         "Source of truth is GOALS.json (rendered to GOALS.md for humans). "
         "Use 'set' to replace the full list, 'add'/'update'/'remove' for "
-        "incremental changes, 'list' to read the current state. "
-        "Operator-only."
+        "incremental changes, 'list' to read the current state, and "
+        "'record_seed_ask' to stamp when you last pinged the user for "
+        "cold-start goals (throttles re-asks). Operator-only."
     ),
     parameters={
         "action": {
             "type": "string",
-            "enum": ["set", "add", "update", "remove", "list"],
+            "enum": [
+                "set", "add", "update", "remove", "list", "record_seed_ask",
+            ],
             "description": "Which operation to perform.",
         },
         "goals": {
@@ -2256,6 +2429,16 @@ def _validate_goal_input(goal, *, require_status: bool = True) -> tuple[dict | N
             "description": "Goal name for action='remove'.",
             "default": "",
         },
+        "team_names": {
+            "type": "array",
+            "description": (
+                "Team names referenced in the cold-start seed ask, for "
+                "action='record_seed_ask'. The heartbeat reads this back "
+                "to throttle re-asks. Capped at 20 names."
+            ),
+            "items": {"type": "string"},
+            "default": [],
+        },
     },
 )
 async def manage_goals(
@@ -2264,6 +2447,7 @@ async def manage_goals(
     goals: list | None = None,
     goal: dict | None = None,
     name: str = "",
+    team_names: list | None = None,
     workspace_manager=None,
     **_kw,
 ) -> dict:
@@ -2281,10 +2465,76 @@ async def manage_goals(
         }
 
     workspace_root = workspace_manager.root
-    current = _read_goals_sidecar(workspace_root)
+
+    # Action-specific read policy (Codex r4 catch — without this,
+    # incremental writes silently clobbered a corrupt GOALS.json).
+    # ``_MERGE_WRITE_ACTIONS`` is the module-scope source of truth;
+    # see the comment beside its definition for the classification
+    # rules and the "must add new actions here" note for future
+    # contributors.
+    if action in _MERGE_WRITE_ACTIONS:
+        try:
+            current = _safe_read_goals_for_merge(workspace_root)
+        except _GoalsCorruptError as e:
+            return {
+                "error": (
+                    f"GOALS.json is corrupt — refusing to "
+                    f"{action} because doing so would silently lose "
+                    f"the pre-existing goals on disk. Inspect the "
+                    f"file in the operator workspace and repair or "
+                    f"rotate it before retrying. ({e})"
+                ),
+            }
+    elif action == "set":
+        # ``set`` replaces the full list, so a corrupt file's prior
+        # goals are intentionally going away. Surface the corruption
+        # in logs so the operator notices, but proceed.
+        try:
+            current = _safe_read_goals_for_merge(workspace_root)
+        except _GoalsCorruptError as e:
+            logger.warning(
+                "GOALS.json at %s was corrupt during 'set' replacement; "
+                "treating as empty and overwriting. (%s)",
+                workspace_root / _GOALS_JSON_FILENAME, e,
+            )
+            current = []
+    else:
+        # ``list`` / ``record_seed_ask`` — current goals aren't used
+        # by these branches except indirectly (record_seed_ask reads
+        # via _write_seed_ask, which has its own strict guard).
+        current = _read_goals_sidecar(workspace_root)
 
     if action == "list":
-        return {"ok": True, "goals": current}
+        # List surfaces the seed_ask block too so the heartbeat can
+        # mechanically decide whether to re-ask, instead of having
+        # the LLM scan free-form OBSERVATIONS notes.
+        seed_ask = _read_seed_ask(workspace_root)
+        return {"ok": True, "goals": current, "seed_ask": seed_ask}
+
+    if action == "record_seed_ask":
+        raw_names = team_names if isinstance(team_names, list) else []
+        cleaned: list[str] = []
+        for n in raw_names:
+            if not isinstance(n, str):
+                continue
+            s = sanitize_for_prompt(n).strip()
+            if s:
+                cleaned.append(s)
+        cleaned = cleaned[:_MAX_SEED_ASK_TEAMS]
+        try:
+            seed_ask = _write_seed_ask(workspace_root, cleaned)
+        except _GoalsCorruptError as e:
+            # Surface to the LLM rather than silently wiping goals.
+            return {
+                "error": (
+                    f"GOALS.json is corrupt — refusing to record the "
+                    f"seed_ask block because doing so would clobber "
+                    f"any existing goals on disk. Inspect the file in "
+                    f"the operator workspace and repair or rotate it "
+                    f"before retrying. ({e})"
+                ),
+            }
+        return {"ok": True, "seed_ask": seed_ask}
 
     now = datetime.now(timezone.utc).isoformat()
 

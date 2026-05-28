@@ -507,8 +507,20 @@ class CronScheduler:
                             )
                             return None
 
-                        # Build rich heartbeat message
-                        sections: list[str] = [f"Heartbeat for {job.agent}."]
+                        # Build rich heartbeat message. The leading line
+                        # carries the current ISO timestamp so the LLM
+                        # has a concrete "now" for date math (e.g. the
+                        # 7-day re-ask throttle on goal seeding which
+                        # otherwise has to guess against its training
+                        # cutoff). Codex r3 (PR 972) flagged the gap.
+                        # ``datetime`` + ``timezone`` are imported at
+                        # module scope (line 29) — re-importing here
+                        # would shadow the module-level binding and
+                        # break earlier same-function references.
+                        now_iso = datetime.now(timezone.utc).isoformat()
+                        sections: list[str] = [
+                            f"Heartbeat for {job.agent} at {now_iso}."
+                        ]
 
                         # Hardcoded operating rules — always included, cannot be
                         # overridden by agent-editable HEARTBEAT.md

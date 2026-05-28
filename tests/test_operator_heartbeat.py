@@ -100,11 +100,18 @@ def test_heartbeat_tools_constant():
       so the heartbeat instructions that grade up to 10 oldest unrated
       done tasks and steward goal staleness are actually reachable —
       without these the loop denies the calls the instructions request.
+    * v4 (PR 972 Codex follow-up): + ``inspect_agents``. Step 5 of
+      the heartbeat procedure already called it for roster summary
+      and drill-ins but the allowlist denied the call — a pre-existing
+      contract mismatch Codex flagged during PR 972 review.
     """
     assert _HEARTBEAT_TOOLS == frozenset({
         "list_agents", "get_agent_profile", "get_system_status",
         "notify_user",
         "check_inbox", "workflow_snapshot", "await_task_event",
         "rate_delivery", "manage_goals",
+        "inspect_agents",
     })
-    assert len(_HEARTBEAT_TOOLS) == 9
+    # v3 main was 9 tools (no save_observations — removed pre-merge);
+    # v4 this branch added inspect_agents = 10.
+    assert len(_HEARTBEAT_TOOLS) == 10

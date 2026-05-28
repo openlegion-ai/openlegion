@@ -179,6 +179,33 @@ class TestEnsureOperatorModelSync(_TempConfigMixin):
         mtime_after = self._agents_path.stat().st_mtime
         assert mtime_before == mtime_after
 
+    def test_empty_heartbeat_is_bootstrapped_to_canonical_template(self):
+        """Codex r3 (PR 972) catch — the WARN for no-sentinel files
+        instructs operators to clear ``heartbeat:`` in agents.yaml to
+        re-bootstrap. That recovery path must actually work: an
+        existing operator with an empty heartbeat field must get
+        rewritten from the canonical template on next ``_ensure``
+        rather than left empty forever."""
+        from src.cli.config import _OPERATOR_HEARTBEAT
+
+        agents_cfg = {"agents": {"operator": {
+            "role": "Existing operator",
+            "model": "openai/gpt-4o-mini",
+            "heartbeat": "",   # operator followed the WARN advice
+        }}}
+        with open(self._agents_path, "w") as f:
+            yaml.dump(agents_cfg, f)
+
+        with self._mock_config():
+            from src.cli.config import _ensure_operator_agent
+            _ensure_operator_agent(default_model="openai/gpt-4o-mini")
+
+        with open(self._agents_path) as f:
+            result = yaml.safe_load(f)
+        # The full canonical template — not an empty string — is now
+        # in place. The first line check confirms it's the real thing.
+        assert result["agents"]["operator"]["heartbeat"] == _OPERATOR_HEARTBEAT
+
 
 class TestEnsureOperatorMigratesConcierge(_TempConfigMixin):
     """Renames concierge to operator in both agents.yaml and permissions."""
@@ -271,7 +298,11 @@ class TestOperatorConstants:
         #  * v3 (Work-tab rewrite PR 2/3): +rate_delivery, manage_goals so the
         #    heartbeat instructions that grade up to 10 oldest unrated done
         #    tasks per cycle and steward goal staleness are reachable.
-        assert len(_OPERATOR_HEARTBEAT_TOOLS) == 9
+        #  * v4 (PR 972 Codex follow-up): +inspect_agents — step 5 of
+        #    the heartbeat procedure already called it but the allowlist
+        #    denied the call. (Note: main had previously dropped
+        #    save_observations, so v3 baseline was 9 not 10.)
+        assert len(_OPERATOR_HEARTBEAT_TOOLS) == 10
         # The operator-tier heartbeat tools must also be on the main
         # operator allowlist — they're the tools operator can use from
         # both /chat and heartbeat. Two heartbeat entries are

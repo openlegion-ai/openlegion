@@ -360,12 +360,40 @@ class WorkspaceManager:
                 existing = heartbeat_path.read_text(errors="replace")
             except Exception:
                 existing = ""
-            # Refresh if the EXISTING file lacks the latest sentinel —
-            # i.e., it's still on a prior heartbeat version (or
-            # custom). Using ``any()`` over the whole tuple would
-            # silently skip v2→v3 upgrades because v2's marker is
-            # already present in old files.
-            needs_refresh = f"<!-- {latest_sentinel} -->" not in existing
+            # Refresh ONLY when the file carries at least one prior
+            # sentinel (proving it's a system-managed heartbeat we
+            # have rights to roll forward) AND lacks the latest one.
+            # Skipping the "any old sentinel present" check would
+            # silently overwrite user-customised heartbeats — those
+            # don't carry ANY marker because the user replaced the
+            # template — every time we ship a new sentinel bump.
+            #
+            # Trade-off (Codex pre-merge review): pre-v2 system files
+            # (installed before sentinel markers existed) also lack
+            # any marker, so they're indistinguishable from user
+            # customisation and stay on their old template until the
+            # operator manually deletes HEARTBEAT.md to bootstrap a
+            # fresh copy. The warn below makes the situation visible
+            # in operator logs so it can be acted on.
+            has_any_old_sentinel = any(
+                f"<!-- {s} -->" in existing for s in HEARTBEAT_SENTINELS
+            )
+            needs_refresh = (
+                has_any_old_sentinel
+                and f"<!-- {latest_sentinel} -->" not in existing
+            )
+            if (
+                not has_any_old_sentinel
+                and f"<!-- {latest_sentinel} -->" not in existing
+                and existing.strip()
+            ):
+                logger.warning(
+                    "%s carries no known sentinel — treating as "
+                    "user-customised and skipping refresh. If this is "
+                    "a pre-sentinel system file, delete the file to "
+                    "bootstrap a fresh template on next startup.",
+                    self.HEARTBEAT_FILE,
+                )
             if needs_refresh:
                 heartbeat_path.write_text(
                     "# Heartbeat Rules\n\n"

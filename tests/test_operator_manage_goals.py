@@ -72,7 +72,9 @@ async def test_manage_goals_list_empty(tmp_path):
 
     ws = _FakeWorkspace(tmp_path)
     result = await manage_goals("list", workspace_manager=ws)
-    assert result == {"ok": True, "goals": []}
+    # PR 972 Codex follow-up — list now also returns the seed_ask
+    # throttle block (None when never recorded).
+    assert result == {"ok": True, "goals": [], "seed_ask": None}
 
 
 @pytest.mark.asyncio
@@ -403,3 +405,336 @@ async def test_manage_goals_add_caps_at_max_entries(tmp_path):
     )
     assert "error" in overflow
     assert "max" in overflow["error"].lower()
+
+
+# ── Cold-start seed-ask throttle (PR 972 Codex follow-up) ─────────
+
+
+def _load_goals_payload(tmp_path: Path) -> dict:
+    return json.loads((tmp_path / "GOALS.json").read_text())
+
+
+@pytest.mark.asyncio
+async def test_list_returns_null_seed_ask_when_unset(tmp_path):
+    """Fresh workspace: no GOALS.json yet → ``seed_ask`` is ``None`` so
+    the heartbeat can ask immediately."""
+    from src.agent.builtins.operator_tools import manage_goals
+
+    ws = _FakeWorkspace(tmp_path)
+    result = await manage_goals("list", workspace_manager=ws)
+    assert result["ok"] is True
+    assert result["goals"] == []
+    assert result["seed_ask"] is None
+
+
+@pytest.mark.asyncio
+async def test_record_seed_ask_writes_structured_block(tmp_path):
+    """``record_seed_ask`` writes a ``{last_ts, team_names}`` block to
+    GOALS.json and echoes it back to the caller."""
+    from src.agent.builtins.operator_tools import manage_goals
+
+    ws = _FakeWorkspace(tmp_path)
+    result = await manage_goals(
+        "record_seed_ask",
+        team_names=["alpha", "beta"],
+        workspace_manager=ws,
+    )
+    assert result["ok"] is True
+    seed = result["seed_ask"]
+    assert seed["team_names"] == ["alpha", "beta"]
+    assert seed["last_ts"]  # ISO timestamp
+    # File-level check.
+    payload = _load_goals_payload(tmp_path)
+    assert payload["seed_ask"] == seed
+
+
+@pytest.mark.asyncio
+async def test_list_returns_recorded_seed_ask(tmp_path):
+    """After ``record_seed_ask``, ``list`` echoes the same block back."""
+    from src.agent.builtins.operator_tools import manage_goals
+
+    ws = _FakeWorkspace(tmp_path)
+    await manage_goals(
+        "record_seed_ask",
+        team_names=["growth"],
+        workspace_manager=ws,
+    )
+    result = await manage_goals("list", workspace_manager=ws)
+    assert result["seed_ask"]["team_names"] == ["growth"]
+
+
+@pytest.mark.asyncio
+async def test_seed_ask_preserved_across_goal_mutations(tmp_path):
+    """Recording a seed_ask and then mutating goals via set/add/update
+    must NOT wipe the seed_ask block — the throttle has to outlive
+    incremental goal edits."""
+    from src.agent.builtins.operator_tools import manage_goals
+
+    ws = _FakeWorkspace(tmp_path)
+    await manage_goals(
+        "record_seed_ask",
+        team_names=["growth"],
+        workspace_manager=ws,
+    )
+    before = _load_goals_payload(tmp_path)["seed_ask"]
+    # set
+    await manage_goals(
+        "set",
+        goals=[{"name": "Launch landing page", "status": "in_progress"}],
+        workspace_manager=ws,
+    )
+    assert _load_goals_payload(tmp_path)["seed_ask"] == before
+    # add
+    await manage_goals(
+        "add",
+        goal={"name": "Sign 5 design partners", "status": "not_started"},
+        workspace_manager=ws,
+    )
+    assert _load_goals_payload(tmp_path)["seed_ask"] == before
+    # update
+    await manage_goals(
+        "update",
+        goal={"name": "Launch landing page", "status": "on_track"},
+        workspace_manager=ws,
+    )
+    assert _load_goals_payload(tmp_path)["seed_ask"] == before
+
+
+@pytest.mark.asyncio
+async def test_record_seed_ask_caps_team_names_and_sanitises(tmp_path):
+    """Defensive bounds: empty/whitespace strings dropped, list capped."""
+    from src.agent.builtins.operator_tools import manage_goals
+
+    ws = _FakeWorkspace(tmp_path)
+    raw = [
+        "alpha", "", "  ", "beta", None, 42,
+        *[f"team-{i}" for i in range(25)],
+    ]
+    result = await manage_goals(
+        "record_seed_ask",
+        team_names=raw,
+        workspace_manager=ws,
+    )
+    names = result["seed_ask"]["team_names"]
+    assert "alpha" in names and "beta" in names
+    assert "" not in names
+    assert None not in names
+    assert 42 not in names
+    assert len(names) <= 20  # _MAX_SEED_ASK_TEAMS
+
+
+@pytest.mark.asyncio
+async def test_record_seed_ask_updates_timestamp_on_replay(tmp_path):
+    """A second call updates the timestamp (the throttle's whole point
+    is "when did I last ask")."""
+    import time as _time
+
+    from src.agent.builtins.operator_tools import manage_goals
+
+    ws = _FakeWorkspace(tmp_path)
+    first = await manage_goals(
+        "record_seed_ask",
+        team_names=["alpha"],
+        workspace_manager=ws,
+    )
+    _time.sleep(0.01)
+    second = await manage_goals(
+        "record_seed_ask",
+        team_names=["alpha"],
+        workspace_manager=ws,
+    )
+    assert second["seed_ask"]["last_ts"] > first["seed_ask"]["last_ts"]
+
+
+@pytest.mark.asyncio
+async def test_record_seed_ask_refuses_on_corrupt_goals_json(tmp_path):
+    """Codex r3 catch — when GOALS.json is corrupt (e.g. a partial
+    write from a prior crash), ``record_seed_ask`` must NOT silently
+    write back ``{"goals": [], "seed_ask": {...}}`` and thereby wipe
+    any goals the file would have decoded to. It must abort and
+    surface an error so the operator can repair the file."""
+    from src.agent.builtins.operator_tools import manage_goals
+
+    ws = _FakeWorkspace(tmp_path)
+    # First, seed some goals via the happy path so we have a valid
+    # baseline to "lose" — proves the corrupt-input refusal is what
+    # protects the data, not just an empty-file check.
+    await manage_goals(
+        "set",
+        goals=[{"name": "Launch landing page", "status": "in_progress"}],
+        workspace_manager=ws,
+    )
+    # Now simulate a corrupt write — truncated JSON.
+    (tmp_path / "GOALS.json").write_text('{"goals": [{"name":')
+    result = await manage_goals(
+        "record_seed_ask",
+        team_names=["growth"],
+        workspace_manager=ws,
+    )
+    assert "error" in result
+    assert "corrupt" in result["error"].lower()
+    # File is left untouched — operator can inspect and repair.
+    assert (tmp_path / "GOALS.json").read_text() == '{"goals": [{"name":'
+
+
+@pytest.mark.asyncio
+async def test_record_seed_ask_seeds_into_empty_workspace(tmp_path):
+    """No GOALS.json yet → record_seed_ask creates one with empty
+    goals + the new seed_ask block. The corrupt-file guard at
+    ``_safe_read_goals_for_merge`` distinguishes "missing" (legitimate
+    empty) from "exists but corrupt" (raise)."""
+    from src.agent.builtins.operator_tools import manage_goals
+
+    ws = _FakeWorkspace(tmp_path)
+    result = await manage_goals(
+        "record_seed_ask",
+        team_names=["alpha"],
+        workspace_manager=ws,
+    )
+    assert result["ok"] is True
+    payload = json.loads((tmp_path / "GOALS.json").read_text())
+    assert payload["goals"] == []
+    assert payload["seed_ask"]["team_names"] == ["alpha"]
+
+
+# ── Corrupt-GOALS-file protection across all merge-write actions ──
+#
+# Codex r4 caught: the r3 fix wired ``_safe_read_goals_for_merge``
+# only into ``_write_seed_ask``. ``add`` / ``update`` / ``remove``
+# still used the lenient reader and could silently overwrite a
+# corrupt file. These tests pin each action's behaviour on a
+# corrupted GOALS.json (truncated mid-write).
+
+
+_CORRUPT_JSON = '{"goals": [{"name":'
+
+
+@pytest.mark.asyncio
+async def test_add_refuses_on_corrupt_goals_json(tmp_path):
+    """``add`` must abort and surface an error rather than overwrite
+    a corrupt file with ``[new_goal]``."""
+    from src.agent.builtins.operator_tools import manage_goals
+
+    ws = _FakeWorkspace(tmp_path)
+    (tmp_path / "GOALS.json").write_text(_CORRUPT_JSON)
+    result = await manage_goals(
+        "add",
+        goal={"name": "Launch landing page", "status": "in_progress"},
+        workspace_manager=ws,
+    )
+    assert "error" in result
+    assert "corrupt" in result["error"].lower()
+    # File untouched — operator can repair.
+    assert (tmp_path / "GOALS.json").read_text() == _CORRUPT_JSON
+
+
+@pytest.mark.asyncio
+async def test_update_refuses_on_corrupt_goals_json(tmp_path):
+    """``update`` must abort with a 'corrupt' error, NOT a misleading
+    'goal not found' error — the latter would imply the goal didn't
+    exist when in fact the file just couldn't be read."""
+    from src.agent.builtins.operator_tools import manage_goals
+
+    ws = _FakeWorkspace(tmp_path)
+    (tmp_path / "GOALS.json").write_text(_CORRUPT_JSON)
+    result = await manage_goals(
+        "update",
+        goal={"name": "Launch landing page", "status": "on_track"},
+        workspace_manager=ws,
+    )
+    assert "error" in result
+    assert "corrupt" in result["error"].lower()
+    assert (tmp_path / "GOALS.json").read_text() == _CORRUPT_JSON
+
+
+@pytest.mark.asyncio
+async def test_remove_refuses_on_corrupt_goals_json(tmp_path):
+    """``remove`` must abort with a 'corrupt' error rather than the
+    confusing 'goal not found' that the lenient path produced."""
+    from src.agent.builtins.operator_tools import manage_goals
+
+    ws = _FakeWorkspace(tmp_path)
+    (tmp_path / "GOALS.json").write_text(_CORRUPT_JSON)
+    result = await manage_goals(
+        "remove",
+        name="Launch landing page",
+        workspace_manager=ws,
+    )
+    assert "error" in result
+    assert "corrupt" in result["error"].lower()
+    assert (tmp_path / "GOALS.json").read_text() == _CORRUPT_JSON
+
+
+@pytest.mark.asyncio
+async def test_set_overwrites_corrupt_but_logs_warning(tmp_path, caplog):
+    """``set`` is an intentional full replacement — the user is
+    re-asserting truth, so accepting current=[] on corrupt and
+    proceeding is acceptable. But the corruption MUST be surfaced
+    via a WARNING log so the situation isn't silent."""
+    import logging
+
+    from src.agent.builtins.operator_tools import manage_goals
+
+    ws = _FakeWorkspace(tmp_path)
+    (tmp_path / "GOALS.json").write_text(_CORRUPT_JSON)
+    caplog.set_level(logging.WARNING, logger="agent.builtins.operator_tools")
+    result = await manage_goals(
+        "set",
+        goals=[{"name": "Fresh start", "status": "in_progress"}],
+        workspace_manager=ws,
+    )
+    assert result.get("ok") is True
+    assert len(result["goals"]) == 1
+    payload = json.loads((tmp_path / "GOALS.json").read_text())
+    assert payload["goals"][0]["name"] == "Fresh start"
+    # WARNING was logged — operator notices the corruption recovery.
+    assert any(
+        "corrupt" in r.message.lower() and r.levelno >= logging.WARNING
+        for r in caplog.records
+    ), f"missing corrupt-file warning in logs: {[r.message for r in caplog.records]}"
+
+
+@pytest.mark.asyncio
+async def test_list_tolerates_corrupt_goals_json(tmp_path):
+    """``list`` is a read-only display surface — returning ``[]`` on
+    a corrupt file is acceptable (the dashboard already handles empty
+    cleanly). The strict guard is only for WRITE paths."""
+    from src.agent.builtins.operator_tools import manage_goals
+
+    ws = _FakeWorkspace(tmp_path)
+    (tmp_path / "GOALS.json").write_text(_CORRUPT_JSON)
+    result = await manage_goals("list", workspace_manager=ws)
+    assert result.get("ok") is True
+    assert result["goals"] == []
+    # File untouched (list is read-only).
+    assert (tmp_path / "GOALS.json").read_text() == _CORRUPT_JSON
+
+
+@pytest.mark.asyncio
+async def test_set_on_corrupt_logs_seed_ask_drop(tmp_path, caplog):
+    """Codex r5 catch — when ``set`` recovers from a corrupt GOALS.json
+    by overwriting it, ``_write_goals`` cannot preserve the seed_ask
+    block (the existing JSON can't be parsed). The block is dropped,
+    but the drop MUST be visible in logs so the operator can decide
+    whether to re-pester users for goals. Without this WARN, the only
+    user-facing signal is one extra heartbeat ping with no explanation."""
+    import logging
+
+    from src.agent.builtins.operator_tools import manage_goals
+
+    ws = _FakeWorkspace(tmp_path)
+    (tmp_path / "GOALS.json").write_text(_CORRUPT_JSON)
+    caplog.set_level(logging.WARNING, logger="agent.builtins.operator_tools")
+    result = await manage_goals(
+        "set",
+        goals=[{"name": "Fresh start", "status": "in_progress"}],
+        workspace_manager=ws,
+    )
+    assert result.get("ok") is True
+    # Two distinct WARNINGs fire: the outer 'set' recovery + the
+    # inner _write_goals seed_ask preservation failure.
+    messages = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("corrupt" in m.lower() for m in messages)
+    assert any(
+        "seed_ask" in m.lower() and "drop" in m.lower() for m in messages
+    ), f"missing seed_ask drop warning: {messages}"

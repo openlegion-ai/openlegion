@@ -1700,6 +1700,10 @@ _OPERATOR_HEARTBEAT_TOOLS: list[str] = [
     # v3 Work-tab rewrite — heartbeat grades up to 10 oldest unrated
     # done tasks per cycle and stewards goal staleness.
     "rate_delivery", "manage_goals",
+    # v4 — ``inspect_agents`` was already prompted in step 5 of the
+    # heartbeat procedure but missing from this allowlist; added so
+    # the runtime gate stops denying the prompted call.
+    "inspect_agents",
 ]
 
 _OPERATOR_SOUL = """\
@@ -1719,6 +1723,7 @@ You build the workforce and step back. Users work with agents directly.
 _OPERATOR_HEARTBEAT = """\
 <!-- heartbeat_v2_workflow_aware -->
 <!-- heartbeat_v3_rate_delivery -->
+<!-- heartbeat_v4_goal_seeding -->
 You are running an autonomous fleet health check. You have access ONLY to monitoring tools.
 
 Step budget: stay at or under 8 tool calls per cycle (HEARTBEAT_MAX_ITERATIONS=12
@@ -1805,6 +1810,33 @@ workspace files.
 If you cannot identify which team a task belongs to, or two goals
 conflict, call `notify_user` and stop. Do not guess your way through.
 
+## Goal seeding (cold start)
+
+Procedure when GOALS.json is empty AND ≥1 team has active agents:
+
+1. Call `manage_goals(action="list")`. The response carries both
+   `goals` (the current list) and `seed_ask` (your throttle record:
+   `{last_ts, team_names}` or `null` if you've never asked).
+2. If `seed_ask` is `null` OR `seed_ask.last_ts` is more than 7 days
+   old, you may re-ask. Otherwise skip — you've already pinged the
+   user this cycle's window.
+3. To ask: call `notify_user` with a short message naming the
+   visible teams and inviting the user to state business outcomes.
+   Immediately follow with
+   `manage_goals(action="record_seed_ask", team_names=[…])` so the
+   throttle is stamped. Don't guess goals from a heartbeat —
+   surface the question and stop.
+
+The structured `seed_ask` block on GOALS.json replaces the
+freeform-notes throttle Codex flagged during PR 972 review; the
+LLM no longer has to scan free-form prose to decide whether it
+already asked.
+
+During CHAT (not heartbeat), draft goals with `manage_goals` action
+"set" / "add" whenever the user states outcomes freely or after
+team creation reveals measurable goals — that's the primary seeding
+path; the heartbeat ask is the safety net.
+
 ## Goal stewardship
 
 On each cycle scan goals for staleness (no related task activity in
@@ -1875,7 +1907,32 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
             latest_sentinel is not None
             and f"<!-- {latest_sentinel} -->" in existing_heartbeat
         )
-        if new_has_latest and not old_has_latest:
+        # Roll forward ONLY when the existing heartbeat carries at
+        # least one prior sentinel — proves it's a system-managed
+        # template we have rights to refresh. A user-customised
+        # heartbeat carries NO marker because the user replaced the
+        # template; without this guard every sentinel bump would
+        # silently overwrite their customisation.
+        #
+        # Trade-off (Codex pre-merge review): pre-sentinel system
+        # installs also lack any marker, so they look identical to
+        # user customisation and stay on their old template. The
+        # operator can manually clear `heartbeat:` in agents.yaml to
+        # opt in to the fresh template on next startup. We log a
+        # warn so the situation is visible.
+        old_has_any_sentinel = any(
+            f"<!-- {s} -->" in existing_heartbeat for s in HEARTBEAT_SENTINELS
+        )
+        # An EMPTY heartbeat is the operator's documented opt-in path
+        # for re-bootstrap (the WARN below for no-sentinel files
+        # instructs operators to clear the field; the refresh has to
+        # actually fire when they do). Treated as "fresh install" and
+        # rewritten from the canonical template.
+        existing_is_empty = not existing_heartbeat.strip()
+        if new_has_latest and (
+            (not old_has_latest and old_has_any_sentinel)
+            or existing_is_empty
+        ):
             op_entry["heartbeat"] = _OPERATOR_HEARTBEAT
             agents_cfg["agents"][_OPERATOR_AGENT_ID] = op_entry
             AGENTS_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -1884,7 +1941,22 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
                     agents_cfg, f, default_flow_style=False, sort_keys=False,
                 )
             logger.info(
-                "Refreshed operator heartbeat to versioned template",
+                "Refreshed operator heartbeat to versioned template%s",
+                " (was empty — bootstrapped)" if existing_is_empty else "",
+            )
+        elif (
+            new_has_latest
+            and not old_has_latest
+            and not old_has_any_sentinel
+            and not existing_is_empty
+        ):
+            logger.warning(
+                "operator heartbeat carries no known sentinel — "
+                "treating as user-customised and skipping refresh. "
+                "To opt in to the fresh template: clear the `heartbeat:` "
+                "field in agents.yaml (set to empty/null) AND delete "
+                "the operator's HEARTBEAT.md — startup will then write "
+                "both layers fresh from the canonical template."
             )
 
         # Ensure permissions are correct even for existing operator
