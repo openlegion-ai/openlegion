@@ -4518,6 +4518,47 @@ class TestLLMAuthAndConfigErrors:
         # Did NOT fire — config is misconfig, not credential failure.
         assert recorded == []
 
+    @pytest.mark.asyncio
+    async def test_execute_api_call_tags_transient_without_recording(self):
+        """``execute_api_call`` tags transient errors (Claude subscription
+        throttle empty-response, RemoteProtocolError stream interruption)
+        but does NOT call the auth-failure recorder — transient errors are
+        not credential failures and must not quarantine the agent. The
+        agent's classifier (src/agent/llm.py) routes ``error_type="transient"``
+        to ``LLMRetryableError`` so ``_llm_call_with_retry`` backs off."""
+        from src.shared.errors import LLMTransientError
+        from src.shared.types import APIProxyRequest
+        v = CredentialVault()
+        recorded: list[tuple] = []
+        v.set_auth_failure_recorder(
+            lambda *a: recorded.append(a),
+        )
+
+        async def _failing_handler(req):
+            raise LLMTransientError(
+                "Anthropic OAuth error: Connection to the AI provider was "
+                "interrupted. Retrying may help.",
+                provider="anthropic",
+                model="anthropic/claude-sonnet-4-6",
+            )
+
+        v.service_handlers["llm"] = _failing_handler
+
+        req = APIProxyRequest(
+            service="llm", action="chat",
+            params={"model": "anthropic/claude-sonnet-4-6", "messages": []},
+        )
+        resp = await v.execute_api_call(req, agent_id="agent-a")
+        assert resp.success is False
+        assert resp.error_type == "transient"
+        assert (resp.error_meta or {}).get("provider") == "anthropic"
+        assert (resp.error_meta or {}).get("model") == "anthropic/claude-sonnet-4-6"
+        # ``retry_after`` field exists on the meta (None by default) — the
+        # agent loop can use it later without changing the exception shape.
+        assert "retry_after" in (resp.error_meta or {})
+        # Recorder did NOT fire — transient isn't a credential failure.
+        assert recorded == []
+
 
 class TestLiteLLMTypedErrorClassification:
     """Codex P1 r3: LiteLLM exceptions (API-key path) must classify into
