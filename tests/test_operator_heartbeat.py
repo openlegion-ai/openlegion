@@ -18,7 +18,7 @@ async def test_heartbeat_restricts_operator_tools():
     # Simulate operator: set _allowed_tools to a superset
     operator_tools = frozenset({
         "list_agents", "get_agent_profile", "get_system_status",
-        "notify_user", "save_observations", "hand_off", "confirm_edit",
+        "notify_user", "hand_off", "confirm_edit",
     })
     loop._allowed_tools = operator_tools
     original_allowed = loop._allowed_tools
@@ -91,9 +91,8 @@ def test_heartbeat_tools_constant():
     """Verify _HEARTBEAT_TOOLS carries the heartbeat-reachable allowlist.
 
     Layer history:
-    * v1 (initial): 5 read-only tools — ``list_agents``,
-      ``get_agent_profile``, ``get_system_status``, ``notify_user``,
-      ``save_observations``.
+    * v1 (initial): 4 read-only tools — ``list_agents``,
+      ``get_agent_profile``, ``get_system_status``, ``notify_user``.
     * v2 (workflow awareness): + ``check_inbox``, ``workflow_snapshot``,
       ``await_task_event`` so the heartbeat can drive multi-stage
       chains without dropping out to a full /chat turn.
@@ -108,9 +107,11 @@ def test_heartbeat_tools_constant():
     """
     assert _HEARTBEAT_TOOLS == frozenset({
         "list_agents", "get_agent_profile", "get_system_status",
-        "notify_user", "save_observations",
+        "notify_user",
         "check_inbox", "workflow_snapshot", "await_task_event",
         "rate_delivery", "manage_goals",
         "inspect_agents",
     })
-    assert len(_HEARTBEAT_TOOLS) == 11
+    # v3 main was 9 tools (no save_observations — removed pre-merge);
+    # v4 this branch added inspect_agents = 10.
+    assert len(_HEARTBEAT_TOOLS) == 10

@@ -4,31 +4,30 @@ Real-time web dashboard for fleet observability and management.
 
 ## Overview
 
-The dashboard is served at `http://localhost:8420/dashboard` (or whatever port the mesh is configured on). It provides a live view of your agent fleet across four top-nav tabs with a consolidated navigation bar, slide-over chat panels, and a keyboard command palette.
+The dashboard is served at `http://localhost:8420/dashboard` (or whatever port the mesh is configured on). It provides a live view of your agent fleet across four primary tabs — a labeled left sidebar on desktop (`md:` and up) and an icon-only top strip on mobile — with slide-over chat panels and a keyboard command palette.
 
 No additional setup is required — the dashboard starts automatically with `openlegion start`. In self-hosted and local dev mode, the dashboard is open to anyone who can reach port 8420. In hosted mode (subdomain deployments), SSO authentication is required; see [Authentication](#authentication) for details.
 
 ## Navigation
 
-### Top-Nav Tabs
+### Primary Tabs
 
-The dashboard has **four** top-level tabs. Tab IDs are frozen for URL stability (deep links, persisted preferences, dashboard endpoint paths reference them) while the user-facing labels have diverged — per CLAUDE.md #14, renaming the IDs would break links so only the labels were updated.
+The dashboard has **four** top-level tabs. Tab IDs are frozen for URL stability (deep links, persisted preferences, dashboard endpoint paths reference them) while the user-facing labels have diverged — per CLAUDE.md #14, renaming the IDs would break links so only the labels were updated. The tabs render as a labeled vertical sidebar (`<aside class="side-nav">` in `src/dashboard/templates/index.html`) on `md:` and wider, collapsing to an icon-only strip in the slim top bar on `<md` mobile viewports.
 
 | Tab ID (frozen) | User Label | What It Shows |
 |----------------|------------|--------------|
 | `chat` | **Chat** | Multi-agent chat surface — slide-over panels, streaming, command palette entry. Default tab on boot |
 | `workplace` | **Work** | Kanban / Needs-You / Activity feed / Pending Actions — the Board surface. See [Work Tab](#work-tab) |
-| `fleet` | **Team** | Agent grid with operator card prepended in standalone view, drill-down agent detail (config, identity, capabilities, files). See [Team Tab](#team-tab) |
+| `fleet` | **Teams (N)** | Agent grid with operator card prepended in standalone view, drill-down agent detail (config, identity, capabilities, files). URL `/teams` (legacy `/agents` accepted as back-compat). See [Team Tab](#team-tab) |
 | `system` | **Settings** | 11 sub-tabs: Activity / Costs / Automation / Integrations / API Keys / Wallet / Network / Storage / Operator / Browser / Settings. See [System Tab](#system-tab) |
 
 The defaults — `tabs` array and `activeTab: 'chat'` — live in `src/dashboard/static/js/app.js` (top of the `dashboard()` factory). Routes parse the URL hash into `{ tab, systemTab, agentId, identityTab, activityView }` (the Work tab has no sub-routes — `/home/*` variants all normalize to `/home`).
 
 A command palette (**Cmd+K** / **Ctrl+K**) provides quick access to agents, actions, and navigation. The search button in the nav bar also opens it.
 
-### Top-Nav Bell + "Needs Attention" Badge
+### Top-Nav Bell
 
-- **Notifications bell** (top-right) — driven by `/api/notifications`. Subtle gray dot when unread items exist; click to open the dropdown. See [Notifications](#notifications-system).
-- **"N agents need attention" badge** — wired to `fleetDigest?.agents_attention?.length`, populated from the operator's `OBSERVATIONS.md` aggregation. Renders only when the count is non-zero.
+- **Notifications bell** (top-right) — driven by `/dashboard/api/notifications`. Subtle gray dot when unread items exist; click to open the dropdown. See [Notifications](#notifications-system).
 
 ## Team Management
 
@@ -36,19 +35,31 @@ The dashboard supports multi-team namespaces for organizing agents into
 isolated groups. The tab ID is still `fleet` (frozen for URL stability)
 but the user-facing label is **Teams**.
 
-### Team Switcher
+### Team Filter
 
-A tab bar at the top of the Teams view shows all teams plus an "All
-Agents" view. Click a team tab to filter the agent grid to that team's
-members. The "All Agents" tab shows every agent with team badges. Each
-tab displays a member count.
+A chip strip at the top of the Teams view shows a **Solo (N)** chip plus
+one chip per team, each with a member count. Click a team chip to filter
+the agent grid to that team's members; click **Solo** to show only agents
+not assigned to any team. When the team count grows past 6, the strip
+caps at two rows and a **Show all teams / Show fewer** toggle reveals or
+hides the overflow (preference persisted to
+`localStorage.ol_team_filter_expanded`).
 
 ### Create Team
 
-Click the **+** button next to the team tabs to create a new team. Enter
-a name and optional description. Teams are stored on disk under
-`config/teams/{name}/`; the startup migrator drops a `config/projects`
-symlink at the legacy path so pre-rename code paths still resolve.
+Click the **+ New Team** button on the right side of the team filter row
+to create a new team. Enter a name and optional description. Teams are
+stored on disk under `config/teams/{name}/`; the startup migrator drops
+a `config/projects` symlink at the legacy path so pre-rename code paths
+still resolve.
+
+### Add Agent
+
+The agent grid has an **Add Agent** card as its final cell — a dashed
+outline with a `+` icon. Click to open the new-agent modal; the modal
+pre-fills the active team filter so an agent created while viewing team
+X joins X by default. The card shows a disabled state with a
+"Agent limit reached" tooltip when `atAgentLimit` is true.
 
 ### Team Members
 
@@ -82,7 +93,7 @@ When the shared browser service is running, an embedded KasmVNC viewer appears i
 The operator is a system agent that builds and manages your workforce. It is rendered differently from regular agents:
 
 - In the **solo fleet view** (no team selected), the operator card is **prepended** to the grid as the first card with a `system` badge.
-- Inside a team view, the operator card is **not** rendered — operator is never a team member. The backend rejects `POST /api/teams` and `POST /api/teams/{name}/members` requests that include the operator (`ValueError → HTTP 400`).
+- Inside a team view, the operator card is **not** rendered — operator is never a team member. The backend rejects `POST /dashboard/api/teams` and `POST /dashboard/api/teams/{name}/members` requests that include the operator (`ValueError → HTTP 400`).
 - Clicking the operator card routes to **Settings → Operator** (not the standard agent detail panel).
 - The operator is **excluded from quota math, fleet cost/token totals, and broadcasts** — only "real" agents count against `OPENLEGION_MAX_AGENTS` and receive broadcast messages.
 - The standard agent detail panel for operator (if reached via deep link) shows a banner directing the user to the Operator system sub-tab; **Heartbeat Pause** is hidden.
@@ -93,10 +104,10 @@ The Work tab is the user's primary surface for steering the team without managin
 
 The page composes four surfaces. In actual render order, top to bottom (`index.html` line refs):
 
-1. **Sticky "Needs You" panel** (line ~3936) — pending actions, credential requests, browser-login handoffs, CAPTCHA handoffs, and blocked tasks. Pinned with `sticky top-0`. Aggregated client-side from `/api/workplace/pending` + `/api/workplace/blockers` + operator chat asks.
-2. **Goals strip** (line ~4011) — operator-managed business outcomes from `GOALS.json`. Status-colored chips, hides entirely when empty. Read endpoint: `GET /api/workplace/goals`. Source-of-truth tool: `manage_goals` (operator-only, capped at 10 entries). Cold-start seeding lives in the operator's heartbeat (`heartbeat_v4_goal_seeding`): when GOALS.json is empty and ≥1 team has active agents, operator pings the user once via `notify_user` rather than guessing.
-3. **Summary cards** (line ~4060) — operator-composed daily narratives from `WorkSummariesStore` (one row per team or solo agent per period). Three inline SVG rating buttons (accept / acknowledge / rework, Lucide-style outline) with `data-testid="summary-rate-{accept,acknowledge,rework}"`; the rework button opens an inline feedback box whose submission flows back into the next composition. Loaded via `GET /api/workplace/summaries`. **The only Work-tab steering surface** — the standalone "Tell operator" textarea was removed; freeform direction lives in the Chat tab instead.
-4. **Stuck Tasks panel** (line ~4248) — tasks pending or working for >24h with no status change. Silent stale-work detection, distinct from Blockers (which are explicit `status='blocked'` raises). Each row carries Cancel + Restart-agent buttons. Computed client-side from `/api/workplace/tasks`. Hidden entirely when no tasks are stuck; appears at the bottom only when needed.
+1. **Sticky "Needs You" panel** (line ~3936) — pending actions, credential requests, browser-login handoffs, CAPTCHA handoffs, and blocked tasks. Pinned with `sticky top-0`. Aggregated client-side from `/dashboard/api/workplace/pending` + `/dashboard/api/workplace/blockers` + operator chat asks.
+2. **Goals strip** (line ~4011) — operator-managed business outcomes from `GOALS.json`. Status-colored chips, hides entirely when empty. Read endpoint: `GET /dashboard/api/workplace/goals`. Source-of-truth tool: `manage_goals` (operator-only, capped at 10 entries). Cold-start seeding lives in the operator's heartbeat (`heartbeat_v4_goal_seeding`): when GOALS.json is empty and ≥1 team has active agents, operator pings the user once via `notify_user` rather than guessing.
+3. **Summary cards** (line ~4060) — operator-composed daily narratives from `WorkSummariesStore` (one row per team or solo agent per period). Three inline SVG rating buttons (accept / acknowledge / rework, Lucide-style outline) with `data-testid="summary-rate-{accept,acknowledge,rework}"`; the rework button opens an inline feedback box whose submission flows back into the next composition. Loaded via `GET /dashboard/api/workplace/summaries`. **The only Work-tab steering surface** — the standalone "Tell operator" textarea was removed; freeform direction lives in the Chat tab instead.
+4. **Stuck Tasks panel** (line ~4248) — tasks pending or working for >24h with no status change. Silent stale-work detection, distinct from Blockers (which are explicit `status='blocked'` raises). Each row carries Cancel + Restart-agent buttons. Computed client-side from `/dashboard/api/workplace/tasks`. Hidden entirely when no tasks are stuck; appears at the bottom only when needed.
 
 The task **drill-in modal** stays reachable from Needs You blocker actions and notification-bell payload clicks. It serves the small fraction of users who want raw task detail; the per-summary rating UI handles the common QA loop for everyone else.
 
@@ -119,15 +130,13 @@ The System tab is split into **11 sub-tabs** along the top. Default sub-tab: `ac
 | **Costs** | Per-agent LLM spend with period selector (today/week/month) and budget bars |
 | **Automation** | Cron jobs + webhook endpoints. View schedule, last run time, run count, error count. Actions: Run / Pause / Resume / Edit / Delete |
 | **Integrations** | Configured credentials with tier labels (system or agent, names only — never values), pub/sub subscriptions, model pricing |
-| **API Keys** | Named external API keys (`/api/external-api-keys`) for inbound integrations |
+| **API Keys** | Named external API keys (`/dashboard/api/external-api-keys`) for inbound integrations |
 | **Wallet** | Wallet seed init, addresses (Ethereum + Solana), RPC endpoints, per-agent wallet enablement |
 | **Network** | Fleet-wide and per-agent proxy configuration. See [Proxy Configuration](#proxy-configuration) |
 | **Storage** | Agent SQLite databases with purge buttons. Each row shows DB id, size, oldest timestamp, `purgeable` flag |
 | **Operator** | Operator agent settings (model picker, heartbeat editor) and the operator audit log ("Change Log"). See [Operator Sub-tab](#operator-sub-tab) |
 | **Browser** | Live browser metrics fleet table, interaction speed/delay sliders, idle timeout, CAPTCHA solver provider/key. See [Browser Sub-tab](#browser-sub-tab) |
 | **Settings** | Default model, runtime logs viewer, miscellaneous toggles |
-
-A **Fleet pulse card** sits at the top of the System tab, rendering the operator's `OBSERVATIONS.md` aggregation.
 
 ### Activity Sub-tab (System → Activity)
 
@@ -143,10 +152,10 @@ Three sub-views toggled via the `activityView` state var:
 
 Operator-only system-agent control panel. Status card with health indicator, a model picker (searchable dropdown over `availableModels`), and a heartbeat-schedule editor (number + unit, e.g. `15m`, `1h`). Heartbeat **Pause** is intentionally hidden — the operator is not subject to operator-level pause controls.
 
-Below the status card, a **Change Log** table renders the operator audit feed (`GET /api/operator-audit?per_page=20&page=N&include_archived=…`). Each entry shows actor, action, target, and timestamp. The list paginates client-side via `auditPage`.
+Below the status card, a **Change Log** table renders the operator audit feed (`GET /dashboard/api/operator-audit?per_page=20&page=N&include_archived=…`). Each entry shows actor, action, target, and timestamp. The list paginates client-side via `auditPage`.
 
 - **`include_archived` toggle** — defaults off. When enabled, archived rows surface alongside active rows. Backed by the `audit_log.archived` column.
-- **"Archive entries older than"** control — 7 / 30 / 90 days (default 30). Calls `POST /api/operator-audit/archive` with `{ "before_date": "<ISO 8601>" }`, which the dashboard proxies to `POST /mesh/audit/archive` over loopback so the operator-or-internal permission tier (not just the dashboard cookie) gates the write and the audit-of-audit row is recorded by the mesh. Soft-archive flips rows to `archived=1`.
+- **"Archive entries older than"** control — 7 / 30 / 90 days (default 30). Calls `POST /dashboard/api/operator-audit/archive` with `{ "before_date": "<ISO 8601>" }`, which the dashboard proxies to `POST /mesh/audit/archive` over loopback so the operator-or-internal permission tier (not just the dashboard cookie) gates the write and the audit-of-audit row is recorded by the mesh. Soft-archive flips rows to `archived=1`.
 - Query optimisation: the mesh-side `audit_log` table carries a composite index `idx_audit_log_active(archived, id DESC)` so the default filter is cheap.
 
 ### Browser Sub-tab
@@ -154,10 +163,10 @@ Below the status card, a **Change Log** table renders the operator audit feed (`
 | Section | Backing endpoint(s) | Notes |
 |---------|--------------------|-------|
 | Live Browser Health (fleet table) | WS `browser_metrics` events | Per-agent rows: click rate (last 100), clicks/min, snapshot p50/p95, nav timeouts, last-update age. Stale rows fade after the 30-min eviction window |
-| Interaction Speed slider | `/api/browser-settings` | Speed multiplier with presets (Off / Light / Moderate / Heavy / Maximum) |
-| Delay Between Actions slider | `/api/browser-settings` | Random pause after each browser action (0–10s) |
-| Idle Timeout | `/api/system-settings` | Container idle timeout in minutes (5–120, default 30); restart required |
-| CAPTCHA Solver | `/api/captcha-solver` | Provider dropdown (none / 2captcha / capsolver) + API key field. Stored masked; restart required |
+| Interaction Speed slider | `/dashboard/api/browser-settings` | Speed multiplier with presets (Off / Light / Moderate / Heavy / Maximum) |
+| Delay Between Actions slider | `/dashboard/api/browser-settings` | Random pause after each browser action (0–10s) |
+| Idle Timeout | `/dashboard/api/system-settings` | Container idle timeout in minutes (5–120, default 30); restart required |
+| CAPTCHA Solver | `/dashboard/api/captcha-solver` | Provider dropdown (none / 2captcha / capsolver) + API key field. Stored masked; restart required |
 
 ## Agent Management
 
@@ -192,10 +201,10 @@ The panel has **7 tabs** defined in `_IDENTITY_TABS` (`app.js`):
 | `config` | **Config** | Model, role, budget, credential access | Agent configuration (model changes trigger restart). Includes a **Remove Agent** action at the bottom |
 | `identity` | **Identity** | `SOUL.md` (4K cap), `INSTRUCTIONS.md` (12K cap), `INTERFACE.md` (4K cap) | Personality, tone, operating procedures, public collaboration contract |
 | `memory` | **Memory** | `MEMORY.md` (16K cap), `USER.md` (4K cap), `HEARTBEAT.md` (no cap) | Long-term facts, user preferences, autonomous heartbeat rules |
-| `activity` | **Activity** | Per-agent activity stream from `/api/agents/{id}/activity` | Recent agent events scoped to this agent |
+| `activity` | **Activity** | Per-agent activity stream from `/dashboard/api/agents/{id}/activity` | Recent agent events scoped to this agent |
 | `logs` | **Logs** | Daily logs + Learnings (read-only) | Daily session logs and recorded errors/corrections |
-| `capabilities` | **Tools** | Tools list (read-only) | Available tools and skill definitions from `/api/agents/{id}/capabilities` |
-| `files` | **Files** | `/data` listing for the agent | Browse files written by the agent; proxied via `/api/agents/{id}/files` |
+| `capabilities` | **Tools** | Tools list (read-only) | Available tools and skill definitions from `/dashboard/api/agents/{id}/capabilities` |
+| `files` | **Files** | `/data` listing for the agent | Browse files written by the agent; proxied via `/dashboard/api/agents/{id}/files` |
 
 Each file card shows an access badge: **Shared** (teal) for files both you and the agent can edit (`SOUL.md`, `INSTRUCTIONS.md`, `USER.md`, `HEARTBEAT.md`, `INTERFACE.md`), **Auto** (gray) for system-managed files (`MEMORY.md`). Customized files show a description subtitle; default files show a CTA prompt.
 
@@ -218,7 +227,7 @@ The dashboard proxies workspace operations through the mesh transport layer to t
 An inline collapsible card on the agent detail panel lets operators paste cookie or storage-state payloads into an agent's Firefox profile, useful for transferring an authenticated session captured manually. The card is **operator-only** and **hidden on the operator agent itself** (operator does not run a browser session).
 
 - Two input modes: **Playwright** (storage-state JSON) or **Netscape** (TSV cookie jar)
-- POSTs to `/api/agents/{id}/browser/import_cookies` with rate limit 10/hour per (operator, agent)
+- POSTs to `/dashboard/api/agents/{id}/browser/import_cookies` with rate limit 10/hour per (operator, agent)
 - A fleet kill switch (`OPENLEGION_DISABLE_COOKIE_IMPORT=1`) disables the endpoint
 - Card state lives in Alpine `x-data` only — it is **never persisted to localStorage** (cookie text is high-trust; persistence would leave session material in browser storage longer than the in-page lifetime). Inputs are cleared on success
 - Imported cookies are stored UNENCRYPTED in `cookies.sqlite` inside the agent profile; the card surfaces an inline warning banner
@@ -253,9 +262,9 @@ Persistent conversation state across reloads is backed by three endpoints (used 
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/conversations` | List active conversations |
-| `POST` | `/api/conversations/{agent_id}/open` | Mark a conversation open |
-| `POST` | `/api/conversations/{agent_id}/close` | Mark a conversation closed |
+| `GET` | `/dashboard/api/conversations` | List active conversations |
+| `POST` | `/dashboard/api/conversations/{agent_id}/open` | Mark a conversation open |
+| `POST` | `/dashboard/api/conversations/{agent_id}/close` | Mark a conversation closed |
 
 ### Keyboard Shortcuts
 
@@ -322,7 +331,7 @@ WAL mode, `busy_timeout=30000`. Composite index `idx_notifications_unread_ts(rea
 
 ### Live Updates
 
-The mesh emits `notification_added` immediately after each `NotificationStore.add` call (via `_notifications_producer`) so the bell badge updates without waiting for the 60-second poll cycle. Subscribers listen for the WS event and refetch `/api/notifications` for the top page.
+The mesh emits `notification_added` immediately after each `NotificationStore.add` call (via `_notifications_producer`) so the bell badge updates without waiting for the 60-second poll cycle. Subscribers listen for the WS event and refetch `/dashboard/api/notifications` for the top page.
 
 ## Telemetry System
 
@@ -371,7 +380,7 @@ Proxy changes auto-restart the agent and reset the browser session. In the Syste
 
 ## Broadcast
 
-Send a message to multiple agents simultaneously using the broadcast bar below the agent grid. When a team is selected, the broadcast targets only that team's members. When viewing "All Agents", it targets every agent. Solo agents (not on any team) are included only in the "All Agents" broadcast. The operator is always excluded from broadcasts. Each agent processes the message independently. Responses display inline with expand/collapse for long replies (200+ characters).
+Send a message to multiple agents simultaneously using the broadcast bar below the agent grid. When a team chip is selected, the broadcast targets only that team's members. When the **Solo** chip is selected, it targets every agent not assigned to a team. The operator is always excluded from broadcasts. Each agent processes the message independently. Responses display inline with expand/collapse for long replies (200+ characters).
 
 ## Blackboard Operations
 
@@ -421,7 +430,7 @@ The dashboard connects to the mesh via WebSocket at `/ws/events`. Events are str
 
 ### Event Types
 
-`DashboardEvent.type` is a `Literal[…]` of **50 values** (`src/shared/types.py:552-643`). They group into nine families:
+`DashboardEvent.type` is a `Literal[…]` of **53 values** (`src/shared/types.py:729-838`). They group into nine families:
 
 | Family | Events |
 |--------|--------|
@@ -432,7 +441,8 @@ The dashboard connects to the mesh via WebSocket at `/ws/events`. Events are str
 | **Automation** | `cron_change` |
 | **Credentials / handoffs** | `credential_request`, `credential_request_cancelled`, `credential_stored`, `browser_login_request`, `browser_login_completed`, `browser_login_cancelled`, `browser_captcha_help_request`, `browser_captcha_help_completed`, `browser_captcha_help_cancelled` |
 | **Browser metrics** | `browser_metrics`, `browser_nav_probe` |
-| **Tasks** | `task_created`, `task_status_changed`, `task_outcome`, `task_artifact_added` |
+| **Tasks** | `task_created`, `task_status_changed`, `task_completed_without_handoff`, `task_outcome`, `task_artifact_added` |
+| **Work summaries** | `work_summary_created`, `work_summary_rated` — drives summary cards on the Work tab; emitted by `WorkSummariesStore` |
 | **Pending actions** | `pending_action_created`, `pending_action_resolved`, `pending_action_expired` |
 | **Operator action receipts** | `operator_action_receipt`, `operator_action_receipt_undone`, `operator_action_receipt_superseded` |
 | **Agent lifecycle** | `agent_archived`, `agent_unarchived`, `agent_restarting`, `agent_restarted`, `agent_config_updated` |
@@ -512,7 +522,7 @@ The per-agent VNC reverse proxy lives at **`/agent-vnc/{agent_id}/{path}`** on t
 
 ## CAPTCHA Rollup CSV
 
-The `/api/billing/captcha-rollup` endpoint exports per-tenant CAPTCHA-solver spend as CSV. It has **no UI** — operators reach it directly via curl. Required query params: `tenant` (team slug) and `period` (`daily` | `weekly` | `monthly`, default `monthly`).
+The `/dashboard/api/billing/captcha-rollup` endpoint exports per-tenant CAPTCHA-solver spend as CSV. It has **no UI** — operators reach it directly via curl. Required query params: `tenant` (team slug) and `period` (`daily` | `weekly` | `monthly`, default `monthly`).
 
 Column schema (one header row, then per-agent rows sorted by agent_id, then a synthetic tenant-total row):
 
@@ -588,7 +598,7 @@ The tables below are not exhaustive — they cover the user-facing surface area 
 | `GET` | `/dashboard/api/agents/{id}/workspace-logs?days=N` | Read daily logs (read-only, default 3 days) |
 | `GET` | `/dashboard/api/agents/{id}/workspace-learnings` | Read errors and corrections (read-only) |
 
-**Work (Board) Surface — `/api/workplace/*`**
+**Work (Board) Surface — `/dashboard/api/workplace/*`**
 
 These endpoints power the Work tab. They cover the summary cards, Needs-You panel, Stuck Tasks panel, task drill-in modal, and pending-action review surfaces. State-changing routes require the CSRF header. (PR 3 of the Work-tab rewrite retired `GET /workplace/outputs` and `GET /workplace/feed` along with the legacy team-outputs + activity sub-tabs.)
 
@@ -672,8 +682,8 @@ These endpoints power the Work tab. They cover the summary cards, Needs-You pane
 
 **Teams**
 
-The canonical surface is `/api/teams/*`. PR 3 removed the pre-rename
-`/api/projects/*` mirrors; JSON responses still carry a `project_id`
+The canonical surface is `/dashboard/api/teams/*`. PR 3 removed the pre-rename
+`/dashboard/api/projects/*` mirrors; JSON responses still carry a `project_id`
 key alongside `team_id` for consumer back-compat.
 
 | Method | Path | Description |
@@ -848,4 +858,4 @@ The dashboard includes several accessibility features:
 | `src/dashboard/auth.py` | `ol_session` cookie verification, hosted-mode detection via `/opt/openlegion/.subdomain`, 24h `COOKIE_MAX_AGE` + 5m skew |
 | `src/dashboard/notifications.py` | Persistent SQLite notifications store backing the top-nav bell |
 | `src/dashboard/telemetry.py` | Frontend telemetry sink with `_MAX_EVENTS=100_000` retention + 60/min per-session rate limit |
-| `src/dashboard/platform_success.py` | Per-tenant success scoring (backs `/api/dashboard/platform-success`) |
+| `src/dashboard/platform_success.py` | Per-tenant success scoring (backs `/dashboard/api/dashboard/platform-success`) |

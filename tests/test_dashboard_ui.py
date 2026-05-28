@@ -354,12 +354,6 @@ class TestVocabularySweepStrings:
     def test_failure_label_renamed_to_errors(self):
         assert ">Errors<" in _INDEX_HTML
 
-    def test_add_agent_renamed_to_add_teammate(self):
-        # All three "Add Agent" instances (sidebar header + modal title +
-        # submit button) flip to "Add teammate".
-        assert ">Add teammate<" in _INDEX_HTML
-        assert ">Add Agent<" not in _INDEX_HTML
-
     def test_pending_action_toasts_renamed(self):
         # The toast strings shown on confirm/cancel.
         assert "'Approval confirmed.'" in _APP_JS_TEXT

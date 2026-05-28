@@ -144,7 +144,7 @@ _BLACKBOARD_TOOLS = frozenset({
 # without dropping out to a full /chat turn.
 _HEARTBEAT_TOOLS = frozenset({
     "list_agents", "get_agent_profile", "get_system_status",
-    "notify_user", "save_observations", "check_inbox",
+    "notify_user", "check_inbox",
     "workflow_snapshot", "await_task_event",
     # PR 2 of Work tab rewrite. Heartbeat instructions tell operator
     # to rate up to 10 oldest unrated done tasks via ``rate_delivery``

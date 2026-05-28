@@ -2108,9 +2108,9 @@ def test_heartbeat_max_iterations_constant():
     """PR-V — bumped from 10 to 12 for defensive headroom.
 
     Worst-case operator heartbeat (cap-3 drill-ins): 1 status + 1 roster +
-    3 drill-ins + 1 stale fanout + 1 save_observations + 1 notify_user =
-    8 tool calls plus the final assistant turn — well inside the 12-iter
-    ceiling, with budget for future playbook additions.
+    3 drill-ins + 1 stale fanout + 1 notify_user = 7 tool calls plus the
+    final assistant turn — well inside the 12-iter ceiling, with budget
+    for future playbook additions.
     """
     assert HEARTBEAT_MAX_ITERATIONS == 12
 

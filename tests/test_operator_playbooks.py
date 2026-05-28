@@ -154,7 +154,7 @@ class TestPlaybookConstants:
         # Non-domain tools that are unrelated to the rename must remain.
         for shared in {
             "create_agent", "apply_template", "edit_agent",
-            "undo_change", "save_observations",
+            "undo_change",
             "request_credential", "request_browser_login",
         }:
             assert shared in keys, f"core tool {shared} missing from playbook map"
@@ -200,7 +200,7 @@ class TestPlaybookConstants:
 
         assert "check_inbox" in _PLAYBOOK_MONITOR
         assert "get_system_status" in _PLAYBOOK_MONITOR
-        assert "save_observations" in _PLAYBOOK_MONITOR
+        assert "inspect_agents" in _PLAYBOOK_MONITOR
 
         assert "request_credential" in _PLAYBOOK_CREDENTIALS
         assert "request_browser_login" in _PLAYBOOK_CREDENTIALS

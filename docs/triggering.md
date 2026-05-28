@@ -6,7 +6,7 @@ OpenLegion agents can be triggered automatically through cron schedules, heartbe
 
 Scheduled tasks that dispatch messages to agents at regular intervals. The cron scheduler runs in the mesh host (not agent containers), so schedules survive container restarts.
 
-The scheduler loop ticks every `TICK_INTERVAL = 5` seconds (`src/host/cron.py:76`). 5-field cron jobs are rate-limited to fire at most once per minute via a `last_run` dedup guard, and each job runs under a per-job `asyncio.Lock` — if a previous run is still in flight when the next tick arrives, the new run is skipped rather than overlapping. When an agent is removed, all of its jobs are purged automatically via `remove_agent_jobs(agent_id)`.
+The scheduler loop ticks every `TICK_INTERVAL = 5` seconds (`src/host/cron.py:83`). 5-field cron jobs are rate-limited to fire at most once per minute via a `last_run` dedup guard, and each job runs under a per-job `asyncio.Lock` — if a previous run is still in flight when the next tick arrives, the new run is skipped rather than overlapping. When an agent is removed, all of its jobs are purged automatically via `remove_agent_jobs(agent_id)`.
 
 ### Schedule Syntax
 
@@ -103,7 +103,7 @@ By default, cron jobs suppress empty or trivial agent responses. The complete se
 
 Heartbeats are a cost-efficient form of autonomous monitoring. They run **cheap deterministic probes first**, and only invoke the LLM when probes find actionable items.
 
-The default heartbeat schedule is `"every 15m"` (`DEFAULT_HEARTBEAT_SCHEDULE`, `src/host/cron.py:77`). The **operator agent's heartbeat is forced to `"every 15m"` regardless of `mesh.heartbeat_schedule`** — see `src/cli/runtime.py:825`.
+The default heartbeat schedule is `"every 15m"` (`DEFAULT_HEARTBEAT_SCHEDULE`, `src/host/cron.py:84`). The **operator agent's heartbeat is forced to `"every 15m"` regardless of `mesh.heartbeat_schedule`** — see `src/cli/runtime.py:973`.
 
 ### How Heartbeats Work
 
@@ -337,10 +337,10 @@ Each agent has a FIFO task lane (`src/host/lanes.py`) with three dispatch modes:
 | Mode | Behavior |
 |------|----------|
 | `followup` (default) | Queue the message; process after the current task finishes. |
-| `steer` | Inject the message into the agent's active conversation between tool rounds. Rate-limited to `_STEER_WAKEUP_MAX = 10` wakeups per `_STEER_WAKEUP_WINDOW = 3600` seconds. |
+| `steer` | Inject the message into the agent's active conversation between tool rounds. Rate-limited to `_STEER_WAKEUP_MAX = 10` injections per `_STEER_WAKEUP_WINDOW = 3600` seconds (per-agent). |
 | `collect` | Batch queued messages while the agent is busy, then dispatch them as a single combined message once the agent becomes free. |
 
-When a lane completes a task that originated from a channel handoff (`auto_notify=True`), the result is forwarded back to the originating channel/user with a `[agent_name]` prefix. The send is capped at `_NOTIFY_FORWARD_TIMEOUT = 30` seconds (`lanes.py:29`).
+When a lane completes a task that originated from a channel handoff (`auto_notify=True`), the result is forwarded back to the originating channel/user with a `[agent_name]` prefix. The send is capped at `_NOTIFY_FORWARD_TIMEOUT = 30` seconds (`lanes.py:30`).
 
 ## Notification Routing
 

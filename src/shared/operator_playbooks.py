@@ -342,8 +342,6 @@ asking — the user can Undo if you got it wrong.
 
 6. If everything is green, tell the user in one line.
 
-7. Call save_observations() with structured fleet health data.
-
 Surface issues briefly when the user engages. Mention once, don't repeat.
 
 ## Outcome ratings (Board tab)
@@ -429,7 +427,6 @@ _TOOL_PLAYBOOK_MAP: dict[str, str] = {
     "set_team_goal": "team_build",
     "edit_agent": "edit",
     "undo_change": "edit",
-    "save_observations": "monitor",
     "request_credential": "credentials",
     "request_browser_login": "credentials",
 }

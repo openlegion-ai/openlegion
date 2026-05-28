@@ -291,8 +291,8 @@ class TestOperatorConstants:
         # ``_HEARTBEAT_TOOLS`` frozenset in ``src/agent/loop.py`` + the
         # ``_OPERATOR_HEARTBEAT_TOOLS`` doc list in ``src/cli/config.py``
         # together when adding a new heartbeat-reachable tool):
-        #  * v1 (initial): 5 read-only tools (list_agents, get_agent_profile,
-        #    get_system_status, notify_user, save_observations).
+        #  * v1 (initial): 4 read-only tools (list_agents, get_agent_profile,
+        #    get_system_status, notify_user).
         #  * v2 (workflow awareness): +check_inbox, workflow_snapshot,
         #    await_task_event for multi-stage chain driving.
         #  * v3 (Work-tab rewrite PR 2/3): +rate_delivery, manage_goals so the
@@ -300,8 +300,9 @@ class TestOperatorConstants:
         #    tasks per cycle and steward goal staleness are reachable.
         #  * v4 (PR 972 Codex follow-up): +inspect_agents — step 5 of
         #    the heartbeat procedure already called it but the allowlist
-        #    denied the call.
-        assert len(_OPERATOR_HEARTBEAT_TOOLS) == 11
+        #    denied the call. (Note: main had previously dropped
+        #    save_observations, so v3 baseline was 9 not 10.)
+        assert len(_OPERATOR_HEARTBEAT_TOOLS) == 10
         # The operator-tier heartbeat tools must also be on the main
         # operator allowlist — they're the tools operator can use from
         # both /chat and heartbeat. Two heartbeat entries are
@@ -408,8 +409,8 @@ class TestOperatorConstants:
     def test_heartbeat_has_steps(self):
         from src.cli.config import _OPERATOR_HEARTBEAT
         assert "get_system_status" in _OPERATOR_HEARTBEAT
-        assert "save_observations" in _OPERATOR_HEARTBEAT
         assert "notify_user" in _OPERATOR_HEARTBEAT
+        assert "check_inbox" in _OPERATOR_HEARTBEAT
 
     def test_heartbeat_references_prj_metric_keys(self):
         """PR-J' — heartbeat keys on the new metric fields, not failure_rate."""
@@ -432,9 +433,9 @@ class TestOperatorConstants:
         step that calls a tool burns one iteration. PR-V capped per-cycle
         drill-ins at 3, and bumped the loop ceiling from 10 to 12 to give
         headroom. The worst-case fan-out is now:
-        1 status + 1 roster + 3 drill-ins + 1 stale fanout + 1 save_observations
-        + 1 notify_user = 8 tool calls, plus the final assistant turn that
-        emits the heartbeat summary.
+        1 status + 1 roster + 3 drill-ins + 1 stale fanout + 1 notify_user
+        = 7 tool calls, plus the final assistant turn that emits the
+        heartbeat summary.
         """
         import re
 
@@ -452,7 +453,7 @@ class TestOperatorConstants:
         Without a cap, N concerning agents → N drill calls + 4 fixed steps,
         which blows past HEARTBEAT_MAX_ITERATIONS at N>=6. The playbook now
         instructs the operator to focus on the top-3 worst offenders and
-        defer the rest to the next cycle via OBSERVATIONS.md.
+        defer the rest to the next cycle.
         """
         from src.cli.config import _OPERATOR_HEARTBEAT
         # Cap-3 wording must be unambiguous.
@@ -461,8 +462,7 @@ class TestOperatorConstants:
         # cannot misread the subject of the count (audit follow-up).
         assert "more than 3 agents trigger" in _OPERATOR_HEARTBEAT
         assert "top-3 worst" in _OPERATOR_HEARTBEAT
-        # Overflow agents must be queued for the next cycle in OBSERVATIONS.md.
-        assert "OBSERVATIONS.md" in _OPERATOR_HEARTBEAT
+        # Overflow agents must be deferred to the next cycle.
         assert "next cycle" in _OPERATOR_HEARTBEAT
 
     def test_heartbeat_budget_header_matches_loop_constant(self):

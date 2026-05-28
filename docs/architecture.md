@@ -50,7 +50,7 @@ OpenLegion uses a **fleet model, not hierarchy**. There is no CEO agent that rou
 
 ### Operator agent
 
-A reserved agent named `operator` is auto-created at startup (`_ensure_operator_agent` in `src/cli/runtime.py`). It runs at lower resource caps (128MB RAM, 0.05 CPU) and carries fleet-management tools (`fleet_tool.py`, `operator_tools.py`). The operator owns `OBSERVATIONS.md` (written via `save_observations`), surfaces the Fleet pulse card on the dashboard, and is the only agent that can apply fleet templates, archive teams, or confirm hard config edits.
+A reserved agent named `operator` is auto-created at startup (`_ensure_operator_agent` in `src/cli/runtime.py`). It runs at lower resource caps (128MB RAM, 0.05 CPU) and carries fleet-management tools (`fleet_tool.py`, `operator_tools.py`). The operator is the only agent that can apply fleet templates, archive teams, or confirm hard config edits.
 
 ### Reserved agent IDs
 
@@ -69,7 +69,7 @@ The mesh host runs on the user's machine as a single FastAPI process. It is the 
 | Module | Responsibility |
 |--------|---------------|
 | `mesh.py` | Blackboard (SQLite WAL, atomic CAS, audit log with undo/archive), PubSub, MessageRouter (with cross-team block + capability-based addressing) |
-| `server.py` | FastAPI app factory — 98 `@app.*` endpoints, all permission-checked. Three auth tiers (any-auth / operator-or-internal / loopback). |
+| `server.py` | FastAPI app factory — 109 `@app.*` endpoints, all permission-checked. Three auth tiers (any-auth / operator-or-internal / loopback). |
 | `runtime.py` | `RuntimeBackend` ABC → `DockerBackend` / `SandboxBackend`; the browser-service container lives here too. SandboxBackend falls back to DockerBackend on init failure. |
 | `transport.py` | `Transport` ABC → `HttpTransport` / `SandboxTransport` |
 | `credentials.py` | Two-tier credential vault (`OPENLEGION_SYSTEM_*` / `OPENLEGION_CRED_*`) + LLM API proxy. OpenAI / Anthropic OAuth support. |
@@ -98,7 +98,7 @@ Each agent runs in an isolated Docker container with its own FastAPI server (28 
 | `skills.py` | Skill discovery and registry; `@skill` decorator system. |
 | `mcp_client.py` | MCP server lifecycle management and tool routing. |
 | `memory.py` | SQLite + sqlite-vec + FTS5 hierarchical memory (`EMBEDDING_DIM=1536`, weighted 0.7 vector / 0.3 keyword with salience decay). |
-| `workspace.py` | Persistent markdown workspace. Scaffold files (`_SCAFFOLD_FILES`): `INSTRUCTIONS.md`, `SOUL.md`, `USER.md`, `MEMORY.md`, `HEARTBEAT.md`, `INTERFACE.md`. `TEAM.md` / `SYSTEM.md` are read-only bootstrap inclusions, not writable scaffolds (legacy `PROJECT.md` is retained as a read-only fallback for workspaces that pre-date the rename). Operator's `OBSERVATIONS.md` is written by the `save_observations` tool, not a generic scaffold. |
+| `workspace.py` | Persistent markdown workspace. Scaffold files (`_SCAFFOLD_FILES`): `INSTRUCTIONS.md`, `SOUL.md`, `USER.md`, `MEMORY.md`, `HEARTBEAT.md`, `INTERFACE.md`. `TEAM.md` / `SYSTEM.md` are read-only bootstrap inclusions, not writable scaffolds (legacy `PROJECT.md` is retained as a read-only fallback for workspaces that pre-date the rename). |
 | `context.py` | Context window management. Flush facts at 60%, summarize-and-replace at 70%, warn at 80%. Empty summary falls back to hard prune. Write-then-compact flushes facts to `MEMORY.md` before discarding context. |
 | `llm.py` | LLM client (`chat_stream()` and `chat()`) — routes through mesh proxy, never holds keys. |
 | `mesh_client.py` | HTTP client for agent-to-mesh communication; merges `origin_header()` into `wake_agent` / `create_task`. |
@@ -124,7 +124,7 @@ Each agent runs in an isolated Docker container with its own FastAPI server (28 
 | `introspect_tool.py` | Runtime state query — permissions, budget, fleet, cron, health. |
 | `skill_tool.py` | Self-authoring with AST validation. Forbidden imports/calls/attrs prevent `eval`, `exec`, `open`, `__subclasses__`, etc. |
 | `fleet_tool.py` | Operator-only fleet management — `list_templates`, `apply_template` (per-slot creation, not atomic across slots). |
-| `operator_tools.py` | Operator-only orchestration — `edit_agent` (single tool; all fields apply immediately and emit an undo receipt: 5-min for soft fields, 30-min for hard fields), `undo_change`, deprecated `confirm_edit` no-op stub (kept for in-flight LLM conversations), `save_observations`, `inspect_agents`, `inspect_teams` (alias `inspect_projects`), team/agent CRUD via `create_team` / `add_agents_to_team` / … (legacy `*_project` names still callable). |
+| `operator_tools.py` | Operator-only orchestration — `edit_agent` (single tool; all fields apply immediately and emit an undo receipt: 5-min for soft fields, 30-min for hard fields), `undo_change`, deprecated `confirm_edit` no-op stub (kept for in-flight LLM conversations), `inspect_agents`, `inspect_teams` (alias `inspect_projects`), team/agent CRUD via `create_team` / `add_agents_to_team` / … (legacy `*_project` names still callable). |
 | `wallet_tool.py` | Wallet operations — get address, get balance, read contract, transfer, execute (Ethereum + Solana). |
 
 ### Browser Service (`src/browser/`)

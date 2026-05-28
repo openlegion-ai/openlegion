@@ -6269,7 +6269,7 @@ def create_dashboard_router(
 
     _WORKSPACE_ALLOWLIST = frozenset({
         "SOUL.md", "HEARTBEAT.md", "USER.md", "INSTRUCTIONS.md", "AGENTS.md", "MEMORY.md",
-        "INTERFACE.md", "OBSERVATIONS.md",
+        "INTERFACE.md",
         # NOTE: GOALS.md / GOALS.json are intentionally NOT listed here.
         # The dashboard exposes goals via the dedicated
         # ``GET /api/workplace/goals`` read endpoint (which calls

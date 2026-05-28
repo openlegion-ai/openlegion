@@ -88,7 +88,7 @@ Credentials are split into two tiers to prevent agents from accessing LLM provid
 | **System** | `anthropic_api_key`, `openai_api_key`, `gemini_api_base` | Mesh proxy only (internal). Agents can **never** resolve these. |
 | **Agent** | `brave_search_api_key`, `myservice_password`, user-created credentials | Only agents in the `allowed_credentials` allowlist |
 
-System credentials are identified by matching known provider names with key suffixes (`_api_key`, `_api_base`). Everything else is an agent credential. The known set is `_LITELLM_NATIVE_PROVIDERS` (`src/host/credentials.py:207-211`) — **15 providers** as of this writing: `anthropic`, `openai`, `openrouter`, `gemini`, `mistral`, `deepseek`, `groq`, `together_ai`, `fireworks_ai`, `perplexity`, `minimax`, `moonshot`, `xai`, `zai`, `ollama`. A credential named e.g. `openrouter_api_key` or `mistral_api_base` is therefore system-tier and unreachable to agents regardless of `allowed_credentials` configuration.
+System credentials are identified by matching known provider names with key suffixes (`_api_key`, `_api_base`). Everything else is an agent credential. The known set is `_LITELLM_NATIVE_PROVIDERS` (`src/host/credentials.py:212-216`) — **15 providers** as of this writing: `anthropic`, `openai`, `openrouter`, `gemini`, `mistral`, `deepseek`, `groq`, `together_ai`, `fireworks_ai`, `perplexity`, `minimax`, `moonshot`, `xai`, `zai`, `ollama`. A credential named e.g. `openrouter_api_key` or `mistral_api_base` is therefore system-tier and unreachable to agents regardless of `allowed_credentials` configuration.
 
 Per-agent access is controlled by `allowed_credentials` glob patterns in `config/permissions.json`:
 
@@ -253,7 +253,7 @@ All file operations are scoped to the container's `/data` volume.
 
 Workspace files (the agent's own `SOUL.md` / `INSTRUCTIONS.md` / `MEMORY.md` / etc.) are managed through a dedicated `/workspace/{filename}` endpoint on the **agent's own** FastAPI server, not via the general `/data` file tools. Three protections:
 
-- **`_WORKSPACE_ALLOWLIST` frozenset** (`src/agent/server.py:326-329`) — exactly 8 entries: `SOUL.md`, `HEARTBEAT.md`, `USER.md`, `INSTRUCTIONS.md`, `AGENTS.md`, `MEMORY.md`, `INTERFACE.md`, `OBSERVATIONS.md`. Reads / writes to anything outside this list return HTTP 400.
+- **`_WORKSPACE_ALLOWLIST` frozenset** (`src/agent/server.py`) — 9 entries: `SOUL.md`, `HEARTBEAT.md`, `USER.md`, `INSTRUCTIONS.md`, `AGENTS.md`, `MEMORY.md`, `INTERFACE.md`, `GOALS.md`, `GOALS.json`. Reads / writes to anything outside this list return HTTP 400.
 - **`_FILE_CAPS`** (`src/agent/server.py:332-340`) — char-count caps per file, enforced on `PUT` with HTTP 413 on overflow: `SOUL.md=4000`, `INSTRUCTIONS.md=12000`, `AGENTS.md=12000`, `USER.md=4000`, `MEMORY.md=16000`, `INTERFACE.md=4000`, `HEARTBEAT.md=None` (uncapped).
 - **`x-mesh-internal` gate on `PUT /workspace/{filename}`** (`src/agent/server.py:397-402`) — the agent cannot call its own workspace endpoint via `http_tool` or `exec+curl`. Writes must originate from the mesh on loopback with the internal header set. Reads from the agent's own loop are allowed without the gate.
 
@@ -279,26 +279,25 @@ Per-agent rate limits on mesh endpoints prevent abuse and resource exhaustion:
 
 | Endpoint | Limit | Window |
 |----------|-------|--------|
-| `api_proxy` | 30 requests | 60 seconds |
-| `vault_resolve` | 5 requests | 60 seconds |
-| `vault_store` | 10 requests | 3600 seconds |
-| `blackboard_read` | 200 requests | 60 seconds |
-| `blackboard_write` | 100 requests | 60 seconds |
-| `publish` | 200 requests | 60 seconds |
-| `notify` | 10 requests | 60 seconds |
-| `cron_create` | 10 requests | 3600 seconds |
-| `spawn` | 5 requests | 3600 seconds |
-| `wallet_read` | 120 requests | 60 seconds |
-| `wallet_transfer` | 10 requests | 3600 seconds |
-| `wallet_execute` | 10 requests | 3600 seconds |
-| `image_gen` | 10 requests | 60 seconds |
-| `agent_profile` | 30 requests | 60 seconds |
-| `upload_stage` | 30 requests | 60 seconds |
-| `upload_apply` | 30 requests | 60 seconds |
-| `ext_credentials` | 30 requests | 60 seconds |
-| `ext_status` | 60 requests | 60 seconds |
+| `api_proxy` | 6000 requests | 60 seconds |
+| `vault_resolve` | 10000 requests | 60 seconds |
+| `vault_store` | 600 requests | 60 seconds |
+| `blackboard_read` | 20000 requests | 60 seconds |
+| `blackboard_write` | 10000 requests | 60 seconds |
+| `publish` | 20000 requests | 60 seconds |
+| `notify` | 3000 requests | 60 seconds |
+| `cron_create` | 1000 requests | 60 seconds |
+| `spawn` | 600 requests | 60 seconds |
+| `wallet_read` | 6000 requests | 60 seconds |
+| `wallet_transfer` | 600 requests | 60 seconds |
+| `wallet_execute` | 600 requests | 60 seconds |
+| `image_gen` | 600 requests | 60 seconds |
+| `agent_profile` | 6000 requests | 60 seconds |
+| `upload_stage` | 3000 requests | 60 seconds |
+| `upload_apply` | 3000 requests | 60 seconds |
+| `auth_failure` | 60 requests | 60 seconds |
 
-`_RATE_LIMITS` currently has 18 entries: 16 declared statically in `src/host/server.py` plus `ext_credentials` and `ext_status` registered when external-API support initializes. All other endpoints default to 100 requests per 60 seconds.
+`_RATE_LIMITS` declares 17 entries statically in `src/host/server.py:788-815`; `ext_credentials` and `ext_status` are registered dynamically when external-API support initializes. All other endpoints fall through to the default `(10000, 60)` — i.e. 10000 requests per 60 seconds. These ceilings exist to catch a genuinely runaway loop in a single-tenant deployment; cost budgets (`costs.py`) and per-tx wallet caps are the real spend guardrails.
 
 Exceeding a rate limit returns HTTP 429. Rate-limit buckets are automatically cleaned up when agents are deregistered.
 

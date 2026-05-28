@@ -1,4 +1,4 @@
-"""Operator agent tools -- agent edits (with undo), observations, agent/team management."""
+"""Operator agent tools -- agent edits (with undo), inspection, agent/team management."""
 from __future__ import annotations
 
 import asyncio
@@ -617,102 +617,6 @@ async def undo_change(
         "field": result.get("field"),
         "restored_value": result.get("restored_value"),
     }
-
-
-# ── Observations ─────────────────────────────────────────────
-
-
-_MAX_OBSERVATIONS_CHARS = 1500
-_MAX_HISTORY_ENTRIES = 50
-
-
-@skill(
-    name="save_observations",
-    description=(
-        "Save fleet health observations from your monitoring check. "
-        "Writes structured data to OBSERVATIONS.md for the Fleet Digest display."
-    ),
-    parameters={
-        "fleet_summary": {
-            "type": "string",
-            "description": "One-line fleet health summary (e.g. '5/6 healthy, cost stable')",
-        },
-        "agents_attention": {
-            "type": "array",
-            "description": "Agents needing attention: [{agent_id, issue, severity}]",
-            "items": {"type": "object"},
-            "default": [],
-        },
-        "cost_trend": {
-            "type": "string",
-            "description": "Cost trend (e.g. 'up_40pct', 'stable', 'down_15pct')",
-        },
-        "notes": {
-            "type": "string",
-            "description": "Optional freeform notes",
-            "default": "",
-        },
-    },
-)
-async def save_observations(
-    fleet_summary: str,
-    cost_trend: str,
-    agents_attention: list | None = None,
-    notes: str = "",
-    *,
-    workspace_manager=None,
-    **_kw,
-) -> dict:
-    """Save fleet observations to workspace for dashboard display."""
-    if not _is_operator():
-        return {"error": "This tool is only available to the operator agent."}
-    if workspace_manager is None:
-        return {"error": "No workspace_manager available"}
-
-    timestamp = datetime.now(timezone.utc).isoformat()
-
-    obs = {
-        "timestamp": timestamp,
-        "fleet_summary": fleet_summary,
-        "agents_attention": agents_attention or [],
-        "cost_trend": cost_trend,
-        "notes": notes,
-    }
-
-    # Build markdown with JSON block
-    content = (
-        f"# Fleet Observations\nUpdated: {timestamp}\n\n"
-        f"```json\n{json.dumps(obs, indent=2)}\n```\n"
-    )
-
-    # Enforce char cap by truncating notes
-    while len(content) > _MAX_OBSERVATIONS_CHARS and notes:
-        notes = notes[:-50] + "..." if len(notes) > 50 else ""
-        obs["notes"] = notes
-        content = (
-            f"# Fleet Observations\nUpdated: {timestamp}\n\n"
-            f"```json\n{json.dumps(obs, indent=2)}\n```\n"
-        )
-
-    # Write OBSERVATIONS.md directly to workspace root (not in AGENT_WRITABLE)
-    obs_path = workspace_manager.root / "OBSERVATIONS.md"
-    obs_path.write_text(content)
-
-    # Append to OBSERVATIONS_HISTORY.md (rolling window)
-    history_path = workspace_manager.root / "OBSERVATIONS_HISTORY.md"
-    history_content = ""
-    if history_path.exists():
-        try:
-            history_content = history_path.read_text(errors="replace")
-        except OSError:
-            pass
-    history_lines = [e for e in history_content.strip().split("\n---\n") if e.strip()]
-    history_lines.append(json.dumps(obs))
-    if len(history_lines) > _MAX_HISTORY_ENTRIES:
-        history_lines = history_lines[-_MAX_HISTORY_ENTRIES:]
-    history_path.write_text("\n---\n".join(history_lines) + "\n")
-
-    return {"saved": True, "timestamp": timestamp, "chars": len(content)}
 
 
 # ── Create Agent ─────────────────────────────────────────────
@@ -2356,13 +2260,12 @@ def _render_goals_md(goals: list[dict]) -> str:
 def _write_goals(workspace_root, goals: list[dict]) -> None:
     """Persist both sidecar JSON and rendered markdown atomically-ish.
 
-    Direct ``path.write_text`` matches the ``save_observations``
-    precedent (``OBSERVATIONS.md`` / ``OBSERVATIONS_HISTORY.md``); these
-    files are operator-internal state, not user-edited content, so the
-    workspace_manager's audit/versioning machinery doesn't apply.
-    Two writes are not atomic — if the MD write fails after the JSON
-    write succeeds, the two files diverge. Risk is small for a stable
-    workspace volume; if it ever bites, switch to temp-file + rename.
+    Direct ``path.write_text`` because these files are operator-internal
+    state, not user-edited content, so the workspace_manager's
+    audit/versioning machinery doesn't apply. Two writes are not atomic —
+    if the MD write fails after the JSON write succeeds, the two files
+    diverge. Risk is small for a stable workspace volume; if it ever
+    bites, switch to temp-file + rename.
 
     Preserves an existing ``seed_ask`` block across goal mutations so
     the heartbeat throttle can't be silently cleared by an unrelated

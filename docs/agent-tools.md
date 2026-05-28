@@ -12,11 +12,11 @@ Agents interact with their environment through **skills** -- Python functions re
 
 ### File Operations
 
-All file operations are scoped to `/data` inside the container. Path traversal is blocked (two-stage: reject `..` then resolve symlinks via `lstat()`). `_MAX_READ=500_000`, `_MAX_LIST_ENTRIES=500`. Direct writes to `SOUL.md` / `AGENTS.md` / `INSTRUCTIONS.md` / `HEARTBEAT.md` / `USER.md` / `MEMORY.md` are blocked — use `update_workspace`.
+All file operations are scoped to `/data` inside the container. Path traversal is blocked (two-stage: reject `..` then resolve symlinks via `lstat()`). `_MAX_READ=500_000`, `_MAX_LIST_ENTRIES=500`. Direct writes to `SOUL.md` / `AGENTS.md` / `INSTRUCTIONS.md` / `HEARTBEAT.md` / `USER.md` / `MEMORY.md` / `INTERFACE.md` are blocked — use `update_workspace`.
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `read_file` (`loop_exempt=True`) | `path`, `offset` (default 0, 0-based line), `limit` (default 0 = read all) | Read file contents with optional pagination |
+| `read_file` | `path`, `offset` (default 0, 0-based line), `limit` (default 0 = read all) | Read file contents with optional pagination |
 | `write_file` | `path`, `content`, `append` (default false) | Write or append to a file (creates directories) |
 | `list_files` | `path` (default "."), `pattern` (default "*"), `recursive` (default false) | List files with optional glob pattern matching |
 
@@ -24,7 +24,7 @@ All file operations are scoped to `/data` inside the container. Path traversal i
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `http_request` (`loop_exempt=True`) | `url`, `method` (default "GET"), `headers` (default {}), `body` (default "", string), `timeout` (default 30) | Make HTTP requests (GET/POST/PUT/DELETE/PATCH). Supports `$CRED{name}` handles in URL, headers, and body for credential-blind API calls. Resolved credentials are redacted from responses. SSRF protection blocks requests to private/internal addresses (loopback, link-local, reserved ranges) including redirect targets — re-validated at each hop, max `_MAX_REDIRECTS=5`. Authorization header is stripped on cross-origin redirects. **Note:** `body` must be a string — serialize JSON manually before passing it (e.g. `json.dumps(data)`). |
+| `http_request` | `url`, `method` (default "GET"), `headers` (default {}), `body` (default "", string), `timeout` (default 30) | Make HTTP requests (GET/POST/PUT/DELETE/PATCH). Supports `$CRED{name}` handles in URL, headers, and body for credential-blind API calls. Resolved credentials are redacted from responses. SSRF protection blocks requests to private/internal addresses (loopback, link-local, reserved ranges) including redirect targets — re-validated at each hop, max `_MAX_REDIRECTS=5`. Authorization header is stripped on cross-origin redirects. **Note:** `body` must be a string — serialize JSON manually before passing it (e.g. `json.dumps(data)`). |
 
 ### Browser Automation
 
@@ -37,7 +37,7 @@ An OS-level device profile is selected by `BROWSER_DEVICE_PROFILE` (`desktop-win
 | `browser_navigate` | `url`, `wait_ms` (default 1000, capped at 10000), `wait_until` (`domcontentloaded` default / `load` / `networkidle` / `commit`), `snapshot_after` (default false), `referer` | Open URL, wait, extract page text. `referer` unset → service auto-picks; `""` → explicit no-referer; URL → caller override. Returns `{success, data: {url, title, body}, captcha?, snapshot?}` — `body` is a 1000-char preview when `snapshot_after=true`, 5000 chars otherwise. Auto-detects CAPTCHA after load and may auto-solve, charging cost (see CAPTCHA solving below); the `captcha` field appears only when a CAPTCHA was detected and not solved. |
 | `browser_warmup` | `target_url` (http/https), `intensity` (default `normal`; values: `light` / `normal` / `deep`) | Pre-task warmup that hits a search engine then the target's apex host so the session has a realistic browsing trail. Call once at session start before automating behavior-fingerprinting targets (LinkedIn, X/Twitter, Facebook, Instagram). NOT for casual sites; do NOT repeat per session. `light` = search only (1 nav); `normal` = search + apex (2 navs); `deep` = search + scroll + apex + scroll (4 actions). |
 | `browser_get_elements` | `filter` (`actionable` / `inputs` / `headings` / `landmarks`), `from_ref`, `diff_from_last` (default false), `frame` (URL substring or `f-xxxxxxxx` frame_id), `include_frames` (default true) | Accessibility tree snapshot with element refs (e1, e2, ...). Returns structured text, not a visual image. Capped at 200 elements; iframe nesting capped at 3 levels. `diff_from_last=true` returns only what changed since the prior snapshot. |
-| `browser_screenshot` (`loop_exempt=True`) | `full_page` (default false), `format` (`webp` default / `png`), `quality` (1-100, default 75), `scale` (0.5-1.0, default 1.0) | Take screenshot, return visual image. Default format is **WebP**; falls back to PNG if WebP encoding fails. |
+| `browser_screenshot` | `full_page` (default false), `format` (`webp` default / `png`), `quality` (1-100, default 75), `scale` (0.5-1.0, default 1.0) | Take screenshot, return visual image. Default format is **WebP**; falls back to PNG if WebP encoding fails. |
 | `browser_click` | `ref` or `selector`, `force` (default false), `snapshot_after` (default false), `timeout_ms` (default 10000, max 30000), `frame` | Click element by accessibility ref or CSS selector. `force` bypasses actionability checks (auto-applied for disabled button/link refs). Modal close-button clicks fall back to Escape if the modal persists. Returns `{success, data: {ref, ...}, captcha?}` — auto re-detects CAPTCHA after click. |
 | `browser_click_xy` | `x`, `y` (viewport-relative CSS pixels) | Coordinate-based click for canvas/SVG widgets without a11y nodes. Pre-checks the target via `elementFromPoint` and walks the ancestor chain — returns an `invalid_input` envelope with `actual_element` + `masked_by` when an overlay would intercept the click. Rejects bools, NaN/Inf, and out-of-viewport coords. |
 | `browser_type` | `ref` or `selector`, `text`, `clear` (default true), `fast` (default false), `snapshot_after` (default false), `frame` | Type into input field. `clear=false` appends rather than replacing. `fast=true` sets the value directly without keystrokes. |
@@ -102,7 +102,7 @@ An OS-level device profile is selected by `BROWSER_DEVICE_PROFILE` (`desktop-win
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `update_workspace` | `filename`, `content` | Update a writable workspace file (`SOUL.md`, `INSTRUCTIONS.md`, `USER.md`, `HEARTBEAT.md`, or `INTERFACE.md`) to persist learnings across sessions |
+| `update_workspace` | `filename`, `content` | Update a writable workspace file (`SOUL.md`, `INSTRUCTIONS.md`, `USER.md`, `HEARTBEAT.md`, `INTERFACE.md`, `GOALS.md`, or `GOALS.json`) to persist learnings across sessions |
 
 ### Scheduling & Automation
 
@@ -127,7 +127,7 @@ An OS-level device profile is selected by `BROWSER_DEVICE_PROFILE` (`desktop-win
 | `spawn_fleet_agent` | `role`, `system_prompt` (default ""), `ttl` (default 3600s) | Spawn a new agent in its own isolated container with independent tools, memory, and environment. The agent joins the fleet as a peer. Permission gate: `permissions.can_spawn` (operator cannot grant this). |
 
 **AST validation for `create_skill`.** The submitted source is parsed and rejected if it touches any of:
-- `_FORBIDDEN_IMPORTS` (24 modules): `os`, `subprocess`, `shutil`, `ctypes`, `importlib`, `socket`, `sys`, `signal`, `multiprocessing`, `threading`, `pathlib`, `io`, `tempfile`, `pty`, `code`, `gc`, `inspect`, `pickle`, `shelve`, `http`, `asyncio`, `resource`, `builtins`.
+- `_FORBIDDEN_IMPORTS` (23 modules): `os`, `subprocess`, `shutil`, `ctypes`, `importlib`, `socket`, `sys`, `signal`, `multiprocessing`, `threading`, `pathlib`, `io`, `tempfile`, `pty`, `code`, `gc`, `inspect`, `pickle`, `shelve`, `http`, `asyncio`, `resource`, `builtins`.
 - `_FORBIDDEN_CALLS` (16): `eval`, `exec`, `__import__`, `compile`, `globals`, `locals`, `getattr`, `setattr`, `delattr`, `breakpoint`, `open`, `type`, `vars`, `dir`, `memoryview`, `super`.
 - `_FORBIDDEN_ATTRS` (11): `__builtins__`, `__import__`, `__subclasses__`, `__class__`, `__bases__`, `__mro__`, `__globals__`, `__code__`, `__reduce__`, `__dict__`, `builtins`.
 
@@ -227,7 +227,6 @@ stale LLM prompt fails fast and retries on the canonical name.
 | `edit_agent` | `agent_id`, `field` (enum: `instructions` / `soul` / `role` / `heartbeat` / `heartbeat_schedule` / `interface` / `model` / `thinking` / `budget` / `permissions`), `value`, `reason` (default `"user_asked"`; values: `user_asked` / `operator_proactive`) | Single entry point for agent config changes. ALL fields apply immediately and emit an undo receipt — soft fields (`instructions`, `soul`, `role`, `heartbeat`, `heartbeat_schedule`, `interface`) carry a 5-minute Undo window; hard fields (`model`, `thinking`, `budget`, `permissions`) carry a 30-minute Undo window. No pre-execution confirm step. `heartbeat_schedule` also retargets the live cron job in lockstep with the YAML write. |
 | `undo_change` | `undo_token` | Reverse an edit applied via `edit_agent`. Token is returned with the edit and remains valid for 5 minutes (soft fields) or 30 minutes (hard fields); 404 if expired or already undone. |
 | `confirm_edit` | `change_id` | Deprecated no-op stub. The `/edit-soft` immediate-apply refactor retired the propose-then-confirm flow; `confirm_edit` returns a friendly hint and is retained only so in-flight LLM conversations that still emit it don't error. New conversations should call `edit_agent` directly. |
-| `save_observations` | `fleet_summary`, `agents_attention` (default `[]`, items: `{agent_id, issue, severity}`), `cost_trend`, `notes` (default "") | Persist fleet health observations to `OBSERVATIONS.md` for the Fleet Digest display. Char cap 1500; history retains last 50 entries. |
 | `create_agent` | `name` (lowercase, alphanumeric + hyphens, 1–32 chars), `role`, `model` (default ""), `instructions`, `soul` (default "") | Create a new custom agent. Requires user confirmation. |
 | `create_team` | `name`, `description`, `agent_ids` (default []) | Create a new team and optionally assign agents. Requires user confirmation. |
 | `add_agents_to_team` | `team_name`, `agent_ids` | Add one or more agents to a team. Requires user confirmation. |
