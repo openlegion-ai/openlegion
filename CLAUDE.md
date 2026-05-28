@@ -48,7 +48,7 @@ Only modules with non-obvious quirks worth flagging are listed. The rest are vis
 | `src/agent/builtins/skill_tool.py` | Self-authoring with AST validation (`_FORBIDDEN_IMPORTS` / `_FORBIDDEN_CALLS` / `_FORBIDDEN_ATTRS`) |
 | `src/agent/builtins/fleet_tool.py` | Operator-only `list_templates` / `apply_template`. Validates upfront; create loop is per-slot, not atomic (Constraint #3). |
 | `src/agent/builtins/operator_tools.py` | Operator-only orchestration. `edit_agent` is the unified edit surface (all fields apply immediately + undo receipt). `read_agent_config` is its inverse. `_OPERATOR_PERMISSION_CEILING` blocks `can_spawn` / `can_use_wallet`. |
-| `src/host/server.py` | Mesh FastAPI app — 100 endpoints, all permission-checked. `_RATE_LIMITS` enforces per-category limits. `_require_operator_or_internal` is a permission tier between standard agent auth and loopback-only `x-mesh-internal`. `pending_actions` is now delete-confirmations only. |
+| `src/host/server.py` | Mesh FastAPI app — 109 endpoints, all permission-checked. `_RATE_LIMITS` enforces per-category limits. `_require_operator_or_internal` is a permission tier between standard agent auth and loopback-only `x-mesh-internal`. `pending_actions` is now delete-confirmations only. |
 | `src/host/runtime.py` | RuntimeBackend ABC → DockerBackend / SandboxBackend. Container hardening enforced here. |
 | `src/host/credentials.py` | Two-tier credential vault (SYSTEM_*/CRED_*) + LLM API proxy. OpenAI OAuth support. |
 | `src/host/permissions.py` | Per-agent ACL (glob patterns, deny-all default). `browser_actions: list[str] \| None` narrows per-action surface (`None` = all allowed, `[]` = deny all). |

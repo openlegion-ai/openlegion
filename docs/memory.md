@@ -1,20 +1,15 @@
 # Memory System
 
-OpenLegion agents have a five-layer memory architecture that provides persistent, self-improving recall across sessions, tasks, and context window resets.
+OpenLegion agents have a four-layer memory architecture that provides persistent recall across sessions, tasks, and context window resets.
 
-## Five Layers
+## Four Layers
 
 ```
-Layer 5: Context Manager          <- Manages the LLM's context window
+Layer 4: Context Manager          <- Manages the LLM's context window
   |  Monitors token usage
   |  Proactive flush at 60% capacity
   |  Auto-compacts at 70% capacity
   |  Extracts facts before discarding messages
-  |
-Layer 4: Learnings                <- Self-improvement through failure tracking
-  |  learnings/errors.md         (tool failures with context)
-  |  learnings/corrections.md   (user corrections and preferences)
-  |  Auto-injected into system prompt each session
   |
 Layer 3: Workspace Files          <- Durable, human-readable storage
   |  INSTRUCTIONS.md, SOUL.md, USER.md  (loaded into system prompt)
@@ -46,10 +41,11 @@ Manages the LLM's context window to prevent overflow while preserving important 
 
 - **Model-aware token estimation**: tiktoken for OpenAI models (accurate), 3.5 chars/token for Anthropic, 4 chars/token fallback for unknown providers
 - **Model-aware context windows**: auto-detects max context from model name (12 models supported), with explicit `max_tokens` override
-- Three compaction thresholds:
+- Four compaction thresholds:
   - **60%** -- proactive flush (extract facts to MEMORY.md)
-  - **70%** -- auto-compact (summarize + trim to last 3–4 messages, preserving tool-call group boundaries). Hard-prune is used as a fallback within this path if the LLM is unavailable or summarization fails — it is not a separately triggered threshold.
+  - **70%** -- auto-compact (summarize + trim, preserving tool-call group boundaries). If the LLM is unavailable or summarization returns an empty summary (`context.py:452-453`), this path falls back to hard prune.
   - **80%** -- warning injected into system prompt telling agents to wrap up or save important facts
+  - **90%** -- emergency hard prune (`_hard_prune()`): keep first message + last 4 message groups (tool-call boundaries preserved; bridges same-role sequences). Triggers if 80% warning was not heeded or summarization fails.
 
 ### Write-Then-Compact Pattern
 
@@ -58,7 +54,7 @@ Before discarding any conversation context:
 1. **Extract** -- Asks the LLM to identify important facts from the conversation
 2. **Store** -- Saves facts to both `MEMORY.md` and the structured memory DB
 3. **Summarize** -- Creates a concise summary of the conversation so far
-4. **Replace** -- Swaps full history with: summary + last 3 or 4 messages (4 normally; 3 + a bridge assistant message when the role invariant would be violated by consecutive user messages)
+4. **Replace** -- Swaps full history with: summary + first message + last 4 message groups (groups = tool-call sequences; preserves the user→assistant(tool_calls)→tool(result)→assistant invariant by bridging same-role sequences)
 
 Nothing is permanently lost during compaction.
 
@@ -83,8 +79,8 @@ Persistent markdown files stored on the agent's `/data/workspace` volume.
 | `SOUL.md` | Agent personality and behavioral guidelines | 4K chars | System prompt |
 | `USER.md` | User preferences and working style | 4K chars | System prompt |
 | `MEMORY.md` | Curated long-term facts | 16K chars | System prompt |
-| `TEAM.md` | Team-wide context (optional, mounted read-only from host). The bootstrap loader also accepts a stray `PROJECT.md` from pre-rename workspaces as a read-only fallback. | -- | System prompt |
-| `SYSTEM.md` | System architecture guide + runtime snapshot (auto-generated, read-only) | 6K chars | System prompt |
+| `TEAM.md` | Team-wide context (optional, per-team, mounted from host, **read-only** when present). Bootstrap accepts a legacy `PROJECT.md` (also read-only) for pre-rename workspaces. | -- | When present in the team config |
+| `SYSTEM.md` | System architecture guide + runtime snapshot (auto-generated, read-only) | capped at 6K chars | System prompt |
 | `HEARTBEAT.md` | Autonomous monitoring rules | -- | Heartbeat dispatch (auto-loaded) |
 | `INTERFACE.md` | Public collaboration contract (inputs, outputs, subscriptions) | 4K chars | Not auto-loaded into system prompt — read by other agents via `get_agent_profile` |
 
@@ -212,29 +208,3 @@ Session 2: User asks "What timezone am I in?"
            -> Returns "PST" via semantic search
 ```
 
-## Learnings (`src/agent/workspace.py`)
-
-Self-improvement through failure tracking:
-
-### Error Learning
-
-When a tool call fails, the error context is recorded in `learnings/errors.md`:
-```markdown
-## 2026-02-20T10:30:00
-**Tool:** exec_command
-**Error:** Permission denied: /etc/passwd
-**Context:** Tried to read system file outside /data
-**Lesson:** File operations are scoped to /data volume
-```
-
-### Correction Learning
-
-When a user corrects the agent, it's recorded in `learnings/corrections.md`:
-```markdown
-## 2026-02-20T11:00:00
-**User said:** "No, use pytest not unittest"
-**Context:** Was writing tests with unittest framework
-**Lesson:** User prefers pytest for testing
-```
-
-Both are injected into the system prompt at the start of each session, so the agent learns from past mistakes.

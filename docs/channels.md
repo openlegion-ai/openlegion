@@ -17,7 +17,7 @@ Every channel provides a unified interface:
 All four external adapters inherit from `Channel` in `src/channels/base.py` and share:
 
 - **PairingManager** — one shared protocol (`/start <code>` claims ownership, `/allow` / `/revoke` / `/paired` per-owner) backs the pairing table shown for each channel below. The four channels are not independent flows.
-- **`sanitize_for_prompt()` on all inbound messages** — every text reaching the LLM passes through the shared sanitizer (`base.py:224`), which strips invisible Unicode and prompt-injection markers.
+- **`sanitize_for_prompt()` on all inbound messages** — every text reaching the LLM passes through the shared sanitizer (`base.py:224`), which strips invisible Unicode characters (Cc/Cf/Co/Cs/Cn categories plus variation selectors and zero-width joiners) that enable prompt injection. Credential redaction is a separate concern handled by `src/shared/redaction.py`.
 - **`MessageOrigin` stamping** — every inbound channel message is tagged with `MessageOrigin(kind="human", channel=<channel_type>, user=<user_id>)` (`base.py:246-254`). This is what lets a busy agent's reply route back to the originating user/channel after a hand-off completes (see [Notifications & Auto-Notify](#notifications--auto-notify)).
 - **`chunk_text()` helper** — splits long responses against per-platform message size limits.
 - **Streaming debounce** — Telegram, Discord, and Slack all share `_EDIT_INTERVAL = 0.5` seconds (500 ms) to batch progressive edits and stay under platform rate limits.

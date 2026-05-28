@@ -73,6 +73,7 @@ model: anthropic/claude-haiku-4-5-20251001
 model: anthropic/claude-sonnet-4-6
 
 # OpenAI
+model: openai/gpt-4o-mini
 model: openai/gpt-4.1-mini
 model: openai/gpt-4.1
 
@@ -81,10 +82,24 @@ model: gemini/gemini-2.5-flash
 
 # Other supported providers
 model: deepseek/deepseek-chat
-model: xai/grok-2
+model: xai/grok-4
 model: groq/llama-3.3-70b-versatile
-model: zai/glm-4-plus
+model: zai/glm-5
 ```
+
+### Workspace File Size Limits
+
+Per-agent workspace files (seeded by `soul`, `initial_instructions`, `initial_interface`, and edited at runtime via `PUT /workspace/{filename}`) are size-capped server-side. Writes that exceed the cap return HTTP 413. Caps are defined in `src/agent/server.py:_FILE_CAPS`.
+
+| File | Cap (bytes) |
+|------|-------------|
+| `SOUL.md` | 4000 |
+| `INSTRUCTIONS.md` | 12000 |
+| `AGENTS.md` | 12000 |
+| `USER.md` | 4000 |
+| `MEMORY.md` | 16000 |
+| `HEARTBEAT.md` | uncapped |
+| `INTERFACE.md` | 4000 |
 
 ## `config/mesh.yaml`
 
@@ -291,9 +306,10 @@ Beyond credentials, these environment variables affect runtime behavior:
 | `THINKING` | `off` | Extended thinking/reasoning mode (set automatically from `thinking` in agents.yaml) |
 | `PROJECT_NAME` | -- | Team this agent belongs to (set automatically for team members). Env-var name is retained through PR 2 of the project→team rename. |
 | `EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model for memory vector search (set automatically from `llm.embedding_model` in mesh.yaml). Set to `"none"` to disable vector search |
-| `OPENLEGION_MAX_AGENTS` | `0` | Plan limit: maximum agents to start. `0` means unlimited. If set to N > 0, only the first N agents are started. **Also drives plan-aware browser-service sizing** (`src/host/runtime.py:start_browser_service`) — the browser container's memory, SHM, CPU quota, and `MAX_BROWSERS` cap are selected by the `max_agents <= 1` / `<= 5` / `> 5` branches: ≤1 → Basic (2GB / 512m / 1.0 CPU / 1 browser), ≤5 → Growth (4GB / 1g / 1.5 CPU / N browsers), >5 → Pro (8GB / 2g / 2.0 CPU / `min(N, 10)` browsers). Note: `OPENLEGION_MAX_AGENTS=0` (the default, meaning "unlimited agents") falls into the `<= 1` branch and selects the **Basic** browser-service tier — counterintuitive but intentional for self-host installs that haven't declared a plan. |
+| `OPENLEGION_MAX_AGENTS` | `0` | Plan limit: maximum agents to start. `0` means unlimited. If set to N > 0, only the first N agents are started. **Also drives plan-aware browser-service sizing** (`src/host/runtime.py:506-526`) — the browser container's memory, SHM, CPU quota, and `max_browsers` cap are selected across four `max_agents` tiers (see **Browser-Service Sizing Tiers** below). Note: `OPENLEGION_MAX_AGENTS=0` (the default, meaning "unlimited agents") falls into the `≤1` branch and selects the **Basic** browser-service tier — counterintuitive but intentional for self-host installs that haven't declared a plan. |
 | `OPENLEGION_MAX_TEAMS` (alias `OPENLEGION_MAX_PROJECTS`) | -- | Plan limit. Three-state semantics: **unset** (env var absent) → teams are unlimited; **set to `0`** → teams are disabled entirely, `POST /mesh/teams` returns HTTP 403; **set to N > 0** → only N teams are allowed. The new var name is the canonical read; the legacy one is preserved as a permanent zero-cost fallback for existing deploys. |
 | `OPENLEGION_TEAM_SCOPE_MODE` (alias `OPENLEGION_PROJECT_SCOPE_MODE`) | `enforce` | Team-scope rollout kill switch. Accepts `"warn"` or `"enforce"` (case-insensitive via `.lower()`). Invalid values default to `"enforce"` with a WARNING. **Read once at module import — restart the mesh to change.** Legacy var name preserved as a permanent fallback. |
+| `OPENLEGION_SKIP_TRUST_TIER_BOOT_GATE` | -- | Bypass the fail-closed startup gate that refuses to boot when `OPENLEGION_TEAM_SCOPE_MODE=enforce` and `auth_tokens` is empty (an unverifiable `X-Agent-ID` header would otherwise make the operator trust tier forgeable). Set to `"1"` to skip the gate. Used by `tests/conftest.py` for in-process test sessions; not for production deploys (`src/host/server.py`). |
 | `OPENLEGION_TEAM_MIGRATION_RENAME_DB` | `1` | DB column rename `tasks.project_id` → `tasks.team_id` on startup. Default-on as of PR 3 of the project→team rename; set to `0` to opt out for emergency rollback. The orchestration layer introspects the live column at init via PRAGMA so either schema shape works without source changes. |
 | `OPENLEGION_ORCHESTRATION_TASKS_V2` | `1` | Toggle the durable orchestration v2 tasks store. `"1"` enables; `"0"` falls back to the legacy blackboard task path. **Read once at module import — restart the mesh to flip.** |
 | `OPENLEGION_ORCHESTRATION_TASKS_DB` | `data/tasks.db` | Override the SQLite path for the orchestration v2 tasks store. |
@@ -304,7 +320,7 @@ Beyond credentials, these environment variables affect runtime behavior:
 | `OPENLEGION_SYSTEM_WALLET_MASTER_SEED` | -- | BIP-39 mnemonic (24 words) for HD wallet key derivation. Required to enable wallet features. Generate with `openlegion wallet init`. |
 | `OPENLEGION_WALLET_LIMIT_PER_TX_USD` | `10.0` | Default per-transaction USD cap applied when an agent's `wallet_spend_limit_per_tx_usd` is `0`. |
 | `OPENLEGION_WALLET_LIMIT_DAILY_USD` | `100.0` | Default daily aggregate USD cap applied when an agent's `wallet_spend_limit_daily_usd` is `0`. |
-| `OPENLEGION_WALLET_RATE_LIMIT_PER_HOUR` | `10` | Default transactions-per-hour cap applied when an agent's `wallet_rate_limit_per_hour` is `0`. |
+| `OPENLEGION_WALLET_RATE_LIMIT_PER_HOUR` | `10000` | Default transactions-per-hour cap applied when an agent's `wallet_rate_limit_per_hour` is `0`. |
 | `BROWSER_OS` | `windows` | OS fingerprint for Camoufox browser: `windows`, `macos`, or `linux`. Windows is recommended (≈70% desktop market share; Linux is a datacenter signal). |
 | `BROWSER_LOCALE` | `en-US` | BCP-47 locale tag for browser fingerprint (e.g. `en-US`, `de-DE`). |
 | `BROWSER_UA_VERSION` | -- | Override Firefox version in User-Agent string (e.g. `138.0`). Useful when Camoufox's bundled Firefox is too old for sites that enforce minimum browser versions (e.g. Shopify). Uses Camoufox's native config system. Ignored when a non-default `BROWSER_DEVICE_PROFILE` pins its own UA. |
@@ -323,6 +339,8 @@ Beyond credentials, these environment variables affect runtime behavior:
 | `OPENLEGION_SYSTEM_PROXY` | -- | System-wide outbound HTTP proxy URL for all agent traffic. Managed via the dashboard proxy settings page. |
 | `HTTP_PROXY` / `HTTPS_PROXY` | -- | Per-agent proxy URLs. Auto-injected into agent containers by the runtime when a per-agent proxy is configured. Read by the agent-side `http_request` tool. |
 | `OPENLEGION_TOOL_TIMEOUT` | `300` | Per-tool execution timeout in seconds (hard ceiling). |
+| `OPENLEGION_LANE_TIMEOUT_SECONDS` | `900` | Per-agent task queue timeout in seconds (`src/host/lanes.py`). |
+| `OPENLEGION_LOOP_STALE_SECONDS` | `900` | Stale loop detection threshold in seconds — agent reachable + queue depth > 0 + no iteration in window (`src/host/health.py`). |
 | `OPENLEGION_MAX_ITERATIONS` | `20` | Maximum agent loop iterations per task (clamped 1–100). Overrides the default at the agent level. |
 | `OPENLEGION_CHAT_MAX_TOOL_ROUNDS` | `30` | Maximum tool rounds per chat turn (clamped 1–200). |
 | `OPENLEGION_CHAT_MAX_TOTAL_ROUNDS` | `200` | Maximum total chat rounds before session auto-continuation (clamped 1–1000). |
@@ -331,6 +349,17 @@ Beyond credentials, these environment variables affect runtime behavior:
 | `OPENLEGION_REDACTION_URL_QUERY_ALLOW` | -- | Comma-separated list of URL query parameter names that the unified redactor (`src/shared/redaction.py`) should NOT redact. Use to keep specific identifiers visible in browser logs / artifacts when an integration intentionally puts non-secret context in the query string. |
 
 The mesh port is configured in `config/mesh.yaml` (`mesh.port`), not via environment variable.
+
+### Browser-Service Sizing Tiers
+
+Selected by `OPENLEGION_MAX_AGENTS` at `start_browser_service` (`src/host/runtime.py:506-526`). `cpu (µs)` is the Docker `cpu_quota` against the default 100,000µs period (e.g. `200000` = 2.0 CPU). `N` is the resolved `max_agents` value.
+
+| Tier | mem | shm | cpu (µs) | max_browsers |
+|---|---|---|---|---|
+| ≤1 agents | 2g | 512m | 100000 | 1 |
+| ≤5 agents | 4g | 1g | 150000 | N |
+| ≤15 agents | 8g | 2g | 200000 | min(N, 10) |
+| >15 agents | 16g | 4g | 400000 | min(N, 30) |
 
 ## Browser Service Flags
 
