@@ -439,27 +439,6 @@
                 </div>
               </div>
 
-              <!-- Phase 1 — delivery banner. Slim slip above the message
-                   list when there's a delivery on Home the user hasn't
-                   seen. ``deliveryBannerVisible`` gates on
-                   ``activeTab === 'chat'``, so we stay invisible when
-                   the user is already on Home. Click → switch to Home
-                   and ack. -->
-              <div x-show="deliveryBannerVisible" x-cloak data-delivery-banner
-                @click="openHomeFromBanner()"
-                role="button" tabindex="0"
-                @keydown.enter.prevent="openHomeFromBanner()"
-                @keydown.space.prevent="openHomeFromBanner()"
-                class="mx-4 mt-2 mb-1 px-3 py-2 rounded-lg bg-indigo-900/30 border border-indigo-700/50 hover:bg-indigo-900/50 hover:border-indigo-600/70 cursor-pointer flex items-center gap-2 transition-colors">
-                <svg class="w-4 h-4 text-indigo-300 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <path d="M3 8l7.89 5.26a2 2 0 0 0 2.22 0L21 8M5 19h14a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2z"/>
-                </svg>
-                <span class="text-xs text-indigo-200 flex-1 truncate" x-text="deliveryBannerSummary()"></span>
-                <svg class="w-3 h-3 text-indigo-300 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <path d="M9 5l7 7-7 7"/>
-                </svg>
-              </div>
-
               <!-- Pending operator-proposed actions render inline as
                    ``pending_action_card`` chat messages (see template
                    below) — matching the credential / browser-login /

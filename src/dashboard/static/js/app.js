@@ -59,11 +59,6 @@ function dashboard() {
     // across navigation via Alpine root scope; localStorage carries it
     // through reloads so users keep their messenger open as they wander.
     messengerSidePanelOpen: false,
-    // Last time the user viewed the Work tab. PR 2 stubbed the
-    // delivery banner that consumed this (the ``recentlyDelivered``
-    // slice was removed); kept as a no-op stash so persisted-state
-    // restore paths don't break and a future banner can revive it.
-    _lastViewedHomeTs: 0,
     // Per-agent visible message count for "Load older →" pagination
     // (Phase 1 Decision 12). Default 50; click appends 50 more.
     _chatVisibleLimit: {},
@@ -1175,13 +1170,9 @@ function dashboard() {
       this._initTs = Date.now();  // track page load time to skip replayed events
       const cfg = window.__config || {};
 
-      // Restore Phase 1 state from localStorage (side panel + last-Home
-      // visit timestamp). These are cosmetic — losing them is harmless,
-      // so we wrap each in its own try/catch and never block init.
-      try {
-        const v = localStorage.getItem('ol_last_viewed_home');
-        if (v) this._lastViewedHomeTs = parseInt(v, 10) || 0;
-      } catch (e) { /* ignore */ }
+      // Restore Phase 1 state from localStorage (side panel).
+      // Cosmetic — losing it is harmless, so wrap in try/catch and
+      // never block init.
       try {
         const v = localStorage.getItem('ol_messenger_side_panel_open');
         if (v === '1') this.messengerSidePanelOpen = true;
@@ -1793,30 +1784,6 @@ function dashboard() {
     systemTabLabelFor(tab) {
       if (tab.id === 'settings') return 'General';
       return tab.label;
-    },
-
-    /** Always false — PR 2 of the Work tab rewrite removed the
-     * ``recentlyDelivered`` slice that backed this banner. The
-     * notification bell + Needs You panel cover the same surface now. */
-    get deliveryBannerVisible() {
-      return false;
-    },
-
-    /** Always empty — paired with the always-false banner. */
-    deliveryBannerSummary() {
-      return '';
-    },
-
-    /** Mark Home as viewed (clears the delivery banner). */
-    markHomeViewed() {
-      this._lastViewedHomeTs = Date.now();
-      try { localStorage.setItem('ol_last_viewed_home', String(this._lastViewedHomeTs)); } catch (e) { /* ignore */ }
-    },
-
-    /** Banner click handler — switch to Home and ack. */
-    openHomeFromBanner() {
-      this.markHomeViewed();
-      this.switchTab('workplace');
     },
 
     /** Toggle the side-panel messenger (visible on non-Chat tabs). */
@@ -2579,12 +2546,6 @@ function dashboard() {
       if (fromTab !== tab) {
         this.track('tab_view', { tab_id: tab, from_tab_id: fromTab || '' });
         this._trackFirstAction('tab_view');
-      }
-      // Phase 1 — clearing the delivery banner. The Chat banner only
-      // shows when there are deliveries newer than ``_lastViewedHomeTs``;
-      // navigating to Home is the natural "I saw it" signal.
-      if (tab === 'workplace') {
-        this.markHomeViewed();
       }
       if (tab === 'chat') {
         if (!this.openChats.includes('operator')) {
