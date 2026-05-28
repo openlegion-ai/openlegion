@@ -2254,7 +2254,16 @@ def _render_goals_md(goals: list[dict]) -> str:
 
 
 def _write_goals(workspace_root, goals: list[dict]) -> None:
-    """Persist both sidecar JSON and rendered markdown atomically-ish."""
+    """Persist both sidecar JSON and rendered markdown atomically-ish.
+
+    Direct ``path.write_text`` matches the ``save_observations``
+    precedent (``OBSERVATIONS.md`` / ``OBSERVATIONS_HISTORY.md``); these
+    files are operator-internal state, not user-edited content, so the
+    workspace_manager's audit/versioning machinery doesn't apply.
+    Two writes are not atomic — if the MD write fails after the JSON
+    write succeeds, the two files diverge. Risk is small for a stable
+    workspace volume; if it ever bites, switch to temp-file + rename.
+    """
     json_path = workspace_root / _GOALS_JSON_FILENAME
     md_path = workspace_root / _GOALS_MD_FILENAME
     json_path.write_text(json.dumps({"goals": goals}, indent=2) + "\n")

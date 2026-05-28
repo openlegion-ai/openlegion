@@ -6391,8 +6391,15 @@ def create_dashboard_router(
     _WORKSPACE_ALLOWLIST = frozenset({
         "SOUL.md", "HEARTBEAT.md", "USER.md", "INSTRUCTIONS.md", "AGENTS.md", "MEMORY.md",
         "INTERFACE.md", "OBSERVATIONS.md",
-        # Operator-tracked goals (mirrors agent-side allowlist).
-        "GOALS.md", "GOALS.json",
+        # NOTE: GOALS.md / GOALS.json are intentionally NOT listed here.
+        # The dashboard exposes goals via the dedicated
+        # ``GET /api/workplace/goals`` read endpoint (which calls
+        # transport.request directly, bypassing this allowlist). The
+        # workspace editor's PUT proxy would inject the mesh-internal
+        # header and let a cookie-authed user write raw JSON to
+        # GOALS.json, bypassing the ``manage_goals`` tool's validation.
+        # The agent-side allowlist keeps both files so the tool's read
+        # path (``/workspace/GOALS.json`` over transport) still works.
     })
 
     @api_router.get("/api/agents/{agent_id}/workspace")
@@ -6864,8 +6871,15 @@ def create_dashboard_router(
                 "operator", "GET", "/workspace/GOALS.json", timeout=10,
             )
         except Exception as e:
+            # Log the real error for ops; surface a generic message to
+            # the browser so internal hostnames / file paths from httpx
+            # don't leak into the dashboard.
             logger.warning("operator goals fetch failed: %s", e)
-            return {"enabled": True, "goals": [], "error": str(e)}
+            return {
+                "enabled": True,
+                "goals": [],
+                "error": "unable to reach operator",
+            }
         raw = ""
         if isinstance(payload, dict):
             raw = str(payload.get("content") or "")

@@ -1651,6 +1651,12 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     "add_agents_to_team", "remove_agents_from_team", "update_team_context",
     # PR 5 — north-star setter is no-confirmation meta-config.
     "set_team_goal",
+    # User-visible business goals on the Work tab (separate from
+    # per-team north stars). Backed by GOALS.json + rendered GOALS.md
+    # in the operator's workspace; dashboard reads via
+    # /api/workplace/goals. Operator-only — _is_operator() is enforced
+    # at the tool boundary as well.
+    "manage_goals",
     # Lifecycle (consolidated archive/delete)
     "manage_team", "manage_agent", "manage_task",
     # Self-cleanup — operator can clear stale pending actions and prune

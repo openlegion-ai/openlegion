@@ -166,8 +166,11 @@ def test_goals_endpoint_malformed_json(tmp_path):
 
 
 def test_goals_endpoint_transport_raises(tmp_path):
-    """Transport failure surfaces but doesn't 500."""
-    fake = _FakeTransport(exc=RuntimeError("operator unreachable"))
+    """Transport failure surfaces but doesn't 500, and the error message
+    is generic so internal hostnames / paths from httpx don't leak."""
+    fake = _FakeTransport(
+        exc=RuntimeError("Connection refused at http://operator-internal:8400"),
+    )
     app, cleanup = _build_app(
         transport=fake,
         agent_registry={"operator": "http://operator:8400"},
@@ -180,7 +183,54 @@ def test_goals_endpoint_transport_raises(tmp_path):
             body = r.json()
             assert body["enabled"] is True
             assert body["goals"] == []
-            assert "operator unreachable" in body.get("error", "")
+            assert body.get("error") == "unable to reach operator"
+            # Internal host/path must NOT leak to the browser.
+            assert "operator-internal" not in body.get("error", "")
+    finally:
+        cleanup()
+
+
+def test_dashboard_workspace_put_rejects_goals_files(tmp_path):
+    """Lock in the security fix: the workspace editor's PUT proxy must
+    refuse GOALS.md and GOALS.json so a cookie-authed user can't write
+    raw JSON around the ``manage_goals`` tool's validation. Goals are
+    read via the dedicated /api/workplace/goals endpoint; there is no
+    legitimate write path through the workspace proxy.
+    """
+    fake = _FakeTransport(response={"filename": "x", "size": 0})
+    app, cleanup = _build_app(
+        transport=fake,
+        agent_registry={"operator": "http://operator:8400"},
+        tmp_path=tmp_path,
+    )
+    try:
+        with TestClient(app):
+            # Use the CSRF-injecting client so the request itself isn't
+            # rejected on CSRF grounds — we want the allowlist check
+            # to fire.
+            from fastapi.testclient import TestClient as _TC
+
+            class _CSRFClient(_TC):
+                def request(self, method, url, **kw):
+                    if method.upper() not in ("GET", "HEAD", "OPTIONS"):
+                        h = kw.get("headers") or {}
+                        h.setdefault("X-Requested-With", "XMLHttpRequest")
+                        kw["headers"] = h
+                    return super().request(method, url, **kw)
+
+            csrf_client = _CSRFClient(app)
+            for filename in ("GOALS.json", "GOALS.md"):
+                r = csrf_client.put(
+                    f"/dashboard/api/agents/operator/workspace/{filename}",
+                    json={"content": '{"goals": []}'},
+                )
+                assert r.status_code == 400, (
+                    f"PUT {filename} should be rejected by allowlist, "
+                    f"got {r.status_code}: {r.text}"
+                )
+                assert "not allowed" in r.text.lower()
+            # Transport must NOT have been called for the rejected PUTs.
+            assert all(call[1] != "PUT" for call in fake.calls)
     finally:
         cleanup()
 
