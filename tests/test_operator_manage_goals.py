@@ -300,6 +300,94 @@ async def test_manage_goals_remove_requires_name(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_manage_goals_update_preserves_progress_note_when_unset(tmp_path):
+    """Regression: update without ``progress_note`` must preserve existing.
+
+    The first cut wiped the note silently on every update that didn't
+    pass it. Verify the validator's None-sentinel + update merge keeps
+    the existing note when the caller only touches status.
+    """
+    from src.agent.builtins.operator_tools import manage_goals
+
+    ws = _FakeWorkspace(tmp_path)
+    await manage_goals(
+        "add",
+        goal={
+            "name": "Launch",
+            "status": "in_progress",
+            "progress_note": "draft running",
+        },
+        workspace_manager=ws,
+    )
+    # Update only the status; do not pass progress_note.
+    await manage_goals(
+        "update",
+        goal={"name": "Launch", "status": "done"},
+        workspace_manager=ws,
+    )
+    persisted = _load_goals_json(tmp_path)
+    assert len(persisted) == 1
+    assert persisted[0]["status"] == "done"
+    assert persisted[0]["progress_note"] == "draft running"
+
+
+@pytest.mark.asyncio
+async def test_manage_goals_update_progress_note_explicit_empty_clears(tmp_path):
+    """Caller can still clear the note by passing ``progress_note: \"\"``."""
+    from src.agent.builtins.operator_tools import manage_goals
+
+    ws = _FakeWorkspace(tmp_path)
+    await manage_goals(
+        "add",
+        goal={
+            "name": "Launch",
+            "status": "in_progress",
+            "progress_note": "old note",
+        },
+        workspace_manager=ws,
+    )
+    await manage_goals(
+        "update",
+        goal={"name": "Launch", "status": "in_progress", "progress_note": ""},
+        workspace_manager=ws,
+    )
+    persisted = _load_goals_json(tmp_path)
+    assert persisted[0]["progress_note"] == ""
+
+
+@pytest.mark.asyncio
+async def test_manage_goals_update_status_only_keeps_other_fields(tmp_path):
+    """Updating only status leaves name + note + (other goals') updated_at intact."""
+    import time as _time
+
+    from src.agent.builtins.operator_tools import manage_goals
+
+    ws = _FakeWorkspace(tmp_path)
+    await manage_goals(
+        "set",
+        goals=[
+            {"name": "A", "status": "in_progress", "progress_note": "alpha note"},
+            {"name": "B", "status": "in_progress", "progress_note": "beta note"},
+        ],
+        workspace_manager=ws,
+    )
+    initial = _load_goals_json(tmp_path)
+    initial_a_note = initial[0]["progress_note"]
+    initial_b_note = initial[1]["progress_note"]
+    _time.sleep(0.01)
+    await manage_goals(
+        "update",
+        goal={"name": "A", "status": "blocked"},
+        workspace_manager=ws,
+    )
+    after = _load_goals_json(tmp_path)
+    by_name = {g["name"]: g for g in after}
+    assert by_name["A"]["status"] == "blocked"
+    assert by_name["A"]["progress_note"] == initial_a_note  # preserved
+    assert by_name["B"]["progress_note"] == initial_b_note  # untouched
+
+
+@pytest.mark.asyncio
 async def test_manage_goals_add_caps_at_max_entries(tmp_path):
     from src.agent.builtins.operator_tools import manage_goals
 

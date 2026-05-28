@@ -2200,13 +2200,19 @@ _VALID_GOAL_ACTIONS = frozenset({"set", "add", "update", "remove", "list"})
 
 
 def _read_goals_sidecar(workspace_root) -> list[dict]:
-    """Read GOALS.json. Returns ``[]`` on missing/corrupt files."""
+    """Read GOALS.json. Returns ``[]`` on missing/corrupt files.
+
+    Corrupt-file path is silent-but-logged: callers can still recover
+    by calling ``set``, but a stale warning makes the data loss visible
+    in operator logs.
+    """
     path = workspace_root / _GOALS_JSON_FILENAME
     if not path.exists():
         return []
     try:
         data = json.loads(path.read_text(errors="replace"))
-    except (OSError, ValueError):
+    except (OSError, ValueError) as e:
+        logger.warning("GOALS.json read/parse failed (treating as empty): %s", e)
         return []
     if not isinstance(data, dict):
         return []
@@ -2262,16 +2268,25 @@ def _validate_goal_input(goal, *, require_status: bool = True) -> tuple[dict | N
     we persist (no ``updated_at`` — caller stamps that). ``require_status``
     is False on update where the caller may want to change only the
     progress note.
+
+    ``progress_note`` is intentionally distinguished from ``None`` (key
+    absent in input) and ``""`` (key present, empty). The update path
+    uses this to preserve an existing note when the caller didn't pass
+    one — otherwise every update would silently wipe the note.
     """
     if not isinstance(goal, dict):
         return None, "goal must be an object"
     name = goal.get("name", "")
     status = goal.get("status", "")
-    note = goal.get("progress_note", "") or ""
-    if not isinstance(name, str) or not isinstance(status, str) or not isinstance(note, str):
+    note_provided = "progress_note" in goal
+    raw_note = goal.get("progress_note") if note_provided else None
+    if raw_note is None:
+        raw_note = ""  # explicit None or unset both treated as "not provided"
+        note_provided = note_provided and goal.get("progress_note") is not None
+    if not isinstance(name, str) or not isinstance(status, str) or not isinstance(raw_note, str):
         return None, "goal name/status/progress_note must be strings"
     name_clean = sanitize_for_prompt(name).strip()
-    note_clean = sanitize_for_prompt(note).strip()
+    note_clean = sanitize_for_prompt(raw_note).strip()
     if not name_clean:
         return None, "goal name is required"
     if len(name_clean) > _MAX_GOAL_NAME_CHARS:
@@ -2286,7 +2301,9 @@ def _validate_goal_input(goal, *, require_status: bool = True) -> tuple[dict | N
     return {
         "name": name_clean,
         "status": status,
-        "progress_note": note_clean,
+        # ``None`` means "caller didn't provide" → update path preserves
+        # existing. Any other value (including ``""``) is an explicit set.
+        "progress_note": note_clean if note_provided else None,
     }, None
 
 
@@ -2383,6 +2400,9 @@ async def manage_goals(
                     ),
                 }
             seen_names.add(obj["name"])
+            # `set` writes a fresh row — unset progress_note becomes "".
+            if obj["progress_note"] is None:
+                obj["progress_note"] = ""
             obj["updated_at"] = now
             cleaned.append(obj)
         _write_goals(workspace_root, cleaned)
@@ -2406,6 +2426,9 @@ async def manage_goals(
                     f"cannot add: already at max of {_MAX_GOALS_ENTRIES} goals"
                 ),
             }
+        # `add` creates a fresh row — unset progress_note becomes "".
+        if obj["progress_note"] is None:
+            obj["progress_note"] = ""
         obj["updated_at"] = now
         new_list = [*current, obj]
         _write_goals(workspace_root, new_list)
@@ -2414,8 +2437,11 @@ async def manage_goals(
     if action == "update":
         if goal is None:
             goal = {}
-        # Status is optional on update — caller may want to change only
-        # the progress note. We still validate the enum if provided.
+        # Status and progress_note are both optional on update — caller
+        # may want to change only one field. We still validate the enum
+        # if provided. ``progress_note=None`` from the validator means
+        # "caller didn't pass" → preserve existing (don't silently wipe).
+        # Renames are not supported: ``name`` is the lookup key.
         obj, err = _validate_goal_input(goal, require_status=False)
         if err:
             return {"error": err}

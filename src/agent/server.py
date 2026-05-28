@@ -388,7 +388,10 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         "MEMORY.md": 16000,
         "HEARTBEAT.md": None,
         "INTERFACE.md": 4000,
-        "GOALS.md": 8000,
+        # GOALS.md intentionally uncapped here — size is tool-enforced
+        # (20 goals × name/note limits in manage_goals); an HTTP cap on
+        # the PUT path would clash at max load with what the tool can
+        # legitimately produce (~14k chars). Matches OBSERVATIONS.md.
     }
     _DEFAULT_HEADINGS = {
         "SOUL.md": "# Identity",
