@@ -7024,7 +7024,19 @@ function dashboard() {
       this.showConfirm(
         'Remove MCP server',
         `Remove "${s.name}"? Agent will restart when you save.`,
-        () => { this.editForm.mcp_servers.splice(idx, 1); },
+        () => {
+          this.editForm.mcp_servers.splice(idx, 1);
+          // Keep _mcpEditIndex pointing at the right row after the
+          // splice. If the edited row itself was removed, close the
+          // draft entirely; if a row ABOVE the edited one was removed,
+          // shift the index down by one. Without this, the inline edit
+          // form silently re-binds to a different entry's row.
+          if (this.editForm._mcpEditIndex === idx) {
+            this.mcpCancelDraft();
+          } else if (this.editForm._mcpEditIndex > idx) {
+            this.editForm._mcpEditIndex -= 1;
+          }
+        },
         true,
       );
     },
@@ -7177,7 +7189,12 @@ function dashboard() {
       // the outer Save, auto-commit the draft so the typed entries
       // aren't silently dropped. Reject the save if the draft is
       // incomplete (no name/command) — surface a clear toast so the
-      // user knows why their save didn't go through.
+      // user knows why their save didn't go through. mcpCommitDraft
+      // can ALSO reject the commit silently (duplicate name, cred row
+      // with no selected credential) — it leaves ``_mcpDraft`` in place
+      // and shows its own toast. Detect that and abort the save so the
+      // user isn't shown a contradictory "Updated: ..." success toast
+      // after a rejection.
       if (this.editForm && this.editForm._mcpDraft) {
         const d = this.editForm._mcpDraft;
         if (!(d.name || '').trim() || !(d.command || '').trim()) {
@@ -7185,6 +7202,7 @@ function dashboard() {
           return;
         }
         this.mcpCommitDraft();
+        if (this.editForm._mcpDraft) return;
       }
       this.configSaving = true;
       try {
