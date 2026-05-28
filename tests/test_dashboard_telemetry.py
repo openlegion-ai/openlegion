@@ -489,19 +489,17 @@ class TestPhase0FrontendWiring:
         assert "if (!this._dockOpen) return;" in close_body
         assert "this._dockOpen = false;" in close_body
 
-    def test_workplace_subtab_buttons_emit_subtab_usage(self):
+    def test_workplace_subnav_removed(self):
+        """PR 2 of Work tab rewrite — sub-nav + switchHomeTab gone.
+
+        The Summaries / Kanban / Activity sub-nav was deleted along with
+        the kanban + activity surfaces. ``switchHomeTab`` calls should
+        no longer appear in the rendered template. trackSubtabUsage
+        itself is kept in app.js for empty-state CTA telemetry — see
+        test_empty_state_cta_buttons_emit_telemetry.
+        """
         html = _TEMPLATE.read_text(encoding="utf-8")
-        # PR #879 made the kanban the default Work view and moved the
-        # single-scroll layout to ``homeTab === 'activity'``. Sub-tab IDs
-        # are now ``'kanban'`` (default) and ``'activity'`` (the legacy
-        # single-scroll). The transition handler is
-        # ``switchHomeTab('kanban' | 'activity')`` invoked from the
-        # back-link and "View activity feed →" CTA. trackSubtabUsage
-        # itself is kept in app.js for the hidden legacy renders + for
-        # empty-state CTA telemetry — see
-        # test_empty_state_cta_buttons_emit_telemetry.
-        assert "switchHomeTab('kanban')" in html
-        assert "switchHomeTab('activity')" in html
+        assert "switchHomeTab(" not in html
 
     def test_needs_you_action_button_uses_telemetry_wrapper(self):
         html = _TEMPLATE.read_text(encoding="utf-8")

@@ -2966,11 +2966,13 @@ class TestBoardLoadingAndErrorStates:
         assert resp.status_code == 200
         body = resp.text
         # Per-section state buckets so the template can render
-        # skeletons + error banners independently per section.
+        # skeletons + error banners independently per section. PR 2
+        # of the Work tab rewrite dropped the outputs + feed buckets
+        # along with the kanban + activity surfaces; goals (PR 1)
+        # gained one when the chip strip landed.
         assert "workplaceSectionLoading" in body
         assert "workplaceErrors" in body
-        # Sections covered (matches the loadWorkplace* surface).
-        for key in ("teams", "tasks", "blockers", "outputs", "pending", "feed"):
+        for key in ("teams", "tasks", "blockers", "pending", "summaries", "goals"):
             assert f"{key}: false" in body or f"'{key}'" in body or f'"{key}"' in body, \
                 f"app.js missing per-section bucket for {key}"
 
@@ -2979,10 +2981,10 @@ class TestBoardLoadingAndErrorStates:
         body = resp.text
         # Error path replaces silent console.error: each loader sets
         # its bucket so the banner renders.
-        assert "workplaceErrors.feed" in body
         assert "workplaceErrors.teams" in body
         assert "workplaceErrors.tasks" in body
-        assert "workplaceErrors.outputs" in body
+        assert "workplaceErrors.summaries" in body
+        assert "workplaceErrors.goals" in body
 
     def test_app_js_exposes_retry_helper(self):
         resp = self.client.get("/dashboard/static/js/app.js")
@@ -2994,60 +2996,24 @@ class TestBoardLoadingAndErrorStates:
     def test_index_html_renders_skeleton_loaders(self):
         resp = self.client.get("/dashboard/")
         body = resp.text
-        # Skeleton testid hooks per sub-tab. The pulsing rectangles
-        # use the existing animate-pulse + bg-gray-800 classes for
-        # visual consistency with the drill-in modal skeleton.
-        assert 'data-testid="workplace-feed-skeleton"' in body
-        assert 'data-testid="workplace-teams-skeleton"' in body
-        assert 'data-testid="workplace-tasks-skeleton"' in body
-        assert 'data-testid="workplace-outputs-skeleton"' in body
-        # Each skeleton is gated on workplaceSectionLoading.<section>
+        # Skeleton testid hooks for the surviving Work-tab sections
+        # (PR 2 dropped the kanban + activity skeletons; only the
+        # summaries skeleton is user-rendered today — the teams skeleton
+        # lives in the dead ``team-status`` legacy template).
+        assert 'data-testid="workplace-summaries-skeleton"' in body
+        # The skeleton is gated on workplaceSectionLoading.<section>
         # so it disappears when the load resolves.
-        assert "workplaceSectionLoading.feed" in body
-        assert "workplaceSectionLoading.teams" in body
-        assert "workplaceSectionLoading.tasks" in body
-        assert "workplaceSectionLoading.outputs" in body
+        assert "workplaceSectionLoading.summaries" in body
 
     def test_index_html_renders_error_banners_with_retry(self):
         resp = self.client.get("/dashboard/")
         body = resp.text
-        # Error banner testid hooks per sub-tab.
-        assert 'data-testid="workplace-feed-error"' in body
-        assert 'data-testid="workplace-teams-error"' in body
-        assert 'data-testid="workplace-tasks-error"' in body
-        assert 'data-testid="workplace-outputs-error"' in body
-        # Each banner has a "Retry" button bound to
-        # retryWorkplaceSection so the user can recover with one
-        # click without reloading.
-        assert "retryWorkplaceSection('feed')" in body
-        assert "retryWorkplaceSection('teams')" in body
-        assert "retryWorkplaceSection('tasks')" in body
-        assert "retryWorkplaceSection('outputs')" in body
-
-    def test_app_js_recently_delivered_inline_preview_helpers(self):
-        resp = self.client.get("/dashboard/static/js/app.js")
-        body = resp.text
-        # Helpers that back the "Recently delivered" inline preview.
-        assert "_ensureRecentlyDeliveredArtifact" in body
-        assert "recentlyDeliveredPreview" in body
-        assert "recentlyDeliveredFull" in body
-        assert "toggleRecentlyDeliveredExpanded" in body
-        assert "copyRecentlyDeliveredText" in body
-        # Copy uses the modern clipboard API with a fallback so it
-        # works on file:// and older browsers too.
-        assert "navigator.clipboard" in body
-
-    def test_index_html_recently_delivered_inline_preview_wired(self):
-        resp = self.client.get("/dashboard/")
-        body = resp.text
-        # Lazy-fetch on first render of each row.
-        assert "_ensureRecentlyDeliveredArtifact(t.id)" in body
-        # Toggle + copy buttons present on the row.
-        assert "toggleRecentlyDeliveredExpanded(t.id)" in body
-        assert "copyRecentlyDeliveredText(t.id)" in body
-        # Preview vs full content selection happens in the template.
-        assert "recentlyDeliveredFull(t.id)" in body
-        assert "recentlyDeliveredPreview(t.id)" in body
+        # Error banner testid hooks for the surviving Work-tab
+        # section (PR 2 dropped the kanban + activity banners).
+        assert 'data-testid="workplace-summaries-error"' in body
+        # The banner has a "Retry" button bound to retryWorkplaceSection
+        # so the user can recover with one click without reloading.
+        assert "retryWorkplaceSection('summaries')" in body
 
     def test_index_html_chip_prefix_does_not_overwrite(self):
         resp = self.client.get("/dashboard/")
