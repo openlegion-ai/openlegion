@@ -6061,6 +6061,12 @@ function dashboard() {
       const tab = this.identityCurrentTab;
       if (tab.id === 'config') {
         if (!this.agentConfigs[agentId]) await this.fetchAgentConfig(agentId);
+        // Fire-and-forget capabilities fetch so the MCP Servers panel's
+        // status dots populate without blocking the Config tab render.
+        // (The Capabilities tab path already runs this awaited; here we
+        // just need it to land so ``agentMcpStatus`` reflects per-server
+        // state.) Errors are logged inside fetchAgentCapabilities.
+        this.fetchAgentCapabilities(agentId);
         return;
       }
       // Composite tabs — load all mapped files (always refetch for freshness)
@@ -6876,6 +6882,12 @@ function dashboard() {
         _mcpRestartPending: false,
         _mcpRestartError: null,
         _mcpErrors: {},
+        _mcpGlobalError: null,
+        // Capture the agent ID this edit form is bound to so the restart-
+        // retry banner targets the right agent even if ``selectedAgent``
+        // changes (e.g. the user clicks a different agent in the list
+        // before clicking Retry).
+        _editingAgentId: this.selectedAgent,
       };
       this.configEditing = true;
     },
@@ -6933,14 +6945,28 @@ function dashboard() {
     mcpCommitDraft() {
       const d = this.editForm._mcpDraft;
       if (!d) return;
+      // env_keys is a display-only field for the inline edit UI:
+      //   * In replace mode it's derived from the new rows the user supplied.
+      //   * In preserve mode (not replacing) we KEEP the original entry's
+      //     env_keys — otherwise re-opening the row would falsely show
+      //     "No env vars" while the backend still has them. The actual
+      //     env payload is built in mcpDraftToWirePayload, which omits
+      //     env entirely when ``_replaceEnv`` is false (PR 1 preserve-
+      //     by-name semantic).
+      let envKeys;
+      if (d._replaceEnv) {
+        envKeys = d._envRows.map(r => (r.key || '').trim()).filter(Boolean);
+      } else if (this.editForm._mcpEditIndex >= 0) {
+        const original = this.editForm.mcp_servers[this.editForm._mcpEditIndex];
+        envKeys = (original && Array.isArray(original.env_keys)) ? [...original.env_keys] : [];
+      } else {
+        envKeys = [];
+      }
       const entry = {
         name: (d.name || '').trim(),
         command: (d.command || '').trim(),
         args: d._argRows.map(r => r.value).filter(v => v !== ''),
-        // We only attach env_keys here for the read-back UI; the actual
-        // env payload that goes on the wire is built in saveAgentConfig
-        // via mcpDraftToWirePayload (which knows _replaceEnv semantics).
-        env_keys: d._envRows.map(r => (r.key || '').trim()).filter(Boolean),
+        env_keys: envKeys,
         _replaceEnv: !!d._replaceEnv,
         _envRows: d._envRows,
       };
@@ -6986,12 +7012,9 @@ function dashboard() {
     mcpToggleReplaceEnv() {
       if (!this.editForm._mcpDraft) return;
       this.editForm._mcpDraft._replaceEnv = !this.editForm._mcpDraft._replaceEnv;
-      // When replace is freshly toggled on, start with an empty editor so
-      // the user is explicitly supplying every var. When toggled off, drop
-      // any draft rows so the save flow omits env (preserve semantics).
-      if (this.editForm._mcpDraft._replaceEnv && this.editForm._mcpDraft._envRows.length === 0) {
-        // leave empty — user will + Add as needed
-      }
+      // Toggling OFF drops any draft rows so the save flow omits env
+      // entirely (preserve-by-name semantics). Toggling ON leaves the
+      // editor empty — the user explicitly supplies every var via +Add.
       if (!this.editForm._mcpDraft._replaceEnv) {
         this.editForm._mcpDraft._envRows = [];
       }
@@ -7185,8 +7208,11 @@ function dashboard() {
           if (resp.ok) {
             configResult = await resp.json();
             allUpdated.push(...configResult.updated);
-            // Clear any prior per-row MCP errors from a failed earlier save.
-            if (this.editForm) this.editForm._mcpErrors = {};
+            // Clear any prior per-row + top-level MCP errors from a failed earlier save.
+            if (this.editForm) {
+              this.editForm._mcpErrors = {};
+              this.editForm._mcpGlobalError = null;
+            }
           } else {
             const err = await resp.json().catch(() => ({}));
             // Structured Pydantic validation errors come back as
@@ -7197,18 +7223,31 @@ function dashboard() {
             const detail = err.detail;
             if (detail && typeof detail === 'object' && detail.field === 'mcp_servers' && Array.isArray(detail.errors)) {
               const perRow = {};
+              const topLevel = [];
               for (const e of detail.errors) {
                 const loc = e.loc || [];
-                // loc[0] = "mcp_servers", loc[1] = row index, loc[2] = field name (or "args"/"env" with deeper path)
+                const msg = e.msg || 'Invalid';
+                // Row-level: loc = ["mcp_servers", row_idx, field_name, ...]
+                // Top-level: loc = ["mcp_servers"] — produced by field
+                // validators on AgentConfig.mcp_servers itself (e.g. the
+                // case-insensitive duplicate-name rejection). Surface
+                // these in a banner above the list so the user can see
+                // what's wrong even though there's no row to anchor on.
                 if (loc.length >= 3 && loc[0] === 'mcp_servers') {
                   const ridx = Number(loc[1]);
-                  if (!Number.isFinite(ridx)) continue;
-                  const field = String(loc[2]);
-                  perRow[ridx] = perRow[ridx] || {};
-                  perRow[ridx][field] = e.msg || 'Invalid';
+                  if (Number.isFinite(ridx)) {
+                    const field = String(loc[2]);
+                    perRow[ridx] = perRow[ridx] || {};
+                    perRow[ridx][field] = msg;
+                    continue;
+                  }
                 }
+                topLevel.push(msg);
               }
-              if (this.editForm) this.editForm._mcpErrors = perRow;
+              if (this.editForm) {
+                this.editForm._mcpErrors = perRow;
+                this.editForm._mcpGlobalError = topLevel.length ? topLevel.join('; ') : null;
+              }
               this.showToast('MCP server config has errors — see inline.');
               return;  // KEEP edit mode open for the user to fix
             }
