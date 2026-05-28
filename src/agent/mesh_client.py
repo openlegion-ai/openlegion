@@ -1077,6 +1077,29 @@ class MeshClient:
         """DEPRECATED: alias for :meth:`set_team_goal`."""
         return await self.set_team_goal(project_name, north_star, success_criteria)
 
+    async def set_task_outcome(
+        self,
+        task_id: str,
+        outcome: str,
+        feedback: str = "",
+    ) -> dict:
+        """Record an operator outcome rating on a completed task.
+
+        Routes through ``POST /mesh/tasks/{task_id}/outcome`` — the
+        canonical mesh-tier endpoint that the operator's
+        ``rate_delivery`` tool calls. Returns the mesh response dict
+        (carries ``rework_task_id`` / ``rework_assignee`` when the
+        outcome triggered a follow-up task spawn).
+        """
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/tasks/{task_id}/outcome",
+            json={"outcome": outcome, "feedback": feedback},
+            headers=self._trace_headers(),
+        )
+        _raise_with_body(response)
+        return response.json()
+
     async def browser_command(
         self, action: str, params: dict | None = None,
         target_agent_id: str | None = None,

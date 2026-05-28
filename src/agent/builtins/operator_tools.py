@@ -2189,7 +2189,7 @@ async def manage_team(
 _GOALS_MD_FILENAME = "GOALS.md"
 _GOALS_JSON_FILENAME = "GOALS.json"
 
-_MAX_GOALS_ENTRIES = 20
+_MAX_GOALS_ENTRIES = 10
 _MAX_GOAL_NAME_CHARS = 120
 _MAX_GOAL_NOTE_CHARS = 500
 
@@ -2335,7 +2335,7 @@ def _validate_goal_input(goal, *, require_status: bool = True) -> tuple[dict | N
             "type": "array",
             "description": (
                 "Full goal list for action='set'. Each entry: "
-                "{name: str, status: enum, progress_note?: str}. Max 20."
+                "{name: str, status: enum, progress_note?: str}. Max 10."
             ),
             "items": {"type": "object"},
             "default": [],
@@ -2344,7 +2344,7 @@ def _validate_goal_input(goal, *, require_status: bool = True) -> tuple[dict | N
             "type": "object",
             "description": (
                 "Single goal for action='add' or 'update'. Same shape as "
-                "'goals' entries."
+                "'goals' entries. Max 10."
             ),
             "default": {},
         },
@@ -2491,3 +2491,107 @@ async def manage_goals(
 
     # Unreachable — action set is validated above.
     return {"error": f"Unknown action {action!r}"}
+
+
+# ── Per-task outcome rating (PR 2 of Work tab rewrite) ───────────────
+#
+# Operator's programmatic per-task judgment. Replaces the human-driven
+# rating buttons that lived on the "Recently delivered" cards before
+# the Work-tab cutover. The deleted UI hit the same dashboard endpoint
+# the drill-in modal uses; this tool routes through the mesh so the
+# operator agent can score completed tasks from its heartbeat loop
+# (preserves the agent-feedback machine loop: memory writes on
+# accepted/rework/rejected + auto-rework spawn on rework).
+
+_VALID_RATE_OUTCOMES = frozenset({
+    "accepted", "acknowledged", "rework", "rejected",
+})
+_MAX_RATE_FEEDBACK_CHARS = 2000
+
+
+@skill(
+    name="rate_delivery",
+    description=(
+        "Record outcome for a completed task. Operator's per-task "
+        "judgment — preserves the agent-feedback machine loop "
+        "(memory writes + auto-rework spawn). Default to "
+        "'acknowledged' when uncertain; never guess. Operator-only."
+    ),
+    parameters={
+        "task_id": {"type": "string", "description": "Task to rate."},
+        "outcome": {
+            "type": "string",
+            "enum": ["accepted", "acknowledged", "rework", "rejected"],
+            "description": (
+                "accepted = matches ask cleanly. acknowledged = neutral/"
+                "low-confidence (no memory write). rework = fixable miss "
+                "(spawns follow-up task; feedback required). rejected = "
+                "needs restart (feedback required)."
+            ),
+        },
+        "feedback": {
+            "type": "string",
+            "description": "Required for rework/rejected (max 2000 chars).",
+            "default": "",
+        },
+    },
+)
+async def rate_delivery(
+    task_id: str = "",
+    outcome: str = "",
+    feedback: str = "",
+    *,
+    mesh_client=None,
+    **_kw,
+) -> dict:
+    """Record an outcome rating on a completed task via the mesh.
+
+    Returns ``{ok, task_id, outcome, rework_task_id?}`` on success or
+    ``{error: ...}`` on validation / mesh failure. Feedback is sanitized
+    via :func:`sanitize_for_prompt` before transit so a corrupted
+    upstream string can't poison the receiving agent's memory.
+    """
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    if not isinstance(task_id, str) or not task_id.strip():
+        return {"error": "task_id is required"}
+    if outcome not in _VALID_RATE_OUTCOMES:
+        return {
+            "error": (
+                f"outcome must be one of {sorted(_VALID_RATE_OUTCOMES)}"
+            ),
+        }
+    if not isinstance(feedback, str):
+        return {"error": "feedback must be a string"}
+    feedback_clean = sanitize_for_prompt(feedback).strip()
+    if len(feedback_clean) > _MAX_RATE_FEEDBACK_CHARS:
+        return {
+            "error": (
+                f"feedback exceeds {_MAX_RATE_FEEDBACK_CHARS} chars"
+            ),
+        }
+    if outcome in ("rework", "rejected") and not feedback_clean:
+        return {
+            "error": f"feedback is required for outcome={outcome!r}",
+        }
+    try:
+        response = await mesh_client.set_task_outcome(
+            task_id.strip(), outcome, feedback_clean,
+        )
+    except Exception as e:
+        return {"error": f"Failed to rate task {task_id}: {e}"}
+    result: dict = {
+        "ok": True,
+        "task_id": task_id.strip(),
+        "outcome": outcome,
+    }
+    if isinstance(response, dict):
+        if "rework_task_id" in response:
+            result["rework_task_id"] = response["rework_task_id"]
+        if "rework_assignee" in response:
+            result["rework_assignee"] = response["rework_assignee"]
+        if "rework_error" in response:
+            result["rework_error"] = response["rework_error"]
+    return result

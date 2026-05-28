@@ -5,7 +5,7 @@ Covers:
 * All five actions (set / add / update / remove / list)
 * `add` rejects duplicate names
 * `update` / `remove` reject unknown names
-* `set` enforces max 20 goals + duplicate name rejection
+* `set` enforces max 10 goals + duplicate name rejection
 * Status enum validation
 * `updated_at` stamped on touched goals; preserved on untouched ones
 * GOALS.md and GOALS.json stay in sync
@@ -112,7 +112,7 @@ async def test_manage_goals_set_caps_max_entries(tmp_path):
 
     ws = _FakeWorkspace(tmp_path)
     too_many = [
-        {"name": f"g{i}", "status": "in_progress"} for i in range(21)
+        {"name": f"g{i}", "status": "in_progress"} for i in range(11)
     ]
     result = await manage_goals("set", goals=too_many, workspace_manager=ws)
     assert "error" in result
@@ -393,7 +393,7 @@ async def test_manage_goals_add_caps_at_max_entries(tmp_path):
 
     ws = _FakeWorkspace(tmp_path)
     initial = [
-        {"name": f"g{i}", "status": "in_progress"} for i in range(20)
+        {"name": f"g{i}", "status": "in_progress"} for i in range(10)
     ]
     await manage_goals("set", goals=initial, workspace_manager=ws)
     overflow = await manage_goals(

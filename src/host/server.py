@@ -30,6 +30,8 @@ from fastapi.responses import StreamingResponse
 from src.host.change_history import ChangeHistory
 from src.host.credentials import is_system_credential
 from src.host.orchestration import (
+    MAX_FEEDBACK_CHARS,
+    VALID_OUTCOMES,
     VALID_STATUSES,
     InvalidStatusTransition,
     TaskNotFound,
@@ -6061,6 +6063,76 @@ def create_mesh_app(
                 origin,
             )
         return updated
+
+    @app.post("/mesh/tasks/{task_id}/outcome")
+    async def set_task_outcome(task_id: str, request: Request) -> dict:
+        """Record an operator outcome rating on a completed task.
+
+        Operator-or-internal. Mirrors the dashboard's
+        ``/api/workplace/tasks/{id}/outcome`` endpoint (the human-driven
+        path) — both call ``tasks_store.set_outcome`` and, on
+        ``outcome == "rework"``, spawn a follow-up task via
+        ``tasks_store.create_rework_task``. The dashboard endpoint
+        stays for the existing human flow; this one exists so the
+        operator agent can score completions from its heartbeat loop
+        without round-tripping through the UI.
+
+        Body: ``{outcome: "accepted"|"acknowledged"|"rework"|"rejected",
+        feedback: str}``. ``accepted`` / ``acknowledged`` allow empty
+        feedback (the rating IS the signal). ``rework`` / ``rejected``
+        require non-empty feedback so the agent + audit trail has
+        something to learn from.
+        """
+        _require_operator_or_internal(request)
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError) as e:
+            raise HTTPException(400, "Invalid JSON body") from e
+        if not isinstance(body, dict):
+            raise HTTPException(400, "Body must be a JSON object")
+        outcome = body.get("outcome")
+        feedback = body.get("feedback") or ""
+        if outcome not in VALID_OUTCOMES:
+            raise HTTPException(
+                400,
+                f"outcome must be one of {sorted(VALID_OUTCOMES)}",
+            )
+        if not isinstance(feedback, str):
+            raise HTTPException(400, "feedback must be a string")
+        feedback = feedback.strip()
+        if len(feedback) > MAX_FEEDBACK_CHARS:
+            raise HTTPException(
+                400, f"feedback exceeds {MAX_FEEDBACK_CHARS} chars",
+            )
+        if outcome in ("rework", "rejected") and not feedback:
+            raise HTTPException(
+                400, f"feedback is required for outcome={outcome!r}",
+            )
+        try:
+            updated = tasks_store.set_outcome(
+                task_id, outcome, feedback or None, actor="operator",
+            )
+        except TaskNotFound as e:
+            raise HTTPException(404, "Task not found") from e
+        except InvalidStatusTransition as e:
+            raise HTTPException(409, str(e)) from e
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        result: dict = {"ok": True, "task": updated}
+        if outcome == "rework":
+            try:
+                rework = tasks_store.create_rework_task(
+                    task_id, feedback, actor="operator",
+                )
+            except (TaskNotFound, ValueError) as e:
+                logger.warning(
+                    "rework spawn failed for %s: %s", task_id, e,
+                )
+                result["rework_error"] = str(e)
+            else:
+                result["rework_task_id"] = rework["id"]
+                result["rework_assignee"] = rework["assignee"]
+        return result
 
     # === Operator Config Endpoints ===
 

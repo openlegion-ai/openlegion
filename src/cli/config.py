@@ -1657,6 +1657,12 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     # /api/workplace/goals. Operator-only — _is_operator() is enforced
     # at the tool boundary as well.
     "manage_goals",
+    # Per-task outcome rating (PR 2 of Work tab rewrite). Replaces
+    # the per-task 👍/➖/👎 buttons deleted from the Work tab —
+    # operator scores tasks programmatically from the heartbeat
+    # loop, preserving the agent-feedback machine loop (memory
+    # writes + auto-rework spawn).
+    "rate_delivery",
     # Lifecycle (consolidated archive/delete)
     "manage_team", "manage_agent", "manage_task",
     # Self-cleanup — operator can clear stale pending actions and prune
@@ -1704,6 +1710,7 @@ You build the workforce and step back. Users work with agents directly.
 
 _OPERATOR_HEARTBEAT = """\
 <!-- heartbeat_v2_workflow_aware -->
+<!-- heartbeat_v3_rate_delivery -->
 You are running an autonomous fleet health check. You have access ONLY to monitoring tools.
 Your previous observations are included above in OBSERVATIONS.md.
 
@@ -1778,6 +1785,47 @@ in the loop; 10 leaves headroom for the final assistant turn).
 
 If any tool call fails, record the failure in save_observations and continue.
 Do not hallucinate data you could not retrieve.
+
+## Per-task rating cadence
+
+Each heartbeat, rate up to 10 oldest unrated done tasks via
+`rate_delivery`. Prefer keeping one team's tasks contiguous if it
+helps focus. Outcomes:
+- accepted: matches the ask cleanly → reinforcement memory written
+- acknowledged: unsure or low-confidence → NO memory write (the
+  safe default when you can't confidently defend the judgment)
+- rework: fixable miss → spawns follow-up task; feedback required
+- rejected: needs starting over → feedback required, no spawn
+
+DEFAULT TO `acknowledged` WHEN UNCERTAIN. Never guess.
+
+## Workspace-as-source-of-truth
+
+Re-read GOALS.json, OBSERVATIONS.md, AGENTS.md fresh at the start of
+each cycle. Treat working memory as ephemeral — anything load-bearing
+must come from workspace files.
+
+## Surface ambiguity, don't guess
+
+If you cannot identify which team a task belongs to, or two goals
+conflict, call `notify_user` and stop. Do not guess your way through.
+
+## Goal stewardship
+
+On each cycle scan goals for staleness (no related task activity in
+14 days). Surface stale candidates in your next summary's "What I'm
+watching" section. DO NOT auto-retire goals — only the user decides
+to drop a goal.
+
+## Tool semantics (don't confuse these)
+
+- `manage_goals` — workplace-wide user-stated business outcomes.
+  Source of truth is GOALS.json. Use when user states/changes
+  direction in chat. (NEW — added in PR 1.)
+- `set_team_goal` — each team's mission statement. Rarely changes;
+  usually set on team creation.
+- `rate_delivery` — your per-task outcome judgment after a task
+  completes. Not user-facing. (NEW — added in PR 2.)
 """
 
 
@@ -1815,22 +1863,24 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
     if has_operator:
         # Refresh the operator's heartbeat field whenever the canonical
         # template gains a new sentinel marker. Mirrors the workspace-
-        # side refresh in ``WorkspaceManager._ensure_scaffold`` — a
-        # sentinel like ``heartbeat_v2_workflow_aware`` lets us roll
-        # the operator's heartbeat forward without touching agents
-        # with user-customised heartbeats.
+        # side refresh in ``WorkspaceManager._ensure_scaffold`` — the
+        # latest sentinel in ``HEARTBEAT_SENTINELS`` is the current
+        # expectation; an operator carrying only earlier markers (e.g.
+        # ``heartbeat_v2_workflow_aware`` after we add v3) needs a
+        # refresh to receive the new instructions.
         op_entry = agents_cfg["agents"].get(_OPERATOR_AGENT_ID, {}) or {}
         existing_heartbeat = op_entry.get("heartbeat") or ""
         from src.shared.types import HEARTBEAT_SENTINELS
-        new_has_sentinel = any(
-            f"<!-- {m} -->" in _OPERATOR_HEARTBEAT
-            for m in HEARTBEAT_SENTINELS
+        latest_sentinel = HEARTBEAT_SENTINELS[-1] if HEARTBEAT_SENTINELS else None
+        new_has_latest = (
+            latest_sentinel is not None
+            and f"<!-- {latest_sentinel} -->" in _OPERATOR_HEARTBEAT
         )
-        old_has_sentinel = any(
-            f"<!-- {m} -->" in existing_heartbeat
-            for m in HEARTBEAT_SENTINELS
+        old_has_latest = (
+            latest_sentinel is not None
+            and f"<!-- {latest_sentinel} -->" in existing_heartbeat
         )
-        if new_has_sentinel and not old_has_sentinel:
+        if new_has_latest and not old_has_latest:
             op_entry["heartbeat"] = _OPERATOR_HEARTBEAT
             agents_cfg["agents"][_OPERATOR_AGENT_ID] = op_entry
             AGENTS_FILE.parent.mkdir(parents=True, exist_ok=True)
