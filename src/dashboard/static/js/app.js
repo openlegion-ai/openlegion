@@ -401,13 +401,15 @@ function dashboard() {
     // entirely when empty.
     workplaceGoals: [],
     // Work summaries surface (PR-B). One row per team per period. The
-    // user rates 👍/➖/👎 with optional feedback; rating + feedback
+    // user rates via three SVG icon buttons (accept / acknowledge /
+    // rework) with optional feedback on rework; rating + feedback
     // flow back into operator's next composition. List is ordered
     // newest-first by ``generated_at``.
     workplaceSummaries: [],
     // Per-summary inline feedback box state. Keyed by summary id;
     // value is the current draft feedback string. The user opens the
-    // box by clicking 👎 → enters reason → submits → entry is cleared.
+    // box by clicking the rework icon → enters reason → submits →
+    // entry is cleared.
     summaryFeedbackDrafts: {},
     // Monotonic per-summary rating sequence. ``rateSummary`` bumps the
     // value on each request, captures it locally, and the
@@ -2764,17 +2766,17 @@ function dashboard() {
       }
     },
 
-    // Submit a 👍 / ➖ rating for a summary. Optimistically updates the
-    // local row + closes any open feedback box. Bumps the per-summary
-    // rate-sequence so a delayed ``work_summary_rated`` WS event
-    // can't roll back to a stale state (codex r1 P2). Returns early
-    // if a request for the same summary is already in flight to
-    // prevent double-fires.
+    // Submit a rating for a summary (accept / acknowledge / rework).
+    // Optimistically updates the local row + closes any open feedback
+    // box. Bumps the per-summary rate-sequence so a delayed
+    // ``work_summary_rated`` WS event can't roll back to a stale state
+    // (codex r1 P2). Returns early if a request for the same summary
+    // is already in flight to prevent double-fires.
     async rateSummary(summaryId, rating, feedback = '') {
       const trimmed = (feedback || '').trim();
       if (rating === 'rework' && !trimmed) {
         // The template enforces this too, but defend at the handler
-        // so a stray keyboard shortcut can't post a bare 👎.
+        // so a stray keyboard shortcut can't post a bare rework.
         return;
       }
       if (this._summaryRateInFlight[summaryId]) return;
@@ -2811,10 +2813,10 @@ function dashboard() {
         if (row) {
           // Clear any leftover stale-event timer + stash from a
           // PREVIOUS pin cycle on the same row — without this, a
-          // deferred apply scheduled by an earlier 👍 → 👎 sequence
-          // could fire AFTER a newer rating and overwrite it with
-          // its stale stashed event (codex r5 P2 — overlapping pin
-          // race).
+          // deferred apply scheduled by an earlier accept → rework
+          // sequence could fire AFTER a newer rating and overwrite
+          // it with its stale stashed event (codex r5 P2 —
+          // overlapping pin race).
           if (row._pendingExternalTimer) {
             clearTimeout(row._pendingExternalTimer);
             delete row._pendingExternalTimer;

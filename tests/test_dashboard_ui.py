@@ -882,26 +882,30 @@ class TestWorkTabPr2Cutover:
 
     def test_summary_rating_uses_svg_icons_not_emoji(self, index_html: str):
         # Three rating buttons (accept / acknowledge / rework) carry
-        # data-testid attributes; their bodies are inline SVG (not
-        # the emoji codepoints 👍 ➖ 👎).
-        assert 'data-testid="summary-rate-accept"' in index_html
-        assert 'data-testid="summary-rate-acknowledge"' in index_html
-        assert 'data-testid="summary-rate-rework"' in index_html
-        # Locate the rating-buttons block and assert no emoji
-        # codepoints (HTML entities OR raw) live inside it.
-        idx = index_html.find('data-testid="summary-rate-buttons"')
-        assert idx > 0, "summary-rate-buttons marker missing"
-        # Each SVG icon button is ~600-700 chars; window must cover
-        # all three plus closing tags. 4000 leaves comfortable headroom.
-        block = index_html[idx:idx + 4000]
-        assert "&#x1F44D;" not in block
-        assert "&#x1F44E;" not in block
-        assert "&#x2796;" not in block
-        assert "\U0001f44d" not in block
-        assert "\U0001f44e" not in block
-        assert "➖" not in block
-        # And SVGs ARE present.
-        assert block.count("<svg") >= 3
+        # data-testid attributes and EACH one contains its own inline
+        # SVG body (not the emoji codepoints 👍 ➖ 👎). We scope the
+        # SVG-presence check per-button so a future addition of an
+        # unrelated SVG nearby can't accidentally satisfy the count.
+        for testid in (
+            "summary-rate-accept",
+            "summary-rate-acknowledge",
+            "summary-rate-rework",
+        ):
+            marker = f'data-testid="{testid}"'
+            idx = index_html.find(marker)
+            assert idx > 0, f"{testid} button missing"
+            # 800 chars covers <button …><svg …>…</svg></button> with
+            # comfortable headroom — actual size is ~600 chars.
+            btn = index_html[idx:idx + 800]
+            assert "<svg" in btn, f"{testid} button has no inline SVG"
+            assert "</button>" in btn, f"{testid} button not closed in window"
+            # No emoji codepoints (HTML entities OR raw).
+            assert "&#x1F44D;" not in btn
+            assert "&#x1F44E;" not in btn
+            assert "&#x2796;" not in btn
+            assert "\U0001f44d" not in btn
+            assert "\U0001f44e" not in btn
+            assert "➖" not in btn
 
     def test_build_path_emits_only_bare_home(self, app_js: str):
         # PR 2 — single Work-tab URL. _buildPath returns '/home' for

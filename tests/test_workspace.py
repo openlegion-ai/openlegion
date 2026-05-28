@@ -1287,21 +1287,26 @@ class TestHeartbeatVersionedRefresh:
         )
         assert path.read_text() == before, "Sentinel-present file must not change"
 
-    def test_existing_file_without_sentinel_is_overwritten(self):
-        """File exists WITHOUT sentinel + initial_heartbeat WITH sentinel
-        → overwrite from template (system-managed version bump)."""
+    def test_existing_file_without_any_sentinel_is_preserved(self):
+        """File exists WITHOUT any known sentinel → leave it alone, even
+        when the template ships a LATEST sentinel. The migrator only
+        refreshes files it can prove are system-managed (i.e. carry at
+        least one prior sentinel); a no-sentinel file is treated as a
+        user customisation. Codex r1 caught the inverse — the old logic
+        overwrote any no-sentinel file every sentinel bump, silently
+        wiping user-edited heartbeats."""
         path = Path(self._tmpdir) / "HEARTBEAT.md"
         path.write_text(
-            "# Heartbeat Rules\n\nLEGACY rules from a prior revision\n",
+            "# Heartbeat Rules\n\nUSER-edited rules with no marker\n",
         )
+        before = path.read_text()
         WorkspaceManager(
             workspace_dir=self._tmpdir,
             initial_heartbeat=self._new_initial_heartbeat(),
         )
-        content = path.read_text()
-        assert "LEGACY" not in content
-        assert self.SENTINEL in content
-        assert "check_inbox" in content
+        assert path.read_text() == before, (
+            "no-sentinel file must be preserved — it's user-customised"
+        )
 
     def test_existing_file_without_sentinel_template_without_sentinel_no_change(
         self,
@@ -1320,19 +1325,19 @@ class TestHeartbeatVersionedRefresh:
     def test_sentinel_constant_imported_from_shared_types(self):
         """``HEARTBEAT_SENTINELS`` lives in ``src.shared.types`` so the
         workspace and the operator-config heartbeat refresh stay in
-        sync. Verify the symbol resolves, includes the historical
-        v2 marker, and that the LATEST sentinel drives the refresh
-        path — a regression here would mean the constant was
-        re-defined locally and would silently drift, or that the
-        check reverted to ``any()`` semantics that skip v2→v3
-        upgrades."""
+        sync. Verify the symbol resolves, includes the historical v2
+        marker, and that the LATEST sentinel drives the refresh path
+        for files carrying at least one prior sentinel."""
         from src.shared.types import HEARTBEAT_SENTINELS
         assert isinstance(HEARTBEAT_SENTINELS, tuple)
         # v2 stays as evidence of past migrations even after later
         # sentinels are added.
         assert "heartbeat_v2_workflow_aware" in HEARTBEAT_SENTINELS
         path = Path(self._tmpdir) / "HEARTBEAT.md"
-        path.write_text("# Heartbeat Rules\n\nLEGACY revision\n")
+        v2_marker = "<!-- heartbeat_v2_workflow_aware -->"
+        # Seed with a v2-sentinel file so the migrator has proof this
+        # is a system-managed heartbeat and can refresh it forward.
+        path.write_text(f"# Heartbeat Rules\n\n{v2_marker}\nLEGACY revision\n")
         latest_marker = f"<!-- {HEARTBEAT_SENTINELS[-1]} -->"
         WorkspaceManager(
             workspace_dir=self._tmpdir,

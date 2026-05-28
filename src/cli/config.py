@@ -1901,7 +1901,16 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
             latest_sentinel is not None
             and f"<!-- {latest_sentinel} -->" in existing_heartbeat
         )
-        if new_has_latest and not old_has_latest:
+        # Roll forward ONLY when the existing heartbeat carries at
+        # least one prior sentinel — proves it's a system-managed
+        # template we have rights to refresh. A user-customised
+        # heartbeat carries NO marker because the user replaced the
+        # template; without this guard every sentinel bump would
+        # silently overwrite their customisation.
+        old_has_any_sentinel = any(
+            f"<!-- {s} -->" in existing_heartbeat for s in HEARTBEAT_SENTINELS
+        )
+        if new_has_latest and not old_has_latest and old_has_any_sentinel:
             op_entry["heartbeat"] = _OPERATOR_HEARTBEAT
             agents_cfg["agents"][_OPERATOR_AGENT_ID] = op_entry
             AGENTS_FILE.parent.mkdir(parents=True, exist_ok=True)
