@@ -152,6 +152,13 @@ _HEARTBEAT_TOOLS = frozenset({
     # chat direction; both surfaces would be unreachable from heartbeat
     # ticks if the loop restricts them to the legacy read-only set.
     "rate_delivery", "manage_goals",
+    # ``inspect_agents`` is read-only (operator-tier read with
+    # ``_is_operator`` self-gate). Heartbeat step 5 explicitly calls
+    # ``inspect_agents()`` for the roster summary and
+    # ``inspect_agents(agent_id, depth="profile")`` / ``stale_threshold_hours=24``
+    # for drill-ins; without it the prompted procedure is denied by
+    # this allowlist (caught by Codex pre-merge review of PR 972).
+    "inspect_agents",
 })
 
 # Tool calls whose ONLY purpose is to read state — they don't produce
@@ -1718,8 +1725,16 @@ class AgentLoop:
         # Restrict operator to heartbeat-only tools during unsupervised execution.
         # Non-operator agents have _allowed_tools=None, so the swap is skipped.
         saved_allowed = getattr(self, '_allowed_tools', None)
-        # Cap operator heartbeat iterations (spec: 5, not default 10)
-        max_iters = 5 if saved_allowed is not None else HEARTBEAT_MAX_ITERATIONS
+        # All heartbeats — operator and non-operator — share the same
+        # iteration budget. The operator's heartbeat procedure now lists
+        # 7 numbered steps plus per-cycle goal seeding and up to 10
+        # rate_delivery calls — 5 iterations couldn't cover the prompted
+        # work, so the operator was silently truncating mid-procedure.
+        # ``HEARTBEAT_MAX_ITERATIONS=12`` matches the prompt's stated
+        # budget of "10 tool calls per cycle, 12 leaves headroom for
+        # the final assistant turn." (Codex pre-merge review of PR 972
+        # flagged the 5-cap as inconsistent with the prompted budget.)
+        max_iters = HEARTBEAT_MAX_ITERATIONS
         if saved_allowed is not None:
             self._allowed_tools = _HEARTBEAT_TOOLS
         try:

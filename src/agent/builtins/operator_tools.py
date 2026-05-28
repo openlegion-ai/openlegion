@@ -2196,7 +2196,12 @@ _MAX_GOAL_NOTE_CHARS = 500
 _VALID_GOAL_STATUSES = frozenset({
     "not_started", "in_progress", "on_track", "at_risk", "blocked", "done",
 })
-_VALID_GOAL_ACTIONS = frozenset({"set", "add", "update", "remove", "list"})
+_VALID_GOAL_ACTIONS = frozenset({
+    "set", "add", "update", "remove", "list", "record_seed_ask",
+})
+# Cap on team names captured in a seed_ask record — defensive bound
+# so a misbehaving caller can't blow up the JSON sidecar.
+_MAX_SEED_ASK_TEAMS = 20
 
 
 def _read_goals_sidecar(workspace_root) -> list[dict]:
@@ -2236,6 +2241,37 @@ def _read_goals_sidecar(workspace_root) -> list[dict]:
     return cleaned
 
 
+def _read_seed_ask(workspace_root) -> dict | None:
+    """Read the seed_ask block from GOALS.json. Returns None if absent
+    or malformed.
+
+    The seed_ask block records when operator last asked the user to
+    name business outcomes (cold-start goal seeding). Heartbeat uses
+    ``last_ts`` to throttle re-asks; without a structured timestamp
+    the throttle would degrade to LLM judgment over freeform notes.
+    """
+    path = workspace_root / _GOALS_JSON_FILENAME
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(errors="replace"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    seed_ask = data.get("seed_ask")
+    if not isinstance(seed_ask, dict):
+        return None
+    last_ts = seed_ask.get("last_ts")
+    team_names = seed_ask.get("team_names")
+    if not isinstance(last_ts, str) or not isinstance(team_names, list):
+        return None
+    cleaned_names = [
+        n for n in team_names if isinstance(n, str) and n.strip()
+    ]
+    return {"last_ts": last_ts, "team_names": cleaned_names}
+
+
 def _render_goals_md(goals: list[dict]) -> str:
     """Render the JSON sidecar back to a human-readable GOALS.md."""
     lines: list[str] = ["# Goals", ""]
@@ -2263,11 +2299,48 @@ def _write_goals(workspace_root, goals: list[dict]) -> None:
     Two writes are not atomic — if the MD write fails after the JSON
     write succeeds, the two files diverge. Risk is small for a stable
     workspace volume; if it ever bites, switch to temp-file + rename.
+
+    Preserves an existing ``seed_ask`` block across goal mutations so
+    the heartbeat throttle can't be silently cleared by an unrelated
+    goal edit.
     """
     json_path = workspace_root / _GOALS_JSON_FILENAME
     md_path = workspace_root / _GOALS_MD_FILENAME
-    json_path.write_text(json.dumps({"goals": goals}, indent=2) + "\n")
+    payload: dict = {"goals": goals}
+    existing_seed_ask = _read_seed_ask(workspace_root)
+    if existing_seed_ask is not None:
+        payload["seed_ask"] = existing_seed_ask
+    json_path.write_text(json.dumps(payload, indent=2) + "\n")
     md_path.write_text(_render_goals_md(goals))
+
+
+def _write_seed_ask(workspace_root, team_names: list[str]) -> dict:
+    """Record a goal-seeding ask. Updates only the ``seed_ask`` block;
+    the ``goals`` array is preserved verbatim. Returns the new
+    ``seed_ask`` dict so the caller can echo it back to the LLM.
+
+    GOALS.md is not re-rendered — the seed_ask record is operator
+    bookkeeping, not user-visible content (the actual ask reaches
+    the user via ``notify_user``).
+
+    Concurrency note: the read-modify-write here isn't atomic, but
+    ``execute_heartbeat`` in ``src/agent/loop.py`` skips when the
+    agent's ``state != "idle"`` or ``_chat_lock`` is held — a single
+    operator can't have two heartbeats running concurrently. The race
+    would only matter across two independent operator processes
+    sharing one workspace, which isn't a supported deployment. Worst
+    case under any race: latest timestamp wins, prior team_names
+    list is lost; the throttle still functions.
+    """
+    json_path = workspace_root / _GOALS_JSON_FILENAME
+    goals = _read_goals_sidecar(workspace_root)
+    seed_ask = {
+        "last_ts": datetime.now(timezone.utc).isoformat(),
+        "team_names": list(team_names),
+    }
+    payload = {"goals": goals, "seed_ask": seed_ask}
+    json_path.write_text(json.dumps(payload, indent=2) + "\n")
+    return seed_ask
 
 
 def _validate_goal_input(goal, *, require_status: bool = True) -> tuple[dict | None, str | None]:
@@ -2322,13 +2395,16 @@ def _validate_goal_input(goal, *, require_status: bool = True) -> tuple[dict | N
         "Manage tracked business goals shown on the user's Work tab. "
         "Source of truth is GOALS.json (rendered to GOALS.md for humans). "
         "Use 'set' to replace the full list, 'add'/'update'/'remove' for "
-        "incremental changes, 'list' to read the current state. "
-        "Operator-only."
+        "incremental changes, 'list' to read the current state, and "
+        "'record_seed_ask' to stamp when you last pinged the user for "
+        "cold-start goals (throttles re-asks). Operator-only."
     ),
     parameters={
         "action": {
             "type": "string",
-            "enum": ["set", "add", "update", "remove", "list"],
+            "enum": [
+                "set", "add", "update", "remove", "list", "record_seed_ask",
+            ],
             "description": "Which operation to perform.",
         },
         "goals": {
@@ -2353,6 +2429,16 @@ def _validate_goal_input(goal, *, require_status: bool = True) -> tuple[dict | N
             "description": "Goal name for action='remove'.",
             "default": "",
         },
+        "team_names": {
+            "type": "array",
+            "description": (
+                "Team names referenced in the cold-start seed ask, for "
+                "action='record_seed_ask'. The heartbeat reads this back "
+                "to throttle re-asks. Capped at 20 names."
+            ),
+            "items": {"type": "string"},
+            "default": [],
+        },
     },
 )
 async def manage_goals(
@@ -2361,6 +2447,7 @@ async def manage_goals(
     goals: list | None = None,
     goal: dict | None = None,
     name: str = "",
+    team_names: list | None = None,
     workspace_manager=None,
     **_kw,
 ) -> dict:
@@ -2381,7 +2468,24 @@ async def manage_goals(
     current = _read_goals_sidecar(workspace_root)
 
     if action == "list":
-        return {"ok": True, "goals": current}
+        # List surfaces the seed_ask block too so the heartbeat can
+        # mechanically decide whether to re-ask, instead of having
+        # the LLM scan free-form OBSERVATIONS notes.
+        seed_ask = _read_seed_ask(workspace_root)
+        return {"ok": True, "goals": current, "seed_ask": seed_ask}
+
+    if action == "record_seed_ask":
+        raw_names = team_names if isinstance(team_names, list) else []
+        cleaned: list[str] = []
+        for n in raw_names:
+            if not isinstance(n, str):
+                continue
+            s = sanitize_for_prompt(n).strip()
+            if s:
+                cleaned.append(s)
+        cleaned = cleaned[:_MAX_SEED_ASK_TEAMS]
+        seed_ask = _write_seed_ask(workspace_root, cleaned)
+        return {"ok": True, "seed_ask": seed_ask}
 
     now = datetime.now(timezone.utc).isoformat()
 

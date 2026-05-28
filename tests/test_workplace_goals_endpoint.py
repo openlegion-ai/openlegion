@@ -235,6 +235,45 @@ def test_dashboard_workspace_put_rejects_goals_files(tmp_path):
         cleanup()
 
 
+def test_goals_endpoint_ignores_seed_ask_block(tmp_path):
+    """A GOALS.json carrying a ``seed_ask`` throttle block (PR 972
+    Codex follow-up) must round-trip through the dashboard endpoint
+    unchanged on the ``goals`` side — the throttle field is operator
+    bookkeeping, not user-visible, and the API surface should not
+    leak it."""
+    payload = {
+        "goals": [
+            {
+                "name": "Launch landing page",
+                "status": "in_progress",
+                "progress_note": "",
+                "updated_at": "2026-05-29T12:00:00+00:00",
+            },
+        ],
+        "seed_ask": {
+            "last_ts": "2026-05-29T11:59:00+00:00",
+            "team_names": ["growth"],
+        },
+    }
+    fake = _FakeTransport(response={"content": json.dumps(payload)})
+    app, cleanup = _build_app(
+        transport=fake,
+        agent_registry={"operator": "http://operator:8400"},
+        tmp_path=tmp_path,
+    )
+    try:
+        with TestClient(app) as c:
+            r = c.get("/dashboard/api/workplace/goals")
+            assert r.status_code == 200
+            body = r.json()
+            assert body["enabled"] is True
+            assert len(body["goals"]) == 1
+            # seed_ask MUST NOT leak through the dashboard surface.
+            assert "seed_ask" not in body
+    finally:
+        cleanup()
+
+
 def test_goals_endpoint_drops_malformed_entries(tmp_path):
     """Entries that aren't dicts get filtered, not 500'd."""
     payload = {

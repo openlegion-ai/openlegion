@@ -271,7 +271,10 @@ class TestOperatorConstants:
         #  * v3 (Work-tab rewrite PR 2/3): +rate_delivery, manage_goals so the
         #    heartbeat instructions that grade up to 10 oldest unrated done
         #    tasks per cycle and steward goal staleness are reachable.
-        assert len(_OPERATOR_HEARTBEAT_TOOLS) == 10
+        #  * v4 (PR 972 Codex follow-up): +inspect_agents — step 5 of
+        #    the heartbeat procedure already called it but the allowlist
+        #    denied the call.
+        assert len(_OPERATOR_HEARTBEAT_TOOLS) == 11
         # The operator-tier heartbeat tools must also be on the main
         # operator allowlist — they're the tools operator can use from
         # both /chat and heartbeat. Two heartbeat entries are
