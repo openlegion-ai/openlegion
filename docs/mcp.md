@@ -171,7 +171,7 @@ If an agent has `ALLOWED_TOOLS` configured (operator mode — `loop.py:277-287` 
 Conflicts are resolved at registration time, before execution:
 
 - If an MCP tool has the same name as a built-in skill, the MCP tool is renamed to `mcp_{server_name}_{tool_name}` and a warning is logged. The built-in always keeps its original name.
-- If two MCP servers provide tools with the same name, the first server's tool keeps the original name and the second server's tool is prefixed with `mcp_{server_name}_{tool_name}`.
+- If two MCP servers provide tools with the same name, conflicts are resolved in **config / registration order**: the first server listed in `mcp_servers` keeps the unprefixed name, and any subsequent server providing the same tool name gets prefixed with `mcp_{server_name}_{tool_name}`.
 
 After registration every tool has a unique name, so there is no runtime priority resolution.
 

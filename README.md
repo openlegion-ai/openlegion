@@ -108,8 +108,8 @@ OpenClaw is the most popular personal AI assistant framework — 200K+ GitHub st
 brilliant for single-user use. For production workloads and team deployments, it
 has documented problems:
 
-- **42,000+ exposed instances** with no authentication (Bitsight, Feb 2026)
-- **341 malicious skills** found stealing user data (Koi Security / The Hacker News)
+- **42,000+ exposed instances** with no authentication ([Bitsight, Feb 2026](https://www.bitsight.com/blog/openclaw-ai-security-risks-exposed-instances))
+- **341 malicious skills** found stealing user data ([Koi Security via The Hacker News](https://thehackernews.com/2026/02/researchers-find-341-malicious-clawhub.html))
 - **CVE-2026-25253**: one-click remote code execution
 - No per-agent cost controls — runaway spend is a real risk
 - No deterministic routing — a CEO agent (LLM) decides what runs next
@@ -229,6 +229,8 @@ connections.
   with lighter caps (128MB / 0.05 CPU).
 ```
 
+To reach an agent from the host, use the mesh proxy at `:8420`, not the agent's internal `:8400`.
+
 ### Trust Zones
 
 | Level | Zone | Description |
@@ -249,8 +251,8 @@ as a single FastAPI process.
 SQLite-backed key-value store with versioning, TTL, and garbage collection.
 Team agents' blackboard access is automatically scoped to `projects/{name}/*` —
 agents use natural keys (e.g. `tasks/research_abc123`) while the MeshClient
-transparently namespaces them under the team. Solo agents have no
-blackboard access.
+transparently namespaces them under the team. Solo agents have no automatic
+team scoping; they can access only keys explicitly granted via ACL.
 
 The on-disk prefix is `projects/{name}/*` — that's a backend storage
 namespace, not a domain term, and renaming it is intentionally out of
@@ -272,7 +274,7 @@ Agents never hold API keys. All external API calls route through the mesh.
 The vault uses a two-tier prefix system: `OPENLEGION_SYSTEM_*` for LLM
 provider keys (never agent-accessible) and `OPENLEGION_CRED_*` for agent-tier
 tool/service keys. Budget limits are enforced before dispatching LLM calls
-and token usage is recorded after each response.
+and token usage is recorded after each response. `OPENLEGION_SYSTEM_*` credentials are never resolvable by agents (mesh-proxy-only). `OPENLEGION_CRED_*` are gated by per-agent `allowed_credentials`. Misclassifying one as the other yields silent invisibility.
 
 ### Model Failover
 
@@ -305,8 +307,10 @@ Matching is **exact match (or `*`)** for `can_message`, `can_publish`, and `can_
 `browser_actions` semantics: `null` (default) = all known actions allowed; `["*"]` = explicit allow-all; specific list (e.g. `["browser_navigate", "browser_screenshot"]`) = narrow allowlist; `[]` = deny all browser use even when `can_use_browser` is true.
 
 Blackboard patterns use the `projects/{name}/*` namespace. When an agent joins a
-team, it receives read/write access to that namespace. Solo agents get
-empty blackboard permissions.
+team, it receives read/write access to that namespace. Solo agents have no
+automatic team scoping; they can access only keys explicitly granted via ACL.
+
+Team scope is enforced by default (env: `OPENLEGION_TEAM_SCOPE_MODE=enforce`). Agents in different teams cannot read each other's blackboard without explicit permission.
 
 ### Container Manager
 
@@ -324,13 +328,13 @@ Agent containers are slim — no browser. Browsing is handled by a shared browse
 - **Image**: `openlegion-browser:latest` (Camoufox stealth browser + KasmVNC)
 - **Resources**: 2–8GB RAM, 1–2 CPU, 512MB–2GB shared memory — scaled by `OPENLEGION_MAX_AGENTS` plan tier
 - **Ports**: 8500 (browser API) is the only exposed port. Per-agent KasmVNC instances run internally on 6100..6163 and are reverse-proxied by the mesh at `/agent-vnc/{agent_id}/...` (no direct port exposed to the host).
-- **Capacity**: 1, 5, or 10 concurrent browser sessions on the standard plan tiers; absolute cap 64 via `OPENLEGION_BROWSER_MAX_CONCURRENT` (legacy alias `MAX_BROWSERS`). Restart the browser service to apply a change.
+- **Capacity**: autoscales by `OPENLEGION_MAX_AGENTS` — ≤1 agent → 1 session; ≤5 → 5; ≤15 → min(N, 10); >15 → min(N, 30). Absolute cap 64 via `OPENLEGION_BROWSER_MAX_CONCURRENT` (legacy alias `MAX_BROWSERS`). Managed deployments may layer their own plan tiers on top of these autoscale rules. Restart the browser service to apply a change.
 
 ### Browser Capabilities
 
 Beyond the basic navigation/screenshot/click tools, the browser service ships with:
 
-- **CAPTCHA solving.** Optional 2captcha or capsolver provider configured per-fleet via `CAPTCHA_SOLVER_KEY` + `CAPTCHA_SOLVER_PROVIDER`. Solver credentials (`CAPTCHA_SOLVER_KEY`, `CAPTCHA_SOLVER_KEY_SECONDARY`, `CAPTCHA_SOLVER_PROXY_LOGIN`, `CAPTCHA_SOLVER_PROXY_PASSWORD`) are env-only by design — they bypass the `OPENLEGION_CRED_*` vault and are stripped from `config/settings.json` at load (`_ENV_ONLY_FLAGS` in `src/browser/flags.py`). Auto-solve runs after `browser_navigate`; behavioral / persistent challenges escalate to `request_captcha_help` which posts a card to the dashboard for the user to clear via the live VNC viewer. Disabled fleet-wide with `CAPTCHA_DISABLED=1`.
+- **CAPTCHA solving.** Optional 2captcha or capsolver provider configured per-fleet via `CAPTCHA_SOLVER_KEY` + `CAPTCHA_SOLVER_PROVIDER`. Solver credentials (`CAPTCHA_SOLVER_KEY`, `CAPTCHA_SOLVER_KEY_SECONDARY`, `CAPTCHA_SOLVER_PROXY_LOGIN`, `CAPTCHA_SOLVER_PROXY_PASSWORD`) are env-only by design — they bypass the `OPENLEGION_CRED_*` vault and are stripped from `config/settings.json` at load (`_ENV_ONLY_FLAGS` in `src/browser/flags.py`). Auto-solve runs after `browser_navigate`; behavioral / persistent challenges escalate to `request_captcha_help` which posts a card to the dashboard for the user to clear via the live VNC viewer. Disabled fleet-wide with `CAPTCHA_DISABLED=1`. Behavioral / vendor JS challenges that 2captcha and capsolver cannot solve escalate via `request_captcha_help`, surfacing a VNC card to the user.
 - **Per-agent + per-tenant solver cost caps.** `CAPTCHA_COST_LIMIT_USD_PER_AGENT_MONTH` and `CAPTCHA_COST_LIMIT_USD_PER_TENANT_MONTH` enforce monthly spend with 50/80/100% threshold alerts. Per-tenant rollups available at `/dashboard/api/billing/captcha-rollup` (requires a dashboard session cookie and the `X-Requested-With` CSRF header).
 - **Fingerprint health monitoring.** A rolling per-agent rejection window detects when a fingerprint is "burned" (>50% rejection over the last 10 events across Cloudflare / DataDome / PerimeterX / Imperva / Akamai BMP signals); subsequent CAPTCHA envelopes carry `fingerprint_burn=True` and a `retry_with_fresh_profile` hint. Operator clears state manually after profile rotation.
 - **JS-challenge detection.** Vendor-specific selectors detect Cloudflare 1xxx / Under Attack / Press & Hold and similar interstitials before the agent attempts to extract content.
@@ -391,7 +395,7 @@ block (permissions, budget, fleet, cron), and searches memory for relevant facts
 Executes tool calls in a bounded loop with three caps from `loop.py`:
 `CHAT_MAX_TOOL_ROUNDS=30` per turn, `CHAT_MAX_TOTAL_ROUNDS=200` total before
 auto-compaction kicks in, and `_MAX_SESSION_CONTINUES=5` auto-continuations
-(after which the session halts with an error rather than continuing forever).
+(hardcoded, not env-overridable — after which the session halts with an error rather than continuing forever).
 
 ### Tool Loop Detection
 
@@ -583,6 +587,10 @@ activity exists, and no probes triggered, the dispatch is skipped entirely
 This 5-stage architecture (scheduler → probes → context → policy → action)
 makes always-on agents economically viable.
 
+### Task Hand-off & Auto-close
+
+Handed-off tasks auto-transition to terminal status (`done`/`failed`) only when the wake chain carries `x-task-id` (via `hand_off`'s task_id propagation). Legacy callers, heartbeats, and manual chats won't auto-close — intentional.
+
 ### Webhook Endpoints
 
 Named webhook URLs that dispatch payloads to agents. Create one from the
@@ -590,8 +598,10 @@ dashboard (System → Automation) or via the mesh API; the URL it returns is
 what you POST to. Payloads are sanitized and capped at 1MB.
 
 ```bash
-# Replace hook_a1b2c3d4 with the ID returned when you created the hook.
-curl -X POST http://localhost:8420/webhook/hook/hook_a1b2c3d4 \
+# The full URL is returned in the `url` field of the `POST /api/webhooks`
+# response (and listed on System → Automation in the dashboard). Pattern:
+#   {base}/webhook/hook/{hook_id}    e.g. http://localhost:8420/webhook/hook/hook_3f9a1c8b2d4e6f70
+curl -X POST "$WEBHOOK_URL" \
   -H "Content-Type: application/json" \
   -d '{"event": "push", "repo": "myproject"}'
 ```
@@ -632,6 +642,10 @@ Defense-in-depth with six layers:
 | Input validation | Path traversal prevention, SSRF blocking, safe condition eval (no `eval()`), token budgets, iteration limits, rate limiting | Injection, runaway loops, network abuse |
 | Unicode sanitization | Invisible character stripping at ~110 call sites across 17 source files, covering all external input boundaries | Prompt injection via hidden Unicode |
 
+Per-agent rate limits on 17 mesh endpoints (token bucket; HTTP 429 + audit log on overflow). See [`docs/security.md`](docs/security.md) for the full table.
+
+Containers run with `no-new-privileges`, `cap_drop=ALL`, `read_only=True`, `/tmp` tmpfs (100MB noexec/nosuid), UID 1000. Skills self-authored by agents pass AST validation (23 forbidden imports, 16 forbidden calls, 11 forbidden attrs).
+
 ### Dual Runtime Backend
 
 OpenLegion supports two isolation levels:
@@ -644,7 +658,7 @@ OpenLegion supports two isolation levels:
 | **Requirements** | Any Docker install | Docker Desktop 4.58+ |
 | **Enable** | `openlegion start` | `openlegion start --sandbox` |
 
-**Docker containers** (default) run agents as non-root with `no-new-privileges`, 384MB memory limit, 0.15 CPU cap, and no host filesystem access. Browser operations are handled by a shared browser service container (2–8GB RAM scaled by fleet size, 1 CPU). This is secure for most use cases.
+**Docker containers** (default) run agents as non-root with `no-new-privileges`, 384MB memory limit, 0.15 CPU cap, and no host filesystem access. Browser operations are handled by a shared browser service container (2–8GB RAM, 0.15–4.0 CPU — scaled by fleet size). This is secure for most use cases.
 
 **Docker Sandbox microVMs** give each agent its own Linux kernel via Apple Virtualization.framework (macOS) or Hyper-V (Windows). Even if an agent achieves code execution, it's trapped inside a lightweight VM with no visibility into other agents or the host. Use this when running untrusted code or when compliance requires hypervisor isolation.
 
@@ -716,6 +730,8 @@ openlegion [--verbose/-v] [--quiet/-q] [--json]
 Aliases: /exit = /quit, /agents = /status, /debug = /traces
 ```
 
+All `/edit` and `/agent edit` changes apply immediately. Soft-field edits (instructions, soul, heartbeat, heartbeat_schedule, interface, role) are undoable for 5 minutes; hard-field edits (model, permissions, budget, thinking) are undoable for 30 minutes.
+
 ### Team Templates
 
 Templates are offered during first-run setup (via `openlegion start`):
@@ -763,6 +779,8 @@ Ship the email personalization pipeline this week
 - Budget: $50/day total across all agents
 - No cold outreach to .edu or .gov domains
 ```
+
+Workspace files have per-file size caps (4–16 KB; HEARTBEAT.md uncapped). See [`docs/configuration.md`](docs/configuration.md) for the table.
 
 ### `config/mesh.yaml` — Framework Settings
 
@@ -828,7 +846,7 @@ OPENLEGION_LOG_FORMAT=text
 
 # Plan limits (0 = unlimited). HTTP 403 once exceeded.
 # OPENLEGION_MAX_AGENTS=0
-# OPENLEGION_MAX_TEAMS=0   # legacy alias: OPENLEGION_MAX_PROJECTS
+# OPENLEGION_MAX_PROJECTS=0   # new name: OPENLEGION_MAX_TEAMS
 ```
 
 ### Connecting Channels

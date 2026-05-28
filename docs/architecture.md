@@ -69,7 +69,7 @@ The mesh host runs on the user's machine as a single FastAPI process. It is the 
 | Module | Responsibility |
 |--------|---------------|
 | `mesh.py` | Blackboard (SQLite WAL, atomic CAS, audit log with undo/archive), PubSub, MessageRouter (with cross-team block + capability-based addressing) |
-| `server.py` | FastAPI app factory — 98 `@app.*` endpoints, all permission-checked. Three auth tiers (any-auth / operator-or-internal / loopback). |
+| `server.py` | FastAPI app factory — 109 `@app.*` endpoints, all permission-checked. Three auth tiers (any-auth / operator-or-internal / loopback). |
 | `runtime.py` | `RuntimeBackend` ABC → `DockerBackend` / `SandboxBackend`; the browser-service container lives here too. SandboxBackend falls back to DockerBackend on init failure. |
 | `transport.py` | `Transport` ABC → `HttpTransport` / `SandboxTransport` |
 | `credentials.py` | Two-tier credential vault (`OPENLEGION_SYSTEM_*` / `OPENLEGION_CRED_*`) + LLM API proxy. OpenAI / Anthropic OAuth support. |

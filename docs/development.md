@@ -42,6 +42,10 @@ cd .claude/worktrees/your-change
 
 Never run `pip install` from a worktree — it hijacks the global `openlegion` entry point. Always merge through a GitHub PR; do not push to `main` directly.
 
+### Entry Point
+
+The `openlegion` CLI is declared as `openlegion = "src.cli:cli"` in `pyproject.toml`. `src/cli/__init__.py` re-exports `cli` from `src/cli/main.py`; the Click group lives at `src/cli/main.py:86-106`. The CLI is also module-invocable via `python -m src.cli` (see `src/cli/__main__.py`).
+
 ## Testing
 
 ### Test Categories
@@ -257,11 +261,38 @@ The shorter `5000`ms timeout on the traces DB is intentional: traces writes are 
 
 No Redis, no external databases.
 
+### Runtime Constants
+
+Bounded execution is enforced by a small set of constants in `src/agent/loop.py`:
+
+| Constant | Value | Env override |
+|---|---|---|
+| `MAX_ITERATIONS` | 20 | `OPENLEGION_MAX_ITERATIONS` (clamped 1–100) |
+| `CHAT_MAX_TOOL_ROUNDS` | 30 | env-clamped 1–200 |
+| `CHAT_MAX_TOTAL_ROUNDS` | 200 | env-clamped 1–1000 |
+| `HEARTBEAT_MAX_ITERATIONS` | 12 | — |
+| `_TOOL_TIMEOUT` | 300 (seconds) | `OPENLEGION_TOOL_TIMEOUT` |
+| `_MAX_SESSION_CONTINUES` | 5 | hardcoded |
+
+Context manager thresholds (`src/agent/context.py`): 60% proactive fact flush, 70% compact (summarize + replace), 80% warning injected into the prompt, 90% emergency hard-prune. `_hard_prune()` keeps the first message plus the last 4 tool-call groups and bridges same-role sequences.
+
+Workspace file caps (`_FILE_CAPS` in `src/agent/server.py`) are enforced on `PUT /workspace/{filename}` with HTTP 413 on overflow — see [`configuration.md`](configuration.md) for the per-file size table.
+
+### Skill Discovery
+
+Skills are auto-discovered at agent startup from three paths inside the container:
+
+- `/app/agent/builtins` — built-in tools shipped with the engine
+- `/data/custom_skills` — agent self-authored skills (persisted on the agent's data volume)
+- `/app/marketplace_skills` — installed marketplace skills
+
+Conflicts resolve in order: custom overrides built-in overrides marketplace.
+
 ## Adding New Components
 
 ### Adding a Built-in Tool
 
-1. Create `src/agent/builtins/your_tool.py`
+1. Create `src/agent/builtins/your_tool.py` (maps to `/app/agent/builtins/your_tool.py` inside the agent container at runtime)
 2. Use the `@skill` decorator
 3. Accept `mesh_client`/`workspace_manager`/`memory_store` as keyword-only args if needed (auto-injected)
 4. Return a dict
@@ -307,10 +338,10 @@ async def your_endpoint(request: Request, body: YourRequest):
 
 ### Adding a Channel
 
-1. Subclass `Channel` from `src/channels/base.py`
+1. Implement the adapter in `src/channels/your_channel.py` (subclass `Channel` from `src/channels/base.py`)
 2. Implement `start()`, `stop()`, `send_notification()`
 3. The base class `handle_message()` handles all command parsing
-4. Add startup logic in `src/cli/channels.py`
+4. Wire startup/stop lifecycle in `src/cli/channels.py:ChannelManager` — channel adapters live under `src/channels/`; `src/cli/channels.py` only orchestrates lifecycle.
 5. Add tests in `tests/test_channels.py`
 
 ### Self-Authored Skills and the Marketplace
@@ -358,8 +389,8 @@ openlegion/
 │   │       ├── fleet_tool.py    # Fleet management (operator-agent only)
 │   │       └── operator_tools.py # Operator-privileged tools (operator-agent only)
 │   ├── host/                    # Runs on the host machine
-│   │   ├── server.py            # Mesh FastAPI app
-│   │   ├── mesh.py              # Blackboard, PubSub, routing
+│   │   ├── server.py            # Mesh HTTP endpoints (~109 routes) that expose the mesh.py classes
+│   │   ├── mesh.py              # Blackboard, PubSub, MessageRouter, audit log (low-level classes)
 │   │   ├── runtime.py           # Docker/Sandbox container management
 │   │   ├── transport.py         # HTTP/Sandbox transport layer
 │   │   ├── credentials.py       # Credential vault + API proxy
@@ -461,6 +492,8 @@ openlegion/
 | `mcp` | `mcp>=1.0` | MCP tool support |
 | `channels` | `python-telegram-bot`, `discord.py`, `slack-bolt` | Messaging channels |
 | `wallet` | `web3`, `eth-account`, `mnemonic`, `solders`, `solana` | Ethereum + Solana wallet support |
+
+There is no `requirements.lock` / `Pipfile.lock` — version bounds in `pyproject.toml` are `>=` only. CI runs the test matrix on both Python 3.11 and 3.12 to catch regressions across the supported range.
 
 ## Common Mistakes
 
