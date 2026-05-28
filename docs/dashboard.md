@@ -4,31 +4,30 @@ Real-time web dashboard for fleet observability and management.
 
 ## Overview
 
-The dashboard is served at `http://localhost:8420/dashboard` (or whatever port the mesh is configured on). It provides a live view of your agent fleet across four top-nav tabs with a consolidated navigation bar, slide-over chat panels, and a keyboard command palette.
+The dashboard is served at `http://localhost:8420/dashboard` (or whatever port the mesh is configured on). It provides a live view of your agent fleet across four primary tabs — a labeled left sidebar on desktop (`md:` and up) and an icon-only top strip on mobile — with slide-over chat panels and a keyboard command palette.
 
 No additional setup is required — the dashboard starts automatically with `openlegion start`. In self-hosted and local dev mode, the dashboard is open to anyone who can reach port 8420. In hosted mode (subdomain deployments), SSO authentication is required; see [Authentication](#authentication) for details.
 
 ## Navigation
 
-### Top-Nav Tabs
+### Primary Tabs
 
-The dashboard has **four** top-level tabs. Tab IDs are frozen for URL stability (deep links, persisted preferences, dashboard endpoint paths reference them) while the user-facing labels have diverged — per CLAUDE.md #14, renaming the IDs would break links so only the labels were updated.
+The dashboard has **four** top-level tabs. Tab IDs are frozen for URL stability (deep links, persisted preferences, dashboard endpoint paths reference them) while the user-facing labels have diverged — per CLAUDE.md #14, renaming the IDs would break links so only the labels were updated. The tabs render as a labeled vertical sidebar (`<aside class="side-nav">` in `src/dashboard/templates/index.html`) on `md:` and wider, collapsing to an icon-only strip in the slim top bar on `<md` mobile viewports.
 
 | Tab ID (frozen) | User Label | What It Shows |
 |----------------|------------|--------------|
 | `chat` | **Chat** | Multi-agent chat surface — slide-over panels, streaming, command palette entry. Default tab on boot |
 | `workplace` | **Work** | Kanban / Needs-You / Activity feed / Pending Actions — the Board surface. See [Work Tab](#work-tab) |
-| `fleet` | **Team** | Agent grid with operator card prepended in standalone view, drill-down agent detail (config, identity, capabilities, files). See [Team Tab](#team-tab) |
+| `fleet` | **Teams (N)** | Agent grid with operator card prepended in standalone view, drill-down agent detail (config, identity, capabilities, files). URL `/teams` (legacy `/agents` accepted as back-compat). See [Team Tab](#team-tab) |
 | `system` | **Settings** | 11 sub-tabs: Activity / Costs / Automation / Integrations / API Keys / Wallet / Network / Storage / Operator / Browser / Settings. See [System Tab](#system-tab) |
 
 The defaults — `tabs` array and `activeTab: 'chat'` — live in `src/dashboard/static/js/app.js` (top of the `dashboard()` factory). Routes parse the URL hash into `{ tab, systemTab, agentId, identityTab, activityView }` (the Work tab has no sub-routes — `/home/*` variants all normalize to `/home`).
 
 A command palette (**Cmd+K** / **Ctrl+K**) provides quick access to agents, actions, and navigation. The search button in the nav bar also opens it.
 
-### Top-Nav Bell + "Needs Attention" Badge
+### Top-Nav Bell
 
 - **Notifications bell** (top-right) — driven by `/dashboard/api/notifications`. Subtle gray dot when unread items exist; click to open the dropdown. See [Notifications](#notifications-system).
-- **"N agents need attention" badge** — wired to `fleetDigest?.agents_attention?.length`, populated from the operator's `OBSERVATIONS.md` aggregation. Renders only when the count is non-zero.
 
 ## Team Management
 
@@ -36,19 +35,31 @@ The dashboard supports multi-team namespaces for organizing agents into
 isolated groups. The tab ID is still `fleet` (frozen for URL stability)
 but the user-facing label is **Teams**.
 
-### Team Switcher
+### Team Filter
 
-A tab bar at the top of the Teams view shows all teams plus an "All
-Agents" view. Click a team tab to filter the agent grid to that team's
-members. The "All Agents" tab shows every agent with team badges. Each
-tab displays a member count.
+A chip strip at the top of the Teams view shows a **Solo (N)** chip plus
+one chip per team, each with a member count. Click a team chip to filter
+the agent grid to that team's members; click **Solo** to show only agents
+not assigned to any team. When the team count grows past 6, the strip
+caps at two rows and a **Show all teams / Show fewer** toggle reveals or
+hides the overflow (preference persisted to
+`localStorage.ol_team_filter_expanded`).
 
 ### Create Team
 
-Click the **+** button next to the team tabs to create a new team. Enter
-a name and optional description. Teams are stored on disk under
-`config/teams/{name}/`; the startup migrator drops a `config/projects`
-symlink at the legacy path so pre-rename code paths still resolve.
+Click the **+ New Team** button on the right side of the team filter row
+to create a new team. Enter a name and optional description. Teams are
+stored on disk under `config/teams/{name}/`; the startup migrator drops
+a `config/projects` symlink at the legacy path so pre-rename code paths
+still resolve.
+
+### Add Agent
+
+The agent grid has an **Add Agent** card as its final cell — a dashed
+outline with a `+` icon. Click to open the new-agent modal; the modal
+pre-fills the active team filter so an agent created while viewing team
+X joins X by default. The card shows a disabled state with a
+"Agent limit reached" tooltip when `atAgentLimit` is true.
 
 ### Team Members
 
@@ -127,8 +138,6 @@ The System tab is split into **11 sub-tabs** along the top. Default sub-tab: `ac
 | **Operator** | Operator agent settings (model picker, heartbeat editor) and the operator audit log ("Change Log"). See [Operator Sub-tab](#operator-sub-tab) |
 | **Browser** | Live browser metrics fleet table, interaction speed/delay sliders, idle timeout, CAPTCHA solver provider/key. See [Browser Sub-tab](#browser-sub-tab) |
 | **Settings** | Default model, runtime logs viewer, miscellaneous toggles |
-
-A **Fleet pulse card** sits at the top of the System tab, rendering the operator's `OBSERVATIONS.md` aggregation.
 
 ### Activity Sub-tab (System → Activity)
 
@@ -372,7 +381,7 @@ Proxy changes auto-restart the agent and reset the browser session. In the Syste
 
 ## Broadcast
 
-Send a message to multiple agents simultaneously using the broadcast bar below the agent grid. When a team is selected, the broadcast targets only that team's members. When viewing "All Agents", it targets every agent. Solo agents (not on any team) are included only in the "All Agents" broadcast. The operator is always excluded from broadcasts. Each agent processes the message independently. Responses display inline with expand/collapse for long replies (200+ characters).
+Send a message to multiple agents simultaneously using the broadcast bar below the agent grid. When a team chip is selected, the broadcast targets only that team's members. When the **Solo** chip is selected, it targets every agent not assigned to a team. The operator is always excluded from broadcasts. Each agent processes the message independently. Responses display inline with expand/collapse for long replies (200+ characters).
 
 ## Blackboard Operations
 

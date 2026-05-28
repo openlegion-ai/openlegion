@@ -253,7 +253,7 @@ All file operations are scoped to the container's `/data` volume.
 
 Workspace files (the agent's own `SOUL.md` / `INSTRUCTIONS.md` / `MEMORY.md` / etc.) are managed through a dedicated `/workspace/{filename}` endpoint on the **agent's own** FastAPI server, not via the general `/data` file tools. Three protections:
 
-- **`_WORKSPACE_ALLOWLIST` frozenset** (`src/agent/server.py:326-329`) — exactly 8 entries: `SOUL.md`, `HEARTBEAT.md`, `USER.md`, `INSTRUCTIONS.md`, `AGENTS.md`, `MEMORY.md`, `INTERFACE.md`, `OBSERVATIONS.md`. Reads / writes to anything outside this list return HTTP 400.
+- **`_WORKSPACE_ALLOWLIST` frozenset** (`src/agent/server.py`) — 9 entries: `SOUL.md`, `HEARTBEAT.md`, `USER.md`, `INSTRUCTIONS.md`, `AGENTS.md`, `MEMORY.md`, `INTERFACE.md`, `GOALS.md`, `GOALS.json`. Reads / writes to anything outside this list return HTTP 400.
 - **`_FILE_CAPS`** (`src/agent/server.py:332-340`) — char-count caps per file, enforced on `PUT` with HTTP 413 on overflow: `SOUL.md=4000`, `INSTRUCTIONS.md=12000`, `AGENTS.md=12000`, `USER.md=4000`, `MEMORY.md=16000`, `INTERFACE.md=4000`, `HEARTBEAT.md=None` (uncapped).
 - **`x-mesh-internal` gate on `PUT /workspace/{filename}`** (`src/agent/server.py:397-402`) — the agent cannot call its own workspace endpoint via `http_tool` or `exec+curl`. Writes must originate from the mesh on loopback with the internal header set. Reads from the agent's own loop are allowed without the gate.
 

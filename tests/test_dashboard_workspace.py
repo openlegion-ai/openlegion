@@ -126,41 +126,6 @@ class TestWorkspaceProxy:
             assert resp.status_code == 400
 
     @pytest.mark.asyncio
-    async def test_observations_md_is_allowlisted(self):
-        """OBSERVATIONS.md is the operator's fleet-pulse data file — must be readable.
-
-        Regression: the file was missing from _WORKSPACE_ALLOWLIST, so the dashboard
-        Fleet pulse card permanently rendered the empty state.
-        """
-        observations_body = (
-            "# Fleet Observations\nUpdated: 2026-05-06T12:00:00Z\n\n"
-            '```json\n{"timestamp": "2026-05-06T12:00:00Z", "fleet_summary": "ok"}\n```\n'
-        )
-        transport = AsyncMock()
-        transport.request = AsyncMock(return_value={
-            "filename": "OBSERVATIONS.md", "content": observations_body,
-        })
-        app = _make_dashboard_app(
-            transport=transport, agent_registry={"operator": "http://localhost:8401"},
-        )
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test",
-        ) as client:
-            resp = await client.get(
-                "/dashboard/api/agents/operator/workspace/OBSERVATIONS.md",
-            )
-            # Must NOT be 400 (the bug) — must be 200.
-            assert resp.status_code == 200, (
-                f"Expected 200 but got {resp.status_code}: {resp.text}"
-            )
-            payload = resp.json()
-            # Response must include `content` field — the JS parser reads data.content.
-            assert "content" in payload
-            assert payload["content"] == observations_body
-            # And the parser must be able to find the JSON block in `content`.
-            assert "```json" in payload["content"]
-
-    @pytest.mark.asyncio
     async def test_agent_not_found_returns_404(self):
         """Non-existent agent returns 404."""
         transport = AsyncMock()

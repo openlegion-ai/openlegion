@@ -86,11 +86,6 @@ function dashboard() {
     ],
     _operatorLastUserMessageTs: 0,
 
-    // Fleet Digest (parsed from operator's OBSERVATIONS.md)
-    fleetDigest: null,
-    fleetDigestRefreshing: false,
-    _fleetDigestTimer: null,
-
     // Fleet
     agents: [],
     agentStates: {},
@@ -144,6 +139,12 @@ function dashboard() {
     addAgentForm: { name: '', role: '', model: '', avatar: 1, color: null, team: '', template: '', _showPicker: false, _showColorPicker: false, _templateSearch: '', _templateDropdownOpen: false, _modelSearch: '', _modelDropdownOpen: false },
     addAgentLoading: false,
     agentTemplates: [],
+
+    // Teams tab — chip strip expand/collapse when many teams. Collapsed
+    // state caps chips at 2 rows via CSS so the panel doesn't dominate
+    // the page; "Show all" toggle reveals the rest. Persisted so the
+    // user's preference survives reloads.
+    teamFilterExpanded: false,
 
     // Blackboard / Comms
     bbEntries: [],
@@ -732,8 +733,8 @@ function dashboard() {
       if (this.detailAgent) {
         const tab = this.identityTab || 'config';
         return tab === 'config'
-          ? `/agents/${this.detailAgent}`
-          : `/agents/${this.detailAgent}/${tab}`;
+          ? `/teams/${this.detailAgent}`
+          : `/teams/${this.detailAgent}/${tab}`;
       }
       if (this.activeTab === 'chat') return '/chat';
       if (this.activeTab === 'system') {
@@ -744,7 +745,7 @@ function dashboard() {
         }
         return '/system/' + (this.systemTab || 'activity');
       }
-      if (this.activeTab === 'fleet') return '/agents';
+      if (this.activeTab === 'fleet') return '/teams';
       // PR 2 of Work tab rewrite — single Work surface. The sub-nav
       // (Summaries / Kanban / Activity) was removed; ``/home`` is the
       // only Work-tab URL. Legacy ``/home/kanban``, ``/home/activity``,
@@ -774,7 +775,7 @@ function dashboard() {
       if (this.activeTab === 'workplace') {
         return 'Work \u2014 OpenLegion';
       }
-      return 'Team \u2014 OpenLegion';
+      return 'Teams \u2014 OpenLegion';
     },
 
     _parsePath(path) {
@@ -783,7 +784,10 @@ function dashboard() {
       if (!clean) return route;
 
       if (clean === 'chat') { route.tab = 'chat'; return route; }
-      if (clean === 'agents' || clean.startsWith('agents/')) { route.tab = 'fleet'; }
+      // /teams is the canonical fleet URL; /agents is kept as a back-compat
+      // alias so old bookmarks resolve. The first _pushUrl after load rewrites
+      // the URL to /teams via replaceState.
+      if (clean === 'teams' || clean.startsWith('teams/') || clean === 'agents' || clean.startsWith('agents/')) { route.tab = 'fleet'; }
       // PR 2 of Work tab rewrite — single Work-tab URL. Any /home or
       // legacy /home/{kanban,activity,summaries,tasks} sub-route
       // normalizes silently to ``/home`` so old bookmarks survive
@@ -793,7 +797,7 @@ function dashboard() {
         return route;
       }
 
-      const agentMatch = clean.match(/^agents\/([^/]+)(?:\/([^/]+))?$/);
+      const agentMatch = clean.match(/^(?:teams|agents)\/([^/]+)(?:\/([^/]+))?$/);
       if (agentMatch) {
         route.agentId = agentMatch[1];
         const tab = agentMatch[2];
@@ -1166,6 +1170,20 @@ function dashboard() {
         if (v === '1') this.messengerSidePanelOpen = true;
       } catch (e) { /* ignore */ }
 
+      // Restore Teams chip-strip expanded preference.
+      try {
+        if (localStorage.getItem('ol_team_filter_expanded') === '1') {
+          this.teamFilterExpanded = true;
+        }
+      } catch (e) { /* ignore */ }
+      // Persist whenever the user toggles the chip strip.
+      this.$watch('teamFilterExpanded', (val) => {
+        try {
+          if (val) localStorage.setItem('ol_team_filter_expanded', '1');
+          else localStorage.removeItem('ol_team_filter_expanded');
+        } catch (e) { /* ignore */ }
+      });
+
       // Restore the currently-active team. Reads the new ``activeTeam`` key,
       // falling back to the legacy ``activeProject`` key one time so users
       // upgrading from PR 2 don't lose their selection. The legacy key is
@@ -1441,7 +1459,6 @@ function dashboard() {
         }
         this.activeChatId = 'operator';
         this._loadChatHistory('operator');
-        this._startFleetDigestRefresh();
         this.$nextTick(() => {
           this._scrollChat('operator', true);
           const el = document.getElementById('operator-chat-input');
@@ -1635,132 +1652,22 @@ function dashboard() {
       Object.values(this._chatRecoveryPolls).forEach(clearInterval);
       this._chatRecoveryPolls = {};
       this.stopHeartbeatTimer();
-      this._stopFleetDigestRefresh();
       if (this._cmdPaletteHandler) document.removeEventListener('keydown', this._cmdPaletteHandler);
       if (this._popstateHandler) window.removeEventListener('popstate', this._popstateHandler);
-    },
-
-    // ── Fleet Digest ─────────────────────────────────────
-
-    async fetchFleetDigest({ userInitiated = false } = {}) {
-      // Lenient parser — never throws. On any error (network, missing file, bad JSON)
-      // we leave fleetDigest as-is on first call (null) so the empty-state placeholder
-      // renders. We deliberately do not clear a previously-loaded digest on a transient
-      // network blip.
-      // 10-second timeout via AbortController so a hung fetch can't strand the spinner.
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 10000);
-      try {
-        const resp = await fetch(
-          `${window.__config.apiBase}/agents/operator/workspace/OBSERVATIONS.md`,
-          { signal: controller.signal },
-        );
-        if (!resp.ok) {
-          // 404 → operator hasn't run a check yet. Clear so the "never run" state shows.
-          if (resp.status === 404) this.fleetDigest = null;
-          return;
-        }
-        // Endpoint returns JSON {filename, content}. Parse the JSON wrapper, then
-        // run the markdown regex against `content` (raw text, real newlines).
-        let text = '';
-        try {
-          const data = await resp.json();
-          text = (data && typeof data === 'object' && typeof data.content === 'string')
-            ? data.content
-            : '';
-        } catch (_e) {
-          this.fleetDigest = null;
-          return;
-        }
-        // Parse JSON block from markdown format
-        const match = text.match(/```json\n([\s\S]*?)\n```/);
-        if (!match) { this.fleetDigest = null; return; }
-        try {
-          const parsed = JSON.parse(match[1]);
-          // Only accept object-shaped payloads
-          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-            this.fleetDigest = parsed;
-          } else {
-            this.fleetDigest = null;
-          }
-        } catch (_e) {
-          this.fleetDigest = null;
-        }
-      } catch (e) {
-        if (e && e.name === 'AbortError' && userInitiated) {
-          this.showToast('Fleet pulse refresh timed out');
-        }
-        // Network error / abort — keep previous value if any.
-      } finally {
-        clearTimeout(timeoutId);
-      }
-    },
-
-    async refreshFleetDigest() {
-      // User-initiated refresh — toggles the spinner, ensures a minimum visible
-      // duration so the spin isn't a single frame on cached responses.
-      if (this.fleetDigestRefreshing) return;
-      this.fleetDigestRefreshing = true;
-      const minDelay = new Promise(r => setTimeout(r, 350));
-      try {
-        await Promise.all([this.fetchFleetDigest({ userInitiated: true }), minDelay]);
-      } finally {
-        this.fleetDigestRefreshing = false;
-      }
-    },
-
-    isFleetDigestStale() {
-      // Returns true when the digest is more than 24h old.
-      // Surfaces a "stale" badge in the card header — the operator may have
-      // stopped running.
-      const ts = this.fleetDigest && this.fleetDigest.timestamp;
-      if (!ts) return false;
-      const t = Date.parse(ts);
-      if (!t) return false;
-      return (Date.now() - t) > 86400000;  // 24h
-    },
-
-    drillIntoAttentionEntry(entry) {
-      // Guarded drill-in: surface a toast if the agent has been deleted since
-      // the operator's last observations were saved.
-      if (!entry || !entry.agent_id) return;
-      const exists = (this.agents || []).find(a => a.id === entry.agent_id);
-      if (!exists) {
-        this.showToast(`Agent ${entry.agent_id} no longer exists`);
-        return;
-      }
-      this.drillDown(entry.agent_id);
-    },
-
-    scrollToFleetPulse() {
-      // Defer a tick so the System tab content is in the DOM before we scroll.
-      this.$nextTick(() => {
-        const el = document.getElementById('fleet-pulse-card');
-        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      });
-    },
-
-    _startFleetDigestRefresh() {
-      this.fetchFleetDigest();
-      if (!this._fleetDigestTimer) {
-        this._fleetDigestTimer = setInterval(() => {
-          // Keep the digest fresh anywhere it is rendered (chat sidebar + system tab card).
-          if (this.activeTab === 'chat' || this.activeTab === 'system') {
-            this.fetchFleetDigest();
-          }
-        }, 300000); // 5 minutes
-      }
     },
 
     // ── Phase 1 — Board UX overhaul helpers ──────────────────
 
     /**
-     * Display label for a top-nav tab. Renames Agents/Board/System to
-     * Team/Work/Settings without touching the tab IDs (URLs, routes,
-     * and JS state vars all stay on the legacy IDs).
+     * Display label for a primary nav tab. Renames Agents/Board/System
+     * to Teams/Work/Settings without touching the tab IDs (URLs, routes,
+     * and JS state vars all stay on the legacy IDs). The Teams sidebar
+     * + mobile aria-label render an explicit ``Teams (N)`` with the team
+     * count alongside; this map is the fallback when callers don't
+     * specialize the fleet case.
      */
     tabLabelFor(tab) {
-      const map = { fleet: 'Team', workplace: 'Work', system: 'Settings' };
+      const map = { fleet: 'Teams', workplace: 'Work', system: 'Settings' };
       return map[tab.id] || tab.label;
     },
 
@@ -1885,13 +1792,6 @@ function dashboard() {
           body: '{}',
         });
       } catch (e) { /* best-effort */ }
-    },
-
-    _stopFleetDigestRefresh() {
-      if (this._fleetDigestTimer) {
-        clearInterval(this._fleetDigestTimer);
-        this._fleetDigestTimer = null;
-      }
     },
 
     // ── Operator readiness ───────────────────────────────
@@ -2541,7 +2441,6 @@ function dashboard() {
         }
         this.activeChatId = 'operator';
         this._loadChatHistory('operator');
-        this._startFleetDigestRefresh();
         this.$nextTick(() => {
           this._scrollChat('operator', true);
           const el = document.getElementById('operator-chat-input');
@@ -10561,7 +10460,6 @@ function dashboard() {
         wallet_get_address: 'looking up a wallet address',
         wallet_get_balance: 'checking a wallet balance',
         wallet_transfer: 'sending a wallet transfer',
-        save_observations: 'taking notes',
         edit_agent: 'updating a teammate',
         read_agent_config: 'reviewing a teammate',
         read_peer_artifact: 'reading a teammate\'s file',
