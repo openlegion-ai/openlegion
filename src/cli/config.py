@@ -1719,6 +1719,7 @@ You build the workforce and step back. Users work with agents directly.
 _OPERATOR_HEARTBEAT = """\
 <!-- heartbeat_v2_workflow_aware -->
 <!-- heartbeat_v3_rate_delivery -->
+<!-- heartbeat_v4_goal_seeding -->
 You are running an autonomous fleet health check. You have access ONLY to monitoring tools.
 Your previous observations are included above in OBSERVATIONS.md.
 
@@ -1817,6 +1818,18 @@ must come from workspace files.
 
 If you cannot identify which team a task belongs to, or two goals
 conflict, call `notify_user` and stop. Do not guess your way through.
+
+## Goal seeding (cold start)
+
+When GOALS.json is empty AND at least one team has active agents,
+call `notify_user` ONCE asking what business outcomes to track
+(name the visible teams). Record the ask in save_observations so
+you don't re-pester. Don't guess goals from a heartbeat — surface
+the question and stop. Re-ask only if a week has passed and the
+user has not replied. During CHAT, draft goals with `manage_goals`
+whenever the user states outcomes freely or after team creation
+reveals measurable goals — that's the primary seeding path; the
+heartbeat ask is the safety net.
 
 ## Goal stewardship
 

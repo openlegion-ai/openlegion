@@ -4002,10 +4002,12 @@
 
         <!-- Goals strip (PR 2 of Work tab rewrite). Operator-managed
              workplace-wide business goals, read-only from this surface
-             (the user steers via the Tell Operator box below; the
-             operator runs the actual ``manage_goals`` writes). Hidden
-             entirely when no goals are tracked — discoverable via
-             Tell Operator, no empty-state CTA. -->
+             (the operator runs the actual ``manage_goals`` writes —
+             user steers via per-summary rework feedback or by talking
+             to operator in the Chat tab). Hidden entirely when no
+             goals are tracked; operator's heartbeat owns cold-start
+             seeding (v4 sentinel: pings user via notify_user when
+             GOALS.json is empty but teams have active agents). -->
         <section x-show="workplaceGoals.length > 0" x-cloak
           data-testid="workplace-goals-strip"
           role="list" aria-label="Tracked business goals"
@@ -4044,12 +4046,10 @@
         <!-- Summary cards — primary content of the Work tab. One card
              per team renders the operator-composed daily summary:
              narrative (rendered markdown), recommendations bullet list,
-             and 👍 / ➖ / 👎 rating buttons. 👎 opens an inline feedback
-             box; submission feeds the next summary's prompt. PR 2 of
-             the Work tab rewrite removed the sub-nav, kanban, and
-             activity surfaces — the summary view is now the
-             unconditional landing surface when the Work tab is open.
-        -->
+             and three SVG rating buttons (accept / acknowledge / rework).
+             Rework opens an inline feedback box; submission feeds the
+             next summary's prompt. The summary view is the unconditional
+             landing surface when the Work tab is open. -->
         <template x-if="workplaceEnabled">
           <div class="space-y-3" data-testid="workplace-summaries-view">
             <!-- Error banner (retry path matches the other sections) -->
@@ -4081,18 +4081,18 @@
                    data-testid="workplace-summaries-empty">
                 <div class="text-gray-300 text-sm font-medium mb-2">No summaries yet</div>
                 <div class="text-xs text-gray-400 max-w-md mx-auto">
-                  Daily team summaries appear here once operator composes the
-                  first one (via heartbeat or the
-                  <code class="bg-gray-800 px-1 rounded">compose_work_summary</code>
-                  skill in chat). Ask the operator to draft one for any team.
+                  Daily summaries appear here as your team produces work.
+                  Operator drafts them automatically. Ask in chat if you'd
+                  like one sooner.
                 </div>
               </div>
             </template>
 
             <!-- One card per summary. Cards are ordered newest-first
-                 by ``generated_at`` (server-side). Unrated cards keep
-                 the 👍 / ➖ / 👎 buttons; rated ones show the outcome
-                 chip + the operator's feedback when 👎 was given. -->
+                 by ``generated_at`` (server-side). Unrated cards show
+                 the three SVG rating buttons (accept / acknowledge /
+                 rework); rated ones show the outcome chip plus the
+                 operator's feedback when rework feedback was given. -->
             <template x-for="s in workplaceSummaries" :key="s.id">
               <div class="bg-gray-800/40 border border-gray-700/50 rounded-lg p-4"
                    data-testid="workplace-summary-card"
@@ -4131,7 +4131,10 @@
 
                 <!-- Footer: rating buttons (unrated) or outcome chip (rated). -->
                 <div class="flex items-center justify-end gap-2 pt-2 border-t border-gray-700/30">
-                  <!-- Rating buttons (only when unrated) -->
+                  <!-- Rating buttons (only when unrated). Lucide-style outline
+                       SVG icons (matches the rest of the dashboard) — not
+                       emoji. Colors: emerald=accept, gray=acknowledge,
+                       amber=rework. -->
                   <template x-if="!s.rating">
                     <div class="flex items-center gap-1"
                          data-testid="summary-rate-buttons">
@@ -4139,17 +4142,35 @@
                         @click.stop="rateSummary(s.id, 'accepted')"
                         title="Accept — good summary"
                         aria-label="Accept this summary"
-                        class="text-sm px-1.5 py-0.5 rounded hover:bg-emerald-500/20 text-emerald-300">&#x1F44D;</button>
+                        data-testid="summary-rate-accept"
+                        class="px-2 py-1 rounded hover:bg-emerald-500/20 text-emerald-300 transition-colors">
+                        <svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                          <path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3z"/>
+                          <line x1="7" y1="22" x2="7" y2="11"/>
+                        </svg>
+                      </button>
                       <button type="button"
                         @click.stop="rateSummary(s.id, 'acknowledged')"
                         title="Acknowledge — neutral"
                         aria-label="Acknowledge this summary without judgement"
-                        class="text-sm px-1.5 py-0.5 rounded hover:bg-gray-500/20 text-gray-400">&#x2796;</button>
+                        data-testid="summary-rate-acknowledge"
+                        class="px-2 py-1 rounded hover:bg-gray-500/20 text-gray-400 transition-colors">
+                        <svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                          <circle cx="12" cy="12" r="10"/>
+                          <line x1="8" y1="12" x2="16" y2="12"/>
+                        </svg>
+                      </button>
                       <button type="button"
                         @click.stop="openSummaryFeedback(s.id)"
                         title="Rework — add feedback"
                         aria-label="Mark this summary for rework"
-                        class="text-sm px-1.5 py-0.5 rounded hover:bg-amber-500/20 text-amber-300">&#x1F44E;</button>
+                        data-testid="summary-rate-rework"
+                        class="px-2 py-1 rounded hover:bg-amber-500/20 text-amber-300 transition-colors">
+                        <svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                          <path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3z"/>
+                          <line x1="17" y1="13" x2="17" y2="2"/>
+                        </svg>
+                      </button>
                     </div>
                   </template>
 
@@ -4175,9 +4196,13 @@
                   </div>
                 </template>
 
-                <!-- Inline feedback box (open via 👎). Submitting fires
-                     rateSummary(id, 'rework', feedback). Cancel clears
-                     the draft. Empty submit is blocked at the handler. -->
+                <!-- Inline feedback box (opens via the rework button).
+                     Submitting fires rateSummary(id, 'rework', feedback).
+                     Cancel clears the draft. Empty submit is blocked at
+                     the handler. This is the ONLY user steering surface
+                     on the Work tab — the standalone "Tell operator"
+                     textarea was removed; freeform direction lives in
+                     the Chat tab instead. -->
                 <template x-if="s.id in summaryFeedbackDrafts && !s.rating">
                   <div class="mt-2 pt-2 border-t border-gray-700/30"
                        data-testid="summary-feedback-box">
@@ -4205,46 +4230,15 @@
           </div>
         </template>
 
-        <!-- Tell Operator — primary steering affordance. PR 2 of the
-             Work tab rewrite. The user types freeform feedback; submit
-             posts to the operator chat (via ``sendChatTo('operator', …)``)
-             and surfaces a "Sent — open Chat tab" confirmation. The
-             operator handles per-task rating + team coordination from
-             the chat reply. -->
-        <template x-if="workplaceEnabled">
-          <section data-testid="workplace-tell-operator"
-            class="mt-6 rounded-lg border border-gray-700/40 bg-gray-800/30 p-4">
-            <h3 class="text-sm font-medium text-gray-200">Tell operator</h3>
-            <p class="text-xs text-gray-400 mt-1">Steer the team in plain language. Operator handles the rest.</p>
-            <textarea
-              x-model="tellOperatorText"
-              :disabled="tellOperatorInflight"
-              rows="3"
-              maxlength="2000"
-              aria-label="Message to operator"
-              placeholder="e.g. The landing page tone feels too corporate — make it warmer."
-              class="mt-2 w-full rounded bg-gray-900/50 border border-gray-700 px-3 py-2 text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:border-indigo-500"
-            ></textarea>
-            <div class="mt-2 flex items-center justify-between">
-              <span x-show="tellOperatorConfirmation" x-text="tellOperatorConfirmation"
-                class="text-xs text-green-400"
-                data-testid="tell-operator-confirmation"></span>
-              <span x-show="!tellOperatorConfirmation" class="text-xs text-gray-500">Response shows up in Chat tab.</span>
-              <button type="button"
-                @click="submitTellOperator()"
-                :disabled="tellOperatorInflight || !tellOperatorText.trim()"
-                class="ml-auto rounded bg-indigo-500 hover:bg-indigo-400 disabled:opacity-50 disabled:cursor-not-allowed px-3 py-1 text-xs text-white"
-                data-testid="tell-operator-submit">
-                <span x-text="tellOperatorInflight ? 'Sending…' : 'Send'"></span>
-              </button>
-            </div>
-          </section>
-        </template>
+        <!-- (Standalone "Tell operator" textarea was removed — it was
+             redundant with the Chat tab. The only user-steering
+             surface on the Work tab is now the inline rework feedback
+             box on summary cards; freeform steering lives in chat.) -->
 
-        <!-- Stuck tasks panel — silent stale-work detector kept across
-             the PR 2 cutover. Renders when ``stuckTasks`` is non-empty
-             (tasks pending or working >24h). Each row carries [Cancel]
-             + [Restart agent] for the operator's two-fastest unblockers. -->
+        <!-- Stuck tasks panel — silent stale-work detector. Renders
+             when ``stuckTasks`` is non-empty (tasks pending or working
+             >24h). Each row carries [Cancel] + [Restart agent] for the
+             operator's two-fastest unblockers. -->
         <template x-if="workplaceEnabled && stuckTasks.length">
           <section class="bg-amber-950/30 border border-amber-800/50 rounded-xl p-3 mb-3"
             data-testid="board-stuck-tasks"
@@ -4290,12 +4284,12 @@
 
 
         <!-- Phase 4 — task cancel confirmation modal. Opens via
-             ``confirmCancelTask`` (kanban × button or stuck-tasks
-             [Cancel]). Closes via Escape or clicking the backdrop.
-             The mesh-side cancel route is creator/assignee/operator/
-             internal-gated — the dashboard proxy uses ``x-mesh-internal``
-             so any session with an ``ol_session`` cookie can cancel
-             from this UI. -->
+             ``confirmCancelTask`` from the stuck-tasks [Cancel] button
+             or the task drill-in modal. Closes via Escape or clicking
+             the backdrop. The mesh-side cancel route is creator/
+             assignee/operator/internal-gated — the dashboard proxy
+             uses ``x-mesh-internal`` so any session with an
+             ``ol_session`` cookie can cancel from this UI. -->
         <template x-if="cancelTaskCandidate">
           <div class="fixed inset-0 z-[70] flex items-center justify-center p-4"
             @keydown.escape.window="closeCancelTaskModal()"
@@ -4371,8 +4365,7 @@
                        column; the modal used to ignore it, leaving the
                        operator with a bare 'failed' status and no
                        actionable signal when drilling in to investigate.
-                       Colour matches the kanban-card status palette
-                       (amber for blocked, red for failed). -->
+                       Colour: amber for blocked, red for failed. -->
                   <template x-if="!drillInLoading && drillInData?.task && drillInData.task.blocker_note && ['blocked','failed'].includes(drillInData.task.status)">
                     <div class="mt-2 text-xs">
                       <span x-show="drillInData.task.status === 'blocked'" class="text-amber-400 font-medium">Blocked:</span>

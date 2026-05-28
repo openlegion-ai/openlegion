@@ -381,15 +381,15 @@ function dashboard() {
     cmdPaletteResults: [],
     cmdPaletteIdx: 0,
 
-    // Workplace tab (peer of Chat / Agents / System). PR 2 of the Work
-    // tab rewrite removed the sub-nav (Summaries / Kanban / Activity)
-    // along with the kanban + activity surfaces; PR 3 dropped the legacy
-    // ``workplaceTab`` / ``workplaceTabs`` Alpine state with the dead
-    // ``team-status`` + ``team-outputs`` templates. The Work tab now
-    // lands directly on summary cards. Stuck Tasks panel + Cancel modal
-    // + Task drill-in (reachable from Needs you + notification bell)
-    // are retained. ``workplaceEnabled`` reflects whether the tasks
-    // store responded — kept for graceful empty-state rendering on
+    // Workplace tab (peer of Chat / Agents / System). The Work tab
+    // lands directly on summary cards — operator-composed daily
+    // narratives the user can accept / acknowledge / rework. The
+    // Goals chip strip renders above when the operator has tracked
+    // any business goals. Needs You panel sits on top; Stuck Tasks
+    // panel below summaries; Cancel modal + Task drill-in are
+    // reachable from Needs You and the notification bell.
+    // ``workplaceEnabled`` reflects whether the tasks store
+    // responded — kept for graceful empty-state rendering on
     // transient errors.
     workplaceEnabled: true,
     workplaceTeams: [],
@@ -445,14 +445,6 @@ function dashboard() {
       summaries: '',
       goals: '',
     },
-    // PR 2 Tell Operator (steering affordance, replaces the deleted
-    // per-task rating UI). ``tellOperatorText`` is the textarea
-    // binding; ``tellOperatorInflight`` disables the Send button
-    // while a request is in flight; ``tellOperatorConfirmation``
-    // shows a transient "Sent" banner that auto-clears after 5s.
-    tellOperatorText: '',
-    tellOperatorInflight: false,
-    tellOperatorConfirmation: '',
     // In-flight audit-log undo so we can disable the button per-row.
     auditReverting: {},
 
@@ -745,11 +737,10 @@ function dashboard() {
         return '/system/' + (this.systemTab || 'activity');
       }
       if (this.activeTab === 'fleet') return '/agents';
-      // PR 2 of Work tab rewrite — single Work surface. The sub-nav
-      // (Summaries / Kanban / Activity) was removed; ``/home`` is the
-      // only Work-tab URL. Legacy ``/home/kanban``, ``/home/activity``,
-      // ``/home/summaries``, and ``/home/tasks`` all normalize to
-      // ``/home`` in ``_parsePath``.
+      // Single Work-tab URL — ``/home``. Legacy ``/home/kanban``,
+      // ``/home/activity``, ``/home/summaries``, ``/home/tasks`` from
+      // old bookmarks all normalize to ``/home`` in ``_parsePath`` so
+      // they 200 instead of 404.
       if (this.activeTab === 'workplace') {
         return '/home';
       }
@@ -784,10 +775,10 @@ function dashboard() {
 
       if (clean === 'chat') { route.tab = 'chat'; return route; }
       if (clean === 'agents' || clean.startsWith('agents/')) { route.tab = 'fleet'; }
-      // PR 2 of Work tab rewrite — single Work-tab URL. Any /home or
-      // legacy /home/{kanban,activity,summaries,tasks} sub-route
-      // normalizes silently to ``/home`` so old bookmarks survive
-      // without a 404 or visible redirect.
+      // Single Work-tab URL. Any /home or legacy
+      // /home/{kanban,activity,summaries,tasks} sub-route normalizes
+      // silently to ``/home`` so old bookmarks survive without a 404
+      // or visible redirect.
       if (clean === 'home' || clean.startsWith('home/')) {
         route.tab = 'workplace';
         return route;
@@ -2752,7 +2743,7 @@ function dashboard() {
         }
         // ``enabled: false`` means the dashboard's mesh app didn't wire
         // the summaries store (e.g. legacy deploy). Hide the section
-        // cleanly — the kanban tab is still usable.
+        // cleanly — the rest of the Work tab still renders.
         if (data.enabled === false) {
           this.workplaceSummaries = [];
           return;
@@ -2887,9 +2878,9 @@ function dashboard() {
     },
 
     async loadWorkplaceTasks() {
-      // PR 2 — feeds the Stuck Tasks panel and the drill-in modal's
-      // sibling-row updates. The team-filter query param was dropped
-      // along with the kanban surface; pull the unfiltered ledger.
+      // Feeds the Stuck Tasks panel and the drill-in modal's
+      // sibling-row updates. Pulls the unfiltered ledger — the
+      // team-filter query param is no longer needed.
       this.workplaceSectionLoading.tasks = true;
       this.workplaceErrors.tasks = '';
       try {
@@ -2981,50 +2972,6 @@ function dashboard() {
           : "Couldn't load goals";
       } finally {
         this.workplaceSectionLoading.goals = false;
-      }
-    },
-
-    // PR 2 — Tell Operator. Steering affordance that replaced the
-    // per-task 👍/➖/👎 buttons. POSTs to the operator chat via the
-    // existing ``sendChatTo`` helper; shows a transient "Sent" banner
-    // and clears the textarea on success.
-    //
-    // ``sendChatTo`` absorbs HTTP failures into the chat history
-    // (sets the assistant placeholder's ``role`` to ``error`` or
-    // ``credit_exhausted``) and returns silently rather than
-    // throwing — so a try/catch around the call wouldn't catch a
-    // 4xx/5xx POST. Detect failure by inspecting the assistant
-    // placeholder's role after the call returns. The user message
-    // is pushed at length-2 and the assistant placeholder at
-    // length-1; we check the tail.
-    async submitTellOperator() {
-      const text = (this.tellOperatorText || '').trim();
-      if (!text || this.tellOperatorInflight) return;
-      this.tellOperatorInflight = true;
-      this.tellOperatorConfirmation = '';
-      try {
-        await this.sendChatTo('operator', text);
-        const history = this.chatHistories['operator'] || [];
-        const tail = history[history.length - 1];
-        const failed = tail && (
-          tail.role === 'error' || tail.role === 'credit_exhausted'
-        );
-        if (failed) {
-          this.tellOperatorConfirmation = (
-            tail.role === 'credit_exhausted'
-              ? 'Send failed — operator out of credit.'
-              : 'Send failed — try again.'
-          );
-          setTimeout(() => { this.tellOperatorConfirmation = ''; }, 5000);
-        } else {
-          this.tellOperatorText = '';
-          this.tellOperatorConfirmation = "Sent — open Chat tab to see operator's response.";
-          setTimeout(() => { this.tellOperatorConfirmation = ''; }, 5000);
-        }
-      } catch (e) {
-        this.tellOperatorConfirmation = 'Send failed — try again.';
-      } finally {
-        this.tellOperatorInflight = false;
       }
     },
 
@@ -3528,12 +3475,12 @@ function dashboard() {
       return n;
     },
 
-    // PR 2 — title truncation for the Stuck tasks panel and drill-in
-    // panel. Long titles (some agents accidentally hand off with
-    // their full instruction text — ~250 chars seen in production)
-    // wreck the kanban grid; truncate to 80 chars + ellipsis on
-    // render. The full title still surfaces in the drill-in modal
-    // and via the ``title=`` tooltip on hover.
+    // Title truncation for the Stuck tasks panel and drill-in panel.
+    // Long titles (some agents accidentally hand off with their full
+    // instruction text — ~250 chars seen in production) wreck panel
+    // layout; truncate to 80 chars + ellipsis on render. The full
+    // title still surfaces in the drill-in modal and via the
+    // ``title=`` tooltip on hover.
     truncateTitle(title, max) {
       const limit = Number.isFinite(max) ? max : 80;
       const s = String(title || '').trim();
@@ -3600,9 +3547,9 @@ function dashboard() {
     cancelTaskInFlight: false,
 
     // Open the cancel-task confirmation modal. Accepts a task object
-    // (from the kanban or stuck-tasks panel) — we copy just the fields
-    // the modal needs so a downstream re-fetch doesn't blow away the
-    // candidate while the user is staring at the dialog.
+    // (from the stuck-tasks panel or drill-in modal) — we copy just
+    // the fields the modal needs so a downstream re-fetch doesn't
+    // blow away the candidate while the user is staring at the dialog.
     confirmCancelTask(task) {
       if (!task || !task.id) return;
       this.cancelTaskCandidate = {
@@ -3620,8 +3567,8 @@ function dashboard() {
 
     // Fire the cancel — POSTs to the dashboard proxy which forwards
     // to the mesh's ``/mesh/tasks/{id}/cancel``. On success we close
-    // the modal and reload tasks so the kanban + stuck-tasks panel
-    // both reflect the change immediately. The mesh also emits a
+    // the modal and reload tasks so the stuck-tasks panel reflects
+    // the change immediately. The mesh also emits a
     // ``task_status_changed`` event so the WS path catches up too.
     async cancelTaskNow() {
       const cand = this.cancelTaskCandidate;
@@ -3636,7 +3583,7 @@ function dashboard() {
               'Content-Type': 'application/json',
               'X-Requested-With': 'XMLHttpRequest',
             },
-            body: JSON.stringify({ reason: 'Cancelled from board' }),
+            body: JSON.stringify({ reason: 'Cancelled from work tab' }),
           },
         );
         if (!resp.ok) {
@@ -3651,7 +3598,7 @@ function dashboard() {
           this.showToast(`Cancelled "${this.truncateTitle(cand.title, 40)}"`);
         }
         this.cancelTaskCandidate = null;
-        // Refresh tasks so the kanban + stuck-tasks panel update.
+        // Refresh tasks so the stuck-tasks panel updates immediately.
         if (typeof this.loadWorkplaceTasks === 'function') {
           await this.loadWorkplaceTasks();
         }
