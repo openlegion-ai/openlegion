@@ -188,8 +188,11 @@ class LLMClient:
                     allowed_models=set(error_meta.get("allowed_models", [])),
                     http_status=error_meta.get("http_status"),
                 )
-            # Rate limits and transient errors should be retried
-            _retryable = ("rate limit", "ratelimit", "429", "too many requests", "overloaded", "503")
+            # Rate limits and transient errors should be retried.
+            # "empty response" is the Claude subscription throttle signal
+            # (Anthropic OAuth + OpenAI Codex paths emit it when the stream
+            # closes with zero content/tool_calls/thinking). Treat as transient.
+            _retryable = ("rate limit", "ratelimit", "429", "too many requests", "overloaded", "503", "empty response")
             if any(kw in error_msg.lower() for kw in _retryable):
                 raise LLMRetryableError(f"LLM call failed: {error_msg}")
             raise RuntimeError(f"LLM call failed: {error_msg}")

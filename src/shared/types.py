@@ -512,6 +512,14 @@ class AgentConfig(BaseModel):
     # Credential handles in env/args resolved by the mesh at agent start.
     mcp_servers: list[MCPServerConfig] | None = None
 
+    # Per-agent override of the task-loop iteration cap (AgentLoop.MAX_ITERATIONS,
+    # default 20). High-fan-out workers (e.g. a translator emitting one PR per
+    # locale) need more headroom than the default. None = inherit the global
+    # OPENLEGION_MAX_ITERATIONS / hard-coded default. The agent-side reader
+    # (_clamp_env in src/agent/loop.py) clamps to 1-100 regardless of source,
+    # so an absurd value here can't blow the cap.
+    max_iterations: int | None = Field(default=None, ge=1, le=100)
+
     model_config = {"extra": "allow"}
 
     @field_validator("mcp_servers")

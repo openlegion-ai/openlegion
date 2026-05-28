@@ -379,6 +379,26 @@ def test_agent_config_keeps_extra_allow_for_outer_unknown_fields():
     assert dumped.get("some_legacy_field") == 42
 
 
+def test_agent_config_max_iterations_defaults_none():
+    """Unset max_iterations inherits the global cap (None sentinel)."""
+    c = AgentConfig(role="researcher")
+    assert c.max_iterations is None
+
+
+def test_agent_config_max_iterations_accepts_in_range():
+    """High-fan-out workers can opt into a larger task-loop cap."""
+    c = AgentConfig(role="locale-translator", max_iterations=80)
+    assert c.max_iterations == 80
+
+
+@pytest.mark.parametrize("bad_value", [0, -1, 101, 1000])
+def test_agent_config_max_iterations_rejects_out_of_range(bad_value):
+    """Mirror the agent-side _clamp_env range so misconfigurations
+    fail loudly at load time rather than silently being clamped."""
+    with pytest.raises(ValidationError):
+        AgentConfig(role="x", max_iterations=bad_value)
+
+
 def test_agent_config_nested_mcp_server_extras_still_forbidden():
     # extra=allow on the outer model does NOT leak into nested MCPServerConfig.
     with pytest.raises(ValidationError) as excinfo:

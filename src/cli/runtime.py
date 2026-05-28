@@ -435,6 +435,15 @@ class RuntimeContext:
             initial_interface = agent_cfg.get("initial_interface", "")
             if initial_interface:
                 agent_env["INITIAL_INTERFACE"] = initial_interface
+            # Per-agent task-loop iteration cap. Overrides the global
+            # OPENLEGION_MAX_ITERATIONS (from dashboard system settings,
+            # injected into extra_env above) because env_overrides is
+            # applied after extra_env in DockerBackend (see
+            # src/host/runtime.py line ~262). Clamping to 1-100 happens
+            # agent-side in _clamp_env (src/agent/loop.py).
+            agent_max_iters = agent_cfg.get("max_iterations")
+            if agent_max_iters is not None:
+                agent_env["OPENLEGION_MAX_ITERATIONS"] = str(agent_max_iters)
             if agent_id == _OPERATOR_AGENT_ID:
                 agent_env["ALLOWED_TOOLS"] = ",".join(_OPERATOR_ALLOWED_TOOLS)
                 # PR-L' — pass the boot greeting so the agent can seed
