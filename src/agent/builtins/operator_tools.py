@@ -2377,22 +2377,32 @@ def _write_goals(workspace_root, goals: list[dict]) -> None:
     payload: dict = {"goals": goals}
     # Distinguish "file missing / no seed_ask present" (silent) from
     # "file exists but unparseable" (log warning so the drop is visible).
-    if json_path.exists() and json_path.read_text(errors="replace").strip():
-        try:
-            existing_seed_ask = _read_seed_ask(workspace_root)
-        except Exception:
-            existing_seed_ask = None
-        if existing_seed_ask is None:
+    # Single read of the raw text — feeds both the parse attempt for
+    # seed_ask extraction and the WARN-trigger check if the parse fails.
+    if json_path.exists():
+        raw_text = json_path.read_text(errors="replace")
+        if raw_text.strip():
             try:
-                json.loads(json_path.read_text(errors="replace"))
+                data = json.loads(raw_text)
+                existing_seed_ask = data.get("seed_ask") if isinstance(data, dict) else None
+                if isinstance(existing_seed_ask, dict):
+                    last_ts = existing_seed_ask.get("last_ts")
+                    team_names = existing_seed_ask.get("team_names")
+                    if isinstance(last_ts, str) and isinstance(team_names, list):
+                        cleaned_names = [
+                            n for n in team_names
+                            if isinstance(n, str) and n.strip()
+                        ]
+                        payload["seed_ask"] = {
+                            "last_ts": last_ts,
+                            "team_names": cleaned_names,
+                        }
             except (OSError, ValueError) as e:
                 logger.warning(
                     "preserving seed_ask: GOALS.json at %s could not be "
                     "parsed; throttle block dropped from this write. (%s)",
                     json_path, e,
                 )
-        if existing_seed_ask is not None:
-            payload["seed_ask"] = existing_seed_ask
     json_path.write_text(json.dumps(payload, indent=2) + "\n")
     md_path.write_text(_render_goals_md(goals))
 
