@@ -98,6 +98,40 @@ Saving a config that doesn't actually change the persisted `mcp_servers` does NO
 
 Last-write-wins semantics for the whole `mcp_servers` field. The dashboard does not currently use an `If-Match` / etag concurrency token, so two operators editing the same agent's MCP config simultaneously will have one overwrite the other. This is consistent with how every other dashboard config edit behaves today.
 
+## Managing MCP servers from the dashboard
+
+The agent settings → Config tab has an **MCP Servers** section that wraps the contract above. The visual UI is the primary path for users — fleet templates and the REST API still work but are no longer the only way in.
+
+In display mode each configured server renders as a row with a status dot (green = running, red = failed at last startup, gray = pending restart), the command preview, and a tool-count badge. Click an agent's settings → Edit to manage.
+
+### Adding / editing / removing servers
+
+The edit-mode list reuses the inline Webhooks pattern: hover a row for **Edit** and **Remove** buttons, or click **+ Add MCP server** to open a fresh form. Each form has:
+
+- **Name** and **Command** as plain inputs (validated against the same `MCPServerConfig` model the backend uses — same regex, same length caps, same `$CRED{...}` rejection in `command`).
+- **Args** as a list-of-pairs (one input per arg + remove + `+ Add arg`). No JSON syntax to learn.
+- **Env** as a list-of-rows where each row has a key field, a **Credential | Plain text** type toggle, and the value field:
+  - **Credential** shows a dropdown filtered to the credentials the agent's `allowed_credentials` policy actually permits — the saved value becomes a `$CRED{name}` handle resolved by the mesh at agent start.
+  - **Plain text** is a regular input. If you paste something that looks like an API key (e.g. starts with `sk-`, `ghp_`, `pat-`, `Bearer ...`, or is high-entropy), an inline warning nudges you toward Credential mode.
+- A **Replace env vars** toggle (edit mode only) that defaults OFF — existing env preserves on the wire. When ON, the editor starts empty and the save replaces env wholesale; the UI explains that values are not retrievable from the masked GET (you'd need to re-supply all of them).
+- An inline Node-runtime warning chip below the command input when it starts with `npx`/`bunx`/`pnpm dlx`/`yarn dlx`/`node`/`npm`/`pnpm`/`yarn`/`bun` (the default agent image is Python-only).
+
+### Save + restart flow
+
+Clicking the outer **Save** in the Config tab will auto-commit any open MCP draft (or block with a toast if the draft is incomplete) so typed entries don't get silently dropped. If `mcp_servers` actually changed (the dashboard does the same canonical diff as the backend's `mcp_touched` check), the agent is restarted automatically. The toast reports success/failure; the per-server status dot reflects the new state once the post-restart capabilities fetch lands.
+
+If the restart itself fails (the config persisted but the container didn't come back up against it), the edit form **stays open** with a persistent red banner: *"Config saved, but agent restart failed: &lt;reason&gt;"* + a **Retry restart** button. Retry calls `POST /restart` only — the config is already on disk, no re-PUT.
+
+### Failure visibility
+
+A red status dot expands to show the captured stderr from `MCPClient.start()` (truncated to 500 chars). The common ones — `command not found`, missing or denied `$CRED{...}` reference, permission error — surface here without needing to tail container logs.
+
+Validation errors from the backend (regex failures, oversize fields, `$CRED` in `command`, etc.) come back as a structured 400 and render as **inline red text** next to the offending field. Errors that don't map to a single row (e.g. case-insensitive duplicate names rejected by the `AgentConfig` field validator) render as a banner above the list.
+
+### Operator-tool MCP management
+
+**Not yet supported.** The operator agent can READ which MCP servers are configured on each agent (through the existing capabilities surface) but cannot ADD or REMOVE them via chat. A follow-up will introduce an operator-requested-setup flow modeled on the existing credential-request and browser-login patterns: the operator surfaces a request card in the dashboard, the human reviews and saves, the agent picks up the new server on restart. Until then, MCP writes are dashboard-only.
+
 ## How It Works
 
 ### Startup Sequence
