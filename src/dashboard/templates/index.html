@@ -491,7 +491,7 @@
                    stream alone only delivers events going forward). -->
               <div x-show="operatorReady" id="chat-messages-operator"
                    x-init="loadWorkplacePending()"
-                   class="flex-1 overflow-y-auto overflow-x-hidden px-4 py-3 flex flex-col gap-4">
+                   class="flex-1 overflow-y-auto overflow-x-hidden px-4 py-3">
 
                 <!-- Phase -1 onboarding wizard cards. Renders only when
                      ``wizard.step !== 'idle'`` and suppresses the
@@ -797,7 +797,7 @@
                   </button>
                 </div>
                 <template x-for="(msg, i) in visibleChatHistory('operator')" :key="i">
-                  <div>
+                  <div class="mb-4 last:mb-0">
                     <!-- System event: compaction / session divider -->
                     <template x-if="msg.role === 'system'">
                       <div class="flex items-center gap-2 py-1 select-none">
@@ -7914,7 +7914,7 @@
              main-tab element is always mounted via x-show and is the FIRST
              match in document order, so getElementById would otherwise pick
              a display:none element and the scroll would silently no-op. -->
-        <div role="log" aria-live="polite" class="flex-1 overflow-y-auto overflow-x-hidden px-4 py-3 flex flex-col gap-4" :id="'side-chat-messages-' + activeChatId">
+        <div role="log" aria-live="polite" class="flex-1 overflow-y-auto overflow-x-hidden px-4 py-3" :id="'side-chat-messages-' + activeChatId">
           <!-- Collapse bar mirrors the operator-panel behaviour: when
                the active chat is the operator and there are ≥2
                unresolved pending actions, hide the cards behind a
@@ -7959,7 +7959,7 @@
           </div>
           <template x-for="(msg, i) in visibleChatHistory(activeChatId)" :key="i">
             <!-- Single root wrapper required by Alpine x-for. -->
-            <div>
+            <div class="mb-4 last:mb-0">
               <!-- System event: compaction / session divider — rendered as a separator, not a bubble -->
               <template x-if="msg.role === 'system'">
                 <div class="flex items-center gap-2 py-1 select-none">
