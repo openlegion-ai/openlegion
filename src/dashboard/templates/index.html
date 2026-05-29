@@ -1552,7 +1552,7 @@
             <div class="flex flex-wrap items-center gap-1 transition-[max-height] duration-200"
                  :class="!teamFilterExpanded && teams.length > 6 ? 'team-chips-collapsed' : ''">
               <button @click="switchTeam(null)"
-                class="px-2.5 py-1 rounded-md text-xs font-medium transition-all shrink-0"
+                class="px-3 py-1.5 rounded-md text-sm font-medium transition-all shrink-0"
                 :class="!activeTeam
                   ? 'bg-gray-700 text-white shadow-sm'
                   : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'">
@@ -1561,7 +1561,7 @@
               </button>
               <template x-for="proj in teams" :key="proj.name">
                 <button @click="switchTeam(proj.name)"
-                  class="px-2.5 py-1 rounded-md text-xs font-medium transition-all inline-flex items-center gap-1 shrink-0"
+                  class="px-3 py-1.5 rounded-md text-sm font-medium transition-all inline-flex items-center gap-1 shrink-0"
                   :class="[
                     activeTeam === proj.name
                       ? 'bg-gray-700 text-white shadow-sm'
@@ -1592,14 +1592,14 @@
           </div>
           <div class="relative group/team flex-shrink-0">
             <button @click="openTeamModal()"
-              class="text-xs px-3 py-1.5 rounded-md transition-colors inline-flex items-center gap-1.5 whitespace-nowrap"
+              class="text-sm font-medium px-3 py-1.5 rounded-md transition-colors inline-flex items-center gap-1.5 whitespace-nowrap"
               :class="atTeamLimit
                 ? 'bg-gray-800 text-gray-400 opacity-50 cursor-not-allowed'
                 : 'bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white'"
               :disabled="atTeamLimit"
               :title="atTeamLimit ? '' : 'Create a new team'"
             >
-              <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
               New Team
             </button>
             <div x-show="atTeamLimit" x-cloak
@@ -1665,40 +1665,40 @@
               <span x-show="activeTeamData?.description" class="text-[10px] text-gray-600 truncate hidden sm:block"
                 :title="activeTeamData?.description" x-text="activeTeamData?.description"></span>
               <!-- Tab pills — desktop only, click stops propagation to header toggle -->
-              <div class="project-hub-desktop-tabs hidden md:flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5 ml-auto flex-shrink-0" @click.stop role="tablist" aria-label="Team sections">
+              <div class="project-hub-desktop-tabs seg-group hidden md:flex ml-auto flex-shrink-0" @click.stop role="tablist" aria-label="Team sections">
                 <button @click="teamHubExpanded = true; teamHubTab = 'docs'"
-                  class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
-                  :class="teamHubExpanded && teamHubTab === 'docs' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
+                  class="seg-tab seg-tab-sm"
+                  :class="teamHubExpanded && teamHubTab === 'docs' ? 'seg-tab-active' : ''"
                   role="tab" :aria-selected="teamHubExpanded && teamHubTab === 'docs'">
                   <span>Context</span><span class="setting-hint setting-hint-sm ml-0.5" tabindex="0">?<span class="setting-hint-text">The shared TEAM.md file visible to all agents. Use it for team-wide instructions, goals, and context.</span></span>
                 </button>
                 <button @click="teamHubExpanded = true; teamHubTab = 'activity'; if (commsActivity.length === 0 && !commsActivityLoading) fetchCommsActivity()"
-                  class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
-                  :class="teamHubExpanded && teamHubTab === 'activity' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
+                  class="seg-tab seg-tab-sm"
+                  :class="teamHubExpanded && teamHubTab === 'activity' ? 'seg-tab-active' : ''"
                   role="tab" :aria-selected="teamHubExpanded && teamHubTab === 'activity'">
                   <span>Activity</span><span x-show="commsActivity.length > 0" class="ml-1 opacity-50 font-mono text-[10px]" x-text="'(' + commsActivity.length + ')'"></span><span class="setting-hint setting-hint-sm ml-0.5" tabindex="0">?<span class="setting-hint-text">Real-time feed of blackboard writes and pub/sub events between agents. Shows how agents are coordinating.</span></span>
                 </button>
                 <button @click="teamHubExpanded = true; teamHubTab = 'state'; fetchBlackboard(); if (Object.keys(commsSubs).length === 0) fetchCommsActivity()"
-                  class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
-                  :class="teamHubExpanded && teamHubTab === 'state' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
+                  class="seg-tab seg-tab-sm"
+                  :class="teamHubExpanded && teamHubTab === 'state' ? 'seg-tab-active' : ''"
                   role="tab" :aria-selected="teamHubExpanded && teamHubTab === 'state'">
                   <span>State</span><span class="setting-hint setting-hint-sm ml-0.5" tabindex="0">?<span class="setting-hint-text">The shared blackboard — a key-value store where agents read and write data to coordinate. Browse, edit, or delete entries.</span></span>
                 </button>
                 <button @click="teamHubExpanded = true; teamHubTab = 'artifacts'; fetchArtifacts()"
-                  class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
-                  :class="teamHubExpanded && teamHubTab === 'artifacts' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
+                  class="seg-tab seg-tab-sm"
+                  :class="teamHubExpanded && teamHubTab === 'artifacts' ? 'seg-tab-active' : ''"
                   role="tab" :aria-selected="teamHubExpanded && teamHubTab === 'artifacts'">
                   Files
                 </button>
                 <button @click="teamHubExpanded = true; teamHubTab = 'broadcast'"
-                  class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
-                  :class="teamHubExpanded && teamHubTab === 'broadcast' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
+                  class="seg-tab seg-tab-sm"
+                  :class="teamHubExpanded && teamHubTab === 'broadcast' ? 'seg-tab-active' : ''"
                   role="tab" :aria-selected="teamHubExpanded && teamHubTab === 'broadcast'">
                   <span>Broadcast</span><span class="setting-hint setting-hint-sm ml-0.5" tabindex="0">?<span class="setting-hint-text">Send a message to all agents at once. Useful for fleet-wide instructions or status requests.</span></span>
                 </button>
                 <button @click="teamHubExpanded = true; teamHubTab = 'members'"
-                  class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
-                  :class="teamHubExpanded && teamHubTab === 'members' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
+                  class="seg-tab seg-tab-sm"
+                  :class="teamHubExpanded && teamHubTab === 'members' ? 'seg-tab-active' : ''"
                   role="tab" :aria-selected="teamHubExpanded && teamHubTab === 'members'">
                   Members<span class="ml-1 opacity-50 font-mono text-[10px]" x-text="'(' + (activeTeamData?.members || []).length + ')'"></span>
                 </button>
@@ -2734,14 +2734,12 @@
                   <div>
                   <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Agent Settings</div>
                   <!-- Tab bar (4 tabs, no access badges) -->
-                  <div class="flex flex-wrap gap-0.5 bg-gray-800/50 rounded-lg p-0.5 mb-3">
+                  <div class="seg-group flex flex-wrap mb-3">
                     <template x-for="tab in identityTabs" :key="tab.id">
                       <button
                         @click="switchIdentityTab(selectedAgent, tab.id)"
-                        class="px-2.5 py-1.5 rounded-md text-xs font-medium transition-all"
-                        :class="identityTab === tab.id
-                          ? 'bg-gray-700 text-white shadow-sm'
-                          : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
+                        class="seg-tab seg-tab-sm"
+                        :class="identityTab === tab.id ? 'seg-tab-active' : ''"
                       >
                         <span x-text="tab.label"></span>
                       </button>
@@ -4619,11 +4617,11 @@
       <!-- System (Activity + Costs + Automation + Integrations + API Keys + Wallet + Storage + Audit + Settings) -->
       <div x-show="activeTab === 'system'" x-cloak>
         <!-- System sub-tab bar -->
-        <div class="flex flex-wrap gap-0.5 bg-gray-800/50 rounded-lg p-0.5 mb-4">
+        <div class="seg-group flex flex-wrap mb-4">
           <template x-for="st in systemTabs" :key="st.id">
             <button @click="switchSystemTab(st.id)"
-              class="px-3 py-1.5 rounded-md text-sm font-medium transition-all relative whitespace-nowrap"
-              :class="systemTab === st.id ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'">
+              class="seg-tab relative"
+              :class="systemTab === st.id ? 'seg-tab-active' : ''">
               <!-- Phase 1 — the parent ``System`` tab is now ``Settings``.
                    The catchall ``settings`` sub-tab inside it would
                    otherwise read "Settings > Settings"; we rename it to
@@ -4663,12 +4661,12 @@
         <!-- Period Selector + Charts -->
         <div class="mb-5">
           <div class="flex items-center justify-between mb-4">
-            <div class="flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5">
+            <div class="seg-group flex">
               <template x-for="p in ['today', 'week', 'month']" :key="p">
                 <button
                   @click="costPeriod = p; fetchCosts()"
-                  class="px-3 py-1.5 rounded-md text-sm font-medium transition-all"
-                  :class="costPeriod === p ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-500 hover:text-gray-300'"
+                  class="seg-tab"
+                  :class="costPeriod === p ? 'seg-tab-active' : ''"
                   x-text="p.charAt(0).toUpperCase() + p.slice(1)"
                 ></button>
               </template>
@@ -6116,18 +6114,18 @@
         <!-- ═══ ACTIVITY SUB-TAB ═══ -->
         <div x-show="systemTab === 'activity'">
         <div class="flex items-center justify-between mb-3">
-          <div class="flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5">
+          <div class="seg-group flex">
             <button @click="setActivityView('traces')"
-              class="px-3 py-1.5 rounded-md text-sm font-medium transition-all"
-              :class="activityView === 'traces' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
+              class="seg-tab"
+              :class="activityView === 'traces' ? 'seg-tab-active' : ''"
             >Traces</button>
             <button @click="setActivityView('events')"
-              class="px-3 py-1.5 rounded-md text-sm font-medium transition-all"
-              :class="activityView === 'events' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
+              class="seg-tab"
+              :class="activityView === 'events' ? 'seg-tab-active' : ''"
             >Live Feed</button>
             <button @click="setActivityView('logs')"
-              class="px-3 py-1.5 rounded-md text-sm font-medium transition-all"
-              :class="activityView === 'logs' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
+              class="seg-tab"
+              :class="activityView === 'logs' ? 'seg-tab-active' : ''"
             >Logs</button>
           </div>
           <span x-show="activityView === 'events'" class="text-xs text-gray-600" x-text="filteredEvents.length + ' events'"></span>

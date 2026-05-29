@@ -1,8 +1,93 @@
 /* OpenLegion Dashboard — custom styles beyond Tailwind */
 
+/* ── Design tokens ─────────────────────────────────────
+   Source of truth for the surfaces, borders, accent, text,
+   radii, and font sizes consumed by the shared components
+   below (the segmented control and the nav active states).
+   They mirror the gray palette already configured in the
+   Tailwind CDN config (see index.html <head>) — the same
+   colours that elsewhere are still hand-written as one-off
+   rgba literals. Only tokens with a live consumer are
+   defined; the set grows as more of the dashboard migrates
+   onto it. No build step; plain CSS custom properties. */
+:root {
+  /* Surfaces (mirror the tailwind gray.* scale) */
+  --surface-raised: #16161f;  /* gray-850 — segmented-control fill */
+  --surface-hover:  #1e1e2a;  /* gray-800 — hover / active fill    */
+
+  /* Border — gray-700 (#2a2a3a) at low opacity */
+  --border-subtle:  rgba(42, 42, 58, 0.3);
+
+  /* Accent — indigo */
+  --accent:         #6366f1;                   /* indigo-500 */
+  --accent-text:    #a5b4fc;                   /* indigo-300 */
+  --accent-weak:    rgba(99, 102, 241, 0.14);
+
+  /* Text */
+  --text:           #e5e7eb;
+  --text-muted:     #9ca3af;
+
+  /* Radii */
+  --r-sm: 0.375rem;  /* chips, small buttons, segmented tabs */
+  --r-md: 0.5rem;    /* segmented-control container          */
+
+  /* Font sizes used by the segmented control */
+  --fs-sm: 0.75rem;
+  --fs-md: 0.875rem;
+}
+
 /* Hide panels until Alpine.js initializes */
 [x-cloak] {
   display: none !important;
+}
+
+/* ── Unified segmented control ─────────────────────────
+   One canonical look for every "pill tab" group (settings
+   sub-tabs, cost-period selector, team-hub sections, agent-
+   detail tabs, activity-view selector) that previously each
+   carried their own inline Tailwind. Put .seg-group on the
+   container and .seg-tab / .seg-tab-active on the buttons.
+   .seg-group is style-only (no `display`): callers keep their
+   own flex utility (`flex`, `flex flex-wrap`, `hidden md:flex`)
+   so responsive show/hide and wrapping behaviour is preserved. */
+.seg-group {
+  gap: 2px;
+  padding: 3px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+}
+
+.seg-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.375rem 0.75rem;
+  border-radius: var(--r-sm);
+  font-size: var(--fs-md);
+  font-weight: 500;
+  white-space: nowrap;
+  color: var(--text-muted);
+  transition: color 0.15s, background-color 0.15s, box-shadow 0.15s;
+}
+
+.seg-tab:hover {
+  color: var(--text);
+  background: rgba(42, 42, 58, 0.45);
+}
+
+.seg-tab-active,
+.seg-tab-active:hover {
+  background: var(--surface-hover);
+  color: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+/* Compact variant for tight inline headers (e.g. the team hub
+   section tabs, which share a row with the team name + kebab). */
+.seg-tab-sm {
+  padding: 0.25rem 0.625rem;
+  font-size: var(--fs-sm);
 }
 
 /* ── Agent card polish ────────────────────────────── */
@@ -232,7 +317,7 @@
 }
 
 .nav-tab-active {
-  background: rgba(42, 42, 58, 0.8);
+  background: var(--surface-hover);
   color: #fff;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
 }
@@ -242,10 +327,10 @@
 }
 
 .nav-tab-inactive {
-  color: #9ca3af;
+  color: var(--text-muted);
 }
 .nav-tab-inactive:hover {
-  color: #e5e7eb;
+  color: var(--text);
   background: rgba(42, 42, 58, 0.4);
 }
 
@@ -280,22 +365,27 @@
   flex-shrink: 0;
 }
 
+/* Active sidebar item reads as selected, not merely hovered:
+   an accent-tinted fill plus an inset left rail in the brand
+   indigo. Inset box-shadow avoids the layout shift a real
+   border-left would cause on a rounded, padded button. */
 .side-nav-tab-active {
-  background: rgba(42, 42, 58, 0.8);
+  background: var(--accent-weak);
   color: #fff;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 
 .side-nav-tab-active svg {
   opacity: 1;
+  color: var(--accent-text);
 }
 
 .side-nav-tab-inactive {
-  color: #9ca3af;
+  color: var(--text-muted);
 }
 
 .side-nav-tab-inactive:hover {
-  color: #e5e7eb;
+  color: var(--text);
   background: rgba(42, 42, 58, 0.4);
 }
 
@@ -826,7 +916,7 @@ select:focus-visible,
   transition: width 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-/* Tablet / small desktop (768-1279px): fixed-width panel so content keeps room */
+/* Tablet / small desktop (<1280px): fixed-width panel so content keeps room */
 .messenger-half {
   width: 380px;
   min-width: 0;
@@ -837,11 +927,21 @@ select:focus-visible,
   width: 100%;
 }
 
-/* Large screens (1280px+): half-viewport panel */
-@media (min-width: 1280px) {
+/* Laptops (1280-1535px): a touch wider for chat readability, but still a
+   fixed width — 50vw here was eating half the screen and squishing the
+   main page on 13"/14" laptops. */
+@media (min-width: 1280px) and (max-width: 1535px) {
+  .messenger-half {
+    width: 420px;
+  }
+}
+
+/* Genuinely wide screens (1536px+ / Tailwind 2xl): half-viewport panel,
+   where there's room for both the panel and a comfortable main column. */
+@media (min-width: 1536px) {
   .messenger-half {
     width: 50vw;
-    min-width: 400px;
+    min-width: 480px;
     max-width: 100%;
   }
 }
@@ -905,7 +1005,13 @@ select:focus-visible,
   margin-right: 380px;
 }
 
-@media (min-width: 1280px) {
+@media (min-width: 1280px) and (max-width: 1535px) {
+  .messenger-margin {
+    margin-right: 420px;
+  }
+}
+
+@media (min-width: 1536px) {
   .messenger-margin {
     margin-right: 50vw;
   }
@@ -1272,7 +1378,7 @@ select:focus-visible,
 /* ── Teams chip strip — wrap + collapse to 2 rows ─── */
 
 .team-chips-collapsed {
-  max-height: 3.75rem; /* ~2 rows of chips at the current chip height */
+  max-height: 4.5rem; /* ~2 rows at the larger (text-sm / py-1.5) chip height */
   overflow: hidden;
 }
 
