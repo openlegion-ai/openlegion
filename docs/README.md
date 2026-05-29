@@ -1,6 +1,6 @@
 # OpenLegion Documentation
 
-Comprehensive documentation for the OpenLegion multi-agent runtime.
+Comprehensive documentation for OpenLegion - a secure, self-hosted AI agent runtime for running isolated, auditable multi-agent fleets in production.
 
 ## Guides
 

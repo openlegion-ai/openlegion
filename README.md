@@ -2,7 +2,7 @@
   <img width="450" alt="openlegion-logo-new" src="https://github.com/user-attachments/assets/08912b04-8df1-4473-b679-6bbac0c3ae2f" />
 </p>
 <h3 align="center">
-  <b>The AI agent framework built for builders who can't afford a security incident.</b>
+  <b>The secure AI agent runtime for builders who can't afford a security incident.</b>
 </h3>
 <div align="center">
    
@@ -16,11 +16,11 @@
    
 </div>
 
-> **Autonomous AI agent fleets — isolated, auditable, and production-ready.**
-> Every agent runs in its own Docker container. API keys never leave the vault.
-> Chat via Telegram, Discord, Slack, or WhatsApp. Built-in cost controls. 100+ LLM providers.
+> **Run autonomous, self-hosted AI agent fleets that are isolated, auditable, and production-ready.**
+> Every agent runs in its own Docker container, API keys never leave the credential vault, and per-agent budgets cap spend.
+> A source-available, security-first OpenClaw alternative for teams. Chat via Telegram, Discord, Slack, or WhatsApp. 100+ LLM providers via LiteLLM.
 
-[Quick Start](#quick-start) · [Full Setup Guide](QUICKSTART.md) · [Why Not OpenClaw?](#why-not-openclaw) · [Docs](docs/)
+[What is OpenLegion?](#what-is-openlegion) · [Quick Start](#quick-start) · [OpenLegion vs OpenClaw](#openlegion-vs-openclaw) · [Security Model](#security-model) · [Docs](docs/)
 
 ---
 
@@ -34,8 +34,10 @@ https://github.com/user-attachments/assets/8bd3fe95-5734-474d-92f0-40616daf91ad
 
 ## Table of Contents
 
+- [What is OpenLegion?](#what-is-openlegion)
+- [Who is OpenLegion for?](#who-is-openlegion-for)
 - [Quick Start](#quick-start)
-- [Why Not OpenClaw?](#why-not-openclaw)
+- [OpenLegion vs OpenClaw](#openlegion-vs-openclaw)
 - [What It Does](#what-it-does)
 - [Architecture](#architecture)
 - [Mesh Host](#mesh-host)
@@ -51,6 +53,29 @@ https://github.com/user-attachments/assets/8bd3fe95-5734-474d-92f0-40616daf91ad
 - [Dependencies](#dependencies)
 - [Project Structure](#project-structure)
 - [Design Principles](#design-principles)
+- [FAQ](#faq)
+
+---
+
+## What is OpenLegion?
+
+OpenLegion is a **secure, self-hosted AI agent runtime** for running fleets of autonomous AI agents in production. Each agent runs in its own hardened Docker container (or microVM), with its own memory, tools, schedule, and budget. Agents never hold API keys - every LLM and API call routes through a central credential vault that also enforces per-agent spend limits. A trusted mesh host coordinates the fleet through shared state and pub/sub events, with permission ACLs checked on every cross-agent action.
+
+It is **source-available** under the Business Source License 1.1 (BSL): you can self-host it for free, read the entire ~77,000-line codebase, and audit it in a day. Managed hosting is available for teams that prefer not to run their own infrastructure. OpenLegion is built as a production- and team-focused **OpenClaw alternative** - it keeps the autonomy of single-user assistant frameworks and adds container isolation, credential vaulting, per-agent budgets, and auditable workflows.
+
+In one line: **a multi-agent framework where security, isolation, and cost control are part of the architecture, not an afterthought.**
+
+---
+
+## Who is OpenLegion for?
+
+- **Developers and AI builders** who want a programmable, self-hosted runtime for multi-agent systems instead of a hosted black box.
+- **Self-hosters and technical founders** who need AI agents that run on their own infrastructure, with data and credentials never leaving their control.
+- **Teams running agents in production** that need per-agent budgets, permission ACLs, Docker/microVM isolation, and a codebase small enough to audit.
+- **OpenClaw, CrewAI, LangGraph, and AutoGen users** who have outgrown single-user or library-only setups and now need security and cost controls around their agents.
+- **Managed-hosting customers** who want the same runtime without operating the infrastructure themselves.
+
+If you just want a personal assistant on one machine, a single-user tool is simpler. OpenLegion is for when agents become shared, always-on, or handle anything you cannot afford to leak or overspend.
 
 ---
 
@@ -102,11 +127,12 @@ openlegion reset               # destructive: wipe config/, data/, skills/* (kee
 
 ---
 
-## Why Not OpenClaw?
+## OpenLegion vs OpenClaw
 
-OpenClaw is the most popular personal AI assistant framework — 200K+ GitHub stars,
-brilliant for single-user use. For production workloads and team deployments, it
-has documented problems:
+OpenLegion is an **OpenClaw alternative built for production and team use**. OpenClaw is
+the most popular personal AI assistant framework (200K+ GitHub stars) and is genuinely
+great for single-user setups. The trade-off shows up once agents become shared, always-on,
+or handle untrusted input - areas where it has documented security and cost gaps:
 
 - **42,000+ exposed instances** with no authentication ([Bitsight, Feb 2026](https://www.bitsight.com/blog/openclaw-ai-security-risks-exposed-instances))
 - **341 malicious skills** found stealing user data ([Koi Security via The Hacker News](https://thehackernews.com/2026/02/researchers-find-341-malicious-clawhub.html))
@@ -1126,6 +1152,37 @@ config/
 
 ---
 
+## FAQ
+
+**What is OpenLegion?**
+OpenLegion is a secure, self-hosted AI agent runtime for running fleets of autonomous AI agents in isolated Docker containers. A central mesh host holds all credentials, enforces per-agent budgets and permission ACLs, and coordinates agents through shared state and pub/sub - so agents stay isolated, auditable, and cost-bounded.
+
+**Is OpenLegion open source?**
+OpenLegion is **source-available**, not open source. It is licensed under the Business Source License 1.1 (BSL): you can view, modify, and self-host the full codebase for free, but you cannot offer it as a competing hosted or SaaS product. The entire ~77,000-line `src/` tree is readable and auditable.
+
+**Can I self-host OpenLegion?**
+Yes. Self-hosting is the default and is free under the BSL. You need Python 3.10+, Docker, and at least one LLM provider key. See the [Quick Start](#quick-start) and the [full setup guide](QUICKSTART.md).
+
+**Is OpenLegion a good OpenClaw alternative?**
+For production and team use, yes - it adds container/microVM isolation, a credential vault so agents never hold API keys, per-agent budget caps, and permission ACLs on top of autonomous agents. For a single-user assistant on one machine, OpenClaw or a lighter tool may be simpler. See [OpenLegion vs OpenClaw](#openlegion-vs-openclaw).
+
+**How does OpenLegion compare to Hermes Agent?**
+Hermes Agent (Nous Research) is an open-source single-user agent known for self-authored, self-improving skills and strong default memory. OpenLegion solves a different problem: running fleets of agents safely in production. It adds per-agent container isolation, a credential vault so agents never hold API keys, per-agent budget caps, and default-deny permission ACLs - controls aimed at teams that cannot afford a security incident. If you want a self-improving personal assistant, Hermes is a strong choice; if you need isolated, auditable, cost-bounded multi-agent fleets, that is what OpenLegion is built for.
+
+**How is OpenLegion different from CrewAI, LangGraph, and AutoGen?**
+Those are primarily libraries/frameworks for orchestrating agent logic inside one process. OpenLegion is a **runtime**: it runs each agent in its own isolated container, vaults credentials away from agents, enforces budgets and ACLs at a mesh host, and ships browser automation, memory, and multi-channel chat. They are not mutually exclusive - you can run framework-style logic on top of OpenLegion's isolation and cost controls.
+
+**How does OpenLegion secure AI agents?**
+Defense-in-depth: per-agent Docker containers (or Docker Sandbox microVMs), a credential vault that proxies every API call so agents never see keys, per-agent budget caps enforced before each LLM call, default-deny permission ACLs, SSRF protection, path-traversal and prompt-injection sanitization, and an auditable codebase. See the [Security Model](#security-model) and [`docs/security.md`](docs/security.md).
+
+**What LLM providers does OpenLegion support?**
+100+ providers via [LiteLLM](https://litellm.ai) (Anthropic, OpenAI, Gemini, Moonshot, DeepSeek, xAI, Groq, Minimax, Zai, Ollama, and more), with health-tracked failover across providers.
+
+**Does OpenLegion offer managed hosting?**
+Yes. Managed hosting is available for teams that prefer not to run their own infrastructure, while self-hosting stays free under the BSL.
+
+---
+
 ## License
 
 OpenLegion.ai is source-available under the Business Source License 1.1 (BSL).
@@ -1143,6 +1200,7 @@ See [LICENSE](LICENSE) for details.
 Looking for alternatives? OpenLegion is often compared to:
 
 - **OpenClaw** — personal AI assistant, 200K+ stars, not designed for production security
+- **Hermes Agent** — open-source self-improving agent (Nous Research), strong memory and self-authored skills, single-user focused, no container isolation or credential vault
 - **nanobot** — ultra-lightweight Python agent (~4K lines), limited multi-agent support
 - **ZeroClaw** — Rust-based AI agent runtime, extreme resource efficiency, early-stage
 - **NanoClaw** — container-isolated, Claude-only, no cost tracking
@@ -1154,6 +1212,7 @@ OpenLegion differs from all of these in combining **fleet orchestration,
 Docker isolation, credential vaulting, and cost enforcement** in a single
 ~77,000-line auditable codebase.
 
-**Keywords:** autonomous AI agents, multi-agent framework, LLM agent orchestration,
-self-hosted AI agents, Docker AI agents, OpenClaw alternative, AI agent security,
-agent cost tracking, Telegram AI bot, Python AI agent framework
+**Keywords:** secure AI agent runtime, self-hosted AI agents, AI agent platform,
+multi-agent framework, autonomous AI agents, OpenClaw alternative, Hermes Agent alternative,
+OpenClaw vs Hermes Agent, AI agent security, Docker-isolated AI agents, AI agent orchestration,
+sandboxed AI agents, managed AI agent hosting
