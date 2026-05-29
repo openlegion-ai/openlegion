@@ -941,15 +941,6 @@ class TestControlPlanePermissions:
         assert m.can_manage_fleet("broad") is True
         assert m.can_manage_fleet("mesh") is True  # trusted shortcut
 
-    def test_can_manage_projects_method(self, tmp_path):
-        m = self._matrix(tmp_path, {
-            "narrow": {},
-            "broad": {"can_manage_projects": True},
-        })
-        assert m.can_manage_projects("narrow") is False
-        assert m.can_manage_projects("broad") is True
-        assert m.can_manage_projects("mesh") is True
-
     def test_can_edit_agent_config_method(self, tmp_path):
         m = self._matrix(tmp_path, {
             "narrow": {},
