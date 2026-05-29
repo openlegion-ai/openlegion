@@ -1163,6 +1163,12 @@ class AgentLoop:
                                 result={
                                     "status": "deferred",
                                     "reason": final_text[:500],
+                                    # ``summary`` mirrors the normal done-close
+                                    # convention so the done back-edge (server
+                                    # reads ``result.summary``) surfaces the
+                                    # deferral context to the originator's
+                                    # check_inbox instead of an empty event.
+                                    "summary": final_text[:500],
                                 },
                                 tokens_used=total_tokens,
                                 duration_ms=int(duration_s * 1000),
@@ -2548,6 +2554,12 @@ class AgentLoop:
                                         result_payload={
                                             "status": "deferred",
                                             "reason": response_text[:500],
+                                            # ``summary`` feeds the done
+                                            # back-edge (server reads
+                                            # ``result.summary``) so the
+                                            # originator's check_inbox shows the
+                                            # deferral reason, not an empty event.
+                                            "summary": response_text[:500],
                                         },
                                     )
                                 else:

@@ -397,6 +397,8 @@ async def test_lazy_guard_explained_deferral_closes_done():
     )
     assert result.result["status"] == "deferred"
     assert "deferring" in result.result["reason"]
+    # summary mirrors reason so the done back-edge surfaces the explanation
+    assert result.result["summary"] == result.result["reason"]
     assert loop.tasks_completed == 1
     assert loop.tasks_failed == 0
 
@@ -3484,6 +3486,8 @@ class TestOutboundEffectLazyGuard:
         payload = last_terminal.kwargs.get("result_payload") or {}
         assert payload.get("status") == "deferred"
         assert "deferring" in payload.get("reason", "")
+        # summary feeds the done back-edge → originator's check_inbox
+        assert payload.get("summary") == payload.get("reason")
 
 
 # === Bug 3 chain pin: chat() error → blocker_note wiring ===
