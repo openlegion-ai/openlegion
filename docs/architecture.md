@@ -98,7 +98,7 @@ Each agent runs in an isolated Docker container with its own FastAPI server (28 
 | `skills.py` | Skill discovery and registry; `@skill` decorator system. |
 | `mcp_client.py` | MCP server lifecycle management and tool routing. |
 | `memory.py` | SQLite + sqlite-vec + FTS5 hierarchical memory (`EMBEDDING_DIM=1536`, weighted 0.7 vector / 0.3 keyword with salience decay). |
-| `workspace.py` | Persistent markdown workspace. Scaffold files (`_SCAFFOLD_FILES`): `INSTRUCTIONS.md`, `SOUL.md`, `USER.md`, `MEMORY.md`, `HEARTBEAT.md`, `INTERFACE.md`. `TEAM.md` / `SYSTEM.md` are read-only bootstrap inclusions, not writable scaffolds (legacy `PROJECT.md` is retained as a read-only fallback for workspaces that pre-date the rename). |
+| `workspace.py` | Persistent markdown workspace. Scaffold files (`_SCAFFOLD_FILES`): `INSTRUCTIONS.md`, `SOUL.md`, `USER.md`, `MEMORY.md`, `HEARTBEAT.md`, `INTERFACE.md`. `TEAM.md` / `SYSTEM.md` are read-only bootstrap inclusions, not writable scaffolds. (Pre-rename `PROJECT.md` files are migrated to `TEAM.md` once at startup by `team_migration.py`; the bootstrap loader itself reads only `TEAM.md`/`team.md`.) |
 | `context.py` | Context window management. Flush facts at 60%, summarize-and-replace at 70%, warn at 80%. Empty summary falls back to hard prune. Write-then-compact flushes facts to `MEMORY.md` before discarding context. |
 | `llm.py` | LLM client (`chat_stream()` and `chat()`) — routes through mesh proxy, never holds keys. |
 | `mesh_client.py` | HTTP client for agent-to-mesh communication; merges `origin_header()` into `wake_agent` / `create_task`. |
@@ -246,7 +246,7 @@ through PR 2 of the project→team rename.)
 
 - **Blackboard scoping**: The `MeshClient` auto-prefixes all blackboard keys with `projects/{name}/`. An agent writing to `tasks/research_01` on the "sales" team actually writes to `projects/sales/tasks/research_01`. Agents see natural keys — the prefix is stripped on read. This is enforced at both the client (auto-namespacing) and server (permission matrix) layers.
 - **Agent visibility**: `list_agents` returns only team peers for team agents, or only the agent itself for solo agents.
-- **TEAM.md**: Only team members receive a `TEAM.md` mounted read-only into their container at `/app/TEAM.md`. Solo agents get none. (The workspace bootstrap keeps a read-only fallback for stray `PROJECT.md` files from pre-rename workspaces — the write path was retired in PR 3.)
+- **TEAM.md**: Only team members receive a `TEAM.md` mounted read-only into their container at `/app/TEAM.md`. Solo agents get none. (Pre-rename `PROJECT.md` files are migrated to `TEAM.md` once at startup by `team_migration.py`; the bootstrap loader reads only `TEAM.md`/`team.md`.)
 - **Permission management on agent create**: `POST /mesh/agents/create` writes defaults of `blackboard_read=["*"]`, `blackboard_write=["tasks/*","context/*","status/*","output/*","artifacts/*"]`, `can_publish=["*"]`, `can_subscribe=["*"]` (`src/host/server.py:2958-2965`). The effective per-team scope comes from the MeshClient's auto-prefix at runtime, not from the on-disk permission file.
 - **Remove from team**: When an agent is removed from a team, `blackboard_read` and `blackboard_write` are cleared to `[]`.
 - **Solo agents**: Agents not assigned to any team have no scoped blackboard prefix, see only themselves in `list_agents`, and receive no `TEAM.md`.

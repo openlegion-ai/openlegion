@@ -96,7 +96,7 @@ An OS-level device profile is selected by `BROWSER_DEVICE_PROFILE` (`desktop-win
 
 **Team isolation:** Blackboard tools (`read_blackboard`, `write_blackboard`, `list_blackboard`, `save_artifact`) are only available to agents assigned to a team. Solo agents cannot access the blackboard — calls return an error explaining they must be added to a team first.
 
-**Team context:** Agents assigned to a team automatically receive a `TEAM.md` file mounted read-only in their workspace. This file contains the team description and shared context, visible to the agent from its first turn without any tool call. (The workspace bootstrap loader retains a read-only fallback for stray `PROJECT.md` files left behind by an old migration.)
+**Team context:** Agents assigned to a team automatically receive a `TEAM.md` file mounted read-only in their workspace. This file contains the team description and shared context, visible to the agent from its first turn without any tool call. (Pre-rename `PROJECT.md` files are migrated to `TEAM.md` once at startup; the bootstrap loader reads only `TEAM.md`/`team.md`.)
 
 ### Workspace
 

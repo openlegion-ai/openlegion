@@ -387,9 +387,9 @@ structured output and optional blackboard promotions.
 ### Chat Mode (`POST /chat`)
 
 Accepts a user message. On the first message, loads bootstrap workspace files
-into the system prompt — TEAM.md (team members only; the bootstrap loader
-retains a read-only fallback for stray `PROJECT.md` files from pre-rename
-workspaces), SYSTEM.md, INSTRUCTIONS.md, SOUL.md, USER.md, MEMORY.md — injects
+into the system prompt — TEAM.md (team members only; pre-rename `PROJECT.md`
+files are migrated to `TEAM.md` once at startup), SYSTEM.md, INSTRUCTIONS.md,
+SOUL.md, USER.md, MEMORY.md — injects
 a live Runtime Context
 block (permissions, budget, fleet, cron), and searches memory for relevant facts.
 Executes tool calls in a bounded loop with three caps from `loop.py`:
@@ -509,7 +509,7 @@ Layer 4: Learnings                ← Self-improvement through failure tracking
   │
 Layer 3: Workspace Files          ← Durable, human-readable storage
   │  Bootstrap files loaded into the first-message system prompt:
-  │    TEAM.md (team members only; legacy `PROJECT.md` read-only fallback), SYSTEM.md, INSTRUCTIONS.md,
+  │    TEAM.md (team members only; pre-rename `PROJECT.md` migrated to `TEAM.md` at startup), SYSTEM.md, INSTRUCTIONS.md,
   │    SOUL.md, USER.md, MEMORY.md
   │  Other workspace files:
   │    HEARTBEAT.md             (autonomous monitoring rules)
@@ -846,7 +846,7 @@ OPENLEGION_LOG_FORMAT=text
 
 # Plan limits (0 = unlimited). HTTP 403 once exceeded.
 # OPENLEGION_MAX_AGENTS=0
-# OPENLEGION_MAX_PROJECTS=0   # new name: OPENLEGION_MAX_TEAMS
+# OPENLEGION_MAX_TEAMS=0
 ```
 
 ### Connecting Channels

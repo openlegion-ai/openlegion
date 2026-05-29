@@ -78,9 +78,9 @@ become solo agents.
 When a team is selected, a TEAM.md banner appears above the agent grid.
 Edit it to set shared context for all team members. The content is
 pushed to running member agents on save. When no team is selected (Solo
-Agents view), the banner is hidden. (The workspace bootstrap loader on
-agents retains a read-only fallback for stray `PROJECT.md` files from
-pre-rename workspaces.)
+Agents view), the banner is hidden. (Pre-rename `PROJECT.md` files are
+migrated to `TEAM.md` once at startup; the bootstrap loader reads only
+`TEAM.md`/`team.md`.)
 
 ## Team Tab
 
