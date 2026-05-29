@@ -1114,10 +1114,75 @@ class AgentLoop:
                     # ``{"result": {"status": "noop", "reason": "..."}}``,
                     # which escapes via ``is_structured_final``.
                     if outbound_tool_calls_count == 0 and not is_structured_final:
+                        read_only_count = tool_calls_count - outbound_tool_calls_count
+                        final_text = (llm_response.content or "").strip()
+                        # Bug 3 (explained-deferral carve-out): an agent that
+                        # called at least one READ-ONLY tool to verify a
+                        # prerequisite (backpressure / dedup / state check)
+                        # AND then explained its decision in plain prose —
+                        # rather than the structured ``{"result": {...}}``
+                        # envelope — is correctly DEFERRING, not ghosting. It
+                        # examined state and made a reasoned call. Close as
+                        # ``done`` with a ``deferred`` result payload (mirrors
+                        # the structured-noop success shape; ``deferred`` lives
+                        # only inside the payload — there is no ``deferred``
+                        # task STATUS, see VALID_STATUSES). The genuine ghost
+                        # case (zero tools, OR no explanation) still hard-fails
+                        # below.
+                        if read_only_count > 0 and final_text:
+                            self.state = "idle"
+                            self.current_task = None
+                            self.tasks_completed += 1
+                            logger.info(
+                                "execute_task explained-deferral carve-out for "
+                                "task=%s: iterations=%d tokens=%d "
+                                "outbound_tool_calls=0 read_only_tool_calls=%d "
+                                "non_empty_final=True — closing done with "
+                                "deferred result (agent examined state via "
+                                "read-only tools and explained its decision)",
+                                assignment.task_id, iterations_executed,
+                                total_tokens, read_only_count,
+                            )
+                            if self.workspace:
+                                self.workspace.append_activity(
+                                    trigger="task",
+                                    summary=(
+                                        f"Task deferred: {assignment.task_type} | "
+                                        f"{iterations_executed} iterations, "
+                                        f"{total_tokens} tokens, {duration_s}s | "
+                                        f"{read_only_count} read-only tool call(s)"
+                                    ),
+                                    tools_used=[],
+                                    duration_ms=int(duration_s * 1000),
+                                    tokens_used=total_tokens,
+                                    outcome="deferred",
+                                )
+                            result = TaskResult(
+                                task_id=assignment.task_id,
+                                status="complete",
+                                result={
+                                    "status": "deferred",
+                                    "reason": final_text[:500],
+                                    # ``summary`` mirrors the normal done-close
+                                    # convention so the done back-edge (server
+                                    # reads ``result.summary``) surfaces the
+                                    # deferral context to the originator's
+                                    # check_inbox instead of an empty event.
+                                    "summary": final_text[:500],
+                                },
+                                tokens_used=total_tokens,
+                                duration_ms=int(duration_s * 1000),
+                            )
+                            self._last_result = result
+                            logger.info(
+                                "execute_task exit branch=explained_deferral "
+                                "status=%s iterations=%d tokens=%d",
+                                result.status, iterations_executed, total_tokens,
+                            )
+                            return result
                         self.state = "idle"
                         self.current_task = None
                         self.tasks_failed += 1
-                        read_only_count = tool_calls_count - outbound_tool_calls_count
                         logger.error(
                             "execute_task lazy-completion guard tripped for "
                             "task=%s: iterations=%d tokens=%d "
@@ -2462,37 +2527,73 @@ class AgentLoop:
                                     (t.get("tool") or t.get("name") or "?")
                                     for t in tool_outputs
                                 ]
-                                logger.error(
-                                    "chat lazy-completion guard tripped for "
-                                    "handoff task=%s: outbound_effect=False "
-                                    "structured_final=False tools_called=%s "
-                                    "— auto-closing as failed (LLM either "
-                                    "made no tool calls or called only "
-                                    "read-only / diagnostic tools)",
-                                    task_id, tool_names,
-                                )
-                                read_only_summary = (
-                                    f" (read-only tools called: {tool_names})"
-                                    if tool_names else ""
-                                )
-                                await self._auto_close_task(
-                                    task_id, "failed",
-                                    error=(
-                                        "no_outbound_effects: the recipient "
-                                        "completed the turn without producing "
-                                        "any outbound effect (no hand_off, "
-                                        "write_blackboard, notify_user, "
-                                        "publish_event, etc.) and without "
-                                        "returning a structured "
-                                        "{\"result\": {...}} payload."
-                                        f"{read_only_summary} Handoff tasks "
-                                        "must either perform real work via an "
-                                        "outbound tool OR return a structured "
-                                        "result envelope (e.g. {\"result\": "
-                                        "{\"status\": \"noop\", \"reason\": "
-                                        "\"...\"}})."
-                                    ),
-                                )
+                                # Bug 3 (explained-deferral carve-out): if the
+                                # turn called at least one READ-ONLY tool AND
+                                # produced a non-empty prose explanation, the
+                                # recipient correctly DEFERRED (examined state
+                                # and decided) rather than ghosting. Close as
+                                # ``done`` with a ``deferred`` result payload
+                                # (mirrors the structured-noop success shape;
+                                # ``deferred`` lives only inside the payload,
+                                # the task STATUS stays ``done``). The genuine
+                                # ghost case — zero tools OR empty response —
+                                # still hard-fails below.
+                                if tool_outputs and response_text.strip():
+                                    logger.info(
+                                        "chat explained-deferral carve-out for "
+                                        "handoff task=%s: outbound_effect=False "
+                                        "non_empty_response=True tools_called=%s "
+                                        "— auto-closing done with deferred "
+                                        "result (recipient examined state via "
+                                        "read-only tools and explained its "
+                                        "decision)",
+                                        task_id, tool_names,
+                                    )
+                                    await self._auto_close_task(
+                                        task_id, "done",
+                                        result_payload={
+                                            "status": "deferred",
+                                            "reason": response_text[:500],
+                                            # ``summary`` feeds the done
+                                            # back-edge (server reads
+                                            # ``result.summary``) so the
+                                            # originator's check_inbox shows the
+                                            # deferral reason, not an empty event.
+                                            "summary": response_text[:500],
+                                        },
+                                    )
+                                else:
+                                    logger.error(
+                                        "chat lazy-completion guard tripped for "
+                                        "handoff task=%s: outbound_effect=False "
+                                        "structured_final=False tools_called=%s "
+                                        "— auto-closing as failed (LLM either "
+                                        "made no tool calls or called only "
+                                        "read-only / diagnostic tools)",
+                                        task_id, tool_names,
+                                    )
+                                    read_only_summary = (
+                                        f" (read-only tools called: {tool_names})"
+                                        if tool_names else ""
+                                    )
+                                    await self._auto_close_task(
+                                        task_id, "failed",
+                                        error=(
+                                            "no_outbound_effects: the recipient "
+                                            "completed the turn without producing "
+                                            "any outbound effect (no hand_off, "
+                                            "write_blackboard, notify_user, "
+                                            "publish_event, etc.) and without "
+                                            "returning a structured "
+                                            "{\"result\": {...}} payload."
+                                            f"{read_only_summary} Handoff tasks "
+                                            "must either perform real work via an "
+                                            "outbound tool OR return a structured "
+                                            "result envelope (e.g. {\"result\": "
+                                            "{\"status\": \"noop\", \"reason\": "
+                                            "\"...\"}})."
+                                        ),
+                                    )
                             else:
                                 summary = response_text[:500]
                                 await self._auto_close_task(

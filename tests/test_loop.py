@@ -357,6 +357,83 @@ async def test_lazy_guard_fires_on_iter0_text_only_with_tools_available():
 
 
 @pytest.mark.asyncio
+async def test_lazy_guard_explained_deferral_closes_done():
+    """Bug 3 (explained-deferral carve-out): an agent that calls a
+    READ-ONLY tool to verify a prerequisite AND then explains its
+    decision in plain prose (not the structured ``{"result": {...}}``
+    envelope) is correctly DEFERRING, not ghosting. The task closes as
+    ``complete`` with a ``deferred`` result payload — distinct from the
+    genuine ghost case (zero tools / empty text) which still fails."""
+    responses = [
+        # Iter 0: call a read-only tool to check backpressure / dedup.
+        LLMResponse(
+            content="",
+            tool_calls=[ToolCallInfo(name="read_blackboard", arguments={"key": "queue"})],
+            tokens_used=20,
+        ),
+        # Iter 1: explain the deferral decision in plain prose (NOT a
+        # structured result envelope).
+        LLMResponse(
+            content=(
+                "The upstream queue already has a pending item for this "
+                "request, so I'm deferring to avoid duplicate work."
+            ),
+            tokens_used=30,
+        ),
+    ]
+    loop = _make_loop(responses)
+    loop.skills.get_tool_definitions = MagicMock(
+        return_value=[{"type": "function", "function": {"name": "read_blackboard"}}]
+    )
+    loop.skills.execute = AsyncMock(return_value={"value": "pending"})
+    assignment = TaskAssignment(
+        workflow_id="wf1", step_id="s1", task_type="research",
+        input_data={"query": "test"},
+    )
+    result = await loop.execute_task(assignment)
+    assert result.status == "complete", (
+        f"explained read-only deferral must close done, not failed; "
+        f"got status={result.status} error={result.error}"
+    )
+    assert result.result["status"] == "deferred"
+    assert "deferring" in result.result["reason"]
+    # summary mirrors reason so the done back-edge surfaces the explanation
+    assert result.result["summary"] == result.result["reason"]
+    assert loop.tasks_completed == 1
+    assert loop.tasks_failed == 0
+
+
+@pytest.mark.asyncio
+async def test_lazy_guard_read_only_empty_text_still_fails():
+    """Ghost-case preservation: a read-only tool call followed by an
+    EMPTY response (no explanation) is NOT a deferral — it's a ghost
+    turn. The carve-out requires non-empty prose, so this still fails."""
+    responses = [
+        LLMResponse(
+            content="",
+            tool_calls=[ToolCallInfo(name="read_blackboard", arguments={"key": "queue"})],
+            tokens_used=20,
+        ),
+        # Iter 1: empty / whitespace-only — no explanation.
+        LLMResponse(content="   ", tokens_used=30),
+    ]
+    loop = _make_loop(responses)
+    loop.skills.get_tool_definitions = MagicMock(
+        return_value=[{"type": "function", "function": {"name": "read_blackboard"}}]
+    )
+    loop.skills.execute = AsyncMock(return_value={"value": "pending"})
+    assignment = TaskAssignment(
+        workflow_id="wf1", step_id="s1", task_type="research",
+        input_data={"query": "test"},
+    )
+    result = await loop.execute_task(assignment)
+    assert result.status == "failed"
+    assert "no_outbound_effects" in (result.error or "")
+    assert loop.tasks_failed == 1
+    assert loop.tasks_completed == 0
+
+
+@pytest.mark.asyncio
 async def test_lazy_guard_passes_iter0_structured_noop():
     """Counter-test to the iter-0 fix: a legitimate one-shot noop task
     must still complete when the LLM returns the documented contract
@@ -3365,6 +3442,52 @@ class TestOutboundEffectLazyGuard:
             "outbound-effect turn must close as 'done', not 'failed'; "
             f"calls: {loop._auto_close_task.await_args_list}"
         )
+
+    @pytest.mark.asyncio
+    async def test_chat_handoff_read_only_with_prose_auto_closes_deferred(self):
+        """Bug 3 (explained-deferral carve-out): a handoff turn whose
+        tool_outputs are ALL read-only (no outbound effect) BUT whose
+        response is non-empty prose is a correct DEFERRAL, not a ghost.
+        It auto-closes as ``done`` with a ``deferred`` result payload
+        instead of ``failed`` (which polluted failure metrics)."""
+        loop = _make_loop()
+
+        async def fake_inner(_msg):
+            return {
+                "response": (
+                    "Already a pending dedup entry on the blackboard for "
+                    "this request — deferring to avoid duplicate work."
+                ),
+                "tool_outputs": [
+                    {
+                        "tool": "read_blackboard",
+                        "input": {"key": "queue"},
+                        "output": {"value": "pending"},
+                    },
+                ],
+                "tokens_used": 5,
+            }
+        loop._chat_inner = fake_inner
+        loop._auto_close_task = AsyncMock(return_value=None)
+
+        await loop.chat("hi", task_id="task_deferred")
+
+        terminal_calls = [
+            c for c in loop._auto_close_task.await_args_list
+            if len(c.args) >= 2 and c.args[1] in ("done", "failed")
+        ]
+        assert terminal_calls
+        last_terminal = terminal_calls[-1]
+        assert last_terminal.args[1] == "done", (
+            "read-only turn WITH a prose explanation must close as 'done' "
+            f"(deferral), not 'failed'; calls: "
+            f"{loop._auto_close_task.await_args_list}"
+        )
+        payload = last_terminal.kwargs.get("result_payload") or {}
+        assert payload.get("status") == "deferred"
+        assert "deferring" in payload.get("reason", "")
+        # summary feeds the done back-edge → originator's check_inbox
+        assert payload.get("summary") == payload.get("reason")
 
 
 # === Bug 3 chain pin: chat() error → blocker_note wiring ===
