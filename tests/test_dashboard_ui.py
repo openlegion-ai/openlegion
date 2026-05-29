@@ -422,16 +422,19 @@ class TestNotificationsBellMarkup:
         #    hides the dropdown entirely when empty.
         assert "No recent activity" not in _INDEX_HTML
 
-    def test_only_one_notifications_bell_renders(self):
-        # The bell SVG path is identifying enough — both Phase 1 and
-        # Phase 2 used the same ``M18 8A6 6 0 0...`` Feather icon. After
-        # the fix exactly one bell remains in the top-nav.
+    def test_notifications_bell_renders_once_per_breakpoint(self):
+        # The shell folds the desktop top bar into the sidebar, so the
+        # Phase-2 bell now renders TWICE: once in the mobile/tablet top
+        # bar (visible <md) and once in the desktop sidebar tray (visible
+        # md+). Only one is ever visible — the other's container is
+        # display:none — but both are in the DOM. The legacy Phase-1 bell
+        # is still guarded separately (test_legacy_notifications_bell_removed),
+        # so two here means "one per breakpoint", not a legacy regression.
         # Match the bell-shape path with whitespace-tolerance (Phase 1
-        # used ``A6 6 0 0 0`` while Phase 2 collapsed to ``A6 6 0 006``;
-        # any future SVG change still picks both up).
+        # used ``A6 6 0 0 0`` while Phase 2 collapsed to ``A6 6 0 006``).
         bells = re.findall(r'M18 8A6 6 0\s*0?\s*0?6 8c0 7-3 9-3 9h18s-3-2-3-9', _INDEX_HTML)
-        assert len(bells) == 1, (
-            f"Expected exactly one notifications bell SVG, found {len(bells)}"
+        assert len(bells) == 2, (
+            f"Expected exactly two notifications bells (one per breakpoint), found {len(bells)}"
         )
 
 
@@ -2280,7 +2283,10 @@ def _has_legacy_notifications_bell(html: str) -> bool:
 
 
 class TestNotificationsBellSingleton:
-    """Only one notifications bell should render after PR-B lands."""
+    """After PR-B (legacy bell removed) the only bells are the Phase-2
+    bell rendered once per responsive breakpoint (mobile top bar + desktop
+    sidebar tray) — see the shell fold-down. The legacy Phase-1 bell must
+    stay gone."""
 
     @pytest.mark.skipif(
         _has_legacy_notifications_bell(_INDEX_HTML),
@@ -2299,14 +2305,17 @@ class TestNotificationsBellSingleton:
         _has_legacy_notifications_bell(_INDEX_HTML),
         reason="depends on PR-B: only one bell after legacy is removed",
     )
-    def test_only_one_notifications_bell_renders(self):
-        """Exactly one bell SVG sits in the top-nav."""
-        # The bell SVG path is unique enough to count occurrences.
-        # Both the Phase 1 and Phase 2 variants share this path string.
+    def test_notifications_bell_renders_once_per_breakpoint(self):
+        """Exactly two Phase-2 bells: mobile top bar + desktop sidebar."""
+        # The bell SVG path is unique enough to count occurrences. The
+        # shell renders the bell once per responsive nav container (the
+        # mobile/tablet top bar and the desktop sidebar tray), only one
+        # of which is ever visible. The legacy Phase-1 bell is guarded by
+        # test_legacy_notifications_bell_removed above.
         bell_path = 'M18 8A6 6 0 0'
         count = _INDEX_HTML.count(bell_path)
-        assert count == 1, (
-            f"expected exactly 1 notifications bell after PR-B, got {count}"
+        assert count == 2, (
+            f"expected exactly 2 notifications bells (one per breakpoint), got {count}"
         )
 
 
