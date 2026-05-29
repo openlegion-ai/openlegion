@@ -420,6 +420,8 @@ class TestOperatorConstants:
         assert "stale_tasks_24h_count" in _OPERATOR_HEARTBEAT
         assert "execution_failures_24h_count" in _OPERATOR_HEARTBEAT
         assert "chain_breaks_24h_count" in _OPERATOR_HEARTBEAT
+        # Bug 6 — operator's own untriaged-inbox depth surfaces here.
+        assert "inbox_stale_count" in _OPERATOR_HEARTBEAT
         assert "per_agent_cost_vs_yesterday_ratio" in _OPERATOR_HEARTBEAT
         # The dead failure_rate threshold rule must NOT be back.
         assert "failure_rate > 0.30" not in _OPERATOR_HEARTBEAT

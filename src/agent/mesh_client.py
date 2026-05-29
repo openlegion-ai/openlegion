@@ -1288,6 +1288,23 @@ class MeshClient:
         _raise_with_body(response)
         return response.json()
 
+    async def read_user_notifications(
+        self, hours: float = 24, limit: int = 50,
+    ) -> dict:
+        """Operator-tier read of recent agent→user notifications.
+
+        Backs the operator's ``read_user_notifications`` tool. Returns
+        ``{notifications: [{from, message, ts}, ...]}`` with RAW messages
+        — the tool sanitizes each at its boundary. 403 if the caller
+        isn't operator/internal.
+        """
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/user-notifications"
+            f"?hours={hours}&limit={int(limit)}",
+        )
+        _raise_with_body(response)
+        return response.json()
+
     async def list_task_inbox(self, assignee: str | None = None) -> list[dict]:
         """List tasks assigned to ``assignee`` (defaults to self)."""
         target = assignee or self.agent_id
