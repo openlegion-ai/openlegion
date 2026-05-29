@@ -99,6 +99,66 @@ class LLMClient:
                 params[k] = v
 
     @staticmethod
+    def _raise_classified_error(
+        error_msg: str,
+        error_type: str | None,
+        error_meta: dict,
+        *,
+        prefix: str,
+    ) -> None:
+        """Raise the typed exception for a mesh error payload. Always raises.
+
+        Fix 3 (seam follow-up): the mesh proxy tags distinguished exceptions on
+        APIProxyResponse.error_type so we can re-raise the same type the agent
+        loop expects to catch. Without this, every credential failure looks
+        like a generic RuntimeError to the loop and the quarantine path doesn't
+        trigger via the agent's report channel (mesh also records directly, but
+        the agent-side branches still need the type).
+
+        Shared by ``chat`` (``prefix="LLM call failed"``) and ``chat_stream``
+        (``prefix="LLM stream error"``) so the streaming path gets the same
+        ``transient`` + substring-backstop retry handling the non-streaming path
+        has always had.
+        """
+        if error_type == "auth_failure":
+            from src.shared.errors import LLMAuthError
+            raise LLMAuthError(
+                error_msg,
+                provider=error_meta.get("provider", "unknown"),
+                model=error_meta.get("model"),
+                http_status=error_meta.get("http_status"),
+            )
+        if error_type == "config_error":
+            from src.shared.errors import LLMConfigError
+            raise LLMConfigError(
+                error_msg,
+                provider=error_meta.get("provider", "unknown"),
+                model=error_meta.get("model", ""),
+                allowed_models=set(error_meta.get("allowed_models", [])),
+                http_status=error_meta.get("http_status"),
+            )
+        if error_type == "transient":
+            # Mesh-tagged transient (Claude subscription throttle, stream
+            # interruption, empty-choices response). The mesh already
+            # classified it at the source — surface as retryable so
+            # ``_llm_call_with_retry`` backs off.
+            raise LLMRetryableError(f"{prefix}: {error_msg}")
+        # Backstop for un-tagged transient signals — third-party SDKs, future
+        # wrapper sites not yet routed through the typed channel, or paths the
+        # mesh outer handler didn't catch. Each substring corresponds to a known
+        # transient pattern; ``retrying may help`` is the deliberate suffix
+        # appended by ``friendly_streaming_error`` (src/shared/utils.py:78), so
+        # matching on it recognizes the helper's contract rather than
+        # whack-a-mole'ing message text.
+        _retryable = (
+            "rate limit", "ratelimit", "429", "too many requests",
+            "overloaded", "503", "empty response", "retrying may help",
+        )
+        if any(kw in error_msg.lower() for kw in _retryable):
+            raise LLMRetryableError(f"{prefix}: {error_msg}")
+        raise RuntimeError(f"{prefix}: {error_msg}")
+
+    @staticmethod
     def _parse_tool_calls(raw_calls: list[dict]) -> list[ToolCallInfo] | None:
         """Parse raw tool-call dicts into ToolCallInfo objects."""
         tool_calls: list[ToolCallInfo] = []
@@ -107,15 +167,31 @@ class LLMClient:
             if args is None:
                 args = {}
             elif isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except json.JSONDecodeError:
-                    logger.warning(
-                        "Malformed tool arguments for %s: %s",
-                        tc.get("name"),
-                        args[:200] if isinstance(args, str) else args,
-                    )
-                    args = {"raw": args}
+                if args.strip() == "":
+                    # Legitimate no-arg tool call (e.g. check_inbox()).
+                    # Empty / whitespace-only arguments are valid and MUST
+                    # keep working — do not raise.
+                    args = {}
+                else:
+                    try:
+                        args = json.loads(args)
+                    except json.JSONDecodeError as e:
+                        # Non-empty arguments that won't parse means the tool
+                        # call was truncated mid-stream (provider hit the output
+                        # token cap mid-tool-call, or the stream dropped before
+                        # the JSON closed). Treat as retryable so
+                        # ``_llm_call_with_retry``'s backoff re-issues the call
+                        # (and the streaming caller falls back to non-streaming
+                        # where a complete response can assemble) rather than
+                        # dispatching a ``{"raw": <truncated>}`` stub that fails
+                        # downstream with a confusing missing-required-param
+                        # error. (Incident: ``edit_agent`` received a payload
+                        # whose JSON cut off mid-string, e.g.
+                        # ``{"agent_id": "page-validator", "field": ...``.)
+                        raise LLMRetryableError(
+                            f"Truncated tool-call arguments for "
+                            f"{tc.get('name')!r}: {args[:200]}"
+                        ) from e
             # json.loads can return non-dict types (null→None, "42"→int,
             # "[1,2]"→list).  Normalise to dict so ToolCallInfo validation
             # and downstream execute() don't crash.
@@ -161,54 +237,12 @@ class LLMClient:
         data = response.json()
 
         if not data.get("success"):
-            error_msg = data.get("error", "")
-            # Fix 3 (seam follow-up): the mesh proxy tags distinguished
-            # exceptions on APIProxyResponse.error_type so we can re-raise
-            # the same type the agent loop expects to catch. Without
-            # this, every credential failure looks like a generic
-            # RuntimeError to the loop and the quarantine path doesn't
-            # trigger via the agent's report channel (mesh also records
-            # directly, but the agent-side branches still need the type).
-            error_type = data.get("error_type")
-            error_meta = data.get("error_meta") or {}
-            if error_type == "auth_failure":
-                from src.shared.errors import LLMAuthError
-                raise LLMAuthError(
-                    error_msg,
-                    provider=error_meta.get("provider", "unknown"),
-                    model=error_meta.get("model"),
-                    http_status=error_meta.get("http_status"),
-                )
-            if error_type == "config_error":
-                from src.shared.errors import LLMConfigError
-                raise LLMConfigError(
-                    error_msg,
-                    provider=error_meta.get("provider", "unknown"),
-                    model=error_meta.get("model", ""),
-                    allowed_models=set(error_meta.get("allowed_models", [])),
-                    http_status=error_meta.get("http_status"),
-                )
-            if error_type == "transient":
-                # Mesh-tagged transient (Claude subscription throttle,
-                # stream interruption, empty-choices response). The mesh
-                # already classified it at the source — surface as
-                # retryable so ``_llm_call_with_retry`` backs off.
-                raise LLMRetryableError(f"LLM call failed: {error_msg}")
-            # Backstop for un-tagged transient signals — third-party SDKs,
-            # future wrapper sites not yet routed through the typed channel,
-            # or paths the mesh outer handler didn't catch. Each substring
-            # corresponds to a known transient pattern; ``retrying may
-            # help`` is the deliberate suffix appended by
-            # ``friendly_streaming_error`` (src/shared/utils.py:78), so
-            # matching on it recognizes the helper's contract rather than
-            # whack-a-mole'ing message text.
-            _retryable = (
-                "rate limit", "ratelimit", "429", "too many requests",
-                "overloaded", "503", "empty response", "retrying may help",
+            self._raise_classified_error(
+                data.get("error", ""),
+                data.get("error_type"),
+                data.get("error_meta") or {},
+                prefix="LLM call failed",
             )
-            if any(kw in error_msg.lower() for kw in _retryable):
-                raise LLMRetryableError(f"LLM call failed: {error_msg}")
-            raise RuntimeError(f"LLM call failed: {error_msg}")
 
         result = data["data"]
         return LLMResponse(
@@ -271,29 +305,19 @@ class LLMClient:
                     continue
 
                 if "error" in data:
-                    # Fix 3 (seam follow-up): distinguished error types
-                    # ride the SSE payload so the agent loop can route
-                    # to the auth-failure / config-error branches.
-                    error_type = data.get("error_type")
-                    error_meta = data.get("error_meta") or {}
-                    if error_type == "auth_failure":
-                        from src.shared.errors import LLMAuthError
-                        raise LLMAuthError(
-                            data["error"],
-                            provider=error_meta.get("provider", "unknown"),
-                            model=error_meta.get("model"),
-                            http_status=error_meta.get("http_status"),
-                        )
-                    if error_type == "config_error":
-                        from src.shared.errors import LLMConfigError
-                        raise LLMConfigError(
-                            data["error"],
-                            provider=error_meta.get("provider", "unknown"),
-                            model=error_meta.get("model", ""),
-                            allowed_models=set(error_meta.get("allowed_models", [])),
-                            http_status=error_meta.get("http_status"),
-                        )
-                    raise RuntimeError(f"LLM stream error: {data['error']}")
+                    # Distinguished error types ride the SSE payload so the
+                    # agent loop can route to the auth-failure / config-error
+                    # branches. Shared helper also adds the ``transient`` +
+                    # substring-backstop retry handling that ``chat`` has —
+                    # closing the streaming-path asymmetry (a mid-stream
+                    # transient is now retried rather than raised as a bare
+                    # RuntimeError).
+                    self._raise_classified_error(
+                        data["error"],
+                        data.get("error_type"),
+                        data.get("error_meta") or {},
+                        prefix="LLM stream error",
+                    )
 
                 if data.get("type") == "text_delta":
                     yield {"type": "text_delta", "content": data.get("content", "")}

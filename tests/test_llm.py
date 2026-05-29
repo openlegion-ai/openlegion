@@ -13,11 +13,13 @@ test pins the post-fix behavior: empty-response is now retryable.
 
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from src.agent.llm import LLMClient, LLMRetryableError
+from src.shared.errors import LLMAuthError
 
 
 def _make_mesh_response(
@@ -155,3 +157,172 @@ async def test_unrelated_runtime_error_still_permanent():
         await client.chat(system="s", messages=[{"role": "user", "content": "x"}])
     # Must NOT be the retryable subclass.
     assert not isinstance(exc_info.value, LLMRetryableError)
+
+
+# --------------------------------------------------------------------------
+# _parse_tool_calls — truncated-args retryable carve-out
+#
+# A streamed tool call whose JSON ``arguments`` got truncated (provider hit
+# the output token cap mid-tool-call, or the stream dropped before the JSON
+# closed) used to degrade to ``{"raw": <truncated>}`` and dispatch a stub that
+# failed downstream with a confusing missing-required-param error (the
+# ``edit_agent`` incident). It is now raised as ``LLMRetryableError`` so the
+# call is retried (and the streaming caller falls back to non-streaming).
+# Empty / whitespace-only args remain a legitimate no-arg call.
+# --------------------------------------------------------------------------
+
+
+def test_parse_tool_calls_truncated_args_raises_retryable():
+    """Non-empty unparseable args = truncated mid-stream → retryable."""
+    raw = [{
+        "name": "edit_agent",
+        "arguments": '{"agent_id": "page-validator", "field": "instructions", "value": "You are page-validator',
+    }]
+    with pytest.raises(LLMRetryableError) as exc_info:
+        LLMClient._parse_tool_calls(raw)
+    # Message surfaces the tool name + a truncated preview for the operator.
+    assert "edit_agent" in str(exc_info.value)
+
+
+def test_parse_tool_calls_empty_string_args_is_no_arg_call():
+    """Empty-string args = legitimate no-arg tool call → {} (no raise)."""
+    raw = [{"name": "check_inbox", "arguments": ""}]
+    parsed = LLMClient._parse_tool_calls(raw)
+    assert parsed is not None
+    assert len(parsed) == 1
+    assert parsed[0].name == "check_inbox"
+    assert parsed[0].arguments == {}
+
+
+def test_parse_tool_calls_whitespace_only_args_is_no_arg_call():
+    """Whitespace-only args = legitimate no-arg tool call → {} (no raise)."""
+    raw = [{"name": "check_inbox", "arguments": "   \n\t  "}]
+    parsed = LLMClient._parse_tool_calls(raw)
+    assert parsed is not None
+    assert parsed[0].arguments == {}
+
+
+def test_parse_tool_calls_valid_object_args_parsed():
+    """Valid JSON object args parse into the dict unchanged."""
+    raw = [{"name": "edit_agent", "arguments": '{"agent_id": "x", "field": "model"}'}]
+    parsed = LLMClient._parse_tool_calls(raw)
+    assert parsed is not None
+    assert parsed[0].arguments == {"agent_id": "x", "field": "model"}
+
+
+def test_parse_tool_calls_valid_non_dict_json_normalised_to_empty():
+    """Valid-but-non-dict JSON (e.g. ``"42"`` → int) normalises to {} and
+    MUST NOT raise — distinct from the truncated-args case."""
+    raw = [{"name": "noop", "arguments": "42"}]
+    parsed = LLMClient._parse_tool_calls(raw)
+    assert parsed is not None
+    assert parsed[0].arguments == {}
+
+
+# --------------------------------------------------------------------------
+# chat_stream — error classification + truncated done-frame
+# --------------------------------------------------------------------------
+
+
+def _make_stream_client(frames: list[dict]) -> LLMClient:
+    """Build an LLMClient whose ``client.stream(...)`` yields the given SSE
+    ``data:`` frames via an async context manager."""
+    client = LLMClient(
+        mesh_url="http://mesh.test",
+        agent_id="test-agent",
+        default_model="anthropic/claude-sonnet-4-6",
+    )
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        async def aiter_lines(self):
+            for frame in frames:
+                yield f"data: {json.dumps(frame)}"
+
+    class _FakeStreamCtx:
+        async def __aenter__(self):
+            return _FakeResponse()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    mock_http = MagicMock()
+    mock_http.stream = MagicMock(return_value=_FakeStreamCtx())
+    client._get_client = AsyncMock(return_value=mock_http)
+    return client
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_truncated_done_frame_raises_retryable():
+    """A ``done`` frame carrying a truncated tool-call ``arguments`` must
+    raise ``LLMRetryableError`` out of the generator so the loop falls back
+    to non-streaming."""
+    client = _make_stream_client([
+        {
+            "type": "done",
+            "content": "",
+            "tool_calls": [{
+                "name": "edit_agent",
+                "arguments": '{"agent_id": "page-validator", "field": "instructions", "value": "You are',
+            }],
+            "tokens_used": 10,
+            "model": "anthropic/claude-sonnet-4-6",
+        },
+    ])
+    with pytest.raises(LLMRetryableError):
+        async for _ in client.chat_stream(
+            system="s", messages=[{"role": "user", "content": "x"}],
+        ):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_transient_error_type_retryable():
+    """Mesh-tagged ``error_type="transient"`` mid-stream must now retry
+    (was a bare RuntimeError before the helper extraction)."""
+    client = _make_stream_client([
+        {
+            "error": "Connection to the AI provider was interrupted.",
+            "error_type": "transient",
+            "error_meta": {"provider": "anthropic"},
+        },
+    ])
+    with pytest.raises(LLMRetryableError):
+        async for _ in client.chat_stream(
+            system="s", messages=[{"role": "user", "content": "x"}],
+        ):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_untagged_substring_backstop_retryable():
+    """Substring backstop now works for streaming — an untagged error whose
+    message contains ``retrying may help`` is retryable."""
+    client = _make_stream_client([
+        {"error": "Provider hiccup. Retrying may help."},
+    ])
+    with pytest.raises(LLMRetryableError):
+        async for _ in client.chat_stream(
+            system="s", messages=[{"role": "user", "content": "x"}],
+        ):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_auth_failure_still_raises_auth_error():
+    """Sanity — typed ``auth_failure`` still raises ``LLMAuthError`` (not
+    the retryable subclass) through the shared helper."""
+    client = _make_stream_client([
+        {
+            "error": "Invalid API key",
+            "error_type": "auth_failure",
+            "error_meta": {"provider": "anthropic", "http_status": 401},
+        },
+    ])
+    with pytest.raises(LLMAuthError):
+        async for _ in client.chat_stream(
+            system="s", messages=[{"role": "user", "content": "x"}],
+        ):
+            pass
