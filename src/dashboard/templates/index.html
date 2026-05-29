@@ -88,12 +88,12 @@
         <p class="text-sm text-gray-400 mt-2" x-text="confirmModal.message"></p>
         <div class="flex justify-end gap-3 mt-6">
           <button @click="cancelConfirm()" :disabled="confirmLoading"
-            class="px-4 py-2 text-sm bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg transition-colors disabled:opacity-50">
+            class="btn btn-lg btn-secondary">
             Cancel
           </button>
           <button @click="executeConfirm()" :disabled="confirmLoading"
-            class="px-4 py-2 text-sm rounded-lg transition-colors font-medium inline-flex items-center gap-1.5 disabled:opacity-50"
-            :class="confirmModal.destructive ? 'bg-red-600 hover:bg-red-500 text-white' : 'bg-indigo-600 hover:bg-indigo-500 text-white'">
+            class="btn btn-lg"
+            :class="confirmModal.destructive ? 'btn-danger' : 'btn-primary'">
             <svg x-show="confirmLoading" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
             <span x-text="confirmLoading ? 'Working...' : 'Confirm'"></span>
           </button>
