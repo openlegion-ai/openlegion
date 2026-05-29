@@ -183,6 +183,46 @@
       <div class="px-4 py-4 flex items-center gap-2.5 shrink-0">
         <img src="/dashboard/static/logo.png" alt="OpenLegion" width="24" height="24" class="rounded-full">
         <span class="text-base font-bold text-white tracking-tight">OpenLegion</span>
+        <!-- Notifications bell — tucked into the brand row (top-of-app
+             convention), so it reads as part of the chrome rather than
+             floating by the search box. Dropdown opens downward. The
+             mobile top bar keeps its own copy (sidebar hidden below md). -->
+        <div class="relative ml-auto" @click.away="if ($el.offsetParent !== null) notificationsOpen = false">
+          <button @click="toggleNotifications()"
+            class="relative flex items-center justify-center w-8 h-8 rounded-md text-gray-400 hover:text-gray-200 hover:bg-gray-800/60 transition-colors cursor-pointer"
+            :title="notificationsUnreadCount > 0 ? notificationsUnreadCount + ' new notifications' : 'Notifications'"
+            :aria-label="notificationsUnreadCount > 0 ? notificationsUnreadCount + ' unread notifications' : 'Notifications'"
+            aria-haspopup="true" :aria-expanded="notificationsOpen">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/>
+            </svg>
+            <span x-show="notificationsUnreadCount > 0" x-cloak class="absolute top-1 right-1 w-2 h-2 rounded-full bg-indigo-400 ring-2 ring-gray-900" aria-hidden="true"></span>
+          </button>
+          <div x-show="notificationsOpen && notifications.length > 0" x-cloak
+            class="absolute left-0 top-full mt-2 w-72 max-w-[calc(100vw-2rem)] bg-gray-900 border border-gray-700 rounded-lg shadow-2xl z-50" role="menu">
+            <div class="flex items-center justify-between px-4 py-2 border-b border-gray-800">
+              <span class="text-xs text-gray-400 font-medium">Notifications</span>
+              <button x-show="notificationsUnreadCount > 0" @click="markAllNotificationsRead()" class="text-xs text-indigo-400 hover:text-indigo-300 transition-colors">Mark all as read</button>
+            </div>
+            <div class="max-h-96 overflow-y-auto custom-scrollbar">
+              <template x-for="notification in notifications" :key="notification.id">
+                <button @click="onNotificationClick(notification)" type="button"
+                  class="w-full text-left px-4 py-2.5 flex items-start gap-3 border-b border-gray-800/40 last:border-b-0 hover:bg-gray-800/40 transition-colors"
+                  :class="!notification.read_at && 'bg-indigo-900/10'">
+                  <span class="shrink-0 mt-0.5 text-sm w-5 text-center text-gray-400" x-text="notificationKindIcon(notification.kind)"></span>
+                  <div class="flex-1 min-w-0">
+                    <div class="flex items-center justify-between gap-2">
+                      <span class="text-sm text-gray-100 font-medium truncate" x-text="notification.title"></span>
+                      <span class="text-[11px] text-gray-400 shrink-0" x-text="timeAgo(notification.ts)"></span>
+                    </div>
+                    <p x-show="notification.body" class="text-xs text-gray-400 mt-0.5 line-clamp-2" x-text="notification.body"></p>
+                  </div>
+                  <span x-show="!notification.read_at" class="shrink-0 mt-1.5 w-2 h-2 rounded-full bg-indigo-400" aria-label="Unread"></span>
+                </button>
+              </template>
+            </div>
+          </div>
+        </div>
       </div>
       <nav class="flex-1 px-2 py-2 flex flex-col gap-1 overflow-y-auto" role="tablist" aria-label="Primary">
         <template x-for="tab in tabs" :key="tab.id">
@@ -239,8 +279,8 @@
           <span class="font-mono px-1 rounded bg-red-700/60 text-white text-[11px]" x-text="needsYouItems.length"></span>
         </button>
 
-        <!-- Spend + model-health + actions row -->
-        <div class="flex items-center gap-2 px-1 text-xs min-w-0">
+        <!-- Spend + model-health row -->
+        <div class="flex items-center gap-3 px-1 text-xs min-w-0">
           <button x-show="fleetTotalCost > 0" x-cloak @click="systemTab = 'costs'; switchTab('system')"
             class="flex items-center gap-1 text-gray-400 hover:text-gray-200 transition-colors min-w-0"
             title="Today's spend — view costs">
@@ -253,63 +293,6 @@
               <span class="bg-red-400 relative inline-flex rounded-full h-2 w-2"></span>
             </span>
             <span class="truncate" x-text="modelsDown + ' down'"></span>
-          </div>
-          <div class="flex items-center gap-0.5 ml-auto shrink-0">
-            <!-- Messenger side-panel toggle (hidden on Chat, where the
-                 messenger is already the page). -->
-            <button
-              x-show="activeTab !== 'chat'"
-              x-cloak
-              @click="toggleSidePanel()"
-              class="text-gray-400 hover:text-gray-200 transition-colors p-1.5 rounded relative"
-              :title="messengerSidePanelOpen ? 'Close messenger panel' : 'Open messenger panel'"
-              :aria-label="messengerSidePanelOpen ? 'Close messenger panel' : 'Open messenger panel'"
-              :aria-expanded="messengerSidePanelOpen ? 'true' : 'false'">
-              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <rect x="3" y="4" width="18" height="16" rx="2"/><line x1="14" y1="4" x2="14" y2="20"/><polyline points="8 10 11 12 8 14"/>
-              </svg>
-              <span x-show="!messengerSidePanelOpen && Object.values(chatUnread || {}).some(n => n > 0)" class="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-amber-400"></span>
-            </button>
-            <!-- Notifications bell — dropdown opens upward (anchored to the
-                 sidebar bottom). -->
-            <div class="relative" @click.away="if ($el.offsetParent !== null) notificationsOpen = false">
-              <button
-                @click="toggleNotifications()"
-                class="relative flex items-center justify-center w-8 h-8 rounded-md text-gray-400 hover:text-gray-200 hover:bg-gray-800/60 transition-colors cursor-pointer"
-                :title="notificationsUnreadCount > 0 ? notificationsUnreadCount + ' new notifications' : 'Notifications'"
-                :aria-label="notificationsUnreadCount > 0 ? notificationsUnreadCount + ' unread notifications' : 'Notifications'"
-                aria-haspopup="true"
-                :aria-expanded="notificationsOpen">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/>
-                </svg>
-                <span x-show="notificationsUnreadCount > 0" x-cloak class="absolute top-1 right-1 w-2 h-2 rounded-full bg-indigo-400 ring-2 ring-gray-900" aria-hidden="true"></span>
-              </button>
-              <div x-show="notificationsOpen && notifications.length > 0" x-cloak
-                class="absolute left-0 bottom-full mb-2 w-72 max-w-[calc(100vw-2rem)] bg-gray-900 border border-gray-700 rounded-lg shadow-2xl z-50" role="menu">
-                <div class="flex items-center justify-between px-4 py-2 border-b border-gray-800">
-                  <span class="text-xs text-gray-400 font-medium">Notifications</span>
-                  <button x-show="notificationsUnreadCount > 0" @click="markAllNotificationsRead()" class="text-xs text-indigo-400 hover:text-indigo-300 transition-colors">Mark all as read</button>
-                </div>
-                <div class="max-h-96 overflow-y-auto custom-scrollbar">
-                  <template x-for="notification in notifications" :key="notification.id">
-                    <button @click="onNotificationClick(notification)" type="button"
-                      class="w-full text-left px-4 py-2.5 flex items-start gap-3 border-b border-gray-800/40 last:border-b-0 hover:bg-gray-800/40 transition-colors"
-                      :class="!notification.read_at && 'bg-indigo-900/10'">
-                      <span class="shrink-0 mt-0.5 text-sm w-5 text-center text-gray-400" x-text="notificationKindIcon(notification.kind)"></span>
-                      <div class="flex-1 min-w-0">
-                        <div class="flex items-center justify-between gap-2">
-                          <span class="text-sm text-gray-100 font-medium truncate" x-text="notification.title"></span>
-                          <span class="text-[11px] text-gray-400 shrink-0" x-text="timeAgo(notification.ts)"></span>
-                        </div>
-                        <p x-show="notification.body" class="text-xs text-gray-400 mt-0.5 line-clamp-2" x-text="notification.body"></p>
-                      </div>
-                      <span x-show="!notification.read_at" class="shrink-0 mt-1.5 w-2 h-2 rounded-full bg-indigo-400" aria-label="Unread"></span>
-                    </button>
-                  </template>
-                </div>
-              </div>
-            </div>
           </div>
         </div>
 
@@ -413,36 +396,6 @@
           </svg>
           <span class="hidden sm:inline">Needs you</span>
           <span class="font-mono px-1 rounded bg-red-700/60 text-white text-[11px]" x-text="needsYouItems.length"></span>
-        </button>
-        <!-- Phase 1 — side-panel toggle. Hidden on Chat tab (the messenger
-             is already full-screen there). Cmd+K is reserved for the
-             command palette so we use a visible button with a tooltip;
-             keyboard users hit it via Tab. -->
-        <button
-          x-show="activeTab !== 'chat'"
-          x-cloak
-          @click="toggleSidePanel()"
-          class="text-gray-400 hover:text-gray-200 transition-colors p-1.5 rounded relative"
-          :title="messengerSidePanelOpen ? 'Close messenger panel' : 'Open messenger panel'"
-          :aria-label="messengerSidePanelOpen ? 'Close messenger panel' : 'Open messenger panel'"
-          :aria-expanded="messengerSidePanelOpen ? 'true' : 'false'"
-        >
-          <!-- Distinct from the Chat tab's chat-bubble icon: a sidebar
-               panel pictogram (rectangle + inner divider + arrow) so the
-               control reads as "open the side panel" rather than as a
-               second chat tab. The tour copy below references "panel
-               icon" to match. -->
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <rect x="3" y="4" width="18" height="16" rx="2"/>
-            <line x1="14" y1="4" x2="14" y2="20"/>
-            <polyline points="8 10 11 12 8 14"/>
-          </svg>
-          <!-- Tiny unread dot when there are unread messages anywhere
-               while the panel is closed. The aggregate is computed
-               lazily off ``chatUnread`` so we don't need a getter. -->
-          <span
-            x-show="!messengerSidePanelOpen && Object.values(chatUnread || {}).some(n => n > 0)"
-            class="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-amber-400"></span>
         </button>
         <div class="text-xs text-gray-400 hidden sm:block cursor-pointer hover:text-gray-300 transition-colors" x-show="fleetTotalCost > 0" @click="systemTab = 'costs'; switchTab('system')">
           Today: <span class="text-gray-300 font-medium" x-text="formatCost(fleetTotalCost)"></span>
@@ -548,36 +501,39 @@
 
       <!-- Operator Chat Tab -->
       <div x-show="activeTab === 'chat'" x-cloak class="h-full flex flex-col" style="min-height: calc(100vh - 8rem);">
-          <div class="flex-1 flex flex-col max-w-4xl mx-auto w-full h-full">
-            <!-- Header -->
-            <div class="flex items-center justify-between px-4 py-3 shrink-0 border-b border-gray-800/60">
-              <div class="flex items-center gap-2.5">
-                <img src="/dashboard/static/avatars/operator.png" alt="Operator" class="w-6 h-6 rounded-full">
-                <div>
-                  <h2 class="text-base font-semibold text-white">Operator</h2>
-                  <p class="text-[11px] text-gray-500 mt-0.5">Builds and manages your team</p>
-                </div>
-              </div>
-              <div class="flex items-center gap-1">
-                <!-- Reset conversation -->
-                <button @click="resetAgent('operator')"
-                  title="Reset conversation — memories preserved"
-                  class="text-gray-500 hover:text-red-400 transition-colors p-2 rounded-md"
-                  aria-label="Reset conversation">
-                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
-                    <path d="M3 3v5h5"/>
-                  </svg>
-                </button>
-                <!-- Settings -->
-                <button @click="switchTab('system'); switchSystemTab('operator')"
-                  class="text-xs px-2.5 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors flex items-center gap-1.5"
-                  title="Operator settings">
-                  <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M12 15a3 3 0 100-6 3 3 0 000 6z"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
-                  Settings
-                </button>
+          <!-- Page header — full-width contextual top nav for the chat tab.
+               Avatar alt is empty (decorative): the name sits right beside
+               it, and an empty alt avoids a doubled "Operator" if the image
+               ever fails to load. -->
+          <div class="page-header justify-between shrink-0">
+            <div class="flex items-center gap-2.5 min-w-0">
+              <img src="/dashboard/static/avatars/operator.png" alt="" class="w-7 h-7 rounded-full shrink-0">
+              <div class="min-w-0">
+                <div class="page-header-title">Operator</div>
+                <div class="page-header-subtitle">Builds and manages your team</div>
               </div>
             </div>
+            <div class="flex items-center gap-1 shrink-0">
+              <!-- Reset conversation -->
+              <button @click="resetAgent('operator')"
+                title="Reset conversation — memories preserved"
+                class="text-gray-500 hover:text-red-400 transition-colors p-2 rounded-md"
+                aria-label="Reset conversation">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+                  <path d="M3 3v5h5"/>
+                </svg>
+              </button>
+              <!-- Settings -->
+              <button @click="switchTab('system'); switchSystemTab('operator')"
+                class="text-xs px-2.5 py-1.5 rounded-md bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors flex items-center gap-1.5"
+                title="Operator settings">
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M12 15a3 3 0 100-6 3 3 0 000 6z"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+                Settings
+              </button>
+            </div>
+          </div>
+          <div class="flex-1 flex flex-col max-w-4xl mx-auto w-full min-h-0">
 
               <!-- Operator not ready -->
               <div x-show="!operatorReady" class="flex-1 flex items-center justify-center">
@@ -1662,7 +1618,7 @@
              + prominent "+ New Team" button (right, where + Add Agent
              used to sit). The Add-Agent control now lives as a card
              at the end of the agent grid below. -->
-        <div x-show="agents.length > 0" class="flex items-start gap-3 mb-3 min-w-0" x-cloak>
+        <div x-show="agents.length > 0" class="page-header min-w-0" x-cloak>
           <div class="flex-1 min-w-0 flex flex-col gap-1">
             <div class="flex flex-wrap items-center gap-1 transition-[max-height] duration-200"
                  :class="!teamFilterExpanded && teams.length > 6 ? 'team-chips-collapsed' : ''">
@@ -4105,6 +4061,15 @@
            and the pending-action queue (Task 2d) so a human can run an
            agent team end-to-end without inspecting blackboard keys. -->
       <div x-show="activeTab === 'workplace'" x-cloak x-init="loadWorkplace()">
+        <!-- Page header — KISS title only; the Work tab is a read-only
+             digest, so no invented controls (Needs-you / Goals are already
+             prominent surfaces below). -->
+        <div class="page-header">
+          <div class="min-w-0">
+            <div class="page-header-title">Work</div>
+            <div class="page-header-subtitle">What your fleet has shipped</div>
+          </div>
+        </div>
         <!-- Sticky "Needs you" panel — aggregates every kind of pending
              decision (durable propose/confirm rows, credential / browser-
              login / captcha cards in the operator chat, blocked tasks)

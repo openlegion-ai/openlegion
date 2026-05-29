@@ -474,18 +474,21 @@ function dashboard() {
 
     // System tab — sub-navigation
     systemTab: 'activity',
+    // Order: General first (its id is 'settings', relabelled "General" via
+    // systemTabLabelFor), then by how often each is used — config/monitoring
+    // up front, infrastructure plumbing last.
     systemTabs: [
+      { id: 'settings', label: 'Settings' },
       { id: 'activity', label: 'Activity' },
       { id: 'costs', label: 'Costs' },
-      { id: 'automation', label: 'Automation' },
       { id: 'integrations', label: 'Integrations' },
+      { id: 'automation', label: 'Automation' },
       { id: 'apikeys', label: 'API Keys' },
+      { id: 'operator', label: 'Operator' },
+      { id: 'browser', label: 'Browser' },
       { id: 'wallet', label: 'Wallet' },
       { id: 'network', label: 'Network' },
       { id: 'storage', label: 'Storage' },
-      { id: 'operator', label: 'Operator' },
-      { id: 'browser', label: 'Browser' },
-      { id: 'settings', label: 'Settings' },
     ],
 
     // Audit sub-tab

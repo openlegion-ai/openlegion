@@ -390,6 +390,35 @@
   background: rgba(42, 42, 58, 0.4);
 }
 
+/* ── Per-page contextual header ─────────────────────
+   The band at the top of each tab's content holding page-scoped controls
+   (chat identity, team chips, settings sections, page title). One shared
+   look — consistent height, padding and bottom rule — so the four tabs
+   read as a single contextual top-nav system even though each renders its
+   own. Horizontal insets come from the parent <main> padding. */
+.page-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-height: 3rem;
+  padding-bottom: 0.75rem;
+  margin-bottom: 1rem;
+  border-bottom: 1px solid rgba(42, 42, 58, 0.45);
+}
+
+.page-header-title {
+  font-size: 1.0625rem;
+  font-weight: 600;
+  line-height: 1.2;
+  color: #fff;
+}
+
+.page-header-subtitle {
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+  margin-top: 0.1rem;
+}
+
 /* ── Desktop sidebar (md+) ─────────────────────────── */
 
 .side-nav {
@@ -1055,14 +1084,15 @@ select:focus-visible,
   display: none;
 }
 
-/* Expand the contact list to names + previews from 1280px up. Kept to 160px
-   (not 180) so that on a 520px panel the chat column gets ~360px — the rail
-   was eating too much width and leaving the messages too narrow. Below 1280
-   (tablets/small windows) the rail stays compact (avatar-only). */
+/* Expand the contact list to names + previews from 1280px up. Trimmed to
+   132px so the chat column gets the extra width — on a 520px panel that
+   leaves the messages ~388px, which reads far more proportionally than the
+   old 160px rail. Below 1280 (tablets/small windows) the rail stays
+   compact (avatar-only). */
 @media (min-width: 1280px) {
   .messenger-sidebar {
-    width: 160px;
-    min-width: 160px;
+    width: 132px;
+    min-width: 132px;
   }
   .messenger-sidebar .messenger-contact > div.flex-1 {
     display: block;
