@@ -88,11 +88,11 @@
         <p class="text-sm text-gray-400 mt-2" x-text="confirmModal.message"></p>
         <div class="flex justify-end gap-3 mt-6">
           <button @click="cancelConfirm()" :disabled="confirmLoading"
-            class="btn btn-lg btn-secondary">
+            class="btn btn-secondary">
             Cancel
           </button>
           <button @click="executeConfirm()" :disabled="confirmLoading"
-            class="btn btn-lg"
+            class="btn"
             :class="confirmModal.destructive ? 'btn-danger' : 'btn-primary'">
             <svg x-show="confirmLoading" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
             <span x-text="confirmLoading ? 'Working...' : 'Confirm'"></span>
@@ -4751,7 +4751,7 @@
 
         <!-- Model Pricing (collapsible) -->
         <details class="group/pricing" x-show="settingsData?.model_costs && Object.keys(settingsData.model_costs).length > 0">
-          <summary class="text-xs text-gray-400 uppercase tracking-wider cursor-pointer hover:text-gray-400 transition-colors select-none list-none flex items-center gap-1.5">
+          <summary class="text-xs text-gray-400 uppercase tracking-wider cursor-pointer hover:text-gray-300 transition-colors select-none list-none flex items-center gap-1.5">
             <svg class="w-3 h-3 transition-transform group-open/pricing:rotate-90" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
             Model Pricing
           </summary>

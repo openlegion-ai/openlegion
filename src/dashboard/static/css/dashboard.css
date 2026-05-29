@@ -92,19 +92,22 @@
 }
 
 /* ── Button ─────────────────────────────────────────────
-   One action vocabulary: size (.btn-sm/md/lg) × variant
-   (.btn-primary/secondary/ghost/danger). Sizes/colours mirror
-   the dominant existing Tailwind combos (px-3 py-1.5 / px-4 py-2,
-   indigo-600 / gray-800 / red-600) so migrating a bespoke button
-   is visually neutral. Compose: class="btn btn-md btn-primary". */
+   One action vocabulary: base .btn + variant (.btn-primary/
+   secondary/danger). Sizing/colours mirror the existing modal
+   buttons (px-4 py-2, rounded-lg, indigo-600 / gray-800 / red-600)
+   so migration is visually neutral. Compose: class="btn btn-primary".
+   Size modifiers (.btn-sm/md) land when the broader rollout needs
+   them — kept out now so nothing ships without a consumer. */
 .btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 0.375rem;
+  padding: 0.5rem 1rem;
+  font-size: var(--fs-md);
   font-weight: 500;
   border: 1px solid transparent;
-  border-radius: var(--r-sm);
+  border-radius: var(--r-md);
   white-space: nowrap;
   cursor: pointer;
   transition: background-color 0.15s, color 0.15s, border-color 0.15s, opacity 0.15s;
@@ -119,20 +122,11 @@
   flex-shrink: 0;
 }
 
-/* Sizes */
-.btn-sm { padding: 0.25rem 0.625rem; font-size: var(--fs-sm); }
-.btn-md { padding: 0.375rem 0.75rem; font-size: var(--fs-md); }
-.btn-lg { padding: 0.5rem 1rem;      font-size: var(--fs-md); border-radius: var(--r-md); }
-
-/* Variants */
 .btn-primary { background: var(--accent-strong); color: #fff; }
 .btn-primary:hover:not(:disabled) { background: var(--accent); }
 
 .btn-secondary { background: var(--surface-hover); color: var(--text); }
 .btn-secondary:hover:not(:disabled) { background: #2a2a3a; color: #fff; } /* gray-700 */
-
-.btn-ghost { background: transparent; color: var(--text-muted); }
-.btn-ghost:hover:not(:disabled) { background: var(--surface-hover); color: var(--text); }
 
 .btn-danger { background: #dc2626; color: #fff; }            /* red-600 */
 .btn-danger:hover:not(:disabled) { background: #ef4444; }    /* red-500 */
