@@ -1009,7 +1009,10 @@ select:focus-visible,
   position: fixed;
   top: var(--topnav-h);                      /* mobile/tablet: dock below the top bar */
   right: 0;
-  height: calc(100% - var(--topnav-h));      /* exact remaining height — no clipped top/bottom */
+  /* dvh, not %: a fixed element resolves % against the 100vh initial
+     containing block, which on mobile overshoots the visible area and
+     pushes the composer below the fold. dvh tracks the visible viewport. */
+  height: calc(100dvh - var(--topnav-h));
   z-index: 45;                               /* above content, below modals/cmd-palette */
   transition: width 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
@@ -1037,7 +1040,7 @@ select:focus-visible,
      panel spans the full viewport height flush with the top edge. */
   .messenger-panel {
     top: 0;
-    height: 100%;
+    height: 100dvh;
   }
 }
 

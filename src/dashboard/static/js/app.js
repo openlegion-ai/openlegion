@@ -4171,18 +4171,21 @@ function dashboard() {
     // Fresh-enough timestamps (<1 min) yield empty strings from
     // formatRelativeTime — fall back to "just now" for legibility.
     agentActivityLabel(agent) {
+      // "Last activity" = the last time the agent actually WORKED, i.e. its
+      // most recent LLM call (last_worked_ts, from the usage ledger). This
+      // deliberately does NOT use last_healthy — that's a container health
+      // probe, not work. Falls back to the last task event when the agent
+      // has no recorded LLM call yet (e.g. freshly created).
       const fmt = (sec) => {
         if (!sec) return '';
-        const ms = sec * 1000;
-        const rel = this.formatRelativeTime(ms);
+        const rel = this.formatRelativeTime(sec * 1000);
         return rel || 'just now';
       };
-      const seen = fmt(agent.last_healthy);
+      const worked = fmt(agent.last_worked_ts);
+      if (worked) return 'Worked ' + worked;
       const task = fmt(agent.last_task_event_ts);
-      const parts = [];
-      if (seen) parts.push('Seen ' + seen);
-      if (task) parts.push('Task ' + task);
-      return parts.join(' · ');
+      if (task) return 'Task ' + task;
+      return '';
     },
 
     healthLabel(status) {

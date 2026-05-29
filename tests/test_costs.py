@@ -59,6 +59,26 @@ class TestCostTracking:
         names = {a["agent"] for a in agents}
         assert names == {"agent1", "agent2"}
 
+    def test_get_all_agents_last_worked_empty(self):
+        # No usage recorded yet → empty map (drives the "Last activity"
+        # card stat, which simply hides when there's no work to show).
+        assert self.tracker.get_all_agents_last_worked() == {}
+
+    def test_get_all_agents_last_worked(self):
+        import time
+
+        before = time.time()
+        self.tracker.track("agent1", "openai/gpt-4o-mini", 100, 50)
+        self.tracker.track("agent2", "openai/gpt-4o-mini", 200, 100)
+        worked = self.tracker.get_all_agents_last_worked()
+        assert set(worked) == {"agent1", "agent2"}
+        # Values are unix timestamps (UTC) of the most recent LLM call —
+        # i.e. real work, not a health probe. Allow a generous window for
+        # clock/second-rounding (usage.timestamp is whole-second UTC).
+        for ts in worked.values():
+            assert isinstance(ts, float)
+            assert before - 5 <= ts <= time.time() + 5
+
     def test_get_spend_by_model(self):
         self.tracker.track("agent1", "openai/gpt-4o", 1000, 500)
         self.tracker.track("agent2", "openai/gpt-4o", 500, 200)

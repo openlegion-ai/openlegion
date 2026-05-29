@@ -57,7 +57,7 @@
   <!-- Custom CSS -->
   <link rel="stylesheet" href="/dashboard/static/css/dashboard.css?v={{ v }}">
 </head>
-<body class="bg-gray-950 text-gray-100 min-h-screen">
+<body class="bg-gray-950 text-gray-100 h-[100dvh] overflow-hidden">
   <script>
     window.__config = {
       wsUrl: (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + "{{ ws_path }}",
@@ -67,7 +67,7 @@
     };
   </script>
 
-  <div x-data="dashboard()" x-init="init()" class="flex flex-col md:flex-row h-screen">
+  <div x-data="dashboard()" x-init="init()" class="flex flex-col md:flex-row h-[100dvh]">
 
     <!-- Toast notifications -->
     <div class="fixed top-16 left-1/2 -translate-x-1/2 z-[100] flex flex-col gap-2 items-center pointer-events-none max-w-sm w-full" role="status" aria-live="polite">
@@ -500,7 +500,7 @@
       </div>
 
       <!-- Operator Chat Tab -->
-      <div x-show="activeTab === 'chat'" x-cloak class="h-full flex flex-col" style="min-height: calc(100vh - 8rem);">
+      <div x-show="activeTab === 'chat'" x-cloak class="h-full flex flex-col" style="min-height: calc(100dvh - 8rem);">
           <!-- Page header — full-width contextual top nav for the chat tab.
                Avatar alt is empty (decorative): the name sits right beside
                it, and an empty alt avoids a doubled "Operator" if the image
@@ -2297,8 +2297,8 @@
                   ></span>
                 </div>
                 <div class="flex-1 min-w-0">
-                  <div class="flex items-center gap-2">
-                    <span class="font-semibold text-white group-hover:text-indigo-300 transition-colors truncate cursor-pointer"
+                  <div class="flex items-center gap-2 min-w-0">
+                    <span class="font-semibold text-white group-hover:text-indigo-300 transition-colors truncate cursor-pointer min-w-0"
                       @click="drillDown(agent.id)"
                       :title="agent.id" x-text="agent.id"></span>
                     <span x-show="agent.id === 'operator'" class="text-[11px] px-1.5 py-0.5 rounded bg-indigo-900/30 text-indigo-400 border border-indigo-800/40 shrink-0">system</span>
@@ -2395,10 +2395,10 @@
                   </span>
                   <span class="stat-value" x-text="formatCost(agent.daily_cost)"></span>
                 </div>
-                <div class="stat-row" x-show="agent.last_healthy || agent.last_task_event_ts">
+                <div class="stat-row" x-show="agent.last_worked_ts || agent.last_task_event_ts">
                   <span class="stat-label">
                     <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-                    Last activity<span class="setting-hint setting-hint-sm ml-0.5" tabindex="0">?<span class="setting-hint-text">"Last seen" is the most recent successful health probe; "Last task" is the most recent task event (status change, comment, completion). The two diverge when an agent is healthy but idle, or has finished work but is now offline.</span></span>
+                    Last activity<span class="setting-hint setting-hint-sm ml-0.5" tabindex="0">?<span class="setting-hint-text">When the agent last actually worked — the time of its most recent LLM call. This is NOT container health: an idle-but-healthy agent shows its real last working time. Falls back to the most recent task event if the agent hasn't made an LLM call yet.</span></span>
                   </span>
                   <span class="stat-value text-[11px]" x-text="agentActivityLabel(agent)"></span>
                 </div>
