@@ -1609,38 +1609,10 @@ class TestUndoReceiptCountdown:
         assert format_undo_countdown(222) == "(3:42)"
 
 
-class TestSidePanelToggleIcon:
-    """The side-panel toggle SVG should not be the same chat-bubble
-    glyph used by the Chat tab — keeps the side-panel pictogram
-    distinct from the Chat tab so users don't confuse the two."""
-
-    def test_side_panel_toggle_is_not_chat_bubble(self):
-        # The Chat tab uses a chat-bubble path; the side-panel toggle
-        # was using the SAME path verbatim, which made the tour ambiguous
-        # ("click the chat icon" → users clicked the Chat tab). The
-        # toggle now uses a distinct rectangle + divider + arrow shape.
-        chat_bubble_path = (
-            'd="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"'
-        )
-        # Locate the toggle button by its handler and assert the
-        # chat-bubble path does NOT appear inside its inner SVG.
-        idx = _INDEX_HTML.find("toggleSidePanel()")
-        assert idx > -1, "side-panel toggle handler missing"
-        button_block = _INDEX_HTML[idx : idx + 1500]
-        assert chat_bubble_path not in button_block, (
-            "Side-panel toggle still uses the chat-bubble SVG path; "
-            "it should be a distinct pictogram."
-        )
-
-    def test_side_panel_toggle_uses_panel_pictogram(self):
-        # Find the toggle button and verify its inner SVG carries the
-        # rectangle + divider + arrow shape.
-        idx = _INDEX_HTML.find("toggleSidePanel()")
-        assert idx > -1, "side-panel toggle handler missing"
-        snippet = _INDEX_HTML[idx : idx + 1500]
-        assert '<rect x="3" y="4" width="18" height="16"' in snippet
-        assert '<line x1="14" y1="4" x2="14" y2="20"' in snippet
-        assert '<polyline points="8 10 11 12 8 14"' in snippet
+# NOTE: TestSidePanelToggleIcon was removed — the messenger side-panel
+# toggle button was dropped from both navbars (the panel now opens by
+# clicking an agent). With no toggle in the template there's nothing to
+# assert about its icon.
 
 
 class TestWorkerDmInNeedsYou:
