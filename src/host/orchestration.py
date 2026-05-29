@@ -673,27 +673,6 @@ class Tasks:
             rows = conn.execute(sql, params).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
-    def list_by_creator(
-        self,
-        creator: str,
-        *,
-        include_terminal: bool = True,
-    ) -> list[dict]:
-        """List tasks created by ``creator``. Used by sender-side completion checks."""
-        clauses = ["creator = ?"]
-        params: list[Any] = [creator]
-        if not include_terminal:
-            placeholders = ",".join("?" * len(TERMINAL_STATUSES))
-            clauses.append(f"status NOT IN ({placeholders})")
-            params.extend(sorted(TERMINAL_STATUSES))
-        sql = (
-            f"SELECT {self._SELECT_COLS} FROM tasks "
-            f"WHERE {' AND '.join(clauses)} ORDER BY created_at ASC"
-        )
-        with self._conn() as conn:
-            rows = conn.execute(sql, params).fetchall()
-        return [self._row_to_dict(r) for r in rows]
-
     # ── Per-agent aggregates for the operator heartbeat (PR-J') ─────
     #
     # The system_metrics endpoint surfaces per-agent counts so the

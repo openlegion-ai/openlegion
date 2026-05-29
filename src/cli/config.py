@@ -72,8 +72,6 @@ TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
 DOCKER_IMAGE = "openlegion-agent:latest"
 BROWSER_IMAGE = "openlegion-browser:latest"
 
-MARKETPLACE_DIR = PROJECT_ROOT / "skills" / "_marketplace"
-
 # ── Provider data ───────────────────────────────────────────
 
 def _get_providers() -> list[dict[str, str]]:
