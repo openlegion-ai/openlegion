@@ -1011,8 +1011,12 @@ select:focus-visible,
   display: none;
 }
 
-/* Wide screens: expand sidebar to show names + previews */
-@media (min-width: 1280px) {
+/* Expand the contact list to show names + previews ONLY once the panel is
+   half-viewport (≥1536px). In the 1280–1535 band the panel is a fixed 420px,
+   so a 180px contact rail would leave the chat itself ~240px — too squished.
+   Below 1536 the rail stays compact (56px, avatars only), giving the chat
+   ~364px. Matches the .messenger-half 50vw breakpoint. */
+@media (min-width: 1536px) {
   .messenger-sidebar {
     width: 180px;
     min-width: 180px;
