@@ -10,8 +10,9 @@ Three steps, each independently safe:
 2. **Workspaces**: for every agent workspace under
    ``data/agents/*/workspace/`` that has ``PROJECT.md`` but no
    ``TEAM.md``, copy ``PROJECT.md`` → ``TEAM.md``. The original is
-   preserved — the workspace bootstrap reads ``TEAM.md`` first then
-   falls back to ``PROJECT.md`` (see :mod:`src.agent.workspace`).
+   preserved, but the workspace bootstrap reads only ``TEAM.md`` /
+   ``team.md`` (see :mod:`src.agent.workspace`) — this one-time copy is
+   what carries a pre-rename workspace's context forward.
 3. **SQLite tasks column**: rename ``tasks.project_id`` →
    ``tasks.team_id``. PR 3 flipped this step to **default-on** —
    :func:`migrate_project_to_team` runs the rename unless an operator
@@ -113,8 +114,9 @@ def _migrate_workspaces(repo_root: Path) -> int:
     """Copy ``PROJECT.md`` → ``TEAM.md`` in every agent workspace.
 
     Handles both case variants independently — workspaces may have only
-    the uppercase or only the lowercase file (workspace bootstrap reads
-    in order ``["TEAM.md", "team.md", "PROJECT.md", "project.md"]``).
+    the uppercase or only the lowercase file. The workspace bootstrap
+    reads only ``TEAM.md`` / ``team.md`` (no ``PROJECT.md`` fallback), so
+    this one-time copy is what carries pre-rename context forward.
     Idempotent: skips workspaces that already have the corresponding
     ``TEAM.md`` / ``team.md`` file. Returns the count of copies
     performed this call (each case-pair counted independently — a
