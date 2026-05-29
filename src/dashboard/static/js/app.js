@@ -7321,7 +7321,7 @@ function dashboard() {
     },
 
     platformSuccessTextClass(rate) {
-      if (rate === null || rate === undefined) return 'text-gray-500';
+      if (rate === null || rate === undefined) return 'text-gray-400';
       if (rate >= 0.8) return 'text-emerald-400';
       if (rate >= 0.5) return 'text-yellow-400';
       return 'text-red-400';
@@ -8099,7 +8099,7 @@ function dashboard() {
 
     chatHeaderStatus(agentId) {
       if (!this.chatStreamingAgents[agentId] && !this.chatLoadingAgents[agentId]) {
-        return { label: 'Online', color: 'text-gray-600', dot: 'bg-gray-600' };
+        return { label: 'Online', color: 'text-gray-500', dot: 'bg-gray-600' };
       }
       if (this.chatLoadingAgents[agentId]) {
         return { label: 'Thinking...', color: 'text-purple-400', dot: 'bg-purple-400' };
@@ -9850,7 +9850,7 @@ function dashboard() {
       return (rate * 100).toFixed(0) + '%';
     },
     clickRateColor(rate) {
-      if (rate == null) return 'text-gray-500';
+      if (rate == null) return 'text-gray-400';
       if (rate >= 0.9) return 'text-green-400';
       if (rate >= 0.7) return 'text-yellow-400';
       return 'text-red-400';
