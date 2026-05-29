@@ -40,8 +40,6 @@ class ModelHealth:
     consecutive_failures: int = 0
     cooldown_until: float = 0.0
     last_error: str = ""
-    last_error_time: float = 0.0
-    last_success_time: float = 0.0
 
 
 class ModelHealthTracker:
@@ -65,7 +63,6 @@ class ModelHealthTracker:
         h.success_count += 1
         h.consecutive_failures = 0
         h.cooldown_until = 0.0
-        h.last_success_time = time.time()
 
     def record_failure(
         self, model: str, error_type: str = "", status_code: int = 0,
@@ -74,7 +71,6 @@ class ModelHealthTracker:
         h.failure_count += 1
         h.consecutive_failures += 1
         h.last_error = error_type
-        h.last_error_time = time.time()
 
         cooldown = self._compute_cooldown(h, error_type, status_code)
         h.cooldown_until = time.time() + cooldown

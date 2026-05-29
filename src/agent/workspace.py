@@ -447,10 +447,6 @@ class WorkspaceManager:
         for filename in filenames:
             target[filename] = self._get_mtime(self.root / filename)
 
-    def invalidate_bootstrap_cache(self) -> None:
-        """Explicitly invalidate the bootstrap cache."""
-        self._bootstrap_cache = None
-
     def get_bootstrap_content(self) -> str:
         """Load workspace files for system prompt with per-file and total caps.
 
