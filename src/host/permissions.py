@@ -275,22 +275,10 @@ class PermissionMatrix:
         return self.get_permissions(agent_id).can_manage_fleet
 
     def can_manage_teams(self, agent_id: str) -> bool:
-        """Check if agent is allowed to create/archive teams and manage membership.
-
-        Honors both ``can_manage_teams`` (new) and ``can_manage_projects``
-        (deprecated) on :class:`AgentPermissions`; the model validator
-        :meth:`AgentPermissions._unify_manage_teams_alias` already mirrors
-        either flag onto the other, so this method only needs to consult
-        one field. PR 3 retires the alias.
-        """
+        """Check if agent is allowed to create/archive teams and manage membership."""
         if self._is_trusted(agent_id):
             return True
         return self.get_permissions(agent_id).can_manage_teams
-
-    # Back-compat alias — keep until PR 3.
-    def can_manage_projects(self, agent_id: str) -> bool:
-        """DEPRECATED: alias for :meth:`can_manage_teams`."""
-        return self.can_manage_teams(agent_id)
 
     def can_edit_agent_config(self, agent_id: str) -> bool:
         """Check if agent is allowed to propose/confirm edits to other agents' config."""
