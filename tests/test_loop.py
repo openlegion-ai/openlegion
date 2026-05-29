@@ -3274,6 +3274,7 @@ class TestOutboundEffectLazyGuard:
             "inspect_teams",
             "list_agent_queue",
             "memory_search",
+            "read_user_notifications",
         }
         assert expected_subset.issubset(_READ_ONLY_TOOLS)
 

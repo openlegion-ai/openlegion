@@ -190,6 +190,10 @@ _READ_ONLY_TOOLS = frozenset({
     # Operator workflow diagnostics
     "workflow_snapshot", "await_task_event",
     "summarize_team_progress",
+    # Operator observation-log read (agent→user notifications). Purely
+    # observational — classify read-only so a turn that only reads
+    # notifications isn't miscounted as outbound work by the guard.
+    "read_user_notifications",
     # Cron + history reads (codex round-5 audit) — writes go through
     # ``manage_cron`` / append-only paths, not these.
     "list_cron", "read_agent_history",
