@@ -1,5 +1,7 @@
 # Security Model
 
+This is OpenLegion's approach to **AI agent security**: how a secure, self-hosted AI agent runtime keeps autonomous agents isolated, least-privileged, cost-bounded, and auditable.
+
 OpenLegion is designed assuming agents will be compromised. Defense-in-depth across the layers below prevents a compromised agent from accessing credentials, escaping isolation, exhausting paid services, or affecting other agents.
 
 ## Security Layers
