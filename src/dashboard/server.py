@@ -1241,7 +1241,9 @@ def create_dashboard_router(
                     "last_check": 0,
                     "last_healthy": 0,
                     "last_task_event_ts": None,
-                    "last_worked_ts": None,
+                    # Sourced from the persistent usage ledger, so a stopped /
+                    # over-limit agent still shows when it last actually worked.
+                    "last_worked_ts": worked_map.get(agent_id),
                     "daily_cost": 0,
                     "daily_tokens": 0,
                     "role": acfg.get("role", ""),

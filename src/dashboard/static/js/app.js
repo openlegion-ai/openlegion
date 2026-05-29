@@ -1158,13 +1158,12 @@ function dashboard() {
       this._initTs = Date.now();  // track page load time to skip replayed events
       const cfg = window.__config || {};
 
-      // Restore Phase 1 state from localStorage (side panel).
-      // Cosmetic — losing it is harmless, so wrap in try/catch and
-      // never block init.
-      try {
-        const v = localStorage.getItem('ol_messenger_side_panel_open');
-        if (v === '1') this.messengerSidePanelOpen = true;
-      } catch (e) { /* ignore */ }
+      // NOTE: the side panel is no longer restored from the legacy
+      // ``ol_messenger_side_panel_open`` flag. Its only writer was the
+      // messenger toggle button, now removed from both navbars, so a stale
+      // key from an older session would otherwise force the panel open with
+      // no obvious way to dismiss it. The panel now restores purely from the
+      // persisted open-chats set.
 
       // Restore Teams chip-strip expanded preference.
       try {
@@ -1396,10 +1395,18 @@ function dashboard() {
           e.preventDefault();
           this.cmdPaletteOpen = false;
         }
-        // Phase 1 — ESC also closes the messenger side panel (a11y).
-        // Order matters: cmd palette ESC handler runs first above and
+        // ESC also dismisses the messenger side panel (a11y). The panel is
+        // visible whenever a chat is open (clicking an agent drives
+        // ``openChats``) OR the legacy ``messengerSidePanelOpen`` flag is
+        // set — gate on both so ESC closes the agent-opened panel too, not
+        // just the (now removed) toggle-opened one. Dismiss by minimizing
+        // (keeps the chats; reopen by clicking an agent); ``closeSidePanel``
+        // also clears any legacy flag + restores focus.
+        // Order matters: the cmd palette ESC handler runs first above and
         // returns; we only get here if the palette wasn't open.
-        if (e.key === 'Escape' && this.messengerSidePanelOpen && this.activeTab !== 'chat') {
+        if (e.key === 'Escape' && this.activeTab !== 'chat' && !this.chatPanelMinimized
+            && (this.openChats.length > 0 || this.messengerSidePanelOpen)) {
+          this.chatPanelMinimized = true;
           this.closeSidePanel();
         }
       };
