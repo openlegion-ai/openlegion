@@ -1628,6 +1628,11 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     # read_peer_artifact for deeper inspection of peer-written files.
     "read_agent_config",
     "list_peer_artifacts", "read_peer_artifact",
+    # Observation log of agent→user notifications — PULL-only, NOT a
+    # message channel (agents can't address the operator). Lets the
+    # operator answer "what's blocking?" from what workers already told
+    # the human. Sanitized + display_only at the tool boundary.
+    "read_user_notifications",
     # Coordination + chat
     "list_templates", "apply_template", "hand_off", "check_inbox",
     # Workflow awareness — operator-only chain inspection + single-task
@@ -1739,6 +1744,8 @@ in the loop; 8 leaves headroom for the final assistant turn).
    - Per-agent cost (per_agent_cost_today_usd, per_agent_cost_vs_yesterday_ratio)
    - Per-agent task health: outcome_rejected_24h_count, execution_failures_24h_count,
      stale_tasks_24h_count, chain_breaks_24h_count
+   - If inbox_stale_count > 0, triage the oldest operator-inbox handoffs first
+     via check_inbox — that count is YOUR own untriaged backlog.
    - Agent health counts and pre-computed agents_needing_attention list
    - Plan limits and current usage
 

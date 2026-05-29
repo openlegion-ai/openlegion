@@ -659,6 +659,20 @@ def create_mesh_app(
     )
     app.summaries_store = summaries_store  # exposed for tests/dashboard
 
+    # Observation log of agent→user notifications. NOT a message channel:
+    # agents call ``notify_user`` (intent: tell the human) and the mesh
+    # incidentally logs the push so the trusted operator can PULL recent
+    # agent→user traffic to answer "what's blocking?" without the user
+    # re-pasting. Writing a row never wakes the operator / never creates
+    # an inbox item or task — see ``user_notifications.py`` for the full
+    # trust rationale.
+    from src.host.user_notifications import UserNotificationLog
+    _user_notifications_db_path = os.environ.get(
+        "OPENLEGION_USER_NOTIFICATIONS_DB", "data/user_notifications.db",
+    )
+    user_notification_log = UserNotificationLog(db_path=_user_notifications_db_path)
+    app.user_notification_log = user_notification_log  # exposed for tests/dashboard
+
     # In-memory registry of open "agent asks user for help" requests:
     # credential_request, browser_login_request, browser_captcha_help_request.
     # Keyed by request_id (uuid). The dict lets the cancel endpoints
@@ -2039,6 +2053,15 @@ def create_mesh_app(
         except Exception as e:
             logger.warning("notify_user failed: %s", e)
             raise HTTPException(500, f"Notification failed: {e}")
+        # Best-effort observation-log write. ``body.agent_id`` was
+        # server-resolved above via ``_resolve_agent_id`` so the ``from``
+        # is unforgeable. This is a PULL surface the operator reads via
+        # ``read_user_notifications`` — it never wakes anyone. A logging
+        # failure must NEVER break the notify response.
+        try:
+            user_notification_log.record(body.agent_id, message)
+        except Exception as e:
+            logger.debug("user_notification_log.record failed: %s", e)
         return {"sent": True}
 
     @app.post("/mesh/credential-request")
@@ -3903,6 +3926,11 @@ def create_mesh_app(
         execution_failures_24h: dict[str, int] = {}
         stale_tasks_24h: dict[str, int] = {}
         chain_breaks_24h: dict[str, int] = {}
+        # Operator's own untriaged inbox. Handoffs to the operator land
+        # as durable tasks (assignee="operator") that never expire and
+        # are excluded from every per-agent stale surface below. This
+        # scalar surfaces them so the operator can see its own backlog.
+        inbox_stale_count = 0
         if tasks_store is not None:
             try:
                 _day_seconds = 24 * 60 * 60
@@ -3920,13 +3948,18 @@ def create_mesh_app(
                     ).items()
                     if aid != "operator"
                 }
+                # Single call covers both surfaces: per-agent stale (the
+                # operator filtered out, unchanged) AND the operator's
+                # own inbox-stale scalar (Bug 6) — no parallel signal.
+                _stale_by_assignee = tasks_store.count_stale_since(
+                    threshold_seconds=_day_seconds,
+                )
                 stale_tasks_24h = {
                     aid: count
-                    for aid, count in tasks_store.count_stale_since(
-                        threshold_seconds=_day_seconds,
-                    ).items()
+                    for aid, count in _stale_by_assignee.items()
                     if aid != "operator"
                 }
+                inbox_stale_count = _stale_by_assignee.get("operator", 0)
                 # Chain-break observability — surfaces ``done`` tasks
                 # whose work didn't get handed off (no child row via
                 # ``parent_task_id``) and that the operator hasn't
@@ -4008,6 +4041,12 @@ def create_mesh_app(
             "outcome_rejected_24h_count": outcome_rejected_24h,
             "execution_failures_24h_count": execution_failures_24h,
             "stale_tasks_24h_count": stale_tasks_24h,
+            # Operator's own untriaged-inbox depth (Bug 6). Scalar count
+            # of non-terminal tasks assigned to "operator" older than 24h
+            # — the one assignee deliberately stripped from
+            # stale_tasks_24h_count above. Lets the heartbeat triage its
+            # own handoff backlog instead of being blind to it.
+            "inbox_stale_count": inbox_stale_count,
             # Chain-break observability — per-agent count of ``done``
             # tasks with no successor (no child via ``parent_task_id``)
             # and no outcome set, within the trailing 24h window.
@@ -4852,6 +4891,38 @@ def create_mesh_app(
                 404, f"Root task '{root_task_id}' not found",
             )
         return snapshot
+
+    @app.get("/mesh/user-notifications")
+    async def get_user_notifications(
+        request: Request, hours: float = 24, limit: int = 50,
+    ) -> dict:
+        """Return recent agent→user notifications (operator-only).
+
+        Thin read over the observation log written by the ``/mesh/notify``
+        handler. This is a PULL surface — reading it never wakes any
+        agent and the rows are NOT addressed to the operator; they are
+        observed agent→user traffic. Operator-only by design (workers
+        have no business reading what their peers told the human).
+        Messages are returned RAW; the operator's ``read_user_notifications``
+        tool sanitizes each one through ``sanitize_for_prompt`` at the
+        agent boundary so the endpoint stays a thin data layer.
+        """
+        caller = _extract_verified_agent_id(request)
+        if not (
+            _caller_is_operator(caller, request)
+            or _is_internal_caller(request)
+        ):
+            raise HTTPException(
+                403,
+                "user-notifications is operator-only",
+            )
+        rows = user_notification_log.recent(hours=hours, limit=limit)
+        return {
+            "notifications": [
+                {"from": r["agent_id"], "message": r["message"], "ts": r["ts"]}
+                for r in rows
+            ],
+        }
 
     @app.get("/mesh/tasks/{task_id}")
     async def get_task(task_id: str, request: Request) -> dict:

@@ -1412,6 +1412,25 @@ def test_count_stale_since_groups_by_assignee(tmp_path):
     assert counts == {"alpha": 2, "beta": 1}
 
 
+def test_count_stale_since_includes_operator(tmp_path):
+    """Bug 6 — ``operator`` is NOT special-cased in the store.
+
+    The metrics layer strips ``operator`` from the per-agent stale
+    surface but reads it back out as ``inbox_stale_count``. That only
+    works if the store itself counts operator-assigned stale tasks, so
+    pin the contract here.
+    """
+    t = _make_store(tmp_path)
+    rec = t.create(creator="op", assignee="operator", title="untriaged handoff")
+    with t._conn() as conn:
+        conn.execute(
+            "UPDATE tasks SET created_at=? WHERE id=?",
+            (time.time() - 2 * 24 * 3600, rec["id"]),
+        )
+    counts = t.count_stale_since(threshold_seconds=24 * 3600)
+    assert counts.get("operator") == 1
+
+
 def test_list_stale_for_assignee_returns_oldest_first_capped(tmp_path):
     t = _make_store(tmp_path)
     ids = []
