@@ -968,21 +968,21 @@ select:focus-visible,
   width: 100%;
 }
 
-/* Laptops (1280-1535px): a touch wider for chat readability, but still a
-   fixed width — 50vw here was eating half the screen and squishing the
-   main page on 13"/14" laptops. */
-@media (min-width: 1280px) and (max-width: 1535px) {
+/* Desktops incl. 13" (1280px+): the full, comfortable panel — 520px, wide
+   enough for an expanded contact rail (180px) + a usable chat (~340px).
+   This is the "real" expandable view, not the compact small-screen one. */
+@media (min-width: 1280px) {
   .messenger-half {
-    width: 420px;
+    width: 520px;
   }
 }
 
-/* Genuinely wide screens (1536px+ / Tailwind 2xl): half-viewport panel,
-   where there's room for both the panel and a comfortable main column. */
-@media (min-width: 1536px) {
+/* Large monitors (1680px+): go half-viewport, where there's genuinely room
+   for both the panel and a comfortable main column. */
+@media (min-width: 1680px) {
   .messenger-half {
     width: 50vw;
-    min-width: 480px;
+    min-width: 560px;
     max-width: 100%;
   }
 }
@@ -1011,12 +1011,11 @@ select:focus-visible,
   display: none;
 }
 
-/* Expand the contact list to show names + previews ONLY once the panel is
-   half-viewport (≥1536px). In the 1280–1535 band the panel is a fixed 420px,
-   so a 180px contact rail would leave the chat itself ~240px — too squished.
-   Below 1536 the rail stays compact (56px, avatars only), giving the chat
-   ~364px. Matches the .messenger-half 50vw breakpoint. */
-@media (min-width: 1536px) {
+/* Expand the contact list to names + previews from 1280px up — paired with
+   the 520px panel above, this leaves ~340px for the chat itself (comfortable),
+   so 13" desktops get the full expandable view rather than the avatar-only
+   compact rail. Below 1280 (tablets/small windows) the rail stays compact. */
+@media (min-width: 1280px) {
   .messenger-sidebar {
     width: 180px;
     min-width: 180px;
@@ -1050,13 +1049,13 @@ select:focus-visible,
   margin-right: 380px;
 }
 
-@media (min-width: 1280px) and (max-width: 1535px) {
+@media (min-width: 1280px) {
   .messenger-margin {
-    margin-right: 420px;
+    margin-right: 520px;
   }
 }
 
-@media (min-width: 1536px) {
+@media (min-width: 1680px) {
   .messenger-margin {
     margin-right: 50vw;
   }
