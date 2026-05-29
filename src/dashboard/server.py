@@ -1166,6 +1166,10 @@ def create_dashboard_router(
         health_map = {h["agent"]: h for h in health_list}
         cost_list = cost_tracker.get_all_agents_spend("today")
         cost_map = {c["agent"]: c for c in cost_list}
+        # Accurate "last worked" = timestamp of the agent's most recent LLM
+        # call (from the usage ledger), distinct from the health probe's
+        # "last seen". One query for the whole fleet.
+        worked_map = cost_tracker.get_all_agents_last_worked()
 
         agent_projects = cfg.get("_agent_projects", {})
 
@@ -1201,6 +1205,7 @@ def create_dashboard_router(
                 "last_check": h.get("last_check", 0),
                 "last_healthy": h.get("last_healthy", 0),
                 "last_task_event_ts": last_task_ts,
+                "last_worked_ts": worked_map.get(agent_id),
                 "daily_cost": c.get("cost", 0),
                 "daily_tokens": c.get("tokens", 0),
                 "role": acfg.get("role", ""),
@@ -1236,6 +1241,9 @@ def create_dashboard_router(
                     "last_check": 0,
                     "last_healthy": 0,
                     "last_task_event_ts": None,
+                    # Sourced from the persistent usage ledger, so a stopped /
+                    # over-limit agent still shows when it last actually worked.
+                    "last_worked_ts": worked_map.get(agent_id),
                     "daily_cost": 0,
                     "daily_tokens": 0,
                     "role": acfg.get("role", ""),

@@ -474,18 +474,21 @@ function dashboard() {
 
     // System tab — sub-navigation
     systemTab: 'activity',
+    // Order: General first (its id is 'settings', relabelled "General" via
+    // systemTabLabelFor), then by how often each is used — config/monitoring
+    // up front, infrastructure plumbing last.
     systemTabs: [
+      { id: 'settings', label: 'Settings' },
       { id: 'activity', label: 'Activity' },
       { id: 'costs', label: 'Costs' },
-      { id: 'automation', label: 'Automation' },
       { id: 'integrations', label: 'Integrations' },
+      { id: 'automation', label: 'Automation' },
       { id: 'apikeys', label: 'API Keys' },
+      { id: 'operator', label: 'Operator' },
+      { id: 'browser', label: 'Browser' },
       { id: 'wallet', label: 'Wallet' },
       { id: 'network', label: 'Network' },
       { id: 'storage', label: 'Storage' },
-      { id: 'operator', label: 'Operator' },
-      { id: 'browser', label: 'Browser' },
-      { id: 'settings', label: 'Settings' },
     ],
 
     // Audit sub-tab
@@ -1155,13 +1158,12 @@ function dashboard() {
       this._initTs = Date.now();  // track page load time to skip replayed events
       const cfg = window.__config || {};
 
-      // Restore Phase 1 state from localStorage (side panel).
-      // Cosmetic — losing it is harmless, so wrap in try/catch and
-      // never block init.
-      try {
-        const v = localStorage.getItem('ol_messenger_side_panel_open');
-        if (v === '1') this.messengerSidePanelOpen = true;
-      } catch (e) { /* ignore */ }
+      // NOTE: the side panel is no longer restored from the legacy
+      // ``ol_messenger_side_panel_open`` flag. Its only writer was the
+      // messenger toggle button, now removed from both navbars, so a stale
+      // key from an older session would otherwise force the panel open with
+      // no obvious way to dismiss it. The panel now restores purely from the
+      // persisted open-chats set.
 
       // Restore Teams chip-strip expanded preference.
       try {
@@ -1393,10 +1395,18 @@ function dashboard() {
           e.preventDefault();
           this.cmdPaletteOpen = false;
         }
-        // Phase 1 — ESC also closes the messenger side panel (a11y).
-        // Order matters: cmd palette ESC handler runs first above and
+        // ESC also dismisses the messenger side panel (a11y). The panel is
+        // visible whenever a chat is open (clicking an agent drives
+        // ``openChats``) OR the legacy ``messengerSidePanelOpen`` flag is
+        // set — gate on both so ESC closes the agent-opened panel too, not
+        // just the (now removed) toggle-opened one. Dismiss by minimizing
+        // (keeps the chats; reopen by clicking an agent); ``closeSidePanel``
+        // also clears any legacy flag + restores focus.
+        // Order matters: the cmd palette ESC handler runs first above and
         // returns; we only get here if the palette wasn't open.
-        if (e.key === 'Escape' && this.messengerSidePanelOpen && this.activeTab !== 'chat') {
+        if (e.key === 'Escape' && this.activeTab !== 'chat' && !this.chatPanelMinimized
+            && (this.openChats.length > 0 || this.messengerSidePanelOpen)) {
+          this.chatPanelMinimized = true;
           this.closeSidePanel();
         }
       };
@@ -4168,18 +4178,21 @@ function dashboard() {
     // Fresh-enough timestamps (<1 min) yield empty strings from
     // formatRelativeTime — fall back to "just now" for legibility.
     agentActivityLabel(agent) {
+      // "Last activity" = the last time the agent actually WORKED, i.e. its
+      // most recent LLM call (last_worked_ts, from the usage ledger). This
+      // deliberately does NOT use last_healthy — that's a container health
+      // probe, not work. Falls back to the last task event when the agent
+      // has no recorded LLM call yet (e.g. freshly created).
       const fmt = (sec) => {
         if (!sec) return '';
-        const ms = sec * 1000;
-        const rel = this.formatRelativeTime(ms);
+        const rel = this.formatRelativeTime(sec * 1000);
         return rel || 'just now';
       };
-      const seen = fmt(agent.last_healthy);
+      const worked = fmt(agent.last_worked_ts);
+      if (worked) return 'Worked ' + worked;
       const task = fmt(agent.last_task_event_ts);
-      const parts = [];
-      if (seen) parts.push('Seen ' + seen);
-      if (task) parts.push('Task ' + task);
-      return parts.join(' · ');
+      if (task) return 'Task ' + task;
+      return '';
     },
 
     healthLabel(status) {

@@ -422,16 +422,19 @@ class TestNotificationsBellMarkup:
         #    hides the dropdown entirely when empty.
         assert "No recent activity" not in _INDEX_HTML
 
-    def test_only_one_notifications_bell_renders(self):
-        # The bell SVG path is identifying enough — both Phase 1 and
-        # Phase 2 used the same ``M18 8A6 6 0 0...`` Feather icon. After
-        # the fix exactly one bell remains in the top-nav.
+    def test_notifications_bell_renders_once_per_breakpoint(self):
+        # The shell folds the desktop top bar into the sidebar, so the
+        # Phase-2 bell now renders TWICE: once in the mobile/tablet top
+        # bar (visible <md) and once in the desktop sidebar tray (visible
+        # md+). Only one is ever visible — the other's container is
+        # display:none — but both are in the DOM. The legacy Phase-1 bell
+        # is still guarded separately (test_legacy_notifications_bell_removed),
+        # so two here means "one per breakpoint", not a legacy regression.
         # Match the bell-shape path with whitespace-tolerance (Phase 1
-        # used ``A6 6 0 0 0`` while Phase 2 collapsed to ``A6 6 0 006``;
-        # any future SVG change still picks both up).
+        # used ``A6 6 0 0 0`` while Phase 2 collapsed to ``A6 6 0 006``).
         bells = re.findall(r'M18 8A6 6 0\s*0?\s*0?6 8c0 7-3 9-3 9h18s-3-2-3-9', _INDEX_HTML)
-        assert len(bells) == 1, (
-            f"Expected exactly one notifications bell SVG, found {len(bells)}"
+        assert len(bells) == 2, (
+            f"Expected exactly two notifications bells (one per breakpoint), found {len(bells)}"
         )
 
 
@@ -1606,38 +1609,10 @@ class TestUndoReceiptCountdown:
         assert format_undo_countdown(222) == "(3:42)"
 
 
-class TestSidePanelToggleIcon:
-    """The side-panel toggle SVG should not be the same chat-bubble
-    glyph used by the Chat tab — keeps the side-panel pictogram
-    distinct from the Chat tab so users don't confuse the two."""
-
-    def test_side_panel_toggle_is_not_chat_bubble(self):
-        # The Chat tab uses a chat-bubble path; the side-panel toggle
-        # was using the SAME path verbatim, which made the tour ambiguous
-        # ("click the chat icon" → users clicked the Chat tab). The
-        # toggle now uses a distinct rectangle + divider + arrow shape.
-        chat_bubble_path = (
-            'd="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"'
-        )
-        # Locate the toggle button by its handler and assert the
-        # chat-bubble path does NOT appear inside its inner SVG.
-        idx = _INDEX_HTML.find("toggleSidePanel()")
-        assert idx > -1, "side-panel toggle handler missing"
-        button_block = _INDEX_HTML[idx : idx + 1500]
-        assert chat_bubble_path not in button_block, (
-            "Side-panel toggle still uses the chat-bubble SVG path; "
-            "it should be a distinct pictogram."
-        )
-
-    def test_side_panel_toggle_uses_panel_pictogram(self):
-        # Find the toggle button and verify its inner SVG carries the
-        # rectangle + divider + arrow shape.
-        idx = _INDEX_HTML.find("toggleSidePanel()")
-        assert idx > -1, "side-panel toggle handler missing"
-        snippet = _INDEX_HTML[idx : idx + 1500]
-        assert '<rect x="3" y="4" width="18" height="16"' in snippet
-        assert '<line x1="14" y1="4" x2="14" y2="20"' in snippet
-        assert '<polyline points="8 10 11 12 8 14"' in snippet
+# NOTE: TestSidePanelToggleIcon was removed — the messenger side-panel
+# toggle button was dropped from both navbars (the panel now opens by
+# clicking an agent). With no toggle in the template there's nothing to
+# assert about its icon.
 
 
 class TestWorkerDmInNeedsYou:
@@ -2280,7 +2255,10 @@ def _has_legacy_notifications_bell(html: str) -> bool:
 
 
 class TestNotificationsBellSingleton:
-    """Only one notifications bell should render after PR-B lands."""
+    """After PR-B (legacy bell removed) the only bells are the Phase-2
+    bell rendered once per responsive breakpoint (mobile top bar + desktop
+    sidebar tray) — see the shell fold-down. The legacy Phase-1 bell must
+    stay gone."""
 
     @pytest.mark.skipif(
         _has_legacy_notifications_bell(_INDEX_HTML),
@@ -2299,14 +2277,17 @@ class TestNotificationsBellSingleton:
         _has_legacy_notifications_bell(_INDEX_HTML),
         reason="depends on PR-B: only one bell after legacy is removed",
     )
-    def test_only_one_notifications_bell_renders(self):
-        """Exactly one bell SVG sits in the top-nav."""
-        # The bell SVG path is unique enough to count occurrences.
-        # Both the Phase 1 and Phase 2 variants share this path string.
+    def test_notifications_bell_renders_once_per_breakpoint(self):
+        """Exactly two Phase-2 bells: mobile top bar + desktop sidebar."""
+        # The bell SVG path is unique enough to count occurrences. The
+        # shell renders the bell once per responsive nav container (the
+        # mobile/tablet top bar and the desktop sidebar tray), only one
+        # of which is ever visible. The legacy Phase-1 bell is guarded by
+        # test_legacy_notifications_bell_removed above.
         bell_path = 'M18 8A6 6 0 0'
         count = _INDEX_HTML.count(bell_path)
-        assert count == 1, (
-            f"expected exactly 1 notifications bell after PR-B, got {count}"
+        assert count == 2, (
+            f"expected exactly 2 notifications bells (one per breakpoint), got {count}"
         )
 
 

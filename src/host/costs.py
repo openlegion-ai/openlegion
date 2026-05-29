@@ -302,6 +302,33 @@ class CostTracker:
             for r in rows
         ]
 
+    def get_all_agents_last_worked(self) -> dict[str, float]:
+        """Map of agent → unix timestamp (UTC) of its most recent LLM call.
+
+        This is an accurate "last actually worked" signal: every billed LLM
+        call is recorded in the usage ledger, so the most recent row marks
+        the last time the agent did real work — distinct from the health
+        monitor's "last seen", which is just a container liveness probe.
+        Returns an empty dict if nothing is recorded yet.
+        """
+        rows = self.db.execute(
+            "SELECT agent, MAX(timestamp) FROM usage GROUP BY agent"
+        ).fetchall()
+        out: dict[str, float] = {}
+        for agent, ts in rows:
+            if not agent or not ts:
+                continue
+            try:
+                # usage.timestamp is "YYYY-MM-DD HH:MM:SS" in UTC
+                # (SQLite datetime('now')) — match _period_to_since's format.
+                dt = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S").replace(
+                    tzinfo=timezone.utc
+                )
+                out[agent] = dt.timestamp()
+            except (ValueError, TypeError):
+                continue
+        return out
+
     def get_spend_by_model(self, period: str = "today") -> list[dict]:
         """Get cost breakdown by model across all agents."""
         since = _period_to_since(period)
