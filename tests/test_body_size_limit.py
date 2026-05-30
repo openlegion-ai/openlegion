@@ -203,17 +203,16 @@ async def test_mesh_rejects_oversized_chunked_body(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_mesh_upload_route_exempt_from_global_cap(tmp_path, monkeypatch):
-    """Large-upload routes must NOT be pre-empted by the 8 MiB global cap.
+async def test_upload_route_allows_body_over_global_cap(tmp_path, monkeypatch):
+    """Upload routes get the higher upload cap, not the 8 MiB global cap.
 
-    ``/mesh/browser/upload-stage`` enforces its own 50 MB per-route cap, so a
-    9 MiB body (over the 8 MiB global cap, under the 50 MB route cap) must pass
-    the body-size middleware and reach the route — never the middleware's 413.
+    A 9 MiB body (over the 8 MiB global cap, under the 64 MiB upload cap) must
+    pass the body-size middleware and reach the route — never the global 413.
     Regression for the bodysize-vs-uploads conflict (H4 review).
     """
     monkeypatch.setenv("OPENLEGION_PROJECT_SCOPE_MODE", "warn")
     app, closers = _make_mesh_app(tmp_path)
-    over_global = 9 * 1024 * 1024  # > 8 MiB global cap, < 50 MB route cap
+    over_global = 9 * 1024 * 1024  # > 8 MiB global cap, < 64 MiB upload cap
     try:
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test",
@@ -226,13 +225,45 @@ async def test_mesh_upload_route_exempt_from_global_cap(tmp_path, monkeypatch):
                     "authorization": "Bearer operator-secret",
                 },
             )
-        # The middleware must not short-circuit this route with its 413. The
-        # route may itself reject (auth/validation), but never for body size at
-        # 9 MiB — so any status other than the global-cap 413 proves exemption.
+        # The middleware must not short-circuit this route with its global 413.
+        # The route may itself reject (auth/validation), but never for body size
+        # at 9 MiB — so any status other than the body-size 413 proves the
+        # higher upload cap applied.
         assert resp.status_code != 413, (
             "upload route was pre-empted by the global body-size cap: "
             f"{resp.status_code} {resp.text}"
         )
+    finally:
+        for c in closers:
+            c.close()
+
+
+@pytest.mark.asyncio
+async def test_upload_route_keeps_oom_backstop(tmp_path, monkeypatch):
+    """Upload routes are NOT fully exempt — the streaming guard still caps them.
+
+    With the upload cap lowered to 1 MiB, a 2 MiB body to an upload route must
+    still be rejected with 413, proving the OOM backstop (a full exemption
+    would let it through and let the buffering /dashboard upload route OOM).
+    """
+    monkeypatch.setenv("OPENLEGION_PROJECT_SCOPE_MODE", "warn")
+    monkeypatch.setenv("OPENLEGION_MAX_UPLOAD_BODY_MB", "1")
+    app, closers = _make_mesh_app(tmp_path)
+    over_upload = 2 * 1024 * 1024  # > 1 MiB upload cap override
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            resp = await client.post(
+                "/mesh/browser/upload-stage",
+                content=b"x" * over_upload,
+                headers={
+                    "content-type": "application/octet-stream",
+                    "authorization": "Bearer operator-secret",
+                },
+            )
+        assert resp.status_code == 413, resp.text
+        assert "too large" in resp.text.lower()
     finally:
         for c in closers:
             c.close()

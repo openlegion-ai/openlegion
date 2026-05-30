@@ -81,13 +81,38 @@ def _max_body_bytes() -> int:
 
 
 # Routes that legitimately accept large bodies (file uploads) enforce their
-# OWN per-route size caps (50 MB) with their own streaming guards, so the
-# global 8 MiB body-size cap must not pre-empt them with a 413. Matched by
-# path prefix against ``request.url.path``.
-_BODY_SIZE_EXEMPT_PREFIXES: tuple[str, ...] = (
-    "/dashboard/api/uploads/",   # dashboard file uploads (_MAX_UPLOAD_BYTES = 50 MB)
-    "/mesh/browser/upload-stage",  # agent->browser upload staging (_UPLOAD_STAGE_MAX_BYTES = 50 MB)
+# OWN ~50 MB per-route limit, so the small global cap must not pre-empt them.
+# We give them a HIGHER cap rather than exempting them outright: the streaming
+# guard then still bounds memory (an OOM backstop) — which matters because not
+# every upload route streams. /mesh/browser/upload-stage streams chunk-by-chunk
+# with its own counter, but /dashboard/api/uploads does ``await request.body()``
+# (buffers the whole body before its len() check), so a full exemption would
+# reopen an OOM via that route. Matched by path prefix against request.url.path.
+_UPLOAD_ROUTE_PREFIXES: tuple[str, ...] = (
+    "/dashboard/api/uploads/",   # dashboard file uploads (route cap 50 MB; BUFFERS body)
+    "/mesh/browser/upload-stage",  # agent->browser upload staging (route cap 50 MB; streams)
 )
+
+
+def _upload_route_max_bytes() -> int:
+    """OOM-backstop cap for the large-upload routes. Env override
+    ``OPENLEGION_MAX_UPLOAD_BODY_MB`` (default 64). Kept comfortably above the
+    routes' own 50 MB limit so a 50-64 MB upload hits their clean per-route 413,
+    while anything larger is streaming-aborted before it is buffered into RAM.
+    """
+    try:
+        mb = float(os.environ.get("OPENLEGION_MAX_UPLOAD_BODY_MB", "64"))
+    except ValueError:
+        mb = 64.0
+    return max(1, int(mb * 1024 * 1024))
+
+
+def _body_cap_for_path(path: str) -> int:
+    """Per-route body cap: the higher upload cap for upload routes, else the
+    global cap. Never returns "unlimited" — every route keeps an OOM backstop."""
+    if path.startswith(_UPLOAD_ROUTE_PREFIXES):
+        return _upload_route_max_bytes()
+    return _max_body_bytes()
 
 
 def _install_body_size_limit(app: FastAPI) -> None:
@@ -108,10 +133,10 @@ def _install_body_size_limit(app: FastAPI) -> None:
 
     @app.middleware("http")
     async def _enforce_body_size(request: Request, call_next):
-        # Large-upload routes police their own (higher) per-route caps.
-        if request.url.path.startswith(_BODY_SIZE_EXEMPT_PREFIXES):
-            return await call_next(request)
-        max_bytes = _max_body_bytes()
+        # Per-route cap: upload routes get a higher OOM-backstop cap (not a
+        # full exemption), so the streaming guard still bounds memory even for
+        # a route that buffers its body before its own size check.
+        max_bytes = _body_cap_for_path(request.url.path)
         cl = request.headers.get("content-length")
         if cl is not None:
             try:
