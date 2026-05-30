@@ -274,9 +274,10 @@ async def test_get_task_visible_to_creator_assignee_operator(v2_app):
         # Operator can read.
         r = await c.get(f"/mesh/tasks/{tid}", headers={"X-Agent-ID": "operator"})
         assert r.status_code == 200
-        # Outsider cannot.
+        # Outsider cannot — L16: returns a uniform 404 (not 403) so the
+        # endpoint can't be used as an existence oracle.
         r = await c.get(f"/mesh/tasks/{tid}", headers={"X-Agent-ID": "tracker"})
-        assert r.status_code == 403
+        assert r.status_code == 404
 
 
 @pytest.mark.asyncio

@@ -1159,3 +1159,45 @@ class TestAtomicPermissionsWrite:
         loaded = json.loads(perms_file.read_text())
         assert len(loaded["permissions"]) == 500
         assert not list(perms_file.parent.glob("*.tmp"))
+
+
+class TestCanAccessCredentialSystemTier:
+    """L10: system-tier credentials are blocked from agents by LOADED TIER,
+    not just by the provider-key name-shape heuristic."""
+
+    @pytest.fixture()
+    def cred_matrix(self, tmp_path):
+        cfg = {
+            "permissions": {
+                "worker": {
+                    # Broad allowlist that WOULD match the system secret by
+                    # pattern if the tier guard didn't exist.
+                    "allowed_credentials": ["*"],
+                },
+            },
+        }
+        path = tmp_path / "permissions.json"
+        path.write_text(json.dumps(cfg))
+        return PermissionMatrix(config_path=str(path))
+
+    def test_non_conforming_system_name_blocked_by_tier(self, cred_matrix):
+        # ``my_internal_token`` does NOT match the provider-key shape, so
+        # ``is_system_credential`` alone would allow it. The loaded-tier
+        # registry must still block it.
+        assert cred_matrix.can_access_credential("worker", "my_internal_token") is True
+        cred_matrix.set_system_credential_names(["my_internal_token"])
+        assert cred_matrix.can_access_credential("worker", "my_internal_token") is False
+
+    def test_tier_check_is_case_insensitive(self, cred_matrix):
+        cred_matrix.set_system_credential_names(["My_Internal_Token"])
+        assert cred_matrix.can_access_credential("worker", "MY_INTERNAL_TOKEN") is False
+
+    def test_agent_tier_credential_still_accessible(self, cred_matrix):
+        cred_matrix.set_system_credential_names(["my_internal_token"])
+        # An ordinary agent-tier credential is unaffected by the registry.
+        assert cred_matrix.can_access_credential("worker", "stripe_token") is True
+
+    def test_name_shape_guard_still_applies(self, cred_matrix):
+        # Even with an EMPTY tier registry, provider-key shapes stay blocked.
+        cred_matrix.set_system_credential_names([])
+        assert cred_matrix.can_access_credential("worker", "anthropic_api_key") is False

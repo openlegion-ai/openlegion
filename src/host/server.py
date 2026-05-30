@@ -235,6 +235,30 @@ def _extract_prompt_preview(params: dict, max_len: int = 500) -> str:
     return ""
 
 
+# M8: generous ceiling on the serialized LLM-proxy input. Large-context
+# prompts are legitimate, so this only trips on pathological / abusive
+# payloads (~4 MiB of serialized params). Overridable for operators with
+# unusually large legitimate contexts.
+_PROXY_INPUT_MAX_BYTES = int(
+    os.environ.get("OPENLEGION_PROXY_INPUT_MAX_BYTES", str(4 * 1024 * 1024))
+)
+
+
+def _proxy_input_too_large(params: dict) -> int | None:
+    """Return the serialized byte size if it exceeds the cap, else ``None``.
+
+    Serializes ``params`` (messages, tools, etc.) to measure the worst-case
+    request body the proxy would forward. Best-effort: if serialization
+    fails for any reason we do NOT block (fail-open on the size check —
+    downstream validation still applies).
+    """
+    try:
+        size = len(json.dumps(params, default=str).encode("utf-8"))
+    except Exception:
+        return None
+    return size if size > _PROXY_INPUT_MAX_BYTES else None
+
+
 if TYPE_CHECKING:
     from src.dashboard.events import EventBus
     from src.host.api_keys import ApiKeyManager
@@ -779,6 +803,23 @@ def create_mesh_app(
         migrate_project_to_team()
     except Exception as e:
         logger.error("team_migration failed at startup: %s — continuing", e, exc_info=True)
+
+    # L10: register the loaded system-tier credential names with the
+    # permission matrix so ``can_access_credential`` denies agent access to
+    # a system secret even when its name doesn't match the provider-key
+    # shape heuristic.
+    if credential_vault is not None and hasattr(
+        permissions, "set_system_credential_names"
+    ):
+        try:
+            permissions.set_system_credential_names(
+                credential_vault.list_system_credential_names()
+            )
+        except Exception as e:
+            logger.error(
+                "Failed to register system credential names with permissions: %s",
+                e, exc_info=True,
+            )
 
     # Durable orchestration task records. ``OPENLEGION_ORCHESTRATION_TASKS_DB``
     # overrides the on-disk path — used by tests to keep the db inside
@@ -1867,6 +1908,22 @@ def create_mesh_app(
         if credential_vault is None:
             return APIProxyResponse(success=False, error="No credential vault configured")
 
+        # M8: reject pathologically large inputs before dispatch.
+        _oversize = _proxy_input_too_large(api_request.params)
+        if _oversize is not None:
+            logger.warning(
+                "Rejected oversized proxy input from agent=%s service=%s: %d bytes > %d cap",
+                agent_id, api_request.service, _oversize, _PROXY_INPUT_MAX_BYTES,
+            )
+            return APIProxyResponse(
+                success=False,
+                error=(
+                    f"Request input too large ({_oversize} bytes); "
+                    f"limit is {_PROXY_INPUT_MAX_BYTES} bytes."
+                ),
+                status_code=413,
+            )
+
         req_trace_id = request.headers.get("x-trace-id")
         prompt_preview = _extract_prompt_preview(api_request.params)
         t0 = time.time()
@@ -1969,6 +2026,19 @@ def create_mesh_app(
         _enforce_model_pin(agent_id, request, api_request)
         if credential_vault is None:
             raise HTTPException(503, "No credential vault configured")
+
+        # M8: reject pathologically large inputs before opening the stream.
+        _oversize = _proxy_input_too_large(api_request.params)
+        if _oversize is not None:
+            logger.warning(
+                "Rejected oversized stream input from agent=%s service=%s: %d bytes > %d cap",
+                agent_id, api_request.service, _oversize, _PROXY_INPUT_MAX_BYTES,
+            )
+            raise HTTPException(
+                413,
+                f"Request input too large ({_oversize} bytes); "
+                f"limit is {_PROXY_INPUT_MAX_BYTES} bytes.",
+            )
 
         req_trace_id = request.headers.get("x-trace-id")
         prompt_preview = _extract_prompt_preview(api_request.params)
@@ -5389,37 +5459,41 @@ def create_mesh_app(
         """Read a task by id.
 
         Visible to creator, assignee, project members, operator, and
-        internal callers. Other callers receive 403.
+        internal callers. L16: unauthorized callers receive the SAME 404
+        as a non-existent task so the endpoint can't be used as an
+        existence oracle (404-not-found vs 403-exists-but-denied).
         """
         store = tasks_store
         caller = _extract_verified_agent_id(request)
         record = store.get(task_id)
-        if record is None:
-            raise HTTPException(404, f"Task '{task_id}' not found")
-        if (
+        if record is not None and (
             caller in (record["creator"], record["assignee"])
             or _caller_is_operator(caller, request)
             or _is_internal_caller(request)
             or (record["project_id"] and _is_project_member(caller, record["project_id"]))
         ):
             return record
-        raise HTTPException(403, "Not authorized to read this task")
+        # Uniform 404 for both not-found and not-authorized (no oracle).
+        raise HTTPException(404, f"Task '{task_id}' not found")
 
     @app.get("/mesh/tasks/{task_id}/events")
     async def list_task_events(task_id: str, request: Request) -> dict:
-        """Audit history for a task. Same visibility rules as get_task."""
+        """Audit history for a task. Same visibility rules as get_task.
+
+        L16: unauthorized callers receive the same 404 as a non-existent
+        task to avoid leaking task existence.
+        """
         store = tasks_store
         caller = _extract_verified_agent_id(request)
         record = store.get(task_id)
-        if record is None:
-            raise HTTPException(404, f"Task '{task_id}' not found")
-        if not (
+        if record is None or not (
             caller in (record["creator"], record["assignee"])
             or _caller_is_operator(caller, request)
             or _is_internal_caller(request)
             or (record["project_id"] and _is_project_member(caller, record["project_id"]))
         ):
-            raise HTTPException(403, "Not authorized to read this task")
+            # Uniform 404 for both not-found and not-authorized (no oracle).
+            raise HTTPException(404, f"Task '{task_id}' not found")
         events = store.list_events(task_id)
         return {"events": events, "count": len(events)}
 
@@ -5828,19 +5902,21 @@ def create_mesh_app(
 
     @app.get("/mesh/work-summaries/{summary_id}")
     async def get_work_summary(summary_id: str, request: Request) -> dict:
-        """Fetch a single summary by id. Scope-checked."""
+        """Fetch a single summary by id. Scope-checked.
+
+        L16: unauthorized callers receive the same 404 as a non-existent
+        summary so the endpoint can't be used as an existence oracle.
+        """
         caller = _extract_verified_agent_id(request)
         row = summaries_store.get(summary_id)
-        if row is None:
+        if row is None or not _can_read_summary(caller, request, row):
+            if row is not None:
+                _record_denial(
+                    "scope", caller=caller, target=summary_id,
+                    gate="work_summaries.get:scope",
+                )
+            # Uniform 404 for both not-found and not-authorized (no oracle).
             raise HTTPException(404, f"Summary {summary_id!r} not found")
-        if not _can_read_summary(caller, request, row):
-            _record_denial(
-                "scope", caller=caller, target=summary_id,
-                gate="work_summaries.get:scope",
-            )
-            raise HTTPException(
-                403, f"Caller {caller} cannot read summary {summary_id!r}",
-            )
         return row
 
     @app.post("/mesh/work-summaries/{summary_id}/rating")
