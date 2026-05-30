@@ -80,6 +80,16 @@ def _max_body_bytes() -> int:
     return int(mb * 1024 * 1024)
 
 
+# Routes that legitimately accept large bodies (file uploads) enforce their
+# OWN per-route size caps (50 MB) with their own streaming guards, so the
+# global 8 MiB body-size cap must not pre-empt them with a 413. Matched by
+# path prefix against ``request.url.path``.
+_BODY_SIZE_EXEMPT_PREFIXES: tuple[str, ...] = (
+    "/dashboard/api/uploads/",   # dashboard file uploads (_MAX_UPLOAD_BYTES = 50 MB)
+    "/mesh/browser/upload-stage",  # agent->browser upload staging (_UPLOAD_STAGE_MAX_BYTES = 50 MB)
+)
+
+
 def _install_body_size_limit(app: FastAPI) -> None:
     """Register an outer HTTP middleware that rejects oversized bodies.
 
@@ -98,6 +108,9 @@ def _install_body_size_limit(app: FastAPI) -> None:
 
     @app.middleware("http")
     async def _enforce_body_size(request: Request, call_next):
+        # Large-upload routes police their own (higher) per-route caps.
+        if request.url.path.startswith(_BODY_SIZE_EXEMPT_PREFIXES):
+            return await call_next(request)
         max_bytes = _max_body_bytes()
         cl = request.headers.get("content-length")
         if cl is not None:
