@@ -32,6 +32,10 @@ class _Subscription:
     ws: WebSocket
     agents: set[str] = field(default_factory=set)
     types: set[str] = field(default_factory=set)
+    # Serializes sends to this one WebSocket. Concurrent _broadcast tasks
+    # (one per emitted event) must not interleave frames on the same
+    # connection — Starlette's send is not safe under concurrent callers.
+    send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     def matches(self, evt: dict) -> bool:
         if self.types and evt.get("type") not in self.types:
@@ -58,6 +62,10 @@ class EventBus:
         # be cheap and non-blocking; exceptions are swallowed to keep emit
         # robust against a buggy aggregator.
         self._listeners: list[Callable[[dict], None]] = []
+        # Strong refs to in-flight fire-and-forget broadcast tasks. Without
+        # this, asyncio only keeps a weak reference and the task may be
+        # garbage-collected mid-send. Each task discards itself on done.
+        self._broadcast_tasks: set[asyncio.Task] = set()
 
     def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Bind to the mesh server's event loop. Idempotent."""
@@ -79,6 +87,7 @@ class EventBus:
             evt_dict["_seq"] = self._seq
             self._buffer.append(evt_dict)
             listeners = list(self._listeners)
+            has_clients = bool(self._clients)
 
         # In-process listeners run synchronously on the caller's stack —
         # the dashboard aggregators are O(1) per event so this is cheap.
@@ -90,7 +99,7 @@ class EventBus:
             except Exception as e:
                 logger.debug("EventBus listener raised: %s", e)
 
-        if not self._clients:
+        if not has_clients:
             return
 
         # Auto-bind loop on first emit from an async context
@@ -105,11 +114,21 @@ class EventBus:
         except RuntimeError:
             running_loop = None
 
-        coro = self._broadcast(evt_dict)
         if running_loop is self._loop:
-            asyncio.ensure_future(coro)
+            self._spawn_broadcast(evt_dict)
         else:
-            self._loop.call_soon_threadsafe(asyncio.ensure_future, coro)
+            self._loop.call_soon_threadsafe(self._spawn_broadcast, evt_dict)
+
+    def _spawn_broadcast(self, evt_dict: dict) -> None:
+        """Schedule a broadcast task and keep a strong ref to it.
+
+        Runs on the bound event loop. Tracking the task in a set (and
+        discarding on completion) prevents the GC from collecting an
+        in-flight broadcast — asyncio only holds a weak reference.
+        """
+        task = asyncio.ensure_future(self._broadcast(evt_dict))
+        self._broadcast_tasks.add(task)
+        task.add_done_callback(self._broadcast_tasks.discard)
 
     def subscribe(
         self,
@@ -117,14 +136,17 @@ class EventBus:
         agents_filter: set[str] | None = None,
         types_filter: set[str] | None = None,
     ) -> None:
-        self._clients.append(_Subscription(
+        sub = _Subscription(
             ws=ws,
             agents=agents_filter or set(),
             types=types_filter or set(),
-        ))
+        )
+        with self._lock:
+            self._clients.append(sub)
 
     def unsubscribe(self, ws: WebSocket) -> None:
-        self._clients = [c for c in self._clients if c.ws is not ws]
+        with self._lock:
+            self._clients = [c for c in self._clients if c.ws is not ws]
 
     def add_listener(self, cb: Callable[[dict], None]) -> None:
         """Register an in-process callback invoked synchronously from emit().
@@ -177,13 +199,22 @@ class EventBus:
         """Send event to all matching subscribers. Remove dead connections."""
         dead: list[_Subscription] = []
         payload = dumps_safe(evt_dict)
-        for sub in self._clients:
+        # Snapshot under the lock so a concurrent subscribe/unsubscribe (or
+        # another _broadcast's dead-removal) can't mutate the list mid-iter
+        # and silently drop a live client.
+        with self._lock:
+            subscribers = list(self._clients)
+        for sub in subscribers:
             if not sub.matches(evt_dict):
                 continue
             try:
-                await sub.ws.send_text(payload)
+                # Per-connection lock: never interleave two events' frames
+                # on the same WebSocket.
+                async with sub.send_lock:
+                    await sub.ws.send_text(payload)
             except Exception as e:
                 logger.debug("Event send to WebSocket failed (client disconnected?): %s", e)
                 dead.append(sub)
-        for d in dead:
-            self._clients.remove(d)
+        if dead:
+            with self._lock:
+                self._clients = [c for c in self._clients if c not in dead]

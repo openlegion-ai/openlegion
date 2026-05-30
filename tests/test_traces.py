@@ -221,6 +221,36 @@ class TestTraceStore:
         finally:
             store.close()
 
+    def test_default_retention_window_gcs_week_old_rows(self):
+        """M22 — the 7-day (168h) default retention reaps rows older than a
+        week while keeping fresh ones."""
+        store = TraceStore(
+            db_path=os.path.join(self._tmpdir, "week.db"),
+            max_age_hours=168,
+        )
+        try:
+            now = time.time()
+            week = 168 * 3600
+            store._conn.execute(
+                "INSERT INTO traces (trace_id, timestamp, source, agent, event_type) "
+                "VALUES (?, ?, ?, ?, ?)",
+                ("tr_8d", now - (week + 86400), "repl", "a", "chat"),  # 8 days old
+            )
+            store._conn.execute(
+                "INSERT INTO traces (trace_id, timestamp, source, agent, event_type) "
+                "VALUES (?, ?, ?, ?, ?)",
+                ("tr_1d", now - 86400, "repl", "a", "chat"),  # 1 day old
+            )
+            store._conn.commit()
+            store._last_age_gc = -300.0  # force GC on next record()
+            store.record("tr_new", "repl", "a", "chat")
+            trace_ids = {e["trace_id"] for e in store.query()}
+            assert "tr_8d" not in trace_ids
+            assert "tr_1d" in trace_ids
+            assert "tr_new" in trace_ids
+        finally:
+            store.close()
+
     def test_no_max_age_keeps_everything(self):
         """Without max_age_hours, all events are kept."""
         store = TraceStore(

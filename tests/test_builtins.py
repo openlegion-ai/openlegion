@@ -513,14 +513,17 @@ class TestHttpTool:
         Previously this test hit ``https://httpbin.org/get`` directly and
         flaked on the busy CI shard whenever the upstream was slow.
         """
-        from unittest.mock import AsyncMock, patch
+        from unittest.mock import patch
+
+        import httpx
 
         from src.agent.builtins.http_tool import http_request
 
-        mock_response = AsyncMock()
-        mock_response.status_code = 200
-        mock_response.text = '{"url": "https://example/get"}'
-        mock_response.headers = {"content-type": "application/json"}
+        mock_response = httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            content=b'{"url": "https://example/get"}',
+        )
 
         with patch(
             "src.agent.builtins.http_tool._request_with_pinned_dns",
@@ -529,6 +532,7 @@ class TestHttpTool:
             result = await http_request(url="https://example.com/get", timeout=10)
         assert result["status_code"] == 200
         assert "body" in result
+        assert result["body"] == '{"url": "https://example/get"}'
 
     @pytest.mark.asyncio
     async def test_http_bad_url(self):
@@ -547,10 +551,10 @@ class TestHttpTool:
         mock_mesh = AsyncMock()
         mock_mesh.vault_resolve = AsyncMock(return_value="secret-token-123")
 
-        mock_response = AsyncMock()
-        mock_response.status_code = 200
-        mock_response.text = '{"ok": true}'
-        mock_response.headers = {"content-type": "application/json"}
+        import httpx
+        mock_response = httpx.Response(
+            200, headers={"content-type": "application/json"}, content=b'{"ok": true}',
+        )
 
         captured = {}
         async def _capture_request(client, method, url, headers, content, timeout):
@@ -601,14 +605,12 @@ class TestHttpTool:
     @pytest.mark.asyncio
     async def test_no_cred_handles_skips_resolution(self):
         """Requests without $CRED{} handles work without mesh_client."""
-        from unittest.mock import AsyncMock, patch
+        from unittest.mock import patch
+
+        import httpx
 
         from src.agent.builtins.http_tool import http_request
-
-        mock_response = AsyncMock()
-        mock_response.status_code = 200
-        mock_response.text = "ok"
-        mock_response.headers = {}
+        mock_response = httpx.Response(200, headers={}, content=b"ok")
 
         async def _mock_pinned(client, method, url, headers, content, timeout):
             return mock_response
@@ -630,10 +632,8 @@ class TestHttpTool:
         mock_mesh = AsyncMock()
         mock_mesh.vault_resolve = AsyncMock(return_value="my-api-key")
 
-        mock_response = AsyncMock()
-        mock_response.status_code = 200
-        mock_response.text = "ok"
-        mock_response.headers = {}
+        import httpx
+        mock_response = httpx.Response(200, headers={}, content=b"ok")
 
         captured = {}
         async def _capture_request(client, method, url, headers, content, timeout):
@@ -660,10 +660,8 @@ class TestHttpTool:
         mock_mesh = AsyncMock()
         mock_mesh.vault_resolve = AsyncMock(return_value="secret-value")
 
-        mock_response = AsyncMock()
-        mock_response.status_code = 200
-        mock_response.text = "ok"
-        mock_response.headers = {}
+        import httpx
+        mock_response = httpx.Response(200, headers={}, content=b"ok")
 
         captured = {}
         async def _capture_request(client, method, url, headers, content, timeout):
@@ -692,10 +690,12 @@ class TestHttpTool:
         mock_mesh = AsyncMock()
         mock_mesh.vault_resolve = AsyncMock(return_value="secret-token-123")
 
-        mock_response = AsyncMock()
-        mock_response.status_code = 200
-        mock_response.text = '{"token": "secret-token-123", "user": "alice"}'
-        mock_response.headers = {"content-type": "application/json"}
+        import httpx
+        mock_response = httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            content=b'{"token": "secret-token-123", "user": "alice"}',
+        )
 
         async def _mock_pinned(client, method, url, headers, content, timeout):
             return mock_response
@@ -722,13 +722,15 @@ class TestHttpTool:
         mock_mesh = AsyncMock()
         mock_mesh.vault_resolve = AsyncMock(return_value="secret-key-abc")
 
-        mock_response = AsyncMock()
-        mock_response.status_code = 200
-        mock_response.text = "ok"
-        mock_response.headers = {
-            "content-type": "application/json",
-            "x-api-key": "secret-key-abc",
-        }
+        import httpx
+        mock_response = httpx.Response(
+            200,
+            headers={
+                "content-type": "application/json",
+                "x-api-key": "secret-key-abc",
+            },
+            content=b"ok",
+        )
 
         async def _mock_pinned(client, method, url, headers, content, timeout):
             return mock_response
@@ -795,14 +797,16 @@ class TestHttpTool:
     @pytest.mark.asyncio
     async def test_no_redaction_without_credentials(self):
         """Responses without credential resolution are returned as-is."""
-        from unittest.mock import AsyncMock, patch
+        from unittest.mock import patch
+
+        import httpx
 
         from src.agent.builtins.http_tool import http_request
-
-        mock_response = AsyncMock()
-        mock_response.status_code = 200
-        mock_response.text = '{"data": "normal response"}'
-        mock_response.headers = {"content-type": "application/json"}
+        mock_response = httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            content=b'{"data": "normal response"}',
+        )
 
         async def _mock_pinned(client, method, url, headers, content, timeout):
             return mock_response
@@ -811,7 +815,7 @@ class TestHttpTool:
             result = await http_request(url="https://example.com")
 
         assert result["body"] == '{"data": "normal response"}'
-        assert result["headers"] == {"content-type": "application/json"}
+        assert result["headers"]["content-type"] == "application/json"
 
     @pytest.mark.asyncio
     async def test_dns_pinning_blocks_private_ip(self):
@@ -980,6 +984,118 @@ class TestHttpTool:
         with patch("src.agent.builtins.http_tool.socket.getaddrinfo", side_effect=socket.gaierror("NXDOMAIN")):
             with pytest.raises(ValueError, match="DNS resolution failed"):
                 _resolve_and_pin("http://nonexistent.invalid/path")
+
+    @pytest.mark.asyncio
+    async def test_large_body_truncated_without_full_read(self):
+        """A huge streamed body is bounded — we stop reading near the cap and
+        flag truncated, never buffering the whole (potentially OOM) body."""
+        from unittest.mock import patch
+
+        from src.agent.builtins.http_tool import _MAX_BODY, _MAX_READ_BYTES, http_request
+
+        # Simulate a malicious server streaming far more than the cap. We track
+        # how many bytes the consumer actually pulled to prove it stops early.
+        read_total = {"bytes": 0}
+        chunk = b"a" * 8192
+        # Enough chunks to dwarf the cap many times over.
+        total_chunks = (_MAX_READ_BYTES // len(chunk)) * 10
+
+        class _FakeStreamResponse:
+            status_code = 200
+            headers = {"content-type": "text/plain"}
+
+            async def aiter_bytes(self):
+                for _ in range(total_chunks):
+                    read_total["bytes"] += len(chunk)
+                    yield chunk
+
+            async def aclose(self):
+                pass
+
+            @property
+            def text(self):
+                # Mirror httpx: decode whatever bytes were buffered.
+                return self._content.decode("utf-8", "replace")
+
+        fake = _FakeStreamResponse()
+
+        async def _mock_pinned(client, method, url, headers, content, timeout):
+            return fake
+
+        with patch("src.agent.builtins.http_tool._request_with_pinned_dns", side_effect=_mock_pinned):
+            result = await http_request(url="https://example.com/huge")
+
+        assert result["status_code"] == 200
+        assert result["truncated"] is True
+        assert len(result["body"]) == _MAX_BODY
+        # Critically: we did NOT read the entire body — reading stopped soon
+        # after exceeding the cap, well under the full simulated payload.
+        assert read_total["bytes"] <= _MAX_READ_BYTES + len(chunk)
+        assert read_total["bytes"] < total_chunks * len(chunk)
+
+    @pytest.mark.asyncio
+    async def test_small_body_identical_to_full_read(self):
+        """For a normal sub-cap body the bounded read returns the same content
+        as the old response.text[:_MAX_BODY] path, with truncated False."""
+        from unittest.mock import patch
+
+        import httpx
+
+        from src.agent.builtins.http_tool import http_request
+
+        payload = '{"hello": "world", "n": 42}'
+        mock_response = httpx.Response(
+            200, headers={"content-type": "application/json"}, content=payload.encode(),
+        )
+
+        async def _mock_pinned(client, method, url, headers, content, timeout):
+            return mock_response
+
+        with patch("src.agent.builtins.http_tool._request_with_pinned_dns", side_effect=_mock_pinned):
+            result = await http_request(url="https://example.com/small")
+
+        assert result["body"] == payload
+        assert result["truncated"] is False
+
+    @pytest.mark.asyncio
+    async def test_timeout_clamped_high(self):
+        """An absurd timeout is clamped to the upper band before sending."""
+        from unittest.mock import patch
+
+        import httpx
+
+        from src.agent.builtins.http_tool import _MAX_TIMEOUT, http_request
+
+        captured = {}
+
+        async def _capture(client, method, url, headers, content, timeout):
+            captured["timeout"] = timeout
+            return httpx.Response(200, content=b"ok")
+
+        with patch("src.agent.builtins.http_tool._request_with_pinned_dns", side_effect=_capture):
+            await http_request(url="https://example.com", timeout=999_999)
+
+        assert captured["timeout"] == _MAX_TIMEOUT
+
+    @pytest.mark.asyncio
+    async def test_timeout_clamped_low(self):
+        """A non-positive timeout is clamped up to the minimum band."""
+        from unittest.mock import patch
+
+        import httpx
+
+        from src.agent.builtins.http_tool import _MIN_TIMEOUT, http_request
+
+        captured = {}
+
+        async def _capture(client, method, url, headers, content, timeout):
+            captured["timeout"] = timeout
+            return httpx.Response(200, content=b"ok")
+
+        with patch("src.agent.builtins.http_tool._request_with_pinned_dns", side_effect=_capture):
+            await http_request(url="https://example.com", timeout=0)
+
+        assert captured["timeout"] == _MIN_TIMEOUT
 
 
 class TestHttpToolProxyAware:

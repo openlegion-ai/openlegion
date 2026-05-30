@@ -1077,3 +1077,85 @@ def test_arbitrary_keys_blocked_after_project_remove_strips_wildcard(tmp_path, m
     assert not pm.can_read_blackboard("rover", "projects/alpha/secret")
     assert not pm.can_read_blackboard("rover", "projects/beta/secret")
     assert not pm.can_write_blackboard("rover", "projects/beta/note")
+
+
+class TestCorruptPermissionsFailClosed:
+    """M14 — a corrupt permissions.json must NOT crash boot and must NOT
+    grant access. It fails closed to deny-all, like the missing-file case."""
+
+    def test_corrupt_json_does_not_crash_and_denies(self, tmp_path):
+        perms_file = tmp_path / "permissions.json"
+        perms_file.write_text('{"permissions": {"rover": {  this is not json')
+
+        # Must construct without raising — boot survives a corrupt ACL.
+        pm = PermissionMatrix(config_path=str(perms_file))
+
+        # Deny-all: no agent has any grant.
+        assert pm.permissions == {}
+        assert not pm.can_use_api("rover", "github")
+        assert not pm.can_read_blackboard("rover", "anything")
+        assert not pm.can_write_blackboard("rover", "anything")
+
+    def test_corrupt_reload_clears_stale_grants(self, tmp_path):
+        perms_file = tmp_path / "permissions.json"
+        perms_file.write_text(json.dumps({
+            "permissions": {"rover": {"allowed_apis": ["github"]}},
+        }))
+        pm = PermissionMatrix(config_path=str(perms_file))
+        assert pm.can_use_api("rover", "github")
+
+        # File becomes corrupt, then reload — stale grant must be dropped.
+        perms_file.write_text("}{ broken")
+        pm.reload()
+        assert pm.permissions == {}
+        assert not pm.can_use_api("rover", "github")
+
+
+class TestAtomicPermissionsWrite:
+    """M14 — _save_permissions writes atomically (no torn file) and the
+    module lock keeps concurrent read-modify-write saves from losing data."""
+
+    def test_concurrent_saves_do_not_lose_data(self, tmp_path, monkeypatch):
+        import threading
+
+        from src.cli import config as cfg
+
+        perms_file = tmp_path / "permissions.json"
+        perms_file.write_text(json.dumps({"permissions": {}}))
+        monkeypatch.setattr(cfg, "PERMISSIONS_FILE", perms_file)
+
+        n = 40
+
+        def _add(i):
+            # Full read-modify-write under the shared reentrant lock so neither
+            # writer clobbers the other's new key. _load/_save re-acquire the
+            # same RLock internally — safe because it is reentrant.
+            with cfg._PERMISSIONS_LOCK:
+                perms = cfg._load_permissions()
+                perms["permissions"][f"agent{i}"] = {"allowed_apis": ["github"]}
+                cfg._save_permissions(perms)
+
+        threads = [threading.Thread(target=_add, args=(i,)) for i in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        final = json.loads(perms_file.read_text())
+        assert len(final["permissions"]) == n
+        for i in range(n):
+            assert f"agent{i}" in final["permissions"]
+
+    def test_save_is_atomic_no_partial_file(self, tmp_path, monkeypatch):
+        from src.cli import config as cfg
+
+        perms_file = tmp_path / "permissions.json"
+        monkeypatch.setattr(cfg, "PERMISSIONS_FILE", perms_file)
+
+        big = {"permissions": {f"a{i}": {"can_use_api": True} for i in range(500)}}
+        cfg._save_permissions(big)
+
+        # File is complete + parseable; no leftover .tmp files.
+        loaded = json.loads(perms_file.read_text())
+        assert len(loaded["permissions"]) == 500
+        assert not list(perms_file.parent.glob("*.tmp"))

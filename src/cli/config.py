@@ -5,10 +5,13 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import os
 import re
 import secrets
 import subprocess
 import sys
+import tempfile
+import threading
 from pathlib import Path
 
 import click
@@ -251,18 +254,60 @@ def _load_config(mesh_path: Path | None = None) -> dict:
     return cfg
 
 
+# Guards individual reads/writes of permissions.json. Held internally by
+# _load_permissions and _save_permissions so a save never interleaves with a
+# read, and pairs with the atomic os.replace below so a reader never observes a
+# half-written file (the boot-crash / torn-read protection — finding M14).
+#
+# NOTE: this does NOT by itself prevent the lost-update race. Callers do
+# ``perms = _load_permissions(); ...mutate...; _save_permissions(perms)`` as
+# two separate lock acquisitions, so two concurrent writers (e.g. a template
+# apply touching agent B while the dashboard edits agent A) can both load the
+# same baseline and the second save clobbers the first. The lock is REENTRANT
+# precisely so a caller CAN close that gap by holding it across the whole
+# load→mutate→save (``with _PERMISSIONS_LOCK: ...``); today no caller does.
+# Low risk under the single-operator model; wrapping the hot call sites is a
+# tracked follow-up, not part of M14's torn-read/atomicity fix.
+_PERMISSIONS_LOCK = threading.RLock()
+
+
 def _load_permissions() -> dict:
     if not PERMISSIONS_FILE.exists():
         return {"permissions": {}}
-    with open(PERMISSIONS_FILE) as f:
-        return json.load(f)
+    with _PERMISSIONS_LOCK:
+        with open(PERMISSIONS_FILE) as f:
+            return json.load(f)
 
 
 def _save_permissions(perms: dict) -> None:
+    """Persist permissions.json atomically (temp file + os.replace).
+
+    The atomic rename guarantees a concurrent reader sees either the old
+    or the new complete file, never a truncated one — so a crash or
+    interleaved read can never produce a corrupt ACL (which fail-closed
+    loading would then treat as deny-all).
+    """
     PERMISSIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(PERMISSIONS_FILE, "w") as f:
-        json.dump(perms, f, indent=2)
-        f.write("\n")
+    content = json.dumps(perms, indent=2) + "\n"
+    with _PERMISSIONS_LOCK:
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(PERMISSIONS_FILE.parent), suffix=".tmp",
+        )
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(content)
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass  # already closed by fdopen
+            Path(tmp_path).unlink(missing_ok=True)
+            raise
+        try:
+            os.replace(tmp_path, PERMISSIONS_FILE)
+        except BaseException:
+            Path(tmp_path).unlink(missing_ok=True)
+            raise
 
 
 def _set_env_key(name: str, value: str, *, system: bool = False) -> None:
