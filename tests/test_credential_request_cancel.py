@@ -27,6 +27,14 @@ def _build_mesh(tmp_path, *, lane_manager=None):
     bb = Blackboard(str(tmp_path / "bb.db"))
     pubsub = PubSub()
     perms = PermissionMatrix()
+    # L2 gate: /mesh/credential-request enforces
+    # ``can_request_user_credentials``. Grant it to ``agent-1`` so these
+    # cancellation tests can reach the request endpoint.
+    from src.shared.types import AgentPermissions
+    for _aid in ("agent-1", "a"):
+        perms.permissions[_aid] = AgentPermissions(
+            agent_id=_aid, can_request_user_credentials=True,
+        )
     router = MessageRouter(perms, {})
     costs = CostTracker(str(tmp_path / "costs.db"))
     traces = TraceStore(str(tmp_path / "traces.db"))

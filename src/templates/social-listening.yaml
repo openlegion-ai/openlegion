@@ -148,6 +148,9 @@ agents:
       blackboard_write: ["signals/*", "tasks/*", "output/*", "status/*"]
       can_publish: ["signal_found"]
       can_subscribe: ["draft_complete"]
+      # Reads login-gated social platforms via browser — may need to ask
+      # the user for a service credential.
+      can_request_user_credentials: true
     resources:
       memory_limit: "512m"
       cpu_limit: 0.5

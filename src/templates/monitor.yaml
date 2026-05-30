@@ -71,6 +71,9 @@ agents:
       blackboard_write: ["alerts/*", "tasks/*", "output/*", "status/*"]
       can_publish: ["alert_triggered"]
       can_subscribe: ["analysis_complete"]
+      # Checks login-gated sources via browser — may need to ask the user
+      # for a service credential.
+      can_request_user_credentials: true
     resources:
       memory_limit: "512m"
       cpu_limit: 0.5

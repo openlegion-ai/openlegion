@@ -200,6 +200,15 @@ class TestCredentialRequestEndpoint:
         blackboard = Blackboard(str(bb_path))
         pubsub = PubSub()
         permissions = PermissionMatrix()
+        # L2 gate: /mesh/credential-request now enforces
+        # ``can_request_user_credentials``. Grant it to ``agent-1`` so the
+        # happy-path endpoint tests below exercise an *authorized* worker.
+        # ``test_denied_without_capability`` covers the deny path.
+        from src.shared.types import AgentPermissions
+        permissions.permissions["agent-1"] = AgentPermissions(
+            agent_id="agent-1", can_request_user_credentials=True,
+        )
+        self.permissions = permissions
         router = MessageRouter(permissions, {})
         costs = CostTracker(str(costs_path))
         traces = TraceStore(str(traces_path))
@@ -307,3 +316,55 @@ class TestCredentialRequestEndpoint:
         assert set(call_data.keys()) == {
             "name", "description", "service", "request_id",
         }
+
+    @pytest.mark.asyncio
+    async def test_denied_without_capability(self, _app):
+        """L2 gate: a worker lacking can_request_user_credentials is 403.
+
+        ``unprivileged`` has no permissions entry, so the matrix returns
+        the deny-all default (``can_request_user_credentials=False``).
+        """
+        from httpx import ASGITransport, AsyncClient
+
+        async with AsyncClient(
+            transport=ASGITransport(app=_app), base_url="http://test",
+        ) as client:
+            resp = await client.post(
+                "/mesh/credential-request",
+                json={
+                    "agent_id": "unprivileged",
+                    "name": "stripe_key",
+                    "description": "Your Stripe key",
+                    "service": "Stripe",
+                },
+            )
+        assert resp.status_code == 403
+        # No dashboard event must be emitted for a denied request.
+        self.event_bus.emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_allowed_with_capability(self, _app):
+        """L2 gate: a worker WITH the capability is allowed through."""
+        from httpx import ASGITransport, AsyncClient
+
+        from src.shared.types import AgentPermissions
+
+        self.permissions.permissions["worker-cred"] = AgentPermissions(
+            agent_id="worker-cred", can_request_user_credentials=True,
+        )
+
+        async with AsyncClient(
+            transport=ASGITransport(app=_app), base_url="http://test",
+        ) as client:
+            resp = await client.post(
+                "/mesh/credential-request",
+                json={
+                    "agent_id": "worker-cred",
+                    "name": "linkedin_key",
+                    "description": "Your LinkedIn key",
+                    "service": "LinkedIn",
+                },
+            )
+        assert resp.status_code == 200
+        assert resp.json()["requested"] is True
+        self.event_bus.emit.assert_called_once()
