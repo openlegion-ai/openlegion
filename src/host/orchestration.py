@@ -26,6 +26,7 @@ table. Operators read this for the per-task audit history.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -41,6 +42,29 @@ from src.shared.utils import dumps_safe, setup_logging
 logger = setup_logging("host.orchestration")
 
 
+def _env_int(name: str, default: int) -> int:
+    """Read a non-negative int from the environment, falling back to
+    ``default`` on missing / unparseable values. A negative parsed value
+    is also treated as ``default`` (callers use ``<= 0`` to mean
+    "disabled", so we preserve 0 but reject malformed negatives)."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        val = int(raw.strip())
+    except (TypeError, ValueError):
+        logger.warning(
+            "Ignoring non-integer %s=%r — using default %d", name, raw, default,
+        )
+        return default
+    if val < 0:
+        logger.warning(
+            "Ignoring negative %s=%d — using default %d", name, val, default,
+        )
+        return default
+    return val
+
+
 # ── Status machine ────────────────────────────────────────────────
 
 VALID_STATUSES: frozenset[str] = frozenset({
@@ -48,6 +72,14 @@ VALID_STATUSES: frozenset[str] = frozenset({
 })
 
 TERMINAL_STATUSES: frozenset[str] = frozenset({"done", "failed", "cancelled"})
+
+# Non-terminal, not-yet-being-worked statuses. The per-assignee pending
+# cap (H5) counts ONLY these so a backlog of un-started work can't grow
+# unbounded — tasks an agent is actively progressing (``working`` /
+# ``blocked`` / ``accepted``) are deliberately excluded so a busy agent
+# is never blocked from receiving the handoff it's mid-flight on, and
+# completed work (``done`` / ``failed`` / ``cancelled``) never counts.
+PENDING_STATUSES: frozenset[str] = frozenset({"pending"})
 
 # Outcome enum — operator-supplied judgement on a completed task.
 # ``None`` means "not yet rated". Outcomes are write-many: every
@@ -104,6 +136,34 @@ DEFAULT_RETENTION_SECONDS: int = 90 * 24 * 60 * 60  # 90 days
 # point at which the temporary chain table starts to matter.
 MAX_WORKFLOW_CHAIN_DEPTH: int = 200
 
+# H5 — runaway parent-chain guard. ``parent_task_id`` forms a chain
+# (each task points at one parent); legitimate workflows are 3–8 stages
+# deep, so 25 is generous headroom while still cutting off a self-
+# replicating loop that keeps spawning "do the next step" children
+# forever. This bounds the parent CHAIN length only — it does NOT bound
+# fan-out (one parent may legitimately have dozens of sibling subtasks).
+# Self-parent cycles (parent_task_id == own id, or a cycle reached while
+# walking up) are rejected regardless of depth. Env override:
+# ``OPENLEGION_MAX_TASK_CHAIN_DEPTH``.
+DEFAULT_MAX_TASK_CHAIN_DEPTH: int = 25
+
+# H5 — per-assignee backlog cap. Counts only ``PENDING_STATUSES`` tasks
+# (un-started work) so a runaway producer can't bury an assignee under an
+# unbounded queue. 200 is far above any plausible real backlog (agents
+# rarely carry more than a handful of un-started tasks at once) while
+# still catching a loop minting thousands. Env override:
+# ``OPENLEGION_MAX_PENDING_TASKS_PER_AGENT``.
+DEFAULT_MAX_PENDING_TASKS_PER_AGENT: int = 200
+
+
+class TaskLimitExceeded(ValueError):
+    """Raised when a task-creation resource cap (chain depth / pending
+    backlog) would be exceeded. The mesh endpoint maps this to HTTP 400.
+
+    Distinct from ``InvalidStatusTransition`` so callers can surface a
+    cap-specific ``create_failed`` envelope to the agent.
+    """
+
 
 class InvalidStatusTransition(ValueError):
     """Raised when a status transition is not allowed by the state machine."""
@@ -132,9 +192,32 @@ class Tasks:
         *,
         retention_seconds: int = DEFAULT_RETENTION_SECONDS,
         event_bus=None,
+        max_pending_per_agent: int | None = None,
+        max_chain_depth: int | None = None,
     ):
         self.db_path = db_path
         self.retention_seconds = retention_seconds
+        # H5 resource caps. Resolved once at construction: explicit kwarg
+        # wins, then env override, then the generous module default. A
+        # non-positive value disables the cap entirely (operator escape
+        # hatch — set ``OPENLEGION_MAX_PENDING_TASKS_PER_AGENT=0`` to turn
+        # off the backlog cap).
+        self.max_pending_per_agent = (
+            max_pending_per_agent
+            if max_pending_per_agent is not None
+            else _env_int(
+                "OPENLEGION_MAX_PENDING_TASKS_PER_AGENT",
+                DEFAULT_MAX_PENDING_TASKS_PER_AGENT,
+            )
+        )
+        self.max_chain_depth = (
+            max_chain_depth
+            if max_chain_depth is not None
+            else _env_int(
+                "OPENLEGION_MAX_TASK_CHAIN_DEPTH",
+                DEFAULT_MAX_TASK_CHAIN_DEPTH,
+            )
+        )
         self._shared_conn: sqlite3.Connection | None = None
         # Task 9 — optional EventBus for surfacing task lifecycle to the
         # dashboard. Wired in by ``create_mesh_app`` after construction
@@ -506,6 +589,33 @@ class Tasks:
         # which call path created it.
         title, description = normalize_title_and_description(title, description)
 
+        # ── H5 resource caps ────────────────────────────────────────
+        # Enforced here (the single create choke-point) so EVERY path —
+        # the mesh endpoint, coordination_tool hand_off, migration shims —
+        # is bounded identically. Both raise ``TaskLimitExceeded`` which
+        # the endpoint maps to HTTP 400 and the agent surfaces as a
+        # ``create_failed`` envelope.
+        #
+        # 1. Parent-chain depth + cycle guard. Walks UP the parent chain;
+        #    rejects self-parenting, cycles, and chains deeper than the
+        #    cap. Fan-out (many children of one parent) is unaffected —
+        #    only chain LENGTH is bounded.
+        if parent_task_id:
+            self._guard_parent_chain(parent_task_id, proposed_id=task_id)
+
+        # 2. Per-assignee pending backlog cap. Counts only un-started
+        #    (PENDING_STATUSES) tasks so an actively-working agent is
+        #    never blocked from receiving the next handoff, and terminal
+        #    rows never count.
+        if self.max_pending_per_agent > 0:
+            pending = self.count_pending_for_assignee(assignee)
+            if pending >= self.max_pending_per_agent:
+                raise TaskLimitExceeded(
+                    f"assignee {assignee!r} has {pending} pending tasks "
+                    f"(cap {self.max_pending_per_agent}); complete or "
+                    "cancel un-started work before creating more"
+                )
+
         tid = task_id or f"task_{uuid.uuid4().hex[:12]}"
         now = time.time()
         kind = origin.get("kind") if isinstance(origin, dict) else None
@@ -595,6 +705,75 @@ class Tasks:
             record.get("status"), (title or "")[:80],
         )
         return record
+
+    # ── H5 cap helpers ──────────────────────────────────────────────
+
+    def count_pending_for_assignee(self, assignee: str) -> int:
+        """Count un-started (``PENDING_STATUSES``) tasks for ``assignee``.
+
+        Used by the per-assignee backlog cap. Deliberately excludes
+        ``accepted`` / ``working`` / ``blocked`` (in-flight) and terminal
+        rows — only genuinely queued, not-yet-started work counts."""
+        placeholders = ",".join("?" * len(PENDING_STATUSES))
+        params: list[Any] = [assignee, *sorted(PENDING_STATUSES)]
+        with self._conn() as conn:
+            row = conn.execute(
+                f"SELECT COUNT(*) FROM tasks "
+                f"WHERE assignee = ? AND status IN ({placeholders})",
+                params,
+            ).fetchone()
+        return int(row[0]) if row else 0
+
+    def _guard_parent_chain(
+        self, parent_task_id: str, *, proposed_id: str | None = None,
+    ) -> None:
+        """Reject runaway / cyclic ``parent_task_id`` chains.
+
+        Walks UP from ``parent_task_id`` following each row's own parent.
+        Raises :class:`TaskLimitExceeded` on:
+          * self-parenting (``proposed_id == parent_task_id``),
+          * a cycle reached while walking (a parent already seen),
+          * a chain deeper than ``self.max_chain_depth``.
+
+        A non-positive ``max_chain_depth`` disables the depth cap, but the
+        self-parent + cycle checks always run (they are correctness, not
+        capacity, guards). Bounds only chain LENGTH — sibling fan-out is
+        never affected. Unknown parents are allowed through (the endpoint
+        does not require the parent to pre-exist; a dangling reference is
+        a separate concern)."""
+        # Self-parent: the new task names itself as parent.
+        if proposed_id is not None and proposed_id == parent_task_id:
+            raise TaskLimitExceeded(
+                f"task {proposed_id!r} cannot be its own parent "
+                "(self-parent cycle)"
+            )
+        seen: set[str] = set()
+        if proposed_id is not None:
+            seen.add(proposed_id)
+        depth = 1  # the link from the new task to ``parent_task_id``
+        current: str | None = parent_task_id
+        cap = self.max_chain_depth
+        while current is not None:
+            if current in seen:
+                raise TaskLimitExceeded(
+                    f"parent chain through {current!r} forms a cycle"
+                )
+            seen.add(current)
+            if cap > 0 and depth > cap:
+                raise TaskLimitExceeded(
+                    f"parent chain exceeds max depth {cap} "
+                    "(runaway task chain)"
+                )
+            with self._conn() as conn:
+                row = conn.execute(
+                    "SELECT parent_task_id FROM tasks WHERE id = ?",
+                    (current,),
+                ).fetchone()
+            if row is None:
+                # Dangling / unknown parent — stop walking, allow.
+                break
+            current = row[0]
+            depth += 1
 
     def get(self, task_id: str) -> dict | None:
         """Read a task by id. Returns None when not found."""

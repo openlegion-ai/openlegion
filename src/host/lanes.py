@@ -35,6 +35,22 @@ _NOTIFY_FORWARD_TIMEOUT = 30  # seconds — cap on auto-notify send
 _DEFAULT_LANE_TIMEOUT_SECONDS = int(
     os.getenv("OPENLEGION_LANE_TIMEOUT_SECONDS", "900"),
 )
+# H7 — per-agent lane queue depth cap. Bounds the un-drained followup
+# backlog so a flood of wakes/handoffs can't grow a single agent's queue
+# without limit (memory + a guarantee that backpressure surfaces as a
+# 429 rather than a silent unbounded build-up). 100 is generous: a lane
+# drains serially, so a healthy agent rarely carries more than a handful
+# queued, and 100 deep is already a strong signal something is looping.
+# ``<= 0`` disables the bound (unbounded queue, pre-H7 behaviour).
+_DEFAULT_LANE_QUEUE_MAX = int(
+    os.getenv("OPENLEGION_LANE_QUEUE_MAX", "100"),
+)
+
+
+class LaneQueueFull(Exception):
+    """Raised by ``enqueue`` when an agent's followup queue is at its
+    depth cap. The mesh wake/task endpoints map this to HTTP 429 so the
+    caller backs off rather than the lane silently dropping work."""
 
 
 @dataclass
@@ -62,8 +78,16 @@ class LaneManager:
         tasks_store: Any = None,
         task_timeout_seconds: int | None = None,
         quarantine_check: Callable[[str], bool] | None = None,
+        queue_maxsize: int | None = None,
     ):
         self._dispatch_fn = dispatch_fn
+        # H7 — per-lane queue depth cap. Resolved once: kwarg wins, else
+        # env default. ``<= 0`` means unbounded (asyncio.Queue(maxsize=0)).
+        self._queue_maxsize = (
+            queue_maxsize
+            if queue_maxsize is not None
+            else _DEFAULT_LANE_QUEUE_MAX
+        )
         self._steer_fn = steer_fn
         self._trace_store = trace_store
         self._notify_fn = notify_fn
@@ -169,10 +193,29 @@ class LaneManager:
         """
         self._quarantine_check = check
 
+    def lane_full(self, agent: str) -> bool:
+        """Return True when ``agent``'s lane queue is at its depth cap.
+
+        H7 pre-flight check for callers that enqueue cross-thread (fire-
+        and-forget on the dispatch loop) and therefore can't catch
+        ``LaneQueueFull`` synchronously. ``qsize()`` is a plain int read.
+        Unbounded lanes (``maxsize<=0``) are never full. A not-yet-created
+        lane is never full (it'll be created with headroom on first put)."""
+        if self._queue_maxsize <= 0:
+            return False
+        q = self._queues.get(agent)
+        if q is None:
+            return False
+        return q.qsize() >= self._queue_maxsize
+
     def _ensure_lane(self, agent: str) -> None:
         """Lazily create queue, worker, and tracking structures for an agent."""
         if agent not in self._queues:
-            self._queues[agent] = asyncio.Queue()
+            # H7 — bound the followup backlog. ``maxsize<=0`` →
+            # unbounded (asyncio semantics), preserving the escape hatch.
+            self._queues[agent] = asyncio.Queue(
+                maxsize=max(0, self._queue_maxsize),
+            )
             self._pending[agent] = []
             self._busy[agent] = False
             self._state_locks[agent] = asyncio.Lock()
@@ -227,8 +270,23 @@ class LaneManager:
             auto_notify=auto_notify,
             task_id=task_id,
         )
+        # H7 — non-blocking put so a full lane surfaces backpressure
+        # (LaneQueueFull → HTTP 429) instead of silently awaiting forever
+        # or growing without bound. ``_pending`` is only appended on a
+        # successful put so it stays in lockstep with the queue.
+        try:
+            self._queues[agent].put_nowait(task)
+        except asyncio.QueueFull:
+            logger.warning(
+                "Lane queue full for agent '%s' (depth: %d/%d) — rejecting "
+                "with backpressure",
+                agent, self._queues[agent].qsize(), self._queue_maxsize,
+            )
+            raise LaneQueueFull(
+                f"agent '{agent}' lane queue is full "
+                f"(depth {self._queues[agent].qsize()}/{self._queue_maxsize})"
+            )
         self._pending[agent].append(task)
-        await self._queues[agent].put(task)
         logger.debug(f"Queued task {task.id} for agent '{agent}' (depth: {self._queues[agent].qsize()})")
         return await task.future
 

@@ -34,6 +34,7 @@ from src.host.orchestration import (
     VALID_OUTCOMES,
     VALID_STATUSES,
     InvalidStatusTransition,
+    TaskLimitExceeded,
     TaskNotFound,
     Tasks,
 )
@@ -465,7 +466,7 @@ def _emit_team_event(
 #   * ``permission`` — ``permissions.can_*()`` returned False
 #   * ``rate``       — rate limiter rejected
 _DENIAL_CATEGORIES: frozenset[str] = frozenset(
-    {"auth", "scope", "role", "permission", "rate"}
+    {"auth", "scope", "role", "permission", "rate", "limit"}
 )
 _denial_counter: dict[str, int] = defaultdict(int)
 # Mutable single-element wrapper so ``_record_denial`` can rotate the
@@ -799,6 +800,17 @@ def create_mesh_app(
     _rate_ts: dict[str, deque[float]] = defaultdict(deque)
     _rate_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
+    # M15 — serialise count-check→create for all durable-entity creation
+    # paths (``create_custom_agent`` / ``apply_fleet_template`` /
+    # ``mesh_create_team``). Without this, two concurrent creates can each
+    # read ``current_count < MAX`` before either registers, then both
+    # proceed and overshoot ``OPENLEGION_MAX_AGENTS`` / ``MAX_TEAMS``. A
+    # single app-scoped lock makes the read-then-create atomic. The
+    # critical sections are short (config write + register), so the lock
+    # is not a throughput concern — fleet creation is rare and operator-
+    # driven.
+    _creation_lock = asyncio.Lock()
+
     _RATE_LIMITS: dict[str, tuple[int, int]] = {
         # (max_requests, window_seconds)
         # Self-hosted single-tenant: limits only exist to catch a genuinely
@@ -810,6 +822,15 @@ def create_mesh_app(
         "vault_store": (600, 60),
         "blackboard_read": (20000, 60),
         "blackboard_write": (10000, 60),
+        # H5 — task creation gets its own bucket (generous: ~300/min) so a
+        # runaway handoff loop is throttled without touching the broad
+        # blackboard_write ceiling. Normal multi-stage fan-out is dozens
+        # of tasks, nowhere near this.
+        "task_create": (300, 60),
+        # H7 — wake / lane enqueue. Its own category so backpressure on a
+        # flooded lane is independent of blackboard writes. Generous since
+        # legitimate handoff chains wake many agents.
+        "wake": (3000, 60),
         "publish": (20000, 60),
         "notify": (3000, 60),
         "cron_create": (1000, 60),
@@ -1154,9 +1175,29 @@ def create_mesh_app(
                     gate="wake:can_message",
                 )
                 raise HTTPException(403, f"Agent {caller} cannot wake {target}")
-        await _check_rate_limit("blackboard_write", caller)  # reuse bb rate limit
+        # H7 — wake gets its own rate category (generous ~3000/min) so a
+        # flooded lane is throttled independently of blackboard writes.
+        await _check_rate_limit("wake", caller)
         if target not in router.agent_registry:
             raise HTTPException(404, f"Agent '{target}' not registered")
+
+        # H7 — pre-flight backpressure. The actual enqueue runs cross-
+        # thread on ``dispatch_loop`` (fire-and-forget), so a QueueFull
+        # raised there can't propagate back to this request. Peek the
+        # target lane depth here and reject with 429 before scheduling so
+        # the caller backs off instead of the work being silently dropped
+        # on the dispatch loop. ``qsize()`` is a plain int read — safe to
+        # call from this thread.
+        _lane_full = getattr(lane_manager, "lane_full", None)
+        if lane_manager is not None and callable(_lane_full) and _lane_full(target):
+            _record_denial(
+                "limit", caller=caller, target=target,
+                gate="wake:lane_queue_full",
+            )
+            raise HTTPException(
+                429,
+                f"Agent '{target}' lane queue is full — back off and retry",
+            )
 
         if message:
             wake_msg = sanitize_for_prompt(message)
@@ -2938,6 +2979,12 @@ def create_mesh_app(
                         "(requires can_manage_fleet)",
                 )
 
+        # M15 — applying a template is a spawn-class operation; rate-limit
+        # it on the same ``spawn`` bucket as ``create_custom_agent`` (which
+        # already does this) so a loop of template applies can't mint
+        # agents unthrottled. Generous (600/min) — never trips a human.
+        await _check_rate_limit("spawn", spawned_by)
+
         template_name = data.get("template", "").strip()
         if not template_name:
             raise HTTPException(400, "template is required")
@@ -2953,20 +3000,8 @@ def create_mesh_app(
         if not tpl_agents:
             raise HTTPException(400, f"Template '{template_name}' has no agents")
 
-        # Check plan limits (exclude operator from count)
         import os as _os
         max_agents = int(_os.environ.get("OPENLEGION_MAX_AGENTS", "0"))
-        if max_agents > 0:
-            current_count = sum(
-                1 for aid in router.agent_registry
-                if aid != "operator"
-            )
-            if current_count + len(tpl_agents) > max_agents:
-                raise HTTPException(
-                    403,
-                    f"Would exceed agent limit ({current_count} + {len(tpl_agents)} > {max_agents}). "
-                    "Upgrade your plan for more agents.",
-                )
 
         # Optional model override
         model_override = data.get("model", "")
@@ -3095,15 +3130,45 @@ def create_mesh_app(
                         + (_reason or "not compatible with current credentials."),
                     )
 
-        # Apply template to create config entries
-        created_names = _apply_template(
-            template_name, tpl, agent_overrides=agent_overrides or None,
-        )
-        # _apply_template calls _add_agent_permissions for each new agent;
-        # reload the live matrix so /mesh/register sees the on-disk perms
-        # instead of falling through to default/deny-all. Cheap no-op when
-        # created_names is empty.
-        permissions.reload()
+        # M15 — atomic plan-limit check + create. Hold the shared
+        # creation lock across the ``current_count`` read and
+        # ``_apply_template`` so two concurrent template applies can't
+        # both pass the cap check and overshoot ``OPENLEGION_MAX_AGENTS``.
+        async with _creation_lock:
+            # Re-read the count INSIDE the lock. Union the live router
+            # registry with the on-disk config so the guard sees BOTH
+            # already-running agents (registry) AND any agents a concurrent
+            # ``create_custom_agent`` / template apply just wrote to config
+            # but hasn't registered yet — that union is what makes the
+            # overshoot guard correct under concurrency. Operator is
+            # excluded; already-present template slots don't double-count
+            # (apply is idempotent on existing names).
+            if max_agents > 0:
+                _cfg_existing = set(_load_config().get("agents", {}))
+                _live = {
+                    aid for aid in router.agent_registry if aid != "operator"
+                }
+                _existing = (
+                    _live | {a for a in _cfg_existing if a != "operator"}
+                )
+                current_count = len(_existing)
+                new_slots = [n for n in tpl_agents if n not in _existing]
+                if current_count + len(new_slots) > max_agents:
+                    raise HTTPException(
+                        403,
+                        f"Would exceed agent limit ({current_count} + "
+                        f"{len(new_slots)} > {max_agents}). "
+                        "Upgrade your plan for more agents.",
+                    )
+            # Apply template to create config entries
+            created_names = _apply_template(
+                template_name, tpl, agent_overrides=agent_overrides or None,
+            )
+            # _apply_template calls _add_agent_permissions for each new
+            # agent; reload the live matrix so /mesh/register sees the
+            # on-disk perms instead of falling through to default/deny-all.
+            # Cheap no-op when created_names is empty.
+            permissions.reload()
         if not created_names:
             return {
                 "template": template_name,
@@ -3259,17 +3324,12 @@ def create_mesh_app(
         if name in config.get("agents", {}):
             raise HTTPException(409, f"Agent '{name}' already exists")
 
-        # Check plan limits (exclude operator)
+        # Plan-limit cap is read here but ENFORCED inside the shared
+        # creation lock below (M15) so a concurrent create can't race past
+        # it. ``config`` was loaded above for the dup-name check; the
+        # authoritative count is re-read inside the lock.
         import os
         max_agents = int(os.environ.get("OPENLEGION_MAX_AGENTS", "0"))
-        if max_agents > 0:
-            current = len([a for a in config.get("agents", {}) if a != "operator"])
-            if current >= max_agents:
-                raise HTTPException(
-                    409,
-                    f"Plan limit reached ({current}/{max_agents} agents). "
-                    "Remove an agent or upgrade your plan.",
-                )
 
         # Default model
         if not model:
@@ -3313,10 +3373,37 @@ def create_mesh_app(
             _add_agent_to_config,
             _update_agent_field,
         )
-        _add_agent_to_config(
-            name=name, role=role or name, model=model,
-            initial_instructions=instructions, initial_soul=soul,
-        )
+        # M15 — atomic plan-limit check + config write. Hold the shared
+        # creation lock across the count re-read and ``_add_agent_to_config``
+        # so two concurrent creates can't both pass the cap and overshoot
+        # ``OPENLEGION_MAX_AGENTS``. Re-load config inside the lock for the
+        # authoritative count (another create may have landed since the
+        # dup-name check above).
+        async with _creation_lock:
+            _agents_now = _load_config().get("agents", {})
+            # Dup-name re-check inside the lock (another create may have
+            # landed since the pre-lock check above).
+            if name in _agents_now or name in router.agent_registry:
+                raise HTTPException(409, f"Agent '{name}' already exists")
+            if max_agents > 0:
+                # Union config + live registry (same semantics as
+                # apply_fleet_template) so the cap counts agents written by
+                # a concurrent template apply even before they register.
+                _existing = (
+                    {a for a in _agents_now if a != "operator"}
+                    | {aid for aid in router.agent_registry if aid != "operator"}
+                )
+                current = len(_existing)
+                if current >= max_agents:
+                    raise HTTPException(
+                        409,
+                        f"Plan limit reached ({current}/{max_agents} agents). "
+                        "Remove an agent or upgrade your plan.",
+                    )
+            _add_agent_to_config(
+                name=name, role=role or name, model=model,
+                initial_instructions=instructions, initial_soul=soul,
+            )
         _update_agent_field(name, "avatar", random.randint(1, 50))
         # Operator-created agents need the same coordination defaults as
         # template-created agents — empty blackboard_read/write would lock
@@ -4243,19 +4330,18 @@ def create_mesh_app(
 
         from src.cli.config import _create_project, _load_config, _load_projects
 
+        # Plan-limit cap read here; the "teams disabled" (==0) gate fires
+        # immediately, but the count-vs-cap check is ENFORCED inside the
+        # shared creation lock below (M15) so concurrent team creates
+        # can't race past ``OPENLEGION_MAX_TEAMS``.
         _max_teams_env = _os.environ.get("OPENLEGION_MAX_TEAMS")
+        _max_teams: int | None = None
         if _max_teams_env is not None:
             _max_teams = int(_max_teams_env)
             if _max_teams == 0:
                 raise HTTPException(
                     403,
                     "Teams are not available on your plan. Upgrade for team support.",
-                )
-            current_count = len(_load_projects())
-            if current_count >= _max_teams:
-                raise HTTPException(
-                    403,
-                    f"Team limit reached ({_max_teams}). Upgrade your plan for more teams.",
                 )
 
         body = await request.json()
@@ -4271,10 +4357,22 @@ def create_mesh_app(
         unknown = [m for m in members if m not in known_agents]
         if unknown:
             raise HTTPException(400, f"Unknown agents: {', '.join(unknown)}")
-        try:
-            _create_project(name, description=description, members=members)
-        except ValueError as e:
-            raise HTTPException(400, str(e))
+        # M15 — atomic count re-check + create. Hold the shared creation
+        # lock so two concurrent team creates can't both pass the cap and
+        # overshoot ``OPENLEGION_MAX_TEAMS``.
+        async with _creation_lock:
+            if _max_teams is not None and _max_teams > 0:
+                current_count = len(_load_projects())
+                if current_count >= _max_teams:
+                    raise HTTPException(
+                        403,
+                        f"Team limit reached ({_max_teams}). "
+                        "Upgrade your plan for more teams.",
+                    )
+            try:
+                _create_project(name, description=description, members=members)
+            except ValueError as e:
+                raise HTTPException(400, str(e))
         # Real-time cron lifecycle: schedule the daily work-summary
         # fire on team creation so the operator doesn't have to wait
         # for the next mesh restart for the reconcile to pick it up.
@@ -4661,6 +4759,10 @@ def create_mesh_app(
         """
         store = tasks_store
         caller = _extract_verified_agent_id(request)
+        # H5 — throttle task creation per caller. Generous bucket
+        # (~300/min) so legitimate multi-stage fan-out is never touched;
+        # only a genuinely runaway create loop trips it (429).
+        await _check_rate_limit("task_create", caller)
         # Round-4 forensic logging (Bug 1 still reproduces post-PR#952).
         # INFO-level entry trace so the operator's repro logs reveal
         # whether the request even reached this handler (vs short-
@@ -4755,6 +4857,17 @@ def create_mesh_app(
                 artifact_refs=artifact_refs if isinstance(artifact_refs, list) else None,
                 origin=origin_dict,
             )
+        except TaskLimitExceeded as e:
+            # H5 — per-assignee backlog cap or runaway/cyclic parent
+            # chain. 400 (the request itself is over a resource bound) so
+            # the agent's ``create_failed`` envelope surfaces the actual
+            # reason instead of a generic 500.
+            _record_denial(
+                "limit", caller=caller, target=assignee,
+                gate="tasks.create:resource_cap",
+            )
+            logger.warning("tasks.create rejected by cap: %s", e)
+            raise HTTPException(400, str(e))
         except RuntimeError as e:
             # ``Tasks.create``'s centralised post-write verify raises
             # RuntimeError on integrity failure. Convert to a structured

@@ -936,3 +936,66 @@ class TestPerAgentWatchdogYamlWiring:
         self._apply_yaml_overrides(lm, cfg)
         # Clamped to 60 by ``set_agent_timeout``.
         assert lm._per_agent_timeouts["alpha"] == 60
+
+
+# ── H7: lane queue depth cap (backpressure) ──────────────────────
+
+
+@pytest.mark.asyncio
+async def test_lane_queue_full_raises_backpressure():
+    """When the followup queue is at its depth cap, enqueue raises
+    LaneQueueFull instead of silently dropping or blocking forever."""
+    from src.host.lanes import LaneQueueFull
+
+    release = asyncio.Event()
+    started = asyncio.Event()
+
+    async def blocking_dispatch(agent: str, message: str) -> str:
+        started.set()  # signal the worker pulled the first item
+        await release.wait()  # then pin the worker so the queue fills
+        return "done"
+
+    maxsize = 3
+    lm = LaneManager(dispatch_fn=blocking_dispatch, queue_maxsize=maxsize)
+
+    # First enqueue: the worker pulls it and blocks in dispatch. Fire it
+    # and wait until the worker is confirmed pinned so the queue won't
+    # drain underneath us.
+    first = asyncio.ensure_future(lm.enqueue("a", "m0"))
+    await asyncio.wait_for(started.wait(), timeout=2.0)
+
+    # Now buffer exactly ``maxsize`` more items — the worker is pinned, so
+    # nothing drains and the queue fills to its cap deterministically.
+    buffered = [
+        asyncio.ensure_future(lm.enqueue("a", f"buf{i}"))
+        for i in range(maxsize)
+    ]
+    await asyncio.sleep(0.05)
+    assert lm.lane_full("a") is True
+
+    # A further enqueue is rejected with backpressure, not dropped.
+    with pytest.raises(LaneQueueFull):
+        await lm.enqueue("a", "overflow")
+
+    # Drain cleanly.
+    release.set()
+    await asyncio.gather(first, *buffered)
+    await lm.stop()
+
+
+@pytest.mark.asyncio
+async def test_lane_unbounded_when_maxsize_zero():
+    """maxsize<=0 disables the bound (lane_full always False)."""
+    release = asyncio.Event()
+
+    async def blocking_dispatch(agent: str, message: str) -> str:
+        await release.wait()
+        return "done"
+
+    lm = LaneManager(dispatch_fn=blocking_dispatch, queue_maxsize=0)
+    pending = [asyncio.ensure_future(lm.enqueue("a", f"m{i}")) for i in range(20)]
+    await asyncio.sleep(0.05)
+    assert lm.lane_full("a") is False
+    release.set()
+    await asyncio.gather(*pending)
+    await lm.stop()

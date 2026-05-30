@@ -1173,3 +1173,64 @@ async def test_outcome_endpoint_non_terminal_returns_409(v2_app):
             headers={"X-Agent-ID": "operator"},
         )
         assert r.status_code == 409
+
+
+# ── H5: endpoint-level caps ───────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_create_task_pending_cap_returns_400(tmp_path, monkeypatch):
+    """Past the per-assignee pending cap, ``POST /mesh/tasks`` returns
+    400 (resource cap) — normal volume under the cap succeeds."""
+    monkeypatch.setenv("OPENLEGION_MAX_PENDING_TASKS_PER_AGENT", "3")
+    server_module = _reload_server(monkeypatch, tasks_db=str(tmp_path / "tasks.db"))
+    perms_map = {
+        "alpha": {"can_message": ["*"]},
+        "bravo": {"can_message": ["*"]},
+    }
+    app, bb = _build_app(
+        tmp_path, server_module, perms_map=perms_map,
+        agents={"alpha": "http://alpha:8400", "bravo": "http://bravo:8400"},
+    )
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://t",
+        ) as c:
+            # 3 pending tasks for bravo — all allowed.
+            for i in range(3):
+                r = await c.post(
+                    "/mesh/tasks",
+                    json={"assignee": "bravo", "title": f"t{i}"},
+                    headers={"X-Agent-ID": "alpha"},
+                )
+                assert r.status_code == 200, r.text
+            # 4th over the cap → 400.
+            r = await c.post(
+                "/mesh/tasks",
+                json={"assignee": "bravo", "title": "overflow"},
+                headers={"X-Agent-ID": "alpha"},
+            )
+            assert r.status_code == 400, r.text
+            assert "pending" in r.json().get("detail", "").lower()
+    finally:
+        bb.close()
+        monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)
+        monkeypatch.delenv("OPENLEGION_MAX_PENDING_TASKS_PER_AGENT", raising=False)
+        importlib.reload(server_module)
+
+
+@pytest.mark.asyncio
+async def test_create_task_rate_limit_allows_normal_volume(v2_app):
+    """The task_create rate bucket is generous (~300/min) — a normal
+    burst of a dozen creates never trips it."""
+    app, _, _ = v2_app
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://t",
+    ) as c:
+        for i in range(12):
+            r = await c.post(
+                "/mesh/tasks",
+                json={"assignee": "analyst", "title": f"burst{i}"},
+                headers={"X-Agent-ID": "scout"},
+            )
+            assert r.status_code == 200, r.text

@@ -1717,7 +1717,14 @@ class TestWorkflowSnapshot:
         binding constraint."""
         from src.host.orchestration import MAX_WORKFLOW_CHAIN_DEPTH
         assert MAX_WORKFLOW_CHAIN_DEPTH == 200
-        t = _make_store(tmp_path)
+        # Disable the H5 creation-time chain cap here: this test
+        # deliberately builds a 250-deep chain to exercise the SEPARATE
+        # workflow_snapshot CTE depth bound (200). The H5 guard
+        # (default 25) is about runaway creation, not snapshot recursion.
+        t = Tasks(
+            db_path=str(tmp_path / "tasks.db"),
+            max_chain_depth=0, max_pending_per_agent=0,
+        )
         # Build a linear 250-stage chain. Each new task points to the
         # previous one as parent.
         root = t.create(
@@ -2343,3 +2350,115 @@ def test_workflow_snapshot_terminal_flag_unaffected_by_rework_descendant(
     )
     # The rework itself is pending — flag is False (not 'done').
     assert by_id[rework["id"]]["terminal_without_children"] is False
+
+
+# ── H5 resource caps: pending backlog + parent-chain depth/cycle ──────
+
+
+def test_pending_cap_rejects_past_limit_but_allows_normal_volume(tmp_path):
+    """Per-assignee pending cap blocks creation past the cap, while
+    normal volume (well under) is unaffected. Counts only pending."""
+    from src.host.orchestration import TaskLimitExceeded
+
+    t = Tasks(db_path=str(tmp_path / "tasks.db"), max_pending_per_agent=5)
+    # Five pending tasks — all fine.
+    for i in range(5):
+        t.create(creator="op", assignee="worker", title=f"t{i}")
+    assert t.count_pending_for_assignee("worker") == 5
+    # Sixth trips the cap.
+    with pytest.raises(TaskLimitExceeded):
+        t.create(creator="op", assignee="worker", title="overflow")
+
+
+def test_pending_cap_excludes_in_flight_and_terminal(tmp_path):
+    """Only ``pending`` counts — moving tasks to working/done frees
+    headroom so a busy agent is never blocked from new handoffs."""
+    from src.host.orchestration import TaskLimitExceeded
+
+    t = Tasks(db_path=str(tmp_path / "tasks.db"), max_pending_per_agent=2)
+    a = t.create(creator="op", assignee="worker", title="a")
+    t.create(creator="op", assignee="worker", title="b")
+    # At cap now.
+    with pytest.raises(TaskLimitExceeded):
+        t.create(creator="op", assignee="worker", title="c")
+    # Move one to working → no longer pending → headroom returns.
+    t.update_status(a["id"], "working", actor="worker")
+    assert t.count_pending_for_assignee("worker") == 1
+    t.create(creator="op", assignee="worker", title="c")  # now allowed
+
+
+def test_pending_cap_disabled_when_zero(tmp_path):
+    t = Tasks(db_path=str(tmp_path / "tasks.db"), max_pending_per_agent=0)
+    for i in range(50):
+        t.create(creator="op", assignee="worker", title=f"t{i}")
+    assert t.count_pending_for_assignee("worker") == 50
+
+
+def test_fan_out_dag_is_allowed(tmp_path):
+    """Many sibling subtasks under ONE parent (wide fan-out) is a legit
+    DAG and must NOT be rejected by the chain-depth guard."""
+    t = Tasks(db_path=str(tmp_path / "tasks.db"), max_chain_depth=5)
+    root = t.create(creator="op", assignee="lead", title="root")
+    # 30 direct children of the same root — depth is only 2.
+    for i in range(30):
+        t.create(
+            creator="lead", assignee="worker", title=f"sub{i}",
+            parent_task_id=root["id"],
+        )
+    # No exception — fan-out is unbounded.
+
+
+def test_chain_depth_guard_rejects_deep_chain(tmp_path):
+    """A long parent CHAIN (each task parents the next) is rejected once
+    it exceeds the depth cap."""
+    from src.host.orchestration import TaskLimitExceeded
+
+    t = Tasks(db_path=str(tmp_path / "tasks.db"), max_chain_depth=4)
+    parent = None
+    created = 0
+    with pytest.raises(TaskLimitExceeded):
+        for i in range(20):
+            rec = t.create(
+                creator="op", assignee="worker", title=f"chain{i}",
+                parent_task_id=parent,
+            )
+            parent = rec["id"]
+            created += 1
+    # Some links succeeded before the cap fired — depth-bounded, not zero.
+    assert 0 < created <= 5
+
+
+def test_chain_within_cap_is_allowed(tmp_path):
+    t = Tasks(db_path=str(tmp_path / "tasks.db"), max_chain_depth=10)
+    parent = None
+    for i in range(8):
+        rec = t.create(
+            creator="op", assignee="worker", title=f"chain{i}",
+            parent_task_id=parent,
+        )
+        parent = rec["id"]
+    # 8-deep chain under a cap of 10 — fine.
+
+
+def test_self_parent_cycle_rejected(tmp_path):
+    """A task naming itself as parent is a self-cycle — rejected
+    regardless of depth cap."""
+    from src.host.orchestration import TaskLimitExceeded
+
+    t = Tasks(db_path=str(tmp_path / "tasks.db"))
+    with pytest.raises(TaskLimitExceeded):
+        t.create(
+            creator="op", assignee="worker", title="self",
+            parent_task_id="task_fixedid", task_id="task_fixedid",
+        )
+
+
+def test_unknown_parent_allowed(tmp_path):
+    """A dangling parent reference (parent doesn't exist) is allowed —
+    the chain walk stops, it's a separate concern from the depth guard."""
+    t = Tasks(db_path=str(tmp_path / "tasks.db"), max_chain_depth=5)
+    rec = t.create(
+        creator="op", assignee="worker", title="orphan",
+        parent_task_id="task_doesnotexist",
+    )
+    assert rec["parent_task_id"] == "task_doesnotexist"
