@@ -3038,7 +3038,7 @@ class AgentLoop:
         content = _extract_json_response(content)
         return content
 
-    async def _retry_empty_compose(self, system: str) -> tuple[str, int]:
+    async def _retry_empty_compose(self, system: str) -> tuple[str, int, bool]:
         """Bug 3 — single idempotent retry of the final compose call.
 
         When a chat turn's final text comes back empty (but it was NOT a
@@ -3050,17 +3050,34 @@ class AgentLoop:
         wraps transient transport errors; this adds exactly ONE extra
         compose attempt on top, never a loop.
 
-        Returns ``(content, tokens_used)``. ``content`` is the resolved
-        (non-silent) text, or ``""`` when the retry also came back empty
-        or was a deliberate ``__SILENT__`` reply. Typed credential errors
-        (``LLMAuthError`` / ``LLMConfigError``) are RE-RAISED so the
-        ``auth_failure`` / ``config_error`` taxonomy is preserved — both
-        call sites run inside a ``try`` whose typed arms surface those
-        flags (non-stream: ``auth_failure`` / ``config_error`` result
-        dicts; streaming: the matching ``done`` events). Only transient /
-        transport errors degrade to ``("", 0)``. Callers add the recovered
-        text to ``self._chat_messages`` themselves so the retry stays a
-        pure read here, and fold ``tokens_used`` into the turn total.
+        Returns the tri-state ``(content, tokens_used, deliberate_silence)``:
+
+        - ``content`` is the resolved (non-silent) text, or ``""`` when the
+          retry came back empty / blank, or when it was a deliberate
+          ``__SILENT__`` reply.
+        - ``tokens_used`` is the retry's token cost (folded into the turn
+          total by the caller).
+        - ``deliberate_silence`` is ``True`` ONLY when the retry itself
+          emitted ``__SILENT__`` — in that case the tuple is
+          ``("", tokens, True)`` and the caller MUST keep the turn silent
+          (empty reply, NO marker). This is the bit that distinguishes a
+          deliberately-silent retry from an empty/blip retry: without it
+          the caller can't tell them apart and would paper a deliberate
+          ``__SILENT__`` over with a synthetic marker.
+
+        ``_resolve_content`` is what SETS the ``__silent_reply__`` flag, so
+        it must run BEFORE the flag is read — hence the resolve-then-check
+        ordering below.
+
+        Typed credential errors (``LLMAuthError`` / ``LLMConfigError``) are
+        RE-RAISED so the ``auth_failure`` / ``config_error`` taxonomy is
+        preserved — both call sites run inside a ``try`` whose typed arms
+        surface those flags (non-stream: ``auth_failure`` / ``config_error``
+        result dicts; streaming: the matching ``done`` events). Only
+        transient / transport errors degrade to ``("", 0, False)``. Callers
+        add the recovered text to ``self._chat_messages`` themselves so the
+        retry stays a pure read here, and fold ``tokens_used`` into the turn
+        total.
         """
         try:
             llm_response = await _llm_call_with_retry(
@@ -3073,13 +3090,16 @@ class AgentLoop:
             raise  # preserve the auth_failure/config_error taxonomy
         except Exception as e:
             logger.warning("Bug 3 empty-compose retry failed: %s", e)
-            return "", 0
+            return "", 0, False
         tokens = llm_response.tokens_used
+        # Resolve FIRST — ``_resolve_content`` is what sets the
+        # ``__silent_reply__`` flag when the model emits ``__SILENT__``.
+        content = self._resolve_content(llm_response)
         # Deliberate silence on the retry is honoured — do NOT paper over
         # a model that explicitly chose ``__SILENT__`` the second time.
         if llm_response.__dict__.get("__silent_reply__"):
-            return "", tokens
-        return self._resolve_content(llm_response), tokens
+            return "", tokens, True
+        return content, tokens, False
 
     # ── Non-streaming chat ────────────────────────────────────
 
@@ -3169,10 +3189,14 @@ class AgentLoop:
                     )
                     marker_substituted = False
                     if not content.strip() and not deliberate_silence:
-                        retried, retry_tokens = await self._retry_empty_compose(system)
+                        retried, retry_tokens, retry_silent = await self._retry_empty_compose(system)
                         total_tokens += retry_tokens
                         if retried.strip():
                             content = retried
+                        elif retry_silent:
+                            # Model deliberately chose ``__SILENT__`` on the
+                            # retry — honour it (empty reply, no marker).
+                            deliberate_silence = True
                         else:
                             content = self._synthesize_empty_chat_fallback(tool_outputs)
                             marker_substituted = True
@@ -3955,17 +3979,24 @@ class AgentLoop:
                         llm_response.__dict__.get("__silent_reply__")
                     )
                     if not full_content.strip() and not deliberate_silence:
-                        retried, retry_tokens = await self._retry_empty_compose(system)
+                        retried, retry_tokens, retry_silent = await self._retry_empty_compose(system)
                         total_tokens += retry_tokens
                         if retried.strip():
                             full_content = retried
-                            # The retried text was never streamed (the
-                            # compose ran non-streaming) — append it to
-                            # the assistant message and emit it now.
-                            self._chat_messages[-1]["content"] = full_content
+                        elif retry_silent:
+                            # Model deliberately chose ``__SILENT__`` on the
+                            # retry — honour it: keep the turn silent, emit
+                            # no text_delta, leave full_content empty.
+                            full_content = ""
                         else:
                             full_content = self._synthesize_empty_chat_fallback(tool_outputs)
-                        yield {"type": "text_delta", "content": full_content}
+                        if full_content:
+                            # The retried text / marker was never streamed (the
+                            # compose ran non-streaming) — sync it into the
+                            # in-memory assistant message (matches the
+                            # non-stream path) and emit it now.
+                            self._chat_messages[-1]["content"] = full_content
+                            yield {"type": "text_delta", "content": full_content}
                     self._log_chat_turn(
                         user_message, full_content, tool_outputs,
                         turn_id=turn_id,

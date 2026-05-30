@@ -4131,3 +4131,48 @@ async def test_stream_deliberate_silence_not_retried():
     )
     done = [e for e in events if e.get("type") == "done"]
     assert done and done[-1].get("response") == ""
+
+
+@pytest.mark.asyncio
+async def test_retry_returns_silent_token_is_honoured_not_marked():
+    """Bug 3: the first no-tool reply is empty (an accidental blip, NOT the
+    silent token), so the empty-compose retry fires; the retry itself emits
+    ``__SILENT__``. That deliberate silence on the retry MUST be honoured:
+    empty response, ``silent_reply`` flagged, and NO marker substituted.
+
+    Before the tri-state fix the silence check in ``_retry_empty_compose``
+    was dead (the flag is set inside ``_resolve_content`` which ran AFTER
+    the check), so the retry's ``__SILENT__`` was stripped to ``""`` and the
+    caller papered it over with a marker — this test would FAIL.
+    """
+    loop = _make_loop([_resp(""), _resp(SILENT_REPLY_TOKEN)])
+    result = await loop._chat_inner("ping")
+    assert result["response"] == ""
+    assert result.get("silent_reply") is True
+    resp = (result.get("response") or "")
+    assert not resp.strip().startswith("(")
+    assert "no text response" not in resp.lower()
+    assert "no response" not in resp.lower()
+
+
+@pytest.mark.asyncio
+async def test_stream_retry_returns_silent_token_emits_no_marker():
+    """Bug 3 stream: first no-tool reply empty (blip), retry emits
+    ``__SILENT__``. The deliberate retry-silence is honoured: NO text_delta
+    marker is emitted (ideally no text_delta at all) and the final ``done``
+    event carries an empty ``response``.
+    """
+    loop = _make_loop([_resp(""), _resp(SILENT_REPLY_TOKEN)])
+    # Force the non-streaming fallback so llm.chat (our side_effect) drives it.
+    loop.llm.chat_stream = MagicMock(side_effect=RuntimeError("no stream"))
+    events = [ev async for ev in loop._chat_stream_inner("ping")]
+    text_events = [e for e in events if e.get("type") == "text_delta"]
+    assert text_events == []
+    assert all(
+        "no response" not in (e.get("content") or "").lower() for e in events
+    )
+    assert all(
+        "no text response" not in (e.get("content") or "").lower() for e in events
+    )
+    done = [e for e in events if e.get("type") == "done"]
+    assert done and done[-1].get("response") == ""
