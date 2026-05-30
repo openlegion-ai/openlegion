@@ -100,6 +100,10 @@ Per-agent access is controlled by `allowed_credentials` glob patterns in `config
 
 Even with `allowed_credentials: ["*"]`, system credentials are **always** blocked. Agents also cannot store or overwrite system credential names via `vault_store`.
 
+> **Be explicit: CRED-tier credentials are agent-readable plaintext by design.** The two tiers are asymmetric. `OPENLEGION_SYSTEM_*` keys are **never** returned to an agent — they are injected server-side by the mesh proxy and the agent only ever sees the API response. `OPENLEGION_CRED_*` credentials are different: an agent whose `allowed_credentials` glob matches a CRED name can resolve its **plaintext** via `vault_resolve` / a `$CRED{name}` handle. That is the intended contract (it is how an agent authenticates a tool call it makes itself), but it means a CRED is only as confined as the agents you grant it to. Scope `allowed_credentials` to the narrowest glob that works; assume any agent that can match a CRED can read it. See `docs/security-remediation-review-2026-05-29.md` (L3, L14) — and note the MCP asymmetry below.
+
+> **`$CRED{}` http_tool handles vs. MCP env secrets.** When an agent uses `$CRED{name}` through `http_tool`, the plaintext is resolved **server-side in the mesh** and the agent process never holds it (responses are redacted on the way back — see Credential Redaction). MCP is the asymmetric case: `$CRED{}` handles referenced in an MCP server's `env` / `args` are resolved into the agent container's `MCP_SERVERS` environment variable (`src/host/runtime.py:_build_mcp_servers_env`), so an MCP-using agent's own process **can** read those secrets from its environment. This is unavoidable for stdio MCP — the subprocess needs the secret in-container to authenticate — but it is a real difference from the never-plaintext http_tool path. See `docs/mcp.md` and `docs/security-remediation-review-2026-05-29.md` (L14).
+
 > **Footnote — CAPTCHA solver credentials bypass the vault.** Four keys live as env vars only and are stripped from `config/settings.json` at load time with a one-time warning (`flags._ENV_ONLY_FLAGS`): `CAPTCHA_SOLVER_KEY`, `CAPTCHA_SOLVER_KEY_SECONDARY`, `CAPTCHA_SOLVER_PROXY_LOGIN`, `CAPTCHA_SOLVER_PROXY_PASSWORD`. The dashboard writes them via `os.environ[...]` directly. They are *not* visible in the credentials UI and do *not* flow through `OPENLEGION_CRED_*` ACLs. Agents never see them — solver provider calls happen entirely inside the browser service.
 
 ### Credential Redaction
@@ -261,11 +265,18 @@ Workspace files (the agent's own `SOUL.md` / `INSTRUCTIONS.md` / `MEMORY.md` / e
 
 ### Skill Self-Authoring
 
-Agents can write and register new tools (`skill_tool`). All submitted code is validated through AST analysis before execution:
+Agents can write and register new tools (`skill_tool`). Submitted code passes an AST analysis before being saved:
 - Forbidden imports (23 modules including `os`, `subprocess`, `socket`, `importlib`, etc.)
 - Forbidden calls (16 functions including `eval`, `exec`, `open`, `compile`, etc.)
 - Forbidden attribute accesses (11 attributes including `__dict__`, `__subclasses__`, `__globals__`, etc.)
+- A forgotten-`await` check (sync functions that call `mesh_client`/`memory_store` coroutines are rejected).
 - Skills are capped at 10,000 characters.
+
+**This AST validation is authoring HYGIENE, not a security boundary.** It catches obvious footguns and keeps self-authored skills well-formed — it does **not** contain a malicious agent. Agents already have `run_command`, so in-container code execution is part of the design; a determined agent never needs to smuggle anything past this validator. The **container hardening is the real boundary** (non-root UID 1000, `cap_drop=ALL`, `no-new-privileges`, read-only root fs, memory/CPU/PID limits — see Runtime Isolation above). Do not treat the forbidden-imports / forbidden-calls lists as a sandbox.
+
+**Marketplace skills are loaded without load-time AST validation.** `SkillRegistry.MARKETPLACE_SKILLS_DIR` (`/app/marketplace_skills`) is discovered by importing each module — arbitrary code runs at import time, with no AST gate. This is acceptable today only because that directory is **operator-populated and mounted read-only**. If a remote or agent-reachable marketplace-install path is ever added, pin installs to a verified commit SHA so the audited code is the code that runs.
+
+See `docs/security-remediation-review-2026-05-29.md` (M1, H15) for the full finding.
 
 ### Bounded Execution
 
@@ -357,6 +368,18 @@ Each agent receives a unique auth token at startup (`MESH_AUTH_TOKEN`). All requ
 - Spoofed agent requests
 - Container-to-container communication bypassing the mesh
 - Unauthorized access to mesh endpoints
+
+### `BROWSER_AUTH_TOKEN` is a fleet-wide superuser credential
+
+`BROWSER_AUTH_TOKEN` is a **single, fleet-wide** bearer token. The browser service has **no per-agent identity**: `_verify_auth` (`src/browser/server.py`) compares the request's `Authorization: Bearer <token>` against the one shared token via `hmac.compare_digest` and nothing else. The service trusts the `agent_id` in the URL path (`/browser/{agent_id}/...`) entirely — it never cross-checks that the caller "is" that agent. **Any holder of `BROWSER_AUTH_TOKEN` can therefore drive ANY agent's browser** (navigate, screenshot, fill forms, read the accessibility tree, import session state, etc.).
+
+Because of this, the token must be tightly held:
+
+- **It lives only in the mesh process.** The mesh sets it on the browser container (`BROWSER_AUTH_TOKEN` in `DockerBackend`'s browser environment, `src/host/runtime.py`) and attaches it as the upstream bearer when proxying browser calls.
+- **It is NEVER injected into an agent container's environment.** Agent containers receive only their own per-agent `MESH_AUTH_TOKEN`; they reach the browser through the mesh, which holds the browser token on their behalf. Do not add `BROWSER_AUTH_TOKEN` to `env_overrides`, `extra_env`, or any agent-facing config.
+- **It must never be written to logs.** Treat it like a root password for the browser fleet.
+
+See `docs/security-remediation-review-2026-05-29.md` (M5).
 
 ### Auth Tiers
 
@@ -460,6 +483,16 @@ The on-disk counter file (`data/captcha_costs.json` by default; override via `CA
 - `next_action="retry_with_fresh_profile"`
 
 The window is **not** cleared automatically. The operator must rotate the agent's stealth profile and call `POST /api/agents/{agent_id}/fingerprint-health/reset` to clear the rejection state. This avoids ping-ponging between burn / not-burn while the agent is still fingerprinted.
+
+## Residual Risks & Honest Limitations
+
+These are known, accepted limitations — documented so no one mistakes a best-effort control for a guarantee. Full context in `docs/security-remediation-review-2026-05-29.md`.
+
+- **(M20) The browser's mesh-side SSRF URL check is best-effort, not the boundary.** The `_resolve_and_pin()` early-reject on `navigate` / `open_tab` (`src/host/server.py`) is a friendly pre-check that races against DNS — it does not defend against DNS rebinding, and it covers only those two action paths. In the default Docker **bridge** deployment, the **container iptables egress filter** (installed by `docker/browser-entrypoint.sh`) is the **authoritative** anti-rebinding / anti-SSRF layer for everything the browser does. If that filter is bypassed (`BROWSER_EGRESS_DISABLE=1` or host-network mode), only the partial mesh-side check remains. Do not rely on the mesh-side URL check as a security boundary.
+
+- **(M23) Stored agent memory can carry plaintext prompt injection that re-injects on future tasks.** Untrusted text an agent commits to its own memory (via the memory store) is replayed into that agent's LLM context on later tasks. `sanitize_for_prompt()` runs on that path, but it is **Unicode hygiene only** (strips invisible / smuggling codepoints — see Unicode Sanitization above); it is **not** a prompt-injection defense and does not detect or neutralize natural-language injection. A poisoned memory will re-inject every time it is loaded. The blast radius is **per-agent** — an agent's memory is private to that agent and does not cross into other agents — but a single agent can persistently re-prompt itself. Treat agent memory as attacker-influenceable if the agent ever processes untrusted input.
+
+- **(L19) The `global/` blackboard namespace is fleet-shared, and `wallet_allowed_contracts == []` means allow-all.** Two by-design quirks worth stating plainly: (a) `global/` is a **fleet-wide** namespace, not a per-team or per-agent one. The operator-handoff sub-prefixes have explicit carve-outs (`global/tasks/operator/*` is operator-read-only but any agent may write; `global/output/{agent}/*` is per-sender — see `can_read_blackboard` / `can_write_blackboard` in `src/host/permissions.py`), but any *other* `global/*` key is governed only by an agent's normal `blackboard_read` / `blackboard_write` globs — so a `global/*` glob grants cross-cutting fleet-wide access, unlike the team-scoped `projects/{name}/*` keys. Treat `global/` as shared state, not an isolation boundary, and avoid broad `global/*` globs. (b) For the wallet contract dimension, `wallet_allowed_contracts == []` means **allow-all** (`can_access_wallet_contract` returns `True` on the empty list — `permissions.py:382-383`), not deny-all — the empty list is the "no contract restriction" sentinel. This is still gated by `can_use_wallet*`, so it is not an open door, but the `[]`-means-allow-all polarity is the **opposite** of `allowed_credentials` (`[]` = deny-all) and must not be confused.
 
 ## File-transfer Endpoints
 

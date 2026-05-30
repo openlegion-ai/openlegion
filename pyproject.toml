@@ -23,7 +23,12 @@ dependencies = [
     "websockets>=13.0",
     "pypdf>=4.0",
     "python-multipart>=0.0.9",
-    "Pillow>=10.0",
+    # Floor raised to >=10.3.0 to exclude CVE-2023-50447 and CVE-2024-28219,
+    # reachable via browser-screenshot image processing. NOTE: these are
+    # minimum bounds only (no lock file) — for reproducible builds, generate
+    # and commit a lock file (e.g. `pip-compile` / `uv lock`) as a separate
+    # infra decision; intentionally not added here.
+    "Pillow>=10.3.0",
 ]
 
 [project.optional-dependencies]
