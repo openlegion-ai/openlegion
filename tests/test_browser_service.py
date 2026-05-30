@@ -12279,3 +12279,91 @@ class TestSnapshotDiffSubsetShortCircuit:
         # ``scope`` is included to signal the caller that the diff was
         # not produced.
         assert result["data"].get("scope") == "navigation"
+
+
+class TestBrowserSsrfParity:
+    """M21: navigate/open_tab reject private/loopback/metadata hosts.
+
+    Second defence-in-depth SSRF layer independent of the container
+    iptables egress filter. Only private/metadata IPs are blocked —
+    legitimate PUBLIC navigation must still pass.
+    """
+
+    def test_block_helper_metadata_and_private(self):
+        from src.browser.service import _browser_host_is_blocked
+        # Cloud metadata endpoint (link-local).
+        assert _browser_host_is_blocked("169.254.169.254")
+        # RFC1918 private ranges.
+        assert _browser_host_is_blocked("10.0.0.5")
+        assert _browser_host_is_blocked("192.168.1.1")
+        assert _browser_host_is_blocked("172.16.0.1")
+        # Loopback.
+        assert _browser_host_is_blocked("127.0.0.1")
+        assert _browser_host_is_blocked("[::1]")
+        # CGNAT (RFC 6598).
+        assert _browser_host_is_blocked("100.64.0.1")
+        # IPv4-mapped IPv6 loopback escape hatch.
+        assert _browser_host_is_blocked("::ffff:127.0.0.1")
+        # Empty host fails closed.
+        assert _browser_host_is_blocked("")
+
+    def test_block_helper_allows_public_ip(self):
+        from src.browser.service import _browser_host_is_blocked
+        # Public literal IPs must NOT be blocked (no DNS needed).
+        assert not _browser_host_is_blocked("1.1.1.1")
+        assert not _browser_host_is_blocked("8.8.8.8")
+        assert not _browser_host_is_blocked("93.184.216.34")  # example.com
+
+    @pytest.mark.asyncio
+    async def test_navigate_rejects_metadata_ip(self):
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        # get_or_start should never be reached — assert by making it raise.
+        mgr.get_or_start = AsyncMock(
+            side_effect=AssertionError("get_or_start must not be called"),
+        )
+        result = await mgr.navigate("a1", "http://169.254.169.254/latest/meta-data/")
+        assert result["success"] is False
+        assert "blocked" in result["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_navigate_rejects_private_ip(self):
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr.get_or_start = AsyncMock(
+            side_effect=AssertionError("get_or_start must not be called"),
+        )
+        result = await mgr.navigate("a1", "http://10.0.0.5/")
+        assert result["success"] is False
+        assert "blocked" in result["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_navigate_allows_public_url(self):
+        # A public host passes the SSRF gate and proceeds toward
+        # get_or_start (which we stub to short-circuit). The point is the
+        # SSRF guard does NOT reject a legitimate public URL.
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        sentinel = {"success": False, "error": "stub-reached-get_or_start"}
+
+        async def _boom(*a, **k):
+            raise _ReachedGetOrStart()
+
+        mgr.get_or_start = _boom
+        with pytest.raises(_ReachedGetOrStart):
+            await mgr.navigate("a1", "http://1.1.1.1/")
+        # If the SSRF gate had rejected the public URL, navigate would have
+        # returned before get_or_start and no exception would be raised.
+        _ = sentinel
+
+    @pytest.mark.asyncio
+    async def test_open_tab_rejects_metadata_ip(self):
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr.get_or_start = AsyncMock(
+            side_effect=AssertionError("get_or_start must not be called"),
+        )
+        result = await mgr.open_tab("a1", "http://169.254.169.254/")
+        assert result["success"] is False
+        msg = result["error"]["message"] if isinstance(result["error"], dict) else result["error"]
+        assert "blocked" in msg.lower()
+
+
+class _ReachedGetOrStart(Exception):
+    """Marker — navigate passed the SSRF gate and reached get_or_start."""
