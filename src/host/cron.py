@@ -36,6 +36,21 @@ logger = setup_logging("host.cron")
 
 _EMPTY_RESPONSES = frozenset({"", "ok", "heartbeat_ok", "nothing to do", "no updates"})
 _MAX_CRON_SCAN_MINUTES = 43200  # 30 days
+_DEFAULT_MAX_CRON_JOBS_PER_AGENT = 50
+
+
+def _max_cron_jobs_per_agent() -> int:
+    """Per-agent cron-job cap (M11). Env-configurable via
+    ``OPENLEGION_MAX_CRON_JOBS_PER_AGENT``; falls back to the default on
+    unset / non-integer / non-positive values."""
+    raw = os.environ.get("OPENLEGION_MAX_CRON_JOBS_PER_AGENT")
+    if raw is None:
+        return _DEFAULT_MAX_CRON_JOBS_PER_AGENT
+    try:
+        val = int(raw)
+    except ValueError:
+        return _DEFAULT_MAX_CRON_JOBS_PER_AGENT
+    return val if val > 0 else _DEFAULT_MAX_CRON_JOBS_PER_AGENT
 
 
 @dataclass
@@ -211,6 +226,16 @@ class CronScheduler:
         error = self._validate_schedule(schedule)
         if error:
             raise ValueError(error)
+        # M11: cap the number of cron jobs per agent so a single agent
+        # can't exhaust the scheduler (or the config file) by registering
+        # unbounded jobs. Default 50, env-overridable.
+        cap = _max_cron_jobs_per_agent()
+        existing = sum(1 for j in self.jobs.values() if j.agent == agent)
+        if existing >= cap:
+            raise ValueError(
+                f"Agent '{agent}' has reached the cron job limit ({cap}). "
+                f"Remove an existing job before adding another."
+            )
         job = CronJob(
             id=generate_id("cron"),
             agent=agent,
@@ -324,6 +349,15 @@ class CronScheduler:
             job = self.jobs.get(job_id)
             if not job:
                 return None
+            # H8 validate-before-mutate: a bad schedule must never persist
+            # in the live job. Validate the candidate BEFORE setattr so a
+            # rejected update leaves the job's schedule untouched (the old
+            # ordering setattr'd job.schedule first, so a poison value
+            # stuck in memory even when _compute_next_run later choked).
+            if "schedule" in kwargs:
+                error = self._validate_schedule(kwargs["schedule"])
+                if error:
+                    raise ValueError(error)
             for k, v in kwargs.items():
                 if k in self._UPDATABLE_FIELDS and hasattr(job, k):
                     setattr(job, k, v)
@@ -407,10 +441,22 @@ class CronScheduler:
     async def _tick(self) -> None:
         now = datetime.now(timezone.utc)
         for job in list(self.jobs.values()):
-            if not job.enabled:
+            # H8 crash containment: one poison job (e.g. a malformed
+            # schedule that slipped past validation) must never kill the
+            # scheduler task and silence ALL heartbeats / jobs fleet-wide.
+            # Wrap the per-job body so a raise here logs + continues to
+            # the next job instead of propagating out of the while loop.
+            try:
+                if not job.enabled:
+                    continue
+                if self._is_due(job, now):
+                    asyncio.create_task(self._execute_job(job))
+            except Exception:
+                logger.error(
+                    "Cron tick: job %s raised during scheduling — skipping",
+                    getattr(job, "id", "<unknown>"), exc_info=True,
+                )
                 continue
-            if self._is_due(job, now):
-                asyncio.create_task(self._execute_job(job))
 
     async def _execute_job(self, job: CronJob, manual: bool = False) -> str | None:
         lock = self._job_locks[job.id]
@@ -742,9 +788,58 @@ class CronScheduler:
 
         return False
 
+    # Per-field (min, max) inclusive bounds for a 5-field cron expression:
+    # minute, hour, day-of-month, month, day-of-week (0=Sun..6=Sat).
+    _CRON_FIELD_BOUNDS: tuple[tuple[int, int], ...] = (
+        (0, 59),  # minute
+        (0, 23),  # hour
+        (1, 31),  # day of month
+        (1, 12),  # month
+        (0, 6),   # day of week
+    )
+
     @staticmethod
-    def _validate_schedule(schedule: str) -> str | None:
-        """Validate a schedule string. Returns error message or None."""
+    def _validate_cron_field(field: str, low: int, high: int) -> bool:
+        """Return True iff ``field`` is a structurally valid cron field
+        within [low, high]. Rejects step 0, malformed ranges (``1-``),
+        non-numeric values, and out-of-range numbers."""
+        if field == "*":
+            return True
+        for segment in field.split(","):
+            if not segment:
+                return False
+            try:
+                if "/" in segment:
+                    base, step_str = segment.split("/", 1)
+                    step = int(step_str)
+                    if step <= 0:
+                        return False
+                    # Base may be "*" or a numeric start within bounds.
+                    if base != "*":
+                        base_val = int(base)
+                        if not (low <= base_val <= high):
+                            return False
+                elif "-" in segment:
+                    start_str, end_str = segment.split("-", 1)
+                    start, end = int(start_str), int(end_str)
+                    if start > end or start < low or end > high:
+                        return False
+                else:
+                    val = int(segment)
+                    if not (low <= val <= high):
+                        return False
+            except (ValueError, ZeroDivisionError):
+                return False
+        return True
+
+    @classmethod
+    def _validate_schedule(cls, schedule: str) -> str | None:
+        """Validate a schedule string. Returns error message or None.
+
+        Parses each of the 5 cron fields (not just field count) so a
+        poison schedule like ``*/0 * * * *`` or ``1- * * * *`` is rejected
+        at config-write time (H8) instead of crashing the scheduler loop.
+        """
         schedule = schedule.strip()
         if re.match(r"every\s+(\d+)([smhd])", schedule, re.IGNORECASE):
             return None
@@ -756,6 +851,16 @@ class CronScheduler:
                 "Example: 'every 5s' or '*/1 * * * *'"
             )
         if len(parts) == 5:
+            for field, (low, high) in zip(
+                parts, cls._CRON_FIELD_BOUNDS, strict=True,
+            ):
+                if not cls._validate_cron_field(field, low, high):
+                    return (
+                        f"Invalid cron field '{field}' in schedule "
+                        f"'{schedule}'. Each field must be '*', a number, "
+                        f"a range (a-b), a list (a,b,c), or a step (*/n with "
+                        f"n>0), within range [{low}-{high}]."
+                    )
             return None
         return f"Invalid schedule: '{schedule}'. Use 5-field cron or 'every N[s/m/h/d]'"
 
@@ -793,21 +898,27 @@ def _match_cron_field(field: str, current: int) -> bool:
     if field == "*":
         return True
     for segment in field.split(","):
-        if "/" in segment:
-            base, step_str = segment.split("/", 1)
-            step = int(step_str)
-            if base == "*" and current % step == 0:
-                return True
-        elif "-" in segment:
-            start, end = map(int, segment.split("-", 1))
-            if start <= current <= end:
-                return True
-        else:
-            try:
+        # H8: a malformed field (step 0, bad range like "1-", non-numeric)
+        # must return a non-match rather than raise — a raise here would
+        # bubble up through ``_is_due`` and (pre-fix) kill the scheduler.
+        try:
+            if "/" in segment:
+                base, step_str = segment.split("/", 1)
+                step = int(step_str)
+                # Guard the modulo: step 0 would ZeroDivisionError.
+                if step <= 0:
+                    continue
+                if base == "*" and current % step == 0:
+                    return True
+            elif "-" in segment:
+                start, end = map(int, segment.split("-", 1))
+                if start <= current <= end:
+                    return True
+            else:
                 if int(segment) == current:
                     return True
-            except ValueError:
-                pass
+        except (ValueError, ZeroDivisionError):
+            continue
     return False
 
 
