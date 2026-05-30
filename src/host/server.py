@@ -1041,6 +1041,14 @@ def create_mesh_app(
         """
         if api_request.service != "llm":
             return
+        # Embeddings use a fixed, cheap embedding model (e.g. text-embedding-3-
+        # small) distinct from the agent's chat model, and drive memory
+        # store/search every turn. The pin targets chat/completion cost + key
+        # abuse, so exempt the embed action — otherwise every memory write and
+        # vector search 403s. We exempt ONLY "embed" (never allowlist "chat"),
+        # so chat AND streaming-chat stay pinned.
+        if api_request.action == "embed":
+            return
         requested_model = ""
         if isinstance(api_request.params, dict):
             requested_model = api_request.params.get("model", "") or ""

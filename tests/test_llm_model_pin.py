@@ -273,3 +273,45 @@ async def test_incompatible_requested_model_rejected(pin_setup):
     )
     assert resp.status_code == 403, resp.text
     assert "not compatible" in resp.text
+
+
+def _embed_req(model: str) -> dict:
+    return {
+        "service": "llm",
+        "action": "embed",
+        "params": {
+            "model": model,
+            "input": "some text to embed",
+        },
+        "timeout": 30,
+    }
+
+
+# Embedding calls use a fixed embedding model distinct from the agent's chat
+# model, so the chat-model pin MUST NOT 403 them — otherwise every memory
+# write and vector search breaks. The pin is gated on action != "embed".
+@pytest.mark.asyncio
+async def test_embed_off_allowlist_model_not_blocked(pin_setup):
+    app = pin_setup["app"]
+    # text-embedding-3-small is NOT in writer's allowed set (writer is pinned
+    # to openai/gpt-4o-mini) — but as an embed action it must pass the pin and
+    # reach dispatch, not 403.
+    resp = await _post(
+        app, _embed_req("text-embedding-3-small"), "writer-secret", "writer",
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["success"] is True
+    # It reached the vault (the pin did not short-circuit it).
+    assert pin_setup["vault"].calls[-1]["model"] == "text-embedding-3-small"
+
+
+# The pin still works for chat with that SAME off-allowlist model — embed is
+# the only exempt action, chat/streaming-chat stay pinned.
+@pytest.mark.asyncio
+async def test_chat_same_off_allowlist_model_still_403(pin_setup):
+    app = pin_setup["app"]
+    resp = await _post(
+        app, _req("text-embedding-3-small"), "writer-secret", "writer",
+    )
+    assert resp.status_code == 403, resp.text
+    assert "not authorized to use model" in resp.text
