@@ -166,6 +166,9 @@ agents:
       blackboard_write: ["prices/*", "tasks/*", "output/*", "status/*"]
       can_publish: ["price_change", "extraction_failed"]
       can_subscribe: ["check_requested"]
+      # Crawls login-gated supplier/competitor pricing pages via browser —
+      # may need to ask the user for a service credential.
+      can_request_user_credentials: true
     resources:
       memory_limit: "512m"
       cpu_limit: 0.5

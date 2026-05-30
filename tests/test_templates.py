@@ -228,6 +228,26 @@ class TestAddAgentPermissions(_TempConfigMixin):
         # Defaults still present
         assert "llm" in bob["allowed_apis"]
 
+    def test_can_request_user_credentials_persisted_from_template(self):
+        """L2: a template that sets ``can_request_user_credentials: true``
+        must persist the flag so the /mesh/credential-request gate lets
+        that worker through. Defaults False when the template omits it."""
+        _add_agent_to_config("scraper", "enricher", "openai/gpt-4o")
+        _add_agent_permissions("scraper", permissions={
+            "can_request_user_credentials": True,
+        })
+        _add_agent_to_config("plain", "writer", "openai/gpt-4o")
+        _add_agent_permissions("plain", permissions={
+            "can_publish": ["draft_ready"],
+        })
+        with open(self._perms_path) as f:
+            perms = json.load(f)
+        assert perms["permissions"]["scraper"]["can_request_user_credentials"] is True
+        # Omitted → falls back to the deny-all default (False).
+        assert perms["permissions"]["plain"].get(
+            "can_request_user_credentials", False,
+        ) is False
+
     def test_template_permissions_merge_with_collab_defaults(self):
         """Template permissions add to collaboration defaults, not replace."""
         _add_agent_to_config("carol", "writer", "openai/gpt-4o")

@@ -151,6 +151,9 @@ agents:
       blackboard_write: ["reviews/*", "tasks/*", "output/*", "status/*"]
       can_publish: ["new_review", "negative_review"]
       can_subscribe: []
+      # Scrapes login-gated review platforms via browser — may need to ask
+      # the user for a service credential.
+      can_request_user_credentials: true
     resources:
       memory_limit: "512m"
       cpu_limit: 0.5

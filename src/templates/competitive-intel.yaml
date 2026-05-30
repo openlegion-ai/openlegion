@@ -218,6 +218,9 @@ agents:
       blackboard_write: ["competitors/*", "artifacts/*", "tasks/*", "output/*", "status/*"]
       can_publish: ["competitor_updated", "index_updated", "new_competitor_found"]
       can_subscribe: ["research_requested", "competitor_update_requested"]
+      # Researches login-gated competitor sources via browser — may need
+      # to ask the user for a service credential.
+      can_request_user_credentials: true
 
     resources:
       memory_limit: "768m"

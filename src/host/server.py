@@ -1211,7 +1211,36 @@ def create_mesh_app(
         # Bug 2/3 fix: thread the originating task_id through the lane so
         # the recipient's /chat call auto-closes the task when its loop
         # returns. Missing header preserves legacy fire-and-forget wakes.
+        #
+        # Finding M3 (binding): an ``x-task-id`` header is only honoured
+        # when the named task is actually assigned to the wake ``target``.
+        # Every LEGITIMATE handoff satisfies this invariant — ``hand_off``
+        # creates the task with ``assignee=to`` and then wakes that same
+        # ``to`` with ``task_id`` set, so the recipient is always the
+        # assignee taking the task over. A wake that carries a task_id for
+        # a task assigned to someone else (forged/mismatched) would, if
+        # threaded blindly, let the recipient's loop auto-close an
+        # UNRELATED agent's task on return. We do NOT reject the wake on
+        # mismatch (the wake itself may be a legitimate nudge) — we simply
+        # drop the task_id so no unrelated task is auto-closed.
         task_id = request.headers.get("x-task-id") or None
+        if task_id is not None:
+            try:
+                _task_record = tasks_store.get(task_id)
+            except Exception as e:  # pragma: no cover - defensive
+                logger.warning(
+                    "wake task_id lookup failed for %s: %s", task_id, e,
+                )
+                _task_record = None
+            if _task_record is None or _task_record.get("assignee") != target:
+                logger.info(
+                    "wake task_id %s dropped: assignee=%s != target=%s "
+                    "(M3 binding)",
+                    task_id,
+                    None if _task_record is None else _task_record.get("assignee"),
+                    target,
+                )
+                task_id = None
 
         if lane_manager is not None and dispatch_loop is not None:
             try:
@@ -2074,12 +2103,28 @@ def create_mesh_app(
         """
         agent_id = _resolve_agent_id(data.get("agent_id", ""), request)
         await _check_rate_limit("notify", agent_id)
-        # TODO(Task 4): gate on ``permissions.can_request_user_credentials``.
-        # The capability bit is wired in Task 3 (defaults False for workers,
-        # True for operator), but enforcing it here today would block every
-        # non-operator agent from asking the user for a credential.  Task 4
-        # is responsible for populating the field on workers that actually
-        # need it (template-driven) before this gate flips to enforced.
+        # Finding L2: gate on ``can_request_user_credentials``. The
+        # capability defaults False for workers and True for the operator
+        # (the operator is the fleet's credential-setup driver per the
+        # operator playbook). Templates whose workers must authenticate
+        # against login-gated external services set the bit explicitly in
+        # their YAML (browser-scraping agents: lead-enrichment ``enricher``,
+        # sales ``researcher``, social-listening ``monitor``,
+        # price-intelligence ``crawler``, review-ops ``monitor``,
+        # competitive-intel ``scout``, monitor ``watcher``) so flipping the
+        # gate does not break legitimate worker credential requests.
+        # ``can_request_user_credentials`` short-circuits True for trusted
+        # callers (operator/mesh).
+        if not permissions.can_request_user_credentials(agent_id):
+            _record_denial(
+                "permission", caller=agent_id,
+                gate="credential-request:can_request_user_credentials",
+            )
+            raise HTTPException(
+                403,
+                f"Agent {agent_id} is not permitted to request user "
+                "credentials (can_request_user_credentials not granted)",
+            )
 
         name = data.get("name", "")
         description = data.get("description", "")
@@ -4561,6 +4606,7 @@ def create_mesh_app(
             origin_kind = origin_dict.get("kind") if origin_dict else None
             origin_user = origin_dict.get("user") if origin_dict else None
             assignee = task_record.get("assignee")
+            creator = task_record.get("creator")
             task_id = task_record.get("id")
 
             # Eligibility — only cross-agent agent/operator handoffs.
@@ -4602,6 +4648,30 @@ def create_mesh_app(
             if event_kind not in _BACK_EDGE_WAKE_KINDS:
                 return
             if lane_manager is None or dispatch_loop is None:
+                return
+            # Finding L9 (binding): the back-edge EVENT above is written to
+            # ``inbox/{origin_user}/`` unconditionally so the originator's
+            # ``check_inbox`` always sees the outcome (and picks it up on
+            # heartbeat even when we skip the wake below). But the wake is
+            # a privileged action — it enqueues a lane message to
+            # ``origin_user``. ``origin_user`` is sourced from the task's
+            # stored ``origin`` dict, which (for ``kind="agent"``) is taken
+            # verbatim from the originating agent's X-Origin claim and is
+            # therefore forgeable. Only wake ``origin_user`` when it is the
+            # task's actual ``creator`` — the agent that genuinely created
+            # this handoff. A direct (single-hop) handoff satisfies this:
+            # ``hand_off`` creates the task as ``creator=<caller>`` and the
+            # caller's own origin carries ``user=<caller>``. On mismatch
+            # (forged origin, or a multi-hop chain whose origin points at a
+            # distant chain-root that is not the immediate creator) we keep
+            # the written event but skip the wake — the originator still
+            # learns via heartbeat, and no unrelated agent is woken.
+            if not creator or origin_user != creator:
+                logger.info(
+                    "back-edge wake for task %s skipped: origin_user=%s != "
+                    "creator=%s (L9 binding); event still written",
+                    task_id, origin_user, creator,
+                )
                 return
             if origin_user not in router.agent_registry:
                 return

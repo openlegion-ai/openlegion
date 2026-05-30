@@ -60,6 +60,9 @@ agents:
       blackboard_write: ["leads/*/research", "tasks/*", "output/*", "status/*"]
       can_publish: ["research_complete"]
       can_subscribe: ["lead_added"]
+      # Researches login-gated company/contact sources (e.g. LinkedIn) —
+      # may need to ask the user for a service credential.
+      can_request_user_credentials: true
     resources:
       memory_limit: "512m"
       cpu_limit: 0.5

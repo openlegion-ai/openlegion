@@ -100,6 +100,10 @@ def _record(task_id: str, **overrides) -> dict:
     base = {
         "id": task_id,
         "assignee": "writer",
+        # L9 binding: the back-edge wakes ``origin.user`` only when it
+        # equals the task's ``creator``. For a legit single-hop handoff
+        # (scout → writer), scout is both the creator and the origin user.
+        "creator": "scout",
         "title": "stage work",
         "status": "failed",
         "origin": {"kind": "agent", "channel": "", "user": "scout"},
@@ -201,6 +205,57 @@ class TestBackEdgeHelperEligibility:
             r.value.get("task_id") == "task_self_1" for r in rows
         )
         assert lane.calls == []
+
+    def test_origin_user_mismatch_writes_event_but_does_not_wake(
+        self, mesh_app_with_back_edge,
+    ):
+        """L9 binding: when ``origin.user`` is not the task ``creator``
+        (forged origin, or a multi-hop chain whose origin points at a
+        distant root), the back-edge EVENT is still written so the
+        originator's check_inbox/heartbeat sees it — but the privileged
+        wake is skipped so no arbitrary agent is interrupted."""
+        app, blackboard, lane, _loop = mesh_app_with_back_edge
+        # origin.user="analyst" (claimed) but creator="scout" (real).
+        rec = _record(
+            "task_mismatch_1",
+            creator="scout",
+            origin={"kind": "agent", "channel": "", "user": "analyst"},
+        )
+
+        app._write_task_event_back_edge(
+            rec, event_kind="task_failed",
+            payload_extras={"error": "boom"},
+        )
+        _settle()
+
+        # Event IS written to the claimed origin's inbox (delivery intact).
+        rows = blackboard.list_by_prefix("inbox/analyst/task_event/")
+        assert any(
+            r.value.get("task_id") == "task_mismatch_1" for r in rows
+        )
+        # But NO wake — origin_user != creator.
+        assert lane.calls == []
+
+    def test_origin_user_matches_creator_wakes(self, mesh_app_with_back_edge):
+        """L9 binding: the legit case (origin.user == creator) still
+        wakes the originator — auto-recovery is unaffected."""
+        app, blackboard, lane, _loop = mesh_app_with_back_edge
+        rec = _record(
+            "task_match_1",
+            creator="scout",
+            origin={"kind": "agent", "channel": "", "user": "scout"},
+        )
+
+        app._write_task_event_back_edge(
+            rec, event_kind="task_failed",
+            payload_extras={"error": "boom"},
+        )
+        _settle()
+
+        rows = blackboard.list_by_prefix("inbox/scout/task_event/")
+        assert any(r.value.get("task_id") == "task_match_1" for r in rows)
+        assert len(lane.calls) == 1
+        assert lane.calls[0]["args"][0] == "scout"
 
     def test_human_origin_skipped(self, mesh_app_with_back_edge):
         """``origin.kind=human`` callers (channels, web chat) don't get
