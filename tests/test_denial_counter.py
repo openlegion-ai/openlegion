@@ -259,10 +259,10 @@ class TestDenialCounterAuthAndRole:
         client = TestClient(app)
 
         try:
-            # ``/mesh/traces`` is gated by ``_require_any_auth`` (not
+            # ``/mesh/model-health`` is gated by ``_require_any_auth`` (not
             # ``_extract_verified_agent_id``). Hit it with no Authorization
             # header — expect 401 + counter bump.
-            resp = client.get("/mesh/traces")
+            resp = client.get("/mesh/model-health")
             assert resp.status_code == 401
             assert host_server._denial_counter["auth"] == 1
         finally:
@@ -295,7 +295,7 @@ class TestDenialCounterAuthAndRole:
 
         try:
             resp = client.get(
-                "/mesh/traces",
+                "/mesh/model-health",
                 headers={"Authorization": "Bearer wrong-token"},
             )
             assert resp.status_code == 401
