@@ -13,10 +13,12 @@ Key hierarchy:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac as _hmac
 import os
+import threading
 import time
 from collections import deque
 from datetime import datetime, timezone
@@ -114,6 +116,54 @@ _CHAINS: dict[str, dict[str, Any]] = {
 _FALLBACK_PRICES: dict[str, float] = {"ETH": 3000.0, "POL": 0.10, "SOL": 150.0}
 _PRICE_CACHE_TTL = 300  # 5 minutes
 
+# ── Stablecoin allowlist (H6) ─────────────────────────────────
+#
+# Per-chain map of {token_contract_address_lowercased: usd_price} for the
+# canonical USD-pegged stablecoins on each supported EVM chain.  Used to value
+# token transfers against the per-tx / daily USD spend caps WITHOUT a network
+# round-trip — so the common payment case (USDC/USDT/DAI) keeps working even
+# when CoinGecko is unreachable.
+#
+# All addresses are CANONICAL MAINNET deployments, lowercased for lookup (EVM
+# token contract addresses are matched case-insensitively elsewhere via
+# checksum normalisation, but this table is keyed on the lowercased form).
+# Each entry is pegged at $1.00.  We DELIBERATELY OMIT any address we are not
+# certain of: a wrong address here would let a non-stable token be priced as a
+# dollar (under-counting spend) — strictly worse than omission, which falls
+# through to the network-priced / fail-closed path below.  Testnets (Sepolia,
+# Solana devnet) are omitted — no real value flows there.
+_STABLECOINS: dict[str, dict[str, float]] = {
+    "evm:ethereum": {
+        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": 1.0,  # USDC
+        "0xdac17f958d2ee523a2206206994597c13d831ec7": 1.0,  # USDT
+        "0x6b175474e89094c44da98b954eedeac495271d0f": 1.0,  # DAI
+    },
+    "evm:base": {
+        "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913": 1.0,  # USDC (native)
+        "0x50c5725949a6f0c72e6c4a641f24049a917db0cb": 1.0,  # DAI
+    },
+    "evm:arbitrum": {
+        "0xaf88d065e77c8cc2239327c5edb3a432268e5831": 1.0,  # USDC (native)
+        "0xff970a61a04b1ca14834a43f5de4533ebddb5cc8": 1.0,  # USDC.e (bridged)
+        "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9": 1.0,  # USDT
+    },
+    "evm:polygon": {
+        "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359": 1.0,  # USDC (native)
+        "0x2791bca1f2de4661ed88a30c99a7a9449aa84174": 1.0,  # USDC.e (bridged)
+        "0xc2132d05d31c914a87c6611c10748aeb04b58e8f": 1.0,  # USDT
+    },
+}
+
+# CoinGecko asset-platform slugs for token-price-by-contract lookups (H6).
+# Only chains with a slug here can be priced by contract; others fall through
+# to the fail-closed (None) path.  Testnets are intentionally absent.
+_COINGECKO_PLATFORMS: dict[str, str] = {
+    "evm:ethereum": "ethereum",
+    "evm:base": "base",
+    "evm:arbitrum": "arbitrum-one",
+    "evm:polygon": "polygon-pos",
+}
+
 
 # ── WalletService ─────────────────────────────────────────────
 
@@ -155,6 +205,11 @@ class WalletService:
         # In-memory caches
         self._price_cache: dict[str, tuple[float, float]] = {}
         self._tx_timestamps: dict[str, deque[float]] = {}
+
+        # M4: per-agent locks serialising the check→broadcast→audit span.
+        # Lazily created; guarded by a sync lock to avoid a creation race.
+        self._agent_locks: dict[str, asyncio.Lock] = {}
+        self._agent_locks_guard = threading.Lock()
 
         # Lazy-init RPC providers (one per chain)
         self._evm_providers: dict[str, Any] = {}
@@ -494,6 +549,11 @@ class WalletService:
                 "value_wei": 0,
                 "amount": str(parsed_amount),
                 "token": token,
+                # H6: value the token notional (not the $0 native value) so the
+                # spend caps actually apply. None => price unknown => fail closed.
+                "token_value_usd": await self._estimate_token_value_usd(
+                    chain, token_addr, parsed_amount,
+                ),
             }
         else:
             # Native token transfer (ETH/SOL/POL)
@@ -572,25 +632,53 @@ class WalletService:
     ) -> dict:
         cfg = self._chains[chain]
         native_value = tx_params.get("native_value", 0)
-        value_usd = await self._estimate_value_usd(chain, native_value)
 
-        denial = self._check_policy(agent_id, value_usd, permissions)
-        if denial:
-            self._audit(agent_id, chain, "rejected", error=denial, **audit_info)
-            raise PermissionError(denial)
-
-        eco = cfg["ecosystem"]
-        if eco == "evm":
-            tx_hash = await self._evm_sign_and_send(agent_id, chain, tx_params)
-        elif eco == "solana":
-            tx_hash = await self._solana_sign_and_send(agent_id, chain, tx_params)
+        # H6: prefer the token notional when this is a fungible-token transfer.
+        # ``token_value_usd`` is absent for native sends, a float for priced
+        # tokens, and explicitly None when the price could not be determined.
+        token_value_usd = tx_params.get("token_value_usd", "__native__")
+        if token_value_usd == "__native__":
+            value_usd = await self._estimate_value_usd(chain, native_value)
+        elif token_value_usd is None:
+            # Price unknown.  Fail closed only when a spend cap actually
+            # constrains this agent — otherwise valuing at $0 would be a silent
+            # cap bypass.  (Stablecoins never reach here, so normal USDC/USDT/DAI
+            # payments are unaffected by network outages.)
+            if self._has_spend_cap(agent_id, permissions):
+                denial = (
+                    "Token price unavailable — cannot verify the transfer "
+                    "against your USD spend cap, so it is rejected (fail-closed). "
+                    "Retry once price data is available, or use a stablecoin."
+                )
+                self._audit(agent_id, chain, "rejected", error=denial, **audit_info)
+                raise PermissionError(denial)
+            value_usd = 0.0
         else:
-            raise ValueError(f"Unknown ecosystem: {eco}")
+            value_usd = float(token_value_usd)
 
-        self._audit(
-            agent_id, chain, "broadcast",
-            tx_hash=tx_hash, value_usd=value_usd, **audit_info,
-        )
+        # M4: hold a per-agent lock across check → broadcast → audit.  This
+        # closes the TOCTOU race on the daily-SUM cap (two concurrent transfers
+        # could each read the same pre-spend total and both pass) AND serialises
+        # EVM nonce assignment for the agent.  Per-AGENT only — different agents
+        # still sign concurrently.
+        async with self._agent_lock(agent_id):
+            denial = self._check_policy(agent_id, value_usd, permissions)
+            if denial:
+                self._audit(agent_id, chain, "rejected", error=denial, **audit_info)
+                raise PermissionError(denial)
+
+            eco = cfg["ecosystem"]
+            if eco == "evm":
+                tx_hash = await self._evm_sign_and_send(agent_id, chain, tx_params)
+            elif eco == "solana":
+                tx_hash = await self._solana_sign_and_send(agent_id, chain, tx_params)
+            else:
+                raise ValueError(f"Unknown ecosystem: {eco}")
+
+            self._audit(
+                agent_id, chain, "broadcast",
+                tx_hash=tx_hash, value_usd=value_usd, **audit_info,
+            )
         explorer = cfg["explorer_tx_fmt"]
         return {
             "tx_hash": tx_hash,
@@ -891,6 +979,72 @@ class WalletService:
         price = await self._get_price(cfg["symbol"], cfg["coingecko_id"])
         return float(Decimal(value_smallest_unit) / Decimal(10 ** cfg["decimals"])) * price
 
+    async def _estimate_token_value_usd(
+        self, chain: str, token_addr: str, human_amount: Decimal,
+    ) -> float | None:
+        """Value a fungible-token transfer in USD (H6).
+
+        ``token_addr`` is the token contract (EVM, lowercased-insensitive) or an
+        SPL mint (Solana). ``human_amount`` is the decimal-adjusted amount.
+
+        Returns the USD notional, or ``None`` when the price is UNKNOWN so the
+        caller can fail closed instead of letting the transfer through at $0.
+
+        Resolution order:
+          1. Stablecoin allowlist  → human_amount * $1.00  (no network needed).
+          2. CoinGecko by contract → live price (best-effort, EVM only).
+          3. Unknown               → ``None`` (caller decides).
+        """
+        key = token_addr.lower()
+        stable = _STABLECOINS.get(chain, {}).get(key)
+        if stable is not None:
+            return float(human_amount) * stable
+
+        price = await self._get_token_price_by_contract(chain, key)
+        if price is None:
+            return None
+        return float(human_amount) * price
+
+    async def _get_token_price_by_contract(
+        self, chain: str, token_addr_lc: str,
+    ) -> float | None:
+        """Best-effort CoinGecko price for an EVM token by contract address.
+
+        Returns ``None`` on any failure (network, unlisted token, non-EVM) —
+        NEVER a fallback price.  Unlike native pricing (which fails OPEN to a
+        fallback because a native symbol is always a known asset), an unknown
+        token has no safe default value, so we surface ``None`` and let the
+        caller fail closed.
+        """
+        cfg = self._chains.get(chain, {})
+        platform = _COINGECKO_PLATFORMS.get(chain)
+        if cfg.get("ecosystem") != "evm" or platform is None:
+            return None
+
+        cache_key = f"contract:{chain}:{token_addr_lc}"
+        cached = self._price_cache.get(cache_key)
+        if cached and time.time() - cached[1] < _PRICE_CACHE_TTL:
+            return cached[0]
+        try:
+            async with httpx.AsyncClient(timeout=5) as c:
+                resp = await c.get(
+                    f"https://api.coingecko.com/api/v3/simple/token_price/{platform}",
+                    params={
+                        "contract_addresses": token_addr_lc,
+                        "vs_currencies": "usd",
+                    },
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    entry = data.get(token_addr_lc) or {}
+                    price = entry.get("usd")
+                    if isinstance(price, (int, float)) and price > 0:
+                        self._price_cache[cache_key] = (float(price), time.time())
+                        return float(price)
+        except (httpx.HTTPError, OSError, KeyError, ValueError):
+            pass
+        return None
+
     async def _get_price(self, symbol: str, coingecko_id: str) -> float:
         cached = self._price_cache.get(symbol)
         if cached and time.time() - cached[1] < _PRICE_CACHE_TTL:
@@ -908,6 +1062,36 @@ class WalletService:
         except (httpx.HTTPError, OSError, KeyError, ValueError):
             pass
         return _FALLBACK_PRICES.get(symbol, 3000.0)
+
+    # ── Concurrency + cap helpers ─────────────────────────────
+
+    def _agent_lock(self, agent_id: str) -> asyncio.Lock:
+        """Return the per-agent asyncio.Lock, creating it on first use (M4)."""
+        lock = self._agent_locks.get(agent_id)
+        if lock is None:
+            with self._agent_locks_guard:
+                lock = self._agent_locks.get(agent_id)
+                if lock is None:
+                    lock = asyncio.Lock()
+                    self._agent_locks[agent_id] = lock
+        return lock
+
+    def _has_spend_cap(
+        self, agent_id: str, permissions: PermissionMatrix | None,
+    ) -> bool:
+        """True when a finite per-tx OR daily USD cap constrains this agent.
+
+        Mirrors the resolution in ``_check_policy``: a missing/zero per-agent
+        limit falls back to the service default.  Defaults are finite, so this
+        is effectively always True in practice — but the explicit check keeps
+        the fail-closed branch honest if defaults are ever set to 0/unlimited.
+        """
+        per_tx, daily = 0.0, 0.0
+        if permissions:
+            per_tx, daily, _ = permissions.get_wallet_limits(agent_id)
+        per_tx = per_tx or self._default_per_tx_usd
+        daily = daily or self._default_daily_usd
+        return per_tx > 0 or daily > 0
 
     # ── Policy engine ─────────────────────────────────────────
 
