@@ -2542,7 +2542,21 @@ class AgentLoop:
                                 # the task STATUS stays ``done``). The genuine
                                 # ghost case — zero tools OR empty response —
                                 # still hard-fails below.
-                                if tool_outputs and response_text.strip():
+                                #
+                                # ``silent_reply`` guard: a synthetic empty-turn
+                                # marker (Bug 3) lands in ``response_text`` as
+                                # non-empty prose that literally says no text was
+                                # generated. ``_chat_inner`` is the only place that
+                                # sets ``silent_reply=True`` alongside a non-empty
+                                # response, so a marker turn must NOT be treated as
+                                # a genuine deferral explanation — otherwise a ghost
+                                # (read-only tools, originally empty) would slip
+                                # into the deferral carve-out instead of failing.
+                                if (
+                                    tool_outputs
+                                    and response_text.strip()
+                                    and not result.get("silent_reply")
+                                ):
                                     logger.info(
                                         "chat explained-deferral carve-out for "
                                         "handoff task=%s: outbound_effect=False "
@@ -2604,38 +2618,41 @@ class AgentLoop:
                                     task_id, "done",
                                     result_payload={"summary": summary},
                                 )
-                    # Bug 3 fallback: when the LLM produced zero text but
-                    # ran tool calls, the dashboard would render an empty
-                    # chat panel even though work happened (notify_user,
-                    # workflow_snapshot, etc.). Surface a synthetic
-                    # response so the user sees that the turn DID execute.
-                    # Only fires for non-handoff chats (handoff lazy
-                    # completion was already handled above) and only when
-                    # tool_outputs is non-empty (a truly silent LLM
-                    # response in a no-tool chat is a different problem
-                    # and shouldn't be papered over).
-                    if not task_id:
-                        if (
-                            not (result.get("response") or "").strip()
-                            and result.get("tool_outputs")
-                            and not result.get("silent_reply")
-                            and not result.get("tool_limit_reached")
-                        ):
-                            tool_outputs = result.get("tool_outputs") or []
-                            logger.warning(
-                                "chat empty-response fallback: %d tool "
-                                "call(s) executed but LLM produced no "
-                                "final text — surfacing synthetic notice",
-                                len(tool_outputs),
-                            )
-                            # Single source of truth for the wording —
-                            # ``_log_chat_turn`` writes the same string
-                            # to the transcript so the dashboard chat
-                            # view and ``/chat/history`` agree after a
-                            # page refresh.
-                            result["response"] = (
-                                self._synthesize_empty_chat_fallback(tool_outputs)
-                            )
+                    # Bug 3 final net: a chat turn must never surface an
+                    # empty reply unless the model deliberately chose
+                    # ``__SILENT__``. ``_chat_inner`` already retries the
+                    # compose once (tools withheld) and substitutes a
+                    # marker on every exit — normal, tool-limit, and the
+                    # zero-tools case — REGARDLESS of ``task_id`` /
+                    # ``tool_limit_reached``, setting ``silent_reply`` on
+                    # the marker path so we can distinguish it here. This
+                    # block is the belt-and-suspenders backstop: if a
+                    # response still came back empty without the silence
+                    # flag (e.g. a future code path that bypasses the
+                    # inner substitution), stamp the marker so the user
+                    # never sees a blank bubble. It now fires regardless
+                    # of ``task_id`` and even with zero tool_outputs (the
+                    # marker is generic in that case — see
+                    # ``_synthesize_empty_chat_fallback``).
+                    if (
+                        not (result.get("response") or "").strip()
+                        and not result.get("silent_reply")
+                    ):
+                        tool_outputs = result.get("tool_outputs") or []
+                        logger.warning(
+                            "chat empty-response final net tripped: %d tool "
+                            "call(s) executed but response still empty after "
+                            "inner retry/marker — surfacing synthetic notice",
+                            len(tool_outputs),
+                        )
+                        # Single source of truth for the wording —
+                        # ``_log_chat_turn`` writes the same string to the
+                        # transcript so the dashboard chat view and
+                        # ``/chat/history`` agree after a page refresh.
+                        result["response"] = (
+                            self._synthesize_empty_chat_fallback(tool_outputs)
+                        )
+                        result["silent_reply"] = True
                     return result
                 finally:
                     await self._checkpoint_chat_session()
@@ -3021,6 +3038,69 @@ class AgentLoop:
         content = _extract_json_response(content)
         return content
 
+    async def _retry_empty_compose(self, system: str) -> tuple[str, int, bool]:
+        """Bug 3 — single idempotent retry of the final compose call.
+
+        When a chat turn's final text comes back empty (but it was NOT a
+        deliberate ``__SILENT__`` reply and NOT an auth/config/exception
+        error turn), re-ask the model ONCE with ``tools=None`` so it
+        cannot emit more tool calls and must produce prose. This is a
+        side-effect-free recovery: the messages are unchanged, only a
+        fresh completion is requested. ``_llm_call_with_retry`` still
+        wraps transient transport errors; this adds exactly ONE extra
+        compose attempt on top, never a loop.
+
+        Returns the tri-state ``(content, tokens_used, deliberate_silence)``:
+
+        - ``content`` is the resolved (non-silent) text, or ``""`` when the
+          retry came back empty / blank, or when it was a deliberate
+          ``__SILENT__`` reply.
+        - ``tokens_used`` is the retry's token cost (folded into the turn
+          total by the caller).
+        - ``deliberate_silence`` is ``True`` ONLY when the retry itself
+          emitted ``__SILENT__`` — in that case the tuple is
+          ``("", tokens, True)`` and the caller MUST keep the turn silent
+          (empty reply, NO marker). This is the bit that distinguishes a
+          deliberately-silent retry from an empty/blip retry: without it
+          the caller can't tell them apart and would paper a deliberate
+          ``__SILENT__`` over with a synthetic marker.
+
+        ``_resolve_content`` is what SETS the ``__silent_reply__`` flag, so
+        it must run BEFORE the flag is read — hence the resolve-then-check
+        ordering below.
+
+        Typed credential errors (``LLMAuthError`` / ``LLMConfigError``) are
+        RE-RAISED so the ``auth_failure`` / ``config_error`` taxonomy is
+        preserved — both call sites run inside a ``try`` whose typed arms
+        surface those flags (non-stream: ``auth_failure`` / ``config_error``
+        result dicts; streaming: the matching ``done`` events). Only
+        transient / transport errors degrade to ``("", 0, False)``. Callers
+        add the recovered text to ``self._chat_messages`` themselves so the
+        retry stays a pure read here, and fold ``tokens_used`` into the turn
+        total.
+        """
+        try:
+            llm_response = await _llm_call_with_retry(
+                self.llm.chat,
+                system=system,
+                messages=self._chat_messages,
+                tools=None,
+            )
+        except (LLMAuthError, LLMConfigError):
+            raise  # preserve the auth_failure/config_error taxonomy
+        except Exception as e:
+            logger.warning("Bug 3 empty-compose retry failed: %s", e)
+            return "", 0, False
+        tokens = llm_response.tokens_used
+        # Resolve FIRST — ``_resolve_content`` is what sets the
+        # ``__silent_reply__`` flag when the model emits ``__SILENT__``.
+        content = self._resolve_content(llm_response)
+        # Deliberate silence on the retry is honoured — do NOT paper over
+        # a model that explicitly chose ``__SILENT__`` the second time.
+        if llm_response.__dict__.get("__silent_reply__"):
+            return "", tokens, True
+        return content, tokens, False
+
     # ── Non-streaming chat ────────────────────────────────────
 
     async def _chat_inner(self, user_message: str) -> dict:
@@ -3100,6 +3180,26 @@ class AgentLoop:
                         self._chat_total_rounds += 1
                         await self._compact_chat_context(system)
                         continue
+                    # Bug 3 — the turn produced no final text. Distinguish
+                    # a deliberate ``__SILENT__`` reply (honoured: empty,
+                    # no retry, no marker) from an accidental empty turn
+                    # (retry compose once, then fall back to a marker).
+                    deliberate_silence = bool(
+                        llm_response.__dict__.get("__silent_reply__")
+                    )
+                    marker_substituted = False
+                    if not content.strip() and not deliberate_silence:
+                        retried, retry_tokens, retry_silent = await self._retry_empty_compose(system)
+                        total_tokens += retry_tokens
+                        if retried.strip():
+                            content = retried
+                        elif retry_silent:
+                            # Model deliberately chose ``__SILENT__`` on the
+                            # retry — honour it (empty reply, no marker).
+                            deliberate_silence = True
+                        else:
+                            content = self._synthesize_empty_chat_fallback(tool_outputs)
+                            marker_substituted = True
                     self._chat_messages.append({"role": "assistant", "content": content})
                     self._log_chat_turn(user_message, content, tool_outputs, turn_id=turn_id)
                     if tool_outputs and self.workspace:
@@ -3117,10 +3217,16 @@ class AgentLoop:
                         "tool_outputs": tool_outputs,
                         "tokens_used": total_tokens,
                     }
-                    if llm_response.__dict__.get("__silent_reply__"):
+                    if deliberate_silence:
                         # Mark a deliberate ``__SILENT__`` reply so the
                         # chat() empty-response fallback doesn't
                         # paper over it with a synthetic notice.
+                        result_dict["silent_reply"] = True
+                    elif marker_substituted:
+                        # Empty-turn marker substituted above. Flag so the
+                        # dashboard can badge "recovered from empty-text
+                        # turn"; reuses ``silent_reply`` (the dashboard's
+                        # existing "no live bubble to render" signal).
                         result_dict["silent_reply"] = True
                     return result_dict
 
@@ -3238,6 +3344,17 @@ class AgentLoop:
             )
             total_tokens += llm_response.tokens_used
             content = self._resolve_content(llm_response)
+            # Bug 3 — even the force-compose exit can come back empty. The
+            # call above already withheld tools, so it IS the compose
+            # retry: do NOT stack another ``_retry_empty_compose`` on top
+            # (that would double-retry the identical request). Honour a
+            # deliberate ``__SILENT__`` reply; otherwise substitute the
+            # marker so the user never sees a blank turn.
+            deliberate_silence = bool(llm_response.__dict__.get("__silent_reply__"))
+            marker_substituted = False
+            if not content.strip() and not deliberate_silence:
+                content = self._synthesize_empty_chat_fallback(tool_outputs)
+                marker_substituted = True
             self._chat_messages.append({"role": "assistant", "content": content})
             self._log_chat_turn(user_message, content, tool_outputs, turn_id=turn_id)
             if tool_outputs and self.workspace:
@@ -3256,7 +3373,7 @@ class AgentLoop:
                 "tokens_used": total_tokens,
                 "tool_limit_reached": True,
             }
-            if llm_response.__dict__.get("__silent_reply__"):
+            if deliberate_silence or marker_substituted:
                 tool_limit_result["silent_reply"] = True
             return tool_limit_result
 
@@ -3322,18 +3439,27 @@ class AgentLoop:
     def _synthesize_empty_chat_fallback(
         tool_outputs: list[dict] | None,
     ) -> str:
-        """Build the synthetic notice for an LLM turn that ran tools but
-        emitted no final text. Single source of truth so the dashboard
-        chat panel (live `done` event) and the persisted transcript
-        (`/chat/history` after refresh) carry identical text — without
-        this helper the two diverged and the operator's reply appeared
-        to vanish on page refresh.
+        """Build the synthetic notice for a chat turn that emitted no
+        final text. Single source of truth so the dashboard chat panel
+        (live `done` event) and the persisted transcript (`/chat/history`
+        after refresh) carry identical text — without this helper the two
+        diverged and the operator's reply appeared to vanish on page
+        refresh.
 
-        Returns ``""`` when there are no tools (truly silent LLM —
-        different problem, not papered over here).
+        Bug 3 — NEVER returns ``""``. With tools, the notice points the
+        user at the dashboard for the tool results. With ZERO tools, an
+        empty final text is almost always a transient model hiccup (the
+        retry-compose path already exhausted its one retry by the time we
+        get here), so we surface a generic re-send prompt rather than a
+        blank bubble. Deliberate ``__SILENT__`` replies are filtered out
+        by the callers BEFORE reaching this helper, so a generic marker
+        here can never paper over an intentional silence.
         """
         if not tool_outputs:
-            return ""
+            return (
+                "(No response was generated for this turn — likely a "
+                "transient model issue. Please re-send your message.)"
+            )
         n = len(tool_outputs)
         word = "tool call" if n == 1 else "tool calls"
         return (
@@ -3410,7 +3536,15 @@ class AgentLoop:
         # fallback so the transcript reflects what the dashboard saw
         # for this turn. Without this the assistant entry was skipped
         # entirely and a page refresh lost the turn's persistence.
-        if not assistant_msg.strip():
+        #
+        # Bug 3 — only substitute when there ARE tool_outputs. The
+        # ``_chat_inner`` / ``_chat_stream_inner`` retry-then-marker paths
+        # already pass the resolved text (recovered prose OR the marker)
+        # as ``assistant_msg``, so a genuinely empty ``assistant_msg``
+        # reaching here means a deliberate ``__SILENT__`` reply (no tools)
+        # — which must stay unlogged. Substituting the (now never-empty)
+        # generic no-tools marker here would wrongly persist silent turns.
+        if not assistant_msg.strip() and tool_outputs:
             assistant_msg = self._synthesize_empty_chat_fallback(tool_outputs)
         # Skip logging only for genuinely silent responses (SILENT
         # token, no tools called — there is nothing to persist).
@@ -3833,13 +3967,35 @@ class AgentLoop:
                     # Use accumulated text from all rounds for the transcript
                     # so intermediate messages are preserved after refresh.
                     full_content = "".join(accumulated_text) if accumulated_text else content
-                    # Empty final text + tools ran: synthesize the same
-                    # fallback the transcript will store so the live
-                    # ``done`` event and the post-refresh history agree
-                    # on what the user sees for this turn.
-                    if not full_content.strip() and tool_outputs:
-                        full_content = self._synthesize_empty_chat_fallback(tool_outputs)
+                    # Bug 3 — empty final text and NOT a deliberate
+                    # ``__SILENT__`` reply: retry the compose once (tools
+                    # withheld), then fall back to a marker. The recovered
+                    # text or the marker MUST be emitted as a text_delta
+                    # so the user actually sees it (not merely placed in
+                    # the ``done`` envelope). Applies regardless of
+                    # whether tool_outputs is empty — the marker is
+                    # generic in the no-tools case.
+                    deliberate_silence = bool(
+                        llm_response.__dict__.get("__silent_reply__")
+                    )
+                    if not full_content.strip() and not deliberate_silence:
+                        retried, retry_tokens, retry_silent = await self._retry_empty_compose(system)
+                        total_tokens += retry_tokens
+                        if retried.strip():
+                            full_content = retried
+                        elif retry_silent:
+                            # Model deliberately chose ``__SILENT__`` on the
+                            # retry — honour it: keep the turn silent, emit
+                            # no text_delta, leave full_content empty.
+                            full_content = ""
+                        else:
+                            full_content = self._synthesize_empty_chat_fallback(tool_outputs)
                         if full_content:
+                            # The retried text / marker was never streamed (the
+                            # compose ran non-streaming) — sync it into the
+                            # in-memory assistant message (matches the
+                            # non-stream path) and emit it now.
+                            self._chat_messages[-1]["content"] = full_content
                             yield {"type": "text_delta", "content": full_content}
                     self._log_chat_turn(
                         user_message, full_content, tool_outputs,
@@ -3993,13 +4149,18 @@ class AgentLoop:
                 yield {"type": "text_delta", "content": content}
             self._chat_messages.append({"role": "assistant", "content": content})
             full_content = "".join(accumulated_text) if accumulated_text else content
-            # Same empty-final-text-with-tools fallback as the no-tool-
-            # calls path above — keep the transcript and the streaming
-            # ``done`` event in sync after a max-rounds force-final.
-            if not full_content.strip() and tool_outputs:
+            # Bug 3 — the force-compose call above already withheld tools,
+            # so it IS the compose retry; do NOT stack another
+            # ``_retry_empty_compose`` (that would double-retry the same
+            # request). Honour a deliberate ``__SILENT__`` reply;
+            # otherwise substitute the marker and emit it as a text_delta
+            # so the user never sees a blank turn. Applies regardless of
+            # whether tool_outputs is empty (generic marker in that case).
+            deliberate_silence = bool(llm_response.__dict__.get("__silent_reply__"))
+            if not full_content.strip() and not deliberate_silence:
                 full_content = self._synthesize_empty_chat_fallback(tool_outputs)
-                if full_content:
-                    yield {"type": "text_delta", "content": full_content}
+                self._chat_messages[-1]["content"] = full_content
+                yield {"type": "text_delta", "content": full_content}
             self._log_chat_turn(
                 user_message, full_content, tool_outputs, turn_id=turn_id,
             )

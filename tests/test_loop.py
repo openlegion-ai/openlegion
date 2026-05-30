@@ -20,7 +20,13 @@ from src.agent.loop import (
     AgentLoop,
     _heartbeat_mode,
 )
-from src.shared.types import LLMResponse, TaskAssignment, TokenBudget, ToolCallInfo
+from src.shared.types import (
+    SILENT_REPLY_TOKEN,
+    LLMResponse,
+    TaskAssignment,
+    TokenBudget,
+    ToolCallInfo,
+)
 
 # Audit-pass: ``_has_outbound_effect`` was moved from module-level to a
 # ``@staticmethod`` on ``AgentLoop`` so it sits with the other lazy-
@@ -813,21 +819,30 @@ async def test_non_silent_reply_passes_through():
 
 @pytest.mark.asyncio
 async def test_silent_token_after_tool_rounds_exhausted():
-    """__SILENT__ at max-rounds fallback should also be suppressed."""
-    # Use different arguments each round to avoid triggering loop detection
+    """__SILENT__ at the max-rounds force-compose exit must be honoured:
+    empty reply, NO Bug-3 marker substituted.
+
+    The loop runs ``CHAT_MAX_TOOL_ROUNDS`` tool rounds (consuming that
+    many tool-call responses), breaks, then issues the force-compose
+    call with ``tools=None`` — so the response that lands AT the
+    force-compose exit must itself be the ``__SILENT__`` reply for this
+    to exercise deliberate silence there.
+    """
+    loop = _make_loop()
+    n = loop.CHAT_MAX_TOOL_ROUNDS
+    # Use different arguments each round to avoid triggering loop detection.
     responses = [
         LLMResponse(
             content="",
             tool_calls=[ToolCallInfo(name="search", arguments={"q": f"q_{i}"})],
             tokens_used=10,
         )
-        for i in range(31)
+        for i in range(n)
     ]
-    # Fill CHAT_MAX_TOOL_ROUNDS with tool calls, then final __SILENT__
-    silent_final = LLMResponse(content="__SILENT__", tokens_used=10)
-    responses.append(silent_final)
-
-    loop = _make_loop(responses)
+    # The (n+1)th call is the force-compose (tools withheld) — make it
+    # the deliberate ``__SILENT__`` reply.
+    responses.append(LLMResponse(content="__SILENT__", tokens_used=10))
+    loop.llm.chat = AsyncMock(side_effect=responses)
     loop.skills.get_tool_definitions = MagicMock(
         return_value=[{"type": "function", "function": {"name": "search"}}]
     )
@@ -2920,11 +2935,12 @@ class TestLoopLLMErrorHandling:
 
 
 class TestChatEmptyResponseFallback:
-    """When the LLM produces zero final text but ran tool calls, the chat
-    return value gets a synthetic notice so the dashboard renders the
-    turn (instead of a blank panel). Only fires for non-handoff chats
-    (``task_id is None``). Handoff turns route through the lazy-completion
-    guard above and the fallback must NOT also run there."""
+    """When the LLM produces zero final text, the chat return value gets a
+    synthetic notice so the dashboard renders the turn (instead of a blank
+    panel). Bug 3: this now fires REGARDLESS of task_id / tool_limit and
+    even with zero tool_outputs (generic marker in that case). Deliberate
+    ``__SILENT__`` replies are still preserved (``silent_reply`` set
+    upstream) and are NOT papered over."""
 
     @pytest.mark.asyncio
     async def test_chat_empty_response_with_tools_gets_fallback(self):
@@ -2946,9 +2962,13 @@ class TestChatEmptyResponseFallback:
         assert "2 tool calls" in result["response"]
 
     @pytest.mark.asyncio
-    async def test_chat_empty_response_no_tools_unchanged(self):
-        """A truly silent no-tool LLM turn is a different problem and
-        must NOT be papered over by the fallback."""
+    async def test_chat_empty_response_no_tools_gets_generic_marker(self):
+        """Bug 3 (updated contract): a no-tool empty turn that is NOT a
+        deliberate ``__SILENT__`` reply must NOT surface a blank bubble.
+        The ``chat()`` final net substitutes the generic (no-tools)
+        marker and flags ``silent_reply``. Deliberate silence is handled
+        upstream in ``_chat_inner`` (it sets ``silent_reply`` so this net
+        leaves it alone — covered by the silent-token tests)."""
         loop = _make_loop()
 
         async def fake_inner(_msg):
@@ -2956,16 +2976,17 @@ class TestChatEmptyResponseFallback:
         loop._chat_inner = fake_inner
 
         result = await loop.chat("hi")
-        assert result["response"] == ""
-        assert result["tool_outputs"] == []
+        assert result["response"].startswith("(No response")
+        assert result.get("silent_reply") is True
 
     @pytest.mark.asyncio
-    async def test_chat_with_task_id_skips_fallback(self):
-        """Handoff (task_id) path: the lazy-completion guard fires
-        instead. An empty response with tool_outputs in task_id mode
-        means a handoff that produced no structured result; auto-close
-        as ``done`` runs above, and the synthetic fallback must NOT
-        rewrite ``response``."""
+    async def test_chat_with_task_id_still_rescued(self):
+        """Bug 3 (updated contract): the empty-response rescue is NO
+        LONGER gated on ``not task_id``. A handoff (task_id) turn that
+        ends empty with tool_outputs must also be rescued so the user
+        never sees a blank reply. ``_chat_inner`` normally substitutes
+        the marker; here we fake an empty inner result to prove the
+        ``chat()`` final net rescues it even in task_id mode."""
         loop = _make_loop()
 
         async def fake_inner(_msg):
@@ -2977,20 +2998,15 @@ class TestChatEmptyResponseFallback:
         loop._chat_inner = fake_inner
 
         # Mock the auto-close pipeline so the test doesn't depend on
-        # mesh round-trips. We just want to assert the chat-mode
-        # synthetic-response fallback does NOT fire for task_id chats.
+        # mesh round-trips.
         loop._auto_close_task = AsyncMock(return_value=None)
 
         result = await loop.chat("hi", task_id="task_X")
 
-        # The chat-mode synthetic fallback (which mentions "Completed N
-        # tool calls") must NOT have fired.
-        assert "Completed" not in (result.get("response") or "")
-        assert "tool calls" not in (result.get("response") or "")
-        # The lazy-completion guard ran for the task. With non-empty
-        # tool_outputs and an empty response, the guard goes through
-        # the "did work" branch and auto-closes as ``done``.
-        loop._auto_close_task.assert_awaited()
+        # The rescue fires regardless of task_id — response is non-empty.
+        assert result["response"].strip() != ""
+        assert "Completed" in result["response"]
+        assert result.get("silent_reply") is True
 
     # --- Transcript-persistence regression tests (chat refresh bug) ---
     #
@@ -3033,8 +3049,10 @@ class TestChatEmptyResponseFallback:
 
     def test_log_chat_turn_skips_when_empty_and_no_tools(self, tmp_path):
         """Truly silent turn (no text, no tools) — nothing to persist.
-        The fallback helper returns ``""``, the guard skips, no
-        assistant row lands in the transcript."""
+        Bug 3: ``_log_chat_turn`` only substitutes the marker when there
+        ARE tool_outputs, so a deliberate ``__SILENT__`` reply (empty
+        text, no tools) still skips persistence — no assistant row lands
+        in the transcript."""
         from src.agent.workspace import WorkspaceManager
 
         loop = _make_loop()
@@ -3049,10 +3067,12 @@ class TestChatEmptyResponseFallback:
         assert assistant_entries == []
 
     def test_synthesize_helper_pluralization(self):
-        """Pure-function contract on the helper. Empty/None → ``""``.
-        1 tool → singular "tool call". 2+ tools → plural "tool calls"."""
-        assert AgentLoop._synthesize_empty_chat_fallback(None) == ""
-        assert AgentLoop._synthesize_empty_chat_fallback([]) == ""
+        """Pure-function contract on the helper. Bug 3: Empty/None now
+        returns the GENERIC (no-tools) marker, never ``""``. 1 tool →
+        singular "tool call". 2+ tools → plural "tool calls"."""
+        generic = AgentLoop._synthesize_empty_chat_fallback(None)
+        assert generic.startswith("(No response")
+        assert AgentLoop._synthesize_empty_chat_fallback([]) == generic
 
         one = AgentLoop._synthesize_empty_chat_fallback([{"tool": "x"}])
         assert "1 tool call" in one
@@ -3490,6 +3510,108 @@ class TestOutboundEffectLazyGuard:
         # summary feeds the done back-edge → originator's check_inbox
         assert payload.get("summary") == payload.get("reason")
 
+    @pytest.mark.asyncio
+    async def test_ghost_handoff_empty_response_closes_failed(self):
+        """Regression (don't-let-marker-mask-ghost): a handoff turn that
+        calls ONE read-only tool then produces NO final text is a ghost
+        completion. ``_chat_inner`` substitutes a synthetic empty-turn
+        marker into ``result["response"]`` (flagging ``silent_reply``).
+        The explained-deferral carve-out MUST ignore marker turns, so the
+        task auto-closes as ``failed`` (``no_outbound_effects``) — the
+        marker must NOT be mistaken for a genuine deferral explanation.
+
+        Drives the REAL ``_chat_inner`` (round 1: read-only tool call +
+        empty text; round 2: empty final → triggers the empty-compose
+        retry; retry: also empty → marker substituted) so the actual
+        marker/silent_reply interaction with the carve-out is exercised.
+        Without the ``not result.get("silent_reply")`` gate this closes as
+        ``done``/deferred instead — defeating the ghost guard.
+        """
+        read_only_call = ToolCallInfo(name="check_inbox", arguments={})
+        responses = [
+            _resp("", tool_calls=[read_only_call]),  # round 1: read-only tool
+            _resp(""),                               # round 2: empty final
+            _resp(""),                               # empty-compose retry: empty
+        ]
+        loop = _make_loop(responses)
+        loop.skills.get_tool_definitions = MagicMock(
+            return_value=[{"name": "check_inbox"}]
+        )
+        loop.skills.execute = AsyncMock(return_value={"events": []})
+        loop._auto_close_task = AsyncMock(return_value=None)
+
+        result = await loop.chat("hi", task_id="t-ghost")
+
+        # The marker was substituted (user never sees a blank bubble) —
+        # but the task STATUS must still be a ghost failure.
+        assert result.get("silent_reply") is True
+        assert result["response"].strip() != ""
+
+        terminal_calls = [
+            c for c in loop._auto_close_task.await_args_list
+            if len(c.args) >= 2 and c.args[1] in ("done", "failed")
+        ]
+        assert terminal_calls, (
+            "expected a terminal auto_close_task call, saw: "
+            f"{loop._auto_close_task.await_args_list}"
+        )
+        last_terminal = terminal_calls[-1]
+        assert last_terminal.args[1] == "failed", (
+            "ghost turn (read-only tool, empty real text → marker) must "
+            "close as 'failed', not 'done'/deferred; the synthetic marker "
+            "must not mask the ghost. calls: "
+            f"{loop._auto_close_task.await_args_list}"
+        )
+        assert last_terminal.args[0] == "t-ghost"
+        error_msg = last_terminal.kwargs.get("error") or ""
+        assert "no_outbound_effects" in error_msg, (
+            f"expected 'no_outbound_effects' in error, got: {error_msg!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_genuine_deferral_handoff_closes_done_deferred(self):
+        """Counterpart: a handoff turn that calls ONE read-only tool then
+        returns REAL prose (a genuine deferral explanation, ``silent_reply``
+        NOT set) still takes the carve-out → auto-closes as ``done`` with a
+        ``deferred`` result payload. The ``silent_reply`` gate only excludes
+        synthetic marker turns; genuine explanations are unaffected.
+        """
+        read_only_call = ToolCallInfo(
+            name="read_blackboard", arguments={"key": "queue"},
+        )
+        responses = [
+            _resp("", tool_calls=[read_only_call]),  # round 1: read-only tool
+            _resp("Reviewed the blackboard; no action needed because X."),
+        ]
+        loop = _make_loop(responses)
+        loop.skills.get_tool_definitions = MagicMock(
+            return_value=[{"name": "read_blackboard"}]
+        )
+        loop.skills.execute = AsyncMock(return_value={"value": "pending"})
+        loop._auto_close_task = AsyncMock(return_value=None)
+
+        result = await loop.chat("hi", task_id="t-deferral")
+
+        # Genuine prose: no marker, silent_reply not set.
+        assert result.get("silent_reply") is not True
+        assert "no action needed" in result["response"]
+
+        terminal_calls = [
+            c for c in loop._auto_close_task.await_args_list
+            if len(c.args) >= 2 and c.args[1] in ("done", "failed")
+        ]
+        assert terminal_calls
+        last_terminal = terminal_calls[-1]
+        assert last_terminal.args[1] == "done", (
+            "genuine deferral (read-only tool + real prose) must close as "
+            f"'done', not 'failed'. calls: {loop._auto_close_task.await_args_list}"
+        )
+        assert last_terminal.args[0] == "t-deferral"
+        payload = last_terminal.kwargs.get("result_payload") or {}
+        assert payload.get("status") == "deferred", (
+            f"expected deferred result payload, got: {payload!r}"
+        )
+
 
 # === Bug 3 chain pin: chat() error → blocker_note wiring ===
 
@@ -3796,3 +3918,261 @@ class TestChatExceptionPathsFinalizeCleanly:
             "finalize must receive the turn's turn_id so the partial "
             "supersedes cleanly"
         )
+
+
+# ── Bug 3: empty-chat-turn recovery (retry-then-marker) ──────────────
+#
+# A chat turn that runs tools (or even none) but produces no final text
+# must NEVER surface a blank reply unless the model deliberately emitted
+# ``__SILENT__``. ``_chat_inner`` / ``_chat_stream_inner`` retry the
+# final compose once with tools withheld; if still empty they substitute
+# a marker via ``_synthesize_empty_chat_fallback`` and flag the result
+# with ``silent_reply`` so the dashboard can badge the recovery. These
+# tests pin that contract across BOTH surfaces, regardless of task_id /
+# tool_limit_reached, and confirm deliberate silence is preserved.
+
+
+def _resp(content, tool_calls=None, tokens=10):
+    return LLMResponse(content=content, tool_calls=tool_calls, tokens_used=tokens)
+
+
+def _empty_after_tools_loop(final_responses):
+    """An AgentLoop wired so round 1 calls a tool, then subsequent
+    responses are returned in order. One tool round populates
+    ``tool_outputs`` before the empty/recovery exit."""
+    tool_call = ToolCallInfo(name="search", arguments={"q": "x"})
+    responses = [_resp("", tool_calls=[tool_call])] + list(final_responses)
+    loop = _make_loop(responses)
+    loop.skills.get_tool_definitions = MagicMock(return_value=[{"name": "search"}])
+    loop.skills.execute = AsyncMock(return_value={"ok": True})
+    return loop
+
+
+@pytest.mark.asyncio
+async def test_empty_chat_after_tools_retry_succeeds_returns_recovered_text():
+    """Empty final text after tools, retry yields prose → that prose is
+    the response; no marker; ``silent_reply`` not set."""
+    # round 1: tool call. round 2: empty final → triggers retry.
+    # retry compose (tools withheld): real text.
+    loop = _empty_after_tools_loop([_resp(""), _resp("Recovered answer")])
+    result = await loop.chat("ping")
+    assert result["response"] == "Recovered answer"
+    assert result.get("silent_reply") is not True
+    assert loop._chat_messages[-1]["content"] == "Recovered answer"
+
+
+@pytest.mark.asyncio
+async def test_empty_chat_after_tools_retry_also_empty_returns_marker():
+    """Empty final text after tools, retry also empty → marker response,
+    ``silent_reply`` True."""
+    loop = _empty_after_tools_loop([_resp(""), _resp("")])
+    result = await loop.chat("ping")
+    assert "Completed" in result["response"]
+    assert "tool call" in result["response"]
+    assert result.get("silent_reply") is True
+
+
+@pytest.mark.asyncio
+async def test_empty_chat_after_tools_with_task_id_is_rescued():
+    """task_id set must NOT gate the rescue (the old gate is removed):
+    the response is non-empty (recovered text or marker)."""
+    loop = _empty_after_tools_loop([_resp(""), _resp("")])
+    loop._auto_close_task = AsyncMock(return_value=None)
+    result = await loop.chat("ping", task_id="task-123")
+    assert result["response"].strip() != ""
+
+
+@pytest.mark.asyncio
+async def test_empty_chat_tool_limit_reached_is_rescued():
+    """The tool-limit force-compose exit must also be rescued — an empty
+    forced compose yields the marker, not a blank reply."""
+    loop = _make_loop()
+    loop.CHAT_MAX_TOOL_ROUNDS = 2
+    tool_call = ToolCallInfo(name="search", arguments={"q": "x"})
+    responses = [
+        _resp("", tool_calls=[tool_call]),
+        _resp("", tool_calls=[tool_call]),
+        _resp(""),  # force-final compose: empty
+    ]
+    loop.llm.chat = AsyncMock(side_effect=responses)
+    loop.skills.get_tool_definitions = MagicMock(return_value=[{"name": "search"}])
+    loop.skills.execute = AsyncMock(return_value={"ok": True})
+    result = await loop.chat("ping")
+    assert result.get("tool_limit_reached") is True
+    assert result["response"].strip() != ""
+    assert result.get("silent_reply") is True
+
+
+@pytest.mark.asyncio
+async def test_empty_chat_zero_tools_retry_empty_returns_generic_marker():
+    """Empty final text, ZERO tool_outputs, retry also empty → the
+    generic (no-tools) marker, never an empty string."""
+    # round 1 (no tools): empty → retry. retry: empty.
+    loop = _make_loop([_resp(""), _resp("")])
+    result = await loop.chat("ping")
+    assert result["response"].startswith("(No response")
+    assert result.get("silent_reply") is True
+    assert result["response"] != ""
+
+
+@pytest.mark.asyncio
+async def test_deliberate_silent_after_tools_not_rescued_and_no_retry():
+    """A deliberate ``__SILENT__`` final (after a tool round) yields an
+    empty reply with NO marker, and the retry compose is NOT called
+    (proven by the LLM mock call count)."""
+    loop = _empty_after_tools_loop([_resp(SILENT_REPLY_TOKEN)])
+    result = await loop.chat("ping")
+    assert result["response"] == ""
+    assert result.get("silent_reply") is True
+    # 2 calls only: round-1 tool call + the silent final. No 3rd retry.
+    assert loop.llm.chat.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_normal_nonempty_response_unchanged():
+    """A normal text reply is returned unchanged (regression guard) and
+    the retry compose is never invoked."""
+    loop = _make_loop([_resp("All good.")])
+    result = await loop.chat("ping")
+    assert result["response"] == "All good."
+    assert result.get("silent_reply") is not True
+    assert loop.llm.chat.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_empty_after_tools_emits_marker_text_event():
+    """Streaming: empty final text after tools (retry also empty) emits a
+    text_delta carrying the marker AND the done event carries it too."""
+    tool_call = ToolCallInfo(name="search", arguments={"q": "x"})
+    responses = [
+        _resp("", tool_calls=[tool_call]),  # round 1: tool call
+        _resp(""),                          # round 2: empty final
+        _resp(""),                          # retry compose: empty
+    ]
+    loop = _make_loop(responses)
+    # Force the non-streaming fallback path: chat_stream raises so the
+    # loop falls back to ``self.llm.chat`` (our AsyncMock side_effect).
+    loop.llm.chat_stream = MagicMock(side_effect=RuntimeError("no stream"))
+    loop.skills.get_tool_definitions = MagicMock(return_value=[{"name": "search"}])
+    loop.skills.execute = AsyncMock(return_value={"ok": True})
+    events = [ev async for ev in loop.chat_stream("ping")]
+    text_events = [e for e in events if e.get("type") == "text_delta"]
+    done_events = [e for e in events if e.get("type") == "done"]
+    assert any("Completed" in (e.get("content") or "") for e in text_events)
+    assert done_events
+    assert "Completed" in (done_events[-1].get("response") or "")
+
+
+@pytest.mark.asyncio
+async def test_stream_empty_after_tools_retry_succeeds_emits_recovered_text():
+    """Streaming: empty final text after tools, retry yields prose → a
+    text_delta and done carry the recovered prose, not a marker."""
+    tool_call = ToolCallInfo(name="search", arguments={"q": "x"})
+    responses = [
+        _resp("", tool_calls=[tool_call]),   # round 1: tool call
+        _resp(""),                           # round 2: empty final
+        _resp("Streamed recovery"),          # retry compose: prose
+    ]
+    loop = _make_loop(responses)
+    loop.llm.chat_stream = MagicMock(side_effect=RuntimeError("no stream"))
+    loop.skills.get_tool_definitions = MagicMock(return_value=[{"name": "search"}])
+    loop.skills.execute = AsyncMock(return_value={"ok": True})
+    events = [ev async for ev in loop.chat_stream("ping")]
+    text_events = [e for e in events if e.get("type") == "text_delta"]
+    done_events = [e for e in events if e.get("type") == "done"]
+    assert any("Streamed recovery" in (e.get("content") or "") for e in text_events)
+    assert done_events[-1]["response"] == "Streamed recovery"
+
+
+@pytest.mark.asyncio
+async def test_empty_compose_retry_reraises_auth_error():
+    """Regression: a credential outage DURING the empty-compose retry must
+    surface as ``auth_failure`` — not be swallowed into a benign
+    ``"(no response)"`` marker. The helper re-raises LLMAuthError /
+    LLMConfigError; ``_chat_inner``'s typed ``except`` arm tags the result.
+    """
+    from src.shared.errors import LLMAuthError
+
+    tool_call = ToolCallInfo(name="search", arguments={"q": "x"})
+    # Round 1: tool call + empty text. Round 2: empty final → triggers retry.
+    # The retry compose (3rd llm.chat) raises LLMAuthError.
+    responses = [
+        _resp("", tool_calls=[tool_call]),
+        _resp(""),
+        LLMAuthError("credentials revoked", provider="anthropic"),
+    ]
+    loop = _make_loop(responses)
+    loop.skills.get_tool_definitions = MagicMock(return_value=[{"name": "search"}])
+    loop.skills.execute = AsyncMock(return_value={"ok": True})
+    result = await loop._chat_inner("ping")
+    assert result.get("auth_failure") is True
+    # Must NOT be papered over as a successful "(no response)" marker.
+    assert "(no response" not in (result.get("response") or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_stream_deliberate_silence_not_retried():
+    """Streaming deliberate ``__SILENT__`` reply: NO compose retry and NO
+    marker text event (mirror of the non-stream deliberate-silence test).
+    """
+    loop = _make_loop([_resp(SILENT_REPLY_TOKEN)])
+    # Force the non-streaming fallback so llm.chat (our side_effect) is used.
+    loop.llm.chat_stream = MagicMock(side_effect=RuntimeError("no stream"))
+    # Patch the retry helper to a sentinel so we can assert it is NOT called.
+    loop._retry_empty_compose = AsyncMock()
+
+    events = [ev async for ev in loop._chat_stream_inner("ping")]
+
+    assert loop._retry_empty_compose.call_count == 0
+    text_events = [e for e in events if e.get("type") == "text_delta"]
+    assert text_events == []
+    assert all(
+        "(no response" not in (e.get("content") or "").lower() for e in events
+    )
+    done = [e for e in events if e.get("type") == "done"]
+    assert done and done[-1].get("response") == ""
+
+
+@pytest.mark.asyncio
+async def test_retry_returns_silent_token_is_honoured_not_marked():
+    """Bug 3: the first no-tool reply is empty (an accidental blip, NOT the
+    silent token), so the empty-compose retry fires; the retry itself emits
+    ``__SILENT__``. That deliberate silence on the retry MUST be honoured:
+    empty response, ``silent_reply`` flagged, and NO marker substituted.
+
+    Before the tri-state fix the silence check in ``_retry_empty_compose``
+    was dead (the flag is set inside ``_resolve_content`` which ran AFTER
+    the check), so the retry's ``__SILENT__`` was stripped to ``""`` and the
+    caller papered it over with a marker — this test would FAIL.
+    """
+    loop = _make_loop([_resp(""), _resp(SILENT_REPLY_TOKEN)])
+    result = await loop._chat_inner("ping")
+    assert result["response"] == ""
+    assert result.get("silent_reply") is True
+    resp = (result.get("response") or "")
+    assert not resp.strip().startswith("(")
+    assert "no text response" not in resp.lower()
+    assert "no response" not in resp.lower()
+
+
+@pytest.mark.asyncio
+async def test_stream_retry_returns_silent_token_emits_no_marker():
+    """Bug 3 stream: first no-tool reply empty (blip), retry emits
+    ``__SILENT__``. The deliberate retry-silence is honoured: NO text_delta
+    marker is emitted (ideally no text_delta at all) and the final ``done``
+    event carries an empty ``response``.
+    """
+    loop = _make_loop([_resp(""), _resp(SILENT_REPLY_TOKEN)])
+    # Force the non-streaming fallback so llm.chat (our side_effect) drives it.
+    loop.llm.chat_stream = MagicMock(side_effect=RuntimeError("no stream"))
+    events = [ev async for ev in loop._chat_stream_inner("ping")]
+    text_events = [e for e in events if e.get("type") == "text_delta"]
+    assert text_events == []
+    assert all(
+        "no response" not in (e.get("content") or "").lower() for e in events
+    )
+    assert all(
+        "no text response" not in (e.get("content") or "").lower() for e in events
+    )
+    done = [e for e in events if e.get("type") == "done"]
+    assert done and done[-1].get("response") == ""
