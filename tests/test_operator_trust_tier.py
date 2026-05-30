@@ -753,3 +753,70 @@ def test_raise_with_body_passthrough_on_success():
     response = httpx.Response(status_code=200, request=request, content=b"{}")
     # No exception.
     _raise_with_body(response)
+
+
+# =============================================================================
+# Trace endpoints are operator/loopback-internal only (H16)
+# =============================================================================
+#
+# ``/mesh/traces`` and ``/mesh/traces/{id}`` expose prompt/response previews
+# across every agent. They previously used ``_require_any_auth``, so any
+# agent's bearer could read every agent's stored LLM previews (cross-agent
+# disclosure). They now require operator or loopback ``x-mesh-internal``.
+
+
+@pytest.mark.asyncio
+async def test_worker_cannot_list_traces(mesh_setup):
+    """A regular agent bearer gets 403 on /mesh/traces (operator-only)."""
+    app = mesh_setup["app"]
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test",
+    ) as client:
+        resp = await client.get(
+            "/mesh/traces",
+            headers=_hdr(mesh_setup["tokens"]["trend-scout"]),
+        )
+    assert resp.status_code == 403, resp.text
+
+
+@pytest.mark.asyncio
+async def test_worker_cannot_get_trace(mesh_setup):
+    """A regular agent bearer gets 403 on /mesh/traces/{id}."""
+    app = mesh_setup["app"]
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test",
+    ) as client:
+        resp = await client.get(
+            "/mesh/traces/tr_anything",
+            headers=_hdr(mesh_setup["tokens"]["seo-strategist"]),
+        )
+    assert resp.status_code == 403, resp.text
+
+
+@pytest.mark.asyncio
+async def test_operator_can_list_traces(mesh_setup):
+    """Operator bearer still reads traces."""
+    app = mesh_setup["app"]
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test",
+    ) as client:
+        resp = await client.get(
+            "/mesh/traces",
+            headers=_hdr(mesh_setup["tokens"]["operator"]),
+        )
+    assert resp.status_code == 200, resp.text
+
+
+@pytest.mark.asyncio
+async def test_internal_loopback_can_list_traces(mesh_setup):
+    """Loopback x-mesh-internal callers (health checks) still read traces."""
+    app = mesh_setup["app"]
+    transport = ASGITransport(app=app, client=("127.0.0.1", 12345))
+    async with AsyncClient(
+        transport=transport, base_url="http://test",
+    ) as client:
+        resp = await client.get(
+            "/mesh/traces",
+            headers={"x-mesh-internal": "1"},
+        )
+    assert resp.status_code == 200, resp.text
