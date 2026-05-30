@@ -14,7 +14,7 @@ test pins the post-fix behavior: empty-response is now retryable.
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -326,3 +326,45 @@ async def test_chat_stream_auth_failure_still_raises_auth_error():
             system="s", messages=[{"role": "user", "content": "x"}],
         ):
             pass
+
+
+def test_default_max_output_tokens_is_8192():
+    """The hardcoded 4096 cap was too small for large tool-call payloads."""
+    llm = LLMClient(mesh_url="http://mesh:8420", agent_id="a1")
+    assert llm.max_output_tokens == 8192
+
+
+def test_max_output_tokens_override():
+    llm = LLMClient(
+        mesh_url="http://mesh:8420", agent_id="a1", max_output_tokens=32000,
+    )
+    assert llm.max_output_tokens == 32000
+
+
+@pytest.mark.asyncio
+async def test_chat_uses_instance_max_tokens_default():
+    """chat() must send the instance max_output_tokens when caller omits it."""
+    llm = LLMClient(
+        mesh_url="http://mesh:8420", agent_id="a1", max_output_tokens=16384,
+    )
+    captured = {}
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {
+                "success": True,
+                "data": {"content": "ok", "tool_calls": [], "tokens_used": 1,
+                         "model": "m"},
+            }
+
+    class _Client:
+        async def post(self, url, json=None, params=None, headers=None):
+            captured["max_tokens"] = json["params"]["max_tokens"]
+            return _Resp()
+
+    with patch.object(llm, "_get_client", AsyncMock(return_value=_Client())):
+        await llm.chat(system="s", messages=[{"role": "user", "content": "hi"}])
+    assert captured["max_tokens"] == 16384

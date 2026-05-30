@@ -49,10 +49,16 @@ def main() -> None:
     llm_model = os.environ.get("LLM_MODEL", "openai/gpt-4o-mini")
     embedding_model = os.environ.get("EMBEDDING_MODEL", "")
     thinking = os.environ.get("THINKING", "off")
+    try:
+        max_output_tokens = int(os.environ.get("LLM_MAX_TOKENS", "8192"))
+    except ValueError:
+        logger.warning("Invalid LLM_MAX_TOKENS, using default 8192")
+        max_output_tokens = 8192
+    max_output_tokens = max(256, min(max_output_tokens, 200_000))
     llm = LLMClient(
         mesh_url=mesh_url, agent_id=agent_id,
         default_model=llm_model, embedding_model=embedding_model,
-        thinking=thinking,
+        thinking=thinking, max_output_tokens=max_output_tokens,
     )
     project_name = os.environ.get("PROJECT_NAME", "")
     mesh_client = MeshClient(

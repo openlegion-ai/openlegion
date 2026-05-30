@@ -38,6 +38,7 @@ class LLMClient:
         default_model: str = "openai/gpt-4o-mini",
         embedding_model: str = "",
         thinking: str = "off",
+        max_output_tokens: int = 8192,
     ):
         if thinking and thinking not in self.VALID_THINKING_LEVELS:
             logger.warning(
@@ -50,6 +51,16 @@ class LLMClient:
         self.default_model = default_model
         self.embedding_model = embedding_model
         self.thinking = thinking
+        # Default output-token cap for chat()/chat_stream() when the caller
+        # doesn't pass max_tokens explicitly. Configurable per-agent via the
+        # LLM_MAX_TOKENS env var (see __main__.py) and hot-reloadable via the
+        # agent /config endpoint. The legacy hardcoded 4096 was too small for
+        # tool calls with large argument payloads (e.g. write_file of a
+        # 15-20KB file): the model hit the cap mid-tool-call, the JSON never
+        # closed, and the call failed permanently with "Truncated tool-call
+        # arguments". 8192 is the safe floor across common modern models
+        # (gpt-4o family = 16384, Claude 3.5 Sonnet = 8192, Claude 4.x = 64K+).
+        self.max_output_tokens = max_output_tokens
         self._client: httpx.AsyncClient | None = None
         self._client_lock = asyncio.Lock()
         self._auth_token: str = os.environ.get("MESH_AUTH_TOKEN", "")
@@ -206,11 +217,13 @@ class LLMClient:
         messages: list[dict],
         tools: list[dict] | None = None,
         model: str | None = None,
-        max_tokens: int = 4096,
+        max_tokens: int | None = None,
         temperature: float = 0.7,
         **kwargs,
     ) -> LLMResponse:
         """Send a chat completion request through the mesh proxy."""
+        if max_tokens is None:
+            max_tokens = self.max_output_tokens
         params: dict = {
             "model": model or self.default_model,
             "messages": [{"role": "system", "content": system}] + messages,
@@ -259,7 +272,7 @@ class LLMClient:
         messages: list[dict],
         tools: list[dict] | None = None,
         model: str | None = None,
-        max_tokens: int = 4096,
+        max_tokens: int | None = None,
         temperature: float = 0.7,
         **kwargs,
     ) -> AsyncIterator[dict]:
@@ -270,6 +283,8 @@ class LLMClient:
           {"type": "done", "response": LLMResponse} — final assembled response
         On error, falls back by raising so caller can retry non-streaming.
         """
+        if max_tokens is None:
+            max_tokens = self.max_output_tokens
         params: dict = {
             "model": model or self.default_model,
             "messages": [{"role": "system", "content": system}] + messages,
