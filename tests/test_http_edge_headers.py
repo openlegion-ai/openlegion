@@ -30,7 +30,11 @@ def _make_mesh_app(tmp_path):
         blackboard=bb, pubsub=pubsub, router=router, permissions=perms,
         cost_tracker=costs, trace_store=traces,
     )
-    cleanup = lambda: (bb.close(), costs.close(), traces.close())
+    def cleanup():
+        bb.close()
+        costs.close()
+        traces.close()
+
     return app, cleanup
 
 
