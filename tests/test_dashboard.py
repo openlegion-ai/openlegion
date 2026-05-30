@@ -185,6 +185,23 @@ class TestDashboardIndex:
         resp = self.client.get("/dashboard/static/../../server.py")
         assert resp.status_code == 404
 
+    def test_dashboard_csp_has_frame_ancestors_self(self):
+        # M18: clickjacking guard. Must be 'self' (not 'none') so the
+        # same-origin /agent-vnc/ iframe still loads, while existing
+        # CSP directives remain intact.
+        resp = self.client.get("/dashboard/")
+        csp = resp.headers["Content-Security-Policy"]
+        assert "frame-ancestors 'self'" in csp
+        # existing directives preserved
+        assert "frame-src 'self'" in csp
+        assert "object-src 'none'" in csp
+
+    def test_dashboard_x_frame_options_sameorigin(self):
+        # M18: legacy clickjacking header. SAMEORIGIN (not DENY) keeps the
+        # same-origin VNC iframe working.
+        resp = self.client.get("/dashboard/")
+        assert resp.headers["X-Frame-Options"] == "SAMEORIGIN"
+
 
 class TestDashboardAgentsAPI:
     def setup_method(self):

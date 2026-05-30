@@ -164,7 +164,14 @@ def _origin_from_mesh_request(request: Request):
 
 def create_agent_app(loop: AgentLoop) -> FastAPI:
     """Create the FastAPI application for an agent container."""
-    app = FastAPI(title=f"OpenLegion Agent: {loop.agent_id}")
+    # M19: disable interactive API docs / OpenAPI schema by default; gate dev
+    # access behind OPENLEGION_ENABLE_DOCS.
+    _docs_kwargs = (
+        {}
+        if os.environ.get("OPENLEGION_ENABLE_DOCS", "").lower() in ("1", "true", "yes", "on")
+        else {"docs_url": None, "redoc_url": None, "openapi_url": None}
+    )
+    app = FastAPI(title=f"OpenLegion Agent: {loop.agent_id}", **_docs_kwargs)
     _install_body_size_limit(app)
     _task_accept_lock = asyncio.Lock()
 
