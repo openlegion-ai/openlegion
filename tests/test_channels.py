@@ -27,17 +27,30 @@ except ImportError:
 # ── Test concrete channel ─────────────────────────────────────
 
 class StubChannel(Channel):
-    """Concrete channel for testing base class behaviour."""
+    """Concrete channel for testing base class behaviour.
 
-    def __init__(self, **kwargs):
+    ``owner_ids`` controls which user ids ``_resolve_owner`` treats as the
+    owner. Defaults to ``None`` meaning *everyone is the owner* — this keeps
+    the broad command-coverage tests (which dispatch as an arbitrary "u1"
+    user) exercising the privileged-command paths. Tests that need a
+    non-owner user pass an explicit ``owner_ids`` set.
+    """
+
+    def __init__(self, owner_ids: set | None = None, **kwargs):
         super().__init__(**kwargs)
         self.notifications: list[str] = []
+        self._owner_ids = owner_ids
 
     async def start(self):
         pass
 
     async def stop(self):
         pass
+
+    def _resolve_owner(self, user_id: str) -> bool:
+        if self._owner_ids is None:
+            return True
+        return user_id in self._owner_ids
 
     async def send_notification(self, text: str) -> None:
         self.notifications.append(text)
@@ -325,6 +338,98 @@ class TestAddKeyCommand:
         ch = _make_channel()
         result = await ch.handle_message("u1", "/help")
         assert "/addkey" in result
+
+
+# ── H2: owner-gating of privileged commands ──────────────────
+
+class TestPrivilegedCommandOwnerGate:
+    """Non-owner allowed users keep chat + read-only commands but are
+    refused privileged ones (/addkey, /steer, /broadcast, /reset, /debug)."""
+
+    def _owner_aware_channel(self, **overrides):
+        # owner == "owner", everyone else is a non-owner allowed user.
+        stored: list = []
+
+        def addkey_fn(svc, key):
+            stored.append((svc, key))
+
+        steered: list = []
+
+        def steer_fn(agent, msg):
+            steered.append((agent, msg))
+
+        def debug_fn(trace_id=None):
+            return [{"trace_id": "abc", "agent": "alpha", "event_type": "chat"}]
+
+        defaults = {
+            "owner_ids": {"owner"},
+            "addkey_fn": addkey_fn,
+            "steer_fn": steer_fn,
+            "debug_fn": debug_fn,
+        }
+        defaults.update(overrides)
+        ch = _make_channel(**defaults)
+        ch._stored = stored
+        ch._steered = steered
+        return ch
+
+    @pytest.mark.asyncio
+    async def test_non_owner_refused_addkey(self):
+        ch = self._owner_aware_channel()
+        result = await ch.handle_message("intruder", "/addkey openai sk-evil")
+        assert "owner only" in result.lower()
+        assert ch._stored == []  # credential NOT stored
+
+    @pytest.mark.asyncio
+    async def test_owner_can_addkey(self):
+        ch = self._owner_aware_channel()
+        result = await ch.handle_message("owner", "/addkey openai sk-good")
+        assert "stored" in result.lower()
+        assert ch._stored == [("openai_api_key", "sk-good")]
+
+    @pytest.mark.asyncio
+    async def test_non_owner_refused_steer_broadcast_reset_debug(self):
+        ch = self._owner_aware_channel()
+        for cmd in ("/steer focus", "/broadcast hi", "/reset", "/debug"):
+            result = await ch.handle_message("intruder", cmd)
+            assert "owner only" in result.lower(), f"{cmd} not gated: {result}"
+        assert ch._steered == []
+        assert ch._resets == []
+
+    @pytest.mark.asyncio
+    async def test_owner_can_use_privileged_commands(self):
+        ch = self._owner_aware_channel()
+        assert "Steered" in await ch.handle_message("owner", "/steer focus")
+        assert "Broadcast" in await ch.handle_message("owner", "/broadcast hi")
+        assert "reset" in (await ch.handle_message("owner", "/reset")).lower()
+        assert "traces" in (await ch.handle_message("owner", "/debug")).lower()
+
+    @pytest.mark.asyncio
+    async def test_non_owner_keeps_chat_and_readonly(self):
+        """Non-owner allowed user can still chat and use read-only commands."""
+        ch = self._owner_aware_channel()
+        # Normal chat
+        chat = await ch.handle_message("intruder", "hello there")
+        assert "[alpha]" in chat
+        # Read-only commands all succeed (no "owner only")
+        for cmd in ("/agents", "/status", "/costs", "/use beta", "/help"):
+            result = await ch.handle_message("intruder", cmd)
+            assert "owner only" not in result.lower(), f"{cmd} wrongly gated"
+
+    @pytest.mark.asyncio
+    async def test_help_hides_privileged_for_non_owner(self):
+        ch = self._owner_aware_channel()
+        non_owner = await ch.handle_message("intruder", "/help")
+        assert "/addkey" not in non_owner
+        assert "/broadcast" not in non_owner
+        assert "/steer" not in non_owner
+        assert "/reset" not in non_owner
+        # read-only still listed
+        assert "/agents" in non_owner
+        assert "/costs" in non_owner
+        owner = await ch.handle_message("owner", "/help")
+        assert "/addkey" in owner
+        assert "/broadcast" in owner
 
 
 # ── Discord !-to-/ command translation ────────────────────────

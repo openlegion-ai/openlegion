@@ -278,6 +278,17 @@ class TelegramChannel(Channel):
     def _is_owner(self, user_id: int) -> bool:
         return self._pairing.is_owner(user_id)
 
+    def _resolve_owner(self, user_id: str) -> bool:
+        """Owner check for base ``handle_message`` (H2 privileged-command gate).
+
+        ``handle_message`` receives the Telegram user id as a string; the
+        pairing store keys on the integer id, so coerce before lookup.
+        """
+        try:
+            return self._is_owner(int(user_id))
+        except (TypeError, ValueError):
+            return False
+
     async def _cmd_start(self, update, context) -> None:
         user_id = update.effective_user.id
         username = update.effective_user.username or update.effective_user.first_name

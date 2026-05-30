@@ -22,7 +22,9 @@ import asyncio
 import hashlib
 import hmac
 import os
+import time
 import weakref
+from collections import OrderedDict
 
 import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -34,6 +36,47 @@ logger = setup_logging("channels.whatsapp")
 
 MAX_WA_LEN = 4096
 _GRAPH_API_BASE = "https://graph.facebook.com/v21.0"
+
+# M7: inbound dedup. WhatsApp Cloud API redelivers webhooks on any non-2xx /
+# slow response, so the same message["id"] can arrive several times. Bound the
+# seen-set so it can't grow without limit, and expire entries after a TTL so a
+# long-lived process doesn't reject a legitimately-reused id forever.
+_DEDUP_TTL_SECONDS = 3600
+_DEDUP_MAX_IDS = 4096
+
+
+class _SeenIds:
+    """Bounded TTL/LRU set of already-processed message ids.
+
+    Not thread-safe by design — only touched from the single webhook event
+    loop. ``add`` returns False when the id was already present (a replay).
+    """
+
+    def __init__(self, ttl: float = _DEDUP_TTL_SECONDS, maxlen: int = _DEDUP_MAX_IDS):
+        self._ttl = ttl
+        self._maxlen = maxlen
+        self._ids: OrderedDict[str, float] = OrderedDict()
+
+    def add(self, msg_id: str, now: float | None = None) -> bool:
+        """Record ``msg_id``; return True if newly seen, False if a replay."""
+        if not msg_id:
+            # No id to dedup on — treat as new so the message still processes.
+            return True
+        now = time.monotonic() if now is None else now
+        # Drop expired entries (cheap amortized sweep from the oldest end).
+        while self._ids:
+            oldest_id, ts = next(iter(self._ids.items()))
+            if now - ts > self._ttl:
+                self._ids.popitem(last=False)
+            else:
+                break
+        if msg_id in self._ids:
+            return False
+        self._ids[msg_id] = now
+        # LRU cap: evict oldest insertions beyond the bound.
+        while len(self._ids) > self._maxlen:
+            self._ids.popitem(last=False)
+        return True
 
 
 class WhatsAppChannel(Channel):
@@ -73,6 +116,7 @@ class WhatsAppChannel(Channel):
         self._phone_numbers: set[str] = set()
         self._denied_notified: set[str] = set()
         self._pairing = PairingManager("config/whatsapp_paired.json")
+        self._seen_ids = _SeenIds()  # M7: inbound webhook dedup
 
     def _client_for_loop(self) -> httpx.AsyncClient | None:
         """Return a per-loop httpx client, creating it lazily on first use.
@@ -100,10 +144,16 @@ class WhatsAppChannel(Channel):
         return client
 
     async def start(self) -> None:
-        if os.environ.get("MESH_AUTH_TOKEN") and not os.environ.get("WHATSAPP_APP_SECRET"):
+        # H9: WHATSAPP_APP_SECRET is mandatory whenever this channel is enabled,
+        # decoupled from MESH_AUTH_TOKEN. Real WhatsApp delivery requires the
+        # Meta app secret anyway; without it webhook signatures cannot be
+        # verified and any HTTP client could inject messages. Fail closed.
+        if not os.environ.get("WHATSAPP_APP_SECRET"):
             raise RuntimeError(
-                "WHATSAPP_APP_SECRET is required in production (MESH_AUTH_TOKEN is set). "
-                "Without it, webhook signature verification is disabled."
+                "WHATSAPP_APP_SECRET is required to run the WhatsApp channel. "
+                "Without it, webhook signature verification is disabled and any "
+                "HTTP client could inject messages. Set the app secret from the "
+                "Meta app dashboard."
             )
         # Warm the cache for the current loop and mirror the client onto
         # ``_http`` so existing readiness checks (``if not self._http``)
@@ -193,6 +243,14 @@ class WhatsAppChannel(Channel):
     def _is_owner(self, phone: str) -> bool:
         return self._pairing.is_owner(phone)
 
+    def _resolve_owner(self, user_id: str) -> bool:
+        """Owner check for base ``handle_message`` (H2 privileged-command gate).
+
+        WhatsApp keys users by phone number, which is exactly what
+        ``handle_message`` receives, so this is a direct pairing lookup.
+        """
+        return self._is_owner(user_id)
+
     def create_router(self) -> APIRouter:
         """Create a FastAPI router for WhatsApp webhook endpoints."""
         router = APIRouter(prefix="/channels/whatsapp")
@@ -214,22 +272,28 @@ class WhatsAppChannel(Channel):
         @router.post("/webhook")
         async def receive_webhook(request: Request) -> dict:
             """Receive incoming WhatsApp messages."""
-            # Verify X-Hub-Signature-256 -- required for production security
+            # H9: signature verification is mandatory. Without an app secret we
+            # cannot authenticate the sender, so fail closed (503) rather than
+            # process unauthenticated input. start() already refuses to boot the
+            # channel without WHATSAPP_APP_SECRET; this is defense in depth.
             app_secret = os.environ.get("WHATSAPP_APP_SECRET", "")
-            if not app_secret and not getattr(receive_webhook, "_no_secret_warned", False):
-                logger.warning(
-                    "WHATSAPP_APP_SECRET not set — webhook signature verification DISABLED. "
-                    "Any HTTP client can inject messages. Set the app secret from Meta dashboard."
+            if not app_secret:
+                logger.error(
+                    "WhatsApp webhook rejected: WHATSAPP_APP_SECRET not set — "
+                    "signature verification impossible. Refusing to process."
                 )
-                receive_webhook._no_secret_warned = True  # type: ignore[attr-defined]
-            if app_secret:
-                raw_body = await request.body()
-                signature = request.headers.get("X-Hub-Signature-256", "")
-                expected = "sha256=" + hmac.new(
-                    app_secret.encode(), raw_body, hashlib.sha256,
-                ).hexdigest()
-                if not hmac.compare_digest(signature, expected):
-                    raise HTTPException(status_code=401, detail="Invalid signature")
+                raise HTTPException(
+                    status_code=503,
+                    detail="WhatsApp webhook unavailable: app secret not configured",
+                )
+
+            raw_body = await request.body()
+            signature = request.headers.get("X-Hub-Signature-256", "")
+            expected = "sha256=" + hmac.new(
+                app_secret.encode(), raw_body, hashlib.sha256,
+            ).hexdigest()
+            if not hmac.compare_digest(signature, expected):
+                raise HTTPException(status_code=401, detail="Invalid signature")
 
             try:
                 body = await request.json()
@@ -242,6 +306,13 @@ class WhatsAppChannel(Channel):
                 for change in entry.get("changes", []):
                     value = change.get("value", {})
                     for message in value.get("messages", []):
+                        # M7: skip replays/retries of an already-seen message id.
+                        if not channel_ref._seen_ids.add(message.get("id", "")):
+                            logger.info(
+                                "WhatsApp webhook: duplicate message id %s ignored",
+                                message.get("id", ""),
+                            )
+                            continue
                         asyncio.create_task(
                             channel_ref._process_message(message)
                         )

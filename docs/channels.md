@@ -299,7 +299,12 @@ WhatsApp uses the **Cloud API** (pinned to Graph API `v21.0` via `_GRAPH_API_BAS
 
 ### Security
 
-**Production deployments must set `WHATSAPP_APP_SECRET`.** Without it, `X-Hub-Signature-256` webhook signature verification is disabled — any HTTP client can inject arbitrary messages. When `MESH_AUTH_TOKEN` is set (i.e., production mode) and `WHATSAPP_APP_SECRET` is absent, channel startup raises a `RuntimeError` (`src/channels/whatsapp.py:103-108`). Incoming signatures are compared with `hmac.compare_digest` (timing-safe).
+**`WHATSAPP_APP_SECRET` is mandatory whenever the WhatsApp channel is enabled** (decoupled from `MESH_AUTH_TOKEN` as of the May 2026 H9 remediation). Without it, `X-Hub-Signature-256` webhook signature verification is impossible and any HTTP client could inject arbitrary messages, so the channel fails closed:
+
+- `start()` raises a `RuntimeError` if `WHATSAPP_APP_SECRET` is absent — the channel refuses to boot.
+- As defense in depth, the webhook POST handler also returns **HTTP 503** when the secret is unset rather than processing unauthenticated input.
+
+Incoming signatures are compared with `hmac.compare_digest` (timing-safe); a mismatch returns HTTP 401. Inbound messages are de-duplicated by their WhatsApp `message["id"]` via a bounded TTL/LRU set, so Cloud API retries/replays don't double-fire dispatch.
 
 Set the app secret to the value shown in the Meta dashboard under your WhatsApp app → App Settings → App Secret:
 

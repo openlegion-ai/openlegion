@@ -178,6 +178,17 @@ class Channel(abc.ABC):
             type(self).__name__, user_id,
         )
 
+    def _resolve_owner(self, user_id: str) -> bool:
+        """Whether ``user_id`` is the channel owner.
+
+        Base default is ``False`` (fail-closed): a channel with no owner
+        concept grants no privileged access.  Subclasses with a
+        ``PairingManager`` override this to consult ``_is_owner`` and to
+        normalize their platform-specific user-key format (e.g. Slack's
+        ``user_id:thread_ts`` composite) before the lookup.
+        """
+        return False
+
     def _get_active_agent(self, user_id: str) -> str:
         return self._active_agent.get(user_id, self.default_agent)
 
@@ -240,7 +251,10 @@ class Channel(abc.ABC):
 
         # Slash commands
         if message.startswith("/"):
-            return await self._handle_command(user_id, message, current, agents)
+            is_owner = self._resolve_owner(user_id)
+            return await self._handle_command(
+                user_id, message, current, agents, is_owner,
+            )
 
         # Normal message: build origin and dispatch to agent.
         # Task 2b: stamp typed ``MessageOrigin`` (kind="human") so the
@@ -260,11 +274,26 @@ class Channel(abc.ABC):
             return ""  # Suppress silent/empty responses
         return f"[{target}] {response}"
 
+    #: Commands gated to the channel owner only. Non-owner allowed users
+    #: keep chat + read-only commands (/use, /agents, /status, /costs, /help)
+    #: but are refused these privileged, state-mutating / sensitive ones.
+    _OWNER_ONLY_COMMANDS = frozenset({
+        "/addkey", "/steer", "/broadcast", "/reset", "/debug",
+    })
+
     async def _handle_command(
         self, user_id: str, message: str, current: str, agents: list[str],
+        is_owner: bool = False,
     ) -> str:
         parts = message.split(None, 1)
         cmd = parts[0].lower()
+
+        # H2: owner-gate privileged commands. Allowed (non-owner) users are
+        # already authenticated for chat + read-only commands, but these
+        # commands can mint credentials, inject context, broadcast, reset
+        # state, or expose traces — restrict them to the owner.
+        if cmd in self._OWNER_ONLY_COMMANDS and not is_owner:
+            return f"'{cmd}' is owner only."
 
         if cmd == "/use":
             if len(parts) < 2:
@@ -404,18 +433,22 @@ class Channel(abc.ABC):
                 "  /use <agent>      Switch active agent",
                 "  /agents           List all agents",
                 "  /status           Show agent health",
-                "  /broadcast <msg>  Send to all agents",
             ]
-            if self.steer_fn:
-                lines.append("  /steer <msg>      Inject message into busy agent's context")
-            if self.debug_fn:
-                lines.append("  /debug [trace_id] Show recent traces or trace detail")
-            lines.extend([
-                "  /costs            Show today's LLM spend",
-                "  /addkey <svc> <key>  Add an API credential",
-                "  /reset            Clear conversation with active agent",
-                "  /help             Show this help",
-            ])
+            # Owner-only commands surface in help only for the owner so
+            # non-owner allowed users aren't told about commands they can't run.
+            if is_owner:
+                lines.append("  /broadcast <msg>  Send to all agents")
+                if self.steer_fn:
+                    lines.append("  /steer <msg>      Inject message into busy agent's context")
+                if self.debug_fn:
+                    lines.append("  /debug [trace_id] Show recent traces or trace detail")
+            lines.append("  /costs            Show today's LLM spend")
+            if is_owner:
+                lines.extend([
+                    "  /addkey <svc> <key>  Add an API credential",
+                    "  /reset            Clear conversation with active agent",
+                ])
+            lines.append("  /help             Show this help")
             return "\n".join(lines)
 
         return f"Unknown command: {cmd}. Type /help for commands."

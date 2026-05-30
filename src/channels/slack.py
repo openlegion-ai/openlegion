@@ -179,6 +179,16 @@ class SlackChannel(Channel):
     def _is_owner(self, user_id: str) -> bool:
         return self._pairing.is_owner(user_id)
 
+    def _resolve_owner(self, user_id: str) -> bool:
+        """Owner check for base ``handle_message`` (H2 privileged-command gate).
+
+        ``handle_message`` is called with the composite ``user_id:thread_ts``
+        key from ``_get_user_key``; the pairing store keys on the bare Slack
+        user id, so strip the thread suffix before the lookup.
+        """
+        bare_user_id = user_id.partition(":")[0]
+        return self._is_owner(bare_user_id)
+
     async def _on_message(self, event: dict, say) -> None:
         """Handle incoming Slack message events."""
         logger.warning(
