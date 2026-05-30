@@ -1,5 +1,6 @@
 """Tests for MCP (Model Context Protocol) client integration."""
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -267,6 +268,200 @@ class TestMCPClientServerFailure:
             ])
 
         assert client.has_tool("good_tool")
+
+
+class TestMCPMetadataHardening:
+    """M12: tool metadata from a (possibly malicious/rug-pulled) MCP server
+    is sanitized + length-capped before it can enter the LLM tool payload.
+    sanitize_for_prompt is lossless for normal text; the cap is the DoS
+    control. Schema string values are sanitized but keys/structure stay
+    intact so tool-calling is not broken.
+    """
+
+    @pytest.mark.asyncio
+    async def test_description_sanitized_and_length_capped(self):
+        from src.agent.mcp_client import _MCP_DESCRIPTION_MAX_BYTES
+
+        # Invisible/control chars (zero-width space U+200B, BOM U+FEFF) plus
+        # a description far larger than the cap.
+        poisoned = "Read​a﻿file " + ("A" * (_MCP_DESCRIPTION_MAX_BYTES + 5000))
+
+        client = MCPClient()
+        session = AsyncMock()
+        tools_result = MagicMock()
+        tools_result.tools = [_make_mock_tool("read_file", poisoned)]
+        session.initialize = AsyncMock()
+        session.list_tools = AsyncMock(return_value=tools_result)
+
+        p1, p2, p3 = _mcp_patches()
+        with p1, p2 as mock_stdio, p3 as mock_cs_cls:
+            _setup_mock_server(mock_stdio, mock_cs_cls, session)
+            await client.start([{"name": "fs", "command": "x"}])
+
+        desc = client.list_tools()[0]["description"]
+        # Invisible chars stripped (lossless for the legit text around them).
+        assert "​" not in desc
+        assert "﻿" not in desc
+        assert desc.startswith("Readafile ")
+        # Length-capped well under the original size.
+        assert len(desc.encode("utf-8")) <= _MCP_DESCRIPTION_MAX_BYTES
+        assert desc.endswith("… [truncated]")
+
+    @pytest.mark.asyncio
+    async def test_legit_description_unaffected(self):
+        """A normal description passes through unchanged (lossless)."""
+        client = MCPClient()
+        session = AsyncMock()
+        tools_result = MagicMock()
+        tools_result.tools = [
+            _make_mock_tool("read_file", "Read a file from disk and return contents."),
+        ]
+        session.initialize = AsyncMock()
+        session.list_tools = AsyncMock(return_value=tools_result)
+
+        p1, p2, p3 = _mcp_patches()
+        with p1, p2 as mock_stdio, p3 as mock_cs_cls:
+            _setup_mock_server(mock_stdio, mock_cs_cls, session)
+            await client.start([{"name": "fs", "command": "x"}])
+
+        assert (
+            client.list_tools()[0]["description"]
+            == "Read a file from disk and return contents."
+        )
+
+    @pytest.mark.asyncio
+    async def test_schema_string_values_sanitized_keys_and_structure_intact(self):
+        client = MCPClient()
+        session = AsyncMock()
+        tools_result = MagicMock()
+        tools_result.tools = [
+            _make_mock_tool(
+                "search",
+                "Search",
+                {
+                    "type": "object",
+                    "properties": {
+                        # Key contains a name; value description is poisoned.
+                        "query": {
+                            "type": "string",
+                            "description": "The​search query",
+                            "title": "Que﻿ry",
+                        },
+                        "limit": {"type": "integer", "description": "Max​results"},
+                    },
+                    "required": ["query"],
+                },
+            ),
+        ]
+        session.initialize = AsyncMock()
+        session.list_tools = AsyncMock(return_value=tools_result)
+
+        p1, p2, p3 = _mcp_patches()
+        with p1, p2 as mock_stdio, p3 as mock_cs_cls:
+            _setup_mock_server(mock_stdio, mock_cs_cls, session)
+            await client.start([{"name": "srv", "command": "x"}])
+
+        params = client.list_tools()[0]["parameters"]
+        props = params["properties"]
+        # Structure + keys preserved exactly.
+        assert params["type"] == "object"
+        assert params["required"] == ["query"]
+        assert set(props.keys()) == {"query", "limit"}
+        assert props["query"]["type"] == "string"
+        assert props["limit"]["type"] == "integer"
+        # String VALUES sanitized (invisible chars stripped).
+        assert props["query"]["description"] == "Thesearch query"
+        assert props["query"]["title"] == "Query"
+        assert props["limit"]["description"] == "Maxresults"
+
+    @pytest.mark.asyncio
+    async def test_invisible_char_in_tool_name_stripped_and_routable(self):
+        """A poisoned tool name is sanitized and the routing key matches the
+        emitted name, so call_tool() still resolves it.
+        """
+        client = MCPClient()
+        session = AsyncMock()
+        tools_result = MagicMock()
+        tools_result.tools = [_make_mock_tool("read​file", "Read")]
+        session.initialize = AsyncMock()
+        session.list_tools = AsyncMock(return_value=tools_result)
+
+        p1, p2, p3 = _mcp_patches()
+        with p1, p2 as mock_stdio, p3 as mock_cs_cls:
+            _setup_mock_server(mock_stdio, mock_cs_cls, session)
+            await client.start([{"name": "fs", "command": "x"}])
+
+        emitted_name = client.list_tools()[0]["name"]
+        assert emitted_name == "readfile"
+        assert client.has_tool("readfile")
+        assert not client.has_tool("read​file")
+
+
+class TestMCPStartupTimeout:
+    """L17: a hung MCP server (accepts the connection but never completes
+    the init/list_tools handshake) must time out and be marked failed so
+    agent boot proceeds instead of blocking forever.
+    """
+
+    @pytest.mark.asyncio
+    async def test_hung_server_times_out_and_boot_continues(self):
+        import src.agent.mcp_client as mcp_mod
+
+        # Drop the timeout so the test is fast; the production default is 30s.
+        with patch.object(mcp_mod, "_MCP_STARTUP_TIMEOUT_SECONDS", 0.05):
+            client = MCPClient()
+
+            async def _never_returns():
+                await asyncio.Event().wait()  # blocks forever
+
+            hung_session = AsyncMock()
+            hung_session.initialize = AsyncMock(side_effect=_never_returns)
+            hung_session.list_tools = AsyncMock(side_effect=_never_returns)
+
+            good_session = AsyncMock()
+            good_tools = MagicMock()
+            good_tools.tools = [_make_mock_tool("ok_tool")]
+            good_session.initialize = AsyncMock()
+            good_session.list_tools = AsyncMock(return_value=good_tools)
+
+            call_count = 0
+
+            def stdio_side_effect(params):
+                cm = AsyncMock()
+                cm.__aenter__ = AsyncMock(return_value=(MagicMock(), MagicMock()))
+                return cm
+
+            def session_side_effect(read, write):
+                nonlocal call_count
+                call_count += 1
+                cm = AsyncMock()
+                if call_count == 1:
+                    cm.__aenter__ = AsyncMock(return_value=hung_session)
+                else:
+                    cm.__aenter__ = AsyncMock(return_value=good_session)
+                return cm
+
+            p1 = patch("src.agent.mcp_client.StdioServerParameters", MagicMock())
+            p2 = patch(
+                "src.agent.mcp_client.stdio_client", side_effect=stdio_side_effect
+            )
+            p3 = patch(
+                "src.agent.mcp_client.ClientSession", side_effect=session_side_effect
+            )
+            with p1, p2, p3:
+                await client.start([
+                    {"name": "hung", "command": "x"},
+                    {"name": "good", "command": "y"},
+                ])
+
+        # The hung server timed out → marked failed, boot proceeded to the
+        # next server which started normally.
+        statuses = {s["name"]: s for s in client.list_server_statuses()}
+        assert statuses["hung"]["state"] == "failed"
+        assert statuses["hung"]["tools_count"] == 0
+        assert statuses["good"]["state"] == "running"
+        assert client.has_tool("ok_tool")
+        assert not client.has_tool("hung")
 
 
 class TestMCPClientLifecycle:
