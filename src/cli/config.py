@@ -5,10 +5,13 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import os
 import re
 import secrets
 import subprocess
 import sys
+import tempfile
+import threading
 from pathlib import Path
 
 import click
@@ -251,18 +254,55 @@ def _load_config(mesh_path: Path | None = None) -> dict:
     return cfg
 
 
+# Serializes read-modify-write of permissions.json. Callers do
+# ``perms = _load_permissions(); ...mutate...; _save_permissions(perms)``;
+# this lock keeps concurrent writers (dashboard + mesh endpoints sharing
+# the process) from losing each other's edits, and pairs with the atomic
+# os.replace below so a reader never observes a half-written file.
+#
+# Reentrant so a caller may hold it across a whole load→mutate→save critical
+# section (e.g. ``with _PERMISSIONS_LOCK: ...``) even though _load_permissions
+# and _save_permissions each re-acquire it internally.
+_PERMISSIONS_LOCK = threading.RLock()
+
+
 def _load_permissions() -> dict:
     if not PERMISSIONS_FILE.exists():
         return {"permissions": {}}
-    with open(PERMISSIONS_FILE) as f:
-        return json.load(f)
+    with _PERMISSIONS_LOCK:
+        with open(PERMISSIONS_FILE) as f:
+            return json.load(f)
 
 
 def _save_permissions(perms: dict) -> None:
+    """Persist permissions.json atomically (temp file + os.replace).
+
+    The atomic rename guarantees a concurrent reader sees either the old
+    or the new complete file, never a truncated one — so a crash or
+    interleaved read can never produce a corrupt ACL (which fail-closed
+    loading would then treat as deny-all).
+    """
     PERMISSIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(PERMISSIONS_FILE, "w") as f:
-        json.dump(perms, f, indent=2)
-        f.write("\n")
+    content = json.dumps(perms, indent=2) + "\n"
+    with _PERMISSIONS_LOCK:
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(PERMISSIONS_FILE.parent), suffix=".tmp",
+        )
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(content)
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass  # already closed by fdopen
+            Path(tmp_path).unlink(missing_ok=True)
+            raise
+        try:
+            os.replace(tmp_path, PERMISSIONS_FILE)
+        except BaseException:
+            Path(tmp_path).unlink(missing_ok=True)
+            raise
 
 
 def _set_env_key(name: str, value: str, *, system: bool = False) -> None:

@@ -23,7 +23,47 @@ from src.agent.skills import skill
 
 _MAX_BODY = 50_000
 _MAX_REDIRECTS = 5
+# Hard ceiling on bytes pulled off the wire. We decode bytes→text *after*
+# bounding, so worst-case multibyte expansion can't exceed this; we read a
+# little past _MAX_BODY (one extra chunk) only to set the `truncated` flag,
+# never buffering the whole body. Caps memory on the 384m agent container
+# against a malicious server streaming an unbounded response.
+_MAX_READ_BYTES = _MAX_BODY * 4
+_MIN_TIMEOUT = 1
+_MAX_TIMEOUT = 120
 _CGNAT_NETWORK = ipaddress.IPv4Network("100.64.0.0/10")
+
+
+async def _read_bounded_text(response: httpx.Response) -> tuple[str, bool]:
+    """Read a streamed response body up to the byte cap, then decode to text.
+
+    Returns ``(text, truncated)``. Reading stops as soon as the cap is
+    exceeded so an unbounded/malicious response can never OOM the agent
+    container. For normal (sub-cap) responses the returned text is byte-for-
+    byte identical to ``response.text[:_MAX_BODY]`` of a fully-buffered read.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    truncated = False
+    try:
+        async for chunk in response.aiter_bytes():
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > _MAX_READ_BYTES:
+                truncated = True
+                break
+    finally:
+        await response.aclose()
+    raw = b"".join(chunks)
+    # Decode with the response's declared charset (httpx falls back to
+    # utf-8/charset detection just like .text does), tolerating a partial
+    # trailing multibyte sequence from the byte-bounded cut.
+    response._content = raw  # let httpx.Response.text apply its charset logic
+    text = response.text
+    if len(text) > _MAX_BODY:
+        text = text[:_MAX_BODY]
+        truncated = True
+    return text, truncated
 
 # Shared client for connection pooling across tool invocations.
 # Redirects are followed manually (follow_redirects=False) so we can
@@ -243,7 +283,9 @@ async def _send_pinned_request(
     if parsed.scheme == "https":
         request.extensions["sni_hostname"] = original_hostname.encode("ascii")
 
-    return await client.send(request, follow_redirects=False, stream=False)
+    # stream=True so the body is NOT eagerly buffered; the caller reads it
+    # with a byte cap (or aclose()s it if it's an intermediate redirect hop).
+    return await client.send(request, follow_redirects=False, stream=True)
 
 
 async def _request_with_pinned_dns(
@@ -289,12 +331,17 @@ async def _request_with_pinned_dns(
             headers = {k: v for k, v in headers.items() if k.lower() != "authorization"}
 
         url = redirect_url
+        # This redirect response's streamed body is never read — release the
+        # connection before issuing the next hop.
+        await response.aclose()
         # Re-resolve and re-validate DNS for the redirect target
         response = await _send_pinned_request(client, method, url, headers, content, timeout)
 
+    request = response.request
+    await response.aclose()
     raise httpx.TooManyRedirects(
         f"SSRF protection: exceeded {_MAX_REDIRECTS} redirects",
-        request=response.request,
+        request=request,
     )
 
 
@@ -380,6 +427,13 @@ async def http_request(
     mesh_client=None,
 ) -> dict:
     """Make an HTTP request and return status, headers, and body."""
+    # Clamp the timeout into a sane band so an agent can't pin a connection
+    # open indefinitely (or pass a non-positive value httpx would reject).
+    try:
+        timeout = min(max(int(timeout), _MIN_TIMEOUT), _MAX_TIMEOUT)
+    except (TypeError, ValueError):
+        timeout = 30
+
     # Collect all resolved secret values for redaction
     all_secrets: list[str] = []
 
@@ -412,13 +466,18 @@ async def http_request(
                     error_msg = _redact(error_msg, all_secrets)
                 return {"error": error_msg, "status_code": 0}
 
-            # Send through proxy (httpx handles proxy routing)
-            response = await client.request(
-                method=method.upper(),
-                url=resolved_url,
-                headers=resolved_headers,
-                content=resolved_body if resolved_body else None,
-                timeout=timeout,
+            # Send through proxy (httpx handles proxy routing). stream=True so
+            # the body isn't eagerly buffered; bounded-read happens below.
+            response = await client.send(
+                client.build_request(
+                    method=method.upper(),
+                    url=resolved_url,
+                    headers=resolved_headers,
+                    content=resolved_body if resolved_body else None,
+                    timeout=timeout,
+                ),
+                follow_redirects=False,
+                stream=True,
             )
 
             # Manual redirect following for proxied path
@@ -436,6 +495,7 @@ async def http_request(
                 # SSRF check on redirect target
                 is_safe = await loop.run_in_executor(None, _preflight_check_target, redirect_url)
                 if not is_safe:
+                    await response.aclose()
                     error_msg = "SSRF protection: redirect to private/internal address blocked"
                     if all_secrets:
                         error_msg = _redact(error_msg, all_secrets)
@@ -453,16 +513,23 @@ async def http_request(
                     resolved_headers = {k: v for k, v in resolved_headers.items() if k.lower() != "authorization"}
 
                 resolved_url = redirect_url
-                response = await client.request(
-                    method=method.upper(),
-                    url=resolved_url,
-                    headers=resolved_headers,
-                    content=resolved_body if resolved_body else None,
-                    timeout=timeout,
+                # Release the unread redirect-hop body before the next send.
+                await response.aclose()
+                response = await client.send(
+                    client.build_request(
+                        method=method.upper(),
+                        url=resolved_url,
+                        headers=resolved_headers,
+                        content=resolved_body if resolved_body else None,
+                        timeout=timeout,
+                    ),
+                    follow_redirects=False,
+                    stream=True,
                 )
             else:
                 # Exhausted redirect budget — check if final response is still a redirect
                 if response.status_code in (301, 302, 303, 307, 308):
+                    await response.aclose()
                     return {"error": f"SSRF protection: exceeded {_MAX_REDIRECTS} redirects", "status_code": 0}
         else:
             # Existing DNS pinning path (unchanged)
@@ -475,8 +542,10 @@ async def http_request(
                 timeout=timeout,
             )
 
-        resp_body = response.text[:_MAX_BODY]
-        truncated = len(response.text) > _MAX_BODY
+        # Stream the body with a hard byte cap (and aclose the response) so a
+        # malicious/unbounded server can't OOM the agent container. For normal
+        # sub-cap responses this yields the same text as response.text[:_MAX_BODY].
+        resp_body, truncated = await _read_bounded_text(response)
 
         # Redact any credential values that appear in the response
         if all_secrets:

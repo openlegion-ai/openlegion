@@ -91,8 +91,20 @@ class PermissionMatrix:
             # Clear so stale permissions don't persist (fail closed)
             self.permissions.clear()
             return
-        with open(path) as f:
-            data = json.load(f)
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            # Corrupt or unreadable ACL file: fail CLOSED. A parse error must
+            # not crash boot and must NOT leave stale grants in place — clear
+            # to deny-all, exactly like the missing-file branch above.
+            logger.error(
+                "Permissions file %s is corrupt or unreadable (%s); "
+                "falling back to deny-all defaults",
+                config_path, e,
+            )
+            self.permissions.clear()
+            return
         # Clear before repopulating so that removed entries don't persist
         self.permissions.clear()
         for agent_id, perms in data.get("permissions", {}).items():

@@ -273,6 +273,92 @@ async def test_broadcast_removes_dead_connections():
     ws_alive.send_text.assert_called_once()
 
 
+@pytest.mark.asyncio
+async def test_concurrent_broadcasts_do_not_evict_live_clients():
+    """M26 — many broadcasts racing in parallel must not drop a live client.
+
+    Before the fix, _broadcast iterated and mutated ``self._clients`` without
+    the lock; a concurrent dead-removal could splice the list mid-iteration and
+    silently skip (or even remove) a healthy subscriber.
+    """
+    bus = EventBus()
+    bus.set_loop(asyncio.get_running_loop())
+
+    # One slow-but-healthy client (its send awaits, widening the race window)
+    # and one that always fails (forces dead-removal under contention).
+    slow_sends = 0
+
+    class _SlowWS:
+        async def send_text(self, _payload):
+            nonlocal slow_sends
+            await asyncio.sleep(0)  # yield, letting other broadcasts interleave
+            slow_sends += 1
+
+    ws_slow = _SlowWS()
+    ws_dead = AsyncMock()
+    ws_dead.send_text.side_effect = ConnectionError("gone")
+
+    bus.subscribe(ws_slow)
+    bus.subscribe(ws_dead)
+
+    # Fire many overlapping broadcasts on the same loop.
+    n = 50
+    await asyncio.gather(*[bus._broadcast({"type": "llm_call", "agent": "a1", "_seq": i}) for i in range(n)])
+
+    # The live client received every broadcast — never evicted by a racing
+    # dead-removal — and the dead client was pruned exactly once it failed.
+    assert slow_sends == n
+    assert ws_slow in [c.ws for c in bus._clients]
+    assert ws_dead not in [c.ws for c in bus._clients]
+
+
+@pytest.mark.asyncio
+async def test_emit_holds_strong_ref_to_broadcast_task():
+    """M26 — fire-and-forget broadcast tasks are tracked so the GC can't
+    collect them mid-send."""
+    bus = EventBus()
+    bus.set_loop(asyncio.get_running_loop())
+
+    ws = AsyncMock()
+    bus.subscribe(ws)
+
+    bus.emit("llm_call", agent="a1")
+    # Task registered synchronously by _spawn_broadcast (same-loop path).
+    assert len(bus._broadcast_tasks) >= 1
+
+    await asyncio.sleep(0.05)
+    # Completed tasks discard themselves via the done-callback.
+    assert len(bus._broadcast_tasks) == 0
+    ws.send_text.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_per_subscription_send_lock_serializes_frames():
+    """M26 — concurrent broadcasts to the SAME socket never interleave: the
+    per-subscription send lock serializes send_text calls."""
+    bus = EventBus()
+    bus.set_loop(asyncio.get_running_loop())
+
+    in_flight = 0
+    max_concurrent = 0
+
+    class _TrackingWS:
+        async def send_text(self, _payload):
+            nonlocal in_flight, max_concurrent
+            in_flight += 1
+            max_concurrent = max(max_concurrent, in_flight)
+            await asyncio.sleep(0)  # force a scheduling point inside the send
+            in_flight -= 1
+
+    ws = _TrackingWS()
+    bus.subscribe(ws)
+
+    await asyncio.gather(*[bus._broadcast({"type": "llm_call", "agent": "a1", "_seq": i}) for i in range(20)])
+
+    # Never more than one send_text active on this socket at a time.
+    assert max_concurrent == 1
+
+
 # === Integration: Blackboard emits on write ===
 
 

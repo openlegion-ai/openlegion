@@ -266,7 +266,15 @@ class RuntimeContext:
             _set_collaborative_permissions()
 
         self.event_bus = EventBus()
-        self.trace_store = TraceStore()
+        # Trace retention GC on by default (7 days). Override via
+        # OPENLEGION_TRACE_RETENTION_HOURS; <=0 disables time-based GC.
+        try:
+            _trace_retention = int(os.environ.get("OPENLEGION_TRACE_RETENTION_HOURS", "168"))
+        except ValueError:
+            _trace_retention = 168
+        self.trace_store = TraceStore(
+            max_age_hours=_trace_retention if _trace_retention > 0 else None
+        )
         self.blackboard = Blackboard(event_bus=self.event_bus)
         self.pubsub = PubSub(db_path="pubsub.db")
         self.permissions = PermissionMatrix()
