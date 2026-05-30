@@ -320,6 +320,55 @@ class TestWebhookRouter:
         resp = client.post(f"/webhook/hook/{hook['id']}", json={"event": "push"})
         assert resp.status_code == 401
 
+    def test_duplicate_nonce_dispatched_once(self):
+        """M7: replays with the same delivery-id header dispatch only once."""
+        dispatch = AsyncMock(return_value="ok")
+        app, mgr = self._make_app(dispatch_fn=dispatch)
+        hook = mgr.add_hook(agent="a", name="dedup")
+        client = TestClient(app)
+
+        headers = {"X-Webhook-Id": "delivery-123"}
+        r1 = client.post(f"/webhook/hook/{hook['id']}", json={"x": 1}, headers=headers)
+        r2 = client.post(f"/webhook/hook/{hook['id']}", json={"x": 1}, headers=headers)
+
+        assert r1.status_code == 200 and r1.json()["status"] == "processed"
+        assert r2.status_code == 200 and r2.json()["status"] == "duplicate"
+        dispatch.assert_called_once()
+        # call_count only incremented for the processed delivery
+        assert mgr.hooks[hook["id"]]["call_count"] == 1
+
+    def test_distinct_nonces_both_dispatched(self):
+        dispatch = AsyncMock(return_value="ok")
+        app, mgr = self._make_app(dispatch_fn=dispatch)
+        hook = mgr.add_hook(agent="a", name="dedup2")
+        client = TestClient(app)
+
+        client.post(f"/webhook/hook/{hook['id']}", json={}, headers={"X-Webhook-Id": "d1"})
+        client.post(f"/webhook/hook/{hook['id']}", json={}, headers={"X-Webhook-Id": "d2"})
+        assert dispatch.call_count == 2
+
+    def test_no_nonce_not_deduped(self):
+        """Without a delivery-id header, every delivery still processes."""
+        dispatch = AsyncMock(return_value="ok")
+        app, mgr = self._make_app(dispatch_fn=dispatch)
+        hook = mgr.add_hook(agent="a", name="nonce-less")
+        client = TestClient(app)
+
+        client.post(f"/webhook/hook/{hook['id']}", json={"x": 1})
+        client.post(f"/webhook/hook/{hook['id']}", json={"x": 1})
+        assert dispatch.call_count == 2
+
+    def test_github_delivery_header_deduped(self):
+        dispatch = AsyncMock(return_value="ok")
+        app, mgr = self._make_app(dispatch_fn=dispatch)
+        hook = mgr.add_hook(agent="a", name="gh")
+        client = TestClient(app)
+
+        headers = {"X-GitHub-Delivery": "gh-uuid-1"}
+        client.post(f"/webhook/hook/{hook['id']}", json={}, headers=headers)
+        client.post(f"/webhook/hook/{hook['id']}", json={}, headers=headers)
+        dispatch.assert_called_once()
+
     def test_list_hooks_does_not_mutate_stored_data(self):
         """Callers mutating returned dicts must not pollute the manager's state."""
         app, mgr = self._make_app()

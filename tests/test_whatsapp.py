@@ -7,6 +7,9 @@ Uses FastAPI TestClient for webhook endpoint tests.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
 import logging
 from unittest.mock import AsyncMock, MagicMock
 
@@ -15,6 +18,18 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.channels.whatsapp import WhatsAppChannel
+
+_TEST_APP_SECRET = "test-app-secret"
+
+
+def _sign(secret: str, payload: dict) -> tuple[bytes, dict]:
+    """Serialize ``payload`` and produce a valid X-Hub-Signature-256 header."""
+    raw = json.dumps(payload).encode()
+    sig = "sha256=" + hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
+    return raw, {
+        "content-type": "application/json",
+        "X-Hub-Signature-256": sig,
+    }
 
 # ── helpers ──────────────────────────────────────────────────────
 
@@ -75,13 +90,14 @@ def _make_http_mock():
     return http
 
 
-def _webhook_payload(from_phone: str, text: str) -> dict:
+def _webhook_payload(from_phone: str, text: str, msg_id: str = "wamid.test1") -> dict:
     """Create a standard WhatsApp webhook payload for a text message."""
     return {
         "entry": [{
             "changes": [{
                 "value": {
                     "messages": [{
+                        "id": msg_id,
                         "from": from_phone,
                         "type": "text",
                         "text": {"body": text},
@@ -199,25 +215,156 @@ class TestIncomingMessages:
 # ── webhook POST endpoint ───────────────────────────────────────
 
 class TestWebhookPost:
-    def test_webhook_post_returns_ok(self):
+    def test_webhook_post_returns_ok(self, monkeypatch):
+        monkeypatch.setenv("WHATSAPP_APP_SECRET", _TEST_APP_SECRET)
+        ch = _make_channel(paired={"owner": "+1234", "allowed": []})
+        app = _make_app(ch)
+        client = TestClient(app)
+        payload = _webhook_payload("+1234", "hello")
+        raw, headers = _sign(_TEST_APP_SECRET, payload)
+        resp = client.post("/channels/whatsapp/webhook", content=raw, headers=headers)
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "ok"
+
+    def test_webhook_post_empty_body_ok(self, monkeypatch):
+        monkeypatch.setenv("WHATSAPP_APP_SECRET", _TEST_APP_SECRET)
+        ch = _make_channel(paired={"owner": "+1234", "allowed": []})
+        app = _make_app(ch)
+        client = TestClient(app)
+        raw = b"not json"
+        sig = "sha256=" + hmac.new(
+            _TEST_APP_SECRET.encode(), raw, hashlib.sha256,
+        ).hexdigest()
+        resp = client.post(
+            "/channels/whatsapp/webhook",
+            content=raw,
+            headers={"content-type": "application/json", "X-Hub-Signature-256": sig},
+        )
+        assert resp.status_code == 200
+
+
+# ── H9: signature mandatory (fail-closed) ───────────────────────
+
+class TestWebhookSignatureMandatory:
+    def test_no_secret_returns_503(self, monkeypatch):
+        """Without WHATSAPP_APP_SECRET the webhook fails closed with 503."""
+        monkeypatch.delenv("WHATSAPP_APP_SECRET", raising=False)
         ch = _make_channel(paired={"owner": "+1234", "allowed": []})
         app = _make_app(ch)
         client = TestClient(app)
         payload = _webhook_payload("+1234", "hello")
         resp = client.post("/channels/whatsapp/webhook", json=payload)
-        assert resp.status_code == 200
-        assert resp.json()["status"] == "ok"
+        assert resp.status_code == 503
 
-    def test_webhook_post_empty_body_ok(self):
+    def test_bad_signature_returns_401(self, monkeypatch):
+        monkeypatch.setenv("WHATSAPP_APP_SECRET", _TEST_APP_SECRET)
         ch = _make_channel(paired={"owner": "+1234", "allowed": []})
         app = _make_app(ch)
         client = TestClient(app)
+        payload = _webhook_payload("+1234", "hello")
         resp = client.post(
             "/channels/whatsapp/webhook",
-            content=b"not json",
-            headers={"content-type": "application/json"},
+            json=payload,
+            headers={"X-Hub-Signature-256": "sha256=deadbeef"},
         )
+        assert resp.status_code == 401
+
+    def test_valid_signature_processed(self, monkeypatch):
+        monkeypatch.setenv("WHATSAPP_APP_SECRET", _TEST_APP_SECRET)
+        ch = _make_channel(paired={"owner": "+1234", "allowed": []})
+        app = _make_app(ch)
+        client = TestClient(app)
+        payload = _webhook_payload("+1234", "hello")
+        raw, headers = _sign(_TEST_APP_SECRET, payload)
+        resp = client.post("/channels/whatsapp/webhook", content=raw, headers=headers)
         assert resp.status_code == 200
+        assert resp.json()["status"] == "ok"
+
+
+# ── start() guard requires app secret (H9) ──────────────────────
+
+class TestStartRequiresAppSecret:
+    @pytest.mark.asyncio
+    async def test_start_raises_without_app_secret(self, monkeypatch):
+        monkeypatch.delenv("WHATSAPP_APP_SECRET", raising=False)
+        monkeypatch.delenv("MESH_AUTH_TOKEN", raising=False)
+        ch = _make_channel()
+        with pytest.raises(RuntimeError, match="WHATSAPP_APP_SECRET"):
+            await ch.start()
+
+    @pytest.mark.asyncio
+    async def test_start_ok_with_app_secret(self, monkeypatch):
+        monkeypatch.setenv("WHATSAPP_APP_SECRET", _TEST_APP_SECRET)
+        ch = _make_channel()
+        await ch.start()  # must not raise
+        await ch.stop()
+
+
+# ── M7: inbound dedup by message id ─────────────────────────────
+
+class TestWebhookDedup:
+    def test_replay_same_id_processed_once(self, monkeypatch):
+        """A replayed webhook (same message id) only dispatches once."""
+        monkeypatch.setenv("WHATSAPP_APP_SECRET", _TEST_APP_SECRET)
+        ch = _make_channel(paired={"owner": "+1234", "allowed": []})
+
+        processed: list = []
+
+        async def fake_process(message):
+            processed.append(message.get("id"))
+
+        ch._process_message = fake_process  # type: ignore[assignment]
+        app = _make_app(ch)
+        client = TestClient(app)
+
+        payload = _webhook_payload("+1234", "hello", msg_id="wamid.DUP")
+        raw, headers = _sign(_TEST_APP_SECRET, payload)
+
+        first = client.post("/channels/whatsapp/webhook", content=raw, headers=headers)
+        second = client.post("/channels/whatsapp/webhook", content=raw, headers=headers)
+
+        assert first.status_code == 200
+        assert second.status_code == 200
+        assert second.json()["status"] == "ok"
+        # Despite two deliveries, only the first dispatched.
+        assert processed == ["wamid.DUP"]
+
+    def test_distinct_ids_both_processed(self, monkeypatch):
+        monkeypatch.setenv("WHATSAPP_APP_SECRET", _TEST_APP_SECRET)
+        ch = _make_channel(paired={"owner": "+1234", "allowed": []})
+
+        processed: list = []
+
+        async def fake_process(message):
+            processed.append(message.get("id"))
+
+        ch._process_message = fake_process  # type: ignore[assignment]
+        app = _make_app(ch)
+        client = TestClient(app)
+
+        for mid in ("wamid.A", "wamid.B"):
+            payload = _webhook_payload("+1234", "hi", msg_id=mid)
+            raw, headers = _sign(_TEST_APP_SECRET, payload)
+            client.post("/channels/whatsapp/webhook", content=raw, headers=headers)
+
+        assert processed == ["wamid.A", "wamid.B"]
+
+    def test_seen_ids_unit(self):
+        from src.channels.whatsapp import _SeenIds
+
+        seen = _SeenIds(ttl=100, maxlen=3)
+        assert seen.add("a") is True
+        assert seen.add("a") is False  # replay
+        assert seen.add("") is True  # empty id never dedups
+        assert seen.add("") is True
+
+    def test_seen_ids_ttl_expiry(self):
+        from src.channels.whatsapp import _SeenIds
+
+        seen = _SeenIds(ttl=10, maxlen=10)
+        assert seen.add("x", now=0.0) is True
+        assert seen.add("x", now=5.0) is False  # within TTL
+        assert seen.add("x", now=100.0) is True  # expired → seen as new
 
 
 # ── pairing flow ────────────────────────────────────────────────

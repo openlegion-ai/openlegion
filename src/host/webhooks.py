@@ -12,6 +12,8 @@ import hashlib
 import hmac
 import json
 import secrets
+import time
+from collections import OrderedDict
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +23,52 @@ from fastapi import APIRouter, HTTPException, Request
 from src.shared.utils import dumps_safe, generate_id, sanitize_for_prompt, setup_logging
 
 logger = setup_logging("host.webhooks")
+
+# M7: inbound dedup. Senders that retry on a slow/failed response can replay an
+# identical delivery. When the caller supplies a delivery id / nonce header we
+# remember it in a bounded TTL/LRU set and drop repeats so we don't double-fire
+# the agent dispatch. Bounded so a flood of unique ids can't exhaust memory.
+_DEDUP_TTL_SECONDS = 3600
+_DEDUP_MAX_IDS = 4096
+# Common delivery-id / idempotency headers, checked in order.
+_NONCE_HEADERS = (
+    "x-webhook-id",
+    "x-webhook-nonce",
+    "x-idempotency-key",
+    "x-delivery-id",
+    "x-github-delivery",
+)
+
+
+class _SeenNonces:
+    """Bounded TTL/LRU set of already-processed webhook delivery ids."""
+
+    def __init__(self, ttl: float = _DEDUP_TTL_SECONDS, maxlen: int = _DEDUP_MAX_IDS):
+        self._ttl = ttl
+        self._maxlen = maxlen
+        self._ids: OrderedDict[str, float] = OrderedDict()
+
+    def add(self, nonce: str, now: float | None = None) -> bool:
+        """Record ``nonce``; return True if newly seen, False if a replay.
+
+        An empty nonce means the caller supplied no delivery id, so we can't
+        dedup — treat as new and let the message process.
+        """
+        if not nonce:
+            return True
+        now = time.monotonic() if now is None else now
+        while self._ids:
+            _oldest, ts = next(iter(self._ids.items()))
+            if now - ts > self._ttl:
+                self._ids.popitem(last=False)
+            else:
+                break
+        if nonce in self._ids:
+            return False
+        self._ids[nonce] = now
+        while len(self._ids) > self._maxlen:
+            self._ids.popitem(last=False)
+        return True
 
 
 def _build_message(hook: dict, body_json: str, *, test: bool = False) -> str:
@@ -43,6 +91,7 @@ class WebhookManager:
         self.config_path = Path(config_path)
         self.hooks: dict[str, dict] = {}
         self.dispatch_fn = dispatch_fn
+        self._seen_nonces = _SeenNonces()  # M7: inbound dedup
         self._load()
 
     def _load(self) -> None:
@@ -181,6 +230,18 @@ class WebhookManager:
                 ).hexdigest()
                 if not hmac.compare_digest(sig_header, expected):
                     raise HTTPException(status_code=401, detail="Invalid signature")
+
+            # M7: drop replays of an already-seen delivery id / nonce. Checked
+            # after signature verification so an unauthenticated caller can't
+            # poison the dedup set with a victim's future delivery id.
+            nonce = ""
+            for header in _NONCE_HEADERS:
+                nonce = request.headers.get(header, "")
+                if nonce:
+                    break
+            if not manager._seen_nonces.add(nonce):
+                logger.info("Webhook %s: duplicate delivery %s ignored", hook_id, nonce)
+                return {"status": "duplicate", "hook": hook["name"]}
 
             try:
                 body = json.loads(raw_body)

@@ -170,7 +170,7 @@ SHM (shared memory) is critical for Firefox compositor IPC — too small causes 
 | `telegram.py` | Telegram Bot API adapter (sanitized streaming). |
 | `discord.py` | Discord Bot adapter (sanitized streaming). |
 | `slack.py` | Slack adapter (Socket Mode via slack-bolt, sanitized streaming). |
-| `whatsapp.py` | WhatsApp Cloud API adapter. `X-Hub-Signature-256` HMAC verification when `WHATSAPP_APP_SECRET` is set; warns once and disables verification otherwise. |
+| `whatsapp.py` | WhatsApp Cloud API adapter. `WHATSAPP_APP_SECRET` is mandatory (decoupled from `MESH_AUTH_TOKEN`): `start()` raises without it and the webhook returns 503 fail-closed. Mandatory `X-Hub-Signature-256` HMAC verification (401 on mismatch). Inbound dedup by `message["id"]` via bounded TTL/LRU set. |
 
 ### Dashboard (`src/dashboard/`)
 

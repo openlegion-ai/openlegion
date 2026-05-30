@@ -56,6 +56,17 @@ class DiscordChannel(Channel):
     def _is_owner(self, user_id: int) -> bool:
         return self._pairing.is_owner(user_id)
 
+    def _resolve_owner(self, user_id: str) -> bool:
+        """Owner check for base ``handle_message`` (H2 privileged-command gate).
+
+        ``handle_message`` receives the Discord user id as a string; the
+        pairing store keys on the integer id, so coerce before lookup.
+        """
+        try:
+            return self._is_owner(int(user_id))
+        except (TypeError, ValueError):
+            return False
+
     # ── extracted command handlers ─────────────────────────────
 
     def _handle_pairing(self, author_id: int, code_arg: str) -> str:
