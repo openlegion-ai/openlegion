@@ -976,6 +976,103 @@ def create_mesh_app(
             return _extract_verified_agent_id(request)
         return agent_id
 
+    def _agent_allowed_models(agent_id: str) -> set[str] | None:
+        """Resolve the set of LLM models an agent is authorized to request.
+
+        Finding H3 remediation: the LLM proxy gates only on
+        ``can_use_api("llm")``, but the agent fully controls
+        ``params["model"]``. Without a per-agent pin, a cheap-model agent
+        can route through ANY configured provider key (cost drain / key
+        abuse). ``is_model_compatible`` alone does NOT close this — it
+        permits the whole API-key catalog.
+
+        Source of truth is the agent's configured model in
+        ``config/settings.json`` (``agents.{id}.model``, falling back to
+        ``llm.default_model``) — the SAME value written on
+        ``create_agent`` / ``edit_agent`` and injected as the container's
+        ``LLM_MODEL`` env. Because models are config-fixed per agent today
+        (``loop.py`` never passes a ``model=`` override — it always sends
+        ``self.default_model``), the legitimate agent only ever requests
+        this one model, so the pin is non-breaking. The pin auto-updates
+        when the operator edits the model (edit-soft rewrites this same
+        config row).
+
+        An optional operator-settable ``allowed_models`` list on the
+        agent's config row widens the set (e.g. for an agent the operator
+        deliberately lets pick among a few models). The configured model
+        is always included.
+
+        Returns ``None`` (no pin / fail-open) when the config cannot be
+        read or the agent has no resolvable model — keeps test harnesses
+        and partial-config deployments working rather than 403-ing real
+        traffic on a missing file.
+        """
+        try:
+            from src.cli.config import _load_config
+            cfg = _load_config()
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("model-pin: config load failed for %s: %s", agent_id, e)
+            return None
+        agents_cfg = cfg.get("agents", {}) or {}
+        acfg = agents_cfg.get(agent_id) or {}
+        default_model = (cfg.get("llm", {}) or {}).get(
+            "default_model", "openai/gpt-4o-mini",
+        )
+        allowed: set[str] = set()
+        configured = acfg.get("model") or default_model
+        if isinstance(configured, str) and configured:
+            allowed.add(configured)
+        extra = acfg.get("allowed_models")
+        if isinstance(extra, list):
+            allowed.update(m for m in extra if isinstance(m, str) and m)
+        return allowed or None
+
+    def _enforce_model_pin(agent_id: str, request: Request, api_request: APIProxyRequest) -> None:
+        """403 when an agent requests an LLM model it isn't pinned to.
+
+        Applied ONLY to the agent-REQUESTED model — never to a failover
+        substitute the mesh chooses internally (failover happens deeper in
+        ``credentials._call_llm_with_failover`` on the mesh's own model
+        chain, so legitimate failover is never 403'd here).
+
+        Operators bypass the pin (they manage the fleet). Also runs the
+        cheap ``is_model_compatible`` check so an incompatible requested
+        model is rejected at the proxy boundary before dispatch.
+        """
+        if api_request.service != "llm":
+            return
+        requested_model = ""
+        if isinstance(api_request.params, dict):
+            requested_model = api_request.params.get("model", "") or ""
+        if not requested_model:
+            return
+        if _caller_is_operator(agent_id, request):
+            return
+        allowed = _agent_allowed_models(agent_id)
+        if allowed is not None and requested_model not in allowed:
+            _record_denial(
+                "permission", caller=agent_id, target=requested_model,
+                gate="api:model_pin",
+            )
+            raise HTTPException(
+                403,
+                f"Agent {agent_id} is not authorized to use model "
+                f"'{requested_model}'. Allowed: {sorted(allowed)}.",
+            )
+        # Cheap interim compatibility gate (mirrors the call-time check the
+        # LLM proxy runs) — reject requested models with no usable
+        # credentials before dispatch.
+        if credential_vault is not None:
+            compatible, reason = credential_vault.is_model_compatible(requested_model)
+            if not compatible:
+                _record_denial(
+                    "permission", caller=agent_id, target=requested_model,
+                    gate="api:model_incompatible",
+                )
+                raise HTTPException(
+                    403, reason or f"Model '{requested_model}' is not compatible.",
+                )
+
     def _resolve_browser_target(
         caller_id: str, target_claim: object, request: Request,
     ) -> str:
@@ -1530,6 +1627,8 @@ def create_mesh_app(
                     gate="api:can_use_api",
                 )
                 raise HTTPException(403, f"Agent {agent_id} cannot access {api_request.service}")
+        # H3: pin the REQUESTED model to the agent's configured model(s).
+        _enforce_model_pin(agent_id, request, api_request)
         if credential_vault is None:
             return APIProxyResponse(success=False, error="No credential vault configured")
 
@@ -1631,6 +1730,8 @@ def create_mesh_app(
                     gate="api_stream:can_use_api",
                 )
                 raise HTTPException(403, f"Agent {agent_id} cannot access {api_request.service}")
+        # H3: pin the REQUESTED model to the agent's configured model(s).
+        _enforce_model_pin(agent_id, request, api_request)
         if credential_vault is None:
             raise HTTPException(503, "No credential vault configured")
 
