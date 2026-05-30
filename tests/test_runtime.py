@@ -78,6 +78,25 @@ class TestDockerBackendLifecycle:
         vol.remove.assert_called_once_with(force=True)
         assert "alpha" not in backend.agents
 
+    def test_delete_wipes_volume_for_deregistered_agent(self):
+        """H12: archive→delete is the only delete path, and archive already
+        deregistered the agent, so deleting a NOT-in-registry agent must STILL
+        wipe its /data volume (the wipe is independent of live registration)."""
+        backend = self._make_backend()
+        # "ghost" is NOT in backend.agents — simulates an already-archived /
+        # deregistered agent being deleted.
+        assert "ghost" not in backend.agents
+        vol = MagicMock()
+        backend.client.volumes.get.return_value = vol
+
+        backend.stop_agent("ghost", remove_data=True)
+
+        # The volume is wiped by name even though the agent was deregistered.
+        backend.client.volumes.get.assert_called_once_with(
+            f"openlegion_data_{_docker_safe_name('ghost')}",
+        )
+        vol.remove.assert_called_once_with(force=True)
+
     def test_archive_keeps_volume_but_pops_token(self):
         """Archive uses remove_data=False (default): volume RETAINED for unarchive."""
         backend = self._make_backend()

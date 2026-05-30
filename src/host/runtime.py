@@ -823,24 +823,31 @@ class DockerBackend(RuntimeBackend):
             self.browser_service_url = None
 
     def stop_agent(self, agent_id: str, *, remove_data: bool = False) -> None:
+        safe_name = _docker_safe_name(agent_id)
         if agent_id in self.agents:
-            safe_name = _docker_safe_name(agent_id)
             try:
                 self.agents[agent_id]["container"].stop(timeout=10)
                 self.agents[agent_id]["container"].remove()
                 logger.info(f"Stopped agent '{agent_id}'")
             except Exception as e:
                 logger.warning(f"Error stopping agent '{agent_id}': {e}")
-            if remove_data:
-                try:
-                    vol = self.client.volumes.get(f"openlegion_data_{safe_name}")
-                    vol.remove(force=True)
-                    logger.info(f"Removed data volume for agent '{agent_id}'")
-                except Exception as e:
-                    logger.debug(f"Volume cleanup for '{agent_id}': {e}")
             del self.agents[agent_id]
             if hasattr(self, "auth_tokens"):
                 self.auth_tokens.pop(agent_id, None)
+        # Volume removal must be INDEPENDENT of live registration: the only
+        # supported delete path is archive→delete, and archive already
+        # deregistered the agent (removed it from self.agents), so gating the
+        # wipe on ``agent_id in self.agents`` would silently leave the /data
+        # volume behind on every real delete (H12). The container — if any —
+        # was already stopped/removed above (or during archive), so the volume
+        # is free to remove by name.
+        if remove_data:
+            try:
+                vol = self.client.volumes.get(f"openlegion_data_{safe_name}")
+                vol.remove(force=True)
+                logger.info(f"Removed data volume for agent '{agent_id}'")
+            except Exception as e:
+                logger.debug(f"Volume cleanup for '{agent_id}': {e}")
 
     def health_check(self, agent_id: str) -> bool:
         if agent_id not in self.agents:
