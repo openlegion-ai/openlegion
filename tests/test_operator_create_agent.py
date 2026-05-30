@@ -491,3 +491,58 @@ class TestCreateCustomAgentMeshClient:
         assert captured["json"] == {"name": "min", "role": "min"}
         assert result["ready"] is True
         await mc.close()
+
+
+class TestConcurrentCreateNoOvershoot:
+    """M15 — concurrent create requests must not overshoot MAX_AGENTS.
+
+    The shared creation lock serializes the count-check→config-write so
+    two requests can't both observe ``current < max`` and both proceed.
+    We inject an ``await`` into the locked section (via a patched
+    ``_load_config`` that yields control) to force the event loop to
+    interleave the requests — without the lock both would pass the cap
+    check; with it, exactly MAX_AGENTS land.
+    """
+
+    @pytest.mark.asyncio
+    async def test_concurrent_creates_respect_max_agents(
+        self, mesh_app, monkeypatch,
+    ):
+        import asyncio as _asyncio
+
+        import httpx
+
+        monkeypatch.setenv("OPENLEGION_MAX_AGENTS", "3")
+
+        import src.cli.config as _cfgmod
+        _orig_load = _cfgmod._load_config
+
+        app = mesh_app["client"].app
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test",
+        ) as ac:
+            async def _create(n: int):
+                return await ac.post(
+                    "/mesh/agents/create",
+                    json={
+                        "agent_id": "operator",
+                        "name": f"worker{n}",
+                        "role": "worker",
+                    },
+                )
+
+            # Fire 8 concurrent creates against a cap of 3.
+            results = await _asyncio.gather(*[_create(i) for i in range(8)])
+
+        ok = [r for r in results if r.status_code == 200]
+        rejected = [r for r in results if r.status_code == 409]
+        assert len(ok) == 3, (
+            f"expected exactly 3 successful creates, got {len(ok)} "
+            f"(overshoot means the lock failed)"
+        )
+        assert len(rejected) == 5
+        # On-disk config must hold exactly 3 worker agents.
+        cfg = _orig_load()
+        workers = [a for a in cfg.get("agents", {}) if a.startswith("worker")]
+        assert len(workers) == 3
