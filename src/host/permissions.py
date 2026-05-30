@@ -12,6 +12,16 @@ import json
 from pathlib import Path
 
 from src.host.credentials import is_system_credential
+
+# Operator permission ceiling — moved to ``src/shared/operator_ceiling`` so the
+# agent container (which ships ``src/agent`` + ``src/shared`` but NOT ``src/host``)
+# can import it from the operator tool. Re-exported here so existing host-side
+# imports (e.g. ``from src.host.permissions import clamp_to_operator_ceiling`` in
+# ``server.py``) keep resolving. Single source of truth lives in the shared module.
+from src.shared.operator_ceiling import (  # noqa: F401
+    _OPERATOR_PERMISSION_CEILING,
+    clamp_to_operator_ceiling,
+)
 from src.shared.types import AgentPermissions
 from src.shared.utils import setup_logging
 

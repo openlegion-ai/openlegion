@@ -6811,6 +6811,22 @@ def create_mesh_app(
                     400,
                     f"thinking must be one of: {sorted(LLMClient.VALID_THINKING_LEVELS)}",
                 )
+        elif field == "permissions":
+            # Finding H1 (May 2026 remediation): re-enforce the operator
+            # permission ceiling server-side. The operator tool's
+            # client-side ``_validate_edit`` already checks this, but a
+            # fooled / injected operator LLM (or any future caller) could
+            # POST a raw permissions edit straight to this endpoint and
+            # route around its own guard. The ceiling check shares a
+            # single source of truth with the tool via
+            # ``clamp_to_operator_ceiling``. The human "advanced
+            # permissions" override lives on the dashboard
+            # ``PUT /api/agents/{id}/permissions`` endpoint, which is
+            # DELIBERATELY left without this ceiling.
+            from src.host.permissions import clamp_to_operator_ceiling
+            ceiling_err = clamp_to_operator_ceiling(field, new_value)
+            if ceiling_err:
+                raise HTTPException(400, ceiling_err)
 
         from src.cli.config import _load_config
         agent_cfg = _load_config()

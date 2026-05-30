@@ -169,6 +169,106 @@ async def test_edit_soft_accepts_hard_field_permissions(mesh_app):
 
 
 @pytest.mark.asyncio
+async def test_edit_soft_rejects_can_use_wallet_grant(mesh_app):
+    """H1: the mesh edit-soft endpoint re-enforces the operator ceiling.
+
+    A fooled / injected operator LLM (or any non-dashboard caller) that
+    POSTs a raw permissions edit granting ``can_use_wallet=True`` must be
+    rejected server-side with HTTP 400 even though the client-side
+    operator-tool guard was bypassed.
+    """
+    app, _, tmp_path = mesh_app
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/agents/writer/edit-soft",
+            json={
+                "field": "permissions",
+                "value": {"can_use_wallet": True},
+                "reason": "user_asked",
+            },
+            headers=_human_origin_headers(),
+        )
+    assert r.status_code == 400, r.text
+    assert "ceiling" in r.json()["detail"].lower()
+
+    # The escalation must NOT have been persisted.
+    import json as _json
+    perms = _json.loads((tmp_path / "config" / "permissions.json").read_text())
+    assert perms["permissions"].get("writer", {}).get("can_use_wallet") is not True
+
+
+@pytest.mark.asyncio
+async def test_edit_soft_rejects_can_spawn_grant(mesh_app):
+    """H1: ``can_spawn=True`` hits the same server-side ceiling."""
+    app, _, tmp_path = mesh_app
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/agents/writer/edit-soft",
+            json={
+                "field": "permissions",
+                "value": {"can_spawn": True},
+                "reason": "user_asked",
+            },
+            headers=_human_origin_headers(),
+        )
+    assert r.status_code == 400, r.text
+    assert "ceiling" in r.json()["detail"].lower()
+
+    import json as _json
+    perms = _json.loads((tmp_path / "config" / "permissions.json").read_text())
+    assert perms["permissions"].get("writer", {}).get("can_spawn") is not True
+
+
+@pytest.mark.asyncio
+async def test_edit_soft_rejects_out_of_ceiling_blackboard_write(mesh_app):
+    """H1: blackboard_write patterns outside the ceiling are rejected."""
+    app, _, _ = mesh_app
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/agents/writer/edit-soft",
+            json={
+                "field": "permissions",
+                "value": {"blackboard_write": ["secrets/*"]},
+                "reason": "user_asked",
+            },
+            headers=_human_origin_headers(),
+        )
+    assert r.status_code == 400, r.text
+    assert "ceiling" in r.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_edit_soft_within_ceiling_permissions_still_succeeds(mesh_app):
+    """H1 regression guard: a within-ceiling permissions edit still applies.
+
+    The server-side ceiling re-check must not block legitimate edits
+    (``can_use_browser=True`` + an allowed ``blackboard_write`` pattern).
+    """
+    app, _, tmp_path = mesh_app
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/agents/writer/edit-soft",
+            json={
+                "field": "permissions",
+                "value": {
+                    "can_use_browser": True,
+                    "blackboard_write": ["artifacts/*"],
+                },
+                "reason": "user_asked",
+            },
+            headers=_human_origin_headers(),
+        )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["field"] == "permissions"
+    assert body["undo_token"]
+
+    import json as _json
+    perms = _json.loads((tmp_path / "config" / "permissions.json").read_text())
+    assert perms["permissions"]["writer"]["can_use_browser"] is True
+
+
+@pytest.mark.asyncio
 async def test_edit_soft_soft_field_keeps_5min_ttl(mesh_app):
     """Soft fields keep the snappy 5-minute undo window."""
     app, _, _ = mesh_app

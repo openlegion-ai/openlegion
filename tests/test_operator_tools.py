@@ -782,6 +782,31 @@ async def test_edit_agent_accepts_interface_field():
     )
 
 
+def test_clamp_to_operator_ceiling_single_source_of_truth():
+    """H1: the shared ceiling function (re-used by the operator tool AND the
+    mesh edit-soft endpoint) rejects escalations and passes within-ceiling
+    edits. This pins the single source of truth behavior."""
+    from src.host.permissions import clamp_to_operator_ceiling
+
+    # Escalations rejected.
+    assert clamp_to_operator_ceiling("permissions", {"can_spawn": True}) is not None
+    assert clamp_to_operator_ceiling("permissions", {"can_use_wallet": True}) is not None
+    assert (
+        clamp_to_operator_ceiling("permissions", {"blackboard_write": ["secrets/*"]})
+        is not None
+    )
+
+    # Within-ceiling edits pass.
+    assert clamp_to_operator_ceiling("permissions", {"can_use_browser": True}) is None
+    assert (
+        clamp_to_operator_ceiling("permissions", {"blackboard_write": ["artifacts/*"]})
+        is None
+    )
+    # False grants and non-permissions fields are not the ceiling's concern.
+    assert clamp_to_operator_ceiling("permissions", {"can_spawn": False}) is None
+    assert clamp_to_operator_ceiling("model", "anthropic/claude-haiku") is None
+
+
 @pytest.mark.asyncio
 async def test_edit_agent_permission_ceiling_can_use_wallet():
     """can_use_wallet=True hits the same ceiling as can_spawn=True."""

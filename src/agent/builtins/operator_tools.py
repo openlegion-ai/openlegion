@@ -9,6 +9,10 @@ import time as _time
 from datetime import datetime, timezone
 
 from src.agent.skills import skill
+from src.shared.operator_ceiling import (
+    _OPERATOR_PERMISSION_CEILING,  # noqa: F401 — re-exported for back-compat
+    clamp_to_operator_ceiling,
+)
 from src.shared.redaction import redact_text_with_urls
 from src.shared.types import (
     HARD_EDIT_FIELDS as _HARD_EDIT_FIELDS,
@@ -29,15 +33,9 @@ def _is_operator() -> bool:
     """
     return os.environ.get("ALLOWED_TOOLS", "") != ""
 
-# Permission ceiling: operator cannot grant permissions beyond these limits
-_OPERATOR_PERMISSION_CEILING = {
-    "can_use_browser": True,
-    "can_spawn": False,       # Created agents can't spawn others
-    "can_manage_cron": True,
-    "can_use_wallet": False,  # Requires explicit user setup
-    "blackboard_read": ["*"],
-    "blackboard_write": ["tasks/*", "context/*", "status/*", "output/*", "artifacts/*"],
-}
+# Permission ceiling now lives in :mod:`src.host.permissions` as the single
+# source of truth (``_OPERATOR_PERMISSION_CEILING`` + ``clamp_to_operator_ceiling``).
+# Re-imported above and re-exported for any back-compat callers/tests.
 
 _VALID_FIELDS = frozenset({
     "instructions", "soul", "model", "role", "heartbeat",
@@ -120,30 +118,9 @@ def _validate_edit(agent_id: str, field: str, value) -> dict | None:
             ),
         }
     if field == "permissions" and isinstance(value, dict):
-        for key, max_val in _OPERATOR_PERMISSION_CEILING.items():
-            if key not in value:
-                continue
-            if isinstance(max_val, bool):
-                if value[key] and not max_val:
-                    return {
-                        "error": (
-                            f"Permission ceiling exceeded: '{key}' cannot be set "
-                            "to True by the operator. Use the dashboard for "
-                            "advanced permissions."
-                        ),
-                    }
-            elif isinstance(max_val, list):
-                requested = set(value.get(key, []))
-                allowed = set(max_val)
-                if "*" not in allowed and not requested.issubset(allowed):
-                    excess = requested - allowed
-                    return {
-                        "error": (
-                            f"Permission ceiling exceeded: '{key}' patterns "
-                            f"{excess} exceed allowed {allowed}. Use the "
-                            "dashboard for advanced permissions."
-                        ),
-                    }
+        ceiling_err = clamp_to_operator_ceiling(field, value)
+        if ceiling_err:
+            return {"error": ceiling_err}
     if field == "budget" and isinstance(value, dict):
         daily = value.get("daily_usd", 0)
         monthly = value.get("monthly_usd", 0)
