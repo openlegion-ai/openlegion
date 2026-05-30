@@ -46,6 +46,81 @@ class TestDockerBackend:
         assert DockerBackend.backend_name() == "docker"
 
 
+# ── Agent lifecycle: delete vs archive token/volume semantics ──
+#
+# Security findings H11 (token revocation on delete), H12 (data volume
+# wipe on delete) and M16 (token leak on failed mid-creation).
+
+class TestDockerBackendLifecycle:
+    def _make_backend(self) -> DockerBackend:
+        backend = DockerBackend.__new__(DockerBackend)
+        backend.agents = {}
+        backend.auth_tokens = {}
+        backend.client = MagicMock()
+        return backend
+
+    def test_delete_pops_token_and_removes_volume(self):
+        """H11+H12: stop_agent(remove_data=True) revokes token + wipes volume."""
+        backend = self._make_backend()
+        backend.agents["alpha"] = {"container": MagicMock()}
+        backend.auth_tokens["alpha"] = "secret-token"
+        vol = MagicMock()
+        backend.client.volumes.get.return_value = vol
+
+        backend.stop_agent("alpha", remove_data=True)
+
+        # H11: token revoked.
+        assert "alpha" not in backend.auth_tokens
+        # H12: the agent's private named volume was removed.
+        backend.client.volumes.get.assert_called_once_with(
+            f"openlegion_data_{_docker_safe_name('alpha')}",
+        )
+        vol.remove.assert_called_once_with(force=True)
+        assert "alpha" not in backend.agents
+
+    def test_archive_keeps_volume_but_pops_token(self):
+        """Archive uses remove_data=False (default): volume RETAINED for unarchive."""
+        backend = self._make_backend()
+        backend.agents["beta"] = {"container": MagicMock()}
+        backend.auth_tokens["beta"] = "secret-token"
+
+        # Default remove_data=False — the archive contract.
+        backend.stop_agent("beta")
+
+        # Token still gets popped (archive already revoked it; that's fine).
+        assert "beta" not in backend.auth_tokens
+        # CRITICAL: volume must NOT be touched on archive.
+        backend.client.volumes.get.assert_not_called()
+        assert "beta" not in backend.agents
+
+    def test_start_agent_failure_pops_token(self):
+        """M16: a failed containers.run must not leak a registered auth token."""
+        backend = self._make_backend()
+        backend.auth_tokens = {}
+        backend.agents = {}
+        backend._port_lock = __import__("threading").Lock()
+        backend._next_port = 8400
+        backend.use_host_network = True
+        backend.mesh_host_port = 8420
+        backend.extra_env = {}
+        backend.uploads_dir = __import__("pathlib").Path("/tmp/uploads")
+        backend.project_root = __import__("pathlib").Path("/tmp/proj")
+        backend.BASE_IMAGE = "test-image"
+        backend._network_name = "openlegion_agents"
+        # containers.run raises mid-creation, after the token is registered.
+        backend.client.containers.get.side_effect = __import__(
+            "docker",
+        ).errors.NotFound("no stale")
+        backend.client.containers.run.side_effect = RuntimeError("boom")
+
+        with pytest.raises(RuntimeError, match="boom"):
+            backend.start_agent("gamma", "worker", "")
+
+        # Token must have been popped on the failure path.
+        assert "gamma" not in backend.auth_tokens
+        assert "gamma" not in backend.agents
+
+
 # ── SandboxBackend ────────────────────────────────────────────
 
 class TestSandboxBackend:

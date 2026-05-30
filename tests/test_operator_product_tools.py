@@ -757,6 +757,83 @@ async def test_endpoint_archive_agent_then_delete(v2_app):
     assert body["deleted"] == "agent"
 
 
+@pytest.fixture
+def v2_app_cm(tmp_path, monkeypatch):
+    """Like ``v2_app`` but also yields the ``container_manager`` mock so a
+    test can assert how the lifecycle endpoints drive it (H11/H12)."""
+    pdir = _projects_layout(tmp_path)
+    afile = _agents_yaml(tmp_path, names=["scout", "analyst", "tracker"])
+    monkeypatch.chdir(tmp_path)
+    import src.cli.config as cli_cfg
+    monkeypatch.setattr(cli_cfg, "PROJECTS_DIR", pdir)
+    monkeypatch.setattr(cli_cfg, "AGENTS_FILE", afile)
+    monkeypatch.setattr(cli_cfg, "PERMISSIONS_FILE", tmp_path / "config" / "permissions.json")
+    server_module = _reload_server(
+        monkeypatch, v2=True, tasks_db=str(tmp_path / "tasks.db"),
+    )
+    perms_map = {
+        "operator": {"can_route_tasks": True, "can_manage_projects": True},
+        "scout":    {"can_route_tasks": True, "can_message": ["analyst", "operator"]},
+        "analyst":  {"can_route_tasks": False, "can_message": ["scout"]},
+        "tracker":  {"can_route_tasks": False, "can_message": []},
+    }
+    container_manager = MagicMock()
+    container_manager.stop_agent = MagicMock(return_value=True)
+    app, bb = _build_app(
+        tmp_path, server_module,
+        perms_map=perms_map,
+        agents={
+            "scout": "http://scout:8400",
+            "analyst": "http://analyst:8400",
+            "tracker": "http://tracker:8400",
+            "operator": "http://operator:8400",
+        },
+        container_manager=container_manager,
+    )
+    yield app, container_manager
+    bb.close()
+    monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)
+    importlib.reload(server_module)
+
+
+@pytest.mark.asyncio
+async def test_delete_agent_removes_volume_archive_does_not(v2_app_cm):
+    """H11/H12: confirming an agent delete calls stop_agent(remove_data=True).
+
+    Archive must NOT remove the volume — it passes no remove_data, so the
+    default ``remove_data=False`` keeps the volume for unarchive.
+    """
+    app, container_manager = v2_app_cm
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        # Archive first (required before delete).
+        r = await c.post("/mesh/agents/scout/archive",
+                         headers={"X-Agent-ID": "operator"})
+        assert r.status_code == 200
+        # Archive stops the container WITHOUT removing the volume.
+        archive_calls = container_manager.stop_agent.call_args_list
+        assert archive_calls, "archive should have stopped the container"
+        # No archive call may request remove_data=True.
+        for call in archive_calls:
+            assert call.kwargs.get("remove_data", False) is False
+
+        container_manager.stop_agent.reset_mock()
+
+        # Propose + confirm delete.
+        r = await c.post("/mesh/agents/scout/propose-delete",
+                         headers=_human_origin_headers())
+        assert r.status_code == 200, r.text
+        body = r.json()
+        r = await c.post("/mesh/config/confirm",
+                         json={"change_id": body["change_id"],
+                               "payload_digest": body["payload_digest"]},
+                         headers=_human_origin_headers())
+    assert r.status_code == 200
+    assert r.json()["deleted"] == "agent"
+    # H11/H12: delete routes through stop_agent with remove_data=True so the
+    # token is popped AND the private data volume is wiped.
+    container_manager.stop_agent.assert_called_once_with("scout", remove_data=True)
+
+
 @pytest.mark.asyncio
 async def test_endpoint_delete_agent_requires_archive_first(v2_app):
     app, _, _ = v2_app

@@ -343,8 +343,6 @@ class DockerBackend(RuntimeBackend):
         thinking: str = "",
         env_overrides: dict[str, str] | None = None,
     ) -> str:
-        import docker as _docker
-
         with self._port_lock:
             port = self._next_port
             self._next_port += 1
@@ -356,6 +354,44 @@ class DockerBackend(RuntimeBackend):
         # to allow the cryptographic ``agent_id="operator"`` claim.
         auth_token = secrets.token_urlsafe(32)
         self.auth_tokens[agent_id] = auth_token
+
+        # M16: the token is registered BEFORE ``containers.run``. If start
+        # fails anywhere below, a still-valid mesh auth token would leak for
+        # an agent that never came up. Pop it on any failure and re-raise so
+        # the caller's error handling is unchanged. Only registry insertion
+        # on the success path keeps the token.
+        try:
+            return self._start_agent_container(
+                agent_id=agent_id,
+                role=role,
+                skills_dir=skills_dir,
+                port=port,
+                auth_token=auth_token,
+                system_prompt=system_prompt,
+                model=model,
+                mcp_servers=mcp_servers,
+                thinking=thinking,
+                env_overrides=env_overrides,
+            )
+        except Exception:
+            self.auth_tokens.pop(agent_id, None)
+            raise
+
+    def _start_agent_container(
+        self,
+        *,
+        agent_id: str,
+        role: str,
+        skills_dir: str | None,
+        port: int,
+        auth_token: str,
+        system_prompt: str,
+        model: str,
+        mcp_servers: list[dict] | None,
+        thinking: str,
+        env_overrides: dict[str, str] | None,
+    ) -> str:
+        import docker as _docker
 
         mesh_host = "127.0.0.1" if self.use_host_network else "host.docker.internal"
         environment: dict[str, str] = {
