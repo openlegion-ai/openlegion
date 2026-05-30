@@ -88,10 +88,11 @@ def _max_body_bytes() -> int:
 # with its own counter, but /dashboard/api/uploads does ``await request.body()``
 # (buffers the whole body before its len() check), so a full exemption would
 # reopen an OOM via that route. Matched by path prefix against request.url.path.
-_UPLOAD_ROUTE_PREFIXES: tuple[str, ...] = (
-    "/dashboard/api/uploads/",   # dashboard file uploads (route cap 50 MB; BUFFERS body)
-    "/mesh/browser/upload-stage",  # agent->browser upload staging (route cap 50 MB; streams)
-)
+# Exact-match the fixed staging route (no path param) — a prefix would also
+# match an unrelated future ``/mesh/browser/upload-stage*`` route. Prefix-match
+# the dashboard uploads subtree (it has a ``{name:path}`` param).
+_UPLOAD_ROUTE_EXACT: str = "/mesh/browser/upload-stage"  # agent->browser upload staging (route cap 50 MB; streams)
+_UPLOAD_ROUTE_PREFIX: str = "/dashboard/api/uploads/"    # dashboard file uploads (route cap 50 MB; BUFFERS body)
 
 
 def _upload_route_max_bytes() -> int:
@@ -110,7 +111,7 @@ def _upload_route_max_bytes() -> int:
 def _body_cap_for_path(path: str) -> int:
     """Per-route body cap: the higher upload cap for upload routes, else the
     global cap. Never returns "unlimited" — every route keeps an OOM backstop."""
-    if path.startswith(_UPLOAD_ROUTE_PREFIXES):
+    if path == _UPLOAD_ROUTE_EXACT or path.startswith(_UPLOAD_ROUTE_PREFIX):
         return _upload_route_max_bytes()
     return _max_body_bytes()
 

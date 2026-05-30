@@ -284,3 +284,35 @@ async def test_env_override_lowers_cap(tmp_path, monkeypatch):
             headers={"content-type": "application/json"},
         )
     assert resp.status_code == 413, resp.text
+
+
+# ---------------------------------------------------------------------------
+# _body_cap_for_path — route matching (exact upload route vs prefix subtree)
+# ---------------------------------------------------------------------------
+
+_GLOBAL_CAP = 8 * 1024 * 1024  # 8 MiB default
+
+
+def test_body_cap_exact_match_upload_stage():
+    """The fixed staging route gets the higher upload cap (exact match)."""
+    from src.host.server import _body_cap_for_path
+    assert _body_cap_for_path("/mesh/browser/upload-stage") > _GLOBAL_CAP
+
+
+def test_body_cap_dashboard_uploads_prefix():
+    """The dashboard uploads subtree (prefix) gets the higher upload cap."""
+    from src.host.server import _body_cap_for_path
+    assert _body_cap_for_path("/dashboard/api/uploads/x.png") > _GLOBAL_CAP
+
+
+def test_body_cap_upload_stage_no_overmatch():
+    """A path that merely starts with the staging route must NOT be treated as
+    an upload route — exact match, not startswith (the original over-match bug)."""
+    from src.host.server import _body_cap_for_path
+    assert _body_cap_for_path("/mesh/browser/upload-stage-evil") == _GLOBAL_CAP
+
+
+def test_body_cap_regular_route_uses_global_cap():
+    """A normal route falls back to the 8 MiB global cap."""
+    from src.host.server import _body_cap_for_path
+    assert _body_cap_for_path("/mesh/agents") == _GLOBAL_CAP
