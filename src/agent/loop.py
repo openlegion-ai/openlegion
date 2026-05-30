@@ -2542,7 +2542,21 @@ class AgentLoop:
                                 # the task STATUS stays ``done``). The genuine
                                 # ghost case — zero tools OR empty response —
                                 # still hard-fails below.
-                                if tool_outputs and response_text.strip():
+                                #
+                                # ``silent_reply`` guard: a synthetic empty-turn
+                                # marker (Bug 3) lands in ``response_text`` as
+                                # non-empty prose that literally says no text was
+                                # generated. ``_chat_inner`` is the only place that
+                                # sets ``silent_reply=True`` alongside a non-empty
+                                # response, so a marker turn must NOT be treated as
+                                # a genuine deferral explanation — otherwise a ghost
+                                # (read-only tools, originally empty) would slip
+                                # into the deferral carve-out instead of failing.
+                                if (
+                                    tool_outputs
+                                    and response_text.strip()
+                                    and not result.get("silent_reply")
+                                ):
                                     logger.info(
                                         "chat explained-deferral carve-out for "
                                         "handoff task=%s: outbound_effect=False "

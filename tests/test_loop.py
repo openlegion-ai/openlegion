@@ -3510,6 +3510,108 @@ class TestOutboundEffectLazyGuard:
         # summary feeds the done back-edge → originator's check_inbox
         assert payload.get("summary") == payload.get("reason")
 
+    @pytest.mark.asyncio
+    async def test_ghost_handoff_empty_response_closes_failed(self):
+        """Regression (don't-let-marker-mask-ghost): a handoff turn that
+        calls ONE read-only tool then produces NO final text is a ghost
+        completion. ``_chat_inner`` substitutes a synthetic empty-turn
+        marker into ``result["response"]`` (flagging ``silent_reply``).
+        The explained-deferral carve-out MUST ignore marker turns, so the
+        task auto-closes as ``failed`` (``no_outbound_effects``) — the
+        marker must NOT be mistaken for a genuine deferral explanation.
+
+        Drives the REAL ``_chat_inner`` (round 1: read-only tool call +
+        empty text; round 2: empty final → triggers the empty-compose
+        retry; retry: also empty → marker substituted) so the actual
+        marker/silent_reply interaction with the carve-out is exercised.
+        Without the ``not result.get("silent_reply")`` gate this closes as
+        ``done``/deferred instead — defeating the ghost guard.
+        """
+        read_only_call = ToolCallInfo(name="check_inbox", arguments={})
+        responses = [
+            _resp("", tool_calls=[read_only_call]),  # round 1: read-only tool
+            _resp(""),                               # round 2: empty final
+            _resp(""),                               # empty-compose retry: empty
+        ]
+        loop = _make_loop(responses)
+        loop.skills.get_tool_definitions = MagicMock(
+            return_value=[{"name": "check_inbox"}]
+        )
+        loop.skills.execute = AsyncMock(return_value={"events": []})
+        loop._auto_close_task = AsyncMock(return_value=None)
+
+        result = await loop.chat("hi", task_id="t-ghost")
+
+        # The marker was substituted (user never sees a blank bubble) —
+        # but the task STATUS must still be a ghost failure.
+        assert result.get("silent_reply") is True
+        assert result["response"].strip() != ""
+
+        terminal_calls = [
+            c for c in loop._auto_close_task.await_args_list
+            if len(c.args) >= 2 and c.args[1] in ("done", "failed")
+        ]
+        assert terminal_calls, (
+            "expected a terminal auto_close_task call, saw: "
+            f"{loop._auto_close_task.await_args_list}"
+        )
+        last_terminal = terminal_calls[-1]
+        assert last_terminal.args[1] == "failed", (
+            "ghost turn (read-only tool, empty real text → marker) must "
+            "close as 'failed', not 'done'/deferred; the synthetic marker "
+            "must not mask the ghost. calls: "
+            f"{loop._auto_close_task.await_args_list}"
+        )
+        assert last_terminal.args[0] == "t-ghost"
+        error_msg = last_terminal.kwargs.get("error") or ""
+        assert "no_outbound_effects" in error_msg, (
+            f"expected 'no_outbound_effects' in error, got: {error_msg!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_genuine_deferral_handoff_closes_done_deferred(self):
+        """Counterpart: a handoff turn that calls ONE read-only tool then
+        returns REAL prose (a genuine deferral explanation, ``silent_reply``
+        NOT set) still takes the carve-out → auto-closes as ``done`` with a
+        ``deferred`` result payload. The ``silent_reply`` gate only excludes
+        synthetic marker turns; genuine explanations are unaffected.
+        """
+        read_only_call = ToolCallInfo(
+            name="read_blackboard", arguments={"key": "queue"},
+        )
+        responses = [
+            _resp("", tool_calls=[read_only_call]),  # round 1: read-only tool
+            _resp("Reviewed the blackboard; no action needed because X."),
+        ]
+        loop = _make_loop(responses)
+        loop.skills.get_tool_definitions = MagicMock(
+            return_value=[{"name": "read_blackboard"}]
+        )
+        loop.skills.execute = AsyncMock(return_value={"value": "pending"})
+        loop._auto_close_task = AsyncMock(return_value=None)
+
+        result = await loop.chat("hi", task_id="t-deferral")
+
+        # Genuine prose: no marker, silent_reply not set.
+        assert result.get("silent_reply") is not True
+        assert "no action needed" in result["response"]
+
+        terminal_calls = [
+            c for c in loop._auto_close_task.await_args_list
+            if len(c.args) >= 2 and c.args[1] in ("done", "failed")
+        ]
+        assert terminal_calls
+        last_terminal = terminal_calls[-1]
+        assert last_terminal.args[1] == "done", (
+            "genuine deferral (read-only tool + real prose) must close as "
+            f"'done', not 'failed'. calls: {loop._auto_close_task.await_args_list}"
+        )
+        assert last_terminal.args[0] == "t-deferral"
+        payload = last_terminal.kwargs.get("result_payload") or {}
+        assert payload.get("status") == "deferred", (
+            f"expected deferred result payload, got: {payload!r}"
+        )
+
 
 # === Bug 3 chain pin: chat() error → blocker_note wiring ===
 
@@ -3980,3 +4082,52 @@ async def test_stream_empty_after_tools_retry_succeeds_emits_recovered_text():
     done_events = [e for e in events if e.get("type") == "done"]
     assert any("Streamed recovery" in (e.get("content") or "") for e in text_events)
     assert done_events[-1]["response"] == "Streamed recovery"
+
+
+@pytest.mark.asyncio
+async def test_empty_compose_retry_reraises_auth_error():
+    """Regression: a credential outage DURING the empty-compose retry must
+    surface as ``auth_failure`` — not be swallowed into a benign
+    ``"(no response)"`` marker. The helper re-raises LLMAuthError /
+    LLMConfigError; ``_chat_inner``'s typed ``except`` arm tags the result.
+    """
+    from src.shared.errors import LLMAuthError
+
+    tool_call = ToolCallInfo(name="search", arguments={"q": "x"})
+    # Round 1: tool call + empty text. Round 2: empty final → triggers retry.
+    # The retry compose (3rd llm.chat) raises LLMAuthError.
+    responses = [
+        _resp("", tool_calls=[tool_call]),
+        _resp(""),
+        LLMAuthError("credentials revoked", provider="anthropic"),
+    ]
+    loop = _make_loop(responses)
+    loop.skills.get_tool_definitions = MagicMock(return_value=[{"name": "search"}])
+    loop.skills.execute = AsyncMock(return_value={"ok": True})
+    result = await loop._chat_inner("ping")
+    assert result.get("auth_failure") is True
+    # Must NOT be papered over as a successful "(no response)" marker.
+    assert "(no response" not in (result.get("response") or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_stream_deliberate_silence_not_retried():
+    """Streaming deliberate ``__SILENT__`` reply: NO compose retry and NO
+    marker text event (mirror of the non-stream deliberate-silence test).
+    """
+    loop = _make_loop([_resp(SILENT_REPLY_TOKEN)])
+    # Force the non-streaming fallback so llm.chat (our side_effect) is used.
+    loop.llm.chat_stream = MagicMock(side_effect=RuntimeError("no stream"))
+    # Patch the retry helper to a sentinel so we can assert it is NOT called.
+    loop._retry_empty_compose = AsyncMock()
+
+    events = [ev async for ev in loop._chat_stream_inner("ping")]
+
+    assert loop._retry_empty_compose.call_count == 0
+    text_events = [e for e in events if e.get("type") == "text_delta"]
+    assert text_events == []
+    assert all(
+        "(no response" not in (e.get("content") or "").lower() for e in events
+    )
+    done = [e for e in events if e.get("type") == "done"]
+    assert done and done[-1].get("response") == ""
