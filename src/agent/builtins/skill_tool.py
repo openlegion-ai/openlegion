@@ -2,6 +2,28 @@
 
 The agent writes a Python function, which is validated (syntax-checked),
 saved to the skills directory, and hot-reloaded into the registry.
+
+Security framing — the AST validation below is authoring HYGIENE, not a
+sandbox or a security boundary. The ``_FORBIDDEN_IMPORTS`` /
+``_FORBIDDEN_CALLS`` / ``_FORBIDDEN_ATTRS`` checks and the forgotten-``await``
+detector exist to catch obvious footguns in self-authored code (e.g. an
+accidental ``open()`` or a sync function that forgot to ``await`` a
+mesh_client coroutine), NOT to contain a malicious agent. Agents already
+have ``run_command`` — in-container code execution is part of the design —
+so a determined agent never needs to smuggle anything past this validator.
+The REAL boundary is the Docker container hardening (non-root UID 1000,
+``cap_drop=ALL``, ``no-new-privileges``, read-only root fs, memory/CPU/PID
+limits). Treat these AST checks as a lint pass that keeps honest skills
+well-formed, never as a confinement mechanism.
+
+Marketplace skills (``SkillRegistry.MARKETPLACE_SKILLS_DIR``) are loaded
+WITHOUT any load-time AST validation — that path runs arbitrary module
+code at import. They are trusted because the marketplace directory is
+operator-populated and mounted read-only. If a remote or agent-reachable
+marketplace install path is ever added, pin installs to a verified commit
+SHA so the code under review is the code that runs.
+
+See ``docs/security-remediation-review-2026-05-29.md`` (M1, H15).
 """
 
 from __future__ import annotations

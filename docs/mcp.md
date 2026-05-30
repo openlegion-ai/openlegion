@@ -75,6 +75,8 @@ mcp_servers:
 
 The runtime exposure is bounded by the existing container hardening (UID 1000, `cap_drop=ALL`, `read_only` filesystem, 384 MB memory cap). Persistent storage and observability surfaces are the threat-model windows that credential handles close.
 
+> **Asymmetry vs. `http_tool`'s `$CRED{}` handles — be explicit.** When an agent uses `$CRED{name}` through `http_tool`, the handle is resolved **server-side in the mesh** and the secret never enters the agent process; responses are redacted on the way back. MCP is different: the resolved plaintext is placed into the agent container's `MCP_SERVERS` environment variable and forwarded into the MCP subprocess's `env`, so an MCP-using agent's **own process can read those secrets from its environment**. This is by design — stdio MCP needs the secret in-container to authenticate to the upstream service — but it means an MCP credential is exposed to the agent in a way an `http_tool` `$CRED{}` handle is not. Grant MCP-referenced credentials with that in mind. See `docs/security.md` and `docs/security-remediation-review-2026-05-29.md` (L14).
+
 **Failure modes:**
 
 - **Vault not wired.** `RuntimeBackend` raises a clear startup error if the config contains `$CRED{...}` handles but the mesh credential vault was not plumbed in via `set_credential_resolver`. Silent literal-passthrough was rejected as a footgun: a misconfigured deploy would otherwise ship literal `$CRED{...}` strings to subprocesses.
