@@ -34,6 +34,27 @@ class TestCronFieldMatching:
         assert _match_cron_field("*/5", 0)
         assert not _match_cron_field("*/5", 3)
 
+    # ── H8: malformed fields must not raise (poison-job containment) ──
+
+    def test_step_zero_does_not_divide(self):
+        """``*/0`` would ZeroDivisionError on ``current % step`` — guard it."""
+        # Must return False (no match) rather than raise.
+        assert _match_cron_field("*/0", 0) is False
+        assert _match_cron_field("*/0", 5) is False
+
+    def test_negative_step_safe(self):
+        assert _match_cron_field("*/-1", 0) is False
+
+    def test_malformed_range_safe(self):
+        """``1-`` (missing end) must not raise."""
+        assert _match_cron_field("1-", 3) is False
+
+    def test_non_numeric_field_safe(self):
+        assert _match_cron_field("abc", 3) is False
+        assert _match_cron_field("1,foo,5", 3) is False
+        # A valid segment alongside a junk one still matches the valid one.
+        assert _match_cron_field("foo,5", 5) is True
+
 
 class TestCronScheduler:
     def setup_method(self):
@@ -1263,4 +1284,179 @@ class TestCronQuarantineGate:
         dispatch.reset_mock()
         await sched._execute_job(job)
         dispatch.assert_not_called()
+
+
+# ── H8 / M11: scheduler resilience + per-agent cap ──────────────────
+
+
+class TestScheduleValidation:
+    """Content-aware ``_validate_schedule`` (H8). Both the create and the
+    update mesh endpoints surface this as HTTP 400 — create via
+    ``add_job``'s ValueError, update via the direct ``_validate_schedule``
+    call before ``update_job``."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.config_path = f"{self._tmpdir}/cron.json"
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_step_zero_rejected(self):
+        sched = CronScheduler(config_path=self.config_path)
+        # The error string is what the update endpoint turns into a 400.
+        assert sched._validate_schedule("*/0 * * * *") is not None
+
+    def test_step_zero_rejected_by_create(self):
+        """add_job raises ValueError → create endpoint maps to 400."""
+        sched = CronScheduler(config_path=self.config_path)
+        with pytest.raises(ValueError):
+            sched.add_job(agent="a", schedule="*/0 * * * *", message="x")
+        assert len(sched.jobs) == 0
+
+    @pytest.mark.asyncio
+    async def test_step_zero_rejected_by_update(self):
+        """update_job validate-before-mutate: poison value never persists."""
+        sched = CronScheduler(config_path=self.config_path)
+        job = sched.add_job(agent="a", schedule="0 9 * * *", message="x")
+        # Endpoint validates first; assert _validate_schedule flags it.
+        assert sched._validate_schedule("*/0 * * * *") is not None
+        # And update_job itself refuses to persist the poison schedule.
+        with pytest.raises(ValueError):
+            await sched.update_job(job.id, schedule="*/0 * * * *")
+        # Original schedule untouched.
+        assert sched.jobs[job.id].schedule == "0 9 * * *"
+
+    def test_malformed_range_rejected(self):
+        sched = CronScheduler(config_path=self.config_path)
+        assert sched._validate_schedule("1- * * * *") is not None
+        assert sched._validate_schedule("5-2 * * * *") is not None  # start>end
+
+    def test_out_of_range_rejected(self):
+        sched = CronScheduler(config_path=self.config_path)
+        assert sched._validate_schedule("99 * * * *") is not None  # minute>59
+        assert sched._validate_schedule("* 25 * * *") is not None  # hour>23
+        assert sched._validate_schedule("* * 0 * *") is not None   # dom<1
+
+    def test_non_numeric_rejected(self):
+        sched = CronScheduler(config_path=self.config_path)
+        assert sched._validate_schedule("foo * * * *") is not None
+
+    def test_valid_schedules_accepted(self):
+        sched = CronScheduler(config_path=self.config_path)
+        for good in [
+            "0 9 * * *", "*/5 * * * *", "0 9 * * 1-5",
+            "15,45 * * * *", "* * * * *", "0 0 1 1 *",
+            "every 5m", "every 30s", "every 2h", "every 1d",
+        ]:
+            assert sched._validate_schedule(good) is None, good
+
+    def test_valid_step_and_interval_still_work(self):
+        """A normal cron and an ``every 5m`` job add + compute next_run."""
+        sched = CronScheduler(config_path=self.config_path)
+        cron_job = sched.add_job(agent="a", schedule="*/5 * * * *", message="x")
+        assert cron_job.next_run is not None
+        interval_job = sched.add_job(agent="b", schedule="every 5m", message="y")
+        assert interval_job.next_run is not None
+
+
+class TestSchedulerResilience:
+    """H8: a poison schedule forced into a live job must NOT crash the
+    scheduler. ``_tick`` wraps each job; ``_is_due``/``_match_cron`` no
+    longer raise."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.config_path = f"{self._tmpdir}/cron.json"
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_is_due_does_not_raise_on_poison_schedule(self):
+        """Forcing ``*/0 * * * *`` onto a job: _is_due returns False, no raise."""
+        sched = CronScheduler(config_path=self.config_path)
+        job = sched.add_job(agent="a", schedule="0 9 * * *", message="x")
+        # Bypass validation by mutating the live job directly (simulates a
+        # poison value loaded from an old/corrupt config file).
+        job.schedule = "*/0 * * * *"
+        job.last_run = None
+        # Force the once-per-minute window to be open.
+        now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        # Should not raise ZeroDivisionError.
+        assert sched._is_due(job, now) is False
+
+    @pytest.mark.asyncio
+    async def test_tick_survives_poison_job(self):
+        """A poison job in _tick must not kill the scheduler — the other
+        (healthy) job must still be scheduled."""
+        dispatch = AsyncMock(return_value="ok")
+        sched = CronScheduler(config_path=self.config_path, dispatch_fn=dispatch)
+        poison = sched.add_job(agent="a", schedule="0 9 * * *", message="x")
+        healthy = sched.add_job(agent="b", schedule="every 1s", message="y")
+        # Poison the first job post-validation.
+        poison.schedule = "*/0 * * * *"
+        poison.last_run = None
+        # _tick must not raise even with the poison job present.
+        await sched._tick()
+        # Healthy interval job (no last_run) is due → an execute task fired.
+        # Give the created task a chance to run.
+        import asyncio
+        await asyncio.sleep(0)
+        # Sanity: scheduler is still usable after the poison tick.
+        assert sched.jobs[healthy.id].enabled is True
+
+    @pytest.mark.asyncio
+    async def test_tick_continues_when_is_due_raises(self):
+        """If _is_due itself raises (defensive), _tick logs + continues."""
+        dispatch = AsyncMock(return_value="ok")
+        sched = CronScheduler(config_path=self.config_path, dispatch_fn=dispatch)
+        sched.add_job(agent="a", schedule="0 9 * * *", message="x")
+        with patch.object(
+            sched, "_is_due", side_effect=RuntimeError("boom"),
+        ):
+            # Must swallow the raise rather than propagate out of the loop.
+            await sched._tick()
+
+
+class TestPerAgentCronCap:
+    """M11: per-agent cron-job cap, env-overridable."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.config_path = f"{self._tmpdir}/cron.json"
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_cap_enforced(self, monkeypatch):
+        monkeypatch.setenv("OPENLEGION_MAX_CRON_JOBS_PER_AGENT", "3")
+        sched = CronScheduler(config_path=self.config_path)
+        for i in range(3):
+            sched.add_job(agent="a", schedule="every 1h", message=f"m{i}")
+        with pytest.raises(ValueError, match="cron job limit"):
+            sched.add_job(agent="a", schedule="every 1h", message="overflow")
+        assert sum(1 for j in sched.jobs.values() if j.agent == "a") == 3
+
+    def test_cap_is_per_agent(self, monkeypatch):
+        monkeypatch.setenv("OPENLEGION_MAX_CRON_JOBS_PER_AGENT", "2")
+        sched = CronScheduler(config_path=self.config_path)
+        sched.add_job(agent="a", schedule="every 1h", message="m1")
+        sched.add_job(agent="a", schedule="every 1h", message="m2")
+        # Different agent has its own budget.
+        b = sched.add_job(agent="b", schedule="every 1h", message="m1")
+        assert b.agent == "b"
+
+    def test_default_cap(self):
+        from src.host.cron import (
+            _DEFAULT_MAX_CRON_JOBS_PER_AGENT,
+            _max_cron_jobs_per_agent,
+        )
+        assert _max_cron_jobs_per_agent() == _DEFAULT_MAX_CRON_JOBS_PER_AGENT == 50
+
+    def test_invalid_env_falls_back_to_default(self, monkeypatch):
+        from src.host.cron import _max_cron_jobs_per_agent
+        monkeypatch.setenv("OPENLEGION_MAX_CRON_JOBS_PER_AGENT", "not-a-number")
+        assert _max_cron_jobs_per_agent() == 50
+        monkeypatch.setenv("OPENLEGION_MAX_CRON_JOBS_PER_AGENT", "0")
+        assert _max_cron_jobs_per_agent() == 50
 
