@@ -484,6 +484,46 @@ class TestDockerBackendSlimResources:
         assert "8400/tcp" in ports
         assert "6080/tcp" not in ports
 
+    def test_agent_port_binds_loopback_only(self):
+        """Agent's published :8400 binds to 127.0.0.1 only — the mesh reaches it
+        via loopback, so it must not be exposed on all host interfaces."""
+        import docker as _docker
+
+        backend = self._make_backend()
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("not found")
+        backend.client = mock_client
+
+        backend.start_agent(agent_id="test-agent", role="test", skills_dir="")
+
+        run_call = mock_client.containers.run.call_args
+        ports = run_call.kwargs.get("ports", {})
+        host_binding = ports["8400/tcp"]
+        assert isinstance(host_binding, tuple)
+        assert host_binding[0] == "127.0.0.1"
+
+    def test_browser_port_binds_loopback_only(self):
+        """Browser service's published :8500 binds to 127.0.0.1 only."""
+        import docker as _docker
+
+        backend = self._make_backend()
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("not found")
+        backend.client = mock_client
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        with patch("httpx.get", return_value=mock_resp):
+            backend.start_browser_service()
+
+        run_call = mock_client.containers.run.call_args
+        ports = run_call.kwargs.get("ports", {})
+        host_binding = ports["8500/tcp"]
+        assert isinstance(host_binding, tuple)
+        assert host_binding[0] == "127.0.0.1"
+
     def test_browser_service_lifecycle(self):
         """start_browser_service creates container, stop removes it."""
         import docker as _docker
@@ -1088,7 +1128,9 @@ class TestAgentNetwork:
 
         old_internal.remove.assert_called_once()
         backend.client.networks.create.assert_called_once_with(
-            "openlegion_agents", driver="bridge",
+            "openlegion_agents",
+            driver="bridge",
+            options={"com.docker.network.bridge.enable_icc": "false"},
         )
         assert result is new_net
 
@@ -1105,9 +1147,27 @@ class TestAgentNetwork:
         result = backend._ensure_agent_network()
 
         backend.client.networks.create.assert_called_once_with(
-            "openlegion_agents", driver="bridge",
+            "openlegion_agents",
+            driver="bridge",
+            options={"com.docker.network.bridge.enable_icc": "false"},
         )
         assert result is new_net
+
+    def test_create_disables_inter_container_communication(self):
+        """New network is created with enable_icc=false so a compromised agent
+        cannot reach a peer agent's container directly on the shared bridge."""
+        import docker as _docker
+
+        backend = self._make_backend()
+        backend.client.networks.get.side_effect = _docker.errors.NotFound("nope")
+        backend.client.networks.create.return_value = MagicMock()
+
+        backend._ensure_agent_network()
+
+        create_kwargs = backend.client.networks.create.call_args.kwargs
+        assert create_kwargs["options"] == {
+            "com.docker.network.bridge.enable_icc": "false"
+        }
 
     def test_keeps_stale_if_remove_fails(self):
         """Falls back to stale internal network if removal fails."""

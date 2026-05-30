@@ -313,8 +313,20 @@ class DockerBackend(RuntimeBackend):
                 return network
         except docker.errors.NotFound:
             pass
+        # enable_icc=false disables inter-container communication on the
+        # bridge, so a compromised agent cannot open a connection to a peer
+        # agent's container (:8400). Published ports remain reachable from the
+        # host (the mesh), since that traffic crosses the bridge from the host
+        # namespace, not container-to-container.
+        #
+        # CAVEAT: this option only applies on first creation. An existing
+        # ``openlegion_agents`` network is returned unchanged above and must be
+        # recreated to pick up ICC isolation (we deliberately do NOT auto-delete
+        # a live network, which would disrupt running agents).
         return self.client.networks.create(
-            self._network_name, driver="bridge",
+            self._network_name,
+            driver="bridge",
+            options={"com.docker.network.bridge.enable_icc": "false"},
         )
 
     @staticmethod
@@ -450,7 +462,10 @@ class DockerBackend(RuntimeBackend):
             run_kwargs["network_mode"] = "host"
         else:
             run_kwargs["network"] = self._network_name
-            run_kwargs["ports"] = {"8400/tcp": port}
+            # Bind the published port to loopback only — the mesh reaches the
+            # agent via http://127.0.0.1:{port}, so there is no need to expose
+            # :8400 on all host interfaces.
+            run_kwargs["ports"] = {"8400/tcp": ("127.0.0.1", port)}
             # On Linux, host.docker.internal requires explicit mapping
             if platform.system() == "Linux":
                 run_kwargs["extra_hosts"] = {
@@ -693,7 +708,9 @@ class DockerBackend(RuntimeBackend):
                 "(use_host_network=False) for production deployments."
             )
         else:
-            run_kwargs["ports"] = {"8500/tcp": api_port}
+            # Bind the published port to loopback only — the mesh reaches the
+            # browser service via http://127.0.0.1:{api_port}.
+            run_kwargs["ports"] = {"8500/tcp": ("127.0.0.1", api_port)}
             if platform.system() == "Linux":
                 run_kwargs["extra_hosts"] = {"host.docker.internal": "host-gateway"}
             # Bridge network mode: grant minimal caps needed by the entrypoint.
