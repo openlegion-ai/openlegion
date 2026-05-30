@@ -9,7 +9,7 @@ import time as _time
 from datetime import datetime, timezone
 
 from src.agent.skills import skill
-from src.host.permissions import (
+from src.shared.operator_ceiling import (
     _OPERATOR_PERMISSION_CEILING,  # noqa: F401 — re-exported for back-compat
     clamp_to_operator_ceiling,
 )
