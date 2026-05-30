@@ -467,6 +467,272 @@ class TestPerAgentXStack:
         assert observed["env"]["DISPLAY"] == ":200"
 
 
+class TestStartBrowserSlotLeak:
+    """H13 — a failed ``_start_browser`` tail must not leak a slot/processes.
+
+    The post-launch awaits (``new_page`` / ``_maybe_restore_session`` / WID
+    discovery) run after the display slot is allocated and the Xvnc/Camoufox
+    processes are live, but the caller (``get_or_start``) registers the
+    instance in ``_instances`` only on full success. If any tail await throws
+    without rollback, the slot stays in the allocator and the processes leak,
+    invisible to ``_cleanup_idle`` / ``stop_all``. Repeated failures exhaust
+    the 64-slot pool → fleet-wide browser denial.
+    """
+
+    def _free_allocator(self, span: int = 5):
+        from src.browser.display_allocator import (
+            DisplayAllocator,
+            _port_is_bindable,
+            port_for_display,
+        )
+        for display_start in range(200, 500):
+            if all(
+                _port_is_bindable(port_for_display(d))
+                for d in range(display_start, display_start + span)
+            ):
+                break
+        else:
+            pytest.skip("no free display/VNC test range available")
+        return DisplayAllocator(
+            display_start=display_start,
+            display_end=display_start + span,
+            run_boot_sweep=False,
+        )
+
+    async def _drive_start_browser_with_failing_tail(
+        self, monkeypatch, fail_attr: str,
+    ):
+        """Run the real ``_start_browser`` with a tail step rigged to raise.
+
+        Mocks only the heavy/native boundaries (Playwright, Camoufox launch,
+        profile migration, X-stack spawn). ``_teardown_per_agent_x_stack`` is
+        left REAL so the test asserts on the genuine rollback (slot release +
+        process kill). Returns ``(mgr, allocator, raised)``.
+        """
+        from src.browser.service import BrowserManager
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles_h13")
+        alloc = self._free_allocator()
+        mgr._display_allocator = alloc
+
+        # Playwright — never import the real thing.
+        monkeypatch.setattr(
+            mgr, "_ensure_playwright", AsyncMock(return_value=MagicMock()),
+        )
+
+        # Fake the Camoufox launch entry point that ``_start_browser`` imports
+        # inside the function body (``from camoufox.async_api import
+        # AsyncNewBrowser``). The returned object stands in for the
+        # persistent BrowserContext.
+        import sys
+        import types as _types
+
+        class _FakeContext:
+            def __init__(self):
+                self.pages = []
+                self.close = AsyncMock()
+
+            async def add_init_script(self, *a, **k):
+                return None
+
+            async def new_page(self):
+                if fail_attr == "new_page":
+                    raise RuntimeError("boom: new_page")
+                return AsyncMock()
+
+        fake_ctx = _FakeContext()
+
+        async def _fake_new_browser(pw, **opts):
+            return fake_ctx
+
+        fake_mod = _types.ModuleType("camoufox.async_api")
+        fake_mod.AsyncNewBrowser = _fake_new_browser
+        camoufox_pkg = _types.ModuleType("camoufox")
+        monkeypatch.setitem(sys.modules, "camoufox", camoufox_pkg)
+        monkeypatch.setitem(sys.modules, "camoufox.async_api", fake_mod)
+
+        # Profile schema helpers (imported at module scope + inside the fn).
+        monkeypatch.setattr("src.browser.service.migrate_profile", lambda *a, **k: None)
+        monkeypatch.setattr(
+            "src.browser.profile_schema.sync_adblock_extension", lambda *a, **k: None,
+        )
+        # Deterministic launch options (no proxy, desktop window).
+        monkeypatch.setattr(
+            "src.browser.service.build_launch_options",
+            lambda *a, **k: {"window": (1920, 1080)},
+        )
+        monkeypatch.setattr(mgr, "get_proxy_config", lambda agent_id: None)
+        monkeypatch.setattr(
+            "src.browser.service.build_mobile_init_script", lambda *a, **k: None,
+        )
+        monkeypatch.setattr(
+            "src.browser.service.get_device_profile", lambda *a, **k: MagicMock(),
+        )
+
+        # X-stack spawn returns process handles that report "already dead" so
+        # the REAL teardown's wait loop exits fast.
+        class _MockProc:
+            def __init__(self, pid):
+                self.pid = pid
+                self._exited = False
+
+            def poll(self):
+                if self._exited:
+                    return 0
+                self._exited = True
+                return None
+
+            def wait(self, timeout=None):
+                self._exited = True
+                return 0
+
+        spawned = [_MockProc(40001), _MockProc(40002)]
+        monkeypatch.setattr(
+            mgr, "_spawn_per_agent_x_stack",
+            AsyncMock(return_value=spawned),
+        )
+        monkeypatch.setattr("src.browser.service.os.killpg", lambda *a, **k: None)
+
+        # Rig the chosen tail step to raise (for the non-new_page case).
+        if fail_attr == "_maybe_restore_session":
+            monkeypatch.setattr(
+                mgr, "_maybe_restore_session",
+                AsyncMock(side_effect=RuntimeError("boom: restore")),
+            )
+        else:
+            monkeypatch.setattr(mgr, "_maybe_restore_session", AsyncMock())
+        monkeypatch.setattr(mgr, "_attach_network_listeners", lambda inst: None)
+        monkeypatch.setattr(mgr, "_discover_new_wid", AsyncMock(return_value=None))
+        monkeypatch.setattr(mgr, "_run_navigator_probe", AsyncMock())
+
+        raised = None
+        try:
+            await mgr._start_browser("agent-h13")
+        except Exception as e:  # noqa: BLE001
+            raised = e
+        return mgr, alloc, raised, fake_ctx
+
+    @pytest.mark.asyncio
+    async def test_new_page_failure_releases_slot(self, monkeypatch):
+        mgr, alloc, raised, ctx = (
+            await self._drive_start_browser_with_failing_tail(
+                monkeypatch, "new_page",
+            )
+        )
+        assert raised is not None
+        # No instance registered.
+        assert "agent-h13" not in mgr._instances
+        # Slot fully reclaimed — pool back to empty, reusable.
+        assert alloc.allocated_count == 0
+        # The freed slot can be allocated again (pool not leaked).
+        reused = alloc.allocate()
+        assert reused is not None
+        alloc.release(reused)
+
+    @pytest.mark.asyncio
+    async def test_restore_session_failure_releases_slot_and_closes_browser(
+        self, monkeypatch,
+    ):
+        mgr, alloc, raised, ctx = (
+            await self._drive_start_browser_with_failing_tail(
+                monkeypatch, "_maybe_restore_session",
+            )
+        )
+        assert raised is not None
+        assert "agent-h13" not in mgr._instances
+        assert alloc.allocated_count == 0
+        # Browser context was closed during rollback.
+        ctx.close.assert_awaited()
+
+
+class TestReconcileOrphanedSlots:
+    """H13 — the idle sweep reclaims allocated-but-unbacked display slots."""
+
+    def _free_allocator(self, span: int = 5):
+        from src.browser.display_allocator import (
+            DisplayAllocator,
+            _port_is_bindable,
+            port_for_display,
+        )
+        for display_start in range(200, 500):
+            if all(
+                _port_is_bindable(port_for_display(d))
+                for d in range(display_start, display_start + span)
+            ):
+                break
+        else:
+            pytest.skip("no free display/VNC test range available")
+        return DisplayAllocator(
+            display_start=display_start,
+            display_end=display_start + span,
+            run_boot_sweep=False,
+        )
+
+    def test_reconcile_releases_orphan_keeps_live(self):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles_h13r")
+        alloc = self._free_allocator()
+        mgr._display_allocator = alloc
+
+        live_slot = alloc.allocate()
+        orphan_slot = alloc.allocate()
+        assert alloc.allocated_count == 2
+
+        # One slot is backed by a live instance; the other is orphaned.
+        live = CamoufoxInstance("live", MagicMock(), AsyncMock(), AsyncMock())
+        live.display_slot = live_slot
+        mgr._instances["live"] = live
+
+        mgr._reconcile_orphaned_slots()
+
+        # Orphan released, live slot untouched.
+        assert not alloc.is_allocated(orphan_slot.display)
+        assert alloc.is_allocated(live_slot.display)
+        assert alloc.allocated_count == 1
+
+    def test_reconcile_noop_when_all_backed(self):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles_h13r2")
+        alloc = self._free_allocator()
+        mgr._display_allocator = alloc
+
+        s1 = alloc.allocate()
+        s2 = alloc.allocate()
+        for name, slot in (("a", s1), ("b", s2)):
+            inst = CamoufoxInstance(name, MagicMock(), AsyncMock(), AsyncMock())
+            inst.display_slot = slot
+            mgr._instances[name] = inst
+
+        mgr._reconcile_orphaned_slots()
+        assert alloc.allocated_count == 2
+
+    def test_reconcile_noop_without_allocator(self):
+        from src.browser.service import BrowserManager
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles_h13r3")
+        # Never constructed — must not raise.
+        assert mgr._display_allocator is None
+        mgr._reconcile_orphaned_slots()
+        assert mgr._display_allocator is None
+
+    @pytest.mark.asyncio
+    async def test_cleanup_idle_invokes_reconcile(self):
+        from src.browser.service import BrowserManager
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles_h13r4")
+        alloc = self._free_allocator()
+        mgr._display_allocator = alloc
+        orphan = alloc.allocate()
+        assert alloc.allocated_count == 1
+
+        await mgr._cleanup_idle()
+        # No live instances reference the slot — the sweep reclaims it.
+        assert not alloc.is_allocated(orphan.display)
+        assert alloc.allocated_count == 0
+
+
 class TestBrowserServer:
     """Tests for the browser service FastAPI endpoints."""
 

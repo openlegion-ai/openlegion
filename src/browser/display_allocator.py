@@ -194,6 +194,20 @@ class DisplayAllocator:
     def is_allocated(self, display: int) -> bool:
         return display in self._allocated
 
+    def allocated_slots(self) -> list[Slot]:
+        """Snapshot of the currently-allocated slots.
+
+        Returns a fresh list (sorted by display, deterministic) reconstructed
+        from the internal allocation set, so callers can iterate without
+        exposing or mutating ``_allocated`` directly. Used by the browser
+        manager's orphan-reconciliation sweep (H13) to find slots that are
+        allocated but no longer backed by a live instance.
+        """
+        return [
+            Slot(display=d, vnc_port=port_for_display(d))
+            for d in sorted(self._allocated)
+        ]
+
     @property
     def free_count(self) -> int:
         return len(self._free)

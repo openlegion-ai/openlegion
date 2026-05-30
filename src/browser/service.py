@@ -3506,6 +3506,46 @@ class BrowserManager:
             for agent_id in to_stop:
                 logger.info("Stopping idle browser for '%s'", agent_id)
                 await self._stop_instance(agent_id)
+            # H13: reclaim any display slot that is marked allocated but has
+            # no live instance backing it. A failed ``_start_browser`` tail
+            # now rolls its own slot back, but this sweep is the belt-and-
+            # braces net for any future leak path (and reclaims slots stranded
+            # by an older build before this fix). Runs under the same manager
+            # lock as instance iteration, so the live-instance view is
+            # consistent with the allocator snapshot.
+            self._reconcile_orphaned_slots()
+
+    def _reconcile_orphaned_slots(self) -> None:
+        """Release display slots allocated to no live instance.
+
+        Caller MUST hold ``self._manager_lock()`` — this reads ``_instances``
+        and mutates the allocator in lock-step. An "orphan" is a slot the
+        allocator still marks allocated while NO entry in ``_instances``
+        references it via ``inst.display_slot``. Slots belonging to a
+        starting or healthy instance are skipped: ``_start_browser`` attaches
+        the slot to its instance only after a successful launch and runs
+        under the same lock, so a slot that is mid-launch is either not yet
+        allocated or already attached to an instance that is being registered
+        within the same lock hold — never visible here as a false orphan.
+        """
+        allocator = self._display_allocator
+        if allocator is None:
+            return
+        live_displays = {
+            inst.display_slot.display
+            for inst in self._instances.values()
+            if inst.display_slot is not None
+        }
+        for slot in allocator.allocated_slots():
+            if slot.display in live_displays:
+                continue
+            logger.warning(
+                "Reconciling orphaned display slot :%d (port %d) — allocated "
+                "but no live instance; releasing",
+                slot.display, slot.vnc_port,
+            )
+            with contextlib.suppress(Exception):
+                allocator.release(slot)
 
     def touch_agent(self, agent_id: str) -> bool:
         """Reset the idle timer for one agent's browser. Sync, no lock —
@@ -4032,118 +4072,163 @@ class BrowserManager:
         else:
             os.environ["DISPLAY"] = _saved_display
 
-        # §19.3 / Phase 10 §21: inject the navigator-override init script
-        # for mobile profiles BEFORE any page is created. ``add_init_script``
-        # is registered on the BrowserContext so every page (current + new
-        # tabs) receives it at ``document_start``, ahead of any site script.
-        # Returns ``None`` for desktop profiles — no-op in that case.
-        mobile_init = build_mobile_init_script(get_device_profile(device_profile))
-        if mobile_init is not None:
-            try:
-                await context.add_init_script(script=mobile_init)
-                logger.debug(
-                    "Agent '%s' mobile navigator init script injected (profile=%s)",
-                    agent_id, device_profile,
-                )
-            except Exception as e:
-                # Non-fatal: a missing init script weakens the spoof but
-                # doesn't break the browser. Log and continue.
-                logger.warning(
-                    "Agent '%s' add_init_script failed for profile %s: %s",
-                    agent_id, device_profile, e,
-                )
-
-        pages = context.pages
-        page = pages[0] if pages else await context.new_page()
-
-        # §6.6 ``navigator.connection`` REMOVED on the Firefox UA path.
-        #
-        # Real Firefox does NOT expose ``navigator.connection`` (the
-        # NetworkInformation API is unimplemented as of FF 138; Chromium
-        # is the only major engine shipping it on by default). Injecting
-        # a synthetic ``navigator.connection`` on a UA stamped
-        # ``Firefox/`` was itself a strong cluster signal: zero real
-        # Firefox users in the population have the API, so any Firefox-
-        # shaped client that DOES expose it is by definition spoofed.
-        # Fingerprint.com / Creep.js / DataDome key directly on this
-        # inconsistency.
-        #
-        # ``_assert_firefox_ua`` enforces a Firefox UA at startup, so
-        # the right behavior is to MATCH real-Firefox population —
-        # leave the API absent. The §6.6 plan predates this analysis;
-        # the navigator probe below was updated to stop treating a
-        # missing ``navigator.connection`` as a mismatch.
-        #
-        # If a future build moves to a Chromium-shaped UA, the spoof
-        # path can be restored (gated on UA family); the
-        # ``_NAV_CONNECTION_INIT_SCRIPT`` template is retained for that
-        # purpose.
-
-        inst = CamoufoxInstance(agent_id, browser, context, page)
-        # Attach the per-agent X stack to the instance so subsequent
-        # subprocess_env() calls scope DISPLAY correctly and
-        # _stop_instance can tear the stack down.
-        inst.display_slot = slot
-        inst._x_procs = x_procs
-
-        # §20 — restore the previously-snapshotted session state.
-        #
-        # Camoufox's ``persistent_context=True`` already retains cookies +
-        # localStorage in the on-disk profile dir, so this is genuinely a
-        # SECOND-CHANNEL restore: the JSON sidecar is the operator-visible,
-        # operator-clearable copy of session state that survives even when
-        # the profile dir is wiped (operator support, profile rotation,
-        # template-based agent re-spawn). On a normal restart the sidecar
-        # and profile dir agree; if they disagree (sidecar fresher than the
-        # on-disk profile, e.g. after a profile-dir reset), the sidecar
-        # wins for cookies / localStorage so the agent stays logged in.
-        #
-        # We use Playwright's ``add_cookies`` + ``add_init_script`` here
-        # rather than launching with ``storage_state`` because Camoufox's
-        # ``persistent_context=True`` path does not pass ``storage_state``
-        # through to Firefox (it owns the profile dir directly). The end
-        # state is the same: cookies merged into the cookie jar; localStorage
-        # seeded on each origin's first navigation via the init script.
-        await self._maybe_restore_session(inst)
-
-        # §9.1 wire request listeners at the BrowserContext level so new
-        # tabs (in-page ``window.open()`` or ``browser_open_tab``) inherit
-        # them automatically. Idempotent — also re-runs after browser RESET
-        # because RESET drops the whole instance and the next get_or_start
-        # creates a fresh one with ``_network_attached=False``.
-        self._attach_network_listeners(inst)
-
-        # Discover the new X11 window for targeted focus.  ``wids_before``
-        # is empty by construction — the agent's display was just spawned,
-        # so any Firefox window discovered there is ours. (X11 WIDs are
-        # NOT unique across displays; querying any other display would
-        # risk a numeric collision.)
-        wids_before: set[int] = set()
-        wid = await self._discover_new_wid(wids_before, inst)
-        if wid:
-            inst.x11_wid = wid
-            logger.debug("Agent '%s' browser window: X11 WID %d", agent_id, wid)
-            # Start idle mouse jitter for human-like fidgeting
-            inst._jitter_task = asyncio.create_task(self._idle_mouse_jitter(inst))
-        else:
-            logger.warning(
-                "Could not discover X11 WID for '%s' — interactions on "
-                "high-sensitivity sites will use CDP (isTrusted=false)",
-                agent_id,
-            )
-            inst._jitter_task = None
-
-        # §6.3 run the navigator self-test once. Best-effort — a probe
-        # failure must not block browser start (the inconsistency is
-        # itself the operator's signal to investigate).
+        # H13: everything past the successful Camoufox launch — the first
+        # ``add_init_script`` / ``new_page`` await, session restore, and WID
+        # discovery — runs under a rollback guard. The Camoufox-failure branch
+        # above already tears the slot down on a launch failure, but these
+        # post-launch awaits were previously UNGUARDED: any one of them raising
+        # left ``get_or_start`` short of registering the instance in
+        # ``_instances`` while the allocated display slot and the live Xvnc /
+        # Camoufox processes survived — invisible to ``_cleanup_idle`` /
+        # ``stop_all`` (which iterate only ``_instances``). Repeated failures
+        # exhausted the 64-slot pool → fleet-wide browser denial. On ANY
+        # exception here we tear down the X stack (which releases the slot) and
+        # close the browser, then re-raise so the caller still sees the failure.
+        inst: CamoufoxInstance | None = None
         try:
-            await self._run_navigator_probe(inst)
-        except Exception as e:
-            logger.warning(
-                "Navigator self-test probe failed for '%s': %s", agent_id, e,
-            )
+            # §19.3 / Phase 10 §21: inject the navigator-override init script
+            # for mobile profiles BEFORE any page is created. ``add_init_script``
+            # is registered on the BrowserContext so every page (current + new
+            # tabs) receives it at ``document_start``, ahead of any site script.
+            # Returns ``None`` for desktop profiles — no-op in that case.
+            mobile_init = build_mobile_init_script(get_device_profile(device_profile))
+            if mobile_init is not None:
+                try:
+                    await context.add_init_script(script=mobile_init)
+                    logger.debug(
+                        "Agent '%s' mobile navigator init script injected (profile=%s)",
+                        agent_id, device_profile,
+                    )
+                except Exception as e:
+                    # Non-fatal: a missing init script weakens the spoof but
+                    # doesn't break the browser. Log and continue.
+                    logger.warning(
+                        "Agent '%s' add_init_script failed for profile %s: %s",
+                        agent_id, device_profile, e,
+                    )
 
-        return inst
+            pages = context.pages
+            page = pages[0] if pages else await context.new_page()
+
+            # §6.6 ``navigator.connection`` REMOVED on the Firefox UA path.
+            #
+            # Real Firefox does NOT expose ``navigator.connection`` (the
+            # NetworkInformation API is unimplemented as of FF 138; Chromium
+            # is the only major engine shipping it on by default). Injecting
+            # a synthetic ``navigator.connection`` on a UA stamped
+            # ``Firefox/`` was itself a strong cluster signal: zero real
+            # Firefox users in the population have the API, so any Firefox-
+            # shaped client that DOES expose it is by definition spoofed.
+            # Fingerprint.com / Creep.js / DataDome key directly on this
+            # inconsistency.
+            #
+            # ``_assert_firefox_ua`` enforces a Firefox UA at startup, so
+            # the right behavior is to MATCH real-Firefox population —
+            # leave the API absent. The §6.6 plan predates this analysis;
+            # the navigator probe below was updated to stop treating a
+            # missing ``navigator.connection`` as a mismatch.
+            #
+            # If a future build moves to a Chromium-shaped UA, the spoof
+            # path can be restored (gated on UA family); the
+            # ``_NAV_CONNECTION_INIT_SCRIPT`` template is retained for that
+            # purpose.
+
+            inst = CamoufoxInstance(agent_id, browser, context, page)
+            # Attach the per-agent X stack to the instance so subsequent
+            # subprocess_env() calls scope DISPLAY correctly and
+            # _stop_instance can tear the stack down.
+            inst.display_slot = slot
+            inst._x_procs = x_procs
+
+            # §20 — restore the previously-snapshotted session state.
+            #
+            # Camoufox's ``persistent_context=True`` already retains cookies +
+            # localStorage in the on-disk profile dir, so this is genuinely a
+            # SECOND-CHANNEL restore: the JSON sidecar is the operator-visible,
+            # operator-clearable copy of session state that survives even when
+            # the profile dir is wiped (operator support, profile rotation,
+            # template-based agent re-spawn). On a normal restart the sidecar
+            # and profile dir agree; if they disagree (sidecar fresher than the
+            # on-disk profile, e.g. after a profile-dir reset), the sidecar
+            # wins for cookies / localStorage so the agent stays logged in.
+            #
+            # We use Playwright's ``add_cookies`` + ``add_init_script`` here
+            # rather than launching with ``storage_state`` because Camoufox's
+            # ``persistent_context=True`` path does not pass ``storage_state``
+            # through to Firefox (it owns the profile dir directly). The end
+            # state is the same: cookies merged into the cookie jar; localStorage
+            # seeded on each origin's first navigation via the init script.
+            await self._maybe_restore_session(inst)
+
+            # §9.1 wire request listeners at the BrowserContext level so new
+            # tabs (in-page ``window.open()`` or ``browser_open_tab``) inherit
+            # them automatically. Idempotent — also re-runs after browser RESET
+            # because RESET drops the whole instance and the next get_or_start
+            # creates a fresh one with ``_network_attached=False``.
+            self._attach_network_listeners(inst)
+
+            # Discover the new X11 window for targeted focus.  ``wids_before``
+            # is empty by construction — the agent's display was just spawned,
+            # so any Firefox window discovered there is ours. (X11 WIDs are
+            # NOT unique across displays; querying any other display would
+            # risk a numeric collision.)
+            wids_before: set[int] = set()
+            wid = await self._discover_new_wid(wids_before, inst)
+            if wid:
+                inst.x11_wid = wid
+                logger.debug("Agent '%s' browser window: X11 WID %d", agent_id, wid)
+                # Start idle mouse jitter for human-like fidgeting
+                inst._jitter_task = asyncio.create_task(self._idle_mouse_jitter(inst))
+            else:
+                logger.warning(
+                    "Could not discover X11 WID for '%s' — interactions on "
+                    "high-sensitivity sites will use CDP (isTrusted=false)",
+                    agent_id,
+                )
+                inst._jitter_task = None
+
+            # §6.3 run the navigator self-test once. Best-effort — a probe
+            # failure must not block browser start (the inconsistency is
+            # itself the operator's signal to investigate).
+            try:
+                await self._run_navigator_probe(inst)
+            except Exception as e:
+                logger.warning(
+                    "Navigator self-test probe failed for '%s': %s", agent_id, e,
+                )
+
+            return inst
+        except Exception:
+            # H13 rollback: a post-launch await failed. Mirror the
+            # Camoufox-failure branch above — tear down the per-agent X
+            # stack (which releases the display slot) and close the
+            # browser so neither the slot nor any process survives. The
+            # caller never registered this instance in ``_instances``, so
+            # without this cleanup both would leak permanently.
+            #
+            # Cancel any jitter task we may have just spawned so it can't
+            # keep driving the X11 cursor against a context we're about
+            # to close.
+            jitter = getattr(inst, "_jitter_task", None) if inst is not None else None
+            if jitter is not None:
+                jitter.cancel()
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(asyncio.shield(jitter), timeout=2.0)
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(context.close(), timeout=10.0)
+            # Tear down the X stack + release the slot. Use ``inst`` when we
+            # got far enough to attach the stack to it; otherwise fall back
+            # to a scratch carrier (same shape as the Camoufox-failure
+            # branch) so the teardown helper has ``display_slot`` + ``_x_procs``.
+            teardown_target = inst
+            if teardown_target is None or getattr(teardown_target, "display_slot", None) is None:
+                _scratch = type("_Scratch", (), {})()
+                _scratch.display_slot = slot
+                _scratch._x_procs = x_procs
+                teardown_target = _scratch
+            with contextlib.suppress(Exception):
+                await self._teardown_per_agent_x_stack(teardown_target)
+            raise
 
     async def _maybe_restore_session(self, inst: CamoufoxInstance) -> None:
         """§20 — restore cookies + localStorage from the per-agent sidecar.
