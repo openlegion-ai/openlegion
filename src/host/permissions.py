@@ -72,6 +72,67 @@ KNOWN_BROWSER_ACTIONS: frozenset[str] = frozenset({
 LEGACY_BROWSER_ACTIONS = KNOWN_BROWSER_ACTIONS
 
 
+# Permission ceiling for operator-initiated agent edits. The operator
+# (an LLM-driven agent) is NOT allowed to grant these escalations to the
+# agents it manages — ``can_spawn`` / ``can_use_wallet`` require explicit
+# human setup, and blackboard read/write patterns are bounded.
+#
+# This is the SINGLE SOURCE OF TRUTH. It is enforced in two places:
+#   1. Client-side in the operator tool (`operator_tools._validate_edit`)
+#      for a fast, descriptive error to the operator LLM.
+#   2. Server-side on the mesh ``/edit-soft`` endpoint, so a fooled or
+#      injected operator LLM cannot route a raw permissions edit around
+#      its own client-side guard (finding H1, May 2026 remediation).
+#
+# DELIBERATELY NOT enforced on the dashboard ``PUT /api/agents/{id}/
+# permissions`` endpoint — that is the human operator's "advanced
+# permissions" escalation path, and the ceiling is intentionally human-
+# overridable there.
+_OPERATOR_PERMISSION_CEILING = {
+    "can_use_browser": True,
+    "can_spawn": False,       # Created agents can't spawn others
+    "can_manage_cron": True,
+    "can_use_wallet": False,  # Requires explicit user setup
+    "blackboard_read": ["*"],
+    "blackboard_write": ["tasks/*", "context/*", "status/*", "output/*", "artifacts/*"],
+}
+
+
+def clamp_to_operator_ceiling(field: str, new_value) -> str | None:
+    """Return an error string if a permissions edit exceeds the operator ceiling.
+
+    Single source of truth for the operator permission ceiling, shared by
+    the operator tool's client-side ``_validate_edit`` and the mesh
+    ``/edit-soft`` endpoint's server-side re-check (finding H1).
+
+    Returns ``None`` when the edit is within the ceiling (or is not a
+    permissions edit / not a dict — those are handled by other validators).
+    """
+    if field != "permissions" or not isinstance(new_value, dict):
+        return None
+    for key, max_val in _OPERATOR_PERMISSION_CEILING.items():
+        if key not in new_value:
+            continue
+        if isinstance(max_val, bool):
+            if new_value[key] and not max_val:
+                return (
+                    f"Permission ceiling exceeded: '{key}' cannot be set "
+                    "to True by the operator. Use the dashboard for "
+                    "advanced permissions."
+                )
+        elif isinstance(max_val, list):
+            requested = set(new_value.get(key, []))
+            allowed = set(max_val)
+            if "*" not in allowed and not requested.issubset(allowed):
+                excess = requested - allowed
+                return (
+                    f"Permission ceiling exceeded: '{key}' patterns "
+                    f"{excess} exceed allowed {allowed}. Use the "
+                    "dashboard for advanced permissions."
+                )
+    return None
+
+
 class PermissionMatrix:
     """Enforces agent-level permissions for mesh operations."""
 
