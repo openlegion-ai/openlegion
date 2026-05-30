@@ -1109,17 +1109,6 @@ select:focus-visible,
   position: relative;
 }
 
-.messenger-contact .messenger-close-btn {
-  opacity: 0;
-  transition: opacity 0.15s;
-}
-
-.messenger-contact:hover .messenger-close-btn,
-.messenger-contact:focus-within .messenger-close-btn,
-.messenger-close-btn:focus-visible {
-  opacity: 1;
-}
-
 /* Main-content margin to avoid content hiding behind the chat panel.
    Must stay in sync with .messenger-half widths at each breakpoint. */
 .messenger-margin {
