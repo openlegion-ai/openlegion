@@ -355,8 +355,6 @@ class DockerBackend(RuntimeBackend):
         thinking: str = "",
         env_overrides: dict[str, str] | None = None,
     ) -> str:
-        import docker as _docker
-
         with self._port_lock:
             port = self._next_port
             self._next_port += 1
@@ -368,6 +366,44 @@ class DockerBackend(RuntimeBackend):
         # to allow the cryptographic ``agent_id="operator"`` claim.
         auth_token = secrets.token_urlsafe(32)
         self.auth_tokens[agent_id] = auth_token
+
+        # M16: the token is registered BEFORE ``containers.run``. If start
+        # fails anywhere below, a still-valid mesh auth token would leak for
+        # an agent that never came up. Pop it on any failure and re-raise so
+        # the caller's error handling is unchanged. Only registry insertion
+        # on the success path keeps the token.
+        try:
+            return self._start_agent_container(
+                agent_id=agent_id,
+                role=role,
+                skills_dir=skills_dir,
+                port=port,
+                auth_token=auth_token,
+                system_prompt=system_prompt,
+                model=model,
+                mcp_servers=mcp_servers,
+                thinking=thinking,
+                env_overrides=env_overrides,
+            )
+        except Exception:
+            self.auth_tokens.pop(agent_id, None)
+            raise
+
+    def _start_agent_container(
+        self,
+        *,
+        agent_id: str,
+        role: str,
+        skills_dir: str | None,
+        port: int,
+        auth_token: str,
+        system_prompt: str,
+        model: str,
+        mcp_servers: list[dict] | None,
+        thinking: str,
+        env_overrides: dict[str, str] | None,
+    ) -> str:
+        import docker as _docker
 
         mesh_host = "127.0.0.1" if self.use_host_network else "host.docker.internal"
         environment: dict[str, str] = {
@@ -804,24 +840,31 @@ class DockerBackend(RuntimeBackend):
             self.browser_service_url = None
 
     def stop_agent(self, agent_id: str, *, remove_data: bool = False) -> None:
+        safe_name = _docker_safe_name(agent_id)
         if agent_id in self.agents:
-            safe_name = _docker_safe_name(agent_id)
             try:
                 self.agents[agent_id]["container"].stop(timeout=10)
                 self.agents[agent_id]["container"].remove()
                 logger.info(f"Stopped agent '{agent_id}'")
             except Exception as e:
                 logger.warning(f"Error stopping agent '{agent_id}': {e}")
-            if remove_data:
-                try:
-                    vol = self.client.volumes.get(f"openlegion_data_{safe_name}")
-                    vol.remove(force=True)
-                    logger.info(f"Removed data volume for agent '{agent_id}'")
-                except Exception as e:
-                    logger.debug(f"Volume cleanup for '{agent_id}': {e}")
             del self.agents[agent_id]
             if hasattr(self, "auth_tokens"):
                 self.auth_tokens.pop(agent_id, None)
+        # Volume removal must be INDEPENDENT of live registration: the only
+        # supported delete path is archive→delete, and archive already
+        # deregistered the agent (removed it from self.agents), so gating the
+        # wipe on ``agent_id in self.agents`` would silently leave the /data
+        # volume behind on every real delete (H12). The container — if any —
+        # was already stopped/removed above (or during archive), so the volume
+        # is free to remove by name.
+        if remove_data:
+            try:
+                vol = self.client.volumes.get(f"openlegion_data_{safe_name}")
+                vol.remove(force=True)
+                logger.info(f"Removed data volume for agent '{agent_id}'")
+            except Exception as e:
+                logger.debug(f"Volume cleanup for '{agent_id}': {e}")
 
     def health_check(self, agent_id: str) -> bool:
         if agent_id not in self.agents:

@@ -872,6 +872,17 @@ def create_mesh_app(
         data, pub/sub subscriptions, lane workers, cron jobs, cost
         records, trace records, and wallet records.
         """
+        # H11: revoke the agent's mesh auth token and reload the in-memory
+        # ACL so a deleted agent can no longer authenticate or be permission-
+        # checked, even if the container stop (in stop_agent) threw before it
+        # could pop the token. ``permissions.reload()`` re-reads
+        # config/permissions.json, from which ``_remove_agent`` has already
+        # dropped this agent. Both are idempotent — safe on the teardown path.
+        _auth_tokens.pop(agent_id, None)
+        try:
+            permissions.reload()
+        except Exception as e:
+            logger.warning("permissions.reload() during cleanup of '%s' failed: %s", agent_id, e)
         suffix = f":{agent_id}"
         stale = [k for k in _rate_ts if k.endswith(suffix)]
         for k in stale:
@@ -6056,8 +6067,24 @@ def create_mesh_app(
             from src.cli.config import _load_config, _remove_agent
             if target_id not in _load_config().get("agents", {}):
                 raise HTTPException(404, f"Agent '{target_id}' no longer exists")
+            # H11/H12: stop the container through the runtime backend (not the
+            # raw-docker path inside ``_remove_agent``) so the agent's mesh
+            # auth token is popped (H11) AND its private ``openlegion_data_*``
+            # named volume is removed (H12). ``remove_data=True`` is the delete
+            # contract — archive deliberately calls ``stop_agent`` WITHOUT it
+            # so the volume survives for unarchive. ``_remove_agent`` is then
+            # called with ``stop_container=False`` so it only does config +
+            # permissions removal and never re-runs a token/volume-blind stop.
+            if container_manager is not None:
+                try:
+                    container_manager.stop_agent(target_id, remove_data=True)
+                except Exception as e:
+                    logger.warning(
+                        "stop_agent(%s, remove_data=True) failed during delete: %s",
+                        target_id, e,
+                    )
             try:
-                _remove_agent(target_id, stop_container=container_manager is not None)
+                _remove_agent(target_id, stop_container=False)
             except Exception as e:
                 raise HTTPException(500, f"Failed to delete agent: {e}")
             # Drop runtime state via cleanup_agent (rate buckets, vault,
