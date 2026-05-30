@@ -3037,11 +3037,16 @@ class AgentLoop:
         compose attempt on top, never a loop.
 
         Returns ``(content, tokens_used)``. ``content`` is the resolved
-        (non-silent) text, or ``""`` when the retry also came back empty,
-        was a deliberate ``__SILENT__`` reply, or raised. Callers add the
-        recovered text to ``self._chat_messages`` themselves so the retry
-        stays a pure read here, and fold ``tokens_used`` into the turn
-        total.
+        (non-silent) text, or ``""`` when the retry also came back empty
+        or was a deliberate ``__SILENT__`` reply. Typed credential errors
+        (``LLMAuthError`` / ``LLMConfigError``) are RE-RAISED so the
+        ``auth_failure`` / ``config_error`` taxonomy is preserved — both
+        call sites run inside a ``try`` whose typed arms surface those
+        flags (non-stream: ``auth_failure`` / ``config_error`` result
+        dicts; streaming: the matching ``done`` events). Only transient /
+        transport errors degrade to ``("", 0)``. Callers add the recovered
+        text to ``self._chat_messages`` themselves so the retry stays a
+        pure read here, and fold ``tokens_used`` into the turn total.
         """
         try:
             llm_response = await _llm_call_with_retry(
@@ -3050,6 +3055,8 @@ class AgentLoop:
                 messages=self._chat_messages,
                 tools=None,
             )
+        except (LLMAuthError, LLMConfigError):
+            raise  # preserve the auth_failure/config_error taxonomy
         except Exception as e:
             logger.warning("Bug 3 empty-compose retry failed: %s", e)
             return "", 0
