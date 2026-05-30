@@ -16,7 +16,7 @@ from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING, Any
 
 from src.shared.models import get_context_window
-from src.shared.utils import setup_logging
+from src.shared.utils import sanitize_for_prompt, setup_logging
 
 if TYPE_CHECKING:
     from src.agent.llm import LLMClient
@@ -346,8 +346,14 @@ class ContextManager:
             if not isinstance(facts, list) or not facts:
                 return 0
 
-            # Write human-readable summary to MEMORY.md
-            lines = [f"- **{f['key']}**: {f['value']}" for f in facts if f.get("key") and f.get("value")]
+            # Write human-readable summary to MEMORY.md. M2: sanitize each
+            # LLM-extracted key/value for Unicode hygiene before it lands in
+            # the persistent workspace markdown (re-read into context later).
+            lines = [
+                f"- **{sanitize_for_prompt(str(f['key']))}**: "
+                f"{sanitize_for_prompt(str(f['value']))}"
+                for f in facts if f.get("key") and f.get("value")
+            ]
             if lines and self.workspace:
                 self.workspace.append_memory(
                     f"\n## {label} ({_now_str()})\n\n" + "\n".join(lines),
@@ -466,9 +472,15 @@ class ContextManager:
                                    f"falling back to hard prune: {last_err}")
                     return self._hard_prune(messages)
 
+        # M2: sanitize the LLM-produced summary before re-injecting it into the
+        # context window, for Unicode-hygiene uniformity with the memory /
+        # bootstrap entry paths (which all call ``sanitize_for_prompt``). This
+        # strips invisible/control characters; it is lossless for normal text so
+        # summary quality is unaffected. NOT an anti-injection control.
         summary_msg = {
             "role": "user",
-            "content": f"## Conversation Summary (auto-compacted)\n\n{summary}",
+            "content": "## Conversation Summary (auto-compacted)\n\n"
+            + sanitize_for_prompt(summary),
         }
 
         # The summary is ``role=user``. The recent tail's leading group

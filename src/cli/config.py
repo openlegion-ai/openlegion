@@ -23,6 +23,13 @@ from src.shared.utils import truncate
 
 logger = logging.getLogger("cli")
 
+# L4: irreversible-grant ceiling for fleet templates. Booleans here can never
+# be set true from a template's ``permissions`` dict — they are operator/user-
+# only grants (spawning agents, spending the wallet) that must not be mintable
+# by template application. Mirrors ``_OPERATOR_PERMISSION_CEILING`` in
+# ``src/agent/builtins/operator_tools.py`` (the False entries there).
+_TEMPLATE_PERMISSION_CEILING = frozenset({"can_spawn", "can_use_wallet"})
+
 # ── Path constants ──────────────────────────────────────────
 
 
@@ -600,9 +607,24 @@ def _add_agent_permissions(name: str, permissions: dict | None = None) -> None:
             "can_manage_fleet", "can_manage_teams", "can_edit_agent_config",
             "can_view_fleet_metrics",
             "can_request_user_credentials",
+            "can_use_wallet",
         ):
             if key in permissions:
-                agent_perms[key] = bool(permissions[key])
+                value = bool(permissions[key])
+                # L4: clamp the irreversible-grant ceiling. A fleet template
+                # must never mint an agent that can spawn other agents or
+                # spend from the wallet — those are operator/user-only grants
+                # (mirrors _OPERATOR_PERMISSION_CEILING in operator_tools.py).
+                # None of the shipped templates set these true, so legitimate
+                # template application is unaffected.
+                if key in _TEMPLATE_PERMISSION_CEILING and value:
+                    logger.warning(
+                        "Template for agent '%s' tried to grant '%s'=true; "
+                        "clamping to false (irreversible-grant ceiling)",
+                        name, key,
+                    )
+                    value = False
+                agent_perms[key] = value
 
     perms["permissions"][name] = agent_perms
     _save_permissions(perms)

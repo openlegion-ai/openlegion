@@ -194,6 +194,34 @@ class TestPairing:
 
 # ── message routing ─────────────────────────────────────────────
 
+class TestInboundLogging:
+    @pytest.mark.asyncio
+    async def test_inbound_message_text_not_logged_at_warning(self, caplog):
+        """L6: the pre-auth inbound log line must NOT emit the message body,
+        and must not be at WARNING. The handler logs only sender + length at
+        DEBUG."""
+        import logging
+
+        ch = _make_channel(paired={"owner": "U1", "allowed": ["U2"]})
+        say = _make_say()
+        secret = "super-secret-message-body-12345"
+        event = {"user": "U2", "text": secret, "channel": "C1", "ts": "1.0"}
+        with caplog.at_level(logging.DEBUG, logger="channels.slack"):
+            await ch._on_message(event, say)
+            await asyncio.sleep(0.05)
+        # The message body must never appear in any log record.
+        for rec in caplog.records:
+            assert secret not in rec.getMessage(), (
+                f"message body leaked in log: {rec.getMessage()!r}"
+            )
+        # No WARNING-level "Slack event received" line.
+        warnings = [
+            r for r in caplog.records
+            if r.levelno >= logging.WARNING and "Slack event received" in r.getMessage()
+        ]
+        assert not warnings, "inbound event logged at WARNING"
+
+
 class TestMessageRouting:
     @pytest.mark.asyncio
     async def test_message_dispatches_to_handle_message(self):

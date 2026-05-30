@@ -155,6 +155,50 @@ class TestCompaction:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     @pytest.mark.asyncio
+    async def test_compact_summary_is_sanitized_before_reinjection(self):
+        """M2: the auto-compaction summary is passed through
+        sanitize_for_prompt before being re-injected as a user message —
+        invisible/control chars (e.g. zero-width space, RTL override) are
+        stripped, matching the memory/bootstrap entry paths. Lossless for
+        normal text, so summary quality is preserved."""
+        tmpdir = tempfile.mkdtemp()
+        try:
+            workspace = WorkspaceManager(workspace_dir=tmpdir)
+            # Summary laced with a zero-width space (U+200B) and a
+            # right-to-left override (U+202E). Both are Unicode Cf chars
+            # that sanitize_for_prompt strips.
+            dirty = "Summary: discussed​Python‮and ML."
+            llm = MagicMock()
+            llm.chat = AsyncMock(
+                side_effect=[
+                    LLMResponse(
+                        content='[{"key": "topic", "value": "ok", "category": "fact"}]',
+                        tokens_used=30,
+                    ),
+                    LLMResponse(content=dirty, tokens_used=30),
+                ]
+            )
+
+            cm = ContextManager(max_tokens=100, llm=llm, workspace=workspace)
+            msgs = _make_messages(10, chars_each=200)
+            result, did_compact = await cm.maybe_compact("system", msgs)
+
+            assert did_compact is True
+            summary_msg = next(
+                m for m in result
+                if "Conversation Summary" in m.get("content", "")
+            )
+            content = summary_msg["content"]
+            # Invisible chars stripped...
+            assert "​" not in content
+            assert "‮" not in content
+            # ...but the visible text survives (sanitize is lossless).
+            assert "discussedPython" in content
+            assert "and ML." in content
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    @pytest.mark.asyncio
     async def test_compact_handles_llm_failure(self):
         llm = MagicMock()
         llm.chat = AsyncMock(side_effect=RuntimeError("LLM unavailable"))

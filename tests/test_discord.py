@@ -453,3 +453,35 @@ class TestOnMessageFallback:
         ch._pairing.claim_owner(111)
         msg = ch._handle_paired(111)
         assert "Owner: 111" in msg
+
+
+# ── L5: guild allow-list covers DMs ───────────────────────────
+
+class TestDmGuildRestriction:
+    """_dm_blocked_by_guild_restriction gates DMs when guilds are restricted."""
+
+    def test_unpaired_dm_blocked_when_guilds_restricted(self):
+        """An unpaired DM (no guild) is dropped when allowed_guilds is set —
+        the pairing flow must not be exposed, closing the guild-bypass hole."""
+        ch = _make_discord_channel(allowed_guilds=[12345])
+        assert ch.allowed_guilds == {12345}
+        # has_guild=False (DM), author not paired → blocked.
+        assert ch._dm_blocked_by_guild_restriction(False, 999) is True
+
+    def test_paired_dm_allowed_when_guilds_restricted(self):
+        """An already-paired/allowed DM user is NOT blocked."""
+        ch = _make_discord_channel(allowed_guilds=[12345])
+        ch._pairing.claim_owner(777)
+        assert ch._is_allowed(777) is True
+        assert ch._dm_blocked_by_guild_restriction(False, 777) is False
+
+    def test_guild_message_never_blocked_by_dm_gate(self):
+        """In-guild messages (has_guild=True) bypass the DM gate entirely."""
+        ch = _make_discord_channel(allowed_guilds=[12345])
+        assert ch._dm_blocked_by_guild_restriction(True, 999) is False
+
+    def test_dm_gate_inert_without_guild_restriction(self):
+        """With no allowed_guilds, unpaired DMs reach the normal pairing flow."""
+        ch = _make_discord_channel()  # allowed_guilds=None
+        assert ch.allowed_guilds is None
+        assert ch._dm_blocked_by_guild_restriction(False, 999) is False

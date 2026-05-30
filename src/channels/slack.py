@@ -191,9 +191,12 @@ class SlackChannel(Channel):
 
     async def _on_message(self, event: dict, say) -> None:
         """Handle incoming Slack message events."""
-        logger.warning(
-            "Slack event received: user=%s text=%s",
-            event.get("user", "?"), (event.get("text") or "")[:80],
+        # L6: do NOT log inbound message text — this runs before any
+        # auth/pairing check. Keep a minimal pre-auth debug line (sender +
+        # length only, no body) for diagnostics.
+        logger.debug(
+            "Slack event received: user=%s text_len=%d",
+            event.get("user", "?"), len(event.get("text") or ""),
         )
         # Ignore bot messages and message subtypes (edits, joins, etc.)
         if event.get("bot_id") or event.get("subtype"):
