@@ -138,7 +138,10 @@ class TestTraceStore:
 
     def test_list_trace_summaries_trigger_preview_truncation(self):
         """trigger_preview is truncated to 120 chars."""
-        long_detail = "x" * 200
+        # Space-separated words so capture-time redaction (which collapses
+        # long unbroken alnum blobs to a single [REDACTED] token, as those
+        # are indistinguishable from secrets) leaves the length intact.
+        long_detail = "word " * 60  # 300 chars
         self.store.record("tr_long", "dispatch", "a", "chat", detail=long_detail)
         summaries = self.store.list_trace_summaries(limit=10)
         assert len(summaries[0]["trigger_preview"]) == 120
@@ -267,6 +270,72 @@ class TestTraceStoreCleanup:
     def test_cleanup_nonexistent_agent(self):
         deleted = self.store.cleanup_agent("ghost")
         assert deleted == 0
+
+
+# ── Redaction at capture (H16) ───────────────────────────────
+
+class TestTraceRedactionAtCapture:
+    """Secrets must be redacted before they hit the SQLite store, not just
+    on read — a credential pasted in chat or echoed by the model can ride
+    into ``detail`` / ``error`` / ``meta`` previews."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self._tmpdir, "traces.db")
+        self.store = TraceStore(db_path=self.db_path)
+
+    def teardown_method(self):
+        self.store.close()
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_secret_in_meta_preview_redacted_at_rest(self):
+        secret = "sk-ant-api03ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+        self.store.record(
+            "tr_secret", "mesh.api_proxy", "alpha", "llm_call",
+            meta={"prompt_preview": f"my key is {secret}",
+                  "response_preview": f"got it: {secret}"},
+        )
+        # Assert raw SQLite bytes do not contain the secret.
+        raw = self.store._conn.execute(
+            "SELECT meta_json FROM traces WHERE trace_id = ?", ("tr_secret",)
+        ).fetchone()[0]
+        assert secret not in raw
+        assert "[REDACTED]" in raw
+
+        events = self.store.get_trace("tr_secret")
+        assert secret not in events[0]["meta"]["prompt_preview"]
+        assert secret not in events[0]["meta"]["response_preview"]
+
+    def test_secret_in_detail_redacted_at_rest(self):
+        secret = "sk-ant-api03ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+        self.store.record("tr_d", "repl", "alpha", "chat", detail=f"token {secret}")
+        events = self.store.get_trace("tr_d")
+        assert secret not in events[0]["detail"]
+        assert "[REDACTED]" in events[0]["detail"]
+
+    def test_secret_in_error_redacted_at_rest(self):
+        secret = "sk-ant-api03ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+        self.store.record(
+            "tr_e", "mesh", "alpha", "llm_call",
+            status="error", error=f"auth failed with {secret}",
+        )
+        events = self.store.get_trace("tr_e")
+        assert secret not in events[0]["error"]
+        assert "[REDACTED]" in events[0]["error"]
+
+    def test_sensitive_url_query_param_redacted_in_detail(self):
+        self.store.record(
+            "tr_url", "mesh", "alpha", "http_call",
+            detail="GET https://api.example.com/v1?api_key=supersecretvalue123",
+        )
+        events = self.store.get_trace("tr_url")
+        assert "supersecretvalue123" not in events[0]["detail"]
+        assert "[REDACTED]" in events[0]["detail"]
+
+    def test_benign_text_unchanged(self):
+        self.store.record("tr_ok", "repl", "alpha", "chat", detail="hello world")
+        events = self.store.get_trace("tr_ok")
+        assert events[0]["detail"] == "hello world"
 
 
 # ── _extract_prompt_preview ──────────────────────────────────

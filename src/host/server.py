@@ -3715,16 +3715,27 @@ def create_mesh_app(
 
     @app.get("/mesh/traces")
     async def list_traces(request: Request, limit: int = 50) -> list[dict]:
-        """Return recent trace events."""
-        _require_any_auth(request)
+        """Return recent trace events.
+
+        Operator/loopback-internal only (H16): traces carry prompt/response
+        previews across every agent. ``_require_any_auth`` accepted ANY
+        agent's bearer, enabling cross-agent disclosure — tightened to
+        ``_require_operator_or_internal``. The dashboard reads traces via the
+        ``trace_store`` object on its session-authed router, NOT this HTTP
+        endpoint, so this gate does not affect the dashboard.
+        """
+        _require_operator_or_internal(request)
         if trace_store is None:
             return []
         return trace_store.list_recent(limit=limit)
 
     @app.get("/mesh/traces/{trace_id}")
     async def get_trace(trace_id: str, request: Request) -> list[dict]:
-        """Return all events for a specific trace."""
-        _require_any_auth(request)
+        """Return all events for a specific trace.
+
+        Operator/loopback-internal only (H16) — see ``list_traces``.
+        """
+        _require_operator_or_internal(request)
         if trace_store is None:
             return []
         return trace_store.get_trace(trace_id)

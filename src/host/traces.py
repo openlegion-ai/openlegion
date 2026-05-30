@@ -15,6 +15,7 @@ import threading
 import time
 from pathlib import Path
 
+from src.shared.redaction import deep_redact, redact_text_with_urls
 from src.shared.sqlite_helpers import open_db
 from src.shared.utils import dumps_safe, setup_logging
 
@@ -77,8 +78,18 @@ class TraceStore:
         error: str = "",
         meta: dict | None = None,
     ) -> None:
-        """Insert a trace event."""
-        meta_json = dumps_safe(meta) if meta else ""
+        """Insert a trace event.
+
+        Free-form text fields (``detail``, ``error``) and every string inside
+        ``meta`` (notably ``prompt_preview`` / ``response_preview``, which
+        echo user chat and model output verbatim) are redacted at capture so a
+        credential pasted in chat or emitted by the model is never persisted in
+        plaintext (H16). Redaction is centralized here rather than at each of
+        the ~8 ``record`` callsites in the mesh so no path can regress.
+        """
+        detail = redact_text_with_urls(detail)
+        error = redact_text_with_urls(error)
+        meta_json = dumps_safe(deep_redact(meta)) if meta else ""
         self._conn.execute(
             "INSERT INTO traces "
             "(trace_id, timestamp, source, agent, event_type, detail, duration_ms, status, error, meta_json) "
