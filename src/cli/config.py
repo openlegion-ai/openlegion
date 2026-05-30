@@ -558,7 +558,9 @@ def _add_agent_to_config(
         yaml.dump(agents_cfg, f, default_flow_style=False, sort_keys=False)
 
 
-def _add_agent_permissions(name: str, permissions: dict | None = None) -> None:
+def _add_agent_permissions(
+    name: str, permissions: dict | None = None, *, from_template: bool = False
+) -> None:
     """Add default permissions for a new agent.
 
     If collaboration mode is enabled in mesh.yaml, agents can message
@@ -617,7 +619,7 @@ def _add_agent_permissions(name: str, permissions: dict | None = None) -> None:
                 # (mirrors _OPERATOR_PERMISSION_CEILING in operator_tools.py).
                 # None of the shipped templates set these true, so legitimate
                 # template application is unaffected.
-                if key in _TEMPLATE_PERMISSION_CEILING and value:
+                if from_template and key in _TEMPLATE_PERMISSION_CEILING and value:
                     logger.warning(
                         "Template for agent '%s' tried to grant '%s'=true; "
                         "clamping to false (irreversible-grant ceiling)",
@@ -1345,7 +1347,7 @@ def _apply_template(
             escalation_to=agent_def.get("escalation_to"),
             forbidden=agent_def.get("forbidden") or [],
         )
-        _add_agent_permissions(agent_name, permissions=agent_permissions)
+        _add_agent_permissions(agent_name, permissions=agent_permissions, from_template=True)
         skills_dir = PROJECT_ROOT / "skills" / agent_name
         skills_dir.mkdir(parents=True, exist_ok=True)
         created.append(agent_name)
@@ -1469,7 +1471,7 @@ def _create_agent_from_template(
         escalation_to=agent_def.get("escalation_to"),
         forbidden=agent_def.get("forbidden") or [],
     )
-    _add_agent_permissions(name, permissions=agent_permissions)
+    _add_agent_permissions(name, permissions=agent_permissions, from_template=True)
     skills_dir = PROJECT_ROOT / "skills" / name
     skills_dir.mkdir(parents=True, exist_ok=True)
 

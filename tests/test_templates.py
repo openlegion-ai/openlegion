@@ -256,7 +256,7 @@ class TestAddAgentPermissions(_TempConfigMixin):
             "can_spawn": True,
             "can_use_wallet": True,
             "can_manage_cron": True,  # not on the ceiling — should pass through
-        })
+        }, from_template=True)
         with open(self._perms_path) as f:
             perms = json.load(f)
         m = perms["permissions"]["mallory"]
