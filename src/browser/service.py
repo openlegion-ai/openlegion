@@ -12,6 +12,7 @@ import asyncio
 import base64
 import contextlib
 import inspect
+import ipaddress
 import json
 import math
 import mimetypes
@@ -19,6 +20,7 @@ import os
 import random
 import re
 import signal
+import socket
 import subprocess
 import time
 import uuid
@@ -1495,6 +1497,102 @@ _BLOCKED_URL_SCHEMES = frozenset({
 })
 _ALLOWED_URL_SCHEMES = frozenset({"http", "https"})
 
+# SSRF blocklist (M21 — browser SSRF parity). Mirrors the agent-side
+# ``http_tool._is_blocked_ip`` logic so navigate/open_tab refuse to
+# reach private/loopback/metadata ranges even if the container iptables
+# egress filter is missing or misconfigured. This is a second, defence-
+# in-depth layer — it MUST only block private/metadata IPs, never
+# legitimate public navigation.
+_BROWSER_CGNAT_NETWORK = ipaddress.IPv4Network("100.64.0.0/10")
+
+
+def _browser_ip_is_blocked(
+    ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> bool:
+    """Return True if ``ip`` is in a range that should be blocked for SSRF.
+
+    Covers RFC1918 private, loopback, link-local (incl. 169.254.169.254
+    cloud metadata), reserved, unspecified, multicast, and CGNAT, plus
+    the IPv4-mapped / 6to4 / Teredo embedded-IPv4 escape hatches.
+    """
+    if (ip.is_private or ip.is_loopback or ip.is_link_local
+            or ip.is_reserved or ip.is_unspecified or ip.is_multicast):
+        return True
+    if isinstance(ip, ipaddress.IPv4Address) and ip in _BROWSER_CGNAT_NETWORK:
+        return True
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+        mapped = ip.ipv4_mapped
+        if (mapped.is_private or mapped.is_loopback or mapped.is_link_local
+                or mapped.is_reserved or mapped.is_unspecified
+                or mapped.is_multicast):
+            return True
+        if mapped in _BROWSER_CGNAT_NETWORK:
+            return True
+    if isinstance(ip, ipaddress.IPv6Address) and ip.sixtofour:
+        embedded = ip.sixtofour
+        if (embedded.is_private or embedded.is_loopback
+                or embedded.is_link_local or embedded.is_reserved
+                or embedded.is_unspecified or embedded.is_multicast):
+            return True
+        if embedded in _BROWSER_CGNAT_NETWORK:
+            return True
+    if isinstance(ip, ipaddress.IPv6Address) and ip.teredo:
+        _, teredo_client = ip.teredo
+        if (teredo_client.is_private or teredo_client.is_loopback
+                or teredo_client.is_link_local or teredo_client.is_reserved
+                or teredo_client.is_unspecified or teredo_client.is_multicast):
+            return True
+        if teredo_client in _BROWSER_CGNAT_NETWORK:
+            return True
+    return False
+
+
+def _browser_host_is_blocked(host: str) -> bool:
+    """Resolve ``host`` and return True if ANY resolved IP is blocked.
+
+    A literal IP host is checked directly. A DNS name is resolved and
+    every returned address is screened so a domain that resolves to a
+    private/metadata IP (DNS-based SSRF) is also rejected.
+
+    An empty host is blocked (host-less URLs were already rejected by the
+    callers, but this is belt-and-braces). Resolution *failure* fails
+    OPEN — a name that doesn't resolve can't reach anything, so we let
+    the browser engine surface the real network error (e.g.
+    ``ERR_NAME_NOT_RESOLVED``) rather than masking it. The security
+    property we care about — never reaching a private/metadata IP — is
+    only relevant when resolution succeeds, and that case IS screened.
+    The browser engine performs its own resolution at connect time; this
+    is a best-effort pre-flight, not a DNS pin.
+    """
+    if not host:
+        return True
+    # Strip IPv6 brackets if present (``[::1]`` → ``::1``).
+    candidate = host.strip()
+    if candidate.startswith("[") and candidate.endswith("]"):
+        candidate = candidate[1:-1]
+    # Literal IP — check directly, no DNS.
+    try:
+        ip = ipaddress.ip_address(candidate)
+        return _browser_ip_is_blocked(ip)
+    except ValueError:
+        pass
+    # Hostname — resolve all addresses and screen each. Fail open on a
+    # resolution error (see docstring).
+    try:
+        infos = socket.getaddrinfo(candidate, None)
+    except (socket.gaierror, UnicodeError, OSError):
+        return False
+    for info in infos:
+        addr = info[4][0]
+        # Drop any zone id (``fe80::1%eth0``) before parsing.
+        addr = addr.split("%", 1)[0]
+        try:
+            ip = ipaddress.ip_address(addr)
+        except ValueError:
+            continue
+        if _browser_ip_is_blocked(ip):
+            return True
+    return False
 
 
 _MAX_WAIT_MS = 10000  # 10 seconds max wait after navigation
@@ -3642,9 +3740,15 @@ class BrowserManager:
                 "-SecurityTypes", "None",
                 "-disableBasicAuth",
                 "-AlwaysShared",
-                "-interface", "0.0.0.0",
-                "-http-header", "X-Frame-Options=ALLOWALL",
-                "-http-header", "Access-Control-Allow-Origin=*",
+                # M6: bind to loopback only. The in-container proxy in
+                # src/browser/server.py reaches KasmVNC via
+                # ``http://127.0.0.1:{port}`` over loopback, so binding to
+                # 0.0.0.0 only added external reachability with no benefit.
+                "-interface", "127.0.0.1",
+                # L12: the viewer is always same-origin via the mesh proxy,
+                # so drop the wildcard CORS override and frame any origin.
+                # SAMEORIGIN still permits the dashboard's same-origin iframe.
+                "-http-header", "X-Frame-Options=SAMEORIGIN",
             ]
             xvnc = await loop.run_in_executor(
                 None, lambda: _spawn(xvnc_cmd, name="Xvnc"),
@@ -4938,6 +5042,14 @@ class BrowserManager:
             return {
                 "success": False,
                 "error": "URL missing host component",
+            }
+        # M21: SSRF parity — reject private/loopback/metadata/CGNAT hosts.
+        # Second defence layer independent of the container iptables egress
+        # filter. ``hostname`` strips port + userinfo; only public IPs pass.
+        if _browser_host_is_blocked(parsed.hostname or ""):
+            return {
+                "success": False,
+                "error": "URL host resolves to a blocked (private/loopback/metadata) address",
             }
         if wait_until not in _VALID_WAIT_UNTIL:
             valid = sorted(_VALID_WAIT_UNTIL)
@@ -10695,6 +10807,14 @@ class BrowserManager:
             return _err(
                 "invalid_input",
                 f"URL scheme '{parsed.scheme}' is not allowed",
+            )
+        if not parsed.netloc:
+            return _err("invalid_input", "URL missing host component")
+        # M21: SSRF parity — reject private/loopback/metadata/CGNAT hosts.
+        if _browser_host_is_blocked(parsed.hostname or ""):
+            return _err(
+                "invalid_input",
+                "URL host resolves to a blocked (private/loopback/metadata) address",
             )
 
         inst = await self.get_or_start(agent_id)

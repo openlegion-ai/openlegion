@@ -74,6 +74,25 @@ def _websockets_headers_kw(connect, headers: dict[str, str]) -> dict:
     return {"extra_headers": headers}
 
 
+def _vnc_path_is_safe(agent_id: str, path: str) -> bool:
+    """H14: reject path-traversal on the per-agent VNC proxy.
+
+    Starlette has already percent-decoded ``{path:path}`` by the time it
+    reaches the handler, so a ``..%2f..%2f`` attempt arrives here as the
+    literal ``../../``. The noVNC client only ever requests relative
+    sub-paths (``index.html``, ``vendor/foo.js``, ``websockify``) — it
+    never uses ``..`` — so rejecting any ``..`` segment is safe for the
+    viewer. We also assert the constructed upstream path stays under the
+    agent's ``/agent-vnc/{agent_id}/`` prefix as a belt-and-braces check.
+    """
+    normalized = path.replace("\\", "/")
+    if any(seg == ".." for seg in normalized.split("/")):
+        return False
+    prefix = f"/agent-vnc/{agent_id}/"
+    constructed = f"/agent-vnc/{agent_id}/{path}"
+    return constructed.startswith(prefix)
+
+
 def _extract_prompt_preview(params: dict, max_len: int = 500) -> str:
     """Extract the last user message content as a short preview string."""
     for msg in reversed(params.get("messages", [])):
@@ -8631,6 +8650,8 @@ def create_mesh_app(
             raise HTTPException(401, auth_error)
         if not _AGENT_ID_RE.fullmatch(agent_id):
             raise HTTPException(404)
+        if not _vnc_path_is_safe(agent_id, path):
+            raise HTTPException(400, "Invalid VNC path")
         svc_url = getattr(container_manager, "browser_service_url", None)
         svc_token = getattr(container_manager, "browser_auth_token", "")
         if not svc_url:
@@ -8655,6 +8676,10 @@ def create_mesh_app(
         ct = resp.headers.get("content-type")
         if ct:
             headers["content-type"] = ct
+        # M17: never let the browser MIME-sniff proxied VNC assets. KasmVNC
+        # declares correct content-types, so nosniff is transparent to the
+        # viewer while closing the sniff-based content-confusion vector.
+        headers["x-content-type-options"] = "nosniff"
         return StreamingResponse(
             iter([resp.content]),
             status_code=resp.status_code,
@@ -8685,6 +8710,9 @@ def create_mesh_app(
                         return
         if not _AGENT_ID_RE.fullmatch(agent_id):
             await websocket.close(code=1008, reason="invalid agent_id")
+            return
+        if not _vnc_path_is_safe(agent_id, path):
+            await websocket.close(code=1008, reason="invalid VNC path")
             return
         svc_url = getattr(container_manager, "browser_service_url", None)
         svc_token = getattr(container_manager, "browser_auth_token", "")

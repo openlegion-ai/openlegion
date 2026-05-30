@@ -382,3 +382,34 @@ class TestBrowserStatusActiveAgents:
         body = resp.json()
         assert body.get("active_browsers", -1) == 0
         assert body.get("agents", "missing") == []
+
+
+class TestVncProxyPathTraversal:
+    """H14: the mesh-side VNC proxy must reject ``..`` path traversal.
+
+    Starlette percent-decodes ``{path:path}`` before the handler runs,
+    so a ``..%2f..%2f`` request arrives as the literal ``../../``. The
+    noVNC client never uses ``..`` (only relative sub-paths), so the
+    guard is transparent to the real viewer.
+    """
+
+    def test_traversal_segment_rejected(self):
+        from src.host.server import _vnc_path_is_safe
+        # ``..%2f..%2fetc%2fpasswd`` decodes to this:
+        assert not _vnc_path_is_safe("agent1", "../../etc/passwd")
+        assert not _vnc_path_is_safe("agent1", "vendor/../../secret")
+        assert not _vnc_path_is_safe("agent1", "..")
+        # Backslash-normalized traversal also rejected.
+        assert not _vnc_path_is_safe("agent1", "..\\..\\etc")
+
+    def test_normal_subpaths_pass(self):
+        from src.host.server import _vnc_path_is_safe
+        # Exactly the paths the noVNC client requests.
+        assert _vnc_path_is_safe("agent1", "index.html")
+        assert _vnc_path_is_safe("agent1", "vendor/pako/pako_inflate.js")
+        assert _vnc_path_is_safe("agent1", "app/ui.js")
+        assert _vnc_path_is_safe("agent1", "core/rfb.js")
+        assert _vnc_path_is_safe("agent1", "websockify")
+        assert _vnc_path_is_safe("agent1", "")
+        # A filename that merely contains dots (not a ``..`` segment) is fine.
+        assert _vnc_path_is_safe("agent1", "foo..bar.js")
