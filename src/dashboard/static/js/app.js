@@ -7924,6 +7924,24 @@ function dashboard() {
     },
 
     closeChat(agentId) {
+      // Operator is permanent — it can never be removed from the messenger.
+      // The chat-header X, while Operator is active, either closes the whole
+      // panel (when Operator is the only open chat) or simply shifts focus to
+      // another open chat, leaving Operator pinned in ``openChats``.
+      if (agentId === 'operator') {
+        const others = this.openChats.filter(id => id !== 'operator');
+        if (others.length === 0) {
+          // Operator is the only chat left — close the panel itself rather
+          // than removing Operator. Mirrors the Minimize control's behaviour.
+          this.chatPanelMinimized = true;
+          this._saveChatToSession();
+          return;
+        }
+        // Keep Operator open; move focus to the most recently opened worker.
+        this.activeChatId = others[others.length - 1];
+        this._saveChatToSession();
+        return;
+      }
       if (this._chatAborts[agentId]) {
         this._chatAborts[agentId].abort();
         delete this._chatAborts[agentId];
