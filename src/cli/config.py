@@ -254,15 +254,20 @@ def _load_config(mesh_path: Path | None = None) -> dict:
     return cfg
 
 
-# Serializes read-modify-write of permissions.json. Callers do
-# ``perms = _load_permissions(); ...mutate...; _save_permissions(perms)``;
-# this lock keeps concurrent writers (dashboard + mesh endpoints sharing
-# the process) from losing each other's edits, and pairs with the atomic
-# os.replace below so a reader never observes a half-written file.
+# Guards individual reads/writes of permissions.json. Held internally by
+# _load_permissions and _save_permissions so a save never interleaves with a
+# read, and pairs with the atomic os.replace below so a reader never observes a
+# half-written file (the boot-crash / torn-read protection — finding M14).
 #
-# Reentrant so a caller may hold it across a whole load→mutate→save critical
-# section (e.g. ``with _PERMISSIONS_LOCK: ...``) even though _load_permissions
-# and _save_permissions each re-acquire it internally.
+# NOTE: this does NOT by itself prevent the lost-update race. Callers do
+# ``perms = _load_permissions(); ...mutate...; _save_permissions(perms)`` as
+# two separate lock acquisitions, so two concurrent writers (e.g. a template
+# apply touching agent B while the dashboard edits agent A) can both load the
+# same baseline and the second save clobbers the first. The lock is REENTRANT
+# precisely so a caller CAN close that gap by holding it across the whole
+# load→mutate→save (``with _PERMISSIONS_LOCK: ...``); today no caller does.
+# Low risk under the single-operator model; wrapping the hot call sites is a
+# tracked follow-up, not part of M14's torn-read/atomicity fix.
 _PERMISSIONS_LOCK = threading.RLock()
 
 
