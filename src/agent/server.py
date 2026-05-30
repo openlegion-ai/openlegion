@@ -51,6 +51,95 @@ if TYPE_CHECKING:
 
 logger = setup_logging("agent.server")
 
+
+def _max_body_bytes() -> int:
+    """Resolve the request body-size cap (env-configurable, default 8 MiB).
+
+    Mirrors the browser service cap. Anything larger than this is either
+    operator error or a memory-DoS attempt against the JSON parser — an
+    unbounded body is buffered into RAM before parsing, so a multi-GB POST
+    from an authenticated agent could OOM the single agent process. Env
+    override ``OPENLEGION_MAX_BODY_MB`` (default 8).
+    """
+    try:
+        mb = float(os.environ.get("OPENLEGION_MAX_BODY_MB", "8"))
+    except ValueError:
+        mb = 8.0
+    if mb <= 0:
+        mb = 8.0
+    return int(mb * 1024 * 1024)
+
+
+def _install_body_size_limit(app: FastAPI) -> None:
+    """Register an outer HTTP middleware that rejects oversized bodies.
+
+    Two layers of defence:
+      1. ``Content-Length`` header check — cheap, rejects honest clients early.
+      2. Streaming byte counter — a client can omit Content-Length (chunked
+         transfer) to bypass the header check, so we also wrap the ASGI
+         receive channel and abort with HTTP 413 the moment the streamed body
+         exceeds the cap, before the whole body is buffered into RAM.
+
+    This is an outer middleware: it runs before routing and does not strip
+    headers, so it does not interfere with downstream auth / CSRF
+    dependencies.
+    """
+    from starlette.responses import JSONResponse as _StarletteJSONResponse
+
+    @app.middleware("http")
+    async def _enforce_body_size(request: Request, call_next):
+        max_bytes = _max_body_bytes()
+        cl = request.headers.get("content-length")
+        if cl is not None:
+            try:
+                size = int(cl)
+            except ValueError:
+                return _StarletteJSONResponse(
+                    {"detail": "invalid Content-Length"}, status_code=400,
+                )
+            if size > max_bytes:
+                return _StarletteJSONResponse(
+                    {"detail": "request body too large"}, status_code=413,
+                )
+
+        # Streaming guard for chunked / Content-Length-absent bodies: a
+        # client can omit Content-Length to bypass the header check, so we
+        # drain the ASGI receive channel here with a running byte counter and
+        # bail out the moment the cap is exceeded — the endpoint is never
+        # invoked and at most ``max_bytes`` ever lands in RAM. Buffered
+        # messages are then replayed to the handler unchanged so routing /
+        # auth / CSRF dependencies see the body exactly as sent.
+        original_receive = request._receive
+        received = 0
+        buffered: list[dict] = []
+        while True:
+            message = await original_receive()
+            buffered.append(message)
+            if message["type"] != "http.request":
+                # http.disconnect or other — stop draining, replay as-is.
+                break
+            received += len(message.get("body", b""))
+            if received > max_bytes:
+                return _StarletteJSONResponse(
+                    {"detail": "request body too large"}, status_code=413,
+                )
+            if not message.get("more_body", False):
+                break
+
+        _replay = iter(buffered)
+
+        async def _replay_receive():
+            try:
+                return next(_replay)
+            except StopIteration:
+                # Body fully consumed; defer to the live channel for any
+                # trailing http.disconnect.
+                return await original_receive()
+
+        request._receive = _replay_receive
+        return await call_next(request)
+
+
 _MAX_HISTORY_MEMORY_CHARS = 5000
 _MAX_HISTORY_LOGS_CHARS = 16000
 _MAX_HISTORY_LEARNINGS_CHARS = 8000
@@ -76,6 +165,7 @@ def _origin_from_mesh_request(request: Request):
 def create_agent_app(loop: AgentLoop) -> FastAPI:
     """Create the FastAPI application for an agent container."""
     app = FastAPI(title=f"OpenLegion Agent: {loop.agent_id}")
+    _install_body_size_limit(app)
     _task_accept_lock = asyncio.Lock()
 
     @app.post("/task")
