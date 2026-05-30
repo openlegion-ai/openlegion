@@ -5158,12 +5158,17 @@ function dashboard() {
           this.agents = (await resp.json()).agents;
           this.lastRefresh = Date.now() / 1000;
           this.connectionError = false;
-          // Prune restored chat tabs for agents that no longer exist
+          // Prune restored chat tabs for agents that no longer exist.
+          // Operator is a synthetic system chat — it is never present in
+          // ``/api/agents`` (special-cased server-side, outside
+          // ``agent_registry``), so it is pinned and excluded from
+          // staleness here. A background fleet refresh must not evict
+          // Operator from the messenger.
           const agentIds = new Set(this.agents.map(a => a.id));
-          const stale = this.openChats.filter(id => !agentIds.has(id));
+          const stale = this.openChats.filter(id => id !== 'operator' && !agentIds.has(id));
           if (stale.length) {
-            this.openChats = this.openChats.filter(id => agentIds.has(id));
-            if (this.activeChatId && !agentIds.has(this.activeChatId)) {
+            this.openChats = this.openChats.filter(id => id === 'operator' || agentIds.has(id));
+            if (this.activeChatId && this.activeChatId !== 'operator' && !agentIds.has(this.activeChatId)) {
               this.activeChatId = this.openChats[0] || null;
             }
             this._saveChatToSession();
@@ -7931,9 +7936,12 @@ function dashboard() {
       if (agentId === 'operator') {
         const others = this.openChats.filter(id => id !== 'operator');
         if (others.length === 0) {
-          // Operator is the only chat left — close the panel itself rather
-          // than removing Operator. Mirrors the Minimize control's behaviour.
+          // Operator is the only chat left — dismiss the whole messenger
+          // rather than removing Operator. Mirrors the ESC "dismiss panel"
+          // path: minimize + clear the legacy side-panel flag + restore
+          // focus (``closeSidePanel`` no-ops when not toggle-opened).
           this.chatPanelMinimized = true;
+          this.closeSidePanel();
           this._saveChatToSession();
           return;
         }
