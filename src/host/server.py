@@ -64,6 +64,132 @@ _MAX_BB_KEY_LEN = 512  # chars — prevents abusive key lengths in blackboard
 _MAX_BB_VALUE_BYTES = 262_144  # 256 KB — bounds per-key storage to keep SQLite WAL manageable
 
 
+def _max_body_bytes() -> int:
+    """Resolve the request body-size cap (env-configurable, default 8 MiB).
+
+    Mirrors the browser service cap. An unbounded HTTP body is buffered into
+    RAM before the JSON parser runs, so a multi-GB POST from an authenticated
+    agent could OOM the single coordination process and take the whole fleet
+    down. Env override ``OPENLEGION_MAX_BODY_MB`` (default 8).
+    """
+    try:
+        mb = float(os.environ.get("OPENLEGION_MAX_BODY_MB", "8"))
+    except ValueError:
+        mb = 8.0
+    if mb <= 0:
+        mb = 8.0
+    return int(mb * 1024 * 1024)
+
+
+# Routes that legitimately accept large bodies (file uploads) enforce their
+# OWN ~50 MB per-route limit, so the small global cap must not pre-empt them.
+# We give them a HIGHER cap rather than exempting them outright: the streaming
+# guard then still bounds memory (an OOM backstop) — which matters because not
+# every upload route streams. /mesh/browser/upload-stage streams chunk-by-chunk
+# with its own counter, but /dashboard/api/uploads does ``await request.body()``
+# (buffers the whole body before its len() check), so a full exemption would
+# reopen an OOM via that route. Matched by path prefix against request.url.path.
+# Exact-match the fixed staging route (no path param) — a prefix would also
+# match an unrelated future ``/mesh/browser/upload-stage*`` route. Prefix-match
+# the dashboard uploads subtree (it has a ``{name:path}`` param).
+_UPLOAD_ROUTE_EXACT: str = "/mesh/browser/upload-stage"  # agent->browser upload staging (route cap 50 MB; streams)
+_UPLOAD_ROUTE_PREFIX: str = "/dashboard/api/uploads/"    # dashboard file uploads (route cap 50 MB; BUFFERS body)
+
+
+def _upload_route_max_bytes() -> int:
+    """OOM-backstop cap for the large-upload routes. Env override
+    ``OPENLEGION_MAX_UPLOAD_BODY_MB`` (default 64). Kept comfortably above the
+    routes' own 50 MB limit so a 50-64 MB upload hits their clean per-route 413,
+    while anything larger is streaming-aborted before it is buffered into RAM.
+    """
+    try:
+        mb = float(os.environ.get("OPENLEGION_MAX_UPLOAD_BODY_MB", "64"))
+    except ValueError:
+        mb = 64.0
+    return max(1, int(mb * 1024 * 1024))
+
+
+def _body_cap_for_path(path: str) -> int:
+    """Per-route body cap: the higher upload cap for upload routes, else the
+    global cap. Never returns "unlimited" — every route keeps an OOM backstop."""
+    if path == _UPLOAD_ROUTE_EXACT or path.startswith(_UPLOAD_ROUTE_PREFIX):
+        return _upload_route_max_bytes()
+    return _max_body_bytes()
+
+
+def _install_body_size_limit(app: FastAPI) -> None:
+    """Register an outer HTTP middleware that rejects oversized bodies.
+
+    Two layers of defence:
+      1. ``Content-Length`` header check — cheap, rejects honest clients early.
+      2. Streaming byte counter — a client can omit Content-Length (chunked
+         transfer) to bypass the header check, so we also wrap the ASGI
+         receive channel and abort with HTTP 413 the moment the streamed body
+         exceeds the cap, before the whole body is buffered into RAM.
+
+    This is an outer middleware: it runs before routing and does not strip
+    headers, so it does not interfere with downstream auth / CSRF
+    dependencies.
+    """
+    from starlette.responses import JSONResponse as _StarletteJSONResponse
+
+    @app.middleware("http")
+    async def _enforce_body_size(request: Request, call_next):
+        # Per-route cap: upload routes get a higher OOM-backstop cap (not a
+        # full exemption), so the streaming guard still bounds memory even for
+        # a route that buffers its body before its own size check.
+        max_bytes = _body_cap_for_path(request.url.path)
+        cl = request.headers.get("content-length")
+        if cl is not None:
+            try:
+                size = int(cl)
+            except ValueError:
+                return _StarletteJSONResponse(
+                    {"detail": "invalid Content-Length"}, status_code=400,
+                )
+            if size > max_bytes:
+                return _StarletteJSONResponse(
+                    {"detail": "request body too large"}, status_code=413,
+                )
+
+        # Streaming guard for chunked / Content-Length-absent bodies: a
+        # client can omit Content-Length to bypass the header check, so we
+        # drain the ASGI receive channel here with a running byte counter and
+        # bail out the moment the cap is exceeded — the endpoint is never
+        # invoked and at most ``max_bytes`` ever lands in RAM. Buffered
+        # messages are then replayed to the handler unchanged so routing /
+        # auth / CSRF dependencies see the body exactly as sent.
+        original_receive = request._receive
+        received = 0
+        buffered: list[dict] = []
+        while True:
+            message = await original_receive()
+            buffered.append(message)
+            if message["type"] != "http.request":
+                # http.disconnect or other — stop draining, replay as-is.
+                break
+            received += len(message.get("body", b""))
+            if received > max_bytes:
+                return _StarletteJSONResponse(
+                    {"detail": "request body too large"}, status_code=413,
+                )
+            if not message.get("more_body", False):
+                break
+
+        _replay = iter(buffered)
+
+        async def _replay_receive():
+            try:
+                return next(_replay)
+            except StopIteration:
+                # Body fully consumed; defer to the live channel for any
+                # trailing http.disconnect.
+                return await original_receive()
+
+        request._receive = _replay_receive
+        return await call_next(request)
+
+
 def _websockets_headers_kw(connect, headers: dict[str, str]) -> dict:
     """Return the header kwarg name supported by the installed websockets."""
     try:
@@ -616,6 +742,7 @@ def create_mesh_app(
 ) -> FastAPI:
     """Create the FastAPI application for the mesh host process."""
     app = FastAPI(title="OpenLegion Mesh")
+    _install_body_size_limit(app)
     # Exposed for external callers (dashboard, health monitor) to clean up
     # agent state when agents are removed.
     app.cleanup_agent = lambda agent_id: None  # replaced below
