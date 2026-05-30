@@ -6,8 +6,9 @@ when those packages are not installed (CI runs without blockchain deps).
 
 from __future__ import annotations
 
+import asyncio
 from decimal import Decimal
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -423,3 +424,182 @@ class TestClose:
         # DB should be closed — operations raise
         with pytest.raises(Exception):
             wallet_service.db.execute("SELECT 1")
+
+
+# ── H6: token transfers valued against spend caps ─────────────
+#
+# Canonical Base-mainnet USDC (in the stablecoin allowlist).  6 decimals.
+_USDC_BASE = "0x833589fcD6eDb6E08f4c7C32D4f71b54bdA02913"
+_RECIPIENT = "0x" + "11" * 20
+
+
+def _stub_token_transfer(ws, decimals=6, captured=None):
+    """Patch the network-touching internals of an EVM token transfer.
+
+    Stubs decimals lookup + EVM broadcast so ``transfer`` exercises the real
+    valuation + policy + audit path without RPC.  ``captured`` (if given) gets
+    each tx_hash appended so callers can count broadcasts.
+    """
+    async def _decimals(_chain, _addr):
+        return decimals
+
+    async def _send(_agent, _chain, _tx_params):
+        tx_hash = "0x" + "ab" * 32
+        if captured is not None:
+            captured.append(tx_hash)
+        return tx_hash
+
+    ws._evm_token_decimals = _decimals  # type: ignore[assignment]
+    ws._evm_sign_and_send = AsyncMock(side_effect=_send)  # type: ignore[assignment]
+
+
+@requires_web3
+class TestTokenSpendCaps:
+    @pytest.mark.asyncio
+    async def test_usdc_above_per_tx_cap_rejected(self, wallet_service):
+        """A USDC transfer above the per-tx cap is REJECTED — proving it is
+        valued at its USD notional, not $0 (H6)."""
+        _stub_token_transfer(wallet_service)
+        # Default per-tx cap is $10.  Transferring 25 USDC ($25) must fail.
+        with pytest.raises(PermissionError, match="Per-transaction"):
+            await wallet_service.transfer(
+                "agent-usdc", "evm:base", _RECIPIENT, "25", token=_USDC_BASE,
+            )
+        # No broadcast happened; a 'rejected' audit row was written.
+        wallet_service._evm_sign_and_send.assert_not_called()
+        row = wallet_service.db.execute(
+            "SELECT status FROM transactions WHERE agent_id = 'agent-usdc'",
+        ).fetchone()
+        assert row[0] == "rejected"
+
+    @pytest.mark.asyncio
+    async def test_usdc_within_cap_records_notional(self, wallet_service):
+        """A sub-cap USDC transfer broadcasts and records its USD notional in
+        the audit row (so the daily SUM reflects token value)."""
+        captured: list[str] = []
+        _stub_token_transfer(wallet_service, captured=captured)
+        result = await wallet_service.transfer(
+            "agent-usdc2", "evm:base", _RECIPIENT, "8", token=_USDC_BASE,
+        )
+        assert result["status"] == "broadcast"
+        assert captured  # broadcast occurred
+        row = wallet_service.db.execute(
+            "SELECT value_usd, status, token FROM transactions "
+            "WHERE agent_id = 'agent-usdc2' AND status = 'broadcast'",
+        ).fetchone()
+        assert row[0] == pytest.approx(8.0)
+        assert row[2] == _USDC_BASE
+
+    @pytest.mark.asyncio
+    async def test_daily_cap_counts_token_notional(self, wallet_service):
+        """Two sub-cap token transfers that together exceed the daily cap are
+        blocked — daily SUM reflects token notional (H6)."""
+        # Tighten the daily cap so two $8 sends ($16) breach it.
+        mock_perms = MagicMock()
+        # (per_tx, daily, rate)
+        mock_perms.get_wallet_limits.return_value = (10.0, 12.0, 100)
+        _stub_token_transfer(wallet_service)
+
+        # First $8 transfer: allowed.
+        await wallet_service.transfer(
+            "agent-daily-tok", "evm:base", _RECIPIENT, "8",
+            token=_USDC_BASE, permissions=mock_perms,
+        )
+        # Second $8 transfer: 8 + 8 = $16 > $12 daily → rejected.
+        with pytest.raises(PermissionError, match="Daily limit"):
+            await wallet_service.transfer(
+                "agent-daily-tok", "evm:base", _RECIPIENT, "8",
+                token=_USDC_BASE, permissions=mock_perms,
+            )
+
+    @pytest.mark.asyncio
+    async def test_concurrent_transfers_respect_daily_cap(self, wallet_service):
+        """Concurrent token transfers must not overshoot the daily cap — the
+        per-agent lock serialises check→broadcast→audit (M4)."""
+        mock_perms = MagicMock()
+        # daily $25; each transfer is $10 → at most TWO may pass, third must fail.
+        mock_perms.get_wallet_limits.return_value = (10.0, 25.0, 1000)
+
+        broadcasts: list[str] = []
+        _stub_token_transfer(wallet_service, captured=broadcasts)
+
+        async def _one():
+            try:
+                await wallet_service.transfer(
+                    "agent-race", "evm:base", _RECIPIENT, "10",
+                    token=_USDC_BASE, permissions=mock_perms,
+                )
+                return "ok"
+            except PermissionError:
+                return "denied"
+
+        results = await asyncio.gather(*[_one() for _ in range(5)])
+        oks = results.count("ok")
+        # Without the lock, all 5 could race past the SUM check.  With it,
+        # at most floor(25/10) = 2 broadcast.
+        assert oks == 2, results
+        assert len(broadcasts) == 2
+        total = wallet_service.db.execute(
+            "SELECT COALESCE(SUM(value_usd), 0) FROM transactions "
+            "WHERE agent_id = 'agent-race' AND status = 'broadcast'",
+        ).fetchone()[0]
+        assert total <= 25.0
+
+    @pytest.mark.asyncio
+    async def test_unknown_token_price_fails_closed(self, wallet_service):
+        """A non-stablecoin token whose price is UNKNOWN is rejected when a
+        spend cap is configured (fail-closed, not valued at $0)."""
+        # A token NOT in the stablecoin allowlist; force the contract-price
+        # lookup to return None (network unavailable / unlisted).
+        async def _decimals(_chain, _addr):
+            return 18
+
+        async def _no_price(_chain, _addr_lc):
+            return None
+
+        wallet_service._evm_token_decimals = _decimals  # type: ignore[assignment]
+        wallet_service._get_token_price_by_contract = _no_price  # type: ignore[assignment]
+        wallet_service._evm_sign_and_send = AsyncMock()  # type: ignore[assignment]
+
+        unknown_token = "0x" + "22" * 20
+        with pytest.raises(PermissionError, match="price unavailable"):
+            await wallet_service.transfer(
+                "agent-unknown", "evm:base", _RECIPIENT, "1", token=unknown_token,
+            )
+        wallet_service._evm_sign_and_send.assert_not_called()
+
+
+@requires_web3
+class TestNativeTransferUnchanged:
+    @pytest.mark.asyncio
+    async def test_native_transfer_still_broadcasts(self, wallet_service):
+        """Native transfers behave exactly as before: valued via the native
+        price path, broadcast, and audited (H6 must not regress native)."""
+        wallet_service._evm_sign_and_send = AsyncMock(
+            return_value="0x" + "cd" * 32,
+        )  # type: ignore[assignment]
+        # Pin the native price so the test is network-independent.
+        wallet_service._get_price = AsyncMock(return_value=3000.0)  # type: ignore[assignment]
+        # 0.001 ETH = $3 < $10 cap.
+        result = await wallet_service.transfer(
+            "agent-native", "evm:base", _RECIPIENT, "0.001", token="native",
+        )
+        assert result["status"] == "broadcast"
+        wallet_service._evm_sign_and_send.assert_awaited_once()
+        row = wallet_service.db.execute(
+            "SELECT token, value_usd FROM transactions "
+            "WHERE agent_id = 'agent-native' AND status = 'broadcast'",
+        ).fetchone()
+        assert row[0] == "native"
+        assert row[1] == pytest.approx(3.0, rel=0.01)
+
+    @pytest.mark.asyncio
+    async def test_native_transfer_over_cap_rejected(self, wallet_service):
+        """Native over-cap rejection path is unchanged."""
+        wallet_service._evm_sign_and_send = AsyncMock()  # type: ignore[assignment]
+        # 1 ETH = $3000 (fallback) >> $10 per-tx cap.
+        with pytest.raises(PermissionError, match="Per-transaction"):
+            await wallet_service.transfer(
+                "agent-native2", "evm:base", _RECIPIENT, "1", token="native",
+            )
+        wallet_service._evm_sign_and_send.assert_not_called()
