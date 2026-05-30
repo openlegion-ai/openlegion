@@ -522,6 +522,7 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         from src.agent.llm import LLMClient
         model = body.get("model") if "model" in body else None
         thinking = body.get("thinking") if "thinking" in body else None
+        max_tokens = body.get("max_tokens") if "max_tokens" in body else None
         internet = body.get("internet_access_enabled") if "internet_access_enabled" in body else None
         if "model" in body and (not isinstance(model, str) or not model):
             raise HTTPException(400, "model must be a non-empty string")
@@ -529,6 +530,14 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
             raise HTTPException(
                 400,
                 f"thinking must be one of: {sorted(LLMClient.VALID_THINKING_LEVELS)}",
+            )
+        if "max_tokens" in body and (
+            not isinstance(max_tokens, int)
+            or isinstance(max_tokens, bool)
+            or not (256 <= max_tokens <= 200_000)
+        ):
+            raise HTTPException(
+                400, "max_tokens must be an integer between 256 and 200000",
             )
         if "internet_access_enabled" in body and not isinstance(internet, bool):
             raise HTTPException(
@@ -542,6 +551,9 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         if "thinking" in body:
             loop.llm.thinking = thinking
             updated["thinking"] = thinking
+        if "max_tokens" in body:
+            loop.llm.max_output_tokens = max_tokens
+            updated["max_tokens"] = max_tokens
         if "internet_access_enabled" in body:
             # Mesh-side push from the Operator Settings → Internet
             # access toggle. When False, hide http_request + web_search
