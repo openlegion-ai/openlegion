@@ -765,8 +765,35 @@ def create_mesh_app(
     cfg: dict | None = None,
 ) -> FastAPI:
     """Create the FastAPI application for the mesh host process."""
-    app = FastAPI(title="OpenLegion Mesh")
+    # M19: disable interactive API docs / OpenAPI schema by default to avoid
+    # exposing the full endpoint surface. Gate behind OPENLEGION_ENABLE_DOCS so
+    # dev exploration is still one env flag away.
+    _docs_kwargs = (
+        {}
+        if os.environ.get("OPENLEGION_ENABLE_DOCS", "").lower() in ("1", "true", "yes", "on")
+        else {"docs_url": None, "redoc_url": None, "openapi_url": None}
+    )
+    app = FastAPI(title="OpenLegion Mesh", **_docs_kwargs)
     _install_body_size_limit(app)
+
+    # L11: stamp baseline security headers on every response. Outer middleware —
+    # only adds headers, never strips existing ones, so the CSRF dependency and
+    # auth checks (which run inside route handlers) are untouched. No HSTS here:
+    # Caddy terminates TLS and owns Strict-Transport-Security.
+    @app.middleware("http")
+    async def _security_headers(request: Request, call_next):
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault(
+            "Referrer-Policy", "strict-origin-when-cross-origin"
+        )
+        response.headers.setdefault(
+            "Permissions-Policy",
+            "accelerometer=(), camera=(), geolocation=(), gyroscope=(), "
+            "magnetometer=(), microphone=(), payment=(), usb=()",
+        )
+        return response
+
     # Exposed for external callers (dashboard, health monitor) to clean up
     # agent state when agents are removed.
     app.cleanup_agent = lambda agent_id: None  # replaced below

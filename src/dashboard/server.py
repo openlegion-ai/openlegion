@@ -1076,12 +1076,18 @@ def create_dashboard_router(
         )
         return HTMLResponse(html, headers={
             "Cache-Control": "no-store",
+            # M18: frame-ancestors 'self' + X-Frame-Options SAMEORIGIN guard
+            # against clickjacking. MUST be 'self'/SAMEORIGIN, NOT 'none'/DENY:
+            # the dashboard embeds the per-agent VNC viewer in a same-origin
+            # iframe via /agent-vnc/, so 'none' would break the viewer.
+            "X-Frame-Options": "SAMEORIGIN",
             "Content-Security-Policy": (
                 "default-src 'self'; "
                 "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://cdn.jsdelivr.net; "
                 "style-src 'self' 'unsafe-inline'; "
                 "connect-src 'self'; "
                 "frame-src 'self'; "
+                "frame-ancestors 'self'; "
                 "object-src 'none'"
             ),
         })
@@ -7392,12 +7398,18 @@ def create_spa_catchall_router() -> APIRouter:
         )
         return HTMLResponse(html, headers={
             "Cache-Control": "no-store",
+            # M18: frame-ancestors 'self' + X-Frame-Options SAMEORIGIN guard
+            # against clickjacking. MUST be 'self'/SAMEORIGIN, NOT 'none'/DENY:
+            # the dashboard embeds the per-agent VNC viewer in a same-origin
+            # iframe via /agent-vnc/, so 'none' would break the viewer.
+            "X-Frame-Options": "SAMEORIGIN",
             "Content-Security-Policy": (
                 "default-src 'self'; "
                 "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://cdn.jsdelivr.net; "
                 "style-src 'self' 'unsafe-inline'; "
                 "connect-src 'self'; "
                 "frame-src 'self'; "
+                "frame-ancestors 'self'; "
                 "object-src 'none'"
             ),
         })

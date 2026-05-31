@@ -52,6 +52,10 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
     kwargs = {"title": "OpenLegion Browser Service"}
     if lifespan:
         kwargs["lifespan"] = lifespan
+    # M19: disable interactive API docs / OpenAPI schema by default; gate dev
+    # access behind OPENLEGION_ENABLE_DOCS.
+    if os.environ.get("OPENLEGION_ENABLE_DOCS", "").lower() not in ("1", "true", "yes", "on"):
+        kwargs.update(docs_url=None, redoc_url=None, openapi_url=None)
     app = FastAPI(**kwargs)
 
     @app.middleware("http")
